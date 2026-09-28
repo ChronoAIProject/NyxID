@@ -34,7 +34,12 @@ import { Switch } from "@/components/ui/switch";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { AgentKindBadge } from "@/components/assistant/nyxbot-agent-panels";
 import { ChannelBotsManager } from "@/components/assistant/nyxbot-channels";
-import { ServiceGrantPicker, TEXTAREA_CLASS } from "@/components/assistant/nyxbot-agent-forms";
+import {
+  PERSONA_HINT,
+  ServiceGrantPicker,
+  TEXTAREA_CLASS,
+} from "@/components/assistant/nyxbot-agent-forms";
+import { AgentAvatar } from "@/components/assistant/nyxbot-agent-avatar";
 import {
   nyxBotQueryKeys,
   useDeleteNyxBotAgent,
@@ -45,9 +50,11 @@ import {
   useUpdateNyxBotAgent,
 } from "@/hooks/use-nyxbot-agents";
 import { nyxAgentTransport } from "@/lib/assistant/nyxagent-transport";
-import { AGENT_STATUS_LABEL } from "@/lib/assistant/nyxbot-labels";
+import { AGENT_STATUS_LABEL, agentHandle, agentTitle } from "@/lib/assistant/nyxbot-labels";
 import { formatDateTime } from "@/lib/utils";
 import {
+  ASSISTANT_AGENT_DISPLAY_NAME_MAX,
+  ASSISTANT_AGENT_PERSONA_MAX,
   assistantAgentGrantsSchema,
   assistantAgentProfileSchema,
   type AssistantAgent,
@@ -123,9 +130,9 @@ export function AgentDetailsSheet({
           {agent ? (
             <>
               <div className="flex flex-wrap items-center gap-2 text-[11px] text-text-tertiary">
-                <span className="text-[15px] font-semibold text-foreground">
-                  {agent.kind === "nyxbot" ? "NyxBot" : agent.name}
-                </span>
+                <AgentAvatar agent={agent} size="lg" />
+                <span className="text-[15px] font-semibold text-foreground">{agentTitle(agent)}</span>
+                {agentHandle(agent) ? <span>{agentHandle(agent)}</span> : null}
                 <AgentKindBadge kind={agent.kind} />
                 <Badge variant={agent.status === "running" ? "success" : "secondary"}>
                   {AGENT_STATUS_LABEL[agent.status]}
@@ -138,7 +145,9 @@ export function AgentDetailsSheet({
                 </span>
               </div>
               <ProfileForm
-                key={`${agent.id}:${agent.name}:${agent.description}`}
+                key={[agent.id, agent.name, agent.description, agent.display_name, agent.persona].join(
+                  ":",
+                )}
                 agent={agent}
               />
               {agent.kind === "specialist" ? (
@@ -156,7 +165,7 @@ export function AgentDetailsSheet({
               {agent.status === "destroyed" ? null : (
                 <Section
                   title="Channel bots"
-                  description={`Chat with ${agent.kind === "nyxbot" ? "NyxBot" : agent.name} from these bots.`}
+                  description={`Chat with ${agentTitle(agent)} from these bots.`}
                 >
                   <ChannelBotsManager agents={agents} agent={agent} />
                 </Section>
@@ -178,7 +187,12 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
   const readOnly = agent.status === "destroyed";
   const form = useAppForm<AssistantAgentProfile>({
     resolver: zodResolver(assistantAgentProfileSchema(agent.kind)),
-    defaultValues: { name: agent.name, description: agent.description },
+    defaultValues: {
+      name: agent.name,
+      display_name: agent.display_name ?? "",
+      description: agent.description,
+      persona: agent.persona ?? "",
+    },
   });
   const [error, setError] = useState<string>();
 
@@ -186,10 +200,13 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
     setError(undefined);
     const dirty = form.formState.dirtyFields;
     try {
+      // Only what changed; an emptied display name or persona clears it.
       await update.mutateAsync({
         id: agent.id,
         ...(dirty.name && !nyxbot ? { name: values.name } : {}),
+        ...(dirty.display_name ? { display_name: values.display_name } : {}),
         ...(dirty.description ? { description: values.description } : {}),
+        ...(dirty.persona ? { persona: values.persona } : {}),
       });
       form.reset(values);
     } catch (cause) {
@@ -198,14 +215,9 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
   }
 
   return (
-    <Section title={nyxbot ? "Persona" : "Role"}>
+    <Section title="Profile">
       <Form {...form}>
-        <form
-          aria-label={nyxbot ? "Persona" : "Role"}
-          noValidate
-          onSubmit={form.handleSubmit(save)}
-          className="space-y-3"
-        >
+        <form aria-label="Profile" noValidate onSubmit={form.handleSubmit(save)} className="space-y-3">
           {nyxbot ? null : (
             <FormField
               control={form.control}
@@ -221,6 +233,9 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                       onChange={(event) => field.onChange(event.target.value.toLowerCase())}
                     />
                   </FormControl>
+                  <FormDescription className="text-[11px]">
+                    The @handle used in groups and by NyxBot.
+                  </FormDescription>
                   <FormMessage />
                 </FormItem>
               )}
@@ -228,10 +243,32 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
           )}
           <FormField
             control={form.control}
+            name="display_name"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Display name</FormLabel>
+                <FormControl>
+                  <Input
+                    maxLength={ASSISTANT_AGENT_DISPLAY_NAME_MAX}
+                    disabled={readOnly}
+                    autoComplete="off"
+                    placeholder={nyxbot ? "NyxBot" : agent.name}
+                    {...field}
+                  />
+                </FormControl>
+                <FormDescription className="text-[11px]">
+                  Shown instead of {nyxbot ? "NyxBot" : `@${agent.name}`}. Leave empty to use it.
+                </FormDescription>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+          <FormField
+            control={form.control}
             name="description"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>{nyxbot ? "Persona notes" : "Description"}</FormLabel>
+                <FormLabel>{nyxbot ? "Notes" : "Role"}</FormLabel>
                 <FormControl>
                   <textarea
                     className={TEXTAREA_CLASS}
@@ -241,6 +278,28 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                     {...field}
                   />
                 </FormControl>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+          <FormField
+            control={form.control}
+            name="persona"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Persona</FormLabel>
+                <FormControl>
+                  <textarea
+                    className={TEXTAREA_CLASS}
+                    maxLength={ASSISTANT_AGENT_PERSONA_MAX}
+                    disabled={readOnly}
+                    placeholder={PERSONA_HINT}
+                    {...field}
+                  />
+                </FormControl>
+                <FormDescription className="text-[11px]">
+                  Personality and tone only; it never changes what the agent may do.
+                </FormDescription>
                 <FormMessage />
               </FormItem>
             )}
@@ -364,7 +423,7 @@ function MemoryList({
 }) {
   const forget = useForgetNyxBotMemory();
   const [error, setError] = useState<string>();
-  const name = agent.kind === "nyxbot" ? "NyxBot" : agent.name;
+  const name = agentTitle(agent);
 
   async function remove(note: AssistantAgentMemoryNote) {
     setError(undefined);
@@ -464,7 +523,7 @@ function Lifecycle({
         </h3>
         <p className="text-[12px] text-destructive/70">
           {destroyed
-            ? `${agent.name} was destroyed${agent.destroyed_at ? ` on ${formatDateTime(agent.destroyed_at)}` : ""}. Deleting removes it and all of its threads for good.`
+            ? `${agentTitle(agent)} was destroyed${agent.destroyed_at ? ` on ${formatDateTime(agent.destroyed_at)}` : ""}. Deleting removes it and all of its threads for good.`
             : "Stops its work, revokes its access and disconnects its channel bots. Its threads stay readable."}
         </p>
       </div>
@@ -490,8 +549,8 @@ function Lifecycle({
           <DialogHeader>
             <DialogTitle>
               {confirm === "delete"
-                ? `Delete ${agent.name} permanently?`
-                : `Destroy ${agent.name}?`}
+                ? `Delete ${agentTitle(agent)} permanently?`
+                : `Destroy ${agentTitle(agent)}?`}
             </DialogTitle>
             <DialogDescription>
               {confirm === "delete"

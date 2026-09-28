@@ -132,25 +132,14 @@ export function useNyxAgentAssistantChat({
         ? 2000
         : false,
   });
-  const models = useQuery({
-    queryKey: ["assistant", "nyxagent", userId, "models"],
-    queryFn: () => nyxAgentTransport.models(),
-    enabled: enabled && Boolean(userId),
-    staleTime: 60_000,
-  });
   const send = useCallback(
     async (text: string) => {
       try {
         await liveSend(selectedConversationId, text, onConversationAdopted, draftAgent);
       } finally {
-        // A first turn may have provisioned the credential needed for profile
-        // discovery; a new thread changes its agent's summary.
-        await Promise.all([
-          queryClient.invalidateQueries({
-            queryKey: ["assistant", "nyxagent", userId, "models"],
-          }),
-          queryClient.invalidateQueries({ queryKey: agentsKey }),
-        ]);
+        // A new thread changes its agent's summary. (Model routing is
+        // server-side, so there is no profile list to refresh.)
+        await queryClient.invalidateQueries({ queryKey: agentsKey });
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -299,9 +288,6 @@ export function useNyxAgentAssistantChat({
     decidingAcknowledgement: decision.isPending ? decision.variables?.id : undefined,
     deleteConversation: (id: string) => nyxAgentTransport.delete(id),
     renameConversation: (id: string, title: string) => nyxAgentTransport.rename(id, title),
-    model: nyxAgentTransport.getModel(selectedConversationId),
-    setModel: (model: string) => nyxAgentTransport.setModel(model),
-    models: models.data ?? [{ id: "nyxagent/chat", label: "chat" }],
     beforeSeq: nyxAgentTransport.getHistory(selectedConversationId)?.before_seq,
     loadOlder: async () => {
       const before = nyxAgentTransport.getHistory(selectedConversationId)?.before_seq;

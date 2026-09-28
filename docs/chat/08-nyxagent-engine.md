@@ -286,7 +286,8 @@ Normative design: [09-nyxbot-orchestrator.md](09-nyxbot-orchestrator.md).
 `assistant_agents` holds one `nyxbot` per owner (unique partial index, created on
 first use) and persistent `specialist` agents with a name, role description,
 `grants`, `memory` (≤ 50 notes of ≤ 500 characters), `home_conversation_id`,
-`created_by` and `destroyed_at`. Conversations are threads of an agent
+`created_by`, `destroyed_at`, and an optional `display_name` (≤ 40) and
+`persona` (≤ 2000, style only). Conversations are threads of an agent
 (`agent_id`; legacy rows are NyxBot's) with a denormalized `role`, `report_to`,
 `pending_events` and `event_streak`. NyxAgent is unchanged: every thread is an
 ordinary conversation with its own key.
@@ -294,8 +295,10 @@ ordinary conversation with its own key.
 NyxBot-only native tools (`nyxid__` prefix): `spawn_subagent`, `message_subagent`,
 `wait_for_subagents` (at most 120 s), `list_subagents`, `read_subagent`,
 `grant_subagent`, `revoke_subagent`, `update_subagent`, `decide_permission`,
-`destroy_subagent`, `connect_channel_bot`, `link_channel_bot`,
-`list_channel_agents`, `disconnect_channel_bot`. Every agent has `remember` and
+`destroy_subagent`, `create_group`, `list_groups`, `post_to_group`,
+`update_group`, `delete_group`, `settings_link`, `channel_bot_setup_link`,
+`connect_channel_bot`, `link_channel_bot`, `list_channel_agents`,
+`disconnect_channel_bot`. Every agent has `remember` and
 `forget`; its memory is injected into every thread's instructions and refuses
 obvious credential shapes. A specialist calling a NyxBot-only tool gets
 `orchestrator_only`. Grants resolve slugs or IDs through the owner's MCP catalog.
@@ -314,11 +317,23 @@ turns carry drained events in their instructions. Loop guards: at most 20 event
 turns per owner per hour, and a NyxBot thread stops after 3 consecutive event
 turns without a user message. Specialist and event turns draw from an owner pool
 of `max_concurrent_subagent_turns` (default 3, at most 8) plus one for NyxBot; a
-full pool returns `pool_full`. A background task retries deferred wake-ups each
-minute. Agents are never destroyed automatically. Destroy requests Stop on live
+full pool returns `pool_full`. A background task runs every 15 seconds: it
+resolves watches (connect links and channel bot setup links a chat handed out),
+retries deferred wake-ups and starts group members that were busy. Anything the
+owner finishes outside the chat (a connect link, a bot setup, owner
+verification) resumes the waiting thread with
+an event; the owner never replies "done". Agents are never destroyed automatically. Destroy requests Stop on live
 turns, revokes every thread key and ciphertext, expires cards, disconnects the
 agent's channel bots and keeps read-only threads; a destroyed specialist can be
 deleted with its threads. Deleting a thread deletes only that thread.
+
+Group chats (`assistant_groups`, `assistant_group_messages`, routes
+`/assistant/nyxagent/groups[/{id}[/messages]]`) hold the owner plus 1–8 agents.
+A user message goes to the members it `@mentions`, else to the lead (NyxBot when
+it is a member); members hand work on with `@name`, at most six hand-offs per
+user message. Each member answers through a hidden member thread
+(`group_id`, `group_seen_seq`) with its own key, grants and memory, seeing only
+the transcript lines it has not been given.
 
 Role-to-profile routing (`assistant_profile_routes`, admin
 `GET/PUT /api/v1/admin/assistant/profile-routes`) validates and stores a NyxAgent

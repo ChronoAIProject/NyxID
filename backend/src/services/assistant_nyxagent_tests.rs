@@ -506,6 +506,8 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         pending_events: Vec::new(),
         event_streak: 0,
         channel: None,
+        group_id: None,
+        group_seen_seq: 0,
     }
 }
 

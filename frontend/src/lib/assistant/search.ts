@@ -9,6 +9,8 @@
  *   the actor lands (see AssistantPage.createNewChat).
  * - `agent` selects a NyxBot agent: with `draft` it is the agent a new
  *   thread starts with; alone it lands on that agent's latest thread.
+ * - `g`     opens a NyxBot group chat. With no `c`, `draft`, `agent` or `g`
+ *   the NyxAgent engine shows the NyxBot home.
  * - `mock` preserves the dev-only HTTP fixture boundary across router writes.
  *
  * `draft` is accepted as a boolean and as the string "true": the router's
@@ -19,6 +21,7 @@ export interface AssistantSearch {
   readonly c?: string;
   readonly draft?: boolean;
   readonly agent?: string;
+  readonly g?: string;
   readonly mock?: 1;
 }
 
@@ -33,6 +36,7 @@ export function parseAssistantSearch(
     ...(typeof search.agent === "string" && search.agent
       ? { agent: search.agent }
       : {}),
+    ...(typeof search.g === "string" && search.g ? { g: search.g } : {}),
     ...(search.mock === 1 || search.mock === "1"
       ? { mock: 1 as const }
       : {}),

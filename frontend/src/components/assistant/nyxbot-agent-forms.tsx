@@ -26,9 +26,13 @@ import { Switch } from "@/components/ui/switch";
 import { useKeys } from "@/hooks/use-keys";
 import { useCreateNyxBotAgent } from "@/hooks/use-nyxbot-agents";
 import {
+  ASSISTANT_AGENT_DISPLAY_NAME_MAX,
+  ASSISTANT_AGENT_PERSONA_MAX,
   assistantAgentCreateSchema,
   type AssistantAgentCreate,
 } from "@/schemas/assistant-nyxagent";
+
+export const PERSONA_HINT = "e.g. warm, concise, uses emoji sparingly";
 
 export const TEXTAREA_CLASS =
   "min-h-20 w-full rounded-lg border border-input bg-transparent px-3 py-1.5 text-[12px] leading-relaxed text-foreground placeholder:text-text-tertiary focus-visible:border-white/[0.15] focus-visible:outline-none aria-invalid:border-destructive";
@@ -114,7 +118,14 @@ export function NewAgentDialog({
   const create = useCreateNyxBotAgent();
   const form = useAppForm<AssistantAgentCreate>({
     resolver: zodResolver(assistantAgentCreateSchema),
-    defaultValues: { name: "", description: "", services: [], account_read: false },
+    defaultValues: {
+      name: "",
+      display_name: "",
+      description: "",
+      persona: "",
+      services: [],
+      account_read: false,
+    },
   });
   const [error, setError] = useState<string>();
   const name = form.watch("name");
@@ -164,7 +175,30 @@ export function NewAgentDialog({
                       />
                     </FormControl>
                     <FormDescription className="text-[11px]">
-                      Lowercase letters, digits and hyphens.
+                      The @handle: lowercase letters, digits and hyphens.
+                    </FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
+                name="display_name"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>
+                      Display name <span className="font-normal text-text-tertiary">(optional)</span>
+                    </FormLabel>
+                    <FormControl>
+                      <Input
+                        placeholder="Luna"
+                        autoComplete="off"
+                        maxLength={ASSISTANT_AGENT_DISPLAY_NAME_MAX}
+                        {...field}
+                      />
+                    </FormControl>
+                    <FormDescription className="text-[11px]">
+                      Shown instead of the @handle.
                     </FormDescription>
                     <FormMessage />
                   </FormItem>
@@ -184,6 +218,29 @@ export function NewAgentDialog({
                         {...field}
                       />
                     </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
+                name="persona"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>
+                      Persona <span className="font-normal text-text-tertiary">(optional)</span>
+                    </FormLabel>
+                    <FormControl>
+                      <textarea
+                        className={TEXTAREA_CLASS}
+                        maxLength={ASSISTANT_AGENT_PERSONA_MAX}
+                        placeholder={PERSONA_HINT}
+                        {...field}
+                      />
+                    </FormControl>
+                    <FormDescription className="text-[11px]">
+                      Personality and tone only; it never changes what the agent may do.
+                    </FormDescription>
                     <FormMessage />
                   </FormItem>
                 )}

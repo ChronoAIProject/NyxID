@@ -157,6 +157,8 @@ pub(crate) async fn fixture(name: &str) -> Fixture {
         super::assistant_team_service::CreateRequest {
             name: "worker".into(),
             description: "Help with the user's account".into(),
+            display_name: None,
+            persona: None,
             targets: Default::default(),
             account_read: false,
             specialty: None,

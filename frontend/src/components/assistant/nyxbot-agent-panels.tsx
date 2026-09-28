@@ -2,7 +2,13 @@ import { useState } from "react";
 import { ChevronRight, PanelRightOpen, Users } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { AGENT_KIND_LABEL, AGENT_STATUS_LABEL } from "@/lib/assistant/nyxbot-labels";
+import { AgentAvatar } from "@/components/assistant/nyxbot-agent-avatar";
+import {
+  AGENT_KIND_LABEL,
+  AGENT_STATUS_LABEL,
+  agentTitle,
+  channelPlatformName,
+} from "@/lib/assistant/nyxbot-labels";
 import { cn } from "@/lib/utils";
 import type {
   AssistantAgent,
@@ -39,26 +45,44 @@ export function AgentKindBadge({ kind }: { readonly kind: AssistantAgentKind }) 
   );
 }
 
+/** A thread that came from a chat app (Telegram, ...). */
+export function ChannelBadge({ platform }: { readonly platform: string }) {
+  return <Badge variant="secondary">via {channelPlatformName(platform)}</Badge>;
+}
+
 /**
  * Which agent this thread talks to. Threads of a destroyed specialist are
  * read-only; the banner says so and the page disables the composer.
  */
 export function ThreadHeader({
   name,
+  handle,
   kind,
+  agentId,
   destroyed,
+  channelPlatform,
   onOpenDetails,
 }: {
+  /** The agent's display name (or handle). */
   readonly name: string;
+  /** "@handle", shown when a display name hides it. */
+  readonly handle?: string;
   readonly kind: AssistantAgentKind;
+  /** Picks the specialist's avatar tint. */
+  readonly agentId?: string;
   readonly destroyed: boolean;
+  /** Set when the thread answers one of the user's channel bots. */
+  readonly channelPlatform?: string | null;
   readonly onOpenDetails?: () => void;
 }) {
   return (
     <div className="space-y-2">
       <div className="flex items-center gap-2">
+        <AgentAvatar agent={{ id: agentId ?? name, name, kind }} size="md" />
         <h2 className="min-w-0 truncate text-[13px] font-semibold text-foreground">{name}</h2>
+        {handle ? <span className="shrink-0 text-[11px] text-text-tertiary">{handle}</span> : null}
         <AgentKindBadge kind={kind} />
+        {channelPlatform ? <ChannelBadge platform={channelPlatform} /> : null}
         {onOpenDetails ? (
           <Button
             size="sm"
@@ -141,11 +165,11 @@ export function TeamStrip({
                     onClick={() => onOpenConversation(agent.home_conversation_id!)}
                     className="min-w-0 truncate text-[12px] font-medium text-foreground hover:underline"
                   >
-                    {agent.name}
+                    {agentTitle(agent)}
                   </button>
                 ) : (
                   <span className="min-w-0 truncate text-[12px] font-medium text-foreground">
-                    {agent.name}
+                    {agentTitle(agent)}
                   </span>
                 )}
                 <span className="text-[11px] text-text-tertiary">
@@ -168,7 +192,7 @@ export function TeamStrip({
                   <Button
                     size="sm"
                     variant="outline"
-                    aria-label={`Review ${agent.name}'s request: ${request.summary}`}
+                    aria-label={`Review ${agentTitle(agent)}'s request: ${request.summary}`}
                     onClick={() => onOpenConversation(request.conversation_id)}
                   >
                     Review

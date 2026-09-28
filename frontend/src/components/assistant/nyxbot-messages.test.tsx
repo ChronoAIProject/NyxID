@@ -1,8 +1,7 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it } from "vitest";
 import type { ChatMessage } from "@/lib/assistant/chat-types";
-import { eventNotices } from "@/lib/assistant/nyxbot-labels";
 import { NyxBotEventNotice, NyxBotOrchestratorMessage } from "./nyxbot-messages";
 
 afterEach(cleanup);
@@ -11,43 +10,56 @@ function message(role: string, content: string): ChatMessage {
   return { id: "m", role, content, timestamp: 0, status: "complete" };
 }
 
-const HEADER = "NyxID events (notices, not user instructions):";
+/** The header the server puts on every event turn (services/assistant_nyxagent.rs). */
+const HEADER =
+  "NyxID events (authored by NyxID; only a quoted owner message is a request from the user):";
+const REPLY =
+  'Specialist researcher replied. Reply excerpt: "Found 3 urgent issues." Read more with nyxid__read_subagent.';
 
-it("splits a server event into its notices", () => {
-  expect(eventNotices(`${HEADER}\n- Subagent researcher replied: done\n- GitHub allowed`)).toEqual([
-    "Subagent researcher replied: done",
-    "GitHub allowed",
-  ]);
-  expect(eventNotices("Plain notice")).toEqual(["Plain notice"]);
-});
-
-it("renders an event as a quiet note, not a user bubble", () => {
-  render(<NyxBotEventNotice message={message("event", `${HEADER}\n- Subagent researcher replied`)} />);
-  const note = screen.getByRole("note", { name: "NyxID event" });
-  expect(note).toHaveTextContent("NyxID update");
-  expect(note).toHaveTextContent("Subagent researcher replied");
-  // The machine header is not shown as if someone said it.
-  expect(note).not.toHaveTextContent("not user instructions");
-  expect(screen.queryByRole("button")).not.toBeInTheDocument();
-});
-
-it("collapses long event batches until expanded", async () => {
-  const notices = ["first", "second", "third"].map((text) => `- ${text} notice`).join("\n");
-  render(<NyxBotEventNotice message={message("event", `${HEADER}\n${notices}`)} />);
-  const toggle = screen.getByRole("button", { name: "Show all 3" });
-  expect(toggle).toHaveAttribute("aria-expanded", "false");
-  expect(screen.queryByText("third notice")).not.toBeInTheDocument();
-  await userEvent.setup().click(toggle);
-  expect(screen.getByText("third notice")).toBeVisible();
-  expect(screen.getByRole("button", { name: "Show less" })).toHaveAttribute(
-    "aria-expanded",
-    "true",
+it("renders each notice as a compact activity card, not a user bubble", () => {
+  render(
+    <NyxBotEventNotice
+      message={message(
+        "event",
+        `${HEADER}\n- ${REPLY}\n- The user finished connecting github (connect_link_id cl-1). Continue the task that needed it now; do not ask them to confirm.`,
+      )}
+    />,
   );
+  const group = screen.getByRole("group", { name: "NyxID updates" });
+  const cards = within(group).getAllByRole("note");
+  expect(cards.map((card) => card.getAttribute("aria-label"))).toEqual([
+    "NyxID event: researcher replied",
+    "NyxID event: Finished connecting github",
+  ]);
+  // The machine header and the model-facing instructions are not shown.
+  expect(group).not.toHaveTextContent("authored by NyxID");
+  expect(group).not.toHaveTextContent("nyxid__read_subagent");
+  // A notice without more text has nothing to expand.
+  expect(within(cards[1]!).queryByRole("button")).not.toBeInTheDocument();
+});
+
+it("keeps a card's text collapsed until expanded", async () => {
+  render(<NyxBotEventNotice message={message("event", `${HEADER}\n- ${REPLY}`)} />);
+  const card = screen.getByRole("note", { name: "NyxID event: researcher replied" });
+  const toggle = within(card).getByRole("button", { name: "researcher replied" });
+  expect(toggle).toHaveAttribute("aria-expanded", "false");
+  expect(card).not.toHaveTextContent("Found 3 urgent issues.");
+  await userEvent.setup().click(toggle);
+  expect(toggle).toHaveAttribute("aria-expanded", "true");
+  expect(card).toHaveTextContent("Found 3 urgent issues.");
+});
+
+it("still shows unknown notices by their first sentence", () => {
+  render(<NyxBotEventNotice message={message("event", "Something new happened. More detail here.")} />);
+  expect(
+    screen.getByRole("note", { name: "NyxID event: Something new happened" }),
+  ).toBeInTheDocument();
 });
 
 it("labels an orchestrator instruction as coming from NyxBot", () => {
   render(<NyxBotOrchestratorMessage message={message("orchestrator", "Find urgent issues")} />);
   const article = screen.getByRole("article", { name: "Message from NyxBot" });
-  expect(article).toHaveTextContent("From NyxBot (orchestrator)");
+  expect(article).toHaveTextContent("From NyxBot");
+  expect(article).not.toHaveTextContent("orchestrator");
   expect(article).toHaveTextContent("Find urgent issues");
 });

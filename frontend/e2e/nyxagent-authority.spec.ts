@@ -128,6 +128,13 @@ function agentsNav(page: import("@playwright/test").Page) {
   return page.getByRole("navigation");
 }
 
+function homeHeading(page: import("@playwright/test").Page) {
+  return page.getByRole("heading", {
+    level: 1,
+    name: /^Good (morning|afternoon|evening), Dannick$/,
+  });
+}
+
 test("the Agents list pins NyxBot, opens a specialist's thread, and forgets a memory", async ({
   page,
 }) => {
@@ -137,8 +144,8 @@ test("the Agents list pins NyxBot, opens a specialist's thread, and forgets a me
   await expect(nyxbot).toHaveAttribute("aria-expanded", "true");
   const researcher = nav.getByRole("button", { name: /^researcher, specialist/ });
   await expect(researcher).toBeVisible();
-  // A new NyxBot thread starts the default landing.
-  await expect(page.getByRole("heading", { name: "NyxBot" })).toBeVisible();
+  // The landing is the NyxBot home.
+  await expect(homeHeading(page)).toBeVisible();
 
   await researcher.click();
   await expect(researcher).toHaveAttribute("aria-expanded", "true");
@@ -183,7 +190,7 @@ test("creating an agent opens its home thread, and each agent keeps its own thre
   const nav = agentsNav(page);
   await nav.getByRole("button", { name: "New agent" }).click();
   const dialog = page.getByRole("dialog", { name: "New agent" });
-  await dialog.getByRole("textbox", { name: "Name" }).fill("writer");
+  await dialog.getByRole("textbox", { name: "Name", exact: true }).fill("writer");
   await dialog.getByRole("textbox", { name: "Role" }).fill("Drafts release notes.");
   await dialog.getByRole("checkbox", { name: /GitHub/ }).click();
   await dialog.getByRole("button", { name: "Create agent" }).click();
@@ -208,7 +215,7 @@ test("creating an agent opens its home thread, and each agent keeps its own thre
 
   // NyxBot's threads are separate.
   await nav.getByRole("button", { name: "NyxBot — your personal agent" }).click();
-  await expect(page.getByRole("heading", { name: "NyxBot" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "NyxBot", exact: true })).toBeVisible();
   await expect(nav.getByRole("group", { name: "Threads with NyxBot" })).not.toContainText(
     "Summarize the changelog",
   );
@@ -231,10 +238,9 @@ test("a specialist's permission request is routed to NyxBot and the user can sti
       .getByRole("status")
       .filter({ hasText: "Allowed by you · Allow this agent to use Slack?" }),
   ).toBeVisible();
-  // NyxID resumes the specialist itself; no continuation is typed for the user.
-  await expect(page.getByRole("note", { name: "NyxID event" })).toContainText(
-    "The user allowed Slack for this agent.",
-  );
+  // NyxID resumes the specialist itself (shown as an activity card); no
+  // continuation is typed for the user.
+  await expect(page.getByRole("note", { name: "NyxID event: You allowed slack" })).toBeVisible();
   await expect(page.getByText("Slack access granted. Lookup succeeded.")).toBeVisible({
     timeout: 10_000,
   });
@@ -249,12 +255,19 @@ test("NyxBot delegates to a specialist, shows it working in the Team strip, and 
   await expect(page.getByText("I asked the researcher to find the urgent issues.")).toBeVisible();
   const team = page.getByRole("region", { name: "Team" });
   await expect(team).toContainText("researcher");
-  await expect(page.getByRole("note", { name: "NyxID event" })).toContainText(
-    "researcher replied: Found 3 urgent issues",
-    { timeout: 15_000 },
-  );
+  // The specialist's report arrives as a compact activity card whose text expands.
+  const card = page.getByRole("note", { name: "NyxID event: researcher replied" });
+  await expect(card).toBeVisible({ timeout: 15_000 });
+  await expect(card).not.toContainText("Found 3 urgent issues");
+  await card.getByRole("button", { name: "researcher replied" }).click();
+  await expect(card).toContainText("Found 3 urgent issues: #12, #15 and #18.");
   await expect(page.getByText("The researcher reported back: Found 3 urgent issues: #12, #15 and #18.")).toBeVisible();
   await expect(team).toContainText("Idle", { timeout: 10_000 });
+  // The specialist's own thread shows NyxBot's instruction as coming from NyxBot.
+  await agentsNav(page).getByRole("button", { name: /^researcher, specialist/ }).click();
+  await expect(
+    page.getByRole("article", { name: "Message from NyxBot" }).last(),
+  ).toContainText("From NyxBot");
 });
 
 test("channel bots can be relinked to a specialist", async ({ page }) => {
@@ -305,8 +318,42 @@ test("destroying a specialist makes its threads read-only; it can then be delete
     .getByRole("dialog", { name: "Delete researcher permanently?" })
     .getByRole("button", { name: "Delete permanently" })
     .click();
-  await expect(page.getByRole("heading", { name: "NyxBot" })).toBeVisible();
+  await expect(homeHeading(page)).toBeVisible();
   await expect(nav.getByRole("button", { name: /^researcher/ })).toHaveCount(0);
+});
+
+const DESTINATIONS = [
+  { label: "Plugins", pathname: "/assistant/plugins" },
+  { label: "Approvals", pathname: "/assistant/approvals" },
+  { label: "Studio", pathname: "/dashboard" },
+] as const;
+
+test.describe("sidebar navigation leaves an open thread and stays there", () => {
+  for (const source of ["NyxBot thread", "specialist thread"] as const) {
+    for (const destination of DESTINATIONS) {
+      test(`${source}: ${destination.label} opens ${destination.pathname}`, async ({ page }) => {
+        await openAssistant(page, { faults: { nyxagentEnabled: true } });
+        if (source === "NyxBot thread") {
+          await sendMessage(page, "Use GitHub");
+          await expect(page.getByText("Repository lookup succeeded.")).toBeVisible();
+          await settled(page);
+        } else {
+          await agentsNav(page).getByRole("button", { name: /^researcher, specialist/ }).click();
+          await expect(page.getByRole("heading", { name: "researcher" })).toBeVisible();
+        }
+        await expect(page).toHaveURL(/\/assistant\?.*c=nyxa-[a-f0-9]{32}/);
+
+        await page.getByRole("link", { name: destination.label }).click();
+
+        const pathname = () => new URL(page.url()).pathname;
+        await expect.poll(pathname).toBe(destination.pathname);
+        // A stale landing redirect would pull the page back to the thread.
+        await page.waitForTimeout(1500);
+        expect(pathname()).toBe(destination.pathname);
+        expect(new URL(page.url()).searchParams.get("c")).toBeNull();
+      });
+    }
+  }
 });
 
 test("assistant chat keys are hidden until requested and detail links back to the chat", async ({

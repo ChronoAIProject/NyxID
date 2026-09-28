@@ -735,6 +735,8 @@ mod tests {
             crate::services::assistant_team_service::CreateRequest {
                 name: "reader".into(),
                 description: "Read things".into(),
+                display_name: None,
+                persona: None,
                 targets: Default::default(),
                 account_read: false,
                 specialty: None,

@@ -1950,6 +1950,22 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::nyxbot::list_channels).post(handlers::nyxbot::connect_channel),
         )
         .route(
+            "/nyxagent/groups",
+            get(handlers::assistant_group::list_groups)
+                .post(handlers::assistant_group::create_group),
+        )
+        .route(
+            "/nyxagent/groups/{id}",
+            get(handlers::assistant_group::get_group)
+                .patch(handlers::assistant_group::update_group)
+                .delete(handlers::assistant_group::delete_group),
+        )
+        .route(
+            "/nyxagent/groups/{id}/messages",
+            get(handlers::assistant_group::list_messages)
+                .post(handlers::assistant_group::post_message),
+        )
+        .route(
             "/nyxagent/channels/{id}",
             delete(handlers::nyxbot::disconnect_channel).patch(handlers::nyxbot::link_channel),
         )
