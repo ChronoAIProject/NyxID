@@ -83,6 +83,7 @@ pub(crate) async fn process_inbound_messages(
         } else {
             billing.received(&inbound.platform_message_id).await
         } {
+            tracing::warn!(bot_id = %bot.id, stage = "billing", error_code = error.error_code(), "channel webhook billing admission failed");
             if super::channel_billing_service::blocks_channel(&error)
                 && super::channel_billing_service::suspend(&state, bot, adapter)
                     .await
@@ -129,7 +130,7 @@ pub(crate) async fn process_inbound_messages(
             Err(e) => {
                 tracing::warn!(
                     bot_id = %bot.id,
-                    error = %e,
+                    error_code = e.error_code(),
                     "agent resolution failed"
                 );
                 complete = false;
@@ -175,7 +176,7 @@ pub(crate) async fn process_inbound_messages(
             Ok(Some(message)) => message,
             Ok(None) => continue,
             Err(error) => {
-                tracing::error!(error = %error, "failed to admit inbound message");
+                tracing::error!(bot_id = %bot.id, stage = "storage", error_code = error.error_code(), "failed to admit inbound message");
                 complete = false;
                 continue;
             }

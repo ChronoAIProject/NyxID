@@ -17,6 +17,9 @@ pub(super) fn crc_token(query: &std::collections::HashMap<String, String>) -> Ap
         .get("crc_token")
         .map(String::as_str)
         .filter(|s| !s.is_empty() && s.len() <= 256)
+        // CRC and event signatures share a key. Never sign a JSON object that
+        // could be replayed as an authenticated webhook body.
+        .filter(|s| !serde_json::from_str::<Value>(s).is_ok_and(|value| value.is_object()))
         .ok_or_else(verification_error)
 }
 

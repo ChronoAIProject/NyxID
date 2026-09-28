@@ -475,6 +475,9 @@ it("keeps the shared OAuth impact for X OAuth field clears and the whole provide
     "stops all of the twitter provider's OAuth connections and logins",
   );
   expect(review).toHaveTextContent("stops subscription setup and cleanup");
+  expect(review).toHaveTextContent(
+    "stops OAuth 2.0 webhook signature verification",
+  );
   expect(review).not.toHaveTextContent(
     "OAuth connections and logins are retained",
   );
@@ -486,4 +489,23 @@ it("keeps the shared OAuth impact for X OAuth field clears and the whole provide
       fields: { client_secret: null, app_bearer_token: null },
     }),
   );
+});
+
+it("does not promise OAuth2 webhooks when both signing secrets are cleared", async () => {
+  mock.data = [xProvider()];
+  const user = userEvent.setup();
+  render(<AdminPlatformCredentialsPage />);
+  await user.click(screen.getByRole("button", { name: "Clear Client Secret" }));
+  await user.click(
+    screen.getByRole("button", { name: "Clear API key secret" }),
+  );
+  await user.click(screen.getByRole("button", { name: "Save credentials" }));
+  const review = await screen.findByRole("dialog", { name: "Review changes" });
+  expect(review).toHaveTextContent(
+    "stops OAuth 2.0 webhook signature verification",
+  );
+  expect(review).toHaveTextContent(
+    "stops legacy webhook signature verification",
+  );
+  expect(review).not.toHaveTextContent("remain available");
 });

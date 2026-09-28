@@ -167,49 +167,54 @@ async fn registered_x_dm_fails_closed_after_uncertain_subscription_mutation() {
 }
 
 #[tokio::test]
-async fn registered_x_dm_survives_setup_lease_contention() {
-    let (state, adapter, server, owner, connection) = fixture().await;
-    let bot = insert_bot(&state, &owner, &connection).await;
-    state
+async fn registered_x_channels_survive_setup_lease_contention() {
+    for (metered, chat) in [(false, false), (false, true), (true, false), (true, true)] {
+        let (mut state, adapter, server, owner, connection) = fixture().await;
+        if metered {
+            super::billing::enable_billing(&mut state, &owner).await;
+        }
+        let bot = insert_bot(&state, &owner, &connection).await;
+        state
         .db
         .collection::<ChannelBot>(BOTS)
         .update_one(
             doc! { "_id": &bot.id },
-            doc! { "$set": { "webhook_registered": true } },
+            doc! { "$set": { "webhook_registered": true, "x_events": if chat { vec!["dm", "chat"] } else { vec!["dm"] } } },
         )
         .await
         .unwrap();
-    let bot = channel_bot_service::get_bot(&state.db, &bot.id)
-        .await
-        .unwrap();
-    let runtime = super::super::coordination_service::cluster_lease_runtime();
-    let lease = runtime
-        .acquire(&state.db, "channel-webhook:x")
-        .await
-        .unwrap()
-        .unwrap();
-    let result = webhooks::configure(
-        &state.db,
-        &state.billing,
-        &state.encryption_keys,
-        &state.http_client,
-        &adapter,
-        &bot,
-        "https://nyx.example",
-    )
-    .await;
-    super::super::coordination_service::LeaseStore::release(&state.db, &lease)
-        .await
-        .unwrap();
-    assert!(matches!(result, Err(AppError::Conflict(_))));
-    assert_eq!(
-        channel_bot_service::get_bot(&state.db, &bot.id)
+        let bot = channel_bot_service::get_bot(&state.db, &bot.id)
+            .await
+            .unwrap();
+        let runtime = super::super::coordination_service::cluster_lease_runtime();
+        let lease = runtime
+            .acquire(&state.db, "channel-webhook:x")
             .await
             .unwrap()
-            .status,
-        "active"
-    );
-    assert!(server.received_requests().await.unwrap().is_empty());
+            .unwrap();
+        let result = webhooks::configure(
+            &state.db,
+            &state.billing,
+            &state.encryption_keys,
+            &state.http_client,
+            &adapter,
+            &bot,
+            "https://nyx.example",
+        )
+        .await;
+        super::super::coordination_service::LeaseStore::release(&state.db, &lease)
+            .await
+            .unwrap();
+        assert!(matches!(result, Err(AppError::Conflict(_))));
+        assert_eq!(
+            channel_bot_service::get_bot(&state.db, &bot.id)
+                .await
+                .unwrap()
+                .status,
+            "active"
+        );
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
 }
 
 #[tokio::test]
@@ -316,6 +321,69 @@ async fn x_notification_events_require_webhooks_without_public_reply_scopes() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn x_event_downgrade_retains_cleanup_state_after_read_only_setup_failure() {
+    use crate::models::channel_bot::XChannelEvent;
+    let (state, adapter, server, owner, connection) = fixture().await;
+    credentials(&state, &adapter, &owner).await;
+    let mut bot = insert_bot(&state, &owner, &connection).await;
+    bot.x_events = Some(vec![XChannelEvent::Dm, XChannelEvent::Chat]);
+    bot.webhook_registered = true;
+    state
+        .db
+        .collection::<ChannelBot>(BOTS)
+        .replace_one(doc! {"_id": &bot.id}, &bot)
+        .await
+        .unwrap();
+    let changed = channel_bot_service::update_bot(
+        &state.db,
+        &state.encryption_keys,
+        &state.http_client,
+        &adapter,
+        &bot.id,
+        &owner,
+        channel_bot_service::UpdateBotParams {
+            x_events: Some(&[XChannelEvent::Dm]),
+            bot_token: None,
+            label: None,
+            verification_token: None,
+            encrypt_key: channel_bot_service::SecretPatch::Unchanged,
+            app_id: None,
+            app_secret: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(changed.status, "failed");
+    Mock::given(method("GET"))
+        .and(path("/2/webhooks"))
+        .respond_with(ResponseTemplate::new(503))
+        .expect(1)
+        .mount(&server)
+        .await;
+    assert!(
+        webhooks::configure(
+            &state.db,
+            &state.billing,
+            &state.encryption_keys,
+            &state.http_client,
+            &adapter,
+            &changed,
+            "https://nyx.example"
+        )
+        .await
+        .is_err()
+    );
+    let current = channel_bot_service::get_bot(&state.db, &bot.id)
+        .await
+        .unwrap();
+    assert_eq!(current.status, "failed");
+    assert!(
+        current.webhook_registered,
+        "interrupted selection remains eligible for remote cleanup"
+    );
 }
 
 #[tokio::test]
@@ -739,7 +807,7 @@ async fn x_crc_endpoint_returns_json_using_live_platform_secret() {
         .await
         .unwrap();
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    let mut mac = Hmac::<Sha256>::new_from_slice(b"api-secret").unwrap();
+    let mut mac = Hmac::<Sha256>::new_from_slice(b"platform-secret").unwrap();
     mac.update(b"challenge");
     assert_eq!(
         body["response_token"],

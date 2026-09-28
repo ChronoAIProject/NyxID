@@ -221,6 +221,31 @@ fn x_oauth2_crc_and_webhook_readiness_do_not_require_consumer_secret() {
     );
 }
 
+#[test]
+fn x_crc_cannot_sign_webhook_bodies() {
+    let body = json!({"data": {"event_type": "post.create", "filter": {"user_id": "10"},
+        "tag": "nyxid:bot", "payload": {"id": "500", "author_id": "10", "conversation_id": "500"}}})
+    .to_string();
+    assert!(body.len() <= 256);
+    assert_eq!(webhooks::parse(body.as_bytes()).unwrap().len(), 1);
+    for credentials in [secrets(), [("client_secret", "oauth2-secret")].into()] {
+        for token in [body.as_str(), "{}", " \n{} \t"] {
+            assert!(
+                webhooks::handshake(&credentials, &[("crc_token".into(), token.into())].into())
+                    .is_err()
+            );
+        }
+        // Do not assume an undocumented provider alphabet for opaque tokens.
+        assert!(
+            webhooks::handshake(
+                &credentials,
+                &[("crc_token".into(), "opaque{challenge".into())].into()
+            )
+            .is_ok()
+        );
+    }
+}
+
 pub(crate) fn event() -> Value {
     json!({"data": {"event_type": "dm.received", "event_uuid": "delivery-1",
         "filter": {"user_id": "10"}, "payload": {

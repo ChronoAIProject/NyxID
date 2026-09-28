@@ -487,7 +487,7 @@ impl PlatformAdapter for XAdapter {
                     secret: true,
                     required: true,
                     numeric: false,
-                    help: "X Developer Console > App > OAuth 2.0 Client Secret. Used for OAuth, webhook verification challenges, and X-Twitter-Webhooks-Signature-OAuth2 signatures.",
+                    help: "X Developer Console > App > OAuth 2.0 Client Secret. Used for OAuth, webhook verification challenges, and X-Twitter-Webhooks-Signature-OAuth2 signatures. Changes apply to every X channel using this app; keep the value in sync with X.",
                 },
             ],
             webhook_secret_field: None,

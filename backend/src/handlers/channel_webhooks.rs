@@ -141,6 +141,11 @@ pub async fn platform_subscription(
         return StatusCode::NOT_FOUND.into_response();
     };
     if adapter.validate_platform_subscription(&query).is_err() {
+        tracing::debug!(
+            platform,
+            stage = "challenge_query",
+            "platform webhook challenge rejected"
+        );
         return StatusCode::FORBIDDEN.into_response();
     }
     let result = async {
@@ -163,7 +168,15 @@ pub async fn platform_subscription(
             challenge,
         )
             .into_response(),
-        Err(_) => StatusCode::FORBIDDEN.into_response(),
+        Err(error) => {
+            tracing::warn!(
+                platform,
+                stage = "challenge",
+                error_code = error.error_code(),
+                "platform webhook challenge failed"
+            );
+            StatusCode::FORBIDDEN.into_response()
+        }
     }
 }
 
@@ -205,16 +218,22 @@ pub(super) async fn dispatch_platform_webhook(
         &descriptor,
     )
     .await
-    .inspect_err(|_| {
-        tracing::warn!(platform, stage = "credentials", "platform webhook rejected")
+    .inspect_err(|error| {
+        tracing::warn!(
+            platform,
+            stage = "credentials",
+            error_code = error.error_code(),
+            "platform webhook rejected"
+        )
     })?;
     let targets = adapter
         .platform_webhook_targets(&credentials, headers, body)
         .await
-        .inspect_err(|_| {
+        .inspect_err(|error| {
             tracing::warn!(
                 platform,
                 stage = "signature_or_target",
+                error_code = error.error_code(),
                 "platform webhook rejected"
             )
         })?;
@@ -231,6 +250,7 @@ pub(super) async fn dispatch_platform_webhook(
             tracing::warn!(
                 platform,
                 stage = "bot_lookup",
+                platform_bot_id = %target,
                 "platform webhook has no active managed channel"
             );
             continue;
@@ -426,7 +446,7 @@ async fn handle_webhook_inner_with_deps(
             &bot,
         )
         .await
-        .inspect_err(|_| tracing::warn!(platform = %bot.platform, bot_id, stage = "connection", "channel webhook connection unavailable"))?;
+        .inspect_err(|error| tracing::warn!(platform = %bot.platform, bot_id, stage = "connection", error_code = error.error_code(), "channel webhook connection unavailable"))?;
     }
 
     // Auto-promote pending_webhook bots AFTER successful signature verification.
@@ -526,10 +546,16 @@ mod tests {
             &state.encryption_keys,
             &adapter.platform_credentials().unwrap(),
             &owner,
-            &[(
-                "consumer_secret".into(),
-                Some(zeroize::Zeroizing::new("api-secret".into())),
-            )]
+            &[
+                (
+                    "consumer_secret".into(),
+                    Some(zeroize::Zeroizing::new("api-secret".into())),
+                ),
+                (
+                    "app_bearer_token".into(),
+                    Some(zeroize::Zeroizing::new("app-token".into())),
+                ),
+            ]
             .into(),
             false,
         )
@@ -580,6 +606,37 @@ mod tests {
             )])
         };
         let body = payload("500", "10", "10");
+        let provider_api = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/2/webhooks"))
+            .respond_with(wiremock::ResponseTemplate::new(503))
+            .expect(1)
+            .mount(&provider_api)
+            .await;
+        let setup_adapter = crate::services::channel_adapters::x::XAdapter {
+            api_base: Some(provider_api.uri()),
+        };
+        let bot = channel_bot_service::get_bot(&db, &bot_id).await.unwrap();
+        assert!(
+            crate::services::channel_connection_webhook_service::configure(
+                &db,
+                &state.billing,
+                &state.encryption_keys,
+                &state.http_client,
+                &setup_adapter,
+                &bot,
+                "https://nyx.example",
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            channel_bot_service::get_bot(&db, &bot_id)
+                .await
+                .unwrap()
+                .status,
+            "active"
+        );
         assert!(
             dispatch_platform_webhook(&state, "x", &HeaderMap::new(), &body)
                 .await
@@ -591,6 +648,23 @@ mod tests {
             dispatch_platform_webhook(&state, "x", &sign(&body), &tampered)
                 .await
                 .is_err()
+        );
+        let mut invalid_modern = sign(&body);
+        invalid_modern.insert(
+            "x-twitter-webhooks-signature-oauth2",
+            "invalid".parse().unwrap(),
+        );
+        assert!(
+            dispatch_platform_webhook(&state, "x", &invalid_modern, &body)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            db.collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
         );
         for _ in 0..2 {
             dispatch_platform_webhook(&state, "x", &sign(&body), &body)

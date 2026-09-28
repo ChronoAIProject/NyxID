@@ -37,8 +37,8 @@ import { ServiceIcon } from "@/components/service-icon";
 
 /**
  * Describes what a per-field clear on a shared OAuth backing interrupts. X keeps
- * its OAuth app credentials in the shared provider, while its webhook secrets
- * only affect DM webhook delivery, subscription setup and cleanup.
+ * its OAuth app credentials in the shared provider; the Client Secret also
+ * authenticates modern X webhooks.
  */
 function sharedClearImpact(
   providerId: string,
@@ -58,18 +58,23 @@ function sharedClearImpact(
   const oauthImpact = `Clearing these credentials stops all of the ${sharedProvider} provider's OAuth connections and logins until credentials are restored.`;
   const clearsWebhook =
     providerId === "x" &&
-    (fields.app_bearer_token === null || fields.consumer_secret === null);
+    (fields.app_bearer_token === null ||
+      fields.consumer_secret === null ||
+      fields.client_secret === null);
   if (!clearsWebhook) {
     return { field: "Shared OAuth credentials", after: oauthImpact };
   }
   const webhookImpact = [
+    fields.client_secret === null
+      ? "Clearing the X Client Secret stops OAuth 2.0 webhook signature verification and changes CRC verification to the legacy API key secret, if configured."
+      : "",
     fields.consumer_secret === null
-      ? "Clearing the X API key secret stops legacy webhook signature verification. OAuth 2.0 webhook verification and setup remain available with the Client Secret and app bearer token."
+      ? `Clearing the X API key secret stops legacy webhook signature verification.${fields.client_secret === null || fields.app_bearer_token === null ? "" : " OAuth 2.0 webhook verification and setup remain available with the Client Secret and app bearer token."}`
       : "",
     fields.app_bearer_token === null
       ? "Clearing the X app bearer token stops subscription setup and cleanup until restored. Existing subscriptions can continue delivering billable events."
       : "",
-    "Registered channels do not fall back to polling; restore the credentials and select Verify on each channel.",
+    "Registered channels do not fall back to polling. If delivery or setup is interrupted, restore the required credentials and select Verify on each affected channel.",
   ]
     .filter(Boolean)
     .join(" ");

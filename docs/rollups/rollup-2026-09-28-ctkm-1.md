@@ -13,6 +13,8 @@ receive the immediate HTTP acknowledgment without being admitted or counted.
 
 - Verify the modern header when present; retain legacy verification when absent.
   Reject an invalid modern signature without downgrading to legacy verification.
+- Reject JSON object CRC tokens to prevent challenge responses from being reused
+  as authenticated webhook bodies.
 - Prefer the OAuth Client Secret for CRC, with a legacy consumer-secret fallback.
   Allow app bearer plus either signing secret for webhook readiness.
 - Display the shared `/api/v1/webhooks/channel/x/platform` callback on X bots,
@@ -21,9 +23,11 @@ receive the immediate HTTP acknowledgment without being admitted or counted.
   selected metadata notification.
 - Log fixed rejection stages and successful admission identifiers without
   secrets, plaintext or encrypted payloads.
-- Preserve registered, unmetered DM delivery when Verify encounters a read-only
-  provider error or setup lease contention. Stop after uncertain subscription
-  mutations; paid and non-DM channels retain stricter setup requirements.
+- Preserve all unchanged channels when the setup lease is busy, and registered
+  unmetered DM delivery after read-only provider failures. Stop after uncertain
+  subscription mutations; paid and non-DM channels retain stricter requirements
+  once setup begins. Persist incomplete event-selection changes so cleanup also
+  covers interrupted removal of Chat or other events.
 
 The setup progress tracking and its regression cases originate in the X portion
 of [PR #1644](https://github.com/ChronoAIProject/NyxID/pull/1644), adapted to the
@@ -33,7 +37,7 @@ changes are outside this rollup.
 ## Validation and incident closure
 
 Regression coverage exercises both signature formats, exact-body authentication,
-CRC, no downgrade, encrypted Chat admission through the real HTTP router and
+CRC signing-oracle rejection, no downgrade, encrypted Chat admission through the real HTTP router and
 owner API, failed callbacks retaining activity, deduplication, metered admission,
 legacy callbacks and setup recovery. Browser coverage checks managed X setup and
 activity display with zero ordinary messages. Completed check results belong to

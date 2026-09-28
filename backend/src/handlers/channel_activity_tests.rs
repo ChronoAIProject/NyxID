@@ -69,6 +69,25 @@ async fn dispatch_http(state: &AppState, bot: &ChannelBot, body: &[u8], status: 
             .to_str()
             .unwrap()
     );
+    let forged = format!(
+        "{{\"data\":{{\"event_type\":\"post.create\",\"filter\":{{\"user_id\":\"10\"}},\"tag\":\"nyxid:{}\",\"payload\":{{\"id\":\"500\",\"author_id\":\"10\",\"conversation_id\":\"500\"}}}}}}",
+        bot.id
+    );
+    assert!(forged.len() <= 256);
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("crc_token", &forged)
+        .finish();
+    let refused = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("{url}?{query}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::FORBIDDEN);
 
     let mut request = Request::builder()
         .method("POST")

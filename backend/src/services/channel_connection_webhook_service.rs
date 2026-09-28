@@ -16,6 +16,13 @@ pub fn supports(adapter: &dyn PlatformAdapter) -> bool {
         )
 }
 
+pub fn callback_url(base_url: &str, platform: &str) -> String {
+    format!(
+        "{}/api/v1/webhooks/channel/{platform}/platform",
+        base_url.trim_end_matches('/')
+    )
+}
+
 pub(crate) async fn serialized<T>(
     db: &mongodb::Database,
     platform: &str,
@@ -64,12 +71,14 @@ pub async fn configure(
         return Ok(false);
     }
     let progress = WebhookSetupProgress::default();
+    let started = std::sync::atomic::AtomicBool::new(false);
     // Keep provider setup state off the shared channel verification stack.
     let result = serialized(db, adapter.platform_id(), Box::pin(async {
         let current = super::channel_bot_service::get_bot(db, &bot.id).await?;
         if !current.is_active || current.connection_id != bot.connection_id {
             return Err(AppError::Conflict("Channel connection changed during webhook setup".into()));
         }
+        started.store(true, std::sync::atomic::Ordering::Relaxed);
         let result = configure_inner(db, billing, keys, http, adapter, &current, base_url, &progress).await;
         if result.is_err()
             && setup_failure_requires_stop(&current, billing.billing_enabled(), &progress) {
@@ -78,7 +87,10 @@ pub async fn configure(
         }
         result
     })).await;
-    if result.is_err() && setup_failure_requires_stop(bot, billing.billing_enabled(), &progress) {
+    if result.is_err()
+        && started.load(std::sync::atomic::Ordering::Relaxed)
+        && setup_failure_requires_stop(bot, billing.billing_enabled(), &progress)
+    {
         super::channel_credentials::fail_bot(db, bot,
             "Webhook setup did not complete. Check credits and webhook configuration, then select Verify.").await?;
     }
@@ -144,7 +156,7 @@ async fn configure_inner(
             billing: None,
             token: &token, platform_bot_id: Some(&current.platform_bot_id), platform_secrets: Some(&platform),
         };
-        let url = format!("{}/api/v1/webhooks/channel/{}/platform", base_url.trim_end_matches('/'), adapter.platform_id());
+        let url = callback_url(base_url, adapter.platform_id());
         if billing.billing_enabled() || current.webhook_registered || super::channel_adapters::x::webhook_events_enabled(&current) {
             // Record a possible remote subscription before the provider effect,
             // so failed/partial setup remains eligible for cleanup retry.
