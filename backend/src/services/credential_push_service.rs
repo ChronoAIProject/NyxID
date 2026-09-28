@@ -992,6 +992,7 @@ mod tests {
             auth_method: "bearer".to_string(),
             auth_key_name: "Authorization".to_string(),
             catalog_service_id: None,
+            icon_url: None,
             node_id: Some("node-1".to_string()),
             node_priority: 0,
             service_type: "http".to_string(),

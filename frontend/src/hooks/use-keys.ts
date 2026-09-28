@@ -405,6 +405,8 @@ interface UpdateKeyParams {
   readonly credential?: string;
   readonly keyId: string;
   readonly label?: string;
+  /** Empty string clears the icon override. */
+  readonly icon_url?: string;
   readonly recommended_skills?: readonly string[];
   readonly endpoint_url?: string;
   readonly auth_method?: string;

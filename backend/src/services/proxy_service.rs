@@ -7376,6 +7376,7 @@ mod tests {
             auth_method: "token_exchange".to_string(),
             auth_key_name: String::new(),
             catalog_service_id: Some("cat-1".to_string()),
+            icon_url: None,
             node_id: None,
             node_priority: 0,
             service_type: "http".to_string(),

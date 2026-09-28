@@ -445,6 +445,8 @@ pub struct KeyResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub catalog_service_slug: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub catalog_service_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revocation: Option<KeyRevocationResponse>,
@@ -675,6 +677,8 @@ pub struct KeyListResponse {
 pub struct UpdateKeyRequest {
     /// New display label
     pub label: Option<String>,
+    /// Image URL override for this service. Empty string clears it.
+    pub icon_url: Option<String>,
     /// New endpoint URL
     pub endpoint_url: Option<String>,
     /// Auth method (bearer, header, query, basic, none)
@@ -1477,6 +1481,39 @@ pub async fn update_key(
     let view =
         unified_key_service::get_key(&state.db, &state.encryption_keys, &user_id_str, &key_id)
             .await?;
+
+    if let Some(icon_url) = body.icon_url.as_deref() {
+        let fields = serde_json::to_value(&body).map_err(|error| {
+            AppError::Internal(format!("Failed to inspect key update: {error}"))
+        })?;
+        let has_other_update = body.default_request_headers.is_some()
+            || fields.as_object().is_some_and(|fields| {
+                fields
+                    .iter()
+                    .any(|(field, value)| field != "icon_url" && !value.is_null())
+            });
+        if has_other_update {
+            return Err(AppError::ValidationError(
+                "Change the service icon separately from other settings".to_string(),
+            ));
+        }
+        user_service_service::update_service_icon(&state.db, &user_id_str, &key_id, icon_url)
+            .await?;
+        crate::services::audit_service::log_for_user(
+            state.db.clone(),
+            &auth_user,
+            "service_icon_updated",
+            Some(serde_json::json!({ "service_id": &key_id })),
+        );
+        let mut response = resolve_key_response(&state, &auth_user, &key_id).await?;
+        crate::handlers::service_history::enrich_summaries(
+            &state.db,
+            &auth_user,
+            std::slice::from_mut(&mut response),
+        )
+        .await?;
+        return Ok(Json(response));
+    }
 
     if let Some(use_platform_key) = body.use_platform_key {
         if body.label.is_some()
@@ -2674,6 +2711,7 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
             .and_then(unified_key_service::oauth_connection_status),
         catalog_service_id: result.service.catalog_service_id.clone(),
         catalog_service_slug: None,
+        icon_url: result.service.icon_url.clone(),
         catalog_service_name: None,
         revocation: None,
         node_id: result.service.node_id.clone(),
@@ -2802,6 +2840,7 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
         connection_status: view.connection_status,
         catalog_service_id: view.catalog_service_id,
         catalog_service_slug: view.catalog_service_slug,
+        icon_url: view.icon_url,
         catalog_service_name: view.catalog_service_name,
         revocation: None,
         node_id: view.node_id,
@@ -3462,6 +3501,7 @@ mod tests {
     fn empty_update_request() -> super::UpdateKeyRequest {
         super::UpdateKeyRequest {
             label: None,
+            icon_url: None,
             endpoint_url: None,
             auth_method: None,
             auth_key_name: None,
