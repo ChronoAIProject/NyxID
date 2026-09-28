@@ -274,13 +274,15 @@ sequenceDiagram
 
 ### Editing a sent reply
 
-`POST /api/v1/channel-relay/reply/update` replaces a previously sent message using the `platform_message_id` returned by `/reply` or `/send`:
+`POST /api/v1/channel-relay/reply/update` replaces a previously sent message. `message_id` is the `platform_message_id` returned by `/reply` or `/send`, and `outbound_message_id` is the NyxID `message_id` from the same response:
 
 ```json
-{ "message_id": "<platform_message_id>", "reply": { "text": "Updated response", "metadata": null } }
+{ "message_id": "<platform_message_id>", "outbound_message_id": "<message_id>", "reply": { "text": "Updated response", "metadata": null } }
 ```
 
-An assigned agent API key can edit both anchored replies and agent-initiated messages. A per-callback reply token can edit only replies anchored to its bound inbound message, and only after its JTI has been consumed by `/reply`; it cannot edit initiated rows. The existing authorization and per-message rate limit apply to every edit, with rate limiting before authentication. Discovery exposes native support as `capabilities.edit`.
+NyxID looks for the target only among rows the caller may edit. An agent API key sees the rows it sent, and a reply token sees only the reply its key sent to its bound inbound message in its bound conversation. A platform message ID is not a global identifier: Telegram numbers messages per chat, so a key that serves several chats routinely has several rows with the same ID. When more than one row matches and `outbound_message_id` is absent, the edit returns `409 conflict` rather than choosing one. On Telegram and telegram-new (adapters whose `message_ids_are_chat_scoped()` is true), API-key edits must send `outbound_message_id` and otherwise return `400 validation_error`: even a unique match could be another chat's message once the intended row has expired or was never stored. Other platforms accept edits without it for compatibility, but clients should always send it. Reply-token edits are anchored to one chat and may omit it.
+
+An agent API key can edit anchored replies and agent-initiated messages it sent, while it remains the conversation's assigned agent (otherwise `403`). A per-callback reply token can edit only replies anchored to its bound inbound message, and only after its JTI has been consumed by `/reply`; it cannot edit initiated rows. Rows outside either scope return `404`. After the target row is resolved, every edit also passes the per-message rate limit, which is keyed on that row. Identical platform message IDs in other chats or tenants therefore never share a bucket. Discovery exposes native support as `capabilities.edit`.
 
 - **Telegram / telegram-new:** text messages use `editMessageText`; media captions use `editMessageCaption` after Telegram returns exactly `Bad Request: there is no text in the message to edit`. Both use the chat ID, numeric message ID, and `parse_mode: "Markdown"`, matching sends. Ordinary bot messages are subject to Telegram's 48-hour edit window. An identical edit (`message is not modified`) succeeds idempotently.
 - **Discord:** `PATCH` edits `content` on any bot message, including media messages. NyxID always edits through `PATCH /channels/{channel_id}/messages/{message_id}` with the bot token and never through the interaction-webhook edit endpoint, so edits that Discord only permits via the interaction token (for example ephemeral interaction responses) are not supported and surface as a classified refusal.
@@ -1205,7 +1207,7 @@ for metadata reads; this does not grant bot-management access to Agent Keys.
 | `POST` | `/api/v1/channel-relay/reply` | API key **or** reply token | Agent sends async reply to a message. See [Reply Token](#reply-token). |
 | `POST` | `/api/v1/channel-relay/send` | Assigned API key or human owner | Initiate an opted-in target-addressed message; optional idempotency key. |
 | `GET` | `/api/v1/channel-relay/conversations` | API key | Paginated active assignments, addressability, opt-in, and outbound capabilities. |
-| `POST` | `/api/v1/channel-relay/reply/update` | API key **or** consumed reply token | Edit an anchored reply or API-key-authorized initiated message on Telegram, Discord, Slack, Lark, or Feishu. |
+| `POST` | `/api/v1/channel-relay/reply/update` | API key **or** consumed reply token | Edit an anchored reply or API-key-authorized initiated message on Telegram, Discord, Slack, Lark, or Feishu. Send `outbound_message_id` (required for API-key edits on Telegram); ambiguous unpinned edits return 409. |
 | `GET` | `/api/v1/channel-relay/messages/{message_id}/attachments/{index}` | Assigned API key **or** reply token | Download inbound media without consuming the reply token. |
 | `GET` | `/api/v1/channel-relay/messages/{conversation_id}` | API key | Get conversation message history |
 | `GET` | `/api/v1/channel-relay/resolve-sender` | API key | Resolve a platform sender to a NyxID user (query params: `platform`, `platform_id`) |

@@ -396,6 +396,10 @@ impl PlatformAdapter for TelegramAdapter {
         "telegram"
     }
 
+    fn message_ids_are_chat_scoped(&self) -> bool {
+        true
+    }
+
     fn registration(&self) -> super::super::channel_platform::RegistrationDescriptor {
         super::super::channel_platform::RegistrationDescriptor {
             documentation_url: Some("https://core.telegram.org/bots/api#setwebhook"),

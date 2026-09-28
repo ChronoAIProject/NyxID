@@ -501,6 +501,12 @@ pub trait PlatformAdapter: Send + Sync {
         false
     }
 
+    /// Whether upstream message IDs repeat across chats (Telegram numbers each
+    /// chat from 1), so a platform message ID alone cannot identify a message.
+    fn message_ids_are_chat_scoped(&self) -> bool {
+        false
+    }
+
     async fn retryable_webhook(
         &self,
         _context: &super::channel_retry_ingress::IngressContext<'_>,
