@@ -650,13 +650,13 @@ it.each([[], [{ id: orgId, your_role: "member" }], [{ id: orgId, your_role: "vie
   const user = userEvent.setup();
   post.mockResolvedValue({ id: "personal-bot", platform: "telegram", status: "active" });
   await setup("/channel-bots/connect/telegram?bot_token=fixture-token");
-  expect(await screen.findByLabelText("Bot name")).toHaveValue("Telegram bot");
+  expect(await screen.findByLabelText("Bot name")).toHaveValue("");
   expect(screen.queryByRole("combobox", { name: "Create for" })).not.toBeInTheDocument();
   const submit = screen.getByRole("button", { name: "Connect bot" });
   await waitFor(() => expect(submit).toBeEnabled());
   await user.click(submit);
   expect(post).toHaveBeenCalledExactlyOnceWith("/channel-bots", {
-    platform: "telegram", label: "Telegram bot", bot_token: "fixture-token", target_org_id: undefined,
+    platform: "telegram", label: "", bot_token: "fixture-token", target_org_id: undefined,
   });
 });
 
@@ -665,9 +665,62 @@ it("shows ownership when an admin organization is available and preserves its pr
   expect(await screen.findByRole("combobox", { name: "Create for" })).toHaveValue(orgId);
 });
 
-it.each(["", "%20%20"])("uses the default bot name for a blank label=%s", async (label) => {
+it.each(["", "%20%20"])("leaves the Telegram bot name blank for label=%s", async (label) => {
   await setup(`/channel-bots/connect/telegram?label=${label}`);
-  expect(await screen.findByLabelText("Bot name", { exact: true })).toHaveValue("Telegram bot");
+  expect(await screen.findByLabelText("Bot name")).toHaveValue("");
+  expect(screen.getByText("Optional. Leave blank to use the name from your bot token.")).toBeVisible();
+});
+
+const botFatherToken = "123456789:AAHfiqksKZ8WmR2zSjiQ7_v4TMAKdiHm9T0";
+
+function mockTelegramProfile(label: string | null) {
+  post.mockImplementation(async (path: string) => {
+    if (path === "/channel-bots/telegram/profile")
+      return { username: "acme_support_bot", display_name: label, label };
+    return { id: "telegram-bot", platform: "telegram", status: "active", label: label ?? "Named bot" };
+  });
+}
+
+it("fills a blank Telegram bot name from the pasted BotFather token", async () => {
+  useOrgs.mockReturnValue({ data: [], isError: false });
+  mockTelegramProfile("Acme Support");
+  const user = userEvent.setup();
+  await setup("/channel-bots/connect/telegram");
+  await user.click(await screen.findByLabelText("Bot token"));
+  await user.paste(botFatherToken);
+  await waitFor(() => expect(screen.getByLabelText("Bot name")).toHaveValue("Acme Support"));
+  expect(post).toHaveBeenCalledWith("/channel-bots/telegram/profile", { bot_token: botFatherToken });
+  await user.click(screen.getByRole("button", { name: "Connect bot" }));
+  await waitFor(() => expect(post).toHaveBeenLastCalledWith("/channel-bots", {
+    platform: "telegram", label: "Acme Support", bot_token: botFatherToken, target_org_id: undefined,
+  }));
+});
+
+it("never replaces a Telegram bot name supplied by the link or typed by the user", async () => {
+  useOrgs.mockReturnValue({ data: [], isError: false });
+  mockTelegramProfile("Acme Support");
+  const user = userEvent.setup();
+  await setup("/channel-bots/connect/telegram?label=Support%20desk");
+  const name = await screen.findByLabelText("Bot name");
+  expect(name).toHaveValue("Support desk");
+  await user.click(screen.getByLabelText("Bot token"));
+  await user.paste(botFatherToken);
+  await waitFor(() => expect(post).toHaveBeenCalledWith("/channel-bots/telegram/profile", { bot_token: botFatherToken }));
+  expect(name).toHaveValue("Support desk");
+  await user.clear(name);
+  await user.type(name, "Typed name");
+  await user.click(screen.getByRole("button", { name: "Connect bot" }));
+  await waitFor(() => expect(post).toHaveBeenLastCalledWith("/channel-bots", expect.objectContaining({ label: "Typed name" })));
+});
+
+it("does not look up partial Telegram tokens", async () => {
+  useOrgs.mockReturnValue({ data: [], isError: false });
+  mockTelegramProfile("Acme Support");
+  const user = userEvent.setup();
+  await setup("/channel-bots/connect/telegram");
+  await user.type(await screen.findByLabelText("Bot token"), "12345");
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  expect(post).not.toHaveBeenCalled();
 });
 
 it("keeps an explicitly selected organization visible when membership cannot be confirmed", async () => {

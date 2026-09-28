@@ -1993,6 +1993,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             post(handlers::telegram_new::connect),
         )
         .route(
+            "/channel-bots/telegram/profile",
+            post(handlers::channel_bots::telegram_bot_profile),
+        )
+        .route(
             "/channel-bots/managed-onboarding/{platform}",
             get(handlers::channel_managed::bootstrap),
         )
