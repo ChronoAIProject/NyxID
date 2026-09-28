@@ -507,11 +507,17 @@ pub async fn rename(
 ) -> AppResult<Json<ConversationResponse>> {
     let user_id = auth.user_id.to_string();
     engine::require_enabled(&state.db, &user_id).await?;
-    Ok(Json(
-        engine::rename(&state.db, &user_id, &id, &body.title)
-            .await?
-            .into(),
-    ))
+    let row = engine::rename(&state.db, &user_id, &id, &body.title).await?;
+    // The same shape as the index row, so a rename never drops the agent.
+    let agents = crate::services::assistant_team_service::agents(&state.db, &user_id, true).await?;
+    let counts =
+        acknowledgements::pending_counts(&state.db, &user_id, std::slice::from_ref(&row.id))
+            .await?;
+    let count = counts.get(&row.id).copied().unwrap_or(0);
+    let agent_id = row.agent_id.clone();
+    let mut dto = ConversationResponse::from(row).with_agent(agent_id.as_deref(), &agents);
+    dto.pending_acknowledgements = count;
+    Ok(Json(dto))
 }
 pub async fn stop(
     State(state): State<AppState>,

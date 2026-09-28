@@ -844,6 +844,19 @@ async fn grants_decisions_and_destroy_reach_every_live_thread_key() {
     // Revoking a service never expires an account request.
     let history = acks::history(&state.db, OWNER, &home.id).await.unwrap();
     assert_eq!(status(&history, &account_request.id), "pending");
+    // A rename answers with the thread's agent and pending count, like the index.
+    let renamed = super::super::assistant_nyxagent::rename(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        axum::extract::Path(home.id.clone()),
+        Json(serde_json::from_value(json!({"title": "Coder home"})).unwrap()),
+    )
+    .await
+    .unwrap()
+    .0;
+    let value = serde_json::to_value(&renamed).unwrap();
+    assert_eq!(value["agent"]["name"], "coder");
+    assert_eq!(value["pending_acknowledgements"], 1);
     // A full pool neither runs a turn nor spends the owner's event budget.
     let limit = team_pool_limit(&state, OWNER).await + 1;
     let mut held = Vec::new();
