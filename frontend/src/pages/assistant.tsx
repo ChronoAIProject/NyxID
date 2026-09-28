@@ -16,6 +16,7 @@ import {
 import { AssistantShell } from "@/components/assistant/assistant-shell";
 import { AssistantEngineSidebar } from "@/components/assistant/assistant-engine-sidebar";
 import { AssistantWireLogAction } from "@/components/assistant/assistant-wire-log-panel";
+import { NyxBotSettingsButton } from "@/components/assistant/nyxbot-settings-dialog";
 import { PluginsView } from "@/components/assistant/plugins-view";
 import { useAssistantChat } from "@/hooks/use-assistant-chat";
 import { useDirectAssistantChat } from "@/hooks/use-assistant-direct";
@@ -25,6 +26,7 @@ import {
   isDirectConversationId,
 } from "@/lib/assistant/conversation-ids";
 import { directAssistantTransport } from "@/lib/assistant/direct-transport";
+import { nyxAgentTransport } from "@/lib/assistant/nyxagent-transport";
 import { parseAssistantSearch } from "@/lib/assistant/search";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
 import type { Conversation } from "@/types/assistant";
@@ -192,6 +194,36 @@ function AssistantWorkspacePage({
   );
 }
 
+/**
+ * Plugins / Approvals for NyxAgent users: the NyxAgent sidebar (agents and
+ * groups), and none of the earlier engines' chat lists are fetched.
+ */
+function NyxAgentWorkspacePage({ view }: { readonly view: "plugins" | "approvals" }) {
+  const navigate = useNavigate();
+  function openAssistant(search: { c?: string } = {}) {
+    void navigate({ to: "/assistant" as never, search: search as never });
+  }
+  return (
+    <AssistantShell
+      title={view === "plugins" ? "Plugins" : "Approvals"}
+      headerActions={<NyxBotSettingsButton />}
+      sidebar={
+        <AssistantEngineSidebar
+          engine="nyxagent"
+          conversations={[]}
+          activeConversationId={undefined}
+          activeView={view}
+          onNewChat={() => openAssistant()}
+          onSelect={(id) => openAssistant({ c: id })}
+          onDelete={(id) => nyxAgentTransport.delete(id)}
+        />
+      }
+    >
+      {view === "plugins" ? <PluginsView /> : <ApprovalsView />}
+    </AssistantShell>
+  );
+}
+
 export function AssistantPage({
   view = "chat",
 }: {
@@ -210,7 +242,9 @@ export function AssistantPage({
   });
 
   if (view !== "chat") {
-    const workspace = (
+    const workspace = nyxagentEnabled ? (
+      <NyxAgentWorkspacePage view={view} />
+    ) : (
       <AssistantWorkspacePage view={view} directEnabled={directEnabled} />
     );
     return AssistantHttpFixtureBoundary && fixtureMode() ? (

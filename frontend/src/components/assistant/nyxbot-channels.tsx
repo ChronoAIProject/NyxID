@@ -19,7 +19,7 @@ import {
   useLinkNyxBotChannel,
   useNyxBotChannels,
 } from "@/hooks/use-nyxbot-agents";
-import { channelPlatformName } from "@/lib/assistant/nyxbot-labels";
+import { agentTitle, channelPlatformName } from "@/lib/assistant/nyxbot-labels";
 import { formatDateTime } from "@/lib/utils";
 import type {
   AssistantAgent,
@@ -39,7 +39,7 @@ const channelStatus: Record<string, { label: string; variant: "success" | "warni
   };
 
 function agentLabel(agent: AssistantAgent): string {
-  return agent.kind === "nyxbot" ? "NyxBot" : agent.name;
+  return agentTitle(agent);
 }
 
 function AgentSelect({

@@ -4,6 +4,9 @@ import {
   assistantAgentDetailSchema,
   assistantAgentListSchema,
   assistantAgentProfileSchema,
+  assistantGroupFormSchema,
+  assistantGroupMessagesSchema,
+  assistantGroupPostedSchema,
   nyxAgentAcknowledgementSchema,
   nyxAgentChannelConnectSchema,
   nyxAgentChannelListSchema,
@@ -207,12 +210,17 @@ describe("NyxBot team, settings and channel schemas", () => {
     expect(assistantAgentCreateSchema.safeParse({ ...valid, name: "a".repeat(33) }).success).toBe(false);
     expect(assistantAgentCreateSchema.safeParse({ ...valid, description: " " }).success).toBe(false);
     // NyxBot keeps its name and its persona notes are optional.
+    const style = { display_name: "", persona: "" };
     expect(
-      assistantAgentProfileSchema("nyxbot").safeParse({ name: "NyxBot", description: "" }).success,
+      assistantAgentProfileSchema("nyxbot").safeParse({ name: "NyxBot", description: "", ...style })
+        .success,
     ).toBe(true);
     expect(
-      assistantAgentProfileSchema("specialist").safeParse({ name: "writer", description: "" })
-        .success,
+      assistantAgentProfileSchema("specialist").safeParse({
+        name: "writer",
+        description: "",
+        ...style,
+      }).success,
     ).toBe(false);
   });
 
@@ -274,5 +282,126 @@ describe("NyxBot team, settings and channel schemas", () => {
     expect(
       nyxAgentChannelConnectSchema.parse({ channel_agent, link: { ...link, url: null } }).link.url,
     ).toBeNull();
+  });
+});
+
+describe("group schemas", () => {
+  const group = {
+    id: "nyxg-1",
+    name: "Launch crew",
+    members: [
+      { id: "a1", name: "NyxBot", kind: "nyxbot", destroyed: false, working: false },
+      { id: "a2", name: "researcher", kind: "specialist", destroyed: false, working: true },
+    ],
+    lead_agent_id: "a1",
+    working_agent_ids: ["a2"],
+    message_count: 2,
+    last_message_at: at,
+    created_at: at,
+  };
+
+  it("parses a transcript page with user, agent and notice messages", () => {
+    const page = assistantGroupMessagesSchema.parse({
+      group,
+      messages: [
+        { id: "m1", seq: 1, role: "notice", agent: null, text: "Started", created_at: at },
+        { id: "m2", seq: 2, role: "user", text: "@researcher go", created_at: at },
+        {
+          id: "m3",
+          seq: 3,
+          role: "agent",
+          agent: { id: "a2", name: "researcher", kind: "specialist" },
+          text: "On it",
+          created_at: at,
+        },
+      ],
+      before_seq: null,
+    });
+    expect(page.group.members[1]).toMatchObject({ name: "researcher", working: true });
+    expect(page.messages.map((message) => message.role)).toEqual(["notice", "user", "agent"]);
+    expect(page.messages[1]?.agent).toBeNull();
+    expect(() =>
+      assistantGroupMessagesSchema.parse({
+        group,
+        messages: [{ id: "m", seq: 1, role: "assistant", text: "", created_at: at }],
+        before_seq: null,
+      }),
+    ).toThrow();
+  });
+
+  it("parses the accepted post response", () => {
+    expect(
+      assistantGroupPostedSchema.parse({
+        message: { id: "m", seq: 4, role: "user", agent: null, text: "hi", created_at: at },
+        addressed_agent_ids: ["a1"],
+      }).addressed_agent_ids,
+    ).toEqual(["a1"]);
+  });
+
+  it("validates the create/settings form: a name and 1 to 8 agents", () => {
+    expect(
+      assistantGroupFormSchema.safeParse({ name: "  Crew  ", member_agent_ids: ["a"] }).data,
+    ).toEqual({ name: "Crew", member_agent_ids: ["a"] });
+    expect(assistantGroupFormSchema.safeParse({ name: " ", member_agent_ids: ["a"] }).success).toBe(false);
+    expect(
+      assistantGroupFormSchema.safeParse({ name: "x".repeat(61), member_agent_ids: ["a"] }).success,
+    ).toBe(false);
+    expect(assistantGroupFormSchema.safeParse({ name: "Crew", member_agent_ids: [] }).success).toBe(false);
+    expect(
+      assistantGroupFormSchema.safeParse({
+        name: "Crew",
+        member_agent_ids: Array.from({ length: 9 }, (_, index) => String(index)),
+      }).success,
+    ).toBe(false);
+  });
+});
+
+describe("agent display name and persona", () => {
+  const base = {
+    id: "a1",
+    kind: "specialist",
+    name: "writer",
+    status: "idle",
+    created_at: at,
+    last_active_at: at,
+  };
+
+  it("parses them, and treats older payloads as having none", () => {
+    const list = assistantAgentListSchema.parse({
+      agents: [base, { ...base, id: "a2", display_name: "Luna", persona: "Warm." }],
+      limits: {
+        skip_destructive_confirmation: false,
+        max_live_subagents: 8,
+        max_concurrent_subagent_turns: 3,
+        max_live_subagents_limit: 32,
+        max_concurrent_subagent_turns_limit: 8,
+      },
+    });
+    expect(list.agents.map((agent) => [agent.display_name, agent.persona])).toEqual([
+      [null, null],
+      ["Luna", "Warm."],
+    ]);
+  });
+
+  it("bounds them on create and edit; empty means none", () => {
+    const create = {
+      name: "writer",
+      description: "Drafts",
+      services: [],
+      account_read: false,
+      display_name: "",
+      persona: "",
+    };
+    expect(assistantAgentCreateSchema.safeParse(create).success).toBe(true);
+    expect(
+      assistantAgentCreateSchema.safeParse({ ...create, display_name: "x".repeat(41) }).success,
+    ).toBe(false);
+    expect(
+      assistantAgentCreateSchema.safeParse({ ...create, persona: "x".repeat(2001) }).success,
+    ).toBe(false);
+    const nyxbot = assistantAgentProfileSchema("nyxbot");
+    expect(
+      nyxbot.safeParse({ name: "NyxBot", display_name: " Nyx ", description: "", persona: "" }).data,
+    ).toEqual({ name: "NyxBot", display_name: "Nyx", description: "", persona: "" });
   });
 });

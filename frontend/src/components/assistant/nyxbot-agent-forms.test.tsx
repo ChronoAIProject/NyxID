@@ -96,6 +96,29 @@ it("creates a specialist with its role, services and account read, then opens it
   ]);
 });
 
+it("sends an optional display name and persona", async () => {
+  const { onCreated, user } = renderDialog();
+  const dialog = screen.getByRole("dialog", { name: "New agent" });
+  await user.type(within(dialog).getByRole("textbox", { name: "Name" }), "writer");
+  await user.type(within(dialog).getByRole("textbox", { name: /Display name/ }), "Luna");
+  await user.type(within(dialog).getByRole("textbox", { name: "Role" }), "Drafts notes");
+  const persona = within(dialog).getByRole("textbox", { name: /Persona/ });
+  expect(persona).toHaveAttribute("placeholder", "e.g. warm, concise, uses emoji sparingly");
+  await user.type(persona, "Warm, concise.");
+  await user.click(within(dialog).getByRole("button", { name: "Create agent" }));
+  await waitFor(() => expect(onCreated).toHaveBeenCalled());
+  expect(posts).toEqual([
+    {
+      name: "writer",
+      display_name: "Luna",
+      description: "Drafts notes",
+      persona: "Warm, concise.",
+      services: [],
+      account_read: false,
+    },
+  ]);
+});
+
 it("rejects an invalid name before calling the server and shows server refusals", async () => {
   const { onCreated, user } = renderDialog();
   const dialog = screen.getByRole("dialog", { name: "New agent" });

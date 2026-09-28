@@ -85,7 +85,16 @@ export function useCreateNyxBotAgent() {
 
 export function useUpdateNyxBotAgent() {
   return useAgentsMutation(
-    ({ id, ...body }: { id: string; name?: string; description?: string }) =>
+    ({
+      id,
+      ...body
+    }: {
+      id: string;
+      name?: string;
+      description?: string;
+      display_name?: string;
+      persona?: string;
+    }) =>
       nyxBotApi.updateAgent(id, body),
   );
 }

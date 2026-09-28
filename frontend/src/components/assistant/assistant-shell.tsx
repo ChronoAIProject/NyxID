@@ -170,6 +170,11 @@ export function AssistantShell({
               className="min-h-0 flex-1"
               onClick={(event) => {
                 const target = event.target as HTMLElement;
+                // React bubbles clicks from portaled layers (dialogs and menus
+                // opened from the drawer) through here; those are not drawer
+                // navigation, and closing would unmount them mid-action (a
+                // dialog's submit would never fire).
+                if (!event.currentTarget.contains(target)) return;
                 // Menu triggers open something anchored inside the drawer --
                 // closing it would unmount the anchor out from under them.
                 if (target.closest("[data-keep-drawer-open]")) return;

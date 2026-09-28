@@ -13,7 +13,6 @@ import {
   nyxAgentConversationSchema,
   nyxAgentHistorySchema,
   nyxAgentIndexSchema,
-  nyxAgentModelsSchema,
   nyxAgentEventSchema,
   type NyxAgentConversation,
   type NyxAgentConversationAgent,
@@ -220,13 +219,6 @@ export class NyxAgentTransport {
       active(id ? this.index.get(id) : undefined) ||
       active(this.getHistory(id)?.conversation)
     );
-  }
-
-  async models() {
-    const generation = this.identity();
-    const rows = nyxAgentModelsSchema.parse(await assistantJson(`${ROOT}/models`));
-    this.current(generation);
-    return rows;
   }
 
   /** Every thread, or only one agent's threads when `agentId` is given. */

@@ -5,13 +5,19 @@ import { Input } from "@/components/ui/input";
 import { nyxAgentTitleSchema } from "@/schemas/assistant-nyxagent";
 import { isNyxAgentConversationId } from "@/lib/assistant/conversation-ids";
 import { AgentStatusDot } from "@/components/assistant/nyxbot-agent-panels";
-import { AGENT_STATUS_LABEL, channelPlatformName } from "@/lib/assistant/nyxbot-labels";
-import type { AssistantAgent } from "@/schemas/assistant-nyxagent";
+import { AgentAvatar, AgentAvatarStack } from "@/components/assistant/nyxbot-agent-avatar";
+import {
+  AGENT_STATUS_LABEL,
+  agentHandle,
+  agentTitle,
+  channelPlatformName,
+} from "@/lib/assistant/nyxbot-labels";
+import type { AssistantAgent, AssistantGroup } from "@/schemas/assistant-nyxagent";
 import {
   Activity,
-  Bot,
   ChevronRight,
   FileText,
+  House,
   LayoutGrid,
   MoreHorizontal,
   PencilLine,
@@ -219,7 +225,11 @@ function ConversationRow({
   );
 }
 
-/** The NyxBot agents section: NyxBot pinned first, then specialists. */
+/**
+ * The NyxBot agents section: NyxBot pinned first, then specialists. Its
+ * presence switches the sidebar to the NyxAgent layout (Home, Agents,
+ * Groups; no generic New chat and no legacy Chats list).
+ */
 export interface SidebarAgents {
   readonly agents: readonly AssistantAgent[];
   /** The agent whose threads are expanded. */
@@ -230,12 +240,27 @@ export interface SidebarAgents {
   readonly onSelectAgent: (agentId: string) => void;
   readonly onNewThread: (agentId: string) => void;
   readonly onNewAgent: () => void;
+  /** The NyxBot home is open. */
+  readonly homeActive?: boolean;
+  readonly onHome?: () => void;
+}
+
+/** Group chats: the user plus several agents. */
+export interface SidebarGroups {
+  readonly groups: readonly AssistantGroup[];
+  readonly selectedGroupId?: string;
+  readonly loading?: boolean;
+  readonly onSelectGroup: (groupId: string) => void;
+  readonly onNewGroup: () => void;
 }
 
 function agentAccessibleName(agent: AssistantAgent): string {
-  if (agent.kind === "nyxbot") return "NyxBot — your personal agent";
+  const title = agentTitle(agent);
+  const handle = agentHandle(agent);
+  const named = handle ? `${title} (${handle})` : title;
+  if (agent.kind === "nyxbot") return `${named} — your personal agent`;
   const pending = agent.pending_acknowledgements;
-  return `${agent.name}, specialist, ${AGENT_STATUS_LABEL[agent.status]}${
+  return `${named}, specialist, ${AGENT_STATUS_LABEL[agent.status]}${
     pending ? `, ${String(pending)} pending ${pending === 1 ? "request" : "requests"}` : ""
   }`;
 }
@@ -258,7 +283,14 @@ function AgentRow({
   const nyxbot = agent.kind === "nyxbot";
   const platforms = [...new Set(agent.channels.map((channel) => channel.platform))];
   const pending = agent.pending_acknowledgements;
-  const name = nyxbot ? "NyxBot" : agent.name;
+  const name = agentTitle(agent);
+  const handle = agentHandle(agent);
+  // Under the name: NyxBot's role, and the @handle when a display name hides it.
+  const subtitle = nyxbot
+    ? handle
+      ? `${handle} · personal agent`
+      : "Your personal agent"
+    : handle;
   return (
     <div>
       <button
@@ -274,21 +306,20 @@ function AgentRow({
           agent.status === "destroyed" && "opacity-50",
         )}
       >
-        {nyxbot ? (
-          <Bot
-            aria-hidden="true"
-            className={cn("h-4 w-4 shrink-0", selected ? "text-nyx-secondary-400" : "text-text-tertiary")}
-          />
-        ) : (
-          <span className="flex h-4 w-4 shrink-0 items-center justify-center">
-            <AgentStatusDot status={agent.status} />
-          </span>
-        )}
+        <span className="relative flex shrink-0">
+          <AgentAvatar agent={agent} size="sm" />
+          {nyxbot ? null : (
+            <AgentStatusDot
+              status={agent.status}
+              className="absolute -bottom-0.5 -right-0.5 ring-2 ring-background"
+            />
+          )}
+        </span>
         <span className="min-w-0 flex-1">
           <span className="block truncate">{name}</span>
-          {nyxbot ? (
+          {subtitle ? (
             <span className="block truncate text-[10px] font-normal text-text-tertiary">
-              Your personal agent
+              {subtitle}
             </span>
           ) : null}
         </span>
@@ -372,6 +403,56 @@ function AgentsSection({
   );
 }
 
+function GroupsSection({ model }: { readonly model: SidebarGroups }) {
+  return (
+    <div className="space-y-0.5">
+      {model.groups.map((group) => {
+        const working = group.working_agent_ids.length;
+        const selected = group.id === model.selectedGroupId;
+        return (
+          <button
+            key={group.id}
+            type="button"
+            onClick={() => model.onSelectGroup(group.id)}
+            aria-current={selected ? "page" : undefined}
+            aria-label={`${group.name}, group with ${group.members
+              .map((member) => agentTitle(member))
+              .join(", ")}${working ? `, ${String(working)} working` : ""}`}
+            className={cn(
+              "flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-[13px] transition-colors",
+              selected
+                ? "bg-overlay-strong font-medium text-foreground"
+                : "text-muted-foreground hover:bg-overlay hover:text-foreground",
+            )}
+          >
+            <AgentAvatarStack agents={group.members} size="xs" max={3} />
+            <span className="min-w-0 flex-1 truncate">{group.name}</span>
+            {working ? (
+              <span
+                aria-hidden="true"
+                className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-success"
+              />
+            ) : null}
+          </button>
+        );
+      })}
+      {model.loading && !model.groups.length ? (
+        <p className="px-3 py-1.5 text-[11px] text-text-tertiary">Loading groups...</p>
+      ) : null}
+      {!model.loading && !model.groups.length ? (
+        <button
+          type="button"
+          onClick={model.onNewGroup}
+          data-keep-drawer-open=""
+          className="w-full rounded-lg px-3 py-1.5 text-left text-[11px] text-text-tertiary transition-colors hover:bg-overlay hover:text-muted-foreground"
+        >
+          Chat with several agents at once
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 export function AssistantSidebar({
   conversations,
   activeConversationId,
@@ -383,6 +464,7 @@ export function AssistantSidebar({
   onDelete,
   onRename,
   agents,
+  groups,
 }: {
   readonly conversations: readonly Conversation[];
   readonly activeConversationId: string | undefined;
@@ -395,6 +477,8 @@ export function AssistantSidebar({
   readonly onRename?: (conversationId: string, title: string) => Promise<void>;
   /** NyxBot agents and the selected agent's threads (NyxAgent engine). */
   readonly agents?: SidebarAgents;
+  /** NyxBot group chats (NyxAgent engine). */
+  readonly groups?: SidebarGroups;
 }) {
   const user = useAuthStore((state) => state.user);
   const counts = useAssistantWorkspaceCounts();
@@ -456,22 +540,45 @@ export function AssistantSidebar({
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-background">
-      <div className="p-2.5">
-        {/* No loading state: "New chat" is navigation only — it issues no
-            requests. The conversation is allocated lazily by the first send. */}
-        <Button
-          type="button"
-          variant="primary"
-          className="w-full"
-          onClick={onNewChat}
-        >
-          <Plus />
-          New chat
-        </Button>
-      </div>
+      {/* NyxAgent mode starts chats from the NyxBot home and each agent's
+          own "New chat"; the generic button belongs to the earlier engines. */}
+      {agents ? (
+        <div className="pt-1" />
+      ) : (
+        <div className="p-2.5">
+          {/* No loading state: "New chat" is navigation only — it issues no
+              requests. The conversation is allocated lazily by the first send. */}
+          <Button
+            type="button"
+            variant="primary"
+            className="w-full"
+            onClick={onNewChat}
+          >
+            <Plus />
+            New chat
+          </Button>
+        </div>
+      )}
 
       <GroupLabel>Workspace</GroupLabel>
       <div className="space-y-0.5 px-2">
+        {agents?.onHome ? (
+          <button
+            type="button"
+            onClick={agents.onHome}
+            aria-current={agents.homeActive ? "page" : undefined}
+            className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-[13px] transition-colors ${
+              agents.homeActive
+                ? "bg-overlay-strong font-medium text-foreground"
+                : "text-muted-foreground hover:bg-overlay hover:text-foreground"
+            }`}
+          >
+            <House
+              className={`h-4 w-4 shrink-0 ${agents.homeActive ? "text-nyx-secondary-400" : "text-text-tertiary"}`}
+            />
+            <span className="truncate">Home</span>
+          </button>
+        ) : null}
         <Link
           to="/assistant/plugins"
           className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-[13px] transition-colors ${
@@ -532,6 +639,9 @@ export function AssistantSidebar({
               <button
                 type="button"
                 aria-label="New agent"
+                // The dialog is rendered by this sidebar; closing the mobile
+                // drawer would unmount it.
+                data-keep-drawer-open=""
                 onClick={agents.onNewAgent}
                 className="flex h-6 w-6 items-center justify-center rounded-md text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
               >
@@ -541,7 +651,25 @@ export function AssistantSidebar({
             <AgentsSection model={agents} renderThread={renderRow} />
           </>
         ) : null}
-        {!agents || conversations.length ? (
+        {groups ? (
+          <>
+            <div className="-ml-2 mt-2 flex items-center justify-between">
+              <GroupLabel>Groups</GroupLabel>
+              <button
+                type="button"
+                aria-label="New group"
+                data-keep-drawer-open=""
+                onClick={groups.onNewGroup}
+                className="flex h-6 w-6 items-center justify-center rounded-md text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
+              >
+                <Plus className="h-3.5 w-3.5" />
+              </button>
+            </div>
+            <GroupsSection model={groups} />
+          </>
+        ) : null}
+        {/* The earlier engines' chats; NyxAgent mode lists threads under agents. */}
+        {!agents ? (
           <>
             <div className="-mx-2">
               <GroupLabel>Chats</GroupLabel>

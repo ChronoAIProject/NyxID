@@ -23,6 +23,14 @@ describe("parseAssistantSearch", () => {
     expect(parseAssistantSearch({ mock: "true" })).toEqual({});
   });
 
+  it("keeps an agent and a group", () => {
+    expect(parseAssistantSearch({ agent: "a1", g: "nyxg-1" })).toEqual({
+      agent: "a1",
+      g: "nyxg-1",
+    });
+    expect(parseAssistantSearch({ g: "" })).toEqual({});
+  });
+
   it("drops junk rather than letting it reach the page", () => {
     expect(parseAssistantSearch({ c: 42, draft: "yes", other: "x" })).toEqual(
       {},
@@ -86,6 +94,16 @@ describe("/assistant search round-trip through a real router", () => {
     );
     expect(search.c).toBe("conv-new");
     expect(search.draft).toBeUndefined();
+  });
+
+  it("round-trips a group id", async () => {
+    const router = buildAssistantRouter("/assistant");
+    await router.load();
+    await router.navigate({ to: "/assistant", search: { g: "nyxg-abc123" } });
+    await router.invalidate();
+    expect(
+      parseAssistantSearch(router.state.location.search as Record<string, unknown>),
+    ).toEqual({ g: "nyxg-abc123" });
   });
 
   it("round-trips the numeric mock marker without quoting it", async () => {

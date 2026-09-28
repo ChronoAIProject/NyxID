@@ -15,6 +15,8 @@ function agent(fields: Partial<AssistantAgent>): AssistantAgent {
     kind: "nyxbot",
     name: "NyxBot",
     description: "",
+    display_name: null,
+    persona: null,
     specialty: null,
     created_by: "user",
     status: "idle",

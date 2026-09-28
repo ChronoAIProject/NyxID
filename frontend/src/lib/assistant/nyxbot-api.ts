@@ -4,17 +4,24 @@ import {
   assistantAgentDestroyedSchema,
   assistantAgentDetailSchema,
   assistantAgentListSchema,
+  assistantGroupListSchema,
+  assistantGroupMessagesSchema,
+  assistantGroupPostedSchema,
+  assistantGroupSchema,
   nyxAgentChannelConnectSchema,
   nyxAgentChannelLinkedSchema,
   nyxAgentChannelListSchema,
   nyxAgentSettingsSchema,
   type AssistantAgentCreate,
   type AssistantAgentGrants,
+  type AssistantGroupForm,
+  type AssistantGroupUpdate,
   type NyxAgentSettingsUpdate,
 } from "@/schemas/assistant-nyxagent";
 
 const ROOT = "/assistant/nyxagent";
 const agentPath = (id: string) => `${ROOT}/agents/${encodeURIComponent(id)}`;
+const groupPath = (id: string) => `${ROOT}/groups/${encodeURIComponent(id)}`;
 
 /** NyxBot agents, settings and channel-bot endpoints. The server owns all state. */
 export const nyxBotApi = {
@@ -27,12 +34,24 @@ export const nyxBotApi = {
   async agent(id: string) {
     return assistantAgentDetailSchema.parse(await assistantJson(agentPath(id)));
   },
-  async createAgent(body: AssistantAgentCreate) {
+  /** Blank display name and persona are left out (the agent has none). */
+  async createAgent({ display_name, persona, ...body }: AssistantAgentCreate) {
     return assistantAgentCreatedSchema.parse(
-      await assistantJson(`${ROOT}/agents`, { method: "POST", body }),
+      await assistantJson(`${ROOT}/agents`, {
+        method: "POST",
+        body: {
+          ...body,
+          ...(display_name ? { display_name } : {}),
+          ...(persona ? { persona } : {}),
+        },
+      }),
     );
   },
-  async updateAgent(id: string, body: { name?: string; description?: string }) {
+  /** An empty `display_name` or `persona` clears it. */
+  async updateAgent(
+    id: string,
+    body: { name?: string; description?: string; display_name?: string; persona?: string },
+  ) {
     await assistantJson(agentPath(id), { method: "PATCH", body });
   },
   /** Replaces a specialist's grants. */
@@ -89,5 +108,38 @@ export const nyxBotApi = {
     await assistantJson(`${ROOT}/channels/${encodeURIComponent(channelAgentId)}`, {
       method: "DELETE",
     });
+  },
+  /** Newest activity first. */
+  async groups() {
+    return assistantGroupListSchema.parse(await assistantJson(`${ROOT}/groups`)).groups;
+  },
+  async group(id: string) {
+    return assistantGroupSchema.parse(await assistantJson(groupPath(id)));
+  },
+  async createGroup(body: AssistantGroupForm) {
+    return assistantGroupSchema.parse(
+      await assistantJson(`${ROOT}/groups`, { method: "POST", body }),
+    );
+  },
+  async updateGroup(id: string, body: AssistantGroupUpdate) {
+    return assistantGroupSchema.parse(
+      await assistantJson(groupPath(id), { method: "PATCH", body }),
+    );
+  },
+  async deleteGroup(id: string) {
+    await assistantJson(groupPath(id), { method: "DELETE" });
+  },
+  /** The newest page, or the page before `beforeSeq`; messages ascend by seq. */
+  async groupMessages(id: string, beforeSeq?: number) {
+    const query = beforeSeq ? `&before_seq=${String(beforeSeq)}` : "";
+    return assistantGroupMessagesSchema.parse(
+      await assistantJson(`${groupPath(id)}/messages?limit=50${query}`),
+    );
+  },
+  /** Accepted (202): replies arrive later as new messages. */
+  async postGroupMessage(id: string, text: string) {
+    return assistantGroupPostedSchema.parse(
+      await assistantJson(`${groupPath(id)}/messages`, { method: "POST", body: { text } }),
+    );
   },
 };

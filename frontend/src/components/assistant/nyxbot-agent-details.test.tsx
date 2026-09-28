@@ -161,11 +161,11 @@ it("replaces a specialist's grants with a dirty-gated save", async () => {
 it("edits the role and destroys only after confirmation", async () => {
   const { user } = renderSheet();
   const sheet = await screen.findByRole("dialog", { name: "Agent details" });
-  const role = await within(sheet).findByRole("form", { name: "Role" });
-  const description = within(role).getByRole("textbox", { name: "Description" });
+  const profile = await within(sheet).findByRole("form", { name: "Profile" });
+  const description = within(profile).getByRole("textbox", { name: "Role" });
   await user.clear(description);
   await user.type(description, "Tracks p0 issues");
-  await user.click(within(role).getByRole("button", { name: "Save" }));
+  await user.click(within(profile).getByRole("button", { name: "Save" }));
   await waitFor(() =>
     expect(writes).toContainEqual({
       method: "PATCH",
@@ -209,12 +209,61 @@ it("deletes a destroyed specialist permanently after confirmation", async () => 
   });
 });
 
-it("shows NyxBot's persona and full access, without grants or lifecycle actions", async () => {
-  agent = agentRow({ id: "agent-nyxbot", kind: "nyxbot", name: "NyxBot", created_by: "user" });
-  renderSheet();
+it("sets a display name and persona, and clears them by emptying the fields", async () => {
+  agent = agentRow({ display_name: "Scout", persona: "Brisk and factual." });
+  const { user } = renderSheet();
   const sheet = await screen.findByRole("dialog", { name: "Agent details" });
-  expect(await within(sheet).findByRole("form", { name: "Persona" })).toBeVisible();
+  const profile = await within(sheet).findByRole("form", { name: "Profile" });
+  // The display name heads the sheet with the @handle beside it.
+  expect(sheet).toHaveTextContent("Scout@researcher");
+  const displayName = within(profile).getByRole("textbox", { name: "Display name" });
+  const persona = within(profile).getByRole("textbox", { name: "Persona" });
+  expect(displayName).toHaveValue("Scout");
+  expect(persona).toHaveValue("Brisk and factual.");
+  await user.clear(displayName);
+  await user.type(displayName, "Luna");
+  await user.clear(persona);
+  await user.click(within(profile).getByRole("button", { name: "Save" }));
+  await waitFor(() =>
+    expect(writes).toContainEqual({
+      method: "PATCH",
+      endpoint: "/assistant/nyxagent/agents/agent-researcher",
+      body: { display_name: "Luna", persona: "" },
+    }),
+  );
+});
+
+it("shows the server's refusal of a display name", async () => {
+  const { user } = renderSheet();
+  const sheet = await screen.findByRole("dialog", { name: "Agent details" });
+  const profile = await within(sheet).findByRole("form", { name: "Profile" });
+  globalThis.__nyxidAssistantHttpMock = () =>
+    new Response(JSON.stringify({ message: "A display name must not contain credentials" }), {
+      status: 400,
+    });
+  await user.type(within(profile).getByRole("textbox", { name: "Display name" }), "sk-live");
+  await user.click(within(profile).getByRole("button", { name: "Save" }));
+  expect(await within(profile).findByRole("alert")).toHaveTextContent(
+    "A display name must not contain credentials",
+  );
+});
+
+it("lets NyxBot get a display name and persona, with full access and no grants or lifecycle actions", async () => {
+  agent = agentRow({ id: "agent-nyxbot", kind: "nyxbot", name: "NyxBot", created_by: "user" });
+  const { user } = renderSheet();
+  const sheet = await screen.findByRole("dialog", { name: "Agent details" });
+  const profile = await within(sheet).findByRole("form", { name: "Profile" });
   expect(within(sheet).queryByRole("textbox", { name: "Name" })).not.toBeInTheDocument();
+  await user.type(within(profile).getByRole("textbox", { name: "Display name" }), "Nyx");
+  await user.type(within(profile).getByRole("textbox", { name: "Persona" }), "Warm and concise.");
+  await user.click(within(profile).getByRole("button", { name: "Save" }));
+  await waitFor(() =>
+    expect(writes).toContainEqual({
+      method: "PATCH",
+      endpoint: "/assistant/nyxagent/agents/agent-nyxbot",
+      body: { display_name: "Nyx", persona: "Warm and concise." },
+    }),
+  );
   expect(within(sheet).getByRole("region", { name: "Access" })).toHaveTextContent("full access");
   expect(within(sheet).queryByRole("form", { name: "Grants" })).not.toBeInTheDocument();
   expect(within(sheet).queryByRole("region", { name: "Danger zone" })).not.toBeInTheDocument();
