@@ -14,7 +14,7 @@ pub async fn authorized_target(
     db: &Database,
     sa: &ServiceAccount,
     scope: &str,
-) -> AppResult<String> {
+) -> AppResult<DownstreamService> {
     if !sa.is_active || !sa.platform_protected || sa.purpose != ServiceAccountPurpose::CatalogEditor
     {
         return Err(AppError::Forbidden(
@@ -44,10 +44,10 @@ pub async fn authorized_target(
         .find_one(filter)
         .await?
         .ok_or_else(|| AppError::Forbidden("Active Ornn catalog service required".into()))?;
-    if service.proxy_operation_policy.is_none() {
+    if !sa.catalog_scope_authorized && service.proxy_operation_policy.is_none() {
         return Err(AppError::Forbidden(
             "Ornn requires an explicit proxy operation policy".into(),
         ));
     }
-    Ok(service.id)
+    Ok(service)
 }
