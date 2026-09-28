@@ -295,10 +295,10 @@ POST /api/v1/channel-relay/reply
 { "message_id": "<inbound-msg-id>", "reply": { "text": "..." } }
 
 # Edit a previously-sent reply (Telegram/Discord/Slack/Lark/Feishu).
-# Addresses the upstream platform message returned by a prior /reply or /send call
-# (e.g. Lark `om_xxx`). Same dual auth as /reply.
+# message_id = platform_message_id and outbound_message_id = message_id, both from
+# the prior /reply or /send response. Same dual auth as /reply.
 POST /api/v1/channel-relay/reply/update
-{ "message_id": "<upstream_platform_message_id>", "reply": { "text": "..." } }
+{ "message_id": "<upstream_platform_message_id>", "outbound_message_id": "<nyxid_message_id>", "reply": { "text": "..." } }
 
 # Message history (metadata only — `text` and `attachments` are NOT returned per ADR-013)
 GET /api/v1/channel-relay/messages/<conversation_id>?page=1&per_page=50
@@ -313,7 +313,8 @@ Proactive sends require `addressable`, `allow_agent_initiated`, and `capabilitie
 
 `POST /channel-relay/reply/update` lets an agent PATCH the text of a reply it already sent, which is how you implement progressive / streaming reply rendering on Telegram, Discord, Slack, Lark, and Feishu without flooding the chat with one message per token chunk.
 
-- **Body:** `{ "message_id": "<upstream_platform_message_id>", "reply": { "text": "...", "metadata": {...} } }`. `message_id` is the platform message id (e.g. Lark `om_xxx`) returned by the prior `/reply` or `/send` call — **not** the inbound message id.
+- **Body:** `{ "message_id": "<upstream_platform_message_id>", "outbound_message_id": "<nyxid_message_id>", "reply": { "text": "...", "metadata": {...} } }`. `message_id` is the `platform_message_id` (e.g. Lark `om_xxx`) returned by the prior `/reply` or `/send` call — **not** the inbound message id. `outbound_message_id` is the NyxID `message_id` from that same response. Always send it. Telegram numbers messages per chat, so one key's replies in different chats share platform ids: API-key edits on Telegram/telegram-new without it return `400 validation_error`, and an ambiguous edit elsewhere returns `409 conflict` instead of guessing.
+- **Scope:** an API key resolves only rows it sent, and gets `403` if it is no longer the conversation's assigned agent; a reply token resolves only the reply its key sent to its bound inbound message in its bound conversation. Other rows are `404`.
 - **Auth:** Same as `/reply`: agent API key OR the original per-callback reply token. The reply token is reusable for anchored edits — see the reply-token section below for the JTI semantics. Only an assigned agent API key can edit initiated rows from `/send`; reply tokens cannot.
 - **Platform support:**
   - Lark / Feishu: text edits via `PUT /im/v1/messages/{id}`, card edits via `PATCH /im/v1/messages/{id}` (pass the new card in `reply.metadata.card`).
@@ -322,7 +323,7 @@ Proactive sends require `addressable`, `allow_agent_initiated`, and `capabilitie
   - Slack: `chat.update`; `reply.metadata.blocks` is passed through when present.
   - WhatsApp / X / OpenClaw: `501` with `code="edit_unsupported"`. Degrade to a final `/reply` at turn end.
   - Device channels: `400 device_channel_reply_not_allowed` (device conversations have no reply surface).
-- **Throttling is the caller's job.** NyxID only protects against abuse — per-upstream-message rate limit (default `10/s` burst `20`, configurable via `CHANNEL_RELAY_EDIT_RATE_LIMIT_PER_SECOND` / `..._BURST`). `429 rate_limited` on exceed.
+- **Throttling is the caller's job.** NyxID only protects against abuse — per-outbound-message rate limit, applied after the target row resolves (default `10/s` burst `20`, configurable via `CHANNEL_RELAY_EDIT_RATE_LIMIT_PER_SECOND` / `..._BURST`). `429 rate_limited` on exceed.
 - **Address resolution:** NyxID uses the outbound row’s chat address, then the parent inbound address for legacy rows, then a concrete conversation address. Missing addresses on wildcard routes fail before dispatch with `channel_conversation_not_addressable`.
 - **Error classification:** Known Telegram/Discord/Slack target or edit refusals return `400 channel_conversation_not_reachable`; other upstream errors retain existing platform-error handling, including Slack rate-limit diagnostics. Lark frequency-limit errors surface as `429`; "message not editable / wrong state" errors as `409`; malformed content as `400`. Anything else falls through to `502`.
 
@@ -344,7 +345,7 @@ Every callback delivery carries an RS256 JWT in `X-NyxID-Callback-Token` that do
 The callback payload includes a short-lived `reply_token` (RS256 JWT) the agent can present as `Authorization: Bearer <reply_token>` instead of the agent API key. Intended for runtimes that don't want to persist agent credentials (e.g. Aevatar).
 
 - **Shape:** RS256 JWT. `aud = "channel-relay/reply"` (reply, reply/update and exact-message attachment downloads only). `token_type = "relay_reply"`.
-- **Claim bindings:** `api_key_id`, `conversation_id`, `inbound_message_id`, `platform` — all four must match the reply request. For `/reply`, the body's `message_id` must equal `inbound_message_id`. For `/reply/update`, NyxID looks up the outbound row by the body's `message_id` (platform id) and verifies its stored `reply_to_message_id` equals the token's `inbound_message_id`.
+- **Claim bindings:** `api_key_id`, `conversation_id`, `inbound_message_id`, `platform` — all four must match the reply request. For `/reply`, the body's `message_id` must equal `inbound_message_id`. For `/reply/update`, NyxID looks up the outbound row by the body's `message_id` (platform id) only among rows sent by the token's `api_key_id` in its `conversation_id` with `reply_to_message_id` equal to its `inbound_message_id`; other rows return `404`.
 - **TTL:** `JWT_RELAY_REPLY_TTL_SECS` (default `1800` = 30 min). 60s clock-skew tolerance on both `iat` and `exp`.
 - **JTI semantics:** `jti` is consumed on the first successful `/reply`. Reuse on `/reply` returns `401 "Reply token already used"`. `/reply/update` uses the same token without consuming a new JTI — it requires the JTI to already exist in `reply_token_uses` (i.e. proof the token was used to send), so bare-minted tokens cannot edit-flood. The same token can therefore drive one send + many edits within the TTL.
 - **Revocation coupling:** On every call NyxID re-checks that the bound `api_key_id` (and the channel bot) is still active — revoking the key invalidates all outstanding tokens immediately.
