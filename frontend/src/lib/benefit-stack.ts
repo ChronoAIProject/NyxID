@@ -45,9 +45,15 @@ export interface StackEntry {
 export interface Stack {
   readonly entries: readonly StackEntry[];
   readonly items: readonly StackItem[];
-  /** Total fill, 0..100. */
+  /** Total fill, 0..100 (the exact figure for captions). */
   readonly overall: number;
   readonly status: StackStatus;
+  /**
+   * Visible segments: entries with a non-zero share. Each renders as
+   * `min + (100% - k * min) * share`, so small values still read as pills
+   * and the bar only fills completely when everything is used.
+   */
+  readonly k: number;
 }
 
 const clamp = (value: number) => Math.min(1, Math.max(0, value));
@@ -138,7 +144,13 @@ function build(
     100,
     Math.round(shares.reduce((sum, share) => sum + share, 0) * 1e6) / 1e6,
   );
-  return { entries, items, overall, status: stackStatus(overall) };
+  return {
+    entries,
+    items,
+    overall,
+    status: stackStatus(overall),
+    k: entries.filter((entry) => entry.share > 0).length,
+  };
 }
 
 /**

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type CSSProperties } from "react";
 import {
   Tooltip,
   TooltipContent,
@@ -55,7 +55,12 @@ export function StackedMeter({
                   <span
                     className={cn("stack-seg", `stack-step-${entry.step}`)}
                     data-key={entry.key}
-                    style={{ width: `${round(entry.share)}%` }}
+                    style={
+                      {
+                        "--stack-k": stack.k,
+                        "--stack-share": round(entry.share / 100),
+                      } as CSSProperties
+                    }
                   />
                 </TooltipTrigger>
                 <TooltipContent className="whitespace-pre-line">
@@ -91,5 +96,5 @@ export function StackedMeter({
 }
 
 function round(value: number) {
-  return Math.round(value * 10_000) / 10_000;
+  return Math.round(value * 1_000_000) / 1_000_000;
 }

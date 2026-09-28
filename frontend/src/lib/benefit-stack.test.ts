@@ -35,6 +35,40 @@ describe("equalShareStack", () => {
     expect(overallCaption(stack.overall)).toBe("18% used");
   });
 
+  it("counts the visible segments that each start at the minimum width", () => {
+    // Two allowances are unused, so three segments carry the minimum.
+    expect(stack.k).toBe(3);
+  });
+
+  it("renders nothing for an entirely unused stack (k = 0)", () => {
+    const unused = equalShareStack([input("a", 0), input("b", 0)]);
+    expect(unused.k).toBe(0);
+    expect(unused.entries.every((entry) => entry.share === 0)).toBe(true);
+    expect(overallCaption(unused.overall)).toBe("Unused");
+  });
+
+  it("keeps a single tiny share as one minimum-width segment", () => {
+    const tiny = equalShareStack([input("a", 1, 100_000)]);
+    expect(tiny.k).toBe(1);
+    expect(tiny.entries[0]!.share).toBeCloseTo(0.001, 10);
+    // The caption keeps the exact figure; only the drawn width grows.
+    expect(overallCaption(tiny.overall)).toBe("<0.01% used");
+  });
+
+  it("fills exactly when everything is used, so the bar is only full then", () => {
+    const full = equalShareStack([
+      input("a", 1000),
+      input("b", 1000),
+      input("c", 1000),
+    ]);
+    expect(full.k).toBe(3);
+    // k * min + (100% - k * min) * sum(shares) = 100% exactly when sum = 1.
+    expect(
+      full.entries.reduce((sum, entry) => sum + entry.share, 0),
+    ).toBeCloseTo(100, 10);
+    expect(full.overall).toBe(100);
+  });
+
   it("assigns a distinct opacity step per allowance, in order", () => {
     expect(stack.entries.map((entry) => entry.step)).toEqual([0, 1, 2, 3, 4]);
   });
@@ -52,6 +86,8 @@ describe("equalShareStack", () => {
       ),
     );
     expect(long.entries).toHaveLength(5);
+    // The merged tail is one visible segment.
+    expect(long.k).toBe(5);
     const tail = long.entries.at(-1)!;
     expect(tail).toMatchObject({
       key: "more",
@@ -113,6 +149,7 @@ describe("proportionalStack", () => {
     expect(stack.entries.map((entry) => entry.share)).toEqual([12.5, 7.5]);
     expect(stack.entries.map((entry) => entry.step)).toEqual([0, 1]);
     expect(stack.overall).toBe(20);
+    expect(stack.k).toBe(2);
   });
 
   it("is one segment for a single grant", () => {

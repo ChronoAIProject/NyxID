@@ -59,7 +59,12 @@ function UsedGauge({
         aria-valuenow={percent}
         aria-valuetext={`${formatted}% used`}
       >
-        <span style={{ width: `${percent}%` }} />
+        {/* A floor keeps a tiny non-zero value visible as a pill. */}
+        <span
+          style={{
+            width: percent > 0 ? `max(var(--bar-min), ${percent}%)` : 0,
+          }}
+        />
       </span>
       <span className="benefit-meter-caption">{formatted}% used</span>
     </span>

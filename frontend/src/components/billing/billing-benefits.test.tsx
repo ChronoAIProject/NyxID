@@ -206,11 +206,16 @@ it("stacks allowances into one bar whose segments and legend swatches match", ()
   // Free usage: equal shares, contiguous from the left, total = average.
   const service = screen.getByText("Example LLM").closest("details")!;
   const segments = [...service.querySelectorAll<HTMLElement>(".stack-seg")];
-  expect(segments.map((segment) => segment.style.width)).toEqual([
-    "8.24%",
-    "4.88%",
-    "4.8%",
-    "20%",
+  // Width is min + (100% - k * min) * share; assert the calc inputs.
+  const calcInputs = (segment: HTMLElement) => [
+    segment.style.getPropertyValue("--stack-share"),
+    segment.style.getPropertyValue("--stack-k"),
+  ];
+  expect(segments.map(calcInputs)).toEqual([
+    ["0.0824", "4"],
+    ["0.0488", "4"],
+    ["0.048", "4"],
+    ["0.2", "4"],
   ]);
   expect(
     segments.map((segment) =>
@@ -248,10 +253,11 @@ it("stacks allowances into one bar whose segments and legend swatches match", ()
   // Grants: proportional to consumed credits over all original credits.
   const grants = screen.getByText("Credit grants").closest("details")!;
   expect(
-    [...grants.querySelectorAll<HTMLElement>(".stack-seg")].map(
-      (segment) => segment.style.width,
-    ),
-  ).toEqual(["12.5%", "7.5%"]);
+    [...grants.querySelectorAll<HTMLElement>(".stack-seg")].map(calcInputs),
+  ).toEqual([
+    ["0.125", "2"],
+    ["0.075", "2"],
+  ]);
   expect(within(grants).getByText("20% used")).toBeInTheDocument();
   expect(
     [...grants.querySelectorAll("h4 .stack-swatch")].map(

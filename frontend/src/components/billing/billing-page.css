@@ -722,9 +722,22 @@
   .stack-track:focus-visible {
     outline: 1px solid var(--color-foreground);
   }
+  /* Min + fixed increment: every used segment starts at the minimum pill and
+     grows by the same amount per unit of share across the remaining track,
+     so the bar is only full when everything is used. The minimum shrinks on
+     a narrow track (at most a quarter of it) so the bar degrades toward
+     proportional instead of overflowing. */
   .stack-seg {
+    --seg-min: min(var(--bar-min), 100% / (var(--stack-k) * 4));
     flex: none;
     height: 100%;
+    width: calc(
+      var(--seg-min) + (100% - var(--stack-k) * var(--seg-min)) *
+        var(--stack-share)
+    );
+  }
+  .stack-seg:last-child {
+    border-radius: 0 3px 3px 0;
   }
   .stack-seg + .stack-seg {
     box-shadow: inset 1px 0 0 var(--color-card);
@@ -885,6 +898,9 @@
     var(--stack-base) var(--stack-mix, 100%),
     var(--stack-bg, var(--color-card))
   );
+}
+.billing-page {
+  --bar-min: 10px;
 }
 .billing-page,
 .billing-stack-tooltip {
