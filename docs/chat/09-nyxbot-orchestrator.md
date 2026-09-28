@@ -184,8 +184,9 @@ agent, with that agent's authority and memory.
   while the agent is busy are queued and answered next instead of bounced.
 
 **Deployment prerequisite.** The gateway only calls operator-allowlisted
-providers. Add this entry to `CMAEG_PROVIDERS` (CMA repository,
-`infra/cmaeg/configmap.yaml`) before linking Telegram bots:
+providers, read once at startup. This entry in `CMAEG_PROVIDERS` (CMA repository,
+`infra/cmaeg/configmap.yaml`, ChronoAIProject/cma#953) must be deployed before
+Telegram bots can be linked:
 
 ```json
 {"slug":"nyxbot","base_url":"https://nyx-api.chrono-ai.fun","kind":"responses_http",
@@ -193,8 +194,14 @@ providers. Add this entry to `CMAEG_PROVIDERS` (CMA repository,
   "binding":"/api/v1/nyxbot/bindings/{binding_id}",
   "conversation":"/api/v1/nyxbot/bindings/{binding_id}/conversations/{conversation_id}",
   "responses":"/api/v1/nyxbot/responses"},
- "max_inflight":64}
+ "max_inflight":256}
 ```
+
+`max_inflight` caps concurrent gateway calls to NyxID across all NyxBot
+channels; each running turn holds a slot for its whole duration. 256 equals
+the gateway-wide ceiling (`CMAEG_PROVIDER_MAX_INFLIGHT`) and `cma_codex`, and
+each provider has its own pool. NyxID still limits each owner to two
+concurrent channel turns and queues the rest.
 
 ## 13. No-break guarantees
 
