@@ -3,7 +3,9 @@ import {
   equalShareStack,
   overallCaption,
   proportionalStack,
+  stackStatus,
   stackValueText,
+  WARNING_PERCENT,
   type StackInput,
 } from "./benefit-stack";
 
@@ -118,10 +120,22 @@ describe("equalShareStack", () => {
     expect(overallCaption(low.overall)).toBe("25% used");
   });
 
-  it("turns warning at an 80% average and exhausted when all are spent", () => {
+  it("flags only the last 5%: neutral below 95, warning from 95, destructive when spent", () => {
+    expect(WARNING_PERCENT).toBe(95);
+    expect(stackStatus(94.9)).toBe("normal");
+    expect(stackStatus(95)).toBe("warning");
+    expect(stackStatus(99.9)).toBe("warning");
+    expect(stackStatus(100)).toBe("exhausted");
     expect(equalShareStack([input("a", 800), input("b", 800)]).status).toBe(
+      "normal",
+    );
+    expect(equalShareStack([input("a", 950), input("b", 950)]).status).toBe(
       "warning",
     );
+    // One allowance in its last 5% is flagged even when the average is low.
+    const mixed = equalShareStack([input("a", 960), input("b", 0)]);
+    expect(mixed.status).toBe("normal");
+    expect(mixed.entries[0]!.status).toBe("warning");
     const spent = equalShareStack([
       input("a", 1000),
       input("b", 1000),

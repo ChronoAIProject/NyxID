@@ -469,8 +469,46 @@
     align-items: start;
     gap: 16px;
   }
-  .topup-mobile {
+  .topup-mobile,
+  .grants-mobile {
     display: none;
+  }
+  /* Credit grants: a table on wide screens, two-line rows on phones, like
+     the top-up history below it. */
+  .grants-mobile {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  .grants-mobile > li {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 4px 12px;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--color-border);
+    font-size: 12px;
+  }
+  .grants-mobile > li:last-child {
+    border-bottom: 0;
+  }
+  .grants-mobile strong {
+    font-weight: 500;
+  }
+  .grants-mobile small {
+    grid-column: 1 / -1;
+    font-size: 11px;
+    line-height: 1.6;
+    color: var(--color-muted-foreground);
+  }
+  .grant-scope {
+    border-radius: 3px;
+    text-decoration: underline dotted;
+    text-underline-offset: 3px;
+    outline-offset: 2px;
+  }
+  .grant-scope:focus-visible {
+    outline: 1px solid var(--color-foreground);
   }
   .mobile-topup {
     border: 1px solid var(--color-border);
@@ -534,10 +572,12 @@
     .history-heading {
       flex-direction: column;
     }
-    .topup-desktop {
+    .topup-desktop,
+    .grants-desktop {
       display: none;
     }
-    .topup-mobile {
+    .topup-mobile,
+    .grants-mobile {
       display: block;
     }
     .benefit-expanded .split-facts dd {

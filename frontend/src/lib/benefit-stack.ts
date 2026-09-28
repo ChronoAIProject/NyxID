@@ -58,8 +58,15 @@ export interface Stack {
 
 const clamp = (value: number) => Math.min(1, Math.max(0, value));
 
+/** Usage is flagged only in its last 5%; spent is destructive. */
+export const WARNING_PERCENT = 95;
+
 export function stackStatus(percent: number): StackStatus {
-  return percent >= 100 ? "exhausted" : percent >= 80 ? "warning" : "normal";
+  return percent >= 100
+    ? "exhausted"
+    : percent >= WARNING_PERCENT
+      ? "warning"
+      : "normal";
 }
 
 /** Percentages with up to two decimals, e.g. "41.2", "0.71", "<0.01". */
@@ -195,7 +202,7 @@ export function stackValueText(stack: Stack): string {
   ].join("; ");
 }
 
-/** Base color for a stack: neutral, warning at 80% used, destructive when spent. */
+/** Base color for a stack: neutral, warning from 95% used, destructive when spent. */
 export function stackStatusClass(status: StackStatus) {
   return status === "exhausted"
     ? "stack-exhausted"

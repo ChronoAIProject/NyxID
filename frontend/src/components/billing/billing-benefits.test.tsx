@@ -259,28 +259,29 @@ it("stacks allowances into one bar whose segments and legend swatches match", ()
     ["0.075", "2"],
   ]);
   expect(within(grants).getByText("20% used")).toBeInTheDocument();
+  // The Details table carries each tranche's swatch.
   expect(
-    [...grants.querySelectorAll("h4 .stack-swatch")].map(
+    [...grants.querySelectorAll(".grants-desktop tbody .stack-swatch")].map(
       (swatch) => swatch.className,
     ),
   ).toEqual(["stack-swatch stack-step-0", "stack-swatch stack-step-1"]);
 });
 
-it("switches the stack to warning at an 80% average and destructive when spent", () => {
+it("switches the stack to warning in the last 5% and destructive when spent", () => {
   mocks.grants.mockReturnValue({ ...query(null), data: { grants: [] } });
   mocks.allowances.mockReturnValue({
     ...query(null),
     data: {
       allowances: [
         billingAllowance("input_tokens", {
-          consumed_quantity: 900,
+          consumed_quantity: 960,
           reserved_quantity: 0,
-          remaining_quantity: 100,
+          remaining_quantity: 40,
         }),
         billingAllowance("output_tokens", {
-          consumed_quantity: 800,
+          consumed_quantity: 950,
           reserved_quantity: 0,
-          remaining_quantity: 200,
+          remaining_quantity: 50,
         }),
       ],
     },
@@ -311,4 +312,127 @@ it("switches the stack to warning at an 80% average and destructive when spent",
       selector: ".stacked-meter > .benefit-meter-caption",
     }),
   ).toBeInTheDocument();
+});
+
+it("merges every grant into one row with a soonest-expiring table", async () => {
+  const now = Date.parse("2026-09-28T12:00:00Z");
+  vi.useFakeTimers({ now, toFake: ["Date"] });
+  try {
+    mocks.allowances.mockReturnValue({
+      ...query(null),
+      data: { allowances: [] },
+    });
+    mocks.grants.mockReturnValue({
+      ...query(null),
+      data: {
+        grants: [
+          billingGrant({
+            id: "later",
+            reason: "Scoped tranche",
+            amount_micros: 10_000_000,
+            remaining_micros: 6_000_000,
+            reserved_micros: 500_000,
+            scope: {
+              all_services: false,
+              service_ids: ["a", "b", "c"],
+              service_slugs: ["example-llm", "free-service", "unused-service"],
+            },
+            expires_at: "2026-12-01T12:00:00Z",
+          }),
+          billingGrant({
+            id: "soon",
+            reason: "Welcome credits",
+            amount_micros: 5_000_000,
+            remaining_micros: 4_800_000,
+            reserved_micros: 0,
+            expires_at: "2026-10-03T12:00:00Z",
+          }),
+          billingGrant({
+            id: "open",
+            reason: "Referral bonus",
+            amount_micros: 1_000_000,
+            remaining_micros: 1_000_000,
+            reserved_micros: 0,
+            expires_at: null,
+            activation_state: "pending_activation",
+          }),
+          billingGrant({
+            id: "spent-soon",
+            reason: "Nearly spent",
+            amount_micros: 1_000_000,
+            remaining_micros: 40_000,
+            reserved_micros: 0,
+            expires_at: "2026-11-01T12:00:00Z",
+          }),
+        ],
+      },
+    });
+    // Expiry dates render in the viewer's timezone.
+    const day = (iso: string) =>
+      new Date(iso).toLocaleDateString(undefined, {
+        month: "short",
+        day: "numeric",
+      });
+    render(<BillingBenefits catalog={billingCatalog} />);
+    // One "Credit grants" row, whatever the scopes.
+    expect(
+      screen.getAllByText("Credit grants", { selector: "strong" }),
+    ).toHaveLength(1);
+    const row = screen
+      .getByText("Credit grants", { selector: "strong" })
+      .closest("details")!;
+    expect(within(row).getByText("4 grants")).toBeInTheDocument();
+    // Available = sum(remaining - reserved) = 11.84 - 0.5.
+    expect(within(row).getByText("11.34 credits")).toBeInTheDocument();
+    // Segments in consumption order (soonest expiry first), sized by credits.
+    expect(
+      [...row.querySelectorAll<HTMLElement>("summary .stack-seg")].map(
+        (segment) => segment.dataset.key,
+      ),
+    ).toEqual(["soon", "spent-soon", "later"]);
+    const table = row.querySelector<HTMLElement>(".grants-desktop")!;
+    const rows = within(table).getAllByRole("row").slice(1);
+    expect(
+      rows.map((tableRow) =>
+        within(tableRow)
+          .getAllByRole("cell")
+          .map((cell) => cell.textContent),
+      ),
+    ).toEqual([
+      [
+        "Welcome credits",
+        "All services",
+        "4.8 of 5",
+        "4%",
+        `${day("2026-10-03T12:00:00Z")} · in 5 days`,
+      ],
+      [
+        "Nearly spent",
+        "All services",
+        "0.04 of 1",
+        "96%",
+        day("2026-11-01T12:00:00Z"),
+      ],
+      [
+        "Scoped tranche",
+        "Example LLM, Free service +1 more",
+        "6 of 100.5 reserved",
+        "40%",
+        day("2026-12-01T12:00:00Z"),
+      ],
+      ["Referral bonusPending", "All services", "1 of 1", "0%", "No expiry"],
+    ]);
+    // Only a non-normal state gets a badge; the last-5% row is flagged.
+    expect(within(table).getAllByText("Pending")).toHaveLength(1);
+    expect(within(rows[1]!).getByText("96%")).toHaveClass("text-warning");
+    expect(within(rows[0]!).getByText("4%")).not.toHaveClass("text-warning");
+    // The two-line phone rows carry the same tranches.
+    expect(
+      within(row.querySelector<HTMLElement>(".grants-mobile")!).getAllByRole(
+        "listitem",
+      ),
+    ).toHaveLength(4);
+  } finally {
+    vi.useRealTimers();
+  }
 });
