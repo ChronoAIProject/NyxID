@@ -1,5 +1,5 @@
 //! Human decisions bound to one conversation and one credential generation.
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use futures::TryStreamExt;
 use mongodb::{
     ClientSession, Database,
@@ -425,15 +425,110 @@ pub fn refusal(row: &AssistantAcknowledgement) -> Value {
             "account" => "Ask the user to approve account management for this chat (a card \
                 is shown in the chat), then retry."
                 .into(),
-            _ => "Ask the user to confirm the action card, then retry with \
-                acknowledgement_id. Never confirm it yourself."
-                .into(),
+            _ => format!(
+                "Ask the user to confirm the action card, then retry with \
+                acknowledgement_id. Never confirm it yourself. Where no card can be shown (a \
+                chat app or a group chat), ask them to reply \"yes {code}\" to confirm or \
+                \"no {code}\" to cancel.",
+                code = confirm_code(&row.id)
+            ),
         }
     };
-    json!({"error": if denied {"acknowledgement_denied"} else {"acknowledgement_required"},
+    let mut value = json!({"error": if denied {"acknowledgement_denied"} else {"acknowledgement_required"},
         "kind": row.kind, "acknowledgement_id": row.id, "service_slug": row.service_slug,
         "service_name": row.service_name, "summary": row.summary, "decider": row.decider,
-        "instructions": instructions})
+        "instructions": instructions});
+    if row.kind == "action" && !denied {
+        value["confirm_phrase"] = json!(format!("yes {}", confirm_code(&row.id)));
+    }
+    value
+}
+
+/// A short code the owner quotes to confirm one specific card by reply.
+pub fn confirm_code(id: &str) -> String {
+    let hex: String = id.chars().filter(char::is_ascii_hexdigit).take(6).collect();
+    format!(
+        "{:04}",
+        u32::from_str_radix(&hex, 16).unwrap_or_default() % 10_000
+    )
+}
+
+/// A plain confirmation reply: yes/no, optionally followed by a card code.
+pub fn parse_reply(text: &str) -> Option<(bool, Option<String>)> {
+    let normalized = text
+        .trim()
+        .trim_end_matches(['.', '!', '。', '！'])
+        .trim()
+        .to_lowercase();
+    let (head, code) = match normalized.rsplit_once(char::is_whitespace) {
+        Some((head, code)) if code.len() == 4 && code.bytes().all(|b| b.is_ascii_digit()) => {
+            (head.trim().to_owned(), Some(code.to_owned()))
+        }
+        _ => (normalized.clone(), None),
+    };
+    let allow = match head.as_str() {
+        "yes" | "y" | "yes please" | "confirm" | "confirmed" | "allow" | "approve" | "ok"
+        | "okay" | "go ahead" | "do it" | "是" | "是的" | "确认" | "好" | "好的" | "可以" => {
+            true
+        }
+        "no" | "n" | "deny" | "cancel" | "stop" | "reject" | "don't" | "do not" | "否" | "不"
+        | "不要" | "取消" => false,
+        _ => return None,
+    };
+    Some((allow, code))
+}
+
+/// Decide the owner's action card a reply answers, from a chat app or group
+/// where no card can be shown. A quoted code picks that card; a plain yes/no
+/// applies only when exactly one card was raised since `since` (the owner's
+/// previous message), so an answer to another question never confirms a
+/// stale card.
+pub async fn decide_reply(
+    db: &Database,
+    owner: &str,
+    conversation_ids: &[String],
+    text: &str,
+    since: Option<DateTime<Utc>>,
+) -> AppResult<Option<AssistantAcknowledgement>> {
+    let Some((allow, code)) = parse_reply(text) else {
+        return Ok(None);
+    };
+    if conversation_ids.is_empty() {
+        return Ok(None);
+    }
+    let now = Utc::now();
+    let pending: Vec<AssistantAcknowledgement> = db
+        .collection::<AssistantAcknowledgement>(ACKS)
+        .find(
+            doc! {"user_id": owner, "conversation_id": {"$in": conversation_ids},
+            "kind": "action", "status": "pending", "decider": "user",
+            "expires_at": {"$gt": bson::DateTime::from_chrono(now)}},
+        )
+        .await?
+        .try_collect()
+        .await?;
+    let chosen = match code {
+        Some(code) => pending
+            .into_iter()
+            .find(|ack| confirm_code(&ack.id) == code),
+        None => {
+            let mut recent: Vec<AssistantAcknowledgement> = pending
+                .into_iter()
+                .filter(|ack| since.is_none_or(|since| ack.created_at > since))
+                .collect();
+            if recent.len() == 1 {
+                recent.pop()
+            } else {
+                None
+            }
+        }
+    };
+    let Some(ack) = chosen else {
+        return Ok(None);
+    };
+    decide(db, owner, &ack.conversation_id, &ack.id, allow)
+        .await
+        .map(Some)
 }
 
 /// Gate a subagent's service call. Orchestrators run with Full access and are

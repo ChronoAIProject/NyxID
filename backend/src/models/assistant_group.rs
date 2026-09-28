@@ -29,6 +29,9 @@ pub struct AssistantGroup {
     /// Remaining agent hand-offs since the last user message.
     #[serde(default)]
     pub hops_remaining: i32,
+    /// When the retry sweep last looked at its waiting members (rotation).
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub pending_checked_at: Option<DateTime<Utc>>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub last_message_at: Option<DateTime<Utc>>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]

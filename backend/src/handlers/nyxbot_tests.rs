@@ -544,8 +544,12 @@ async fn owners_confirm_actions_by_replying_yes_in_the_chat_app() {
     .await
     .unwrap();
     assert_eq!(card.status, "pending");
-    // An ordinary message does not decide it.
-    assert_eq!(confirmation("what does that do?"), None);
+    // An ordinary message is not an answer.
+    assert_eq!(acks::parse_reply("what does that do?"), None);
+    assert_eq!(
+        acks::parse_reply("Yes 4821."),
+        Some((true, Some("4821".into())))
+    );
     let second =
         body_text(respond(&state, &agent_key, &event("Yes!", "7", "evt-2"), "evt_2").await).await;
     assert!(second.contains("Here is your answer"), "{second}");
@@ -557,10 +561,59 @@ async fn owners_confirm_actions_by_replying_yes_in_the_chat_app() {
         .unwrap();
     assert_eq!(decided.status, "allowed");
     assert_eq!(decided.decided_by.as_deref(), Some("user"));
-    let calls = calls.lock().await;
-    let instructions = calls.last().unwrap()["instructions"].as_str().unwrap();
-    assert!(instructions.contains("the owner confirmed the pending action"));
-    assert!(instructions.contains("give every link"));
+    {
+        let calls = calls.lock().await;
+        let instructions = calls.last().unwrap()["instructions"].as_str().unwrap();
+        assert!(instructions.contains("the owner confirmed the pending action"));
+        assert!(instructions.contains("give every link"));
+    }
+    // A card the owner has since talked past is not confirmed by a plain yes
+    // (it may answer another question), only by quoting its code.
+    let (stale, _) = acks::request_tracked(
+        &state.db,
+        &chat,
+        acks::Request {
+            kind: "action",
+            service: None,
+            tool: Some("nyxid__delete_channel_bot"),
+            arguments: Some(&json!({"bot_id": "old-bot"})),
+            summary: "Delete channel bot 'old-bot'",
+            platform: false,
+        },
+    )
+    .await
+    .unwrap();
+    respond(
+        &state,
+        &agent_key,
+        &event("Which keys do I have?", "7", "evt-3"),
+        "evt_3",
+    )
+    .await;
+    respond(&state, &agent_key, &event("yes", "7", "evt-4"), "evt_4").await;
+    let status = |id: String| {
+        let state = state.clone();
+        let conversation = conversation.id.clone();
+        async move {
+            acks::history(&state.db, OWNER, &conversation)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|ack| ack.id == id)
+                .unwrap()
+                .status
+        }
+    };
+    assert_eq!(status(stale.id.clone()).await, "pending");
+    let code = acks::confirm_code(&stale.id);
+    respond(
+        &state,
+        &agent_key,
+        &event(&format!("no {code}"), "7", "evt-5"),
+        "evt_5",
+    )
+    .await;
+    assert_eq!(status(stale.id.clone()).await, "denied");
     server.abort();
 }
 

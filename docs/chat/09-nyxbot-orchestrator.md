@@ -65,7 +65,7 @@ key, memory-only context, not addressable by the user). NyxAgent needs no change
 | `name`, `description` | NyxBot is fixed; a specialist has a unique slug-like name and a role description (≤ 2 KiB) |
 | `grants` | Specialists: `service_ids`, `platform_service_ids`, `account_read` |
 | `memory` | Up to 50 notes of ≤ 500 characters the agent saved with `nyxid__remember`; the owner can delete them |
-| `display_name`, `persona` | Optional friendly name (≤ 40 characters; `name` stays the `@handle`) and personality/tone (≤ 2000 characters) chosen by the owner or set by NyxBot at the owner's request. Injected as style only, never authority; credential shapes are refused |
+| `display_name`, `persona` | Optional friendly name (≤ 40 characters; `name` stays the `@handle`) and personality/tone (≤ 2000 characters) chosen by the owner or set by NyxBot at the owner's request. Injected as style only, never authority; credential shapes are refused and triple quotes stripped. NyxBot can set its own display name but only the owner changes NyxBot's persona |
 | `home_conversation_id` | The thread NyxID uses for work and events no thread asked for |
 | `created_by` | `user` or `nyxbot` |
 | `destroyed_at` | Destroyed specialists keep read-only threads |
@@ -166,9 +166,9 @@ ends its turn; NyxID resumes that thread with an event as soon as it happens:
   chat.
 - **Owner verification**: when the owner uses the link or code in the chat app,
   the thread that set the bot up is told.
-- **Proxy approvals**: a decision in the app, on a phone or in Telegram queues an
-  event on the chat whose key asked (keys are named per conversation); approved
-  calls are retried.
+- **Proxy approvals** need no watch: the tool call itself waits for the decision
+  (in the app, on a phone or in Telegram) and continues; an extra "retry" event
+  would run the call twice.
 
 Watches are TTL-expired and claimed atomically, so replicas never link or report
 twice.
@@ -193,7 +193,18 @@ message. Each member speaks through its own hidden member thread
 (`group_id`, `group_seen_seq`): it keeps its own key, grants and memory, and is
 given only the transcript lines it has not seen (bounded). Member threads never
 appear in thread lists. Members addressed while busy or while the pool is full
-wait on the group and start when they are free (or from the sweep). Deleting a
+wait on the group and start when they are free (or from the sweep; the unique
+index allows one member thread per agent and group). Only the owner's message
+refills the hand-off budget: an agent's post spends it, NyxBot cannot post into a
+group from its own member thread, and an owner's groups make at most 60
+hand-offs per hour. Transcript lines are rendered with indented continuations so
+only real user messages start a line with `[user]:`, and specialists cannot be
+named `user`, `nyxbot`, `nyxid`, `owner` or `system`. Every reply of a member
+thread (including event turns) is posted to the group. A member's action card is
+listed as `pending_actions` and answered in the group with its phrase (the web
+page shows Confirm/Cancel, which post it); NyxID decides the card and sends the
+member back to retry. A hidden member thread never becomes an agent's home.
+Deleting a
 group deletes its transcript and member threads; purging an agent removes it
 from its groups. HTTP: `/assistant/nyxagent/groups[/{id}[/messages]]`; NyxBot
 tools: `create_group`, `list_groups`, `post_to_group`, `update_group`,
@@ -216,10 +227,13 @@ agent, with that agent's authority and memory.
 
 - **Everything is answerable in the chat.** A chat app cannot show NyxID's cards
   or buttons, so channel threads are told to give every link as a full URL and
-  to ask for confirmations in words. The verified owner's plain "yes"/"no"
-  (English and Chinese short forms) decides the thread's newest pending action
-  card and is audited like a card decision; asynchronous results (finished
-  links, approvals, specialists' reports) are delivered back into the chat.
+  to ask for confirmations in words. Every action card has a 4-digit code
+  (`confirm_phrase`, e.g. "yes 4821"). The verified owner's reply decides a card
+  only when it quotes that code, or when it is a plain yes/no (English and
+  Chinese short forms) and exactly one card was raised since the owner's
+  previous message, so an answer to another question never confirms a stale
+  card. Decisions are audited like card decisions; asynchronous results
+  (finished links, specialists' reports) are delivered back into the chat.
 
 - **Telegram** (`telegram`, `telegram-new`) uses the Agent Event Gateway,
   following CMA's Bot setup: NyxID mints a route key and a gateway agent key,

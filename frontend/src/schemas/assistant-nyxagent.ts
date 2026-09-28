@@ -463,8 +463,21 @@ export const assistantGroupMessageSchema = z.object({
 });
 export type AssistantGroupMessage = z.infer<typeof assistantGroupMessageSchema>;
 
+/** A member's action card waiting for the owner; answered by posting its phrase. */
+export const assistantGroupPendingActionSchema = z.object({
+  conversation_id: z.string(),
+  acknowledgement_id: z.string(),
+  agent_id: z.string().nullable().optional(),
+  summary: z.string(),
+  /** "yes 1234": posting it confirms; "no 1234" cancels. */
+  confirm_phrase: z.string().regex(/^yes \d{4}$/),
+  expires_at: z.string(),
+});
+export type AssistantGroupPendingAction = z.infer<typeof assistantGroupPendingActionSchema>;
+
 export const assistantGroupMessagesSchema = z.object({
   group: assistantGroupSchema,
+  pending_actions: z.array(assistantGroupPendingActionSchema).default([]),
   /** Ascending by `seq`. */
   messages: z.array(assistantGroupMessageSchema),
   /** Pass as `before_seq` to read the next older page; null at the start. */

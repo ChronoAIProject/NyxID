@@ -321,7 +321,7 @@ full pool returns `pool_full`. A background task runs every 15 seconds: it
 resolves watches (connect links and channel bot setup links a chat handed out),
 retries deferred wake-ups and starts group members that were busy. Anything the
 owner finishes outside the chat (a connect link, a bot setup, owner
-verification, a proxy approval decided anywhere) resumes the waiting thread with
+verification) resumes the waiting thread with
 an event; the owner never replies "done". Agents are never destroyed automatically. Destroy requests Stop on live
 turns, revokes every thread key and ciphertext, expires cards, disconnects the
 agent's channel bots and keeps read-only threads; a destroyed specialist can be

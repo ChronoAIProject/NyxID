@@ -1018,10 +1018,6 @@ pub async fn process_decision(
         )
         .await;
     });
-    // A chat waiting on this approval resumes by itself.
-    if let Err(error) = super::assistant_team_service::approval_decided(db, &updated).await {
-        tracing::debug!(%error, "Assistant approval follow-up not queued");
-    }
 
     Ok(updated)
 }

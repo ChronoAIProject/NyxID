@@ -127,6 +127,7 @@ pub async fn create(
         message_count: 0,
         pending_agent_ids: Vec::new(),
         hops_remaining: HOPS_PER_MESSAGE,
+        pending_checked_at: None,
         last_message_at: None,
         created_at: now,
         updated_at: now,
@@ -476,7 +477,12 @@ pub async fn transcript_since(
             "agent" => identifier(row.agent_name.as_deref().unwrap_or("agent")),
             _ => "NyxID".to_owned(),
         };
-        let line = format!("[{speaker}]: {}", excerpt(&row.text, 3000));
+        // Continuation lines are indented, so only a real user message can
+        // start a line with "[user]:".
+        let line = format!(
+            "[{speaker}]: {}",
+            excerpt(&row.text, 3000).replace('\n', "\n    ")
+        );
         used += line.len();
         if used > TRANSCRIPT_CHARS && !lines.is_empty() {
             break;
@@ -500,14 +506,22 @@ pub async fn set_seen(db: &Database, owner: &str, thread_id: &str, seq: i64) -> 
 
 /// Groups with members waiting to answer, for the retry sweep.
 pub async fn with_pending(db: &Database) -> AppResult<Vec<AssistantGroup>> {
-    Ok(db
+    let rows: Vec<AssistantGroup> = db
         .collection::<AssistantGroup>(GROUPS)
         .find(doc! {"pending_agent_ids.0": {"$exists": true}})
-        .sort(doc! {"updated_at": 1})
+        .sort(doc! {"pending_checked_at": 1})
         .limit(50)
         .await?
         .try_collect()
-        .await?)
+        .await?;
+    let ids: Vec<&str> = rows.iter().map(|row| row.id.as_str()).collect();
+    db.collection::<AssistantGroup>(GROUPS)
+        .update_many(
+            doc! {"_id": {"$in": ids}},
+            doc! {"$set": {"pending_checked_at": bson::DateTime::now()}},
+        )
+        .await?;
+    Ok(rows)
 }
 
 /// A purged agent leaves every group it was in.

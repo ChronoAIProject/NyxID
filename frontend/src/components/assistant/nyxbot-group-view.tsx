@@ -34,6 +34,7 @@ import type {
   AssistantGroup,
   AssistantGroupMember,
   AssistantGroupMessage,
+  AssistantGroupPendingAction,
 } from "@/schemas/assistant-nyxagent";
 import { useAuthStore } from "@/stores/auth-store";
 
@@ -323,6 +324,57 @@ function GroupHeader({
 }
 
 /** A group chat: the user plus several agents, in one transcript. */
+/**
+ * Members' actions waiting for the owner. A group cannot show confirmation
+ * cards inline, so answering posts the card's phrase ("yes 1234" / "no 1234")
+ * to the group: NyxID decides the card and sends the member back to it.
+ */
+export function GroupPendingActions({
+  actions,
+  members,
+  sending,
+  onAnswer,
+}: {
+  readonly actions: readonly AssistantGroupPendingAction[];
+  readonly members: readonly { readonly id: string; readonly name: string; readonly display_name?: string | null }[];
+  readonly sending: boolean;
+  readonly onAnswer: (text: string) => Promise<void>;
+}) {
+  if (!actions.length) return null;
+  return (
+    <div className="mx-auto w-full max-w-3xl space-y-1.5 px-4 pb-2" aria-label="Actions waiting for you">
+      {actions.map((action) => {
+        const member = members.find((candidate) => candidate.id === action.agent_id);
+        const who = member?.display_name ?? member?.name ?? "An agent";
+        const code = action.confirm_phrase.slice(4);
+        return (
+          <div
+            key={action.acknowledgement_id}
+            role="region"
+            aria-label={`Confirm: ${action.summary}`}
+            className="flex items-center gap-3 rounded-lg border border-border bg-overlay px-3 py-2"
+          >
+            <p className="min-w-0 flex-1 text-[12px] text-foreground">
+              <span className="font-medium">{who}</span> wants to: {action.summary}
+            </p>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={sending}
+              onClick={() => void onAnswer(`no ${code}`)}
+            >
+              Cancel
+            </Button>
+            <Button size="sm" disabled={sending} onClick={() => void onAnswer(action.confirm_phrase)}>
+              Confirm
+            </Button>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 export function NyxAgentGroupPage({
   groupId,
   mock,
@@ -440,6 +492,20 @@ export function NyxAgentGroupPage({
           onDeleted={() => setDetailsAgentId(undefined)}
         />
         <div ref={composerRef} className="absolute inset-x-0 bottom-0 z-10">
+          <GroupPendingActions
+            actions={transcript.data?.pending_actions ?? []}
+            members={group?.members ?? []}
+            sending={transcript.post.isPending}
+            onAnswer={async (text) => {
+              try {
+                await transcript.post.mutateAsync(text);
+              } catch (error) {
+                toast.error(
+                  error instanceof Error ? error.message : "The answer was not delivered.",
+                );
+              }
+            }}
+          />
           <ChatComposer
             active={false}
             sending={transcript.post.isPending}

@@ -177,6 +177,10 @@ pub struct NyxbotWatch {
     /// Stable code only, never upstream prose.
     #[serde(default)]
     pub last_error: Option<String>,
+    /// When the sweep last looked at it: sweeps take the least recently
+    /// checked first, so old abandoned watches never starve new ones.
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub checked_at: Option<DateTime<Utc>>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]

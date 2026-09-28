@@ -270,8 +270,9 @@ pub(crate) async fn after_turn(
         return;
     };
     let owner = row.user_id.as_str();
-    // A group member's reply belongs to the group.
-    if turn.origin == TurnOrigin::Group {
+    // Every reply of a hidden group member thread belongs to the group,
+    // including event turns (a finished link, a confirmed action).
+    if row.group_id.is_some() {
         super::assistant_group::member_settled(state, row, text, error.map(|error| error.code))
             .await;
     }
@@ -746,8 +747,17 @@ async fn dispatch(
             )
         }
         "update_subagent" => {
-            // "nyxbot" updates your own display name, persona and description.
+            // "nyxbot" updates your own display name and description. Your own
+            // persona shapes every NyxBot thread's instructions, so only the
+            // owner changes it (agent details), never text you read.
             let agent = target_agent(state, owner, Some(text_arg(args, "subagent"))).await?;
+            if agent.is_nyxbot() && args.get("persona").is_some() {
+                return Err(AppError::ValidationError(
+                    "Only the user can change NyxBot's persona: ask them to edit it in \
+                    NyxBot's agent details"
+                        .into(),
+                ));
+            }
             let agent = team::update_agent(
                 db,
                 owner,
@@ -840,6 +850,12 @@ async fn dispatch(
             let group =
                 crate::services::assistant_group_service::find(db, owner, text_arg(args, "group"))
                     .await?;
+            // Inside the group, your reply is your post.
+            if engine::get(db, owner, caller).await?.group_id.as_deref() == Some(&group.id) {
+                return Err(AppError::ValidationError(
+                    "You are in this group: reply directly instead of posting to it".into(),
+                ));
+            }
             let author = team::ensure_nyxbot(db, owner).await?;
             let (message, addressed) = super::assistant_group::post(
                 state,

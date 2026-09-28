@@ -58,8 +58,12 @@ pub const REPLY_EXCERPT_CHARS: usize = 2000;
 /// Instructions carry at most this much of an agent's memory.
 pub const MEMORY_NOTE_BUDGET: usize = 6000;
 
+/// Names that would read as someone else in a transcript or mention.
+const RESERVED_NAMES: &[&str] = &["user", "nyxbot", "nyxid", "owner", "system"];
+
 pub fn valid_name(name: &str) -> bool {
     !name.is_empty()
+        && !RESERVED_NAMES.contains(&name)
         && name.len() <= MAX_NAME_CHARS
         && name
             .bytes()
@@ -616,7 +620,8 @@ fn style_value(value: &str, max: usize, what: &str, multiline: bool) -> AppResul
             "{what} must not contain credentials"
         )));
     }
-    Ok(Some(value.to_owned()))
+    // The persona is quoted in the prompt between triple quotes.
+    Ok(Some(value.replace("\"\"\"", "\"")))
 }
 
 pub async fn update_agent(
@@ -1027,20 +1032,33 @@ pub async fn purge(db: &Database, owner: &str, agent_id: &str) -> AppResult<()> 
 /// Obvious credential shapes never enter an agent's memory.
 fn looks_secret(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
-    [
-        "nyxid_ag_",
-        "nyx_nauth_",
-        "nyx_owk_",
-        "sk-",
-        "ghp_",
-        "github_pat_",
-        "xoxb-",
-        "-----begin",
-        "password:",
-        "api_key=",
-    ]
-    .iter()
-    .any(|marker| lower.contains(marker))
+    // An OpenAI-style key: "sk-" at a word start followed by a long token
+    // (not "task-oriented" or "risk-averse").
+    let openai_key = lower.match_indices("sk-").any(|(index, _)| {
+        !lower[..index]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+            && lower[index + 3..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+                .count()
+                >= 16
+    });
+    openai_key
+        || [
+            "nyxid_ag_",
+            "nyx_nauth_",
+            "nyx_owk_",
+            "ghp_",
+            "github_pat_",
+            "xoxb-",
+            "-----begin",
+            "password:",
+            "api_key=",
+        ]
+        .iter()
+        .any(|marker| lower.contains(marker))
 }
 
 /// Remember a note, or replace one by ID. Bounded; never secrets.
@@ -1606,80 +1624,6 @@ pub async fn queued(db: &Database, owner: Option<&str>) -> AppResult<Vec<Assista
         .into_iter()
         .filter(|row| live_turn(row, now).is_none())
         .collect())
-}
-
-/// A proxy approval an assistant chat asked for was decided (in the app, on a
-/// phone, or in Telegram): queue an event on that chat so the next sweep
-/// resumes it, instead of the user coming back to say it was approved. Chat
-/// keys are named per conversation; the credential row maps the key to it.
-pub async fn approval_decided(
-    db: &Database,
-    request: &crate::models::approval_request::ApprovalRequest,
-) -> AppResult<()> {
-    let Some(label) = request.requester_label.as_deref() else {
-        return Ok(());
-    };
-    if request.requester_type != "user" || !label.starts_with("NyxID Assistant chat ") {
-        return Ok(());
-    }
-    let owner = request.requester_id.as_str();
-    let keys: Vec<bson::Document> = db
-        .collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
-        .find(doc! {"user_id": owner, "name": label,
-        "platform": credentials::ASSISTANT_PLATFORM})
-        .projection(doc! {"_id": 1})
-        .await?
-        .try_collect()
-        .await?;
-    let key_ids: Vec<&str> = keys
-        .iter()
-        .filter_map(|key| key.get_str("_id").ok())
-        .collect();
-    if key_ids.is_empty() {
-        return Ok(());
-    }
-    let rows: Vec<bson::Document> = db
-        .collection::<bson::Document>(crate::models::assistant_agent_credential::COLLECTION_NAME)
-        .find(doc! {"user_id": owner, "api_key_id": {"$in": &key_ids}})
-        .projection(doc! {"conversation_id": 1})
-        .await?
-        .try_collect()
-        .await?;
-    let approved = request.status == "approved";
-    let text = format!(
-        "The user {} the {} approval request ({}){}. {}",
-        if approved { "approved" } else { "rejected" },
-        identifier(&request.service_name),
-        excerpt(
-            request
-                .action_description
-                .as_deref()
-                .unwrap_or(&request.operation_summary),
-            200
-        ),
-        request
-            .decision_channel
-            .as_deref()
-            .map(|channel| format!(" via {}", identifier(channel)))
-            .unwrap_or_default(),
-        if approved {
-            "Retry that call now and continue; do not ask the user to confirm again."
-        } else {
-            "Do not retry it; tell the user it was not done."
-        }
-    );
-    for row in rows {
-        if let Ok(conversation_id) = row.get_str("conversation_id") {
-            engine::push_events(
-                db,
-                owner,
-                conversation_id,
-                vec![event("approval_decided", text.clone(), None)],
-            )
-            .await?;
-        }
-    }
-    Ok(())
 }
 
 /// Drop events that reached a destroyed agent's thread after it was destroyed.

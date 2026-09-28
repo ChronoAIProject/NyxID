@@ -292,7 +292,8 @@ fn description(name: &str) -> &'static str {
         }
         "update_subagent" => {
             "Rename a specialist, refine its role, or set the friendly name and persona the user \
-            wants (also for yourself with subagent \"nyxbot\")."
+            wants. With subagent \"nyxbot\" it sets your own display name; only the user \
+            changes your persona."
         }
         "create_group" => {
             "Create a group chat of the user and several agents (you and/or specialists). In a \
