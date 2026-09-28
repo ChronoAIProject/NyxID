@@ -6,6 +6,7 @@ import type {
   ChannelBotItem,
   CreateChannelBotRequest,
   CreateChannelBotResponse,
+  TelegramBotProfile,
   UpdateChannelBotRequest,
   VerifyChannelBotResponse,
 } from "@/types/channels";
@@ -91,6 +92,17 @@ export function useCreateChannelBot() {
       // Registration can save a bot before webhook setup fails.
       return queryClient.invalidateQueries({ queryKey: CHANNEL_BOTS_ROOT });
     },
+  });
+}
+
+/** Looks up a Telegram bot token's name. The token is sent only to NyxID. */
+export function useTelegramBotProfile() {
+  return useMutation({
+    gcTime: 0,
+    mutationFn: (botToken: string): Promise<TelegramBotProfile> =>
+      api.post<TelegramBotProfile>("/channel-bots/telegram/profile", {
+        bot_token: botToken,
+      }),
   });
 }
 

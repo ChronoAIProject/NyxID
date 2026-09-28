@@ -1231,6 +1231,7 @@ impl PlatformAdapter for LarkFamilyAdapter {
 
         Ok(BotIdentity {
             platform_bot_id: app_id.to_string(),
+            display_name: None,
             platform_bot_username: format!("{}_bot", self.platform),
         })
     }

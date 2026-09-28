@@ -5,6 +5,7 @@ use axum::{
     response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
@@ -23,6 +24,9 @@ pub struct CreateChannelBotRequest {
     pub platform: String,
     #[serde(default)]
     pub bot_token: String,
+    /// Required except for Telegram bot tokens, where a blank label uses the
+    /// bot's Telegram name.
+    #[serde(default)]
     pub label: String,
     #[serde(default)]
     pub app_id: Option<String>,
@@ -62,6 +66,27 @@ pub struct UpdateChannelBotRequest {
     pub app_id: Option<String>,
     #[serde(default)]
     pub app_secret: Option<String>,
+}
+
+/// Body for `POST /api/v1/channel-bots/telegram/profile`.
+#[derive(Deserialize)]
+pub struct TelegramBotProfileRequest {
+    pub bot_token: Zeroizing<String>,
+}
+
+impl std::fmt::Debug for TelegramBotProfileRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TelegramBotProfileRequest([REDACTED])")
+    }
+}
+
+/// Public Telegram identity for a bot token. `label` is the name NyxID uses
+/// when a Telegram bot is created without one.
+#[derive(Debug, Serialize)]
+pub struct TelegramBotProfileResponse {
+    pub username: String,
+    pub display_name: Option<String>,
+    pub label: Option<String>,
 }
 
 /// Query parameters for `GET /api/v1/channel-bots`. Pass `org_id` to
@@ -238,6 +263,7 @@ pub struct CreateChannelBotResponse {
     pub setup_instructions: &'static [&'static str],
     pub id: String,
     pub platform: String,
+    pub label: String,
     pub platform_bot_username: String,
     pub status: String,
     /// Lark/Feishu only: deep link to the developer console permissions
@@ -363,6 +389,7 @@ impl CreateChannelBotResponse {
             },
             id: bot.id,
             platform: bot.platform,
+            label: bot.label,
             platform_bot_username: bot.platform_bot_username,
             status: if bot.credential_source == "connection" {
                 bot.status
@@ -595,8 +622,10 @@ pub(crate) async fn create_bot_with_adapter(
             descriptor.managed_only_message.to_string(),
         ));
     }
-    let label = body.label.trim();
-    if label.is_empty() || label.len() > 128 {
+    let label = Some(body.label.trim()).filter(|label| !label.is_empty());
+    if (label.is_none() && adapter.platform_id() != "telegram")
+        || label.is_some_and(|label| label.len() > 128)
+    {
         return Err(AppError::ValidationError(
             "Label must be between 1 and 128 characters".to_string(),
         ));
@@ -719,6 +748,55 @@ pub(crate) async fn create_bot_with_adapter(
             webhook_secret,
         )?),
     ))
+}
+
+/// POST /api/v1/channel-bots/telegram/profile
+///
+/// Looks up a bot token's public Telegram name so setup forms can suggest a
+/// label. The token is only sent to Telegram; it is never stored or logged.
+pub async fn telegram_bot_profile(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(body): Json<TelegramBotProfileRequest>,
+) -> AppResult<Json<TelegramBotProfileResponse>> {
+    let adapter = resolve_adapter("telegram", &state.token_exchange_cache)?;
+    telegram_bot_profile_with_adapter(&state, &auth_user, &body, adapter.as_ref()).await
+}
+
+pub(crate) async fn telegram_bot_profile_with_adapter(
+    state: &AppState,
+    auth_user: &AuthUser,
+    body: &TelegramBotProfileRequest,
+    adapter: &dyn PlatformAdapter,
+) -> AppResult<Json<TelegramBotProfileResponse>> {
+    let limiter = crate::mw::rate_limit::PerKeyRateLimiter::with_db(
+        state.db.clone(),
+        "channel_bot_telegram_profile",
+        20,
+        60,
+    );
+    if !limiter.check_shared(&auth_user.user_id.to_string()).await? {
+        return Err(AppError::RateLimited);
+    }
+    let token = body.bot_token.trim();
+    let fields = RegistrationValues([("bot_token", token)].into_iter().collect());
+    adapter.registration().validate(&fields, false)?;
+    let identity = adapter
+        .verify_bot_token(
+            &state.http_client,
+            &BotCredentials {
+                billing: None,
+                token: &adapter.registration_token(&fields)?,
+                platform_bot_id: None,
+                platform_secrets: None,
+            },
+        )
+        .await?;
+    Ok(Json(TelegramBotProfileResponse {
+        label: channel_bot_service::default_label(&identity),
+        username: identity.platform_bot_username,
+        display_name: identity.display_name,
+    }))
 }
 
 /// PATCH /api/v1/channel-bots/{id}
@@ -1729,6 +1807,114 @@ mod tests {
                 .unwrap_err();
             assert!(error.to_string().contains(expected), "{platform}: {error}");
         }
+    }
+
+    async fn telegram_get_me(server: &wiremock::MockServer, token: &str, first_name: &str) {
+        use wiremock::{
+            Mock, ResponseTemplate,
+            matchers::{method, path},
+        };
+        Mock::given(method("GET"))
+            .and(path(format!("/bot{token}/getMe")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": {"id": 4242, "is_bot": true, "first_name": first_name, "username": "acme_support_bot"}
+            })))
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{token}/setWebhook")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"ok": true, "result": true})),
+            )
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn blank_label_is_still_required_for_other_platforms() {
+        use crate::services::telegram_new_api::TelegramApi;
+        use crate::test_utils::{test_app_state_no_db, test_auth_user};
+
+        let state = test_app_state_no_db().await;
+        let adapter = resolve_adapter("discord", &state.token_exchange_cache).unwrap();
+        let error = create_bot_with_adapter(
+            &state,
+            test_auth_user(&uuid::Uuid::new_v4().to_string()),
+            TelemetryContext::default(),
+            serde_json::from_value(serde_json::json!({
+                "platform": "discord", "bot_token": "token", "public_key": "key", "label": " ",
+            }))
+            .unwrap(),
+            adapter.as_ref(),
+            &TelegramApi {
+                http: &state.http_client,
+                base_url: "http://127.0.0.1:9",
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, AppError::ValidationError(message) if message.contains("Label")));
+    }
+
+    #[tokio::test]
+    async fn telegram_profile_returns_bot_name_without_echoing_token() {
+        use crate::services::channel_adapters::telegram::TelegramAdapter;
+        use crate::test_utils::{connect_test_database, test_app_state, test_auth_user};
+
+        let Some(db) = connect_test_database("channel_bot_telegram_profile").await else {
+            return;
+        };
+        let state = test_app_state(db);
+        let server = wiremock::MockServer::start().await;
+        telegram_get_me(&server, "444:profile-token", " Acme Support ").await;
+        let body: TelegramBotProfileRequest =
+            serde_json::from_value(serde_json::json!({"bot_token": " 444:profile-token "}))
+                .unwrap();
+        assert!(!format!("{body:?}").contains("profile-token"));
+        let Json(profile) = telegram_bot_profile_with_adapter(
+            &state,
+            &test_auth_user(&uuid::Uuid::new_v4().to_string()),
+            &body,
+            &TelegramAdapter::media_test_adapter(&server.uri()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(profile.username, "acme_support_bot");
+        assert_eq!(profile.display_name.as_deref(), Some("Acme Support"));
+        assert_eq!(profile.label.as_deref(), Some("Acme Support"));
+        assert!(
+            !serde_json::to_string(&profile)
+                .unwrap()
+                .contains("profile-token")
+        );
+    }
+
+    #[test]
+    fn default_label_prefers_display_name_and_respects_byte_limit() {
+        use crate::services::channel_platform::BotIdentity;
+        let identity = |display_name: Option<&str>, username: &str| BotIdentity {
+            platform_bot_id: "1".into(),
+            platform_bot_username: username.into(),
+            display_name: display_name.map(str::to_string),
+        };
+        assert_eq!(
+            channel_bot_service::default_label(&identity(Some("Acme"), "acme_bot")).as_deref(),
+            Some("Acme")
+        );
+        assert_eq!(
+            channel_bot_service::default_label(&identity(Some("  "), "acme_bot")).as_deref(),
+            Some("acme_bot")
+        );
+        assert_eq!(
+            channel_bot_service::default_label(&identity(None, "")),
+            None
+        );
+        let long = "\u{1F916}".repeat(40);
+        let label = channel_bot_service::default_label(&identity(Some(&long), "acme_bot")).unwrap();
+        assert_eq!(label.len(), 128);
+        assert!(label.chars().all(|ch| ch == '\u{1F916}'));
     }
 
     #[test]

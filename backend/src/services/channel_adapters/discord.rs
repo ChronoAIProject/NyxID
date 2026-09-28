@@ -725,6 +725,7 @@ impl PlatformAdapter for DiscordAdapter {
 
         Ok(BotIdentity {
             platform_bot_id: bot_id.to_string(),
+            display_name: None,
             platform_bot_username: username.to_string(),
         })
     }

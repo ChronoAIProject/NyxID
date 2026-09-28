@@ -134,7 +134,8 @@ async fn write_registration_fields(
 
 /// Register a channel bot or recover the owner's existing manager connection.
 ///
-/// Verifies the token with the platform, encrypts it, generates a webhook
+/// A `None` label uses the platform-reported bot name (display name, then
+/// username). Verifies the token with the platform, encrypts it, generates a webhook
 /// secret, and inserts a new bot in `pending` status. The caller must follow up
 /// with [`register_webhook`] for a new bot or [`verify_telegram_bot`] for a reused
 /// manager connection to activate it.
@@ -146,7 +147,7 @@ pub async fn create_bot(
     http_client: &reqwest::Client,
     adapter: &dyn PlatformAdapter,
     user_id: &str,
-    label: &str,
+    label: Option<&str>,
     fields: &RegistrationValues<'_>,
 ) -> AppResult<CreateBotResult> {
     let descriptor = adapter.registration();
@@ -156,11 +157,10 @@ pub async fn create_bot(
         ));
     }
     descriptor.validate(fields, false)?;
-    // Validate label
-    if label.is_empty() || label.len() > 200 {
-        return Err(AppError::ValidationError(
-            "Label must be between 1 and 200 characters".to_string(),
-        ));
+    let label_error =
+        || AppError::ValidationError("Label must be between 1 and 200 characters".to_string());
+    if label.is_some_and(|label| label.is_empty() || label.len() > 200) {
+        return Err(label_error());
     }
 
     let effective_token = adapter.registration_token(fields)?;
@@ -175,6 +175,10 @@ pub async fn create_bot(
             },
         )
         .await?;
+    let label = match label {
+        Some(label) => label.to_string(),
+        None => default_label(&identity).ok_or_else(label_error)?,
+    };
 
     persist_verified_bot(
         db,
@@ -182,7 +186,7 @@ pub async fn create_bot(
         encryption_keys,
         adapter,
         user_id,
-        label,
+        &label,
         fields,
         &effective_token,
         identity,
@@ -190,6 +194,23 @@ pub async fn create_bot(
         None,
     )
     .await
+}
+
+/// Label derived from the platform's bot identity, bounded to the API limit.
+pub(crate) fn default_label(identity: &BotIdentity) -> Option<String> {
+    let name = identity
+        .display_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .or_else(|| Some(identity.platform_bot_username.trim()).filter(|name| !name.is_empty()))?;
+    let end = name
+        .char_indices()
+        .map(|(index, ch)| index + ch.len_utf8())
+        .take_while(|end| *end <= 128)
+        .last()
+        .unwrap_or(0);
+    Some(name[..end].to_string())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -210,6 +231,7 @@ async fn persist_verified_bot(
     let BotIdentity {
         platform_bot_id,
         platform_bot_username,
+        ..
     } = identity;
 
     // Check for duplicate platform bot
@@ -2009,6 +2031,7 @@ mod tests {
             self.seen_tokens.lock().unwrap().push(bot_token.to_string());
             Ok(BotIdentity {
                 platform_bot_id: "cli_test".to_string(),
+                display_name: None,
                 platform_bot_username: "testbot".to_string(),
             })
         }
