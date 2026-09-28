@@ -116,6 +116,9 @@ pub(crate) async fn process_inbound_messages(
         {
             Ok(Some(r)) => r,
             Ok(None) => {
+                if bot.platform == "x" {
+                    tracing::warn!(bot_id = %bot.id, stage = "routing", "X webhook has no eligible agent route");
+                }
                 tracing::debug!(
                     bot_id = %bot.id,
                     conversation_id = %inbound.conversation_id,
@@ -177,6 +180,12 @@ pub(crate) async fn process_inbound_messages(
                 continue;
             }
         };
+
+        if bot.platform == "x" {
+            tracing::info!(bot_id = %bot.id, message_id = %stored_message.id,
+                kind = activity.as_ref().map(|value| value.kind.as_str()),
+                "X webhook activity recorded");
+        }
 
         // Telemetry: channel.message_received is sampled at 10% per
         // docs/TELEMETRY.md §6.5. Sampling key is the conversation hash,

@@ -410,7 +410,11 @@ function xProvider(): PlatformCredentials {
 }
 
 it.each([
-  ["API key secret", "consumer_secret", "stops verified DM webhook delivery"],
+  [
+    "API key secret",
+    "consumer_secret",
+    "stops legacy webhook signature verification",
+  ],
   [
     "App bearer token",
     "app_bearer_token",
@@ -426,8 +430,14 @@ it.each([
   expect(review).toHaveTextContent("X webhook credentials");
   expect(review).toHaveTextContent(impact);
   if (field === "app_bearer_token") {
-    expect(review).not.toHaveTextContent("stops verified DM webhook delivery");
+    expect(review).not.toHaveTextContent(
+      "stops legacy webhook signature verification",
+    );
     expect(review).toHaveTextContent("continue delivering billable events");
+  } else {
+    expect(review).toHaveTextContent(
+      "OAuth 2.0 webhook verification and setup remain available",
+    );
   }
   expect(review).toHaveTextContent("do not fall back to polling");
   expect(review).toHaveTextContent("OAuth connections and logins are retained");

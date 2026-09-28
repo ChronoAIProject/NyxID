@@ -1124,6 +1124,8 @@ pub fn webhook_url(base_url: &str, bot: &ChannelBot) -> String {
     let base = base_url.trim_end_matches('/');
     if bot.credential_source == "telegram_manager" {
         format!("{base}/api/v1/webhooks/channel/telegram-new/manager")
+    } else if bot.platform == "x" && bot.credential_source == "connection" {
+        format!("{base}/api/v1/webhooks/channel/x/platform")
     } else {
         format!("{base}/api/v1/webhooks/channel/{}/{}", bot.platform, bot.id)
     }

@@ -204,10 +204,20 @@ pub(super) async fn dispatch_platform_webhook(
         &state.encryption_keys,
         &descriptor,
     )
-    .await?;
+    .await
+    .inspect_err(|_| {
+        tracing::warn!(platform, stage = "credentials", "platform webhook rejected")
+    })?;
     let targets = adapter
         .platform_webhook_targets(&credentials, headers, body)
-        .await?;
+        .await
+        .inspect_err(|_| {
+            tracing::warn!(
+                platform,
+                stage = "signature_or_target",
+                "platform webhook rejected"
+            )
+        })?;
     let source = if crate::services::channel_connection_webhook_service::supports(adapter.as_ref())
     {
         "connection"
@@ -218,7 +228,11 @@ pub(super) async fn dispatch_platform_webhook(
         let bot = state.db.collection::<crate::models::channel_bot::ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
             .find_one(doc! { "platform": platform, "credential_source": source, "platform_bot_id": &target, "is_active": true, "status": { "$in": ["active", "pending_webhook"] } }).await?;
         let Some(bot) = bot else {
-            tracing::debug!(platform, platform_bot_id = %target, "platform webhook for unknown number");
+            tracing::warn!(
+                platform,
+                stage = "bot_lookup",
+                "platform webhook has no active managed channel"
+            );
             continue;
         };
         // Reuse per-bot verification and phone filtering for managed credentials.
@@ -402,6 +416,7 @@ async fn handle_webhook_inner_with_deps(
 
     if bot.credential_source == "connection" {
         if !bot.webhook_registered {
+            tracing::warn!(platform = %bot.platform, bot_id, stage = "subscription", "channel webhook is not registered");
             return Ok(None);
         }
         crate::services::channel_credentials::resolve_bot_token(
@@ -410,7 +425,8 @@ async fn handle_webhook_inner_with_deps(
             adapter.as_ref(),
             &bot,
         )
-        .await?;
+        .await
+        .inspect_err(|_| tracing::warn!(platform = %bot.platform, bot_id, stage = "connection", "channel webhook connection unavailable"))?;
     }
 
     // Auto-promote pending_webhook bots AFTER successful signature verification.
@@ -437,6 +453,7 @@ async fn handle_webhook_inner_with_deps(
     }
     let messages = adapter.parse_inbound(&prepared.body).await.map_err(
         |e| -> Box<dyn std::error::Error + Send + Sync> {
+            tracing::warn!(platform = %bot.platform, bot_id, stage = "payload", "channel webhook payload rejected");
             format!("failed to parse inbound messages: {e}").into()
         },
     )?;
@@ -447,7 +464,8 @@ async fn handle_webhook_inner_with_deps(
         adapter.as_ref(),
         &messages,
     )
-    .await?;
+    .await
+    .inspect_err(|_| tracing::warn!(platform = %bot.platform, bot_id, stage = "admission_or_delivery", "channel webhook processing incomplete"))?;
     Ok(None)
 }
 

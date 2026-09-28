@@ -4,10 +4,15 @@ use crate::services::{
     channel_activity_callback_service as callbacks, channel_activity_service as activities,
     channel_x_tests,
 };
+use axum::{
+    body::{Body, to_bytes},
+    http::{Request, StatusCode},
+};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use hmac::{Hmac, Mac};
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use tower::ServiceExt;
 use wiremock::{
     Mock, ResponseTemplate,
     matchers::{method, path},
@@ -22,10 +27,10 @@ fn chat(bot: &ChannelBot, id: &str) -> Vec<u8> {
 }
 
 fn sign(body: &[u8]) -> HeaderMap {
-    let mut mac = Hmac::<Sha256>::new_from_slice(b"api-secret").unwrap();
+    let mut mac = Hmac::<Sha256>::new_from_slice(b"platform-secret").unwrap();
     mac.update(body);
     HeaderMap::from_iter([(
-        "x-twitter-webhooks-signature".parse().unwrap(),
+        "x-twitter-webhooks-signature-oauth2".parse().unwrap(),
         format!("sha256={}", STANDARD.encode(mac.finalize().into_bytes()))
             .parse()
             .unwrap(),
@@ -39,6 +44,91 @@ async fn dispatch(state: &AppState, body: &[u8]) {
     )
     .await
     .unwrap();
+}
+
+async fn dispatch_http(state: &AppState, bot: &ChannelBot, body: &[u8], status: &str) {
+    let (_, router) = crate::routes::build_router_with_state(state.clone());
+    let app = router.with_state(state.clone());
+    let url = crate::services::channel_bot_service::webhook_url("", bot);
+    let crc = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("{url}?crc_token=challenge"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(crc.status(), StatusCode::OK);
+    let crc: serde_json::Value =
+        serde_json::from_slice(&to_bytes(crc.into_body(), 4096).await.unwrap()).unwrap();
+    assert_eq!(
+        crc["response_token"],
+        sign(b"challenge")["x-twitter-webhooks-signature-oauth2"]
+            .to_str()
+            .unwrap()
+    );
+
+    let mut request = Request::builder()
+        .method("POST")
+        .uri(&url)
+        .body(Body::from(body.to_vec()))
+        .unwrap();
+    *request.headers_mut() = sign(body);
+    let ack = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(ack.status(), StatusCode::OK);
+
+    // HTTP acknowledges before processing. Wait for the owner-visible terminal
+    // status, proving authentication, persistence and callback completion.
+    let owner = uuid::Uuid::parse_str(&bot.user_id).unwrap();
+    let token = crate::crypto::jwt::generate_access_token(
+        &state.jwt_keys,
+        &state.config,
+        &owner,
+        "read write",
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let event: serde_json::Value = serde_json::from_slice(body).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/v1/channel-bots/{}/activities", bot.id))
+                        .header("authorization", format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let response: serde_json::Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap())
+                    .unwrap();
+            if response["activities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| {
+                    row["platform_event_id"] == event["data"]["payload"]["id"]
+                        && row["callback_status"] == status
+                })
+            {
+                assert!(response["total"].as_u64().unwrap() > 0);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("signed X webhook must appear in the owner API with its callback outcome");
 }
 
 async fn route(state: &AppState, id: &str) -> ChannelConversation {
@@ -92,7 +182,7 @@ async fn typed_x_notifications_are_durable_gated_signed_deduplicated_and_never_r
         .await
         .unwrap();
         let first = chat(&bot, "e4f4d3fc-8bbf-4928-92eb-e5058d6bb6f6");
-        dispatch(&state, &first).await;
+        dispatch_http(&state, &bot, &first, "not_enabled").await;
         let before = activities::list(&state.db, &owner, Some(&bot.id), None, None, 1, 20)
             .await
             .unwrap();
@@ -307,7 +397,13 @@ async fn typed_x_notifications_are_durable_gated_signed_deduplicated_and_never_r
             .with_priority(1)
             .mount(&server)
             .await;
-        dispatch(&state, &chat(&bot, "12345678-1234-4234-8234-123456789abc")).await;
+        dispatch_http(
+            &state,
+            &bot,
+            &chat(&bot, "12345678-1234-4234-8234-123456789abc"),
+            "failed",
+        )
+        .await;
         let failed = activities::list(&state.db, &owner, Some(&bot.id), None, None, 1, 20)
             .await
             .unwrap();

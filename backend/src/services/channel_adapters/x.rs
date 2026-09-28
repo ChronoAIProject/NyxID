@@ -463,7 +463,7 @@ impl PlatformAdapter for XAdapter {
                     secret: true,
                     required: false,
                     numeric: false,
-                    help: "X Developer Console > Keys & Tokens > Bearer Token. Configure with the API secret to enable automatic DM webhooks billed to this app.",
+                    help: "X Developer Console > Keys & Tokens > Bearer Token. Use the same app as the OAuth Client ID and Client Secret to enable automatic X Activity webhooks.",
                 },
                 PlatformCredentialField {
                     name: "consumer_secret",
@@ -471,7 +471,7 @@ impl PlatformAdapter for XAdapter {
                     secret: true,
                     required: false,
                     numeric: false,
-                    help: "The same X app's API Key Secret, used to verify webhook signatures. This is different from the OAuth 2.0 Client Secret.",
+                    help: "Optional legacy OAuth 1.0 consumer secret from the same X app. Verifies the legacy webhook signature header. OAuth 2.0 webhook signatures use the Client Secret below.",
                 },
                 PlatformCredentialField {
                     name: "client_id",
@@ -487,17 +487,17 @@ impl PlatformAdapter for XAdapter {
                     secret: true,
                     required: true,
                     numeric: false,
-                    help: "X Developer Console > App > OAuth 2.0 Client Secret.",
+                    help: "X Developer Console > App > OAuth 2.0 Client Secret. Used for OAuth, webhook verification challenges, and X-Twitter-Webhooks-Signature-OAuth2 signatures.",
                 },
             ],
             webhook_secret_field: None,
             setup_checklist: &[
                 "Enable OAuth 2.0 user authentication with a confidential Web App and PKCE in the X Developer Console. Use the OAuth callback URL below.",
-                "Allow tweet.read users.read dm.read dm.write media.write offline.access. Existing accounts must consent again to grant DM access.",
+                "Allow tweet.read tweet.write users.read dm.read dm.write media.write offline.access. Existing accounts must consent again to grant missing permissions.",
                 "Fund NyxID's app with paid API credits. All customers' DM traffic consumes this app's credits and limits. Current pricing: https://docs.x.com/x-api/getting-started/pricing (pay-per-usage replaces Basic/Pro subscriptions).",
-                "Set the app bearer token and API key secret from this same app to enable X Activity DM webhooks. NyxID registers the shared HTTPS webhook and per-account subscriptions automatically. Existing connections switch when verified or reconnected; without these fields they keep polling.",
-                "This channel supports unencrypted DMs (dm.received). Encrypted X Chat messages require a separate encryption integration.",
-                "Automated replies require an inbound DM and user consent. NyxID never initiates DM conversations. Publish an opt-out policy for your agent.",
+                "Set the app bearer token and OAuth Client ID and Client Secret from the same app. Keep the API key secret for legacy webhook signatures. NyxID registers the shared HTTPS webhook and selected per-account subscriptions automatically. Select Verify on existing connections to reconcile setup.",
+                "Select Events to receive on each X channel: ordinary DMs, encrypted chat notifications, mentions, replies, or your own posts. Encrypted chat notifications record activity without exposing message text or granting replies.",
+                "Agents must declare supported activity types before owners enable typed notifications. Existing DM callbacks retain their contract. Publish an opt-out policy for automated replies.",
             ],
         })
     }
@@ -905,9 +905,12 @@ impl PlatformAdapter for XAdapter {
     }
 
     fn connection_webhook_configured(&self, credentials: &PlatformVerifySecrets) -> bool {
-        ["app_bearer_token", "consumer_secret"]
-            .iter()
-            .all(|field| credentials.get(field).is_some_and(|s| !s.is_empty()))
+        credentials
+            .get("app_bearer_token")
+            .is_some_and(|s| !s.is_empty())
+            && ["client_secret", "consumer_secret"]
+                .iter()
+                .any(|field| credentials.get(field).is_some_and(|s| !s.is_empty()))
     }
 
     async fn setup_connection_webhook(
@@ -916,6 +919,7 @@ impl PlatformAdapter for XAdapter {
         credentials: &BotCredentials<'_>,
         bot: &ChannelBot,
         webhook_url: &str,
+        progress: &super::super::channel_platform::WebhookSetupProgress,
     ) -> AppResult<()> {
         webhooks::setup(
             self,
@@ -924,6 +928,7 @@ impl PlatformAdapter for XAdapter {
             &bot.id,
             selected_events(bot),
             webhook_url,
+            progress,
         )
         .await
     }
@@ -960,17 +965,20 @@ impl PlatformAdapter for XAdapter {
             body,
         )?;
         if webhooks::target(body)?.as_deref() != Some(bot.platform_bot_id.as_str()) {
-            return Err(webhooks::verification_error());
+            return Err(webhooks::rejected(Some(&bot.id), "account_mismatch"));
         }
         let envelope: Value = serde_json::from_slice(body).map_err(|_| protocol_error())?;
         if envelope["data"]["tag"].as_str() != Some(format!("nyxid:{}", bot.id).as_str()) {
-            return Err(webhooks::verification_error());
+            return Err(webhooks::rejected(
+                Some(&bot.id),
+                "subscription_tag_mismatch",
+            ));
         }
         if !selected_events(bot)
             .iter()
             .any(|event| envelope["data"]["event_type"] == event_name(*event))
         {
-            return Err(webhooks::verification_error());
+            return Err(webhooks::rejected(Some(&bot.id), "event_not_selected"));
         }
         Ok(())
     }

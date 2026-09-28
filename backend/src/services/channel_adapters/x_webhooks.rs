@@ -7,6 +7,11 @@ pub(super) fn verification_error() -> AppError {
     AppError::ChannelWebhookVerificationFailed("Invalid X webhook".into())
 }
 
+pub(super) fn rejected(bot_id: Option<&str>, reason: &'static str) -> AppError {
+    tracing::warn!(platform = "x", bot_id, reason, "X webhook rejected");
+    verification_error()
+}
+
 pub(super) fn crc_token(query: &std::collections::HashMap<String, String>) -> AppResult<&str> {
     query
         .get("crc_token")
@@ -19,16 +24,21 @@ pub(super) fn handshake(
     credentials: &PlatformVerifySecrets,
     query: &std::collections::HashMap<String, String>,
 ) -> AppResult<String> {
-    let mut mac = mac(credentials)?;
+    let secret = credentials
+        .get("client_secret")
+        .filter(|secret| !secret.is_empty())
+        .or_else(|| {
+            credentials
+                .get("consumer_secret")
+                .filter(|secret| !secret.is_empty())
+        })
+        .ok_or_else(verification_error)?;
+    let mut mac = mac(secret)?;
     mac.update(crc_token(query)?.as_bytes());
     Ok(json!({"response_token": format!("sha256={}", STANDARD.encode(mac.finalize().into_bytes()))}).to_string())
 }
 
-fn mac(credentials: &PlatformVerifySecrets) -> AppResult<Hmac<Sha256>> {
-    let secret = credentials
-        .get("consumer_secret")
-        .filter(|s| !s.is_empty())
-        .ok_or_else(verification_error)?;
+fn mac(secret: &str) -> AppResult<Hmac<Sha256>> {
     Hmac::<Sha256>::new_from_slice(secret.as_bytes()).map_err(|_| verification_error())
 }
 
@@ -37,19 +47,28 @@ pub(super) fn verify(
     headers: &HeaderMap,
     body: &[u8],
 ) -> AppResult<()> {
+    let (header, field) = if headers.contains_key("x-twitter-webhooks-signature-oauth2") {
+        ("x-twitter-webhooks-signature-oauth2", "client_secret")
+    } else {
+        ("x-twitter-webhooks-signature", "consumer_secret")
+    };
     let signature = headers
-        .get("x-twitter-webhooks-signature")
+        .get(header)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("sha256="))
         .filter(|v| v.len() == 44)
-        .ok_or_else(verification_error)?;
+        .ok_or_else(|| rejected(None, "signature_missing_or_malformed"))?;
     let signature = STANDARD
         .decode(signature)
-        .map_err(|_| verification_error())?;
-    let mut mac = mac(credentials)?;
+        .map_err(|_| rejected(None, "signature_encoding_invalid"))?;
+    let secret = credentials
+        .get(field)
+        .filter(|secret| !secret.is_empty())
+        .ok_or_else(|| rejected(None, "signing_secret_missing"))?;
+    let mut mac = mac(secret)?;
     mac.update(body);
     mac.verify_slice(&signature)
-        .map_err(|_| verification_error())
+        .map_err(|_| rejected(None, "signature_mismatch"))
 }
 
 pub(super) fn target(body: &[u8]) -> AppResult<Option<String>> {
@@ -304,6 +323,7 @@ pub(super) async fn setup(
     bot_id: &str,
     events: &[XChannelEvent],
     webhook_url: &str,
+    progress: &super::super::super::channel_platform::WebhookSetupProgress,
 ) -> AppResult<()> {
     validate_events("x", events)?;
     let app = app_token(credentials.platform_secrets.ok_or_else(protocol_error)?)?;
@@ -380,6 +400,7 @@ pub(super) async fn setup(
             .iter()
             .any(|keep| keep["subscription_id"] == row["subscription_id"])
         {
+            progress.mark_mutation_started();
             remove_subscription(http, api, app, row).await?;
         }
     }
@@ -400,6 +421,7 @@ pub(super) async fn setup(
                 .as_str()
                 .filter(|id| numeric_id(id))
                 .ok_or_else(protocol_error)?;
+            progress.mark_mutation_started();
             let body = response_json(
                 send(
                     http.put(format!("{api}/2/activity/subscriptions/{id}"))
@@ -414,6 +436,7 @@ pub(super) async fn setup(
                 return Err(protocol_error());
             }
         } else {
+            progress.mark_mutation_started();
             let body = response_json(send(http.post(format!("{api}/2/activity/subscriptions"))
                 .bearer_auth(credentials.token)
                 .json(&json!({"event_type": name, "filter": {"user_id": own_id}, "webhook_id": webhook_id, "tag": tag}))).await?).await?;

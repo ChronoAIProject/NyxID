@@ -64,7 +64,7 @@ function sharedClearImpact(
   }
   const webhookImpact = [
     fields.consumer_secret === null
-      ? "Clearing the X API key secret stops verified DM webhook delivery and webhook setup until restored."
+      ? "Clearing the X API key secret stops legacy webhook signature verification. OAuth 2.0 webhook verification and setup remain available with the Client Secret and app bearer token."
       : "",
     fields.app_bearer_token === null
       ? "Clearing the X app bearer token stops subscription setup and cleanup until restored. Existing subscriptions can continue delivering billable events."
