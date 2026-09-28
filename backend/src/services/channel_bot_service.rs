@@ -1087,6 +1087,19 @@ async fn update_bot_inner(
             bson::to_bson(events)
                 .map_err(|_| AppError::Internal("Unable to encode X events".into()))?,
         );
+        let previous = super::channel_adapters::x::selected_events(&bot);
+        if bot.webhook_registered
+            && (previous.len() != events.len()
+                || events.iter().any(|event| !previous.contains(event)))
+        {
+            // Selection is durable before remote reconciliation. Keep interrupted
+            // changes eligible for subscription cleanup, including chat -> DM.
+            set_doc.insert("status", "failed");
+            set_doc.insert(
+                "error",
+                super::channel_connection_webhook_service::SETUP_PENDING_ERROR,
+            );
+        }
     }
 
     if let Some(label) = params.label {
@@ -1146,6 +1159,8 @@ pub fn webhook_url(base_url: &str, bot: &ChannelBot) -> String {
     let base = base_url.trim_end_matches('/');
     if bot.credential_source == "telegram_manager" {
         format!("{base}/api/v1/webhooks/channel/telegram-new/manager")
+    } else if bot.platform == "x" && bot.credential_source == "connection" {
+        super::channel_connection_webhook_service::callback_url(base, &bot.platform)
     } else {
         format!("{base}/api/v1/webhooks/channel/{}/{}", bot.platform, bot.id)
     }

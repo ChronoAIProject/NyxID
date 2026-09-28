@@ -83,6 +83,7 @@ pub(crate) async fn process_inbound_messages(
         } else {
             billing.received(&inbound.platform_message_id).await
         } {
+            tracing::warn!(bot_id = %bot.id, stage = "billing", error_code = error.error_code(), "channel webhook billing admission failed");
             if super::channel_billing_service::blocks_channel(&error)
                 && super::channel_billing_service::suspend(&state, bot, adapter)
                     .await
@@ -116,6 +117,9 @@ pub(crate) async fn process_inbound_messages(
         {
             Ok(Some(r)) => r,
             Ok(None) => {
+                if bot.platform == "x" {
+                    tracing::warn!(bot_id = %bot.id, stage = "routing", "X webhook has no eligible agent route");
+                }
                 tracing::debug!(
                     bot_id = %bot.id,
                     conversation_id = %inbound.conversation_id,
@@ -126,7 +130,7 @@ pub(crate) async fn process_inbound_messages(
             Err(e) => {
                 tracing::warn!(
                     bot_id = %bot.id,
-                    error = %e,
+                    error_code = e.error_code(),
                     "agent resolution failed"
                 );
                 complete = false;
@@ -172,11 +176,17 @@ pub(crate) async fn process_inbound_messages(
             Ok(Some(message)) => message,
             Ok(None) => continue,
             Err(error) => {
-                tracing::error!(error = %error, "failed to admit inbound message");
+                tracing::error!(bot_id = %bot.id, stage = "storage", error_code = error.error_code(), "failed to admit inbound message");
                 complete = false;
                 continue;
             }
         };
+
+        if bot.platform == "x" {
+            tracing::info!(bot_id = %bot.id, message_id = %stored_message.id,
+                kind = activity.as_ref().map(|value| value.kind.as_str()),
+                "X webhook activity recorded");
+        }
 
         // Telemetry: channel.message_received is sampled at 10% per
         // docs/TELEMETRY.md §6.5. Sampling key is the conversation hash,

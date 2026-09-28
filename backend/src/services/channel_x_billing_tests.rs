@@ -467,7 +467,7 @@ async fn x_billing_subscription_admission_checks_funding_before_x_setup() {
 }
 
 #[tokio::test]
-async fn x_billing_setup_lease_conflict_records_a_recoverable_channel_failure() {
+async fn x_billing_setup_lease_conflict_preserves_channel_state_without_provider_effects() {
     use crate::services::coordination_service::{LeaseStore, cluster_lease_runtime};
     let (mut state, adapter, server, owner, key) = fixture().await;
     enable_billing(&mut state, &owner).await;
@@ -492,9 +492,21 @@ async fn x_billing_setup_lease_conflict_records_a_recoverable_channel_failure() 
     let current = channel_bot_service::get_bot(&state.db, &bot.id)
         .await
         .unwrap();
-    assert_eq!(current.status, "failed");
+    assert_eq!(current.status, bot.status);
     assert!(!current.webhook_registered);
-    assert!(current.error.as_deref().unwrap().contains("Verify"));
+    assert_eq!(current.error, bot.error);
+    assert_eq!(current.updated_at, bot.updated_at);
+    assert_eq!(
+        state
+            .db
+            .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+            .count_documents(
+                doc! {"event_type": "channel_bot_failed", "event_data.bot_id": &bot.id}
+            )
+            .await
+            .unwrap(),
+        0,
+    );
     assert!(server.received_requests().await.unwrap().is_empty());
 }
 
