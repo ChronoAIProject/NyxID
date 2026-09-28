@@ -634,9 +634,7 @@ mod tests {
         assert_eq!(key.platform.as_deref(), Some(ASSISTANT_PLATFORM));
         assert_eq!(key.name, format!("NyxID Assistant chat {}", &row.id[5..13]));
         // New chats are NyxBot orchestrators: Full access.
-        assert!(
-            key.allow_all_services && key.allow_all_nodes && key.allow_auto_connected_services
-        );
+        assert!(key.allow_all_services && key.allow_all_nodes && key.allow_auto_connected_services);
         assert!(key.allowed_service_ids.is_empty() && key.allowed_node_ids.is_empty());
         assert!(key.expires_at.is_none());
         assert_eq!(key.scopes, format!("proxy {ASSISTANT_ACCOUNT_SCOPE}"));
@@ -674,7 +672,7 @@ mod tests {
             .update_one(
                 doc! {"_id": &row.credential_api_key_id},
                 doc! {"$set": {"allow_all_nodes": false, "allow_all_services": false,
-                    "scopes": "proxy"}},
+                "scopes": "proxy"}},
             )
             .await
             .unwrap();

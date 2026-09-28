@@ -14,8 +14,8 @@ use crate::{
     errors::{AppError, AppResult},
     models::{
         assistant_conversation::{
-            AccessMode, ActiveTurn, AgentEvent, AgentRole, AssistantConversation, ChannelOrigin,
-            COLLECTION_NAME as CONVERSATIONS, TurnActivity, TurnOrigin,
+            AccessMode, ActiveTurn, AgentEvent, AgentRole, AssistantConversation,
+            COLLECTION_NAME as CONVERSATIONS, ChannelOrigin, TurnActivity, TurnOrigin,
         },
         assistant_message::{AssistantMessage, COLLECTION_NAME as MESSAGES},
         downstream_service::DownstreamService,
@@ -445,6 +445,16 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
             )
             .await?;
     }
+    // Deferred wake-ups: only rows with queued events enter this sparse index,
+    // so the periodic retry never scans the whole collection.
+    db.collection::<bson::Document>(CONVERSATIONS)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"pending_events.created_at": 1})
+                .options(IndexOptions::builder().sparse(true).build())
+                .build(),
+        )
+        .await?;
     // Admitted gateway events (with their encrypted context) expire on their own.
     db.collection::<bson::Document>(crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME)
         .create_index(
@@ -671,7 +681,7 @@ pub async fn begin_turn(
                     )
                     .update_many(
                         doc! {"conversation_id": &id, "user_id": user_id,
-                            "status": "pending", "kind": {"$in": ["service", "account"]}},
+                        "status": "pending", "kind": {"$in": ["service", "account"]}},
                         doc! {"$set": {"status": "expired"}},
                     )
                     .session(&mut *session)

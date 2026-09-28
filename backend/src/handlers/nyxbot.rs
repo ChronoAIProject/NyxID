@@ -73,15 +73,13 @@ fn sha256_hex(value: impl AsRef<[u8]>) -> String {
 /// The gateway's `/v1` base from the `cmaeg` catalog row: no new environment
 /// variable, and the same origin the NyxID proxy already uses.
 async fn gateway_base(state: &AppState) -> AppResult<String> {
-    let row = crate::services::assistant_service::resolve_admin_service_by_slug(
-        &state.db,
-        GATEWAY_SLUG,
-    )
-    .await
-    .map_err(|_| AppError::ValidationError("gateway_unavailable".into()))?;
+    let row =
+        crate::services::assistant_service::resolve_admin_service_by_slug(&state.db, GATEWAY_SLUG)
+            .await
+            .map_err(|_| AppError::ValidationError("gateway_unavailable".into()))?;
     let base = row.base_url.trim_end_matches('/').to_owned();
-    let parsed =
-        url::Url::parse(&base).map_err(|_| AppError::ValidationError("gateway_unavailable".into()))?;
+    let parsed = url::Url::parse(&base)
+        .map_err(|_| AppError::ValidationError("gateway_unavailable".into()))?;
     let local = matches!(parsed.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
     if !(parsed.scheme() == "https" || (local && parsed.scheme() == "http")) {
         return Err(AppError::ValidationError("gateway_unavailable".into()));
@@ -120,8 +118,8 @@ async fn gateway_call(
         .map_err(|_| AppError::ValidationError("gateway_unavailable".into()))?;
     let status = response.status().as_u16();
     let bytes = response.bytes().await.unwrap_or_default();
-    let body = serde_json::from_slice(&bytes[..bytes.len().min(2 * 1024 * 1024)])
-        .unwrap_or(Value::Null);
+    let body =
+        serde_json::from_slice(&bytes[..bytes.len().min(2 * 1024 * 1024)]).unwrap_or(Value::Null);
     Ok(GatewayResponse { status, body })
 }
 
@@ -130,7 +128,9 @@ fn gateway_error_code(response: &GatewayResponse) -> &'static str {
     let code = response.body["code"].as_str().unwrap_or_default();
     let detail = response.body["detail"].as_str().unwrap_or_default();
     match (response.status, code) {
-        (400, "invalid_request") if detail.contains("provider") => "gateway_provider_not_registered",
+        (400, "invalid_request") if detail.contains("provider") => {
+            "gateway_provider_not_registered"
+        }
         (400, _) => "gateway_rejected_request",
         (401, _) | (403, _) => "gateway_not_authenticated",
         (409, _) => "gateway_conflict",
@@ -200,10 +200,7 @@ fn link_url(row: &NyxbotChannel, code: &str) -> Option<String> {
     }
 }
 
-async fn refresh_link_code(
-    state: &AppState,
-    row: &NyxbotChannel,
-) -> AppResult<LinkInstructions> {
+async fn refresh_link_code(state: &AppState, row: &NyxbotChannel) -> AppResult<LinkInstructions> {
     let code = new_link_code();
     let expires_at = Utc::now() + ChronoDuration::hours(LINK_CODE_TTL_HOURS);
     state
@@ -212,8 +209,8 @@ async fn refresh_link_code(
         .update_one(
             doc! {"_id": &row.id, "user_id": &row.user_id},
             doc! {"$set": {"link_code_hash": sha256_hex(code.as_bytes()),
-                "link_code_expires_at": bson::DateTime::from_chrono(expires_at),
-                "updated_at": bson::DateTime::now()}},
+            "link_code_expires_at": bson::DateTime::from_chrono(expires_at),
+            "updated_at": bson::DateTime::now()}},
         )
         .await?;
     Ok(LinkInstructions {
@@ -244,7 +241,7 @@ async fn active_for_bot(
         .db
         .collection::<NyxbotChannel>(CHANNELS)
         .find_one(doc! {"user_id": owner, "channel_bot_id": bot_id,
-            "status": {"$in": ["pending", "active"]}})
+        "status": {"$in": ["pending", "active"]}})
         .await?)
 }
 
@@ -277,18 +274,35 @@ pub async fn connect(
 ) -> AppResult<(NyxbotChannel, LinkInstructions)> {
     let bot: ChannelBot = channel_bot_service::get_bot_for_user(&state.db, bot_id, owner).await?;
     if !bot.is_active {
-        return Err(AppError::ValidationError("That channel bot is not active".into()));
+        return Err(AppError::ValidationError(
+            "That channel bot is not active".into(),
+        ));
     }
-    if let Some(existing) = active_for_bot(state, owner, &bot.id).await?
-        && existing.status == "active"
-    {
-        let link = refresh_link_code(state, &existing).await?;
-        return Ok((existing, link));
+    if let Some(existing) = active_for_bot(state, owner, &bot.id).await? {
+        let keys_alive = key_service::get_api_key(&state.db, owner, &existing.route_api_key_id)
+            .await
+            .is_ok_and(|key| key.is_active)
+            && match existing.agent_api_key_id.as_deref() {
+                Some(agent) => key_service::get_api_key(&state.db, owner, agent)
+                    .await
+                    .is_ok_and(|key| key.is_active),
+                None => true,
+            };
+        if existing.status == "active" && keys_alive {
+            let link = refresh_link_code(state, &existing).await?;
+            return Ok((existing, link));
+        }
+        // A half-created or broken connection (e.g. a key was deleted) is
+        // released first, then rebuilt from scratch.
+        disconnect(state, owner, &existing.id).await?;
     }
     // Never silently replace another agent's default route.
     let routes =
         channel_routing_service::list_conversations(&state.db, owner, Some(&bot.id)).await?;
-    if routes.iter().any(|route| route.default_agent && route.is_active) {
+    if routes
+        .iter()
+        .any(|route| route.default_agent && route.is_active)
+    {
         return Err(AppError::Conflict(
             "This bot already routes to another agent. Remove that route first \
             (nyxid__delete_channel_route), then connect NyxBot."
@@ -348,7 +362,12 @@ pub async fn connect(
             None,
         )
         .await?;
-        agent_key_ciphertext = Some(state.encryption_keys.encrypt(agent.full_key.as_bytes()).await?);
+        agent_key_ciphertext = Some(
+            state
+                .encryption_keys
+                .encrypt(agent.full_key.as_bytes())
+                .await?,
+        );
         agent_key_id = Some(agent.id.clone());
         agent_key_raw = Some(Zeroizing::new(agent.full_key));
     }
@@ -387,7 +406,10 @@ pub async fn connect(
             state,
             &row,
             &bot,
-            agent_key_raw.as_deref().map(String::as_str).unwrap_or_default(),
+            agent_key_raw
+                .as_deref()
+                .map(String::as_str)
+                .unwrap_or_default(),
             &route_key.full_key,
         )
         .await
@@ -402,13 +424,18 @@ pub async fn connect(
                 .update_one(
                     doc! {"_id": &id},
                     doc! {"$set": {"status": "active", "route_id": &route_id,
-                        "updated_at": bson::DateTime::now()}},
+                    "updated_at": bson::DateTime::now()}},
                 )
                 .await?;
-            audit(state, owner, "nyxbot_channel_connected", json!({
-                "channel_agent_id": &id, "channel_bot_id": &bot.id,
-                "platform": &platform, "transport": &row.transport,
-            }))
+            audit(
+                state,
+                owner,
+                "nyxbot_channel_connected",
+                json!({
+                    "channel_agent_id": &id, "channel_bot_id": &bot.id,
+                    "platform": &platform, "transport": &row.transport,
+                }),
+            )
             .await;
             let row = load_channel(state, owner, &id).await?;
             let link = refresh_link_code(state, &row).await?;
@@ -426,13 +453,18 @@ pub async fn connect(
                 .update_one(
                     doc! {"_id": &id},
                     doc! {"$set": {"status": "failed", "last_error": code,
-                        "updated_at": bson::DateTime::now()},
-                        "$unset": {"agent_key_ciphertext": ""}},
+                    "updated_at": bson::DateTime::now()},
+                    "$unset": {"agent_key_ciphertext": ""}},
                 )
                 .await?;
-            audit(state, owner, "nyxbot_channel_connect_failed", json!({
-                "channel_agent_id": &id, "platform": &platform, "error_code": code,
-            }))
+            audit(
+                state,
+                owner,
+                "nyxbot_channel_connect_failed",
+                json!({
+                    "channel_agent_id": &id, "platform": &platform, "error_code": code,
+                }),
+            )
             .await;
             Err(AppError::ValidationError(match code {
                 "gateway_provider_not_registered" => {
@@ -446,7 +478,12 @@ pub async fn connect(
     }
 }
 
-fn gateway_policy(state: &AppState, row: &NyxbotChannel, bot: &ChannelBot, route_ids: &[String]) -> Value {
+fn gateway_policy(
+    state: &AppState,
+    row: &NyxbotChannel,
+    bot: &ChannelBot,
+    route_ids: &[String],
+) -> Value {
     let username = bot.platform_bot_username.trim_start_matches('@');
     let mut source = json!({
         "type": "nyxid_relay",
@@ -458,11 +495,16 @@ fn gateway_policy(state: &AppState, row: &NyxbotChannel, bot: &ChannelBot, route
             "chats": {"type": "open"}, "groups": "mention_or_reply_to_bot"},
     });
     let valid_username = (5..=32).contains(&username.len())
-        && username.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+        && username
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_');
     if valid_username {
         source["bot_username"] = json!(username);
     }
-    let name: String = format!("NyxBot {}", row.bot_label).chars().take(60).collect();
+    let name: String = format!("NyxBot {}", row.bot_label)
+        .chars()
+        .take(60)
+        .collect();
     json!({
         "schema_version": 1,
         "name": name,
@@ -514,18 +556,24 @@ async fn connect_gateway(
     if created.status != 201 && created.status != 200 {
         return Err(gateway_error_code(&created));
     }
-    let channel_id = created.body["channel_id"].as_str().ok_or("gateway_invalid_response")?;
+    let channel_id = created.body["channel_id"]
+        .as_str()
+        .ok_or("gateway_invalid_response")?;
     let callback = created.body["endpoints"]["nyxid_callback_url"]
         .as_str()
         .ok_or("gateway_invalid_response")?;
-    let version = created.body["version"].as_i64().ok_or("gateway_invalid_response")?;
-    let binding_id = created.body["provider"]["binding_id"].as_str().map(str::to_owned);
+    let version = created.body["version"]
+        .as_i64()
+        .ok_or("gateway_invalid_response")?;
+    let binding_id = created.body["provider"]["binding_id"]
+        .as_str()
+        .map(str::to_owned);
     let db = &state.db;
     db.collection::<NyxbotChannel>(CHANNELS)
         .update_one(
             doc! {"_id": &row.id},
             doc! {"$set": {"gateway_channel_id": channel_id, "gateway_record_id": &record_id,
-                "gateway_version": version, "binding_id": binding_id}},
+            "gateway_version": version, "binding_id": binding_id}},
         )
         .await
         .map_err(|_| "storage_unavailable")?;
@@ -534,7 +582,10 @@ async fn connect_gateway(
         let _ = gateway_call(
             state,
             reqwest::Method::DELETE,
-            &format!("/channels/{}?expected_version={version}", urlencode(channel_id)),
+            &format!(
+                "/channels/{}?expected_version={version}",
+                urlencode(channel_id)
+            ),
             agent_key,
             None,
             None,
@@ -599,7 +650,10 @@ async fn connect_gateway(
             let version = response.body["version"].as_i64().unwrap_or(version + 1);
             let _ = db
                 .collection::<NyxbotChannel>(CHANNELS)
-                .update_one(doc! {"_id": &row.id}, doc! {"$set": {"gateway_version": version}})
+                .update_one(
+                    doc! {"_id": &row.id},
+                    doc! {"$set": {"gateway_version": version}},
+                )
                 .await;
             Ok(route.id)
         }
@@ -658,6 +712,10 @@ async fn decrypt_agent_key(
 /// the route and both keys. Chats stay in the owner's history.
 pub async fn disconnect(state: &AppState, owner: &str, id: &str) -> AppResult<Value> {
     let row = load_channel(state, owner, id).await?;
+    // Release the gateway channel when we still can. Without a live agent key
+    // the gateway cannot authenticate us; the orphan then has no route, key
+    // or provider binding left to reach, so local cleanup proceeds regardless.
+    let mut gateway_released = row.transport != "gateway";
     if row.transport == "gateway"
         && let (Some(channel_id), Some(version), Some(agent_key)) = (
             row.gateway_channel_id.as_deref(),
@@ -665,7 +723,7 @@ pub async fn disconnect(state: &AppState, owner: &str, id: &str) -> AppResult<Va
             decrypt_agent_key(state, &row).await?,
         )
     {
-        let response = gateway_call(
+        gateway_released = gateway_call(
             state,
             reqwest::Method::DELETE,
             &format!("/channels/{}?expected_version={version}", urlencode(channel_id)),
@@ -673,13 +731,8 @@ pub async fn disconnect(state: &AppState, owner: &str, id: &str) -> AppResult<Va
             None,
             None,
         )
-        .await?;
-        if !matches!(response.status, 204 | 200 | 404) {
-            return Err(AppError::ValidationError(format!(
-                "The gateway did not release the channel ({}); try again",
-                gateway_error_code(&response)
-            )));
-        }
+        .await
+        .is_ok_and(|response| matches!(response.status, 204 | 200 | 404));
     }
     if let Some(route_id) = row.route_id.as_deref() {
         match channel_routing_service::delete_conversation(&state.db, route_id, owner).await {
@@ -687,9 +740,12 @@ pub async fn disconnect(state: &AppState, owner: &str, id: &str) -> AppResult<Va
             Err(error) => return Err(error),
         }
     }
-    for key in [Some(row.route_api_key_id.as_str()), row.agent_api_key_id.as_deref()]
-        .into_iter()
-        .flatten()
+    for key in [
+        Some(row.route_api_key_id.as_str()),
+        row.agent_api_key_id.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
     {
         match key_service::delete_api_key(&state.db, owner, key).await {
             Ok(()) | Err(AppError::NotFound(_)) => {}
@@ -702,12 +758,18 @@ pub async fn disconnect(state: &AppState, owner: &str, id: &str) -> AppResult<Va
         .update_one(
             doc! {"_id": &row.id, "user_id": owner},
             doc! {"$set": {"status": "disconnected", "updated_at": bson::DateTime::now()},
-                "$unset": {"agent_key_ciphertext": "", "link_code_hash": ""}},
+            "$unset": {"agent_key_ciphertext": "", "link_code_hash": ""}},
         )
         .await?;
-    audit(state, owner, "nyxbot_channel_disconnected", json!({"channel_agent_id": &row.id}))
-        .await;
-    Ok(json!({"disconnected": row.id, "platform": row.platform}))
+    audit(
+        state,
+        owner,
+        "nyxbot_channel_disconnected",
+        json!({"channel_agent_id": &row.id, "gateway_released": gateway_released}),
+    )
+    .await;
+    Ok(json!({"disconnected": row.id, "platform": row.platform,
+        "gateway_released": gateway_released}))
 }
 
 pub async fn list(state: &AppState, owner: &str) -> AppResult<Vec<NyxbotChannel>> {
@@ -851,11 +913,15 @@ async fn admit_sender(
     sender: &Sender<'_>,
     text: &str,
 ) -> AppResult<Option<Inbound>> {
-    if let (Some(hash), Some(expires_at)) = (row.link_code_hash.as_deref(), row.link_code_expires_at)
+    if let (Some(hash), Some(expires_at)) =
+        (row.link_code_hash.as_deref(), row.link_code_expires_at)
         && expires_at > Utc::now()
-        && text
-            .split_whitespace()
-            .any(|word| sha256_hex(word.as_bytes()).as_bytes().ct_eq(hash.as_bytes()).into())
+        && text.split_whitespace().any(|word| {
+            sha256_hex(word.as_bytes())
+                .as_bytes()
+                .ct_eq(hash.as_bytes())
+                .into()
+        })
     {
         state
             .db
@@ -863,13 +929,18 @@ async fn admit_sender(
             .update_one(
                 doc! {"_id": &row.id, "link_code_hash": hash},
                 doc! {"$addToSet": {"owner_sender_ids": sender.id},
-                    "$unset": {"link_code_hash": "", "link_code_expires_at": ""},
-                    "$set": {"updated_at": bson::DateTime::now()}},
+                "$unset": {"link_code_hash": "", "link_code_expires_at": ""},
+                "$set": {"updated_at": bson::DateTime::now()}},
             )
             .await?;
-        audit(state, &row.user_id, "nyxbot_channel_owner_linked", json!({
-            "channel_agent_id": &row.id, "platform": &row.platform,
-        }))
+        audit(
+            state,
+            &row.user_id,
+            "nyxbot_channel_owner_linked",
+            json!({
+                "channel_agent_id": &row.id, "platform": &row.platform,
+            }),
+        )
         .await;
         return Ok(Some(Inbound::Reply(
             "Linked. I'm your NyxBot: I can use your NyxID services and account here. \
@@ -902,7 +973,7 @@ async fn thread_conversation(
         .update_one(
             doc! {"channel_id": &row.id, "partition": partition},
             doc! {"$setOnInsert": {"_id": Uuid::new_v4().to_string(), "user_id": &row.user_id,
-                "created_at": now}, "$set": {"updated_at": now}},
+            "created_at": now}, "$set": {"updated_at": now}},
         )
         .upsert(true)
         .await?;
@@ -910,7 +981,7 @@ async fn thread_conversation(
     let thread = threads
         .find_one_and_update(
             doc! {"channel_id": &row.id, "partition": partition,
-                "conversation_id": bson::Bson::Null},
+            "conversation_id": bson::Bson::Null},
             doc! {"$set": {"conversation_id": &reserved}},
         )
         .return_document(mongodb::options::ReturnDocument::After)
@@ -940,7 +1011,11 @@ async fn start_owner_turn(
     let exists = engine::get(&state.db, &row.user_id, &conversation_id)
         .await
         .is_ok();
-    let chat = if sender.private_chat { "a private chat" } else { "a group chat" };
+    let chat = if sender.private_chat {
+        "a private chat"
+    } else {
+        "a group chat"
+    };
     let note = format!(
         "This message came through the owner's {} channel bot {} from {} ({chat}); NyxID \
         verified this sender as the owner.",
@@ -972,12 +1047,22 @@ async fn start_owner_turn(
         title: Some(format!("{} · {}", row.platform, row.bot_label)),
         note: Some(note),
     };
-    match start_server_turn(state, &row.user_id, start, Pool::Channel { owner: &row.user_id }).await
+    match start_server_turn(
+        state,
+        &row.user_id,
+        start,
+        Pool::Channel {
+            owner: &row.user_id,
+        },
+    )
+    .await
     {
         Ok(Started::Turn { receiver, .. }) => Ok(Inbound::Turn(receiver)),
         Ok(Started::Busy | Started::PoolFull) => Ok(Inbound::Busy),
         // A concurrent first message created the chat: it now exists.
-        Err(AppError::Conflict(_)) | Err(AppError::DatabaseError(_)) if !exists => Ok(Inbound::Busy),
+        Err(AppError::Conflict(_)) | Err(AppError::DatabaseError(_)) if !exists => {
+            Ok(Inbound::Busy)
+        }
         Err(error) => Err(error),
     }
 }
@@ -989,7 +1074,10 @@ async fn final_reply(mut receiver: broadcast::Receiver<Value>) -> Result<String,
         match receiver.recv().await {
             Ok(event) => match event["event"].as_str() {
                 Some("block.completed") => {
-                    text = event["block"]["text"].as_str().unwrap_or_default().to_owned();
+                    text = event["block"]["text"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned();
                 }
                 Some("turn.completed") => {
                     return if event["status"] == "completed" {
@@ -1045,7 +1133,7 @@ async fn provider_channel(
         .db
         .collection::<NyxbotChannel>(CHANNELS)
         .find_one(doc! {"agent_api_key_id": &key.id, "user_id": &owner,
-            "status": {"$in": ["pending", "active"]}})
+        "status": {"$in": ["pending", "active"]}})
         .await
         .map_err(|_| problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"))?
         .ok_or_else(|| problem(StatusCode::FORBIDDEN, "forbidden"))?;
@@ -1082,7 +1170,11 @@ pub async fn put_binding(
     if !key_matches || !owner_matches || !valid_id {
         return problem(StatusCode::FORBIDDEN, "forbidden");
     }
-    if row.binding_id.as_deref().is_some_and(|bound| bound != binding_id) {
+    if row
+        .binding_id
+        .as_deref()
+        .is_some_and(|bound| bound != binding_id)
+    {
         return problem(StatusCode::CONFLICT, "binding_conflict");
     }
     if state
@@ -1147,9 +1239,9 @@ pub async fn delete_binding(
 }
 
 fn valid_partition(value: &str) -> bool {
-    value.strip_prefix("conv_").is_some_and(|tail| {
-        tail.len() == 32 && tail.bytes().all(|b| b.is_ascii_hexdigit())
-    })
+    value
+        .strip_prefix("conv_")
+        .is_some_and(|tail| tail.len() == 32 && tail.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 pub async fn put_conversation(
@@ -1172,7 +1264,7 @@ pub async fn put_conversation(
         .update_one(
             doc! {"channel_id": &row.id, "partition": &conversation_id},
             doc! {"$setOnInsert": {"_id": Uuid::new_v4().to_string(), "user_id": &row.user_id,
-                "created_at": now}, "$set": {"updated_at": now}},
+            "created_at": now}, "$set": {"updated_at": now}},
         )
         .upsert(true)
         .await
@@ -1219,7 +1311,7 @@ pub async fn get_event_context(
         .db
         .collection::<NyxbotEvent>(EVENTS)
         .find_one(doc! {"channel_id": &row.id, "partition": &conversation_id,
-            "event_id": &event_id})
+        "event_id": &event_id})
         .await;
     let Ok(Some(event)) = event else {
         return problem(StatusCode::NOT_FOUND, "event_not_found");
@@ -1250,9 +1342,10 @@ fn sse(frames: impl futures::Stream<Item = Value> + Send + 'static) -> Response 
     let mut response = axum::response::Sse::new(stream)
         .keep_alive(axum::response::sse::KeepAlive::new().interval(Duration::from_secs(15)))
         .into_response();
-    response
-        .headers_mut()
-        .insert("cache-control", "no-cache, no-transform".parse().expect("static header"));
+    response.headers_mut().insert(
+        "cache-control",
+        "no-cache, no-transform".parse().expect("static header"),
+    );
     response
         .headers_mut()
         .insert("x-accel-buffering", "no".parse().expect("static header"));
@@ -1266,8 +1359,10 @@ fn message_frames(response_id: &str, text: Option<&str>) -> Vec<Value> {
         let item_id = format!("msg_{}", Uuid::new_v4().simple());
         let item = json!({"id": item_id, "type": "message", "role": "assistant",
             "content": [{"type": "output_text", "text": text}]});
-        frames.push(json!({"type": "response.output_item.done", "output_index": 0,
-            "item": item.clone()}));
+        frames.push(
+            json!({"type": "response.output_item.done", "output_index": 0,
+            "item": item.clone()}),
+        );
         output.push(item);
     }
     frames.push(json!({"type": "response.completed",
@@ -1276,11 +1371,7 @@ fn message_frames(response_id: &str, text: Option<&str>) -> Vec<Value> {
 }
 
 /// `POST /api/v1/nyxbot/responses`: admit one gateway event as a NyxBot turn.
-pub async fn responses(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
+pub async fn responses(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
     let (row, _) = match provider_channel(&state, &headers).await {
         Ok(found) => found,
         Err(response) => return response,
@@ -1295,7 +1386,10 @@ pub async fn responses(
     let Ok(request) = serde_json::from_slice::<Value>(&body) else {
         return problem(StatusCode::BAD_REQUEST, "invalid_request");
     };
-    let partition = request["conversation"].as_str().unwrap_or_default().to_owned();
+    let partition = request["conversation"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
     if !valid_partition(&partition) || row.status != "active" {
         return problem(StatusCode::NOT_FOUND, "conversation_not_found");
     }
@@ -1325,7 +1419,10 @@ pub async fn responses(
         .as_str()
         .map(str::to_owned)
         .unwrap_or_else(|| format!("synthetic_{}", sha256_hex(idempotency)));
-    let response_id = format!("resp_{}", sha256_hex(format!("{}:{idempotency}", row.id))[..32].to_owned());
+    let response_id = format!(
+        "resp_{}",
+        sha256_hex(format!("{}:{idempotency}", row.id))[..32].to_owned()
+    );
     // Synthetic management tests carry no event context: answer without a turn.
     if context.is_null() {
         return sse(futures::stream::iter(
@@ -1378,15 +1475,20 @@ pub async fn responses(
             .update_one(
                 doc! {"channel_id": &row.id, "partition": &partition},
                 doc! {"$set": {"event_ref_ciphertext": bson::Binary {
-                        subtype: bson::spec::BinarySubtype::Generic, bytes: sealed },
-                    "event_ref_expires_at": bson::DateTime::from_chrono(
-                        now + ChronoDuration::minutes(29)),
-                    "updated_at": bson::DateTime::now()}},
+                    subtype: bson::spec::BinarySubtype::Generic, bytes: sealed },
+                "event_ref_expires_at": bson::DateTime::from_chrono(
+                    now + ChronoDuration::minutes(29)),
+                "updated_at": bson::DateTime::now()}},
             )
             .await;
     }
-    let sender_id = activity["actor"]["id"].as_str().unwrap_or_default().to_owned();
-    let display = activity["actor"]["display_name"].as_str().map(str::to_owned);
+    let sender_id = activity["actor"]["id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    let display = activity["actor"]["display_name"]
+        .as_str()
+        .map(str::to_owned);
     let private_chat = activity["conversation"]["kind"] == "private";
     let human = activity["actor"]["kind"] == "human";
     let sender = Sender {
@@ -1538,9 +1640,10 @@ pub async fn deliver_update(
             .ok_or_else(|| AppError::NotFound("Channel thread not found".into()))?;
         let reply = bounded_reply(text);
         if channel.transport == "gateway" {
-            let (Some(ciphertext), Some(expires_at)) =
-                (thread.event_ref_ciphertext.as_ref(), thread.event_ref_expires_at)
-            else {
+            let (Some(ciphertext), Some(expires_at)) = (
+                thread.event_ref_ciphertext.as_ref(),
+                thread.event_ref_expires_at,
+            ) else {
                 return Ok(());
             };
             if expires_at <= Utc::now() {
@@ -1598,8 +1701,9 @@ async fn direct_reply(
             None
         }
         None => {
-            let key = key_service::get_api_key(&state.db, &channel.user_id, &channel.route_api_key_id)
-                .await?;
+            let key =
+                key_service::get_api_key(&state.db, &channel.user_id, &channel.route_api_key_id)
+                    .await?;
             let mut auth = super::assistant_team::owner_auth(&channel.user_id)?;
             auth.auth_method = crate::mw::auth::AuthMethod::ApiKey;
             auth.api_key_id = Some(key.id.clone());
@@ -1677,8 +1781,12 @@ pub async fn relay_callback(
         "direct_{}",
         &sha256_hex(format!(
             "{}\0{}\0{}",
-            payload["conversation"]["platform_id"].as_str().unwrap_or_default(),
-            payload["sender"]["platform_id"].as_str().unwrap_or_default(),
+            payload["conversation"]["platform_id"]
+                .as_str()
+                .unwrap_or_default(),
+            payload["sender"]["platform_id"]
+                .as_str()
+                .unwrap_or_default(),
             payload["thread_id"].as_str().unwrap_or_default()
         ))[..32]
     );
@@ -1695,15 +1803,30 @@ pub async fn relay_callback(
         created_at: now,
         expires_at: now + ChronoDuration::hours(EVENT_RETENTION_HOURS),
     };
-    match state.db.collection::<NyxbotEvent>(EVENTS).insert_one(&admitted).await {
+    match state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .insert_one(&admitted)
+        .await
+    {
         Ok(_) => {}
         Err(error) if is_duplicate(&error) => return StatusCode::ACCEPTED.into_response(),
         Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
     }
-    let text = payload["content"]["text"].as_str().unwrap_or_default().to_owned();
-    let reply_token = payload["reply_token"].as_str().map(|token| Zeroizing::new(token.to_owned()));
-    let sender_id = payload["sender"]["platform_id"].as_str().unwrap_or_default().to_owned();
-    let display = payload["sender"]["display_name"].as_str().map(str::to_owned);
+    let text = payload["content"]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    let reply_token = payload["reply_token"]
+        .as_str()
+        .map(|token| Zeroizing::new(token.to_owned()));
+    let sender_id = payload["sender"]["platform_id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    let display = payload["sender"]["display_name"]
+        .as_str()
+        .map(str::to_owned);
     let private_chat = payload["conversation"]["type"] == "private";
     let message_id = claims.message_id.clone();
     tokio::spawn(async move {
@@ -1714,9 +1837,9 @@ pub async fn relay_callback(
                 .update_one(
                     doc! {"channel_id": &row.id, "partition": &partition},
                     doc! {"$setOnInsert": {"_id": Uuid::new_v4().to_string(),
-                        "user_id": &row.user_id, "created_at": bson::DateTime::now()},
-                        "$set": {"last_message_id": &message_id,
-                            "updated_at": bson::DateTime::now()}},
+                    "user_id": &row.user_id, "created_at": bson::DateTime::now()},
+                    "$set": {"last_message_id": &message_id,
+                        "updated_at": bson::DateTime::now()}},
                 )
                 .upsert(true)
                 .await?;

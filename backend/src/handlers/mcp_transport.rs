@@ -1370,7 +1370,9 @@ async fn handle_tools_list(
 
     let mut services = catalog.services;
     if let Some(chat) = auth.chat.as_ref() {
-        services.push(crate::services::assistant_account_tools::virtual_service(chat));
+        services.push(crate::services::assistant_account_tools::virtual_service(
+            chat,
+        ));
     }
     // Session-backed clients get meta-tools + activated service tools only.
     // Stateless (API-key) clients with no session get the full tool list up front.
@@ -2086,7 +2088,11 @@ async fn handle_account_tool(
     }
     if crate::services::assistant_team_tools::is_team_tool(name) {
         let Some(chat) = auth.chat.as_ref() else {
-            return tool_result(request_id, "{\"error\":\"conversation_key_required\"}", true);
+            return tool_result(
+                request_id,
+                "{\"error\":\"conversation_key_required\"}",
+                true,
+            );
         };
         let (value, is_error) = super::assistant_team::execute_tool(state, chat, name, args).await;
         return tool_result(request_id, &value.to_string(), is_error);
@@ -2397,7 +2403,9 @@ async fn load_all_services_for_meta_tools(
         let mut services = services;
         // Reserve the native namespace against a connected service shadowing it.
         services.retain(|service| service.service_slug != "nyxid");
-        services.push(crate::services::assistant_account_tools::virtual_service(chat));
+        services.push(crate::services::assistant_account_tools::virtual_service(
+            chat,
+        ));
         Ok(services)
     } else {
         Ok(filter_services_by_scope(services, auth))

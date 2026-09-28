@@ -821,7 +821,10 @@ async fn acknowledgements_are_owner_scoped_sanitized_decided_once_and_audited() 
     // counted on its nested member entry.
     assert_eq!(index.conversations[0].pending_acknowledgements, 0);
     assert_eq!(index.conversations[0].members.len(), 1);
-    assert_eq!(index.conversations[0].members[0].pending_acknowledgements, 1);
+    assert_eq!(
+        index.conversations[0].members[0].pending_acknowledgements,
+        1
+    );
     let other = Uuid::new_v4().to_string();
     let result = decide_acknowledgement(
         State(f.state.clone()),

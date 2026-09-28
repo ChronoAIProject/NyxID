@@ -100,7 +100,12 @@ async fn channel(state: &AppState, transport: &str) -> (NyxbotChannel, String) {
         id: Uuid::new_v4().to_string(),
         user_id: OWNER.into(),
         channel_bot_id: Uuid::new_v4().to_string(),
-        platform: if transport == "gateway" { "telegram" } else { "lark" }.into(),
+        platform: if transport == "gateway" {
+            "telegram"
+        } else {
+            "lark"
+        }
+        .into(),
         bot_label: "Helper bot".into(),
         bot_username: Some("helper_bot".into()),
         transport: transport.into(),
@@ -288,10 +293,8 @@ async fn gateway_turns_admit_once_answer_only_the_verified_owner_and_keep_contex
     .await;
     assert_eq!(ensured.status(), StatusCode::OK);
     // A stranger in a private chat gets a refusal and no turn.
-    let stranger = body_text(
-        respond(&state, &agent_key, &event("hi", "42", "evt-1"), "evt_1").await,
-    )
-    .await;
+    let stranger =
+        body_text(respond(&state, &agent_key, &event("hi", "42", "evt-1"), "evt_1").await).await;
     assert!(stranger.contains("response.created"));
     assert!(stranger.contains("answers only its owner"), "{stranger}");
     assert!(stranger.contains("response.completed"));
@@ -416,7 +419,10 @@ async fn direct_relay_accepts_only_nyxids_signed_callback_for_the_route_key() {
     };
     let digest = sha256_hex(&bytes);
     // Wrong key, wrong body digest, and a missing token are all refused.
-    for token in [sign("other-key", &digest), sign(&row.route_api_key_id, "00")] {
+    for token in [
+        sign("other-key", &digest),
+        sign(&row.route_api_key_id, "00"),
+    ] {
         assert_eq!(post(token).await.status(), StatusCode::UNAUTHORIZED);
     }
     let unsigned = relay_callback(

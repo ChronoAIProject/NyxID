@@ -68,10 +68,7 @@ pub fn schema(name: &str) -> Value {
             }),
             vec![],
         ),
-        "list_subagents" => (
-            json!({"include_destroyed": {"type": "boolean"}}),
-            vec![],
-        ),
+        "list_subagents" => (json!({"include_destroyed": {"type": "boolean"}}), vec![]),
         "read_subagent" => (
             json!({"subagent": subagent,
                 "limit": {"type": "integer", "minimum": 1, "maximum": 20}}),
@@ -91,10 +88,7 @@ pub fn schema(name: &str) -> Value {
             vec!["request_id", "decision", "reason"],
         ),
         "destroy_subagent" => (json!({"subagent": subagent}), vec!["subagent"]),
-        "connect_channel_bot" => (
-            json!({"bot_id": string(64)}),
-            vec!["bot_id"],
-        ),
+        "connect_channel_bot" => (json!({"bot_id": string(64)}), vec!["bot_id"]),
         "list_channel_agents" => (json!({}), vec![]),
         "disconnect_channel_bot" => (
             json!({"channel_agent_id": string(64)}),
@@ -221,13 +215,7 @@ mod tests {
     #[test]
     fn schemas_reject_unknown_fields_and_bad_values() {
         assert!(validate("spawn_subagent", &json!({"name": "gh", "charter": "c"})).is_ok());
-        assert!(
-            validate(
-                "spawn_subagent",
-                &json!({"name": "GH!", "charter": "c"})
-            )
-            .is_err()
-        );
+        assert!(validate("spawn_subagent", &json!({"name": "GH!", "charter": "c"})).is_err());
         assert!(validate("spawn_subagent", &json!({"name": "gh"})).is_err());
         assert!(
             validate(

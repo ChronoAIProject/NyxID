@@ -137,7 +137,7 @@ mod tests {
 
     #[test]
     fn inactive_routing_always_inherits() {
-        assert!(!ROUTING_ACTIVE);
+        const { assert!(!ROUTING_ACTIVE) };
         for role in [
             RouteRole::Orchestrator,
             RouteRole::Channel,

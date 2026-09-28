@@ -246,7 +246,9 @@ pub fn virtual_service(chat: &acks::ChatAuthority) -> McpToolService {
             .endpoints
             .extend(super::assistant_team_tools::endpoints());
     } else {
-        service.endpoints.retain(|endpoint| read_only(&endpoint.name));
+        service
+            .endpoints
+            .retain(|endpoint| read_only(&endpoint.name));
         service.description = Some(
             "Read your NyxID account (subagent: read-only, with the orchestrator's grant).".into(),
         );
@@ -260,9 +262,7 @@ fn account_service() -> McpToolService {
         service_id: "nyxid".into(),
         service_name: "NyxID account".into(),
         service_slug: "nyxid".into(),
-        description: Some(
-            "Manage your NyxID account and your NyxBot team.".into(),
-        ),
+        description: Some("Manage your NyxID account and your NyxBot team.".into()),
         service_category: "internal".into(),
         source: McpToolSource::Internal,
         executable: true,
@@ -372,7 +372,8 @@ pub struct ToolResult {
     pub value: Value,
     pub is_error: bool,
     /// A new permission request routed to the orchestrator, for notification.
-    pub permission_request: Option<crate::models::assistant_acknowledgement::AssistantAcknowledgement>,
+    pub permission_request:
+        Option<crate::models::assistant_acknowledgement::AssistantAcknowledgement>,
 }
 impl std::fmt::Debug for ToolResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

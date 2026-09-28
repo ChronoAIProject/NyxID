@@ -163,7 +163,9 @@ async fn spawned_subagent_works_with_its_own_key_and_wakes_the_orchestrator_with
                 .into_iter()
                 .filter(|message| message.role == "event")
                 .count();
-            let row = engine::get(&state.db, OWNER, &orchestrator.id).await.unwrap();
+            let row = engine::get(&state.db, OWNER, &orchestrator.id)
+                .await
+                .unwrap();
             if events == 1 && row.active_turn.is_none() {
                 break;
             }
@@ -183,7 +185,11 @@ async fn spawned_subagent_works_with_its_own_key_and_wakes_the_orchestrator_with
         .into_iter()
         .find(|message| message.role == "event")
         .unwrap();
-    assert!(event.text.contains("Subagent researcher replied"), "{}", event.text);
+    assert!(
+        event.text.contains("Subagent researcher replied"),
+        "{}",
+        event.text
+    );
     let calls = calls.lock().await;
     assert_eq!(calls.len(), 3);
     let sub_key =
@@ -292,7 +298,11 @@ async fn subagents_cannot_use_team_tools_and_destroyed_subagents_are_read_only()
     )
     .await;
     assert!(error, "{value}");
-    assert!(engine::history_page(&state.db, OWNER, &sub_id, 10, None).await.is_ok());
+    assert!(
+        engine::history_page(&state.db, OWNER, &sub_id, 10, None)
+            .await
+            .is_ok()
+    );
     // The name can be reused by a new subagent.
     spawn(
         &state,
@@ -369,7 +379,10 @@ async fn spawn_respects_owner_limits_and_grants_resolve_only_visible_services() 
         .await
         .unwrap();
     assert_eq!(key.allowed_service_ids, vec![github]);
-    assert!(key.scopes.contains(crate::mw::auth::ASSISTANT_ACCOUNT_SCOPE));
+    assert!(
+        key.scopes
+            .contains(crate::mw::auth::ASSISTANT_ACCOUNT_SCOPE)
+    );
     assert!(!key.allow_all_services);
     settings::update(
         &state.db,
@@ -496,8 +509,7 @@ async fn permission_requests_reach_the_orchestrator_and_its_decision_resumes_the
         .unwrap();
     let args = json!({"request_id": refusal["acknowledgement_id"], "decision": "allow",
         "reason": "The user asked to review their PRs"});
-    let (_, error) =
-        execute_tool(&state, &other_chat, "nyxid__decide_permission", &args).await;
+    let (_, error) = execute_tool(&state, &other_chat, "nyxid__decide_permission", &args).await;
     assert!(error);
     let (value, error) = execute_tool(&state, &chat, "nyxid__decide_permission", &args).await;
     assert!(!error, "{value}");
@@ -521,7 +533,13 @@ async fn permission_requests_reach_the_orchestrator_and_its_decision_resumes_the
     );
     let ack = acks::history(&state.db, OWNER, &sub_id).await.unwrap();
     assert_eq!(ack[0].decided_by.as_deref(), Some("orchestrator"));
-    assert!(ack[0].reason.as_deref().unwrap().contains("review their PRs"));
+    assert!(
+        ack[0]
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("review their PRs")
+    );
     server.abort();
 }
 
@@ -550,7 +568,9 @@ async fn loop_guards_and_direct_chats_never_wake_the_orchestrator() {
     .unwrap();
     idle_row(&state, &sub_id).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let row = engine::get(&state.db, OWNER, &orchestrator.id).await.unwrap();
+    let row = engine::get(&state.db, OWNER, &orchestrator.id)
+        .await
+        .unwrap();
     assert!(row.pending_events.is_empty() && row.active_turn.is_none());
     assert_eq!(calls.lock().await.len(), 2);
     let note = team::direct_chats_note(&state.db, OWNER, &orchestrator.id, before)
@@ -577,7 +597,9 @@ async fn loop_guards_and_direct_chats_never_wake_the_orchestrator() {
     .unwrap();
     wake(&state, OWNER, &orchestrator.id).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let row = engine::get(&state.db, OWNER, &orchestrator.id).await.unwrap();
+    let row = engine::get(&state.db, OWNER, &orchestrator.id)
+        .await
+        .unwrap();
     assert!(row.active_turn.is_none());
     assert_eq!(row.pending_events.len(), 1);
     assert_eq!(calls.lock().await.len(), 2);
@@ -630,7 +652,7 @@ async fn deleting_an_orchestrator_deletes_its_team_and_idle_subagents_are_swept(
         .update_one(
             doc! {"agent_name": "one"},
             doc! {"$set": {"updated_at": mongodb::bson::DateTime::from_chrono(
-                Utc::now() - chrono::Duration::days(team::IDLE_DESTROY_DAYS + 1))}},
+            Utc::now() - chrono::Duration::days(team::IDLE_DESTROY_DAYS + 1))}},
         )
         .await
         .unwrap();
@@ -650,7 +672,11 @@ async fn deleting_an_orchestrator_deletes_its_team_and_idle_subagents_are_swept(
         .unwrap();
     assert_eq!(rows.len(), 3);
     for key in keys {
-        assert!(key_service::get_api_key(&state.db, OWNER, &key).await.is_err());
+        assert!(
+            key_service::get_api_key(&state.db, OWNER, &key)
+                .await
+                .is_err()
+        );
     }
     assert_eq!(
         state

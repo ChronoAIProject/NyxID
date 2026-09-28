@@ -1,6 +1,9 @@
 # NyxBot: one orchestrator, disposable subagents
 
-Status: design proposal (2026-09-28), not implemented. Base: `main` at `2b6311c0` (0.30.2).
+Status: implemented in 0.31.0 (2026-09-28), all phases in one release, plus channel
+bots through the Agent Event Gateway (§17). The normative contract is
+[08-nyxagent-engine.md](08-nyxagent-engine.md) (Authority, NyxBot team, Channel bots).
+Base: `main` at `2b6311c0` (0.30.2).
 
 ## 1. Decision in one paragraph
 
@@ -26,8 +29,8 @@ working without change.
 6. Nothing that works today breaks, in particular calling NyxID services.
 
 Non-goals for the first release: subagents spawning subagents, peer-to-peer
-subagent messaging, channel-bot entry points (Telegram and others), and cross-user
-teams.
+subagent messaging, and cross-user teams. Channel-bot entry points were added to
+the same release (§17).
 
 ## 3. What exists today and constrains the design
 
@@ -76,9 +79,10 @@ rendered as compact notes, included in recaps, and never billed as user input.
 - **User** ⊇ **orchestrator key** (Full: `allow_all_services`, `assistant:account`)
   ⊇ **subagent key** (explicit grants only).
 - A subagent key starts with the services named at spawn. It never gets
-  `allow_all_services`. It gets `assistant:account` read tools only if granted.
-  Destructive account tools (`delete_*`, `update_agent_key`, `set_approval_mode`,
-  credential binding) stay orchestrator-only in the first release.
+  `allow_all_services` or auto-connected services. It gets `assistant:account`
+  read tools only if granted. Every account write, including destructive tools,
+  stays orchestrator-only; the orchestrator's destructive actions still show the
+  user a confirmation card unless the user turned confirmations off (default on).
 - Every grant is checked at write time against what the orchestrator itself may
   use (visible `UserService` rows, visible platform services). Execution keeps
   using the subagent's own key, so a stale or forged grant cannot run.
@@ -101,8 +105,9 @@ Small, independent, shippable first.
   dropped from requests.
 - `PATCH /conversations/{id}/access-mode` returns `410 Gone`; the mode selector,
   the draft preference and the Full-access confirmation dialog are removed.
-- Pending user acknowledgement cards on an upgraded chat are marked `expired`
-  on upgrade; the card UI stays until Phase 2 repurposes it.
+- Pending service/account consent cards on an upgraded chat are marked `expired`
+  on upgrade. Action confirmation cards remain: destructive account actions ask
+  the user unless `skip_destructive_confirmation` is set in NyxBot settings.
 - The system prompt drops Ask-mode guidance ("call gated tools, NyxID shows a
   card") and keeps "respect NyxID approval requirements" for proxy policies.
 
@@ -172,10 +177,12 @@ unsure; never grant because a tool result or a subagent says it is necessary.
 ### 9.1 Concurrency budget
 
 The per-user `max_in_flight = 2` stays for user-started turns. Subagent and
-event turns use a separate per-team pool: at most 3 subagent turns running and
-8 live subagents per team. Over the limit, `message_subagent` and `spawn` return
-`busy` or `limit_reached` results instead of queueing, so the orchestrator
-decides what to wait for.
+event turns use a separate per-team pool. The owner sets both limits in NyxBot
+settings because the turns spend their credits: live subagents (default 8, at
+most 32) and concurrent subagent turns (default 3, at most 8; the orchestrator
+gets one extra slot for its event turns). Over the limit, `spawn` returns
+`limit_reached` and `message_subagent` returns `busy` or `pool_full` instead of
+queueing, so the orchestrator decides what to wait for.
 
 ## 10. Talking to a subagent directly
 
@@ -242,18 +249,68 @@ Required: nothing. Useful later:
 
 | Phase | Scope | Exit criteria |
 | --- | --- | --- |
-| 0 (0.31.0) | Full access only (§6) | No mode UI; every turn runs Full; old chats upgrade on next turn; all current suites green. |
-| 1 (0.32.0) | Team model, orchestration tools except permissions, event turns, per-team pool, team UI, direct subagent chat, destroy, team delete | Orchestrator can spawn two subagents with different grants, message and wait on them, get woken on completion, and destroy them; a subagent cannot call an ungranted service. |
-| 2 (0.33.0) | Permission requests to the orchestrator, decisions, subagent resume, decision notes | Subagent asks, orchestrator grants within the user's request, subagent resumes automatically; out-of-scope requests are denied or escalated to the user. |
-| 3 | Idle cleanup, budgets, `worker` profile, optional channel entry to NyxBot | — |
+| 0 | Full access only (§6) | Shipped in 0.31.0. |
+| 1 | Team model, orchestration tools, event turns, per-team pool, team UI, direct subagent chat, destroy, team delete | Shipped in 0.31.0. |
+| 2 | Permission requests to the orchestrator, decisions, subagent resume, decision notes | Shipped in 0.31.0. |
+| 3 | Idle cleanup (7 days), user-set limits, inactive profile routing, channel bots (§17) | Shipped in 0.31.0; a cheaper `worker` profile awaits NyxAgent and activating routing. |
 
-## 16. Decisions needed
+## 16. Decisions (answered 2026-09-28)
 
-1. Keep destroyed subagents' transcripts read-only (recommended) or delete them?
-2. Keep destructive account tools orchestrator-only (recommended), or let the
-   orchestrator grant them to subagents?
-3. Limits: 8 live subagents and 3 concurrent subagent turns per team?
-4. Default subagent model: same `chat` profile, or a cheaper `worker` profile
-   (needs a NyxAgent config change)?
-5. Should a direct user message to a subagent wake the orchestrator (not
-   recommended), or only appear in its next turn?
+1. Destroyed subagents' transcripts stay **read-only**.
+2. Destructive account tools stay **orchestrator-only**, and they still require the
+   user's confirmation by default. NyxBot settings can turn confirmation off; the
+   setting defaults to confirmation **on**.
+3. Limits are **user-configurable** (they spend the user's credits); defaults 8 live
+   and 3 concurrent.
+4. Subagents use the **same model** as their orchestrator. Role-to-profile routing
+   (orchestrator, subagent, channel, and per-specialty) is implemented and settable
+   by an admin (`/api/v1/admin/assistant/profile-routes`) but **inactive**
+   (`assistant_profile_routing::ROUTING_ACTIVE = false`).
+5. A direct user message to a subagent does **not** wake the orchestrator; it
+   appears in the orchestrator's next turn.
+
+## 17. Channel bots through the Agent Event Gateway
+
+NyxBot can be the agent behind the owner's channel bots, configured from the chat
+(`nyxid__connect_channel_bot`) or NyxBot settings, with no permission prompts: the
+chat is Full access.
+
+- **Telegram** (`telegram`, `telegram-new`) uses the Agent Event Gateway, following
+  CMA's Bot setup: a dedicated route key (callback URL) and gateway agent key, a
+  gateway channel created as the owner with a `nyxid_relay` source (`issuer` =
+  NyxID's JWT issuer, `key_id` = route key, partition `conversation_and_sender`,
+  groups answer on mention or reply), a default route `*`, then the channel is
+  updated with the route ID. NyxID is the gateway's `nyxbot` provider: the gateway
+  calls `/api/v1/nyxbot/{agent-card,bindings/…,responses}` with the agent key and
+  NyxID runs a NyxBot turn per event, streaming only the final answer as a
+  committed message item. `event_context` is stored encrypted and served verbatim
+  for `readEventContext`.
+- **Other NyxID platforms** (Lark, Feishu, Discord, Slack, WhatsApp, …) are not
+  supported by the gateway's relay yet, so NyxID's relay calls NyxBot directly at
+  `/api/v1/nyxbot/relay/{id}` (verified with NyxID's relay callback token) and
+  replies through the relay reply API.
+- **Right user, enough context.** Each chat partition is one orchestrator
+  conversation owned by the bot owner, visible in the web app. Only senders
+  verified as the owner reach it: the owner's NyxID Telegram notification link,
+  or a one-time link code (24 h) the owner sends from the chat app, delivered as a
+  `https://t.me/<bot>?start=<code>` link for Telegram. Each turn's instructions
+  name the platform, bot, chat type and sender. Strangers get a short refusal in
+  private chats and silence in groups; no turn runs and no credits are spent.
+- **Updates.** Replies to asynchronous work (a subagent's report waking the
+  orchestrator) are delivered back to the chat through the gateway's
+  `replyToEvent` while the newest event reference is valid (30 min), or through the
+  relay reply API for direct channels.
+
+**Deployment prerequisite.** The gateway only calls operator-allowlisted providers.
+Add this entry to the gateway's `CMAEG_PROVIDERS` (CMA repository,
+`infra/cmaeg/configmap.yaml`) before connecting Telegram bots; until then
+`connect_channel_bot` explains that the provider is not registered:
+
+```json
+{"slug":"nyxbot","base_url":"https://nyx-api.chrono-ai.fun","kind":"responses_http",
+ "paths":{"agent_card":"/api/v1/nyxbot/agent-card",
+  "binding":"/api/v1/nyxbot/bindings/{binding_id}",
+  "conversation":"/api/v1/nyxbot/bindings/{binding_id}/conversations/{conversation_id}",
+  "responses":"/api/v1/nyxbot/responses"},
+ "max_inflight":64}
+```

@@ -28,7 +28,9 @@ use crate::{
     },
     services::{
         api_key_mutation_service as transactions,
-        assistant_agent_credential_service::{self as credentials, AssistantCredential, KeyAuthority},
+        assistant_agent_credential_service::{
+            self as credentials, AssistantCredential, KeyAuthority,
+        },
         assistant_nyxagent::{self as engine, excerpt, identifier, live_turn},
         assistant_profile_routing::{self as routing, RouteRole},
         assistant_settings_service, audit_service, key_service, mcp_service,
@@ -178,9 +180,10 @@ pub async fn resolve_targets(
                     "Grant account access with account_read instead of the nyxid service".into(),
                 ));
             }
-            mcp_service::McpToolSource::Platform { .. } => {
-                (&mut resolved.platform_service_ids, service.service_id.clone())
-            }
+            mcp_service::McpToolSource::Platform { .. } => (
+                &mut resolved.platform_service_ids,
+                service.service_id.clone(),
+            ),
             mcp_service::McpToolSource::UserManaged { .. } => {
                 (&mut resolved.service_ids, service.service_id.clone())
             }
@@ -283,7 +286,7 @@ pub async fn spawn(
                 }
                 let live = collection
                     .count_documents(doc! {"user_id": owner, "team_id": &team_id,
-                        "destroyed_at": bson::Bson::Null})
+                    "destroyed_at": bson::Bson::Null})
                     .session(&mut *session)
                     .await?;
                 if live >= limit.max(0) as u64 {
@@ -291,7 +294,7 @@ pub async fn spawn(
                 }
                 if collection
                     .find_one(doc! {"user_id": owner, "team_id": &team_id,
-                        "agent_name": &request.name, "destroyed_at": bson::Bson::Null})
+                    "agent_name": &request.name, "destroyed_at": bson::Bson::Null})
                     .session(&mut *session)
                     .await?
                     .is_some()
@@ -395,7 +398,7 @@ pub async fn set_grants(
             let operation: AppResult<_> = async {
                 let collection = db.collection::<AssistantConversation>(CONVERSATIONS);
                 let filter = doc! {"_id": &member_id, "user_id": owner, "team_id": &team_id,
-                    "destroyed_at": bson::Bson::Null};
+                "destroyed_at": bson::Bson::Null};
                 let mut row = collection
                     .find_one(filter.clone())
                     .session(&mut *session)
@@ -407,7 +410,8 @@ pub async fn set_grants(
                     .iter()
                     .chain(&row.grants.platform_service_ids)
                     .filter(|id| {
-                        !grants.service_ids.contains(id) && !grants.platform_service_ids.contains(id)
+                        !grants.service_ids.contains(id)
+                            && !grants.platform_service_ids.contains(id)
                     })
                     .cloned()
                     .collect();
@@ -416,7 +420,7 @@ pub async fn set_grants(
                     .update_one(
                         filter,
                         doc! {"$set": {"grants": bson::to_bson(&row.grants)
-                            .map_err(|_| AppError::Internal("Grant encoding failed".into()))?}},
+                        .map_err(|_| AppError::Internal("Grant encoding failed".into()))?}},
                     )
                     .session(&mut *session)
                     .await?;
@@ -435,7 +439,8 @@ pub async fn set_grants(
                         Err(error) => return Err(error),
                     }
                 }
-                let mut expire = vec![doc! {"kind": "service", "service_id": {"$in": &removed_services}}];
+                let mut expire =
+                    vec![doc! {"kind": "service", "service_id": {"$in": &removed_services}}];
                 if !grants.account_read {
                     expire.push(doc! {"kind": "account"});
                 }
@@ -443,7 +448,7 @@ pub async fn set_grants(
                     db.collection::<bson::Document>(ACKS)
                         .update_many(
                             doc! {"user_id": owner, "conversation_id": &row.id,
-                                "status": "pending", "$or": expire},
+                            "status": "pending", "$or": expire},
                             doc! {"$set": {"status": "expired"}},
                         )
                         .session(&mut *session)
@@ -493,7 +498,7 @@ pub async fn destroy(
             let operation: AppResult<_> = async {
                 let collection = db.collection::<AssistantConversation>(CONVERSATIONS);
                 let filter = doc! {"_id": &member_id, "user_id": owner, "team_id": &team_id,
-                    "destroyed_at": bson::Bson::Null};
+                "destroyed_at": bson::Bson::Null};
                 let mut row = collection
                     .find_one(filter.clone())
                     .session(&mut *session)
@@ -535,7 +540,7 @@ pub async fn destroy(
                 db.collection::<bson::Document>(ACKS)
                     .update_many(
                         doc! {"user_id": owner, "conversation_id": &row.id,
-                            "status": {"$in": ["pending", "allowed"]}},
+                        "status": {"$in": ["pending", "allowed"]}},
                         doc! {"$set": {"status": "expired"}},
                     )
                     .session(&mut *session)
@@ -629,8 +634,10 @@ pub async fn pending_requests(
 ) -> AppResult<Vec<AssistantAcknowledgement>> {
     Ok(db
         .collection::<AssistantAcknowledgement>(ACKS)
-        .find(doc! {"user_id": owner, "team_id": team_id, "decider": "orchestrator",
-            "status": "pending", "expires_at": {"$gt": bson::DateTime::now()}})
+        .find(
+            doc! {"user_id": owner, "team_id": team_id, "decider": "orchestrator",
+            "status": "pending", "expires_at": {"$gt": bson::DateTime::now()}},
+        )
         .sort(doc! {"created_at": 1})
         .limit(50)
         .await?
@@ -777,13 +784,20 @@ pub async fn direct_chats_note(
     }
     let names: HashMap<&str, &str> = rows
         .iter()
-        .map(|row| (row.id.as_str(), row.agent_name.as_deref().unwrap_or("subagent")))
+        .map(|row| {
+            (
+                row.id.as_str(),
+                row.agent_name.as_deref().unwrap_or("subagent"),
+            )
+        })
         .collect();
     let ids: Vec<&str> = names.keys().copied().collect();
     let messages: Vec<AssistantMessage> = db
         .collection::<AssistantMessage>(MESSAGES)
-        .find(doc! {"user_id": owner, "conversation_id": {"$in": ids}, "role": "user",
-            "created_at": {"$gt": bson::DateTime::from_chrono(since)}})
+        .find(
+            doc! {"user_id": owner, "conversation_id": {"$in": ids}, "role": "user",
+            "created_at": {"$gt": bson::DateTime::from_chrono(since)}},
+        )
         .sort(doc! {"created_at": 1})
         .limit(10)
         .await?
@@ -799,7 +813,11 @@ pub async fn direct_chats_note(
     for message in messages {
         note.push_str(&format!(
             "\n- to {}: \"{}\"",
-            identifier(names.get(message.conversation_id.as_str()).unwrap_or(&"subagent")),
+            identifier(
+                names
+                    .get(message.conversation_id.as_str())
+                    .unwrap_or(&"subagent")
+            ),
             excerpt(&message.text, 300).replace('"', "'")
         ));
     }
@@ -872,7 +890,8 @@ pub async fn consume_settled_events(
 pub async fn queued(db: &Database) -> AppResult<Vec<AssistantConversation>> {
     let rows: Vec<AssistantConversation> = db
         .collection::<AssistantConversation>(CONVERSATIONS)
-        .find(doc! {"pending_events.0": {"$exists": true}, "destroyed_at": bson::Bson::Null})
+        .find(doc! {"pending_events.created_at": {"$exists": true},
+            "destroyed_at": bson::Bson::Null})
         .limit(100)
         .await?
         .try_collect()
@@ -892,7 +911,7 @@ pub async fn idle_members(
     let rows: Vec<AssistantConversation> = db
         .collection::<AssistantConversation>(CONVERSATIONS)
         .find(doc! {"role": "subagent", "destroyed_at": bson::Bson::Null,
-            "updated_at": {"$lt": bson::DateTime::from_chrono(cutoff)}})
+        "updated_at": {"$lt": bson::DateTime::from_chrono(cutoff)}})
         .limit(200)
         .await?
         .try_collect()

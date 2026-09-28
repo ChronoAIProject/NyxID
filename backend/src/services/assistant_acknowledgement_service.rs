@@ -15,7 +15,9 @@ use crate::{
         api_key::{ApiKey, COLLECTION_NAME as KEYS},
         assistant_acknowledgement::{AssistantAcknowledgement, COLLECTION_NAME as ACKS},
         assistant_agent_credential::COLLECTION_NAME as CREDENTIALS,
-        assistant_conversation::{AgentRole, AssistantConversation, COLLECTION_NAME as CONVERSATIONS},
+        assistant_conversation::{
+            AgentRole, AssistantConversation, COLLECTION_NAME as CONVERSATIONS,
+        },
         assistant_message::{AssistantMessage, COLLECTION_NAME as MESSAGES},
     },
     mw::auth::ASSISTANT_ACCOUNT_SCOPE,
@@ -687,7 +689,14 @@ pub async fn decide_as(
                 }
                 row.status = if allow { "allowed" } else { "denied" }.into();
                 row.decided_at = Some(now);
-                row.decided_by = Some(if team.is_some() { "orchestrator" } else { "user" }.into());
+                row.decided_by = Some(
+                    if team.is_some() {
+                        "orchestrator"
+                    } else {
+                        "user"
+                    }
+                    .into(),
+                );
                 row.reason = reason.clone();
                 if allow && row.kind == "action" {
                     row.expires_at = now + Duration::seconds(ACTION_SECONDS);

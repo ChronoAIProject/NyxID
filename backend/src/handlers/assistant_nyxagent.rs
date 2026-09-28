@@ -237,8 +237,8 @@ pub async fn list(
     rows.truncate(limit as usize);
     let next_cursor = more.then(|| engine::index_cursor(rows.last().expect("nonempty page")));
     let team_ids: Vec<String> = rows.iter().map(|row| row.id.clone()).collect();
-    let members = crate::services::assistant_team_service::members(&state.db, &user_id, &team_ids)
-        .await?;
+    let members =
+        crate::services::assistant_team_service::members(&state.db, &user_id, &team_ids).await?;
     let mut ids = team_ids.clone();
     ids.extend(members.iter().map(|row| row.id.clone()));
     let counts = acknowledgements::pending_counts(&state.db, &user_id, &ids).await?;

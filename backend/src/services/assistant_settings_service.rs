@@ -67,7 +67,12 @@ pub async fn update(db: &Database, user_id: &str, update: Update) -> AppResult<A
 }
 
 /// Audit a settings change without free-form values.
-pub async fn audit(db: &Database, user_id: &str, before: &AssistantSettings, after: &AssistantSettings) {
+pub async fn audit(
+    db: &Database,
+    user_id: &str,
+    before: &AssistantSettings,
+    after: &AssistantSettings,
+) {
     let _ = super::audit_service::log_actor_event(
         db.clone(),
         &super::audit_service::AuditActor {

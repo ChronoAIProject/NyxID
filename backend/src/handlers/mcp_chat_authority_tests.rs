@@ -21,10 +21,11 @@ async fn authenticate(f: &Fixture) -> McpAuthContext {
 /// Authenticate as another conversation of the same owner (e.g. the team's
 /// orchestrator when the fixture is a subagent).
 async fn authenticate_id(f: &Fixture, id: &str) -> McpAuthContext {
-    let key = credentials::load_for_conversation(&f.state.db, &f.state.encryption_keys, &f.owner, id)
-        .await
-        .unwrap()
-        .unwrap();
+    let key =
+        credentials::load_for_conversation(&f.state.db, &f.state.encryption_keys, &f.owner, id)
+            .await
+            .unwrap()
+            .unwrap();
     let mut headers = HeaderMap::new();
     headers.insert("x-api-key", key.raw_key.parse().unwrap());
     authenticate_mcp(&f.state, &headers, false).await.unwrap()
@@ -231,14 +232,13 @@ async fn chat_mcp_lists_ungranted_tools_and_allow_retries_execute_without_bypass
     let orchestrator = crate::services::assistant_nyxagent::get(&f.state.db, &f.owner, &team_id)
         .await
         .unwrap();
-    assert!(
-        orchestrator
-            .pending_events
-            .iter()
-            .any(|event| event.kind == "permission_requested"
-                && event.subagent_id.as_deref() == Some(f.row.id.as_str())
-                && event.text.contains(refusal["acknowledgement_id"].as_str().unwrap()))
-    );
+    assert!(orchestrator.pending_events.iter().any(|event| {
+        event.kind == "permission_requested"
+            && event.subagent_id.as_deref() == Some(f.row.id.as_str())
+            && event
+                .text
+                .contains(refusal["acknowledgement_id"].as_str().unwrap())
+    }));
     acks::decide(
         &f.state.db,
         &f.owner,
@@ -336,7 +336,7 @@ async fn chat_mcp_lists_ungranted_tools_and_allow_retries_execute_without_bypass
                 .db
                 .collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME)
                 .find_one(doc! {"event_type": "mcp_tool_call",
-                    "event_data.agent_role": "orchestrator"})
+                "event_data.agent_role": "orchestrator"})
                 .await
                 .unwrap()
                 .is_some();

@@ -88,7 +88,11 @@ async fn base(name: &str) -> (crate::AppState, String) {
     (test_app_state(db), owner)
 }
 
-async fn chat_fixture(state: crate::AppState, owner: String, row: AssistantConversation) -> Fixture {
+async fn chat_fixture(
+    state: crate::AppState,
+    owner: String,
+    row: AssistantConversation,
+) -> Fixture {
     let chat = acks::for_key(&state.db, &owner, Some(&row.credential_api_key_id))
         .await
         .unwrap()
@@ -1162,8 +1166,17 @@ async fn legacy_ask_conversation_upgrades_to_full_on_its_next_turn_and_credentia
     // consent card.
     let mut legacy = bson::to_document(&f.row).unwrap();
     for field in [
-        "access_mode", "role", "team_id", "agent_name", "charter", "specialty", "grants",
-        "destroyed_at", "pending_events", "event_streak", "channel",
+        "access_mode",
+        "role",
+        "team_id",
+        "agent_name",
+        "charter",
+        "specialty",
+        "grants",
+        "destroyed_at",
+        "pending_events",
+        "event_streak",
+        "channel",
     ] {
         legacy.remove(field);
     }
@@ -1456,11 +1469,24 @@ async fn orchestrator_keys_are_full_and_rotation_and_replacement_preserve_role_a
     );
     // A subagent's successor key carries exactly its durable grants.
     let sub = fixture("role_authority_subagent").await;
-    let service = connected(&sub.state.db, &sub.owner, "github", "https://api.github.com").await;
-    let refusal = service_gate(&sub.state.db, &sub.chat, &service, "github", "GitHub", false)
-        .await
-        .unwrap()
-        .unwrap();
+    let service = connected(
+        &sub.state.db,
+        &sub.owner,
+        "github",
+        "https://api.github.com",
+    )
+    .await;
+    let refusal = service_gate(
+        &sub.state.db,
+        &sub.chat,
+        &service,
+        "github",
+        "GitHub",
+        false,
+    )
+    .await
+    .unwrap()
+    .unwrap();
     acks::decide(
         &sub.state.db,
         &sub.owner,
