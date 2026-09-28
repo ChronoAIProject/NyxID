@@ -15,7 +15,7 @@ use crate::{
         api_key::{ApiKey, COLLECTION_NAME as KEYS},
         assistant_acknowledgement::{AssistantAcknowledgement, COLLECTION_NAME as ACKS},
         assistant_agent_credential::COLLECTION_NAME as CREDENTIALS,
-        assistant_conversation::{AssistantConversation, COLLECTION_NAME as CONVERSATIONS},
+        assistant_conversation::{AgentRole, AssistantConversation, COLLECTION_NAME as CONVERSATIONS},
         assistant_message::{AssistantMessage, COLLECTION_NAME as MESSAGES},
     },
     mw::auth::ASSISTANT_ACCOUNT_SCOPE,
@@ -30,7 +30,16 @@ pub struct ChatAuthority {
     pub conversation_id: String,
     pub user_id: String,
     pub api_key_id: String,
-    pub access_mode: crate::models::assistant_conversation::AccessMode,
+    pub role: AgentRole,
+    /// The orchestrator conversation for subagents.
+    pub team_id: Option<String>,
+    pub agent_name: Option<String>,
+}
+impl ChatAuthority {
+    /// Orchestrators run with Full access; subagents only with their grants.
+    pub fn is_orchestrator(&self) -> bool {
+        self.role == AgentRole::Orchestrator
+    }
 }
 impl std::fmt::Debug for ChatAuthority {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -54,11 +63,16 @@ pub async fn for_key(
     };
     let conversation_id = row.get_str("conversation_id").map_err(|_| not_found())?;
     let conversation = super::assistant_nyxagent::get(db, user, conversation_id).await?;
+    if conversation.destroyed_at.is_some() {
+        return Err(not_found());
+    }
     Ok(Some(ChatAuthority {
         user_id: user.into(),
         api_key_id: key.into(),
         conversation_id: conversation_id.into(),
-        access_mode: conversation.access_mode,
+        role: conversation.role,
+        team_id: conversation.team_id,
+        agent_name: conversation.agent_name,
     }))
 }
 
@@ -280,8 +294,20 @@ pub async fn request(
     chat: &ChatAuthority,
     request: Request<'_>,
 ) -> AppResult<AssistantAcknowledgement> {
+    Ok(request_tracked(db, chat, request).await?.0)
+}
+
+/// Like [`request`], also reporting whether a new row was created (a pending
+/// duplicate is returned as-is). Subagent requests are decided by the team's
+/// orchestrator; action confirmations always belong to the user.
+pub async fn request_tracked(
+    db: &Database,
+    chat: &ChatAuthority,
+    request: Request<'_>,
+) -> AppResult<(AssistantAcknowledgement, bool)> {
     expire(db, &chat.user_id, &chat.conversation_id).await?;
     let now = Utc::now();
+    let orchestrated = !chat.is_orchestrator() && request.kind != "action";
     let candidate = AssistantAcknowledgement {
         id: Uuid::new_v4().to_string(),
         conversation_id: chat.conversation_id.clone(),
@@ -300,6 +326,15 @@ pub async fn request(
         created_at: now,
         decided_at: None,
         expires_at: now + Duration::seconds(PENDING_SECONDS),
+        decider: if orchestrated { "orchestrator" } else { "user" }.into(),
+        team_id: if orchestrated {
+            chat.team_id.clone()
+        } else {
+            None
+        },
+        request_excerpt: None,
+        decided_by: None,
+        reason: None,
     };
     let db = db.clone();
     let chat = chat.clone();
@@ -310,17 +345,28 @@ pub async fn request(
             let operation = async {
                 let (conversation, _) = fence(&db, &chat, session).await?;
                 let mut row = candidate.clone();
-                row.requested_turn_id = db
+                // The message that started the current work: the user's, the
+                // orchestrator's instruction, or the event batch that resumed it.
+                let started_by = db
                     .collection::<AssistantMessage>(MESSAGES)
                     .find_one(doc! {
                         "conversation_id": &conversation.id,
                         "user_id": &chat.user_id,
-                        "role": "user",
+                        "role": {"$in": ["user", "orchestrator"]},
                     })
                     .sort(doc! {"seq": -1})
                     .session(&mut *session)
-                    .await?
-                    .map(|message| message.turn_id);
+                    .await?;
+                row.requested_turn_id = started_by.as_ref().map(|message| message.turn_id.clone());
+                if row.decider == "orchestrator" {
+                    row.request_excerpt = started_by.map(|message| {
+                        format!(
+                            "{} said: {}",
+                            message.role,
+                            super::assistant_nyxagent::excerpt(&message.text, 600)
+                        )
+                    });
+                }
                 let filter = doc! {"conversation_id": &chat.conversation_id,
                 "user_id": &chat.user_id, "api_key_id": &chat.api_key_id, "kind": &row.kind,
                 "service_id": &row.service_id, "tool_name": &row.tool_name,
@@ -335,13 +381,13 @@ pub async fn request(
                     .session(&mut *session)
                     .await?
                 {
-                    return Ok(existing);
+                    return Ok((existing, false));
                 }
                 db.collection::<AssistantAcknowledgement>(ACKS)
                     .insert_one(&row)
                     .session(&mut *session)
                     .await?;
-                Ok(row)
+                Ok((row, true))
             }
             .await;
             mutations::transaction_result(operation)
@@ -352,7 +398,18 @@ pub async fn request(
 
 pub fn refusal(row: &AssistantAcknowledgement) -> Value {
     let denied = row.status == "denied";
-    let instructions = if denied {
+    let instructions = if row.decider == "orchestrator" {
+        if denied {
+            "Your orchestrator denied this request. Do not retry it; report what you \
+            could do without it."
+                .into()
+        } else {
+            "NyxID asked your orchestrator for this permission. End your turn now with a \
+            one-line note about what you are waiting for; NyxID resumes you with the \
+            decision."
+                .into()
+        }
+    } else if denied {
         "The user denied this request. Do not retry or request another \
                 card unless the user explicitly asks again in a later message."
             .into()
@@ -373,12 +430,15 @@ pub fn refusal(row: &AssistantAcknowledgement) -> Value {
     };
     json!({"error": if denied {"acknowledgement_denied"} else {"acknowledgement_required"},
         "kind": row.kind, "acknowledgement_id": row.id, "service_slug": row.service_slug,
-        "service_name": row.service_name, "summary": row.summary, "instructions": instructions})
+        "service_name": row.service_name, "summary": row.summary, "decider": row.decider,
+        "instructions": instructions})
 }
 
-/// Gate a service call in Ask mode. `platform` targets are catalog entries the
-/// user reaches through NyxID's platform credential rather than a connection of
-/// their own; they are granted on the key's `allowed_platform_service_ids`.
+/// Gate a subagent's service call. Orchestrators run with Full access and are
+/// never gated. `platform` targets are catalog entries reached through NyxID's
+/// platform credential; they are granted on `allowed_platform_service_ids`.
+/// Returns the refusal and, when a new request was created, its row so the
+/// caller can notify the orchestrator.
 pub async fn service_gate(
     db: &Database,
     chat: &ChatAuthority,
@@ -386,8 +446,8 @@ pub async fn service_gate(
     slug: &str,
     name: &str,
     platform: bool,
-) -> AppResult<Option<Value>> {
-    if chat.access_mode == crate::models::assistant_conversation::AccessMode::Full {
+) -> AppResult<Option<(Value, Option<AssistantAcknowledgement>)>> {
+    if chat.is_orchestrator() {
         return Ok(None);
     }
     let key = key_service::get_api_key(db, &chat.user_id, &chat.api_key_id).await?;
@@ -405,11 +465,11 @@ pub async fn service_gate(
         return Ok(None);
     }
     let summary = if platform {
-        format!("Allow this chat to use {name} (NyxID platform credential)?")
+        format!("Use {name} (NyxID platform credential)")
     } else {
-        format!("Allow this chat to use {name}?")
+        format!("Use {name}")
     };
-    let row = request(
+    let (row, created) = request_tracked(
         db,
         chat,
         Request {
@@ -422,11 +482,17 @@ pub async fn service_gate(
         },
     )
     .await?;
-    Ok(Some(refusal(&row)))
+    let value = refusal(&row);
+    Ok(Some((value, created.then_some(row))))
 }
 
-pub async fn account_gate(db: &Database, chat: &ChatAuthority) -> AppResult<Option<Value>> {
-    if chat.access_mode == crate::models::assistant_conversation::AccessMode::Full {
+/// Gate a subagent's account tool. Subagents reach only read-only tools, and
+/// only with an `account_read` grant.
+pub async fn account_gate(
+    db: &Database,
+    chat: &ChatAuthority,
+) -> AppResult<Option<(Value, Option<AssistantAcknowledgement>)>> {
+    if chat.is_orchestrator() {
         return Ok(None);
     }
     let key = key_service::get_api_key(db, &chat.user_id, &chat.api_key_id).await?;
@@ -437,7 +503,7 @@ pub async fn account_gate(db: &Database, chat: &ChatAuthority) -> AppResult<Opti
     {
         return Ok(None);
     }
-    let row = request(
+    let (row, created) = request_tracked(
         db,
         chat,
         Request {
@@ -445,15 +511,25 @@ pub async fn account_gate(db: &Database, chat: &ChatAuthority) -> AppResult<Opti
             service: None,
             tool: None,
             arguments: None,
-            summary: "Allow this chat to manage your NyxID account (keys, channel bots, \
-                services, nodes, approval settings)?",
+            summary: "Read the NyxID account (keys, channel bots, services, nodes, approvals)",
             platform: false,
         },
     )
     .await?;
-    Ok(Some(refusal(&row)))
+    let value = refusal(&row);
+    Ok(Some((value, created.then_some(row))))
 }
 
+/// Who decides a card.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Decider<'a> {
+    /// The owner, from the card's own conversation.
+    User,
+    /// The orchestrator conversation deciding its team's request.
+    Orchestrator { team_id: &'a str },
+}
+
+/// Decide a card as the owner from its own conversation.
 pub async fn decide(
     db: &Database,
     user: &str,
@@ -462,18 +538,45 @@ pub async fn decide(
     allow: bool,
 ) -> AppResult<AssistantAcknowledgement> {
     super::assistant_nyxagent::get(db, user, conversation).await?;
-    expire(db, user, conversation).await?;
+    decide_as(db, user, Some(conversation), id, allow, Decider::User, None).await
+}
+
+/// Decide a card. The owner decides from the card's conversation, or from the
+/// team's orchestrator thread for subagent requests; the orchestrator decides
+/// only its own team's orchestrator-routed requests. A subagent grant is also
+/// written to the subagent's durable grants so the next turn keeps it.
+pub async fn decide_as(
+    db: &Database,
+    user: &str,
+    conversation: Option<&str>,
+    id: &str,
+    allow: bool,
+    decider: Decider<'_>,
+    reason: Option<&str>,
+) -> AppResult<AssistantAcknowledgement> {
     let db = db.clone();
     let user = user.to_owned();
-    let conversation = conversation.to_owned();
+    let conversation = conversation.map(str::to_owned);
     let id = id.to_owned();
+    let team = match decider {
+        Decider::User => None,
+        Decider::Orchestrator { team_id } => Some(team_id.to_owned()),
+    };
+    let reason = reason.map(|reason| super::assistant_nyxagent::excerpt(reason, 300));
     let mut session = db.client().start_session().await?;
     let row = session
         .start_transaction()
         .and_run2(async move |session| {
             let operation = async {
                 let collection = db.collection::<AssistantAcknowledgement>(ACKS);
-                let filter = doc! {"_id": &id, "user_id": &user, "conversation_id": &conversation};
+                let mut filter = doc! {"_id": &id, "user_id": &user};
+                if let Some(conversation) = &conversation {
+                    filter.insert("conversation_id", conversation);
+                }
+                if let Some(team) = &team {
+                    filter.insert("team_id", team);
+                    filter.insert("decider", "orchestrator");
+                }
                 let mut row = collection
                     .find_one(filter.clone())
                     .session(&mut *session)
@@ -484,13 +587,22 @@ pub async fn decide(
                         "Acknowledgement is no longer pending".into(),
                     ));
                 }
+                let target = db
+                    .collection::<AssistantConversation>(CONVERSATIONS)
+                    .find_one(doc! {"_id": &row.conversation_id, "user_id": &user})
+                    .session(&mut *session)
+                    .await?
+                    .ok_or_else(not_found)?;
                 let chat = ChatAuthority {
                     user_id: user.clone(),
-                    conversation_id: conversation.clone(),
+                    conversation_id: row.conversation_id.clone(),
                     api_key_id: row.api_key_id.clone(),
-                    access_mode: Default::default(),
+                    role: target.role,
+                    team_id: target.team_id.clone(),
+                    agent_name: target.agent_name.clone(),
                 };
                 let (_, key) = fence(&db, &chat, session).await?;
+                let subagent = target.role == AgentRole::Subagent;
                 let now = Utc::now();
                 if row.kind == "service" {
                     let service_id = row.service_id.as_deref().ok_or_else(not_found)?;
@@ -537,7 +649,30 @@ pub async fn decide(
                         Some(&mut *session),
                     )
                     .await?;
+                    if subagent {
+                        let grant = if row.platform {
+                            "grants.platform_service_ids"
+                        } else {
+                            "grants.service_ids"
+                        };
+                        db.collection::<bson::Document>(CONVERSATIONS)
+                            .update_one(
+                                doc! {"_id": &row.conversation_id, "user_id": &user},
+                                doc! {"$addToSet": {grant: service_id}},
+                            )
+                            .session(&mut *session)
+                            .await?;
+                    }
                 } else if allow && row.kind == "account" {
+                    if subagent {
+                        db.collection::<bson::Document>(CONVERSATIONS)
+                            .update_one(
+                                doc! {"_id": &row.conversation_id, "user_id": &user},
+                                doc! {"$set": {"grants.account_read": true}},
+                            )
+                            .session(&mut *session)
+                            .await?;
+                    }
                     let mut scopes: Vec<_> = key.scopes.split_whitespace().collect();
                     if !scopes.contains(&ASSISTANT_ACCOUNT_SCOPE) {
                         scopes.push(ASSISTANT_ACCOUNT_SCOPE);
@@ -552,6 +687,8 @@ pub async fn decide(
                 }
                 row.status = if allow { "allowed" } else { "denied" }.into();
                 row.decided_at = Some(now);
+                row.decided_by = Some(if team.is_some() { "orchestrator" } else { "user" }.into());
+                row.reason = reason.clone();
                 if allow && row.kind == "action" {
                     row.expires_at = now + Duration::seconds(ACTION_SECONDS);
                 }

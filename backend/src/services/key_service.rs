@@ -1198,30 +1198,47 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                         .session(&mut *session)
                         .await?
                         .ok_or_else(|| AppError::NotFound("Conversation not found".into()))?;
-                    let full = conversation.access_mode
-                        == crate::models::assistant_conversation::AccessMode::Full;
-                    successor.scopes =
-                        super::assistant_agent_credential_service::ASSISTANT_SCOPES.into();
-                    if full {
-                        successor.scopes.push(' ');
-                        successor
-                            .scopes
-                            .push_str(crate::mw::auth::ASSISTANT_ACCOUNT_SCOPE);
-                    }
-                    successor.allowed_service_ids.clear();
-                    successor.allowed_node_ids.clear();
-                    successor.allow_all_services = full;
+                    // The successor carries exactly its conversation's authority:
+                    // Full for orchestrators, the durable grants for subagents.
+                    let authority =
+                        super::assistant_agent_credential_service::KeyAuthority::of(&conversation);
+                    let fields = authority.key_fields();
+                    successor.scopes = fields.get_str("scopes").unwrap_or("proxy").to_owned();
+                    successor.allow_all_services =
+                        fields.get_bool("allow_all_services").unwrap_or(false);
                     successor.allow_all_nodes = true;
-                    successor.allow_auto_connected_services = true;
+                    successor.allow_auto_connected_services = fields
+                        .get_bool("allow_auto_connected_services")
+                        .unwrap_or(false);
+                    successor.allowed_service_ids = conversation.grants.service_ids.clone();
+                    successor.allowed_platform_service_ids = match authority {
+                        super::assistant_agent_credential_service::KeyAuthority::Subagent(
+                            grants,
+                        ) => grants.platform_service_ids.clone(),
+                        super::assistant_agent_credential_service::KeyAuthority::Orchestrator => {
+                            Vec::new()
+                        }
+                    };
+                    if matches!(
+                        authority,
+                        super::assistant_agent_credential_service::KeyAuthority::Orchestrator
+                    ) {
+                        successor.allowed_service_ids.clear();
+                    }
+                    successor.allowed_node_ids.clear();
+                    let mut update = fields;
+                    update.insert("allowed_node_ids", bson::Bson::Array(Vec::new()));
+                    if !update.contains_key("allowed_service_ids") {
+                        update.insert("allowed_service_ids", bson::Bson::Array(Vec::new()));
+                        update.insert(
+                            "allowed_platform_service_ids",
+                            bson::Bson::Array(Vec::new()),
+                        );
+                    }
                     key_mutations::update_one(
                         &db,
                         doc! {"_id": &successor.id, "user_id": &user_id},
-                        doc! {"$set": {
-                            "scopes": &successor.scopes,
-                            "allowed_service_ids": [], "allowed_node_ids": [],
-                            "allow_all_services": full, "allow_all_nodes": true,
-                            "allow_auto_connected_services": true,
-                        }},
+                        doc! {"$set": update},
                         Some(&mut *session),
                     )
                     .await?;

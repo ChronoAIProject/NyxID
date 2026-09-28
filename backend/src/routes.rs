@@ -967,6 +967,11 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route("/audit-log", get(handlers::admin::list_audit_log))
         .route("/usage", get(handlers::admin_usage::get_usage))
         .route(
+            "/assistant/profile-routes",
+            get(handlers::assistant_team::get_profile_routes)
+                .put(handlers::assistant_team::put_profile_routes),
+        )
+        .route(
             "/usage/analytics",
             get(handlers::admin_usage::get_analytics),
         )
@@ -1914,6 +1919,27 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             patch(handlers::assistant_nyxagent::change_access_mode),
         )
         .route(
+            "/nyxagent/conversations/{id}/team",
+            get(handlers::assistant_team::get_team),
+        )
+        .route(
+            "/nyxagent/conversations/{id}/destroy",
+            post(handlers::assistant_team::destroy_member),
+        )
+        .route(
+            "/nyxagent/settings",
+            get(handlers::assistant_team::get_settings)
+                .put(handlers::assistant_team::update_settings),
+        )
+        .route(
+            "/nyxagent/channels",
+            get(handlers::nyxbot::list_channels).post(handlers::nyxbot::connect_channel),
+        )
+        .route(
+            "/nyxagent/channels/{id}",
+            delete(handlers::nyxbot::disconnect_channel),
+        )
+        .route(
             "/nyxagent/conversations/{id}/acknowledgements/{ack_id}",
             post(handlers::assistant_nyxagent::decide_acknowledgement),
         )
@@ -2269,6 +2295,32 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 )
                 .route("/pin-conv-url", post(handlers::oracle_worker::pin_conv_url))
                 .layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
+        )
+        // NyxBot as the Agent Event Gateway's `nyxbot` provider, and NyxID's
+        // direct relay receiver for NyxBot channels. Authenticated inside each
+        // handler (the channel's agent key, or NyxID's signed relay callback),
+        // NOT by the JWT middleware.
+        .nest(
+            "/api/v1/nyxbot",
+            Router::new()
+                .route("/agent-card", get(handlers::nyxbot::agent_card))
+                .route(
+                    "/bindings/{binding_id}",
+                    axum::routing::put(handlers::nyxbot::put_binding)
+                        .delete(handlers::nyxbot::delete_binding),
+                )
+                .route(
+                    "/bindings/{binding_id}/conversations/{conversation_id}",
+                    axum::routing::put(handlers::nyxbot::put_conversation)
+                        .delete(handlers::nyxbot::delete_conversation),
+                )
+                .route(
+                    "/bindings/{binding_id}/conversations/{conversation_id}/events/{event_id}",
+                    get(handlers::nyxbot::get_event_context),
+                )
+                .route("/responses", post(handlers::nyxbot::responses))
+                .route("/relay/{channel_id}", post(handlers::nyxbot::relay_callback))
+                .layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
         )
         .nest("/api/v1", api_v1)
         .merge(public_passthrough_routes)

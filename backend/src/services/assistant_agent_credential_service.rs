@@ -15,11 +15,75 @@ use crate::{
         api_key::{ApiKey, ApiKeyPurpose, COLLECTION_NAME as KEYS},
         assistant_agent_credential::{AssistantAgentCredential, COLLECTION_NAME as CREDENTIALS},
         assistant_conversation::{
-            AccessMode, AssistantConversation, COLLECTION_NAME as CONVERSATIONS,
+            AgentRole, AssistantConversation, COLLECTION_NAME as CONVERSATIONS, SubagentGrants,
         },
     },
+    mw::auth::ASSISTANT_ACCOUNT_SCOPE,
     services::{api_key_mutation_service as mutations, key_service},
 };
+
+/// The authority a conversation key carries. Orchestrators always run with
+/// Full access; subagents carry exactly the grants their orchestrator made.
+#[derive(Clone, Copy, Debug)]
+pub enum KeyAuthority<'a> {
+    Orchestrator,
+    Subagent(&'a SubagentGrants),
+}
+
+impl<'a> KeyAuthority<'a> {
+    pub fn of(row: &'a AssistantConversation) -> Self {
+        match row.role {
+            AgentRole::Orchestrator => Self::Orchestrator,
+            AgentRole::Subagent => Self::Subagent(&row.grants),
+        }
+    }
+
+    /// The key fields this authority implies. Applied at every turn start so a
+    /// rotated or hand-edited key converges back to its conversation's authority.
+    pub fn key_fields(&self) -> bson::Document {
+        match self {
+            Self::Orchestrator => doc! {
+                "allow_all_services": true,
+                "allow_all_nodes": true,
+                "allow_auto_connected_services": true,
+                "scopes": format!("{ASSISTANT_SCOPES} {ASSISTANT_ACCOUNT_SCOPE}"),
+            },
+            Self::Subagent(grants) => doc! {
+                "allow_all_services": false,
+                "allow_all_nodes": true,
+                "allow_auto_connected_services": false,
+                "allowed_service_ids": &grants.service_ids,
+                "allowed_platform_service_ids": &grants.platform_service_ids,
+                "scopes": if grants.account_read {
+                    format!("{ASSISTANT_SCOPES} {ASSISTANT_ACCOUNT_SCOPE}")
+                } else {
+                    ASSISTANT_SCOPES.to_owned()
+                },
+            },
+        }
+    }
+}
+
+/// Converge a live conversation key to its authority inside the caller's transaction.
+pub async fn apply_authority(
+    db: &Database,
+    user: &str,
+    key: &str,
+    authority: KeyAuthority<'_>,
+    session: &mut ClientSession,
+) -> AppResult<()> {
+    let result = mutations::update_one(
+        db,
+        doc! {"_id": key, "user_id": user, "is_active": true},
+        doc! {"$set": authority.key_fields()},
+        Some(session),
+    )
+    .await?;
+    if result.matched_count != 1 {
+        return Err(AppError::NotFound("Conversation key not found".into()));
+    }
+    Ok(())
+}
 
 // MCP x-api-key initialization/tools/call require REST proxy scope. `proxy`
 // also authorizes the LLM proxy (mw::auth::scope_allows_llm_proxy); llm:proxy
@@ -171,7 +235,7 @@ pub async fn load_or_provision_in_session(
     keys: &EncryptionKeys,
     user_id: &str,
     conversation_id: &str,
-    access_mode: AccessMode,
+    authority: KeyAuthority<'_>,
     session: &mut ClientSession,
 ) -> AppResult<AssistantCredential> {
     let old = db
@@ -190,11 +254,13 @@ pub async fn load_or_provision_in_session(
             .await?
             .is_some();
         if valid {
+            let mut fields = authority.key_fields();
+            fields.insert("last_used_at", bson::DateTime::now());
             mutations::update_one(
                 db,
                 doc! {"_id": &old.api_key_id, "user_id": user_id},
-                // Service consent covers its node route, including for existing keys.
-                doc! {"$set": {"last_used_at": bson::DateTime::now(), "allow_all_nodes": true}},
+                // Upgrades legacy Ask-mode keys and re-applies subagent grants.
+                doc! {"$set": fields},
                 Some(&mut *session),
             )
             .await?;
@@ -247,9 +313,9 @@ pub async fn load_or_provision_in_session(
         None,
         Some(&[]),
         Some(&[]),
-        Some(access_mode == AccessMode::Full),
+        Some(false),
         Some(true),
-        Some(true),
+        Some(false),
         None,
         None,
         Some(ASSISTANT_PLATFORM),
@@ -260,16 +326,7 @@ pub async fn load_or_provision_in_session(
         Some(&mut *session),
     )
     .await?;
-    if access_mode == AccessMode::Full {
-        super::assistant_access_mode_service::apply_key_mode(
-            db,
-            user_id,
-            &created.id,
-            access_mode,
-            session,
-        )
-        .await?;
-    }
+    apply_authority(db, user_id, &created.id, authority, session).await?;
     let raw = Zeroizing::new(created.full_key);
     let now = Utc::now();
     let row = AssistantAgentCredential {
@@ -339,7 +396,7 @@ pub async fn load_or_provision(
                     &keys,
                     &user_id,
                     &conversation_id,
-                    conversation.access_mode,
+                    KeyAuthority::of(&conversation),
                     session,
                 )
                 .await

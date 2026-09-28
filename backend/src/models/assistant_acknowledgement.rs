@@ -31,6 +31,27 @@ pub struct AssistantAcknowledgement {
     pub decided_at: Option<DateTime<Utc>>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub expires_at: DateTime<Utc>,
+    /// `user` (default) or `orchestrator`: a subagent's permission request is
+    /// decided by its team's orchestrator (or by the user in either thread).
+    #[serde(default = "default_decider")]
+    pub decider: String,
+    /// Orchestrator conversation for subagent requests.
+    #[serde(default)]
+    pub team_id: Option<String>,
+    /// Bounded excerpt of the text that started the requesting turn, so the
+    /// orchestrator can judge the request against what was actually asked.
+    #[serde(default)]
+    pub request_excerpt: Option<String>,
+    /// `user` or `orchestrator` once decided.
+    #[serde(default)]
+    pub decided_by: Option<String>,
+    /// The orchestrator's bounded reason for its decision.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+fn default_decider() -> String {
+    "user".into()
 }
 
 impl std::fmt::Debug for AssistantAcknowledgement {

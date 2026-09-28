@@ -48,6 +48,23 @@ pub const TOOL_NAMES: &[&str] = &[
 const MAX_ITEMS: usize = 100;
 const MAX_RESULT_BYTES: usize = 64 * 1024;
 
+/// Read-only tools a subagent may use with an `account_read` grant.
+pub fn read_only(name: &str) -> bool {
+    matches!(
+        name,
+        "list_agent_keys"
+            | "get_agent_key"
+            | "list_agent_key_bindings"
+            | "list_channel_bots"
+            | "get_channel_bot"
+            | "list_channel_routes"
+            | "list_my_services"
+            | "list_nodes"
+            | "list_approval_configs"
+            | "list_pending_approvals"
+    )
+}
+
 pub fn destructive(name: &str) -> bool {
     matches!(
         name,
@@ -209,25 +226,42 @@ fn description(name: &str) -> String {
         _ => "Unknown account tool.",
     };
     format!(
-        "{purpose} {} In Ask mode, requires this chat's account acknowledgement. Key \
-                creation/rotation, credentials, approval decisions, org \
+        "{purpose} {} Key creation/rotation, credentials, approval decisions, org \
                 administration and billing are available only in the UI.",
         if destructive(name) {
-            "Destructive: Ask mode also requires a single-use action acknowledgement."
+            "Destructive: unless the user turned confirmations off, NyxID first shows \
+            the user a single-use confirmation card; retry with its acknowledgement_id."
         } else {
             "Non-destructive."
         }
     )
 }
 
-pub fn virtual_service() -> McpToolService {
+/// The native `nyxid` service for one chat key. Orchestrators get every account
+/// tool plus the team tools; subagents get read-only account tools only.
+pub fn virtual_service(chat: &acks::ChatAuthority) -> McpToolService {
+    let mut service = account_service();
+    if chat.is_orchestrator() {
+        service
+            .endpoints
+            .extend(super::assistant_team_tools::endpoints());
+    } else {
+        service.endpoints.retain(|endpoint| read_only(&endpoint.name));
+        service.description = Some(
+            "Read your NyxID account (subagent: read-only, with the orchestrator's grant).".into(),
+        );
+    }
+    service
+}
+
+fn account_service() -> McpToolService {
     McpToolService {
         workspace_destinations_pending: false,
         service_id: "nyxid".into(),
         service_name: "NyxID account".into(),
         service_slug: "nyxid".into(),
         description: Some(
-            "Manage your NyxID account with this chat's human acknowledgement.".into(),
+            "Manage your NyxID account and your NyxBot team.".into(),
         ),
         service_category: "internal".into(),
         source: McpToolSource::Internal,
@@ -337,6 +371,8 @@ pub struct AccountTools<'a> {
 pub struct ToolResult {
     pub value: Value,
     pub is_error: bool,
+    /// A new permission request routed to the orchestrator, for notification.
+    pub permission_request: Option<crate::models::assistant_acknowledgement::AssistantAcknowledgement>,
 }
 impl std::fmt::Debug for ToolResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -363,6 +399,7 @@ pub fn error_result(error: AppError) -> ToolResult {
         _ => "The account operation could not be completed. Review it in the NyxID UI.",
     };
     ToolResult {
+        permission_request: None,
         is_error: true,
         value: json!({"error": body.error, "error_code": body.error_code, "message": message}),
     }
@@ -412,11 +449,11 @@ impl AccountTools<'_> {
         } else {
             Ok(None)
         };
-        let access_mode = chat
+        let role = chat
             .as_ref()
             .ok()
             .and_then(|chat| chat.as_ref())
-            .map(|chat| chat.access_mode);
+            .map(|chat| chat.role);
         let conversation_id = chat
             .as_ref()
             .ok()
@@ -449,7 +486,7 @@ impl AccountTools<'_> {
                 } else {
                     "unknown"
                 },
-                "access_mode": access_mode,
+                "role": role,
                 "target_id": target,
                 "outcome": if result.is_error {"refused"} else {"success"},
                 "acknowledgement_id": acknowledgement}),
@@ -469,20 +506,35 @@ impl AccountTools<'_> {
         let name = tool_name.strip_prefix("nyxid__").unwrap_or_default();
         validate_arguments(name, args)?;
         super::assistant_nyxagent::require_enabled(self.db, &chat.user_id).await?;
-        if let Some(refusal) = acks::account_gate(self.db, chat).await? {
+        if !chat.is_orchestrator() && !read_only(name) {
+            return Ok(ToolResult {
+                permission_request: None,
+                is_error: true,
+                value: json!({
+                    "error": "orchestrator_only",
+                    "instructions": "Only the orchestrator can change or delete account \
+                        resources. Report what should change in your reply instead.",
+                }),
+            });
+        }
+        if let Some((refusal, request)) = acks::account_gate(self.db, chat).await? {
             return Ok(ToolResult {
                 value: refusal,
                 is_error: true,
+                permission_request: request,
             });
         }
         if destructive(name)
-            && chat.access_mode != crate::models::assistant_conversation::AccessMode::Full
+            && !super::assistant_settings_service::get(self.db, &chat.user_id)
+                .await?
+                .skip_destructive_confirmation
         {
             // Resolve ownership and a human-readable summary before requesting authority.
             let summary = self.action_summary(&chat.user_id, name, args).await?;
             if let Some(id) = args["acknowledgement_id"].as_str() {
                 if !acks::consume_action(self.db, chat, id, tool_name, args).await? {
                     return Ok(ToolResult {
+                        permission_request: None,
                         is_error: true,
                         value: json!({
                             "error": "acknowledgement_invalid", "kind": "action",
@@ -507,6 +559,7 @@ impl AccountTools<'_> {
                 )
                 .await?;
                 return Ok(ToolResult {
+                    permission_request: None,
                     value: acks::refusal(&row),
                     is_error: true,
                 });
@@ -514,6 +567,7 @@ impl AccountTools<'_> {
         }
         let value = Box::pin(self.dispatch(&chat.user_id, auth, name, args)).await?;
         Ok(ToolResult {
+            permission_request: None,
             value,
             is_error: false,
         })
