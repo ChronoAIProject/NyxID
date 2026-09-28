@@ -24,9 +24,9 @@ receive the immediate HTTP acknowledgment without being admitted or counted.
 - Log fixed rejection stages and successful admission identifiers without
   secrets, plaintext or encrypted payloads.
 - Preserve all unchanged channels when the setup lease is busy, and registered
-  unmetered DM delivery after read-only provider failures. Stop after uncertain
-  subscription mutations; paid and non-DM channels retain stricter requirements
-  once setup begins. Persist incomplete event-selection changes so cleanup also
+  active channels after read-only provider failures once credentials and billing
+  admission have passed. Missing credentials, failed billing admission and
+  uncertain subscription mutations still stop delivery. Persist incomplete event-selection changes so cleanup also
   covers interrupted removal of Chat or other events.
 
 The setup progress tracking and its regression cases originate in the X portion

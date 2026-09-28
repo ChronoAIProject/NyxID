@@ -102,10 +102,17 @@ fn setup_failure_requires_stop(
     billing_enabled: bool,
     progress: &WebhookSetupProgress,
 ) -> bool {
+    if bot.webhook_registered
+        && bot.status == "active"
+        && progress.provider_started()
+        && !progress.mutation_started()
+    {
+        return false;
+    }
     bot.platform == "x"
         && (billing_enabled
             || super::channel_adapters::x::webhook_events_enabled(bot)
-            || (bot.webhook_registered && progress.mutation_started()))
+            || bot.webhook_registered)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -168,6 +175,7 @@ async fn configure_inner(
                 return Err(AppError::Conflict("Channel changed before webhook setup; retry".into()));
             }
         }
+        progress.mark_provider_started();
         adapter.setup_connection_webhook(http, &credentials, &current, &url, progress).await?;
         let result = db.collection::<ChannelBot>(COLLECTION_NAME).update_one(
             doc! {"_id": &current.id, "is_active": true, "connection_id": &current.connection_id, "updated_at": bson::DateTime::from_chrono(current.updated_at)},

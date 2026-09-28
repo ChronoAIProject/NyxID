@@ -39,12 +39,22 @@ pub(super) async fn provider_setup(server: &MockServer, bot: &ChannelBot) {
 }
 
 #[tokio::test]
-async fn registered_x_dm_survives_read_only_setup_failure_but_public_events_fail_closed() {
-    for (public_events, listing_status) in [(false, 503), (false, 401), (true, 503)] {
-        let (state, adapter, server, owner, connection) = fixture().await;
+async fn registered_x_channels_survive_read_only_provider_setup_failure() {
+    use crate::models::channel_bot::XChannelEvent::{Chat, Dm, Mentions};
+    for (event, metered, listing_status) in [
+        (Dm, false, 503),
+        (Dm, false, 401),
+        (Mentions, false, 503),
+        (Chat, false, 503),
+        (Dm, true, 503),
+        (Chat, true, 503),
+    ] {
+        let (mut state, adapter, server, owner, connection) = fixture().await;
+        if metered {
+            super::billing::enable_billing(&mut state, &owner).await;
+        }
         let bot = insert_bot(&state, &owner, &connection).await;
-        let events =
-            public_events.then(|| vec![crate::models::channel_bot::XChannelEvent::Mentions]);
+        let events = vec![event];
         state.db.collection::<ChannelBot>(BOTS).update_one(
             doc! { "_id": &bot.id },
             doc! { "$set": { "webhook_registered": true, "x_events": bson::to_bson(&events).unwrap() } },
@@ -83,12 +93,9 @@ async fn registered_x_dm_survives_read_only_setup_failure_but_public_events_fail
         let current = channel_bot_service::get_bot(&state.db, &bot.id)
             .await
             .unwrap();
-        assert_eq!(
-            current.status,
-            if public_events { "failed" } else { "active" }
-        );
+        assert_eq!(current.status, "active");
         assert!(current.webhook_registered);
-        if !public_events {
+        {
             webhooks::remove_stopped(
                 &state.db,
                 &state.encryption_keys,
