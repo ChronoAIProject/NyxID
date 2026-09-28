@@ -1,6 +1,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use super::bson_datetime;
+
 pub const COLLECTION_NAME: &str = "oauth_states";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -21,6 +23,9 @@ pub struct OAuthState {
     /// Polling interval in seconds for device code flow
     #[serde(default)]
     pub poll_interval: Option<i32>,
+    /// Last time the upstream device token endpoint was contacted.
+    #[serde(default, with = "bson_datetime::optional")]
+    pub last_polled_at: Option<DateTime<Utc>>,
     /// When an admin initiates a flow on behalf of a service account,
     /// this holds the SA ID. Tokens are stored under this ID instead of user_id.
     #[serde(default)]
@@ -90,6 +95,7 @@ mod tests {
             device_code_encrypted: None,
             user_code_encrypted: None,
             poll_interval: None,
+            last_polled_at: None,
             target_user_id: None,
             credential_user_id: None,
             redirect_path: None,
@@ -123,6 +129,7 @@ mod tests {
             device_code_encrypted: Some("encrypted_device_code".to_string()),
             user_code_encrypted: Some("encrypted_user_code".to_string()),
             poll_interval: Some(5),
+            last_polled_at: None,
             target_user_id: None,
             credential_user_id: Some(uuid::Uuid::new_v4().to_string()),
             redirect_path: None,
@@ -154,6 +161,7 @@ mod tests {
             device_code_encrypted: None,
             user_code_encrypted: None,
             poll_interval: None,
+            last_polled_at: None,
             target_user_id: Some(sa_id.clone()),
             credential_user_id: Some(uuid::Uuid::new_v4().to_string()),
             redirect_path: Some(redirect.clone()),

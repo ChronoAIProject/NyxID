@@ -908,6 +908,7 @@ pub async fn initiate_oauth_connect(
         device_code_encrypted: None,
         user_code_encrypted: None,
         poll_interval: None,
+        last_polled_at: None,
         target_user_id: on_behalf_of.map(String::from),
         credential_user_id: resolved.credential_user_id.clone(),
         redirect_path: redirect_path.map(String::from),
@@ -1227,6 +1228,7 @@ pub async fn request_device_code(
         device_code_encrypted: Some(device_code_encrypted),
         user_code_encrypted: Some(user_code_encrypted),
         poll_interval: Some(interval),
+        last_polled_at: None,
         target_user_id: on_behalf_of.map(String::from),
         credential_user_id: resolved.credential_user_id.clone(),
         redirect_path: None,
@@ -1299,6 +1301,29 @@ pub async fn poll_device_code(
         return Err(AppError::BadRequest(
             "Device code state user mismatch".to_string(),
         ));
+    }
+
+    let interval_secs = i64::from(oauth_state.poll_interval.unwrap_or(5).max(1));
+    let poll_cutoff = now - Duration::seconds(interval_secs);
+    let claimed = db
+        .collection::<OAuthState>(OAUTH_STATES)
+        .find_one_and_update(
+            doc! {
+                "_id": state,
+                "$or": [
+                    { "last_polled_at": null },
+                    { "last_polled_at": { "$lte": bson::DateTime::from_chrono(poll_cutoff) } },
+                ],
+            },
+            doc! { "$set": { "last_polled_at": bson::DateTime::from_chrono(now) } },
+        )
+        .await?;
+    if claimed.is_none() {
+        return Ok(DeviceCodePollResult {
+            status: "pending".to_string(),
+            interval: oauth_state.poll_interval,
+            effective_user_id: None,
+        });
     }
 
     // When admin-on-behalf flow, store tokens under the target SA's ID
@@ -3242,10 +3267,11 @@ mod tests {
         build_user_token_summary, chat_attempt_nonce_from_state, classify_device_poll_failure,
         ensure_additional_scopes_supported, merge_scopes, normalize_telegram_bot_api_key,
         oauth_token_payload, parse_additional_scopes, parse_token_exchange_response,
-        resolve_scope_param, token_exchange_provider_error,
+        poll_device_code, resolve_scope_param, token_exchange_provider_error,
     };
     use crate::crypto::telegram::TelegramLoginData;
     use crate::errors::AppError;
+    use crate::models::oauth_state::{COLLECTION_NAME as OAUTH_STATES, OAuthState};
     use crate::models::provider_config::ProviderConfig;
     use crate::models::user_provider_token::UserProviderToken;
     use crate::services::oauth_flow;
@@ -3255,6 +3281,64 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Notify;
+
+    #[tokio::test]
+    async fn device_poll_respects_provider_interval_before_upstream_work() {
+        let Some(db) = connect_test_database("device_poll_interval_guard").await else {
+            return;
+        };
+        let now = Utc::now();
+        let state_id = uuid::Uuid::new_v4().to_string();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<OAuthState>(OAUTH_STATES)
+            .insert_one(OAuthState {
+                id: state_id.clone(),
+                user_id: user_id.clone(),
+                history_context: None,
+                provider_config_id: provider_id.clone(),
+                code_verifier: None,
+                device_code_encrypted: None,
+                user_code_encrypted: None,
+                poll_interval: Some(10),
+                last_polled_at: Some(now),
+                target_user_id: None,
+                credential_user_id: None,
+                connection_id: None,
+                connect_link_id: None,
+                redirect_path: None,
+                flow_kind: None,
+                attempt_nonce: None,
+                consumed: false,
+                expires_at: now + Duration::minutes(5),
+                created_at: now,
+            })
+            .await
+            .unwrap();
+        let keys = test_encryption_keys();
+        let early = poll_device_code(&db, &keys, &user_id, &provider_id, &state_id)
+            .await
+            .unwrap();
+        assert_eq!(early.status, "pending");
+        assert_eq!(early.interval, Some(10));
+
+        db.collection::<OAuthState>(OAUTH_STATES)
+            .update_one(
+                doc! { "_id": &state_id },
+                doc! { "$set": { "last_polled_at": bson::DateTime::from_chrono(now - Duration::seconds(11)) } },
+            )
+            .await
+            .unwrap();
+        let due = poll_device_code(&db, &keys, &user_id, &provider_id, &state_id).await;
+        assert!(matches!(due, Err(AppError::Internal(_))));
+        let stored = db
+            .collection::<OAuthState>(OAUTH_STATES)
+            .find_one(doc! { "_id": &state_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored.last_polled_at.unwrap() > now - Duration::seconds(10));
+    }
 
     #[test]
     fn chat_state_discriminator_requires_canonical_uuid_v4() {

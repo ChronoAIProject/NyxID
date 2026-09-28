@@ -9,6 +9,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { CheckCircle2, ExternalLink, ArrowRight, XCircle } from "lucide-react";
 import { ErrorBanner } from "@/components/shared/error-banner";
+import { ApiError } from "@/lib/api-client";
 import { Button, ButtonIcon } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import {
@@ -55,6 +56,8 @@ interface DeviceChallenge {
   readonly code: string;
   readonly url: string;
   readonly state: string;
+  readonly interval: number;
+  readonly status: string;
 }
 
 export function ConnectLinkPage() {
@@ -79,6 +82,7 @@ export function ConnectLinkPage() {
     platformAvailable &&
     (platformChoice ?? preview.data?.use_platform_key ?? true);
   const complete = useCompleteConnectLink();
+  const completeConnect = complete.mutateAsync;
   const cancel = useCancelHostedConnectLink();
   const actionPending =
     preview.isPending || complete.isPending || cancel.isPending;
@@ -153,6 +157,11 @@ export function ConnectLinkPage() {
           code: result.device_user_code ?? current?.code ?? "",
           url: result.device_verification_uri ?? current?.url ?? "",
           state: result.device_state ?? current?.state ?? "",
+          interval: Math.max(
+            1,
+            result.device_interval ?? current?.interval ?? 5,
+          ),
+          status: result.device_status ?? current?.status ?? "pending",
         }));
         return;
       }
@@ -192,10 +201,81 @@ export function ConnectLinkPage() {
     void submitCompletion(values);
   }
 
-  function handleDeviceCheck() {
-    if (!deviceChallenge?.state || actionPending || withinCooldown()) return;
-    void submitCompletion({ device_state: deviceChallenge.state });
-  }
+  useEffect(() => {
+    if (!deviceChallenge?.state || cancel.data?.status === "cancelled") return;
+    let cancelled = false;
+    let failures = 0;
+    let timer: number | undefined;
+    const state = deviceChallenge.state;
+    const schedule = (seconds: number) => {
+      timer = window.setTimeout(
+        () => {
+          if (cancelled) return;
+          void (async () => {
+            try {
+              const result = await completeConnect({
+                token,
+                values: {
+                  use_platform_key: usePlatformKey,
+                  device_state: state,
+                },
+              });
+              if (cancelled) return;
+              if (result.status !== "device_code_required") {
+                setDeviceChallenge(null);
+                return;
+              }
+              failures = 0;
+              const nextInterval = Math.max(
+                1,
+                result.device_interval ?? deviceChallenge.interval,
+              );
+              setSubmitError(null);
+              setDeviceChallenge((current) =>
+                current?.state === state
+                  ? {
+                      ...current,
+                      interval: nextInterval,
+                      status: result.device_status ?? current.status,
+                    }
+                  : current,
+              );
+              schedule(nextInterval);
+            } catch (error) {
+              if (cancelled) return;
+              failures += 1;
+              const terminalError =
+                error instanceof ApiError &&
+                error.status >= 400 &&
+                error.status < 500 &&
+                error.status !== 429;
+              if (terminalError || failures >= 3) {
+                setSubmitError(connectLinkErrorMessage(error));
+                return;
+              }
+              schedule(
+                deviceChallenge.interval +
+                  (error instanceof ApiError && error.status === 429 ? 5 : 0),
+              );
+            }
+          })();
+        },
+        Math.max(1, seconds) * 1_000,
+      );
+    };
+    schedule(deviceChallenge.interval);
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [
+    cancel.data?.status,
+    completeConnect,
+    deviceChallenge?.interval,
+    deviceChallenge?.state,
+    token,
+    usePlatformKey,
+  ]);
 
   if (isLoading || !isAuthenticated) {
     return (
@@ -224,6 +304,7 @@ export function ConnectLinkPage() {
       {terminal ? (
         <TerminalPanel
           status={terminal.status}
+          serviceName={preview.data?.service_name}
           callbackUrl={terminal.callbackUrl ?? null}
         />
       ) : (
@@ -277,7 +358,9 @@ export function ConnectLinkPage() {
                           />
                         )}
                       </div>
-                      <span className="text-xs font-medium">{preview.data.service_name}</span>
+                      <span className="text-xs font-medium">
+                        {preview.data.service_name}
+                      </span>
                     </div>
                   </div>
                   <div className="space-y-2">
@@ -301,7 +384,7 @@ export function ConnectLinkPage() {
                       byokPrice={catalog.byok_pricing}
                       legacyBillable={catalog.billing?.platform_billable}
                       resaleBillable={catalog.billing?.resale_billable}
-                      disabled={actionPending}
+                      disabled={actionPending || !!deviceChallenge}
                     />
                   )}
                 {preview.data.status !== "pending" ? (
@@ -346,9 +429,19 @@ export function ConnectLinkPage() {
                   <DeviceCodePanel
                     code={deviceChallenge.code}
                     url={deviceChallenge.url}
-                    pending={actionPending}
-                    onCheck={handleDeviceCheck}
+                    interval={deviceChallenge.interval}
+                    status={deviceChallenge.status}
                   />
+                ) : null}
+                {deviceChallenge && submitError ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={actionPending}
+                    onClick={() => void submitCompletion()}
+                  >
+                    Get a new code
+                  </Button>
                 ) : null}
                 {preview.data.status === "pending" ? (
                   <div className="flex justify-center">
@@ -452,6 +545,7 @@ export function ConnectLinkReturnPage() {
       <ConnectShell>
         <TerminalPanel
           status={status.data.status}
+          serviceName={status.data.service_name}
           callbackUrl={status.data.callback_url ?? null}
         />
       </ConnectShell>
@@ -525,7 +619,12 @@ function CredentialForm({
     (preview.requires_gateway_url && endpointUrl.length === 0);
   const credentialLabel =
     preview.auth_key_name.trim() ||
-    (preview.requires_gateway_url ? "Gateway bearer token" : "API key or token");
+    (preview.requires_gateway_url
+      ? "Gateway bearer token"
+      : "API key or token");
+  const credentialPlaceholder = preview.requires_gateway_url
+    ? `Paste bearer token for ${preview.service_name}`
+    : `Paste API key or token for ${preview.service_name}`;
 
   return (
     <Form {...form}>
@@ -537,7 +636,12 @@ function CredentialForm({
             <FormItem>
               <FormLabel>{credentialLabel}</FormLabel>
               <FormControl>
-                <Input type="password" autoComplete="off" {...field} />
+                <Input
+                  type="password"
+                  autoComplete="off"
+                  placeholder={credentialPlaceholder}
+                  {...field}
+                />
               </FormControl>
               <FormMessage />
             </FormItem>
@@ -717,7 +821,8 @@ export function RequestDetails({
           target="_blank"
           rel="noreferrer"
         >
-          Credential setup <ExternalLink className="size-3" aria-hidden="true" />
+          Credential setup{" "}
+          <ExternalLink className="size-3" aria-hidden="true" />
         </a>
       ) : null}
       {preview.scopes.length > 0 &&
@@ -759,36 +864,33 @@ export function ConnectLinkDetailRow({
 function DeviceCodePanel({
   code,
   url,
-  pending,
-  onCheck,
+  interval,
+  status,
 }: {
   readonly code: string;
   readonly url: string;
-  readonly pending: boolean;
-  readonly onCheck: () => void;
+  readonly interval: number;
+  readonly status: string;
 }) {
   return (
     <div className="space-y-3 rounded-lg border border-border/50 p-4">
       <p className="text-[12px] text-muted-foreground">
-        Enter this code at the provider, then check the connection.
+        Enter this code at the provider. NyxID will finish the connection after
+        authorization.
       </p>
       <p className="font-mono text-[15px] font-semibold text-foreground">
         {code}
+      </p>
+      <p className="text-[11px] text-muted-foreground" role="status">
+        {status === "slow_down"
+          ? `Provider requested a slower check. Checking again in ${interval} seconds.`
+          : `Checking automatically every ${interval} seconds.`}
       </p>
       <div className="flex flex-wrap justify-end gap-2">
         <Button asChild variant="outline">
           <a href={url} target="_blank" rel="noreferrer">
             Open provider
           </a>
-        </Button>
-        <Button
-          type="button"
-          variant="primary"
-          disabled={pending}
-          isLoading={pending}
-          onClick={onCheck}
-        >
-          Check connection
         </Button>
       </div>
     </div>
@@ -797,43 +899,52 @@ function DeviceCodePanel({
 
 export function TerminalPanel({
   status,
+  serviceName,
   callbackUrl,
 }: {
   readonly status: "completed" | "cancelled" | "expired";
+  readonly serviceName?: string;
   readonly callbackUrl: string | null;
 }) {
   const completed = status === "completed";
   return (
-    <Card
-      className={
-        completed ? "border-success/25 bg-success/[0.03]" : "border-border/50"
-      }
+    <section
+      role="status"
+      className="flex flex-col items-center py-10 text-center sm:py-16"
     >
-      <CardContent className="flex flex-col items-center gap-3 p-6 text-center">
+      <div className="mb-8 flex size-20 items-center justify-center rounded-2xl border border-border bg-card">
         {completed ? (
-          <CheckCircle2 className="h-6 w-6 text-success" />
+          <NyxidIcon className="size-10" alt="" />
         ) : (
-          <XCircle className="h-6 w-6 text-muted-foreground" />
+          <XCircle className="size-9 text-muted-foreground" />
         )}
-        <h2 className="text-[15px] font-semibold text-foreground">
-          {completed
-            ? "Service connected"
-            : status === "cancelled"
-              ? "Connection cancelled"
-              : "Connection request expired"}
-        </h2>
-        <p className="text-[12px] text-muted-foreground">
-          {completed
-            ? "Return to your agent. It can now retry the original request."
-            : "No credential was connected. Return to the requesting application."}
+      </div>
+      {completed ? (
+        <p className="mb-3 flex items-center gap-2 text-sm font-medium text-success">
+          <CheckCircle2 className="size-4" />
+          Connection completed
         </p>
-        {callbackUrl ? (
-          <p className="text-[11px] text-muted-foreground">
-            Returning to the requesting application...
-          </p>
-        ) : null}
-      </CardContent>
-    </Card>
+      ) : null}
+      <h1 className="text-[28px] font-semibold leading-tight text-foreground sm:text-[36px]">
+        {completed
+          ? `${serviceName ?? "Service"} connected`
+          : status === "cancelled"
+            ? "Connection cancelled"
+            : "Connection request expired"}
+      </h1>
+      <p className="mt-8 text-sm text-muted-foreground sm:mt-12 sm:text-base">
+        {callbackUrl
+          ? "Returning to the requesting application..."
+          : completed
+            ? "You may now close this page."
+            : "You may now close this page or return to the requesting application."}
+      </p>
+      {completed && !callbackUrl ? (
+        <p className="mt-2 text-xs text-muted-foreground">
+          Your agent can now retry the original request.
+        </p>
+      ) : null}
+    </section>
   );
 }
 
