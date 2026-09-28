@@ -454,7 +454,7 @@ describe("KeyDetailPage — core rendering", () => {
     expect(
       screen.queryByRole("button", { name: /reconnect/i }),
     ).not.toBeInTheDocument();
-    expect(screen.getByText("Shared from Acme Org")).toBeInTheDocument();
+    expect(screen.getAllByText("Acme Org").length).toBeGreaterThan(0);
   });
 });
 
@@ -824,7 +824,7 @@ describe("KeyDetailPage — org read-only branch", () => {
 
     render(<KeyDetailPage />);
 
-    expect(screen.getByText("Shared from Acme Org")).toBeInTheDocument();
+    expect(screen.getAllByText("Acme Org").length).toBeGreaterThan(0);
     // Read-only: no Delete or Deactivate buttons, routing widget read-only.
     expect(
       screen.queryByRole("button", { name: /^Delete$/i }),
@@ -832,13 +832,12 @@ describe("KeyDetailPage — org read-only branch", () => {
     expect(
       screen.queryByRole("button", { name: /Disable/i }),
     ).not.toBeInTheDocument();
-    await user.click(screen.getByRole("tab", { name: "Advanced" }));
-    expect(screen.getByTestId("routing-section")).toHaveAttribute(
-      "data-readonly",
-      "true",
-    );
-    // Label heading still shown but with no inline edit pencil.
-    const heading = screen.getByText("My OpenAI");
+    expect(screen.queryByRole("tab", { name: "Advanced" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Details for My OpenAI (Acme Org)" }));
+    expect(document.body.innerHTML).not.toContain("https://api.openai.com");
+    await user.click(screen.getByRole("button", { name: "History for My OpenAI (Acme Org)" }));
+    expect(screen.getByTestId("history")).toHaveTextContent("key-1");
+    const heading = screen.getByRole("heading", { name: "My OpenAI" });
     expect(heading.parentElement?.querySelector("button")).toBeNull();
     expect(screen.queryByRole("button", { name: "Change service icon" })).not.toBeInTheDocument();
   });

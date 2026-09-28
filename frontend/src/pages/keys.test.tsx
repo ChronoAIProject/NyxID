@@ -1,14 +1,20 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render as renderDom, screen, waitFor, fireEvent, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { KeyInfo } from "@/types/keys";
+
+function render(ui: ReactNode) {
+  const client = new QueryClient({ defaultOptions: { mutations: { retry: false }, queries: { retry: false } } });
+  return renderDom(ui, { wrapper: ({ children }) => <QueryClientProvider client={client}>{children}</QueryClientProvider> });
+}
 
 const { mockNavigate, state } = vi.hoisted(() => ({
   mockNavigate: vi.fn(),
   // Mutable containers populated per-test before render.
   state: {
-    search: {} as { tab?: string; slug?: string; action?: string },
+    search: {} as { tab?: string; slug?: string; action?: string; view?: string },
     keys: [] as KeyInfo[],
     keysLoading: false,
     keysError: null as unknown,
@@ -22,12 +28,14 @@ vi.mock("@tanstack/react-router", () => ({
     children,
     to,
     params,
+    ...props
   }: {
     readonly children: ReactNode;
     readonly to: string;
     readonly params?: Record<string, string>;
+    readonly "aria-label"?: string;
   }) => (
-    <a href={params ? `${to}:${Object.values(params).join("/")}` : to}>
+    <a aria-label={props["aria-label"]} href={params ? `${to}:${Object.values(params).join("/")}` : to}>
       {children}
     </a>
   ),
@@ -36,6 +44,7 @@ vi.mock("@tanstack/react-router", () => ({
 }));
 
 vi.mock("@/hooks/use-keys", () => ({
+  useCatalog: () => ({ data: [], refetch: vi.fn() }),
   useKeys: () => ({
     data: state.keys,
     isLoading: state.keysLoading,
@@ -50,6 +59,14 @@ vi.mock("@/hooks/use-user-services", () => ({
 
 vi.mock("@/hooks/use-nodes", () => ({
   useNodes: () => ({ data: state.nodes }),
+}));
+
+vi.mock("@/hooks/use-pools", () => ({
+  useServicePools: () => ({ data: [{
+    id: "pool-one", name: "My pool", slug: "my-pool", strategy: "round_robin",
+    members: [{ user_service_id: "key-1", enabled: true, weight: 1 }],
+    is_active: true,
+  }] }),
 }));
 
 // Heavy children — stubbed to assert wiring (open state, presence), not driven.
@@ -109,10 +126,16 @@ vi.mock("@/components/orgs/org-avatar", () => ({
 }));
 
 import { KeysPage } from "./keys";
+import { useServiceCardView } from "@/stores/service-card-view-store";
+
+function expandConnections() {
+  for (const button of screen.queryAllByRole("button", { name: /^Expand .+ connections$/ })) fireEvent.click(button);
+}
 
 function makeKey(overrides: Partial<KeyInfo> = {}): KeyInfo {
   return {
     id: "key-1",
+    credential_source: { type: "personal" },
     label: "My OpenAI",
     slug: "openai",
     endpoint_url: "https://api.openai.com",
@@ -146,6 +169,7 @@ function makeKey(overrides: Partial<KeyInfo> = {}): KeyInfo {
 describe("KeysPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    useServiceCardView.setState({ accountId: undefined, expanded: [], filters: undefined });
     state.search = {};
     state.keys = [];
     state.keysLoading = false;
@@ -154,21 +178,45 @@ describe("KeysPage", () => {
     state.nodes = [];
   });
 
-  it("defaults to the External Services tab and lists personal services as a flat grid", () => {
+  it("defaults to one collapsed card per service with duplicates inside", async () => {
     state.keys = [
-      makeKey({ id: "key-1", label: "My OpenAI", slug: "openai" }),
-      makeKey({ id: "key-2", label: "My GitHub", slug: "github" }),
+      makeKey({ id: "key-1", label: "Personal OpenAI", slug: "openai" }),
+      makeKey({ id: "key-2", label: "Work OpenAI", slug: "openai-work" }),
     ];
-
     render(<KeysPage />);
-
-    // The personal-only path renders cards directly with no section header.
-    expect(screen.getByText("My OpenAI")).toBeInTheDocument();
-    expect(screen.getByText("My GitHub")).toBeInTheDocument();
-    // Default tab is "services", so the Agent Keys table is not mounted.
+    const group = screen.getByRole("region", { name: "OpenAI" });
+    expect(within(group).getByText("2 connections")).toBeVisible();
+    expect(screen.queryByText("openai")).not.toBeInTheDocument();
     expect(screen.queryByTestId("api-key-table")).not.toBeInTheDocument();
-    // Proxy slug for an HTTP service is rendered as /proxy/s/{slug}.
-    expect(screen.getByText("/proxy/s/openai")).toBeInTheDocument();
+    expandConnections();
+    expect(within(group).getByText("openai")).toBeVisible();
+    expect(within(group).getByText("openai-work")).toBeVisible();
+    expect(within(group).getByRole("link", { name: "View Personal OpenAI connection details (Personal)" })).toHaveAttribute("href", "/keys/$keyId:key-1");
+    expect(within(group).getByRole("link", { name: "View Work OpenAI connection details (Personal)" })).toHaveAttribute("href", "/keys/$keyId:key-2");
+  });
+
+  it("uses the connection table and full detail navigation in the routing view", async () => {
+    state.search = { view: "routing" };
+    state.keys = [makeKey({ label: "My preserved connection", slug: "my-openai", credential_source: { type: "personal" } })];
+    render(<KeysPage />);
+    await screen.findByRole("button", { name: "Expand OpenAI connections" });
+    expandConnections();
+    expect(screen.getByText("https://api.openai.com")).toBeVisible();
+    expect(screen.getByText("my-openai")).toBeVisible();
+    expect(screen.queryByText("Details", { selector: "summary" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Configure My preserved connection (Personal)" })).toHaveAttribute("href", "/keys/$keyId:key-1");
+    expect(screen.getByRole("link", { name: "View all OpenAI service details" })).toHaveAttribute("href", "/keys/services/$groupId:catalog:cat-1");
+    expect(screen.queryByRole("button", { name: "Individual cards" })).not.toBeInTheDocument();
+  });
+
+  it("opens actual pool members with the original cards in the pool preview tab", async () => {
+    state.search = { view: "routing", tab: "pools" };
+    state.keys = [makeKey({ credential_source: { type: "personal" } })];
+    render(<KeysPage />);
+    expect(await screen.findByText("My pool")).toBeInTheDocument();
+    expect(screen.getByText("https://api.openai.com")).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Selection for My pool" })).toHaveValue("current");
+    expect(screen.queryByRole("button", { name: "Create Pool" })).not.toBeInTheDocument();
   });
 
   it("omits oauth2 and api_key credential pills from service cards", () => {
@@ -194,11 +242,12 @@ describe("KeysPage", () => {
     ];
 
     render(<KeysPage />);
+    expandConnections();
 
     expect(screen.queryByText("oauth2")).not.toBeInTheDocument();
     expect(screen.queryByText("api_key")).not.toBeInTheDocument();
-    expect(screen.getByText("bearer")).toBeInTheDocument();
-    expect(screen.getAllByText("Direct")).toHaveLength(3);
+    expect(screen.queryByText("bearer")).not.toBeInTheDocument();
+    expect(screen.queryByText("Direct")).not.toBeInTheDocument();
   });
 
   it("shows the empty state with an Add Your First Service CTA when there are no services", async () => {
@@ -241,48 +290,32 @@ describe("KeysPage", () => {
     expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
   });
 
-  it("hides auto-connected services until the toggle is enabled", async () => {
+  it("filters auto-connected services and their rows inside a matching card", async () => {
     const user = userEvent.setup();
     state.keys = [
-      makeKey({
-        id: "user-1",
-        label: "Manual Key",
-        endpoint_url: "https://manual.example/v1",
-        auto_connected: false,
-      }),
-      makeKey({
-        id: "auto-1",
-        label: "Auto Key",
-        endpoint_url: "https://platform.internal.example/v1",
-        auto_connected: true,
-        source_app_name: "Claude Code",
-      }),
+      makeKey({ id: "manual", label: "Manual Key", endpoint_url: "https://manual.example/v1" }),
+      makeKey({ id: "auto", label: "Auto Key", auto_connected: true, endpoint_url: "https://platform.internal/v1" }),
+      makeKey({ id: "auto-only", catalog_service_id: "auto-only", catalog_service_name: "Platform Only", auto_connected: true }),
     ];
-
     render(<KeysPage />);
-
-    // Auto-connected hidden by default.
-    expect(screen.getByText("Manual Key")).toBeInTheDocument();
-    expect(screen.getByText("https://manual.example/v1")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Service view: Personal" }));
+    expect(screen.getByRole("region", { name: "Platform Only" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Filters" }));
+    await user.click(screen.getByRole("button", { name: "Auto-connected" }));
+    await user.click(screen.getByRole("button", { name: "Hidden" }));
+    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+    expect(screen.queryByRole("region", { name: "Platform Only" })).not.toBeInTheDocument();
+    expect(screen.getByText("1 of 2 match")).toBeVisible();
+    expandConnections();
+    expect(screen.getByText("Manual Key")).toBeVisible();
     expect(screen.queryByText("Auto Key")).not.toBeInTheDocument();
-    expect(
-      screen.queryByText("https://platform.internal.example/v1"),
-    ).not.toBeInTheDocument();
-    // The toggle label reflects the auto-connected count.
-    expect(screen.getByText("Show auto-connected (1)")).toBeInTheDocument();
-
-    await user.click(screen.getByRole("switch"));
-
-    expect(screen.getByText("Auto Key")).toBeInTheDocument();
-    expect(
-      screen.queryByText("https://platform.internal.example/v1"),
-    ).not.toBeInTheDocument();
-    expect(screen.getAllByText("Platform managed").length).toBeGreaterThan(0);
+    expect(screen.queryByText("https://platform.internal/v1")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Clear filters" }));
+    expect(screen.getByRole("region", { name: "Platform Only" })).toBeInTheDocument();
   });
 
   it("hides auto-connected endpoint URLs in table rows without changing normal rows", async () => {
     localStorage.setItem("nyxid-view-mode:keys-services", "table");
-    const user = userEvent.setup();
     state.keys = [
       makeKey({
         id: "manual-table",
@@ -299,7 +332,7 @@ describe("KeysPage", () => {
 
     try {
       render(<KeysPage />);
-      await user.click(screen.getByRole("switch"));
+    fireEvent.click(screen.getByRole("button", { name: "Service view: Personal" }));
 
       expect(screen.getByText("https://manual-table.example/v1")).toBeInTheDocument();
       expect(screen.queryByText("https://platform-table.internal/v1")).not.toBeInTheDocument();
@@ -309,7 +342,7 @@ describe("KeysPage", () => {
     }
   });
 
-  it("groups org-inherited services into a labelled section with a role badge", () => {
+  it("keeps organization identity and role in the connection table", () => {
     state.keys = [
       makeKey({
         id: "org-key",
@@ -326,16 +359,12 @@ describe("KeysPage", () => {
     ];
 
     render(<KeysPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Service view: Personal" }));
+    expandConnections();
 
-    // Org section header (h3) + role badge come from the org credential source.
-    // ("Acme Org" also appears inside the stubbed OrgAvatar, so scope to the heading.)
-    expect(
-      screen.getByRole("heading", { name: "Acme Org" }),
-    ).toBeInTheDocument();
-    expect(screen.getByTestId("role-badge")).toHaveTextContent("member");
-    expect(screen.getByText("Shared from organization")).toBeInTheDocument();
-    // Member (non-admin) org cards are flagged View-Only.
-    expect(screen.getByText("View-Only")).toBeInTheDocument();
+    expect(screen.getAllByText("Acme Org").length).toBeGreaterThan(0);
+    expect(screen.getByText("Organization · member")).toBeVisible();
+
   });
 
   it("opens the Add Key dialog when the toolbar Connect Service button is clicked", async () => {
@@ -365,6 +394,7 @@ describe("KeysPage", () => {
     ];
 
     render(<KeysPage />);
+    expandConnections();
 
     await user.click(screen.getByRole("button", { name: /reconnect/i }));
 
@@ -394,8 +424,9 @@ describe("KeysPage", () => {
     ];
 
     render(<KeysPage />);
+    expandConnections();
 
-    expect(screen.getByText("Credential Missing")).toBeInTheDocument();
+    expect(screen.getByText("Disabled")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /reconnect/i }));
     expect(screen.getByTestId("add-key-dialog")).toHaveAttribute(
       "data-reconnect",
@@ -416,8 +447,9 @@ describe("KeysPage", () => {
     ];
 
     render(<KeysPage />);
+    expandConnections();
 
-    expect(screen.getByText("Expired")).toBeInTheDocument();
+    expect(screen.getByText("Reconnect needed")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /reconnect/i })).toBeInTheDocument();
   });
 
@@ -434,6 +466,7 @@ describe("KeysPage", () => {
     ];
 
     render(<KeysPage />);
+    expandConnections();
 
     await user.click(
       screen.getByRole("button", { name: /continue authentication/i }),
@@ -465,11 +498,25 @@ describe("KeysPage", () => {
     ];
 
     render(<KeysPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Service view: Personal" }));
+    expandConnections();
 
     expect(
       screen.queryByRole("button", { name: /reconnect/i }),
     ).not.toBeInTheDocument();
-    expect(screen.getByText("View-Only")).toBeInTheDocument();
+    expect(screen.getByText("Organization · member")).toBeVisible();
+  });
+
+  it("does not offer reconnect when organization access is denied despite an admin role", () => {
+    state.keys = [makeKey({
+      credential_type: "oauth2", auth_method: "oauth2", status: "failed",
+      credential_source: { type: "org", org_id: "denied-org", org_name: "Restricted", role: "admin", allowed: false, avatar_url: null },
+    })];
+    render(<KeysPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Service view: Personal" }));
+    expandConnections();
+    expect(screen.getByText("No access")).toBeVisible();
+    expect(screen.queryByRole("button", { name: /Reconnect/ })).not.toBeInTheDocument();
   });
 
   it("switches to the Agent Keys tab and mounts the API key table + usage dashboard", async () => {
@@ -522,7 +569,7 @@ describe("KeysPage", () => {
     });
   });
 
-  it("renders services as a table and navigates to the key detail when a row is clicked", async () => {
+  it("shows connection metadata within table rows with explicit configuration navigation", async () => {
     // useViewMode reads localStorage to default the services tab into table mode.
     localStorage.setItem("nyxid-view-mode:keys-services", "table");
     const user = userEvent.setup();
@@ -533,18 +580,16 @@ describe("KeysPage", () => {
 
       // Table view renders column headers instead of cards.
       expect(
-        screen.getByRole("columnheader", { name: "Endpoint" }),
+        screen.getByRole("columnheader", { name: "Configuration" }),
       ).toBeInTheDocument();
       expect(
-        screen.getByRole("columnheader", { name: "Proxy Slug" }),
+        screen.getByRole("columnheader", { name: "Connection / Slug" }),
       ).toBeInTheDocument();
 
-      await user.click(screen.getByText("My OpenAI"));
+      await user.click(screen.getByRole("button", { name: "Details for My OpenAI (Personal)" }));
 
-      expect(mockNavigate).toHaveBeenCalledWith({
-        to: "/keys/$keyId",
-        params: { keyId: "key-1" },
-      });
+      expect(screen.getByRole("button", { name: "Details for My OpenAI (Personal)" })).toHaveAttribute("aria-expanded", "true");
+      expect(screen.getByRole("link", { name: "Configure My OpenAI (Personal)" })).toHaveAttribute("href", "/keys/$keyId:key-1");
     } finally {
       localStorage.removeItem("nyxid-view-mode:keys-services");
     }

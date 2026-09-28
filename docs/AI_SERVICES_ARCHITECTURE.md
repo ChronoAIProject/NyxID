@@ -8,6 +8,87 @@ NyxID's AI Services system lets users manage external API credentials, SSH servi
 
 ---
 
+## Service cards and saved filter defaults
+
+The External Services grid groups catalog-backed connections by `catalog_service_id`.
+Custom connections remain separate by ID. Each group starts collapsed with a
+256px minimum summary height; expanding a group keeps its connection comparison
+table inside the parent. Connection details and history remain on their existing detail pages.
+
+The expanded table shows Classification (personal, named organization with role,
+or an actual platform connection), Status, Activity (latest configuration change
+with actor and date, or creation), and the exact Slug. Each row links by connection
+ID to its detail page, so identical slugs in different organizations remain
+distinguishable. Repeated descriptions, endpoints and configuration belong on
+the full service page. **Service details** opens
+`/keys/services/{groupId}` for the complete catalog group (or one custom service).
+This page has Connections, Service information and History tabs. History is
+selected by connection ID, and each connection links to its existing full
+configuration page. Last-caller attribution remains explicitly unreported when
+absent from the API; credential preparation and provisioning-app metadata are
+never presented as the last service use.
+
+Standalone **Organization** and **Service** multi-select menus precede search.
+Each supports searching and immediate checkbox selection. Active values appear
+as individual removable pills (`Org: ChronoAI`, `Service: Aevatar`,
+`Service: Codex`). Values within one field match with OR; the two fields combine
+with AND. Empty selections mean all. Options come
+from actual connection owners and grouped services, keyed by organization ID and
+group ID. Clearing either selector leaves other criteria intact. Missing saved
+selections remain visible as unavailable until cleared. These selections are
+included in account defaults. Organization ownership uses a small circular org
+avatar with the existing initials fallback on cards, table rows, filter choices
+and pills. Platform sources use the NyxID icon.
+
+The search and Filters controls use the same `DataTableControls`,
+`DataTableFilterPopover` and `DataTableFilterChips` as the audit log. The filter
+panel uses Apply/Cancel; applied chips can be edited, removed individually, or
+cleared together. Search applies on submit or blur. These controls apply to both
+the grid and table. Filters include
+source (`all`, `personal`, `org`, `platform`), service state (`all`, `enabled`,
+`disabled`), type (`all`, `http`, `ssh`), and whether to include auto-connected
+services. All sources/states/types and auto-connected services are included by
+default. Source options come from the current connection list. Enabled/disabled
+uses `UserService.is_active`; it does not assert credential health or readiness.
+All criteria must match the same connection. Expanded tables show only matching
+rows and the parent displays the matching count against the group total. With no
+filters all siblings are visible. The full service page always contains every
+accessible connection in the group, independent of list filters.
+
+**Save as default** writes the current filters to the authenticated user's
+`users.profile_config.services_view` embedded blob. Search text is included.
+**Restore default** discards draft filters. **Clear filters** shows everything for
+this visit; saving afterward makes that the account default. Card expansion is
+session presentation state and is never persisted to the account. Draft filters
+survive detail-page navigation, but reset on sign-out/account change or reload.
+
+`GET /api/v1/users/me` includes `profile_config.services_view` (null until saved).
+`PUT /api/v1/users/me/preferences/services` replaces that one preference group:
+
+```json
+{
+  "search": "",
+  "organization_ids": [],
+  "service_group_ids": [],
+  "source": "org",
+  "state": "enabled",
+  "service_type": "all",
+  "show_auto_connected": true
+}
+```
+
+The PUT returns the saved filter object. It derives ownership from `AuthUser`,
+rejects unknown fields/enum values, limits search to 200 Unicode characters and
+each identifier to 128 characters and each selection list to 100 entries, and uses a dotted MongoDB update to preserve other settings. Existing users need no
+migration: legacy singular organization/service fields are read as one-item
+arrays (null as empty). Writes use the plural array fields and deduplicate IDs.
+Selection order does not change default-view equality. This endpoint changes display preferences only; it does not change
+routing, service access, or connection priority.
+
+Older backends omit `services_view`; filtering remains available, but account
+saving is disabled until the supporting backend is deployed. The UI never falls
+back to browser storage while claiming the preference was saved to the account.
+
 ## System Components
 
 ```mermaid
@@ -587,4 +668,35 @@ membership, owner activity, provider eligibility and catalog configuration.
 
 ## Service authorship and history
 
-Service cards and tables include authorized creator/latest-editor summaries. Instance detail pages, including platform-managed instances, have a History tab. Deleted UUID histories remain discoverable from Services → Deleted service history under current personal-owner/org-admin/resource-scope checks. The transactional journal covers service, endpoint and credential writers; ordinary timestamps, usage and routine refresh do not count as configuration edits. See [SERVICE_HISTORY.md](SERVICE_HISTORY.md) for capture, safe values, writer inventory, audit publication and required MongoDB replica-set migration.
+Service cards and tables include authorized creator/latest-editor summaries. Instance detail pages, including platform-managed instances, have a History tab. Deleted UUID histories remain discoverable from Services → Deleted service history under current personal-owner/org-membership/resource-scope checks. The transactional journal covers service, endpoint and credential writers; ordinary timestamps, usage and routine refresh do not count as configuration edits. See [SERVICE_HISTORY.md](SERVICE_HISTORY.md) for capture, safe values, writer inventory, audit publication and required MongoDB replica-set migration.
+
+### Connection comparison and configuration visibility
+
+The grid starts with one collapsed card per catalog service. Expanding a card keeps
+its connection table inside the parent, replaces the fixed-height summary with a
+compact header, and animates the card and neighboring grid positions using native
+view transitions where supported. Reduced-motion users receive immediate updates.
+The standalone table and service overview use the same comparison component.
+
+Rows combine connection name/slug/type, ownership/avatar/role, service and credential
+state, configuration summary, and latest recorded change. Row disclosure exposes
+additional metadata without nested connection cards. History has a separate action
+for every visible connection; it is not conditional on a recorded creator.
+
+`GET /keys` and `GET /keys/{id}` include `can_edit_configuration`. Personal owners
+and scoped org admins can inspect connection configuration; auto-connected rows
+remain platform managed. Read-only projections omit upstream URLs, private spec
+URLs, SSH targets, custom header values, WebSocket templates, custom User-Agent,
+OAuth app identifiers, and configuration error text. `/user-services` also omits
+private custom settings from inherited read-only rows; endpoint listing enforces
+admin service scope, and operation discovery hides its private source-spec URL
+from non-editors while retaining usable operation descriptions. Execution and
+minimal authorization-evidence representations keep their existing contracts.
+
+The frontend uses the explicit denial when available and known personal/org-admin
+ownership on older servers. It hides configuration on both the listing and direct
+connection pages. Owners, admins, members and viewers retain scoped history access,
+including archived history, under the active-owner and current-membership checks
+in [SERVICE_HISTORY.md](SERVICE_HISTORY.md). This is independent of proxy-use
+permission. Last editor and credential-preparation time are never labeled last
+caller or successful upstream execution.

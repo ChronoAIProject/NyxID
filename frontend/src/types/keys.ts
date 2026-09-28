@@ -6,6 +6,7 @@ import type { WsFrameInjection } from "@/schemas/services";
 export type { DefaultRequestHeader } from "@/schemas/default-request-headers";
 
 export interface KeyInfo {
+  readonly can_edit_configuration?: boolean;
   readonly authorship?: import("@/schemas/service-history").ServiceAuthorship;
   readonly credential_binding?: "platform" | "user";
   readonly platform_key_available?: boolean;

@@ -95,7 +95,7 @@ export function DashboardLayout() {
   // Shared channel onboarding must stay reachable through setup and bot routing.
   const isChannelBotRoute = pathname === "/channel-bots" || pathname.startsWith("/channel-bots/");
   if (onboarding.status === "loading") return null;
-  if (onboarding.status === "show" && !isChannelBotRoute) return <OnboardingTakeover />;
+  if (onboarding.status === "show" && !isChannelBotRoute && !(import.meta.env.DEV && import.meta.env.VITE_ROUTING_PREVIEW === "1")) return <OnboardingTakeover />;
 
   return (
     <RightPanelContext.Provider value={{ setRightPanel }}>
@@ -247,7 +247,8 @@ function TopBarBreadcrumbs() {
   for (const [i, segment] of segments.entries()) {
     const segPath = accPaths[i]!;
     const isLast = i === segments.length - 1;
-    if (UUID_RE.test(segment)) {
+    if (segPath === "/keys/services") continue;
+    if (UUID_RE.test(segment) || (isLast && pathname.startsWith("/keys/services/"))) {
       if (isLast && detailLabel) {
         crumbs.push({ label: detailLabel });
       }

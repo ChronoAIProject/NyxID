@@ -1,7 +1,7 @@
 use crate::{
     errors::{AppError, AppResult},
     models::{
-        org_membership::{OrgMembership, OrgRole},
+        org_membership::OrgMembership,
         service_change_event::{COLLECTION_NAME, ServiceChangeEvent},
         user::{COLLECTION_NAME as USERS, User},
         user_service::UserService,
@@ -44,7 +44,7 @@ pub async fn can_read(
         return Ok(false);
     }
     let access = org_service::resolve_owner_access(db, reader.actor_id, owner).await?;
-    Ok(access.can_write() && access.allows_resource(id))
+    Ok(access.can_read() && access.allows_resource(id))
 }
 
 pub async fn summaries(
@@ -75,7 +75,6 @@ pub async fn summaries(
                 m.org_user_id == owner.id
                     && m.member_user_id == reader.actor_id
                     && m.revoked_at.is_none()
-                    && m.role == OrgRole::Admin
             })
         {
             let scope = crate::services::org_role_scope_service::effective_scope_for_membership(
@@ -279,7 +278,7 @@ pub async fn archived(
     }
     let memberships: Vec<OrgMembership> = db
         .collection(MEMBERSHIPS)
-        .find(doc! { "member_user_id": reader.actor_id, "role": "admin", "revoked_at": null })
+        .find(doc! { "member_user_id": reader.actor_id, "revoked_at": null })
         .await?
         .try_collect()
         .await?;
@@ -295,11 +294,15 @@ pub async fn archived(
     let mut permitted = Vec::new();
     for owner in active {
         let access = org_service::resolve_owner_access(db, reader.actor_id, &owner.id).await?;
-        if !access.can_write() {
+        if !access.can_read() {
             continue;
         }
         let mut filter = doc! { "owner_id": &owner.id };
         if let org_service::OwnerAccess::AsOrgAdmin {
+            allowed_service_ids: Some(ids),
+            ..
+        }
+        | org_service::OwnerAccess::AsOrgMember {
             allowed_service_ids: Some(ids),
             ..
         } = access

@@ -99,6 +99,7 @@ import {
   KeysPage,
   BillingPage,
   KeyDetailPage,
+  ServiceOverviewPage,
   ChannelBotsPage,
   ChannelBotSetupPage,
   ChannelBotSetupLinksPage,
@@ -710,7 +711,8 @@ const keysRoute = createRoute({
   // service scope in the Agent Key create dialog.
   validateSearch: (
     search: Record<string, unknown>,
-  ): { tab?: string; slug?: string; action?: string; service?: string } => ({
+  ): { tab?: string; slug?: string; action?: string; service?: string; view?: string } => ({
+    ...(import.meta.env.DEV && search.view === "routing" ? { view: "routing" } : {}),
     ...(typeof search.tab === "string" ? { tab: search.tab } : {}),
     ...(typeof search.slug === "string" && search.slug.length > 0
       ? { slug: search.slug }
@@ -738,6 +740,12 @@ const billingRoute = createRoute({
       <BillingPage />
     </BillingRouteGuard>
   ),
+});
+
+const serviceOverviewRoute = createRoute({
+  path: "/keys/services/$groupId",
+  getParentRoute: () => dashboardLayout,
+  component: ServiceOverviewPage,
 });
 
 const keyDetailRoute = createRoute({
@@ -1068,6 +1076,7 @@ const routeTree = rootRoute.addChildren([
     approvalGrantsRoute,
     keysRoute,
     billingRoute,
+    serviceOverviewRoute,
     keyDetailRoute,
     apiKeyDetailRoute,
     nodesRoute,

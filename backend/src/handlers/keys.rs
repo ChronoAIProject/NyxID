@@ -413,6 +413,8 @@ impl std::fmt::Debug for CreateKeyRequest {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct KeyResponse {
+    /// Whether the current caller may inspect and edit connection configuration.
+    pub can_edit_configuration: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authorship: Option<crate::handlers::service_history::AuthorshipResponse>,
     pub id: String,
@@ -1303,6 +1305,9 @@ pub async fn list_keys(
         grants.memberships(),
     )
     .await?;
+    for key in &mut keys {
+        restrict_connection_configuration(key);
+    }
     Ok(Json(KeyListResponse { keys }))
 }
 
@@ -1345,6 +1350,7 @@ pub async fn get_key(
         std::slice::from_mut(&mut response),
     )
     .await?;
+    restrict_connection_configuration(&mut response);
     Ok(Json(response))
 }
 
@@ -2673,6 +2679,7 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
     .to_string();
 
     KeyResponse {
+        can_edit_configuration: true,
         authorship: None,
         recommended_skill_refs: None,
         skills_revision: None,
@@ -2811,7 +2818,10 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
         .is_some_and(|node_id| !node_id.is_empty());
     let endpoint_url = (!view.auto_connected).then_some(view.endpoint_url);
 
+    let credential_source: crate::handlers::user_services_handler::CredentialSourceResponse =
+        view.credential_source.clone().into();
     KeyResponse {
+        can_edit_configuration: !view.auto_connected && credential_source.can_edit_configuration(),
         authorship: None,
         recommended_skill_refs: None,
         skills_revision: None,
@@ -2901,6 +2911,31 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
         permission_setup_url: None,
         permission_setup_scopes: None,
     }
+}
+
+/// Apply after discovery enrichment, which can add instance configuration.
+/// Execution and authorization-evidence projections keep their own contracts.
+fn restrict_connection_configuration(key: &mut KeyResponse) {
+    if key.can_edit_configuration {
+        return;
+    }
+    key.endpoint_url = None;
+    key.auth_key_name.clear();
+    key.identity_jwt_audience = None;
+    key.delegation_token_scope.clear();
+    key.custom_user_agent = None;
+    key.oauth_client_id = None;
+    key.default_request_headers = None;
+    key.ws_frame_injections.clear();
+    key.ssh_host = None;
+    key.ssh_port = None;
+    key.ssh_ca_public_key = None;
+    key.ssh_allowed_principals = None;
+    key.ssh_certificate_ttl_minutes = None;
+    key.openapi_spec_url = None;
+    key.permission_setup_url = None;
+    key.permission_setup_scopes = None;
+    key.error_message = None;
 }
 
 async fn enrich_key_node_metadata(
@@ -5496,6 +5531,96 @@ mod tests {
         assert_eq!(old.keys[0].label, "Catalog API");
         assert_eq!(old.keys[0].slug, "catalog-api");
         assert_eq!(old.keys[0].endpoint_url, "https://api.example.com");
+    }
+
+    #[tokio::test]
+    async fn connection_configuration_requires_editor_for_list_and_detail() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("configuration_read_acl").await;
+        let actor = uuid::Uuid::new_v4().to_string();
+        let org = uuid::Uuid::new_v4().to_string();
+        let service = uuid::Uuid::new_v4().to_string();
+        insert_user(&db, &actor, UserType::Person).await;
+        insert_user(&db, &org, UserType::Org).await;
+        insert_key_fixture(&db, &org, &service, "shared", "Shared").await;
+        db.collection::<mongodb::bson::Document>("user_services")
+            .update_one(
+                doc! { "_id": &service },
+                doc! { "$set": { "custom_user_agent": "private-client" } },
+            )
+            .await
+            .unwrap();
+        let membership = test_membership(&org, &actor, OrgRole::Admin, Some(vec![service.clone()]));
+        db.collection::<crate::models::org_membership::OrgMembership>("org_memberships")
+            .insert_one(&membership)
+            .await
+            .unwrap();
+        let state = test_app_state(db.clone());
+        for (role, editable) in [("admin", true), ("member", false), ("viewer", false)] {
+            db.collection::<mongodb::bson::Document>("org_memberships")
+                .update_one(
+                    doc! { "_id": &membership.id },
+                    doc! { "$set": { "role": role } },
+                )
+                .await
+                .unwrap();
+            let Json(detail) = super::get_key(
+                State(state.clone()),
+                test_auth_user(&actor),
+                Path(service.clone()),
+            )
+            .await
+            .unwrap();
+            assert_eq!(detail.can_edit_configuration, editable);
+            assert_eq!(detail.endpoint_url.is_some(), editable);
+            assert!(
+                detail.authorship.is_some(),
+                "all scoped readers receive history metadata"
+            );
+            let Json(list) = super::list_keys(State(state.clone()), test_auth_user(&actor))
+                .await
+                .unwrap();
+            let row = list.keys.iter().find(|row| row.id == service).unwrap();
+            assert_eq!(row.can_edit_configuration, editable);
+            assert_eq!(row.endpoint_url.is_some(), editable);
+            assert!(row.authorship.is_some());
+            assert_eq!(row.custom_user_agent.is_some(), editable);
+            let Json(services) = crate::handlers::user_services_handler::list_user_services(
+                State(state.clone()),
+                test_auth_user(&actor),
+            )
+            .await
+            .unwrap();
+            let row = services
+                .services
+                .iter()
+                .find(|row| row.id == service)
+                .unwrap();
+            assert_eq!(row.custom_user_agent.is_some(), editable);
+            if !editable {
+                assert!(row.default_request_headers.is_none());
+                assert!(row.ws_frame_injections.is_empty());
+                assert!(row.auth_key_name.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn configuration_projection_removes_private_values_but_keeps_usage_identity() {
+        let mut response = poisoned_key_response();
+        response.can_edit_configuration = false;
+        response.openapi_spec_url = Some("https://private.example/spec".into());
+        response.ssh_host = Some("private.internal".into());
+        response.custom_user_agent = Some("custom-client".into());
+        super::restrict_connection_configuration(&mut response);
+        assert!(response.endpoint_url.is_none());
+        assert!(response.openapi_spec_url.is_none());
+        assert!(response.ssh_host.is_none());
+        assert!(response.custom_user_agent.is_none());
+        assert!(response.default_request_headers.is_none());
+        assert!(response.ws_frame_injections.is_empty());
+        assert_eq!(response.slug, "example");
+        assert_eq!(response.id, "service-1");
     }
 
     // ---- get_key org scoping tests ----

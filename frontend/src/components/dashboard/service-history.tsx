@@ -169,7 +169,7 @@ export function ServiceHistory({ serviceId }: { readonly serviceId: string }) {
           <p>
             {query.error instanceof ApiError &&
             [403, 404].includes(query.error.status)
-              ? "Service history is unavailable. Personal owners and currently permitted organization admins can view it."
+              ? "Service history is unavailable. You need current access to this connection to view its history."
               : "Service history could not be loaded."}
           </p>
           <Button
@@ -320,7 +320,7 @@ function ArchiveList() {
     <div className="space-y-3 rounded-xl border border-border/50 p-4">
       <p className="text-xs text-muted-foreground">
         Recorded history of deleted services you currently have permission to
-        manage.
+        view.
       </p>
       {query.isPending && <p role="status">Loading deleted service history…</p>}
       {query.isError && (

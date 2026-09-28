@@ -1,3 +1,5 @@
+import { canEditConnection } from "@/lib/connection-access";
+import { ServiceConnectionTable } from "@/components/dashboard/service-connection-table";
 import { OwnershipTransferCard } from "@/components/shared/ownership-transfer-card";
 import { useOwnershipTransferAuthorization } from "@/hooks/use-ownership-transfers";
 import { ServiceHistory, ServiceAuthorshipFooter } from "@/components/dashboard/service-history";
@@ -2393,7 +2395,7 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
   // a confusing toast error after every attempt.
   const source = keyInfo.credential_source;
   const isOrgSource = source?.type === "org";
-  const readOnly = isOrgSource && source.role !== "admin";
+  const readOnly = !canEditConnection(keyInfo);
   const canReconnect =
     !readOnly &&
     !keyInfo.auto_connected &&
@@ -2442,6 +2444,49 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
         }
       : null;
 
+  if (readOnly && !keyInfo.auto_connected) {
+    return (
+      <div className="space-y-5">
+        <Link
+          to="/keys/services/$groupId"
+          params={{ groupId: keyInfo.catalog_service_id ? `catalog:${keyInfo.catalog_service_id}` : `connection:${keyInfo.id}` }}
+          className="text-xs text-primary hover:underline"
+        >
+          All service connections
+        </Link>
+        <PageHeader title={keyInfo.label} />
+        <Tabs value={platformTab === "history" ? "history" : "overview"} onValueChange={setPlatformTab}>
+          <TabsList>
+            <TabsTrigger value="overview">Overview</TabsTrigger>
+            <TabsTrigger value="history">History</TabsTrigger>
+          </TabsList>
+          <TabsContent value="overview" className="space-y-4">
+            <div className="overflow-hidden rounded-xl border border-border bg-card">
+              <ServiceConnectionTable
+                connections={[keyInfo]}
+                serviceName={keyInfo.label}
+                onViewHistory={() => setPlatformTab("history")}
+              />
+            </div>
+            {!isSsh && (!isOrgSource || source.allowed) && (
+              <ApiUsageSection
+                serviceId={keyInfo.id}
+                slug={keyInfo.slug}
+                authMethod={keyInfo.auth_method}
+                endpointUrl=""
+                catalogServiceSlug={keyInfo.catalog_service_slug}
+                label={keyInfo.label}
+                catalogEntry={catalogEntry}
+                showAgentSetup={false}
+              />
+            )}
+          </TabsContent>
+          <TabsContent value="history"><ServiceHistory serviceId={keyInfo.id} /></TabsContent>
+        </Tabs>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-8">
       {error && (
@@ -2450,6 +2495,15 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
           onRetry={refetch}
         />
       )}
+      {import.meta.env.DEV && import.meta.env.VITE_ROUTING_PREVIEW === "1" && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-primary/20 bg-primary/5 px-4 py-3 text-xs">
+          <p>Local preview · full details from production. Account changes and execution are disabled.</p>
+          <Link to="/keys" search={{ view: "routing" }} className="font-medium text-primary hover:underline">Back to services</Link>
+        </div>
+      )}
+      <Link to="/keys/services/$groupId" params={{ groupId: keyInfo.catalog_service_id ? `catalog:${keyInfo.catalog_service_id}` : `connection:${keyInfo.id}` }} className="inline-flex text-xs text-muted-foreground hover:text-foreground">
+        ← All {keyInfo.catalog_service_name ?? keyInfo.label} service details
+      </Link>
       <div className="flex flex-col gap-2">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-3">
@@ -2574,7 +2628,7 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
         )}
       </div>
 
-      {keyInfo.catalog_service_id && <CredentialBindingCard service={keyInfo} catalog={catalogEntry} readOnly={readOnly} />}
+      {!readOnly && keyInfo.catalog_service_id && <CredentialBindingCard service={keyInfo} catalog={catalogEntry} readOnly={readOnly} />}
 
       <ServiceAuthorshipFooter authorship={keyInfo.authorship} />
       {(keyInfo.auto_connected || keyInfo.credential_binding === "platform") ? (
@@ -2586,7 +2640,7 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
           <TabsList>
             <TabsTrigger value="overview">Overview</TabsTrigger>
             {catalogTransferResource && <TabsTrigger value="advanced">Advanced</TabsTrigger>}
-            {keyInfo.authorship && <TabsTrigger value="history">History</TabsTrigger>}
+            <TabsTrigger value="history">History</TabsTrigger>
           </TabsList>
           <TabsContent value="overview" className="space-y-4">
           <Card>
@@ -2692,7 +2746,7 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
               users can see why those headers reach the downstream. Keep this
               behind disclosure so verification stays before inherited HTTP
               mechanics. */}
-          {keyInfo.auto_connected && !isSsh && catalogHeaders && catalogHeaders.length > 0 && (
+          {!readOnly && keyInfo.auto_connected && !isSsh && catalogHeaders && catalogHeaders.length > 0 && (
             <details className="rounded-xl border border-border/50 bg-card p-4">
               <summary className="cursor-pointer text-sm font-medium text-foreground">
                 Advanced: inherited request headers
@@ -2713,14 +2767,14 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
               <OwnershipTransferCard kind="service" resource={catalogTransferResource} />
             </TabsContent>
           )}
-          {keyInfo.authorship && <TabsContent value="history"><ServiceHistory serviceId={keyInfo.id} /></TabsContent>}
+          <TabsContent value="history"><ServiceHistory serviceId={keyInfo.id} /></TabsContent>
         </Tabs>
       ) : (
         <Tabs defaultValue="overview" className="space-y-6">
           <TabsList className="w-full max-w-full">
             <TabsTrigger value="overview">Overview</TabsTrigger>
             <TabsTrigger value="advanced">Advanced</TabsTrigger>
-            {keyInfo.authorship && <TabsTrigger value="history">History</TabsTrigger>}
+            <TabsTrigger value="history">History</TabsTrigger>
           </TabsList>
 
           <TabsContent value="overview" className="space-y-4">
@@ -2876,7 +2930,7 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
               <OwnershipTransferCard kind="service" resource={catalogTransferResource} />
             )}
           </TabsContent>
-          {keyInfo.authorship && <TabsContent value="history"><ServiceHistory serviceId={keyInfo.id} /></TabsContent>}
+          <TabsContent value="history"><ServiceHistory serviceId={keyInfo.id} /></TabsContent>
         </Tabs>
       )}
 

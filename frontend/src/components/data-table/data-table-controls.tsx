@@ -123,7 +123,7 @@ export function DataTableSearch<SearchKey extends string>({
       role="search"
       className="w-full min-w-0 flex-1 sm:min-w-[320px]"
     >
-      <div className="flex h-11 min-w-0 items-stretch overflow-hidden rounded-lg border border-input bg-transparent transition-colors focus-within:border-white/[0.15] md:h-9">
+      <div className="flex h-11 min-w-0 items-stretch overflow-hidden rounded-lg border border-input bg-transparent md:h-9">
         <span className="flex w-9 shrink-0 items-center justify-center text-muted-foreground">
           <Search className="h-3.5 w-3.5" aria-hidden="true" />
         </span>
@@ -154,31 +154,33 @@ export function DataTableSearch<SearchKey extends string>({
         >
           <X className="h-3.5 w-3.5" aria-hidden="true" />
         </button>
-        <Select
-          open={fieldSelectOpen}
-          onOpenChange={setFieldSelectOpen}
-          value={selectedField ?? ALL_FIELDS_VALUE}
-          onValueChange={handleFieldChange}
-        >
-          <SelectTrigger
-            aria-label={fieldAriaLabel}
-            title={`Search in ${selectedLabel}`}
-            className="h-full w-[124px] shrink-0 rounded-none border-y-0 border-r-0 border-l border-border/60 px-2.5 focus:border-border/60 sm:w-[146px]"
+        {fields.length > 0 && (
+          <Select
+            open={fieldSelectOpen}
+            onOpenChange={setFieldSelectOpen}
+            value={selectedField ?? ALL_FIELDS_VALUE}
+            onValueChange={handleFieldChange}
           >
-            <span className="min-w-0 truncate">
-              <span className="text-muted-foreground">In: </span>
-              {selectedLabel}
-            </span>
-          </SelectTrigger>
-          <SelectContent align="end">
-            <SelectItem value={ALL_FIELDS_VALUE}>{allFieldsLabel}</SelectItem>
-            {fields.map((field) => (
-              <SelectItem key={field.key} value={field.key}>
-                {field.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+            <SelectTrigger
+              aria-label={fieldAriaLabel}
+              title={`Search in ${selectedLabel}`}
+              className="h-full w-[124px] shrink-0 rounded-none border-y-0 border-r-0 border-l border-border/60 px-2.5 focus:border-border/60 sm:w-[146px]"
+            >
+              <span className="min-w-0 truncate">
+                <span className="text-muted-foreground">In: </span>
+                {selectedLabel}
+              </span>
+            </SelectTrigger>
+            <SelectContent align="end">
+              <SelectItem value={ALL_FIELDS_VALUE}>{allFieldsLabel}</SelectItem>
+              {fields.map((field) => (
+                <SelectItem key={field.key} value={field.key}>
+                  {field.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
       </div>
     </form>
   );
@@ -929,6 +931,7 @@ export interface DataTableFilterChipsProps<
   readonly filters: readonly AppliedDataTableFilter<FilterKey>[];
   readonly allFieldsLabel?: string;
   readonly ariaLabel?: string;
+  readonly className?: string;
   readonly onEditSearch: () => void;
   readonly onRemoveSearch: () => void;
   readonly onEditSearchValue: (field: SearchKey, value: string) => void;
@@ -949,6 +952,7 @@ export function DataTableFilterChips<
   filters,
   allFieldsLabel = "All fields",
   ariaLabel = "Applied filters",
+  className,
   onEditSearch,
   onRemoveSearch,
   onEditSearchValue,
@@ -967,7 +971,7 @@ export function DataTableFilterChips<
   );
 
   return (
-    <div className="flex flex-wrap items-center gap-1.5" aria-label={ariaLabel}>
+    <div className={cn("flex flex-wrap items-center gap-1.5", className)} aria-label={ariaLabel}>
       {search && (
         <div
           role="group"
@@ -1128,15 +1132,26 @@ export function DataTableControls({
   filter,
   status,
   chips,
+  singleRow = false,
+  className,
 }: {
   readonly search: ReactNode;
   readonly filter: ReactNode;
   readonly status?: ReactNode;
   readonly chips?: ReactNode;
+  readonly singleRow?: boolean;
+  readonly className?: string;
 }) {
   return (
-    <div className="space-y-2 border-b border-border/60 p-3">
-      <div className="flex flex-wrap items-center gap-2">
+    <div className={cn("space-y-2 border-b border-border/60 p-3", className)}>
+      <div
+        className={cn(
+          "flex items-center gap-2",
+          singleRow
+            ? "-m-1 flex-nowrap overflow-x-auto overscroll-x-contain p-1 [&>form]:min-w-48 [&>form]:w-auto"
+            : "flex-wrap",
+        )}
+      >
         {search}
         <div className="ml-auto flex shrink-0 items-center">{filter}</div>
         {status}

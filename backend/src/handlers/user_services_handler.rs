@@ -172,6 +172,21 @@ pub enum CredentialSourceResponse {
     },
 }
 
+impl CredentialSourceResponse {
+    /// Listing and detail resolvers have already applied the service scope.
+    pub fn can_edit_configuration(&self) -> bool {
+        matches!(
+            self,
+            Self::Personal
+                | Self::Org {
+                    role: OrgRoleResponse::Admin,
+                    allowed: true,
+                    ..
+                }
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum OrgRoleResponse {
@@ -310,6 +325,14 @@ pub async fn list_user_services(
             let mut response = user_service_with_source_response(&state.config, item);
             response.label = label;
             response.catalog_service_name = catalog_service_name;
+            if !response.credential_source.can_edit_configuration() {
+                response.auth_key_name.clear();
+                response.identity_jwt_audience = None;
+                response.delegation_token_scope.clear();
+                response.custom_user_agent = None;
+                response.default_request_headers = None;
+                response.ws_frame_injections.clear();
+            }
             response
         })
         .collect();

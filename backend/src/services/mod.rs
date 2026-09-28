@@ -168,6 +168,7 @@ pub mod url_validation;
 pub mod user_api_key_service;
 pub mod user_credentials_service;
 pub mod user_endpoint_service;
+pub mod user_preferences_service;
 pub mod user_service_service;
 pub mod user_token_service;
 pub mod webhook_delivery_service;
