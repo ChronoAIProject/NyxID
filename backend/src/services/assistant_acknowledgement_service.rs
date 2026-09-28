@@ -33,12 +33,12 @@ pub struct ChatAuthority {
     pub user_id: String,
     pub api_key_id: String,
     pub role: AgentRole,
-    /// The orchestrator conversation for subagents.
-    pub team_id: Option<String>,
-    pub agent_name: Option<String>,
+    /// The agent this thread belongs to (NyxBot or a specialist).
+    pub agent_id: String,
+    pub agent_name: String,
 }
 impl ChatAuthority {
-    /// Orchestrators run with Full access; subagents only with their grants.
+    /// NyxBot threads run with Full access; specialists only with their grants.
     pub fn is_orchestrator(&self) -> bool {
         self.role == AgentRole::Orchestrator
     }
@@ -65,16 +65,21 @@ pub async fn for_key(
     };
     let conversation_id = row.get_str("conversation_id").map_err(|_| not_found())?;
     let conversation = super::assistant_nyxagent::get(db, user, conversation_id).await?;
-    if conversation.destroyed_at.is_some() {
+    let agent = super::assistant_team_service::agent_for_conversation(db, &conversation).await?;
+    if agent.destroyed_at.is_some() {
         return Err(not_found());
     }
     Ok(Some(ChatAuthority {
         user_id: user.into(),
         api_key_id: key.into(),
         conversation_id: conversation_id.into(),
-        role: conversation.role,
-        team_id: conversation.team_id,
-        agent_name: conversation.agent_name,
+        role: if agent.is_nyxbot() {
+            AgentRole::Orchestrator
+        } else {
+            AgentRole::Subagent
+        },
+        agent_id: agent.id,
+        agent_name: agent.name,
     }))
 }
 
@@ -329,11 +334,6 @@ pub async fn request_tracked(
         decided_at: None,
         expires_at: now + Duration::seconds(PENDING_SECONDS),
         decider: if orchestrated { "orchestrator" } else { "user" }.into(),
-        team_id: if orchestrated {
-            chat.team_id.clone()
-        } else {
-            None
-        },
         request_excerpt: None,
         decided_by: None,
         reason: None,
@@ -524,11 +524,11 @@ pub async fn account_gate(
 
 /// Who decides a card.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Decider<'a> {
+pub enum Decider {
     /// The owner, from the card's own conversation.
     User,
-    /// The orchestrator conversation deciding its team's request.
-    Orchestrator { team_id: &'a str },
+    /// The owner's NyxBot deciding a specialist's request.
+    Nyxbot,
 }
 
 /// Decide a card as the owner from its own conversation.
@@ -543,27 +543,23 @@ pub async fn decide(
     decide_as(db, user, Some(conversation), id, allow, Decider::User, None).await
 }
 
-/// Decide a card. The owner decides from the card's conversation, or from the
-/// team's orchestrator thread for subagent requests; the orchestrator decides
-/// only its own team's orchestrator-routed requests. A subagent grant is also
-/// written to the subagent's durable grants so the next turn keeps it.
+/// Decide a card. The owner decides from the card's conversation; the owner's
+/// NyxBot decides only NyxBot-routed specialist requests. A specialist grant is
+/// also written to the agent's durable grants so every thread keeps it.
 pub async fn decide_as(
     db: &Database,
     user: &str,
     conversation: Option<&str>,
     id: &str,
     allow: bool,
-    decider: Decider<'_>,
+    decider: Decider,
     reason: Option<&str>,
 ) -> AppResult<AssistantAcknowledgement> {
     let db = db.clone();
     let user = user.to_owned();
     let conversation = conversation.map(str::to_owned);
     let id = id.to_owned();
-    let team = match decider {
-        Decider::User => None,
-        Decider::Orchestrator { team_id } => Some(team_id.to_owned()),
-    };
+    let by_nyxbot = decider == Decider::Nyxbot;
     let reason = reason.map(|reason| super::assistant_nyxagent::excerpt(reason, 300));
     let mut session = db.client().start_session().await?;
     let row = session
@@ -575,8 +571,7 @@ pub async fn decide_as(
                 if let Some(conversation) = &conversation {
                     filter.insert("conversation_id", conversation);
                 }
-                if let Some(team) = &team {
-                    filter.insert("team_id", team);
+                if by_nyxbot {
                     filter.insert("decider", "orchestrator");
                 }
                 let mut row = collection
@@ -600,8 +595,8 @@ pub async fn decide_as(
                     conversation_id: row.conversation_id.clone(),
                     api_key_id: row.api_key_id.clone(),
                     role: target.role,
-                    team_id: target.team_id.clone(),
-                    agent_name: target.agent_name.clone(),
+                    agent_id: target.agent_id.clone().unwrap_or_default(),
+                    agent_name: String::new(),
                 };
                 let (_, key) = fence(&db, &chat, session).await?;
                 let subagent = target.role == AgentRole::Subagent;
@@ -637,7 +632,30 @@ pub async fn decide_as(
                         })?;
                     }
                 }
-                if allow && row.kind == "service" {
+                if allow && subagent {
+                    // A specialist's grant lives on its agent and converges on
+                    // every one of its thread keys, not just the requesting one.
+                    let mut grant = crate::models::assistant_agent::AgentGrants::default();
+                    match (row.kind.as_str(), row.service_id.clone()) {
+                        ("service", Some(service_id)) if row.platform => {
+                            grant.platform_service_ids.push(service_id)
+                        }
+                        ("service", Some(service_id)) => grant.service_ids.push(service_id),
+                        ("account", _) => grant.account_read = true,
+                        _ => {}
+                    }
+                    if grant != Default::default() {
+                        let agent_id = target.agent_id.as_deref().ok_or_else(not_found)?;
+                        super::assistant_team_service::apply_grants_in_session(
+                            &db,
+                            &user,
+                            agent_id,
+                            &super::assistant_team_service::GrantChange::Add(grant),
+                            &mut *session,
+                        )
+                        .await?;
+                    }
+                } else if allow && row.kind == "service" {
                     let service_id = row.service_id.as_deref().ok_or_else(not_found)?;
                     let field = if row.platform {
                         "allowed_platform_service_ids"
@@ -651,30 +669,7 @@ pub async fn decide_as(
                         Some(&mut *session),
                     )
                     .await?;
-                    if subagent {
-                        let grant = if row.platform {
-                            "grants.platform_service_ids"
-                        } else {
-                            "grants.service_ids"
-                        };
-                        db.collection::<bson::Document>(CONVERSATIONS)
-                            .update_one(
-                                doc! {"_id": &row.conversation_id, "user_id": &user},
-                                doc! {"$addToSet": {grant: service_id}},
-                            )
-                            .session(&mut *session)
-                            .await?;
-                    }
                 } else if allow && row.kind == "account" {
-                    if subagent {
-                        db.collection::<bson::Document>(CONVERSATIONS)
-                            .update_one(
-                                doc! {"_id": &row.conversation_id, "user_id": &user},
-                                doc! {"$set": {"grants.account_read": true}},
-                            )
-                            .session(&mut *session)
-                            .await?;
-                    }
                     let mut scopes: Vec<_> = key.scopes.split_whitespace().collect();
                     if !scopes.contains(&ASSISTANT_ACCOUNT_SCOPE) {
                         scopes.push(ASSISTANT_ACCOUNT_SCOPE);
@@ -689,14 +684,7 @@ pub async fn decide_as(
                 }
                 row.status = if allow { "allowed" } else { "denied" }.into();
                 row.decided_at = Some(now);
-                row.decided_by = Some(
-                    if team.is_some() {
-                        "orchestrator"
-                    } else {
-                        "user"
-                    }
-                    .into(),
-                );
+                row.decided_by = Some(if by_nyxbot { "orchestrator" } else { "user" }.into());
                 row.reason = reason.clone();
                 if allow && row.kind == "action" {
                     row.expires_at = now + Duration::seconds(ACTION_SECONDS);

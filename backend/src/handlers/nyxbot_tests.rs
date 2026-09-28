@@ -129,6 +129,7 @@ async fn channel(state: &AppState, transport: &str) -> (NyxbotChannel, String) {
         link_code_hash: None,
         link_code_expires_at: None,
         source_conversation_id: None,
+        agent_id: None,
         created_at: now,
         updated_at: now,
     };
@@ -332,7 +333,7 @@ async fn gateway_turns_admit_once_answer_only_the_verified_owner_and_keep_contex
         assert_eq!(calls[0]["input"], "What changed today?");
         let instructions = calls[0]["instructions"].as_str().unwrap();
         assert!(instructions.contains("verified this sender as the owner"));
-        assert!(instructions.contains("channel bot through the"));
+        assert!(instructions.contains("channel bot. Replies are delivered"));
     }
     let conversation: AssistantConversation = state
         .db
@@ -367,6 +368,41 @@ async fn gateway_turns_admit_once_answer_only_the_verified_owner_and_keep_contex
     )
     .await;
     assert_eq!(other.status(), StatusCode::NOT_FOUND);
+    // A message while this chat's turn is still running is queued for the
+    // next turn (answered later as an update), not bounced.
+    state
+        .db
+        .collection::<mongodb::bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &conversation.id},
+            doc! {"$set": {"active_turn": {
+                "turn_id": "busy", "origin": "channel",
+                "started_at": mongodb::bson::DateTime::now(), "stop_requested": false,
+            }}},
+        )
+        .await
+        .unwrap();
+    let busy = body_text(
+        respond(
+            &state,
+            &agent_key,
+            &event("And one more thing", "7", "evt-4"),
+            "evt_4",
+        )
+        .await,
+    )
+    .await;
+    assert!(busy.contains("will answer this right after"), "{busy}");
+    let queued = crate::services::assistant_nyxagent::get(&state.db, OWNER, &conversation.id)
+        .await
+        .unwrap();
+    assert!(
+        queued
+            .pending_events
+            .iter()
+            .any(|event| event.kind == "message" && event.text.contains("And one more thing"))
+    );
+    assert_eq!(calls.lock().await.len(), 1);
     // Management test turns carry no context and run nothing.
     let test = body_text(
         respond(
@@ -380,6 +416,95 @@ async fn gateway_turns_admit_once_answer_only_the_verified_owner_and_keep_contex
     .await;
     assert!(test.contains("NyxBot is connected."));
     assert_eq!(calls.lock().await.len(), 1);
+    server.abort();
+}
+
+#[tokio::test]
+async fn relinking_a_bot_to_a_specialist_starts_that_agents_own_thread() {
+    let (state, calls, server) = setup("nyxbot_relink").await;
+    let (row, agent_key) = channel(&state, "gateway").await;
+    let bound = put_binding(
+        State(state.clone()),
+        Path("bnd_relink".into()),
+        bearer(&agent_key),
+        Json(binding_body(&agent_key, OWNER)),
+    )
+    .await;
+    assert_eq!(bound.status(), StatusCode::OK);
+    let ensured = put_conversation(
+        State(state.clone()),
+        Path(("bnd_relink".into(), PARTITION.into())),
+        bearer(&agent_key),
+    )
+    .await;
+    assert_eq!(ensured.status(), StatusCode::OK);
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .update_one(
+            doc! {"_id": &row.id},
+            doc! {"$set": {"owner_sender_ids": ["7"]}},
+        )
+        .await
+        .unwrap();
+    let first =
+        body_text(respond(&state, &agent_key, &event("Hi", "7", "evt-1"), "evt_1").await).await;
+    assert!(first.contains("Here is your answer"), "{first}");
+    let (specialist, _) = crate::services::assistant_team_service::create_specialist(
+        &state.db,
+        &state.encryption_keys,
+        OWNER,
+        crate::services::assistant_team_service::CreateRequest {
+            name: "support".into(),
+            description: "Answer questions from the support chat".into(),
+            targets: Default::default(),
+            account_read: false,
+            specialty: None,
+            created_by: "user",
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let changed = link(&state, OWNER, &row.id, &specialist).await.unwrap();
+    assert_eq!(changed["changed"], true);
+    let second =
+        body_text(respond(&state, &agent_key, &event("Hi", "7", "evt-2"), "evt_2").await).await;
+    assert!(second.contains("Here is your answer"), "{second}");
+    assert_eq!(calls.lock().await.len(), 2);
+    let threads: Vec<AssistantConversation> = state
+        .db
+        .collection::<AssistantConversation>(CONVERSATIONS)
+        .find(doc! {"user_id": OWNER, "channel.nyxbot_channel_id": &row.id})
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(threads.len(), 2);
+    let (nyxbot_thread, specialist_thread): (Vec<_>, Vec<_>) =
+        threads.iter().partition(|thread| !thread.is_subagent());
+    assert_eq!(
+        specialist_thread[0].agent_id.as_deref(),
+        Some(specialist.id.as_str())
+    );
+    // The chat now maps to the specialist's thread; the NyxBot thread's late
+    // updates stay in the app.
+    let mapping = state
+        .db
+        .collection::<NyxbotThread>(THREADS)
+        .find_one(doc! {"channel_id": &row.id, "partition": PARTITION})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        mapping.conversation_id.as_deref(),
+        Some(specialist_thread[0].id.as_str())
+    );
+    assert_ne!(nyxbot_thread[0].id, specialist_thread[0].id);
+    // Linking to the same agent again changes nothing.
+    let unchanged = link(&state, OWNER, &row.id, &specialist).await.unwrap();
+    assert_eq!(unchanged["changed"], false);
     server.abort();
 }
 

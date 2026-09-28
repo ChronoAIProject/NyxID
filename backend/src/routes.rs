@@ -1919,12 +1919,26 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             patch(handlers::assistant_nyxagent::change_access_mode),
         )
         .route(
-            "/nyxagent/conversations/{id}/team",
-            get(handlers::assistant_team::get_team),
+            "/nyxagent/agents",
+            get(handlers::assistant_team::list_agents).post(handlers::assistant_team::create_agent),
         )
         .route(
-            "/nyxagent/conversations/{id}/destroy",
-            post(handlers::assistant_team::destroy_member),
+            "/nyxagent/agents/{id}",
+            get(handlers::assistant_team::get_agent)
+                .patch(handlers::assistant_team::update_agent)
+                .delete(handlers::assistant_team::delete_agent),
+        )
+        .route(
+            "/nyxagent/agents/{id}/grants",
+            axum::routing::put(handlers::assistant_team::set_agent_grants),
+        )
+        .route(
+            "/nyxagent/agents/{id}/destroy",
+            post(handlers::assistant_team::destroy_agent_route),
+        )
+        .route(
+            "/nyxagent/agents/{id}/memory/{note_id}",
+            delete(handlers::assistant_team::delete_memory),
         )
         .route(
             "/nyxagent/settings",
@@ -1937,7 +1951,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .route(
             "/nyxagent/channels/{id}",
-            delete(handlers::nyxbot::disconnect_channel),
+            delete(handlers::nyxbot::disconnect_channel).patch(handlers::nyxbot::link_channel),
         )
         .route(
             "/nyxagent/conversations/{id}/acknowledgements/{ack_id}",

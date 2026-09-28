@@ -83,13 +83,12 @@ pub struct ActiveTurnResponse {
     attachments: Vec<AttachmentResponse>,
 }
 #[derive(Serialize)]
-pub struct MemberResponse {
+pub struct AgentRefResponse {
     pub id: String,
+    pub kind: crate::models::assistant_agent::AgentKind,
     pub name: String,
-    pub status: &'static str,
-    pub pending_acknowledgements: u32,
-    pub last_message_at: DateTime<Utc>,
-    pub destroyed_at: Option<DateTime<Utc>>,
+    /// Destroyed agents' threads are read-only.
+    pub destroyed: bool,
 }
 #[derive(Serialize)]
 pub struct ChannelOriginResponse {
@@ -109,15 +108,32 @@ pub struct ConversationResponse {
     active_turn: Option<ActiveTurnResponse>,
     context_reset_at: Option<DateTime<Utc>>,
     role: crate::models::assistant_conversation::AgentRole,
-    team_id: Option<String>,
-    agent_name: Option<String>,
-    charter: Option<String>,
-    destroyed_at: Option<DateTime<Utc>>,
-    /// Wake-up events waiting for this agent's next turn.
+    /// The agent this thread belongs to; `None` only when it could not be
+    /// resolved (legacy rows resolve to the owner's NyxBot).
+    agent: Option<AgentRefResponse>,
+    /// Wake-up events waiting for this thread's next turn.
     pending_events: usize,
     channel: Option<ChannelOriginResponse>,
-    /// Orchestrators only (index and history): the team's subagents.
-    members: Vec<MemberResponse>,
+}
+impl ConversationResponse {
+    /// Attach the owning agent (legacy rows belong to NyxBot).
+    pub(crate) fn with_agent(
+        mut self,
+        agent_id: Option<&str>,
+        agents: &[crate::models::assistant_agent::AssistantAgent],
+    ) -> Self {
+        let agent = match agent_id {
+            Some(id) => agents.iter().find(|agent| agent.id == id),
+            None => agents.iter().find(|agent| agent.is_nyxbot()),
+        };
+        self.agent = agent.map(|agent| AgentRefResponse {
+            id: agent.id.clone(),
+            kind: agent.kind,
+            name: agent.name.clone(),
+            destroyed: agent.destroyed_at.is_some(),
+        });
+        self
+    }
 }
 impl From<AssistantConversation> for ConversationResponse {
     fn from(row: AssistantConversation) -> Self {
@@ -149,15 +165,11 @@ impl From<AssistantConversation> for ConversationResponse {
             active_turn,
             context_reset_at: row.context_reset_at,
             role: row.role,
-            team_id: row.team_id,
-            agent_name: row.agent_name,
-            charter: row.charter,
-            destroyed_at: row.destroyed_at,
+            agent: None,
             pending_events: row.pending_events.len(),
             channel: row.channel.map(|channel| ChannelOriginResponse {
                 platform: channel.platform,
             }),
-            members: Vec::new(),
         }
     }
 }
@@ -203,6 +215,8 @@ impl From<AssistantMessage> for MessageResponse {
 pub struct PageQuery {
     limit: Option<i64>,
     cursor: Option<String>,
+    /// Only this agent's threads.
+    agent_id: Option<String>,
 }
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -232,28 +246,39 @@ pub async fn list(
     let user_id = auth.user_id.to_string();
     engine::require_enabled(&state.db, &user_id).await?;
     let limit = limit(query.limit)?;
-    let mut rows = engine::list(&state.db, &user_id, limit + 1, query.cursor.as_deref()).await?;
+    crate::services::assistant_team_service::ensure_nyxbot(&state.db, &user_id).await?;
+    let agents = crate::services::assistant_team_service::agents(&state.db, &user_id, true).await?;
+    let agent = match query.agent_id.as_deref() {
+        Some(id) => Some(
+            agents
+                .iter()
+                .find(|agent| agent.id == id)
+                .ok_or_else(|| AppError::NotFound("Agent not found".into()))?,
+        ),
+        None => None,
+    };
+    let mut rows = engine::list(
+        &state.db,
+        &user_id,
+        limit + 1,
+        query.cursor.as_deref(),
+        agent,
+    )
+    .await?;
     let more = rows.len() > limit as usize;
     rows.truncate(limit as usize);
     let next_cursor = more.then(|| engine::index_cursor(rows.last().expect("nonempty page")));
-    let team_ids: Vec<String> = rows.iter().map(|row| row.id.clone()).collect();
-    let members =
-        crate::services::assistant_team_service::members(&state.db, &user_id, &team_ids).await?;
-    let mut ids = team_ids.clone();
-    ids.extend(members.iter().map(|row| row.id.clone()));
+    let ids: Vec<String> = rows.iter().map(|row| row.id.clone()).collect();
     let counts = acknowledgements::pending_counts(&state.db, &user_id, &ids).await?;
     Ok(Json(IndexResponse {
         conversations: rows
             .into_iter()
             .map(|row| {
                 let count = counts.get(&row.id).copied().unwrap_or(0);
-                let team: Vec<_> = members
-                    .iter()
-                    .filter(|member| member.team_id.as_deref() == Some(row.id.as_str()))
-                    .collect();
-                let mut dto = ConversationResponse::from(row);
+                let agent_id = row.agent_id.clone();
+                let mut dto =
+                    ConversationResponse::from(row).with_agent(agent_id.as_deref(), &agents);
                 dto.pending_acknowledgements = count;
-                dto.members = member_responses(&team, &counts);
                 dto
             })
             .collect(),
@@ -261,22 +286,6 @@ pub async fn list(
     }))
 }
 
-pub(crate) fn member_responses(
-    rows: &[&AssistantConversation],
-    counts: &HashMap<String, u32>,
-) -> Vec<MemberResponse> {
-    let now = Utc::now();
-    rows.iter()
-        .map(|row| MemberResponse {
-            id: row.id.clone(),
-            name: row.agent_name.clone().unwrap_or_default(),
-            status: crate::services::assistant_team_service::status(row, now),
-            pending_acknowledgements: counts.get(&row.id).copied().unwrap_or(0),
-            last_message_at: row.updated_at,
-            destroyed_at: row.destroyed_at,
-        })
-        .collect()
-}
 #[derive(Serialize)]
 pub struct HistoryResponse {
     conversation: ConversationResponse,
@@ -334,24 +343,10 @@ pub async fn history(
     let acknowledgements = acknowledgements::history(&state.db, &user_id, &id).await?;
     let approvals =
         engine::pending_approvals(&state.db, &user_id, &conversation.credential_api_key_id).await?;
-    let members = if conversation.is_subagent() {
-        Vec::new()
-    } else {
-        crate::services::assistant_team_service::members(
-            &state.db,
-            &user_id,
-            std::slice::from_ref(&conversation.id),
-        )
-        .await?
-    };
-    let member_counts = acknowledgements::pending_counts(
-        &state.db,
-        &user_id,
-        &members.iter().map(|row| row.id.clone()).collect::<Vec<_>>(),
-    )
-    .await?;
-    let mut conversation = ConversationResponse::from(conversation);
-    conversation.members = member_responses(&members.iter().collect::<Vec<_>>(), &member_counts);
+    let agents = crate::services::assistant_team_service::agents(&state.db, &user_id, true).await?;
+    let agent_id = conversation.agent_id.clone();
+    let mut conversation =
+        ConversationResponse::from(conversation).with_agent(agent_id.as_deref(), &agents);
     conversation.pending_acknowledgements = acknowledgements
         .iter()
         .filter(|ack| ack.status == "pending")
@@ -538,21 +533,7 @@ pub async fn delete(
     let user_id = auth.user_id.to_string();
     engine::require_enabled(&state.db, &user_id).await?;
     let target = engine::get(&state.db, &user_id, &id).await?;
-    // Deleting an orchestrator deletes its team; load every member's key
-    // first so their NyxAgent sessions can be released afterwards.
-    let mut ids = vec![target.id.clone()];
-    if !target.is_subagent() {
-        ids.extend(
-            crate::services::assistant_team_service::members(
-                &state.db,
-                &user_id,
-                std::slice::from_ref(&target.id),
-            )
-            .await?
-            .into_iter()
-            .map(|row| row.id),
-        );
-    }
+    let ids = vec![target.id.clone()];
     let mut credentials_by_id = HashMap::new();
     for member in &ids {
         if let Some(credential) =
@@ -1110,13 +1091,17 @@ async fn execute_turn(
     };
     // Turn-scoped NyxID notes: team state, direct chats, drained events and
     // channel sender context. Lookup failures only omit a note.
-    decisions.push_str(&super::assistant_team::turn_notes(state, row, previous).await);
+    let agent = crate::services::assistant_team_service::agent_for_conversation(&state.db, row)
+        .await
+        .ok();
+    decisions
+        .push_str(&super::assistant_team::turn_notes(state, row, agent.as_ref(), previous).await);
     let mut binding = row.nyxagent_session_id.clone();
     let mut prompt = if binding.is_none() && row.context_reset_reason.is_some() {
         events.notice();
-        engine::instructions(row, &history)
+        engine::instructions(row, agent.as_ref(), &history)
     } else {
-        engine::base_prompt(row)
+        engine::base_prompt(row, agent.as_ref())
     } + &decisions;
     let mut recovery = engine::Recovery::default();
     loop {
@@ -1168,7 +1153,7 @@ async fn execute_turn(
                     .await
                     .map_err(|_| TurnError::new("assistant_unavailable"))?;
                     binding = None;
-                    prompt = engine::instructions(row, &history) + &decisions;
+                    prompt = engine::instructions(row, agent.as_ref(), &history) + &decisions;
                     events.notice();
                 }
                 RecoveryAction::ReplaceCredential => {
@@ -1182,7 +1167,7 @@ async fn execute_turn(
                     .await
                     .map_err(|_| TurnError::new("agent_key_required"))?;
                     binding = None;
-                    prompt = engine::instructions(row, &history) + &decisions;
+                    prompt = engine::instructions(row, agent.as_ref(), &history) + &decisions;
                     events.notice();
                 }
                 RecoveryAction::Backoff => {

@@ -151,46 +151,48 @@ unless the URI explicitly selects a mode. This supports Docker's published 27019
 port when the replica set advertises its internal 27017 port; transaction tests
 still verify a writable replica set and do not skip tests.
 
-## Chat authority and NyxBot team coverage
+## Chat authority and NyxBot agent coverage
 
 `assistant_authority_tests.rs` exercises per-conversation admission rollback,
 service/account/action lifecycle, concurrent decisions, digest/tool/key/conversation
 binding, expiry, one-time use, denial retention until a new user message, rotation
-invalidation and bounded history. Gate tests run through a subagent chat (requests
-route to the orchestrator, carry the requesting text, and grants persist on the
-subagent row); orchestrator tests prove Full authority on provision, rotation and
+invalidation and bounded history. Gate tests run through a specialist agent's
+thread (requests route to NyxBot, carry the requesting text, and grants persist
+on the agent); NyxBot tests prove Full authority on provision, rotation and
 replacement, no consent cards, and destructive action confirmation that the owner
 can turn off. The complete 22-tool native inventory is exercised for
-authorization/refusal/audit and successful service-layer dispatch; subagents reach
-only read-only tools. Migration tests upgrade a legacy Ask row to Full on its next
-turn, expire stale consent cards, and replace the unique owner credential index.
-Deletion tests prove child revocation, binding cleanup and after-commit audit;
-key tests hide another owner's existing key and reject self-widening.
+authorization/refusal/audit and successful service-layer dispatch; specialists
+reach only read-only tools. Migration tests adopt a legacy Ask row as a NyxBot
+thread with Full access, expire stale consent cards, and replace the unique owner
+credential index. Deletion tests prove child revocation, binding cleanup and
+after-commit audit; key tests hide another owner's existing key and reject
+self-widening.
 
 `mcp_chat_authority_tests.rs` verifies visible ungranted services and search tools
-for subagents (auto-connected services need a grant too), native tool metadata,
-JSON-RPC success envelopes containing `isError` refusals, the orchestrator wake-up
-event for a new request, Allow followed by real upstream execution, Deny, and
-orchestrator execution/audit without cards, including request audits for
-execution/mutation and suppression for read-only discovery. Platform-source tests
-verify a subagent's request, execution after Allow, and orchestrator execution
-through both call paths. Node-route tests prove service consent alone permits
-dispatch. Handler tests verify human/flag/owner gates, 409, the retired mode route's
-410, secret-free acknowledgement and key DTOs, and pending counts nested on team
-members.
+for specialists (auto-connected services need a grant too), native tool metadata,
+JSON-RPC success envelopes containing `isError` refusals, NyxBot's wake-up event
+for a new request, Allow followed by real upstream execution, Deny, and NyxBot
+execution/audit without cards, including request audits for execution/mutation
+and suppression for read-only discovery. Platform-source tests verify a
+specialist's request, execution after Allow, and NyxBot execution through both
+call paths. Node-route tests prove service consent alone permits dispatch.
+Handler tests verify human/flag/owner gates, 409, the retired mode route's 410,
+secret-free acknowledgement and key DTOs, and pending counts per thread.
 
 `handlers/assistant_team_tests.rs` runs real detached turns against a NyxAgent
-stand-in: a spawned subagent works with its own restricted key and its report wakes
-the orchestrator with an event turn; subagents cannot use team tools; destroy
-revokes the key and leaves a read-only transcript; spawn limits and grant
-resolution; permission requests reaching the orchestrator and a decision resuming
-the subagent (another team cannot decide it); loop guards; direct chats that never
-wake the orchestrator but appear in its next instructions; team delete cascade and
-the idle sweep. `handlers/nyxbot_tests.rs` covers the gateway provider (binding
-authentication and ownership, `conversation_not_found`, stranger refusal without a
-turn, link-code owner linking, an owner turn answered as a committed message item,
-idempotent retries, verbatim event context, management test turns) and the direct
-relay's signed-callback verification and deduplication.
+stand-in: NyxBot is one agent across threads with shared memory (and memory
+refuses credentials); specialist work runs in its home thread and reports to the
+NyxBot thread that assigned it; specialists keep memory but cannot use team
+tools; destroy revokes keys and leaves read-only threads, and purge deletes them;
+owner-created specialists, limits and grant resolution across threads;
+permission requests reaching NyxBot and a decision resuming the specialist;
+loop guards; direct chats that never wake NyxBot but appear in its next
+instructions. `handlers/nyxbot_tests.rs` covers the gateway provider (binding
+authentication and ownership, `conversation_not_found`, stranger refusal without
+a turn, link-code owner linking, an owner turn answered as a committed message
+item, busy-chat queueing, idempotent retries, verbatim event context,
+management test turns) and the direct relay's signed-callback verification and
+deduplication.
 
 Frontend tests cover acknowledgement parsing/positioning, explicit mutations,
 750 ms throttling, pending-card polling, no automatic message, compact decided

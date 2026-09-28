@@ -13,28 +13,27 @@ use crate::{
     errors::{AppError, AppResult},
     models::{
         api_key::{ApiKey, ApiKeyPurpose, COLLECTION_NAME as KEYS},
+        assistant_agent::{AgentGrants, AgentKind, AssistantAgent, COLLECTION_NAME as AGENTS},
         assistant_agent_credential::{AssistantAgentCredential, COLLECTION_NAME as CREDENTIALS},
-        assistant_conversation::{
-            AgentRole, AssistantConversation, COLLECTION_NAME as CONVERSATIONS, SubagentGrants,
-        },
+        assistant_conversation::{AssistantConversation, COLLECTION_NAME as CONVERSATIONS},
     },
     mw::auth::ASSISTANT_ACCOUNT_SCOPE,
     services::{api_key_mutation_service as mutations, key_service},
 };
 
-/// The authority a conversation key carries. Orchestrators always run with
-/// Full access; subagents carry exactly the grants their orchestrator made.
-#[derive(Clone, Copy, Debug)]
-pub enum KeyAuthority<'a> {
+/// The authority a thread key carries. NyxBot threads always run with Full
+/// access; specialist threads carry exactly their agent's grants.
+#[derive(Clone, Debug)]
+pub enum KeyAuthority {
     Orchestrator,
-    Subagent(&'a SubagentGrants),
+    Subagent(AgentGrants),
 }
 
-impl<'a> KeyAuthority<'a> {
-    pub fn of(row: &'a AssistantConversation) -> Self {
-        match row.role {
-            AgentRole::Orchestrator => Self::Orchestrator,
-            AgentRole::Subagent => Self::Subagent(&row.grants),
+impl KeyAuthority {
+    pub fn for_agent(agent: &AssistantAgent) -> Self {
+        match agent.kind {
+            AgentKind::Nyxbot => Self::Orchestrator,
+            AgentKind::Specialist => Self::Subagent(agent.grants.clone()),
         }
     }
 
@@ -69,7 +68,7 @@ pub async fn apply_authority(
     db: &Database,
     user: &str,
     key: &str,
-    authority: KeyAuthority<'_>,
+    authority: &KeyAuthority,
     session: &mut ClientSession,
 ) -> AppResult<()> {
     let result = mutations::update_one(
@@ -83,6 +82,46 @@ pub async fn apply_authority(
         return Err(AppError::NotFound("Conversation key not found".into()));
     }
     Ok(())
+}
+
+/// The authority of a thread, read from its agent in the caller's
+/// transaction. Rows without an agent are legacy NyxBot threads. A destroyed
+/// agent's threads cannot act.
+pub async fn authority_in_session(
+    db: &Database,
+    conversation: &AssistantConversation,
+    session: &mut ClientSession,
+) -> AppResult<KeyAuthority> {
+    let Some(agent_id) = conversation.agent_id.as_deref() else {
+        return Ok(KeyAuthority::Orchestrator);
+    };
+    let agents = db.collection::<AssistantAgent>(AGENTS);
+    let filter = doc! {"_id": agent_id, "user_id": &conversation.user_id};
+    let agent = agents
+        .find_one(filter.clone())
+        .session(&mut *session)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Agent not found".into()))?;
+    let destroyed =
+        || AppError::Conflict("This agent was destroyed; its threads are read-only".into());
+    if agent.destroyed_at.is_some() {
+        return Err(destroyed());
+    }
+    if agent.kind == AgentKind::Nyxbot {
+        return Ok(KeyAuthority::Orchestrator);
+    }
+    // Fence the specialist row: a concurrent destroy or grant change writes
+    // the same document, so one of the two transactions retries and a new or
+    // rotated key never carries authority the agent no longer has.
+    let mut live = filter;
+    live.insert("destroyed_at", bson::Bson::Null);
+    let agent = agents
+        .find_one_and_update(live, doc! {"$inc": {"thread_fence": 1}})
+        .return_document(mongodb::options::ReturnDocument::After)
+        .session(&mut *session)
+        .await?
+        .ok_or_else(destroyed)?;
+    Ok(KeyAuthority::for_agent(&agent))
 }
 
 // MCP x-api-key initialization/tools/call require REST proxy scope. `proxy`
@@ -235,7 +274,7 @@ pub async fn load_or_provision_in_session(
     keys: &EncryptionKeys,
     user_id: &str,
     conversation_id: &str,
-    authority: KeyAuthority<'_>,
+    authority: &KeyAuthority,
     session: &mut ClientSession,
 ) -> AppResult<AssistantCredential> {
     let old = db
@@ -391,12 +430,13 @@ pub async fn load_or_provision(
                     .session(&mut *session)
                     .await?
                     .ok_or_else(|| AppError::NotFound("Conversation not found".into()))?;
+                let authority = authority_in_session(&db, &conversation, session).await?;
                 load_or_provision_in_session(
                     &db,
                     &keys,
                     &user_id,
                     &conversation_id,
-                    KeyAuthority::of(&conversation),
+                    &authority,
                     session,
                 )
                 .await
@@ -572,6 +612,7 @@ mod tests {
             &state.db,
             owner,
             &engine::TurnRequest {
+                agent_id: None,
                 conversation_id: None,
                 text: "hello".into(),
                 model: None,
@@ -687,17 +728,17 @@ mod tests {
         assert!(key.allow_all_nodes && key.allow_all_services);
         assert_eq!(key.scopes, format!("proxy {ASSISTANT_ACCOUNT_SCOPE}"));
         // A subagent's key never widens beyond its recorded grants.
-        let (subagent, _) = crate::services::assistant_team_service::spawn(
+        let (_, subagent) = crate::services::assistant_team_service::create_specialist(
             db,
             &state.encryption_keys,
             &owner,
-            &row,
-            crate::services::assistant_team_service::SpawnRequest {
+            crate::services::assistant_team_service::CreateRequest {
                 name: "reader".into(),
-                charter: "Read things".into(),
+                description: "Read things".into(),
                 targets: Default::default(),
                 account_read: false,
                 specialty: None,
+                created_by: "user",
             },
         )
         .await

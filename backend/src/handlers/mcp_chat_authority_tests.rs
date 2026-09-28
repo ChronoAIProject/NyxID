@@ -228,13 +228,13 @@ async fn chat_mcp_lists_ungranted_tools_and_allow_retries_execute_without_bypass
     assert_eq!(hits.load(Ordering::SeqCst), 0);
     // The request reached the orchestrator as a wake-up event (it is busy
     // with its own turn, so the event waits in its queue).
-    let team_id = f.chat.team_id.clone().unwrap();
+    let team_id = f.nyxbot_thread.clone();
     let orchestrator = crate::services::assistant_nyxagent::get(&f.state.db, &f.owner, &team_id)
         .await
         .unwrap();
     assert!(orchestrator.pending_events.iter().any(|event| {
         event.kind == "permission_requested"
-            && event.subagent_id.as_deref() == Some(f.row.id.as_str())
+            && event.agent_id.as_deref() == Some(f.chat.agent_id.as_str())
             && event
                 .text
                 .contains(refusal["acknowledgement_id"].as_str().unwrap())
@@ -413,7 +413,7 @@ async fn chat_mcp_native_account_and_action_refusals_are_tool_results() {
     .await;
     assert_eq!(refused["error"], "orchestrator_only");
     // The orchestrator confirms destructive actions with the user by default.
-    let auth = authenticate_id(&f, f.chat.team_id.as_deref().unwrap()).await;
+    let auth = authenticate_id(&f, &f.nyxbot_thread).await;
     let action = result(
         call(
             &f,
@@ -598,7 +598,7 @@ async fn subagents_request_platform_services_and_execute_after_allow() {
         0
     );
     let _ = CONVERSATIONS;
-    let team_id = f.chat.team_id.clone().unwrap();
+    let team_id = f.nyxbot_thread.clone();
     // A subagent asks its orchestrator for the platform service; the
     // orchestrator itself runs with Full access and uses it directly.
     for orchestrator in [false, true] {

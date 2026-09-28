@@ -5,6 +5,7 @@ use crate::test_utils::{connect_transaction_test_database, test_app_state, test_
 
 fn request(id: Option<&str>, text: &str) -> TurnRequest {
     TurnRequest {
+        agent_id: None,
         conversation_id: id.map(str::to_owned),
         text: text.into(),
         model: None,
@@ -272,7 +273,7 @@ fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
             attachments: Vec::new(),
         })
         .collect();
-    let prompt = instructions(&stale_test_row(Utc::now()), &messages);
+    let prompt = instructions(&stale_test_row(Utc::now()), None, &messages);
     assert!(prompt.starts_with(SYSTEM_PROMPT));
     assert!(prompt.contains("Prior conversation history"));
     assert!(prompt.contains("marker29"));
@@ -393,9 +394,9 @@ async fn persistence_fences_concurrent_turns_scopes_owners_paginates_and_deletes
         rename(&db, &owner, &row.id, "Renamed").await.unwrap().title,
         "Renamed"
     );
-    assert_eq!(list(&db, &owner, 1, None).await.unwrap().len(), 1);
+    assert_eq!(list(&db, &owner, 1, None, None).await.unwrap().len(), 1);
     assert!(
-        list(&db, &owner, 1, Some(&index_cursor(&row)))
+        list(&db, &owner, 1, Some(&index_cursor(&row)), None)
             .await
             .unwrap()
             .is_empty()
@@ -500,12 +501,8 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         created_at: now,
         updated_at: now,
         role: Default::default(),
-        team_id: None,
-        agent_name: None,
-        charter: None,
-        specialty: None,
-        grants: Default::default(),
-        destroyed_at: None,
+        agent_id: None,
+        report_to: None,
         pending_events: Vec::new(),
         event_streak: 0,
         channel: None,

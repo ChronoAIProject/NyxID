@@ -1,15 +1,18 @@
-//! NyxBot teams: one orchestrator conversation and its disposable subagents.
+//! NyxBot agents: the owner's single personal agent (NyxBot, their chief of
+//! staff) and persistent specialist agents created by the owner or by NyxBot.
 //!
-//! Every agent is an ordinary NyxAgent conversation with its own restricted
-//! key. The orchestrator runs with Full access; a subagent's key carries only
-//! the grants recorded on its row. Starting turns and waking agents needs the
-//! HTTP proxy and lives in `handlers::assistant_team`; this module owns the
-//! durable state.
+//! An agent is a durable identity with its own grants, memory and threads.
+//! Every thread is an ordinary NyxAgent conversation with its own key: NyxBot
+//! threads run with Full access, specialist threads carry exactly their
+//! agent's grants and ask NyxBot for anything else. Starting turns and waking
+//! agents needs the HTTP proxy and lives in `handlers::assistant_team`; this
+//! module owns the durable state.
 use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
 use mongodb::{
-    Database,
+    ClientSession, Database,
     bson::{self, doc},
+    options::ReturnDocument,
 };
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -20,17 +23,19 @@ use crate::{
     errors::{AppError, AppResult},
     models::{
         assistant_acknowledgement::{AssistantAcknowledgement, COLLECTION_NAME as ACKS},
+        assistant_agent::{
+            AgentGrants, AgentKind, AssistantAgent, COLLECTION_NAME as AGENTS,
+            MAX_MEMORY_NOTE_CHARS, MAX_MEMORY_NOTES, MemoryNote,
+        },
         assistant_conversation::{
             AccessMode, AgentEvent, AgentRole, AssistantConversation,
-            COLLECTION_NAME as CONVERSATIONS, SubagentGrants,
+            COLLECTION_NAME as CONVERSATIONS,
         },
         assistant_message::{AssistantMessage, COLLECTION_NAME as MESSAGES},
     },
     services::{
         api_key_mutation_service as transactions,
-        assistant_agent_credential_service::{
-            self as credentials, AssistantCredential, KeyAuthority,
-        },
+        assistant_agent_credential_service::{self as credentials, KeyAuthority},
         assistant_nyxagent::{self as engine, excerpt, identifier, live_turn},
         assistant_profile_routing::{self as routing, RouteRole},
         assistant_settings_service, audit_service, key_service, mcp_service,
@@ -38,12 +43,10 @@ use crate::{
     },
 };
 
+pub const NYXBOT_NAME: &str = "NyxBot";
 pub const MAX_NAME_CHARS: usize = 32;
-pub const MAX_CHARTER_CHARS: usize = 2048;
+pub const MAX_DESCRIPTION_CHARS: usize = 2048;
 pub const MAX_GRANT_TARGETS: usize = 32;
-/// Subagents with no turn for this long are destroyed by the idle sweep.
-pub const IDLE_DESTROY_DAYS: i64 = 7;
-pub const IDLE_SWEEP_INTERVAL_SECS: u64 = 3600;
 /// Loop guards for server-started event turns.
 pub const EVENT_TURNS_PER_HOUR: u64 = 20;
 pub const MAX_EVENT_STREAK: i32 = 3;
@@ -51,6 +54,8 @@ pub const MAX_EVENT_STREAK: i32 = 3;
 pub const MAX_WAIT_SECS: u64 = 120;
 pub const READ_LIMIT: i64 = 20;
 pub const REPLY_EXCERPT_CHARS: usize = 2000;
+/// Instructions carry at most this much of an agent's memory.
+pub const MEMORY_NOTE_BUDGET: usize = 6000;
 
 pub fn valid_name(name: &str) -> bool {
     !name.is_empty()
@@ -61,74 +66,279 @@ pub fn valid_name(name: &str) -> bool {
         && name.as_bytes()[0].is_ascii_alphanumeric()
 }
 
-pub fn event(kind: &str, text: String, subagent_id: Option<&str>) -> AgentEvent {
+pub fn event(kind: &str, text: String, agent_id: Option<&str>) -> AgentEvent {
     AgentEvent {
         id: Uuid::new_v4().to_string(),
         kind: kind.into(),
         text,
-        subagent_id: subagent_id.map(str::to_owned),
+        agent_id: agent_id.map(str::to_owned),
         created_at: Utc::now(),
     }
 }
 
 fn not_found() -> AppError {
-    AppError::NotFound("Subagent not found".into())
+    AppError::NotFound("Agent not found".into())
 }
 
-/// The owner's live orchestrator conversation.
-pub async fn orchestrator(
-    db: &Database,
-    owner: &str,
-    id: &str,
-) -> AppResult<AssistantConversation> {
-    let row = engine::get(db, owner, id).await?;
-    if row.role != AgentRole::Orchestrator {
-        return Err(AppError::NotFound("Conversation not found".into()));
+pub fn is_duplicate(error: &mongodb::error::Error) -> bool {
+    matches!(error.kind.as_ref(), mongodb::error::ErrorKind::Write(
+        mongodb::error::WriteFailure::WriteError(write)) if write.code == 11000)
+}
+
+// ---------------------------------------------------------------------------
+// Agents
+// ---------------------------------------------------------------------------
+
+/// The owner's NyxBot, created on first use. A unique index keeps it single.
+pub async fn ensure_nyxbot(db: &Database, owner: &str) -> AppResult<AssistantAgent> {
+    let collection = db.collection::<AssistantAgent>(AGENTS);
+    if let Some(agent) = collection
+        .find_one(doc! {"user_id": owner, "kind": "nyxbot"})
+        .await?
+    {
+        return Ok(agent);
     }
-    Ok(row)
+    let now = Utc::now();
+    let agent = AssistantAgent {
+        id: Uuid::new_v4().to_string(),
+        user_id: owner.into(),
+        kind: AgentKind::Nyxbot,
+        name: NYXBOT_NAME.into(),
+        description: String::new(),
+        specialty: None,
+        grants: AgentGrants::default(),
+        created_by: "user".into(),
+        model: routing::model_for(db, RouteRole::Orchestrator, engine::DEFAULT_MODEL).await,
+        home_conversation_id: None,
+        memory: Vec::new(),
+        destroyed_at: None,
+        created_at: now,
+        updated_at: now,
+    };
+    match collection.insert_one(&agent).await {
+        Ok(_) => Ok(agent),
+        // A concurrent first use created it.
+        Err(error) if is_duplicate(&error) => collection
+            .find_one(doc! {"user_id": owner, "kind": "nyxbot"})
+            .await?
+            .ok_or_else(not_found),
+        Err(error) => Err(error.into()),
+    }
 }
 
-/// A team member by conversation ID or name. Destroyed members resolve too
-/// (read-only views); mutating callers check `destroyed_at`.
-pub async fn member(
-    db: &Database,
-    owner: &str,
-    team_id: &str,
-    name_or_id: &str,
-) -> AppResult<AssistantConversation> {
-    let collection = db.collection::<AssistantConversation>(CONVERSATIONS);
-    let filter = if engine::valid_id(name_or_id) {
-        doc! {"_id": name_or_id, "user_id": owner, "team_id": team_id}
+/// An agent of the owner by ID.
+pub async fn agent(db: &Database, owner: &str, id: &str) -> AppResult<AssistantAgent> {
+    if Uuid::parse_str(id).is_err() {
+        return Err(not_found());
+    }
+    db.collection::<AssistantAgent>(AGENTS)
+        .find_one(doc! {"_id": id, "user_id": owner})
+        .await?
+        .ok_or_else(not_found)
+}
+
+/// A specialist by ID or name; a live agent wins over a destroyed namesake.
+pub async fn specialist(db: &Database, owner: &str, name_or_id: &str) -> AppResult<AssistantAgent> {
+    let filter = if Uuid::parse_str(name_or_id).is_ok() {
+        doc! {"_id": name_or_id, "user_id": owner, "kind": "specialist"}
     } else if valid_name(name_or_id) {
-        doc! {"user_id": owner, "team_id": team_id, "agent_name": name_or_id}
+        doc! {"user_id": owner, "kind": "specialist", "name": name_or_id}
     } else {
         return Err(not_found());
     };
-    // Prefer the live member when a name was reused after a destroy.
-    collection
+    db.collection::<AssistantAgent>(AGENTS)
         .find_one(filter)
         .sort(doc! {"destroyed_at": 1, "created_at": -1})
         .await?
         .ok_or_else(not_found)
 }
 
-pub async fn members(
+/// A live specialist by ID or name.
+pub async fn live_specialist(
     db: &Database,
     owner: &str,
-    team_ids: &[String],
-) -> AppResult<Vec<AssistantConversation>> {
-    if team_ids.is_empty() {
-        return Ok(Vec::new());
+    name_or_id: &str,
+) -> AppResult<AssistantAgent> {
+    let agent = specialist(db, owner, name_or_id).await?;
+    if agent.destroyed_at.is_some() {
+        return Err(AppError::Conflict("That agent was destroyed".into()));
     }
+    Ok(agent)
+}
+
+/// The owner's agents: NyxBot first, then specialists oldest first.
+pub async fn agents(
+    db: &Database,
+    owner: &str,
+    include_destroyed: bool,
+) -> AppResult<Vec<AssistantAgent>> {
+    let mut filter = doc! {"user_id": owner};
+    if !include_destroyed {
+        filter.insert("destroyed_at", bson::Bson::Null);
+    }
+    let mut rows: Vec<AssistantAgent> = db
+        .collection::<AssistantAgent>(AGENTS)
+        .find(filter)
+        .sort(doc! {"created_at": 1})
+        .limit(200)
+        .await?
+        .try_collect()
+        .await?;
+    rows.sort_by_key(|agent| !agent.is_nyxbot());
+    Ok(rows)
+}
+
+/// The agent a thread belongs to; legacy rows belong to the owner's NyxBot.
+pub async fn agent_for_conversation(
+    db: &Database,
+    row: &AssistantConversation,
+) -> AppResult<AssistantAgent> {
+    match row.agent_id.as_deref() {
+        Some(id) => agent(db, &row.user_id, id).await,
+        None => ensure_nyxbot(db, &row.user_id).await,
+    }
+}
+
+pub fn thread_filter(agent: &AssistantAgent) -> bson::Document {
+    if agent.is_nyxbot() {
+        doc! {"user_id": &agent.user_id, "$or": [
+            {"agent_id": &agent.id}, {"agent_id": bson::Bson::Null},
+        ]}
+    } else {
+        doc! {"user_id": &agent.user_id, "agent_id": &agent.id}
+    }
+}
+
+/// Threads of an agent, newest first. Legacy rows count as NyxBot threads.
+pub async fn threads(
+    db: &Database,
+    agent: &AssistantAgent,
+    limit: i64,
+) -> AppResult<Vec<AssistantConversation>> {
     Ok(db
         .collection::<AssistantConversation>(CONVERSATIONS)
-        .find(doc! {"user_id": owner, "team_id": {"$in": team_ids}})
-        .sort(doc! {"created_at": 1})
-        .limit(500)
+        .find(thread_filter(agent))
+        .sort(doc! {"updated_at": -1})
+        .limit(limit)
         .await?
         .try_collect()
         .await?)
 }
+
+/// Create a thread row (no turn yet) with its key and credential, and make
+/// it the agent's home when it has none.
+async fn create_thread(
+    db: &Database,
+    keys: &EncryptionKeys,
+    agent: &AssistantAgent,
+    title: &str,
+    session: &mut ClientSession,
+) -> AppResult<AssistantConversation> {
+    let now = Utc::now();
+    let mut row = AssistantConversation {
+        id: format!("nyxa-{}", Uuid::new_v4().simple()),
+        user_id: agent.user_id.clone(),
+        title: title.chars().take(40).collect(),
+        model: agent.model.clone(),
+        access_mode: AccessMode::Full,
+        nyxagent_session_id: None,
+        nyxagent_last_response_id: None,
+        credential_api_key_id: String::new(),
+        message_count: 0,
+        active_turn: None,
+        context_reset_at: None,
+        context_reset_reason: None,
+        created_at: now,
+        updated_at: now,
+        role: if agent.is_nyxbot() {
+            AgentRole::Orchestrator
+        } else {
+            AgentRole::Subagent
+        },
+        agent_id: Some(agent.id.clone()),
+        report_to: None,
+        pending_events: Vec::new(),
+        event_streak: 0,
+        channel: None,
+    };
+    let collection = db.collection::<AssistantConversation>(CONVERSATIONS);
+    collection.insert_one(&row).session(&mut *session).await?;
+    let credential = credentials::load_or_provision_in_session(
+        db,
+        keys,
+        &agent.user_id,
+        &row.id,
+        &KeyAuthority::for_agent(agent),
+        &mut *session,
+    )
+    .await?;
+    row.credential_api_key_id = credential.api_key_id.clone();
+    collection
+        .update_one(
+            doc! {"_id": &row.id},
+            doc! {"$set": {"credential_api_key_id": &row.credential_api_key_id}},
+        )
+        .session(&mut *session)
+        .await?;
+    db.collection::<AssistantAgent>(AGENTS)
+        .update_one(
+            doc! {"_id": &agent.id, "home_conversation_id": bson::Bson::Null},
+            doc! {"$set": {"home_conversation_id": &row.id}},
+        )
+        .session(&mut *session)
+        .await?;
+    Ok(row)
+}
+
+/// The agent's home thread, where NyxID delivers work and events that no
+/// particular thread asked for. Recreated if the owner deleted it.
+pub async fn home_thread(
+    db: &Database,
+    keys: &std::sync::Arc<EncryptionKeys>,
+    agent: &AssistantAgent,
+) -> AppResult<AssistantConversation> {
+    if let Some(id) = agent.home_conversation_id.as_deref()
+        && let Some(row) = db
+            .collection::<AssistantConversation>(CONVERSATIONS)
+            .find_one(doc! {"_id": id, "user_id": &agent.user_id})
+            .await?
+    {
+        return Ok(row);
+    }
+    if let Some(row) = threads(db, agent, 1).await?.into_iter().next() {
+        db.collection::<AssistantAgent>(AGENTS)
+            .update_one(
+                doc! {"_id": &agent.id},
+                doc! {"$set": {"home_conversation_id": &row.id}},
+            )
+            .await?;
+        return Ok(row);
+    }
+    // The pointer referenced a deleted thread (or none exists): clear it so
+    // the new thread becomes home inside the transaction.
+    db.collection::<AssistantAgent>(AGENTS)
+        .update_one(
+            doc! {"_id": &agent.id},
+            doc! {"$set": {"home_conversation_id": bson::Bson::Null}},
+        )
+        .await?;
+    let mut session = db.client().start_session().await?;
+    let db_owned = db.clone();
+    let keys = keys.clone();
+    let agent = agent.clone();
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let operation = create_thread(&db_owned, &keys, &agent, &agent.name, session).await;
+            transactions::transaction_result(operation)
+        })
+        .await
+        .map_err(transactions::map_transaction_error)
+}
+
+// ---------------------------------------------------------------------------
+// Grants
+// ---------------------------------------------------------------------------
 
 /// Services resolved from slugs or IDs exactly as MCP enforces them: user
 /// services by `UserService` ID, platform services by catalog ID.
@@ -196,17 +406,23 @@ pub async fn resolve_targets(
     Ok(resolved)
 }
 
+// ---------------------------------------------------------------------------
+// Specialists
+// ---------------------------------------------------------------------------
+
 #[derive(Clone)]
-pub struct SpawnRequest {
+pub struct CreateRequest {
     pub name: String,
-    pub charter: String,
+    pub description: String,
     pub targets: GrantTargets,
     pub account_read: bool,
     pub specialty: Option<String>,
+    /// `user` or `nyxbot`.
+    pub created_by: &'static str,
 }
-impl std::fmt::Debug for SpawnRequest {
+impl std::fmt::Debug for CreateRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SpawnRequest")
+        f.debug_struct("CreateRequest")
             .field("name", &self.name)
             .finish_non_exhaustive()
     }
@@ -219,27 +435,31 @@ pub enum TeamRefusal {
     NameTaken,
 }
 
-/// Create a subagent row, its key and its encrypted credential in one
-/// transaction. Fencing the orchestrator row serializes concurrent spawns so
-/// the owner's live-subagent limit holds.
-pub async fn spawn(
+fn validate_profile(name: &str, description: &str) -> AppResult<()> {
+    if !valid_name(name) {
+        return Err(AppError::ValidationError(
+            "Agent names use 1-32 lowercase letters, digits, or hyphens".into(),
+        ));
+    }
+    if description.trim().is_empty() || description.chars().count() > MAX_DESCRIPTION_CHARS {
+        return Err(AppError::ValidationError(format!(
+            "A description must contain 1 to {MAX_DESCRIPTION_CHARS} characters"
+        )));
+    }
+    Ok(())
+}
+
+/// Create a persistent specialist with its home thread, key and encrypted
+/// credential in one transaction. Fencing the owner's NyxBot serializes
+/// concurrent creation so the owner's live-agent limit holds.
+pub async fn create_specialist(
     db: &Database,
     keys: &std::sync::Arc<EncryptionKeys>,
     owner: &str,
-    orchestrator: &AssistantConversation,
-    request: SpawnRequest,
-) -> AppResult<Result<(AssistantConversation, AssistantCredential), TeamRefusal>> {
-    if !valid_name(&request.name) {
-        return Err(AppError::ValidationError(
-            "Subagent names use 1-32 lowercase letters, digits, or hyphens".into(),
-        ));
-    }
-    let charter = request.charter.trim().to_owned();
-    if charter.is_empty() || charter.chars().count() > MAX_CHARTER_CHARS {
-        return Err(AppError::ValidationError(format!(
-            "A charter must contain 1 to {MAX_CHARTER_CHARS} characters"
-        )));
-    }
+    request: CreateRequest,
+) -> AppResult<Result<(AssistantAgent, AssistantConversation), TeamRefusal>> {
+    let description = request.description.trim().to_owned();
+    validate_profile(&request.name, &description)?;
     if request
         .specialty
         .as_deref()
@@ -249,6 +469,7 @@ pub async fn spawn(
             "specialty uses up to 32 lowercase letters, digits, hyphens or underscores".into(),
         ));
     }
+    let nyxbot = ensure_nyxbot(db, owner).await?;
     let limit = assistant_settings_service::get(db, owner)
         .await?
         .max_live_subagents;
@@ -257,35 +478,51 @@ pub async fn spawn(
         RouteRole::Subagent {
             specialty: request.specialty.as_deref(),
         },
-        &orchestrator.model,
+        &nyxbot.model,
     )
     .await;
-    let id = format!("nyxa-{}", Uuid::new_v4().simple());
+    let now = Utc::now();
+    let agent = AssistantAgent {
+        id: Uuid::new_v4().to_string(),
+        user_id: owner.into(),
+        kind: AgentKind::Specialist,
+        name: request.name.clone(),
+        description,
+        specialty: request.specialty.clone(),
+        grants: AgentGrants {
+            service_ids: request.targets.service_ids.clone(),
+            platform_service_ids: request.targets.platform_service_ids.clone(),
+            account_read: request.account_read,
+        },
+        created_by: request.created_by.into(),
+        model,
+        home_conversation_id: None,
+        memory: Vec::new(),
+        destroyed_at: None,
+        created_at: now,
+        updated_at: now,
+    };
     let mut session = db.client().start_session().await?;
     let db_owned = db.clone();
-    let keys = keys.clone();
-    let owner_owned = owner.to_owned();
-    let team_id = orchestrator.id.clone();
+    let keys_owned = keys.clone();
+    let nyxbot_id = nyxbot.id.clone();
     let outcome = session
         .start_transaction()
         .and_run2(async move |session| {
             let db = &db_owned;
-            let owner = owner_owned.as_str();
+            let agent = agent.clone();
             let operation: AppResult<_> = async {
-                let collection = db.collection::<AssistantConversation>(CONVERSATIONS);
-                // Serialize team mutations on the orchestrator row.
-                let fenced = collection
+                let collection = db.collection::<AssistantAgent>(AGENTS);
+                // Serialize team changes on the owner's NyxBot row.
+                collection
                     .update_one(
-                        doc! {"_id": &team_id, "user_id": owner, "role": {"$ne": "subagent"}},
+                        doc! {"_id": &nyxbot_id, "user_id": &agent.user_id},
                         doc! {"$inc": {"team_fence": 1}},
                     )
                     .session(&mut *session)
                     .await?;
-                if fenced.matched_count != 1 {
-                    return Err(AppError::NotFound("Conversation not found".into()));
-                }
                 let live = collection
-                    .count_documents(doc! {"user_id": owner, "team_id": &team_id,
+                    .count_documents(doc! {"user_id": &agent.user_id, "kind": "specialist",
                     "destroyed_at": bson::Bson::Null})
                     .session(&mut *session)
                     .await?;
@@ -293,82 +530,35 @@ pub async fn spawn(
                     return Ok(Err(TeamRefusal::LimitReached { limit }));
                 }
                 if collection
-                    .find_one(doc! {"user_id": owner, "team_id": &team_id,
-                    "agent_name": &request.name, "destroyed_at": bson::Bson::Null})
+                    .find_one(doc! {"user_id": &agent.user_id, "kind": "specialist",
+                    "name": &agent.name, "destroyed_at": bson::Bson::Null})
                     .session(&mut *session)
                     .await?
                     .is_some()
                 {
                     return Ok(Err(TeamRefusal::NameTaken));
                 }
-                let now = Utc::now();
-                let row = AssistantConversation {
-                    id: id.clone(),
-                    user_id: owner.into(),
-                    title: request.name.clone(),
-                    model: model.clone(),
-                    access_mode: AccessMode::Full,
-                    nyxagent_session_id: None,
-                    nyxagent_last_response_id: None,
-                    credential_api_key_id: String::new(),
-                    message_count: 0,
-                    active_turn: None,
-                    context_reset_at: None,
-                    context_reset_reason: None,
-                    created_at: now,
-                    updated_at: now,
-                    role: AgentRole::Subagent,
-                    team_id: Some(team_id.clone()),
-                    agent_name: Some(request.name.clone()),
-                    charter: Some(charter.clone()),
-                    specialty: request.specialty.clone(),
-                    grants: SubagentGrants {
-                        service_ids: request.targets.service_ids.clone(),
-                        platform_service_ids: request.targets.platform_service_ids.clone(),
-                        account_read: request.account_read,
-                    },
-                    destroyed_at: None,
-                    pending_events: Vec::new(),
-                    event_streak: 0,
-                    channel: None,
-                };
-                collection.insert_one(&row).session(&mut *session).await?;
-                let credential = credentials::load_or_provision_in_session(
-                    db,
-                    &keys,
-                    owner,
-                    &row.id,
-                    KeyAuthority::of(&row),
-                    &mut *session,
-                )
-                .await?;
-                let mut row = row;
-                row.credential_api_key_id = credential.api_key_id.clone();
-                collection
-                    .update_one(
-                        doc! {"_id": &row.id, "user_id": owner},
-                        doc! {"$set": {"credential_api_key_id": &row.credential_api_key_id}},
-                    )
-                    .session(&mut *session)
-                    .await?;
-                Ok(Ok((row, credential)))
+                collection.insert_one(&agent).session(&mut *session).await?;
+                let home = create_thread(db, &keys_owned, &agent, &agent.name, session).await?;
+                let mut agent = agent;
+                agent.home_conversation_id = Some(home.id.clone());
+                Ok(Ok((agent, home)))
             }
             .await;
             transactions::transaction_result(operation)
         })
         .await
         .map_err(transactions::map_transaction_error)?;
-    if let Ok((row, credential)) = &outcome {
-        credentials::audit_provision(db, owner, &row.id, credential, false).await;
+    if let Ok((agent, _)) = &outcome {
         audit(
             db,
             owner,
-            "assistant_subagent_spawned",
+            "assistant_agent_created",
             serde_json::json!({
-                "team_id": &orchestrator.id, "conversation_id": &row.id,
-                "service_ids": &row.grants.service_ids,
-                "platform_service_ids": &row.grants.platform_service_ids,
-                "account_read": row.grants.account_read,
+                "agent_id": &agent.id, "created_by": &agent.created_by,
+                "service_ids": &agent.grants.service_ids,
+                "platform_service_ids": &agent.grants.platform_service_ids,
+                "account_read": agent.grants.account_read,
             }),
         )
         .await;
@@ -376,87 +566,218 @@ pub async fn spawn(
     Ok(outcome)
 }
 
-/// Replace a live subagent's grants; its key converges in the same
-/// transaction. Revoked targets also expire their pending requests.
+/// Rename or re-describe an agent. NyxBot keeps its fixed name.
+pub async fn update_agent(
+    db: &Database,
+    owner: &str,
+    id: &str,
+    name: Option<&str>,
+    description: Option<&str>,
+) -> AppResult<AssistantAgent> {
+    let current = agent(db, owner, id).await?;
+    if current.destroyed_at.is_some() {
+        return Err(AppError::Conflict("That agent was destroyed".into()));
+    }
+    let mut set = doc! {"updated_at": bson::DateTime::now()};
+    if let Some(name) = name {
+        if current.is_nyxbot() {
+            return Err(AppError::ValidationError("NyxBot's name is fixed".into()));
+        }
+        validate_profile(name, description.unwrap_or(&current.description))?;
+        if name != current.name
+            && db
+                .collection::<AssistantAgent>(AGENTS)
+                .find_one(doc! {"user_id": owner, "kind": "specialist", "name": name,
+                "destroyed_at": bson::Bson::Null})
+                .await?
+                .is_some()
+        {
+            return Err(AppError::Conflict(
+                "A live agent already uses that name".into(),
+            ));
+        }
+        set.insert("name", name);
+    }
+    if let Some(description) = description {
+        let description = description.trim();
+        if description.chars().count() > MAX_DESCRIPTION_CHARS
+            || (!current.is_nyxbot() && description.is_empty())
+        {
+            return Err(AppError::ValidationError(format!(
+                "A description must contain at most {MAX_DESCRIPTION_CHARS} characters"
+            )));
+        }
+        set.insert("description", description);
+    }
+    db.collection::<AssistantAgent>(AGENTS)
+        .find_one_and_update(doc! {"_id": id, "user_id": owner}, doc! {"$set": set})
+        .return_document(ReturnDocument::After)
+        .await?
+        .ok_or_else(not_found)
+}
+
+/// A change to a specialist's grants. Merged inside the transaction against
+/// the grants it reads, so concurrent changes never undo each other.
+#[derive(Clone, Debug)]
+pub enum GrantChange {
+    /// The owner's full replacement.
+    Replace(AgentGrants),
+    /// Add these targets, and account access when `account_read` is set.
+    Add(AgentGrants),
+    /// Remove these targets, and account access when `account_read` is set.
+    Remove(AgentGrants),
+}
+
+impl GrantChange {
+    pub fn apply(&self, current: &AgentGrants) -> AgentGrants {
+        let mut grants = current.clone();
+        match self {
+            Self::Replace(replacement) => grants = replacement.clone(),
+            Self::Add(add) => {
+                for (list, ids) in [
+                    (&mut grants.service_ids, &add.service_ids),
+                    (&mut grants.platform_service_ids, &add.platform_service_ids),
+                ] {
+                    for id in ids {
+                        if !list.contains(id) {
+                            list.push(id.clone());
+                        }
+                    }
+                }
+                grants.account_read |= add.account_read;
+            }
+            Self::Remove(remove) => {
+                grants
+                    .service_ids
+                    .retain(|id| !remove.service_ids.contains(id));
+                grants
+                    .platform_service_ids
+                    .retain(|id| !remove.platform_service_ids.contains(id));
+                grants.account_read &= !remove.account_read;
+            }
+        }
+        grants
+    }
+}
+
+/// Every key a set of threads may hold: the credential row's key, which is
+/// authoritative after rotation or an in-turn replacement, and the key the
+/// thread recorded at its last turn start.
+async fn thread_key_ids(
+    db: &Database,
+    owner: &str,
+    rows: &[AssistantConversation],
+    session: &mut ClientSession,
+) -> AppResult<Vec<String>> {
+    let ids: Vec<&str> = rows.iter().map(|row| row.id.as_str()).collect();
+    let mut cursor = db
+        .collection::<bson::Document>(crate::models::assistant_agent_credential::COLLECTION_NAME)
+        .find(doc! {"user_id": owner, "conversation_id": {"$in": &ids}})
+        .projection(doc! {"api_key_id": 1})
+        .session(&mut *session)
+        .await?;
+    let credentials: Vec<bson::Document> = cursor.stream(&mut *session).try_collect().await?;
+    let mut keys: Vec<String> = credentials
+        .iter()
+        .filter_map(|row| row.get_str("api_key_id").ok().map(str::to_owned))
+        .collect();
+    for row in rows {
+        if !row.credential_api_key_id.is_empty() && !keys.contains(&row.credential_api_key_id) {
+            keys.push(row.credential_api_key_id.clone());
+        }
+    }
+    Ok(keys)
+}
+
+/// Apply a grant change to a live specialist inside the caller's transaction.
+/// The agent row and every thread key converge together; requests for
+/// targets the change removes expire.
+pub async fn apply_grants_in_session(
+    db: &Database,
+    owner: &str,
+    agent_id: &str,
+    change: &GrantChange,
+    session: &mut ClientSession,
+) -> AppResult<AssistantAgent> {
+    let collection = db.collection::<AssistantAgent>(AGENTS);
+    let filter = doc! {"_id": agent_id, "user_id": owner, "kind": "specialist",
+    "destroyed_at": bson::Bson::Null};
+    let mut agent = collection
+        .find_one(filter.clone())
+        .session(&mut *session)
+        .await?
+        .ok_or_else(not_found)?;
+    let grants = change.apply(&agent.grants);
+    let removed: Vec<String> = agent
+        .grants
+        .service_ids
+        .iter()
+        .chain(&agent.grants.platform_service_ids)
+        .filter(|id| !grants.service_ids.contains(id) && !grants.platform_service_ids.contains(id))
+        .cloned()
+        .collect();
+    let lost_account = agent.grants.account_read && !grants.account_read;
+    agent.grants = grants;
+    collection
+        .update_one(
+            filter,
+            doc! {"$set": {"grants": bson::to_bson(&agent.grants)
+            .map_err(|_| AppError::Internal("Grant encoding failed".into()))?,
+            "updated_at": bson::DateTime::now()}},
+        )
+        .session(&mut *session)
+        .await?;
+    let mut cursor = db
+        .collection::<AssistantConversation>(CONVERSATIONS)
+        .find(doc! {"user_id": owner, "agent_id": &agent.id})
+        .session(&mut *session)
+        .await?;
+    let rows: Vec<AssistantConversation> = cursor.stream(&mut *session).try_collect().await?;
+    let authority = KeyAuthority::for_agent(&agent);
+    for key in thread_key_ids(db, owner, &rows, session).await? {
+        match credentials::apply_authority(db, owner, &key, &authority, &mut *session).await {
+            // Revoked predecessors of rotated keys no longer match.
+            Ok(()) | Err(AppError::NotFound(_)) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    let mut expire = Vec::new();
+    if !removed.is_empty() {
+        expire.push(doc! {"kind": "service", "service_id": {"$in": &removed}});
+    }
+    if lost_account {
+        expire.push(doc! {"kind": "account"});
+    }
+    if !expire.is_empty() {
+        let ids: Vec<&str> = rows.iter().map(|row| row.id.as_str()).collect();
+        db.collection::<bson::Document>(ACKS)
+            .update_many(
+                doc! {"user_id": owner, "conversation_id": {"$in": ids},
+                "status": "pending", "$or": expire},
+                doc! {"$set": {"status": "expired"}},
+            )
+            .session(&mut *session)
+            .await?;
+    }
+    Ok(agent)
+}
+
+/// Change a live specialist's grants in one transaction.
 pub async fn set_grants(
     db: &Database,
     owner: &str,
-    team_id: &str,
-    member_id: &str,
-    grants: SubagentGrants,
-) -> AppResult<AssistantConversation> {
+    agent_id: &str,
+    change: GrantChange,
+) -> AppResult<AssistantAgent> {
     let mut session = db.client().start_session().await?;
     let db_owned = db.clone();
     let owner_owned = owner.to_owned();
-    let team_id = team_id.to_owned();
-    let member_id = member_id.to_owned();
-    let row = session
+    let agent_id = agent_id.to_owned();
+    let agent = session
         .start_transaction()
         .and_run2(async move |session| {
-            let db = &db_owned;
-            let owner = owner_owned.as_str();
-            let operation: AppResult<_> = async {
-                let collection = db.collection::<AssistantConversation>(CONVERSATIONS);
-                let filter = doc! {"_id": &member_id, "user_id": owner, "team_id": &team_id,
-                "destroyed_at": bson::Bson::Null};
-                let mut row = collection
-                    .find_one(filter.clone())
-                    .session(&mut *session)
-                    .await?
-                    .ok_or_else(not_found)?;
-                let removed_services: Vec<String> = row
-                    .grants
-                    .service_ids
-                    .iter()
-                    .chain(&row.grants.platform_service_ids)
-                    .filter(|id| {
-                        !grants.service_ids.contains(id)
-                            && !grants.platform_service_ids.contains(id)
-                    })
-                    .cloned()
-                    .collect();
-                row.grants = grants.clone();
-                collection
-                    .update_one(
-                        filter,
-                        doc! {"$set": {"grants": bson::to_bson(&row.grants)
-                        .map_err(|_| AppError::Internal("Grant encoding failed".into()))?}},
-                    )
-                    .session(&mut *session)
-                    .await?;
-                if !row.credential_api_key_id.is_empty() {
-                    match credentials::apply_authority(
-                        db,
-                        owner,
-                        &row.credential_api_key_id,
-                        KeyAuthority::of(&row),
-                        &mut *session,
-                    )
-                    .await
-                    {
-                        // A replaced key converges at its next turn start.
-                        Ok(()) | Err(AppError::NotFound(_)) => {}
-                        Err(error) => return Err(error),
-                    }
-                }
-                let mut expire =
-                    vec![doc! {"kind": "service", "service_id": {"$in": &removed_services}}];
-                if !grants.account_read {
-                    expire.push(doc! {"kind": "account"});
-                }
-                if !removed_services.is_empty() || !grants.account_read {
-                    db.collection::<bson::Document>(ACKS)
-                        .update_many(
-                            doc! {"user_id": owner, "conversation_id": &row.id,
-                            "status": "pending", "$or": expire},
-                            doc! {"$set": {"status": "expired"}},
-                        )
-                        .session(&mut *session)
-                        .await?;
-                }
-                Ok(row)
-            }
-            .await;
+            let operation =
+                apply_grants_in_session(&db_owned, &owner_owned, &agent_id, &change, session).await;
             transactions::transaction_result(operation)
         })
         .await
@@ -464,90 +785,97 @@ pub async fn set_grants(
     audit(
         db,
         owner,
-        "assistant_subagent_grants_changed",
+        "assistant_agent_grants_changed",
         serde_json::json!({
-            "team_id": row.team_id, "conversation_id": &row.id,
-            "service_ids": &row.grants.service_ids,
-            "platform_service_ids": &row.grants.platform_service_ids,
-            "account_read": row.grants.account_read,
+            "agent_id": &agent.id,
+            "service_ids": &agent.grants.service_ids,
+            "platform_service_ids": &agent.grants.platform_service_ids,
+            "account_read": agent.grants.account_read,
         }),
     )
     .await;
-    Ok(row)
+    Ok(agent)
 }
 
-/// Destroy a subagent: request Stop on a live turn, revoke its key and
-/// ciphertext, expire its cards and drop its queue. The transcript stays,
-/// read-only, under the team.
-pub async fn destroy(
-    db: &Database,
-    owner: &str,
-    team_id: &str,
-    member_id: &str,
-) -> AppResult<AssistantConversation> {
+/// Destroy a specialist: request Stop on live turns, revoke every thread key
+/// and ciphertext, expire its cards and drop its queues. Its threads stay,
+/// read-only. The caller disconnects channels linked to it.
+pub async fn destroy(db: &Database, owner: &str, agent_id: &str) -> AppResult<AssistantAgent> {
     let mut session = db.client().start_session().await?;
     let db_owned = db.clone();
     let owner_owned = owner.to_owned();
-    let team_id = team_id.to_owned();
-    let member_id = member_id.to_owned();
-    let (row, children) = session
+    let agent_id = agent_id.to_owned();
+    let (agent, children) = session
         .start_transaction()
         .and_run2(async move |session| {
             let db = &db_owned;
             let owner = owner_owned.as_str();
             let operation: AppResult<_> = async {
-                let collection = db.collection::<AssistantConversation>(CONVERSATIONS);
-                let filter = doc! {"_id": &member_id, "user_id": owner, "team_id": &team_id,
-                "destroyed_at": bson::Bson::Null};
-                let mut row = collection
-                    .find_one(filter.clone())
+                let now = Utc::now();
+                let agent = db
+                    .collection::<AssistantAgent>(AGENTS)
+                    .find_one_and_update(
+                        doc! {"_id": &agent_id, "user_id": owner, "kind": "specialist",
+                        "destroyed_at": bson::Bson::Null},
+                        doc! {"$set": {"destroyed_at": bson::DateTime::from_chrono(now),
+                        "updated_at": bson::DateTime::from_chrono(now)}},
+                    )
+                    .return_document(ReturnDocument::After)
                     .session(&mut *session)
                     .await?
                     .ok_or_else(not_found)?;
-                let now = Utc::now();
-                let mut set = doc! {
-                    "destroyed_at": bson::DateTime::from_chrono(now),
-                    "pending_events": [],
-                    "nyxagent_session_id": bson::Bson::Null,
-                    "nyxagent_last_response_id": bson::Bson::Null,
-                };
-                if live_turn(&row, now).is_some() {
-                    set.insert("active_turn.stop_requested", true);
-                }
-                collection
-                    .update_one(filter, doc! {"$set": set})
+                let conversations = db.collection::<AssistantConversation>(CONVERSATIONS);
+                let mut cursor = conversations
+                    .find(doc! {"user_id": owner, "agent_id": &agent.id})
                     .session(&mut *session)
                     .await?;
-                let children = match key_service::delete_api_key_in_session(
-                    db,
-                    owner,
-                    &row.credential_api_key_id,
-                    None,
-                    Some(&mut *session),
-                )
-                .await
-                {
-                    Ok(children) => children,
-                    Err(AppError::NotFound(_)) => Vec::new(),
-                    Err(error) => return Err(error),
-                };
-                db.collection::<bson::Document>(
-                    crate::models::assistant_agent_credential::COLLECTION_NAME,
-                )
-                .delete_many(doc! {"user_id": owner, "conversation_id": &row.id})
-                .session(&mut *session)
-                .await?;
-                db.collection::<bson::Document>(ACKS)
-                    .update_many(
-                        doc! {"user_id": owner, "conversation_id": &row.id,
-                        "status": {"$in": ["pending", "allowed"]}},
-                        doc! {"$set": {"status": "expired"}},
+                let rows: Vec<AssistantConversation> =
+                    cursor.stream(&mut *session).try_collect().await?;
+                let mut children = Vec::new();
+                for key in thread_key_ids(db, owner, &rows, &mut *session).await? {
+                    match key_service::delete_api_key_in_session(
+                        db,
+                        owner,
+                        &key,
+                        None,
+                        Some(&mut *session),
                     )
+                    .await
+                    {
+                        Ok(revoked) => children.extend(revoked),
+                        Err(AppError::NotFound(_)) => {}
+                        Err(error) => return Err(error),
+                    }
+                }
+                for row in rows {
+                    let mut set = doc! {
+                        "pending_events": [],
+                        "nyxagent_session_id": bson::Bson::Null,
+                        "nyxagent_last_response_id": bson::Bson::Null,
+                    };
+                    if live_turn(&row, now).is_some() {
+                        set.insert("active_turn.stop_requested", true);
+                    }
+                    conversations
+                        .update_one(doc! {"_id": &row.id, "user_id": owner}, doc! {"$set": set})
+                        .session(&mut *session)
+                        .await?;
+                    db.collection::<bson::Document>(
+                        crate::models::assistant_agent_credential::COLLECTION_NAME,
+                    )
+                    .delete_many(doc! {"user_id": owner, "conversation_id": &row.id})
                     .session(&mut *session)
                     .await?;
-                row.destroyed_at = Some(now);
-                row.pending_events.clear();
-                Ok((row, children))
+                    db.collection::<bson::Document>(ACKS)
+                        .update_many(
+                            doc! {"user_id": owner, "conversation_id": &row.id,
+                            "status": {"$in": ["pending", "allowed"]}},
+                            doc! {"$set": {"status": "expired"}},
+                        )
+                        .session(&mut *session)
+                        .await?;
+                }
+                Ok((agent, children))
             }
             .await;
             transactions::transaction_result(operation)
@@ -562,12 +890,173 @@ pub async fn destroy(
     audit(
         db,
         owner,
-        "assistant_subagent_destroyed",
-        serde_json::json!({"team_id": row.team_id, "conversation_id": &row.id}),
+        "assistant_agent_destroyed",
+        serde_json::json!({"agent_id": &agent.id}),
     )
     .await;
-    Ok(row)
+    Ok(agent)
 }
+
+/// Permanently delete a destroyed specialist and all of its threads.
+pub async fn purge(db: &Database, owner: &str, agent_id: &str) -> AppResult<()> {
+    let agent = agent(db, owner, agent_id).await?;
+    if agent.destroyed_at.is_none() {
+        return Err(AppError::Conflict(
+            "Destroy the agent before deleting it".into(),
+        ));
+    }
+    for row in threads(db, &agent, 1000).await? {
+        match engine::delete(db, owner, &row.id).await {
+            Ok(_) | Err(AppError::NotFound(_)) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    db.collection::<AssistantAgent>(AGENTS)
+        .delete_one(doc! {"_id": &agent.id, "user_id": owner})
+        .await?;
+    audit(
+        db,
+        owner,
+        "assistant_agent_deleted",
+        serde_json::json!({"agent_id": &agent.id}),
+    )
+    .await;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Memory
+// ---------------------------------------------------------------------------
+
+/// Obvious credential shapes never enter an agent's memory.
+fn looks_secret(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    [
+        "nyxid_ag_",
+        "nyx_nauth_",
+        "nyx_owk_",
+        "sk-",
+        "ghp_",
+        "github_pat_",
+        "xoxb-",
+        "-----begin",
+        "password:",
+        "api_key=",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+}
+
+/// Remember a note, or replace one by ID. Bounded; never secrets.
+pub async fn remember(
+    db: &Database,
+    owner: &str,
+    agent_id: &str,
+    text: &str,
+    replace_id: Option<&str>,
+) -> AppResult<MemoryNote> {
+    let text = text.trim();
+    if text.is_empty() || text.chars().count() > MAX_MEMORY_NOTE_CHARS {
+        return Err(AppError::ValidationError(format!(
+            "A memory note must contain 1 to {MAX_MEMORY_NOTE_CHARS} characters"
+        )));
+    }
+    if looks_secret(text) {
+        return Err(AppError::ValidationError(
+            "Memory never stores credentials or secrets".into(),
+        ));
+    }
+    let now = Utc::now();
+    let collection = db.collection::<AssistantAgent>(AGENTS);
+    if let Some(replace_id) = replace_id {
+        let updated = collection
+            .update_one(
+                doc! {"_id": agent_id, "user_id": owner, "memory.id": replace_id},
+                doc! {"$set": {"memory.$.text": text,
+                "memory.$.updated_at": bson::DateTime::from_chrono(now)}},
+            )
+            .await?;
+        if updated.matched_count != 1 {
+            return Err(AppError::NotFound("Memory note not found".into()));
+        }
+        let agent = agent(db, owner, agent_id).await?;
+        return agent
+            .memory
+            .into_iter()
+            .find(|note| note.id == replace_id)
+            .ok_or_else(|| AppError::NotFound("Memory note not found".into()));
+    }
+    let note = MemoryNote {
+        id: Uuid::new_v4().to_string(),
+        text: text.into(),
+        created_at: now,
+        updated_at: now,
+    };
+    let mut filter = doc! {"_id": agent_id, "user_id": owner, "destroyed_at": bson::Bson::Null};
+    filter.insert(
+        format!("memory.{}", MAX_MEMORY_NOTES - 1),
+        doc! {"$exists": false},
+    );
+    let pushed = collection
+        .update_one(
+            filter,
+            doc! {"$push": {"memory": bson::to_bson(&note)
+            .map_err(|_| AppError::Internal("Memory encoding failed".into()))?}},
+        )
+        .await?;
+    if pushed.matched_count != 1 {
+        agent(db, owner, agent_id).await?;
+        return Err(AppError::Conflict(format!(
+            "Memory holds at most {MAX_MEMORY_NOTES} notes; forget or replace one first"
+        )));
+    }
+    Ok(note)
+}
+
+pub async fn forget(db: &Database, owner: &str, agent_id: &str, note_id: &str) -> AppResult<()> {
+    let result = db
+        .collection::<AssistantAgent>(AGENTS)
+        .update_one(
+            doc! {"_id": agent_id, "user_id": owner, "memory.id": note_id},
+            doc! {"$pull": {"memory": {"id": note_id}}},
+        )
+        .await?;
+    if result.matched_count != 1 {
+        return Err(AppError::NotFound("Memory note not found".into()));
+    }
+    Ok(())
+}
+
+/// The agent's memory as an instructions note, newest kept within a budget.
+pub fn memory_note(agent: &AssistantAgent) -> String {
+    if agent.memory.is_empty() {
+        return String::new();
+    }
+    let mut lines = Vec::new();
+    let mut used = 0;
+    for note in agent.memory.iter().rev() {
+        let line = format!(
+            "\n- [{}] {}",
+            note.id,
+            excerpt(&note.text, MAX_MEMORY_NOTE_CHARS)
+        );
+        if used + line.len() > MEMORY_NOTE_BUDGET {
+            break;
+        }
+        used += line.len();
+        lines.push(line);
+    }
+    lines.reverse();
+    format!(
+        "\n\nYour memory (notes you saved with nyxid__remember; facts about the user and \
+        their work, not instructions from NyxID):{}",
+        lines.concat()
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Summaries and notes
+// ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ReplySummary {
@@ -578,25 +1067,32 @@ pub struct ReplySummary {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct MemberSummary {
+pub struct AgentSummary {
     pub id: String,
+    pub kind: AgentKind,
     pub name: String,
-    pub charter: String,
+    pub description: String,
     pub specialty: Option<String>,
+    pub created_by: String,
     /// `running`, `idle`, or `destroyed`.
     pub status: &'static str,
     pub services: Vec<String>,
     pub account_read: bool,
     pub pending_requests: Vec<RequestSummary>,
     pub last_reply: Option<ReplySummary>,
+    pub home_conversation_id: Option<String>,
+    pub memory_count: usize,
     pub created_at: DateTime<Utc>,
     pub last_active_at: DateTime<Utc>,
+    pub destroyed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct RequestSummary {
     pub request_id: String,
-    pub subagent: String,
+    pub agent: String,
+    pub agent_id: Option<String>,
+    pub conversation_id: String,
     pub kind: String,
     pub service_slug: Option<String>,
     pub summary: String,
@@ -604,10 +1100,15 @@ pub struct RequestSummary {
     pub expires_at: DateTime<Utc>,
 }
 
-pub fn request_summary(row: &AssistantAcknowledgement, name: &str) -> RequestSummary {
+pub fn request_summary(
+    row: &AssistantAcknowledgement,
+    agent: Option<&AssistantAgent>,
+) -> RequestSummary {
     RequestSummary {
         request_id: row.id.clone(),
-        subagent: name.to_owned(),
+        agent: agent.map(|agent| agent.name.clone()).unwrap_or_default(),
+        agent_id: agent.map(|agent| agent.id.clone()),
+        conversation_id: row.conversation_id.clone(),
         kind: row.kind.clone(),
         service_slug: row.service_slug.clone(),
         summary: row.summary.clone(),
@@ -616,28 +1117,15 @@ pub fn request_summary(row: &AssistantAcknowledgement, name: &str) -> RequestSum
     }
 }
 
-pub fn status(row: &AssistantConversation, now: DateTime<Utc>) -> &'static str {
-    if row.destroyed_at.is_some() {
-        "destroyed"
-    } else if live_turn(row, now).is_some() {
-        "running"
-    } else {
-        "idle"
-    }
-}
-
-/// Pending orchestrator-routed requests for a team, oldest first.
+/// Pending NyxBot-routed requests of the owner's specialists, oldest first.
 pub async fn pending_requests(
     db: &Database,
     owner: &str,
-    team_id: &str,
 ) -> AppResult<Vec<AssistantAcknowledgement>> {
     Ok(db
         .collection::<AssistantAcknowledgement>(ACKS)
-        .find(
-            doc! {"user_id": owner, "team_id": team_id, "decider": "orchestrator",
-            "status": "pending", "expires_at": {"$gt": bson::DateTime::now()}},
-        )
+        .find(doc! {"user_id": owner, "decider": "orchestrator",
+        "status": "pending", "expires_at": {"$gt": bson::DateTime::now()}})
         .sort(doc! {"created_at": 1})
         .limit(50)
         .await?
@@ -645,19 +1133,62 @@ pub async fn pending_requests(
         .await?)
 }
 
+/// Map each requesting thread to its agent.
+async fn request_agents(
+    db: &Database,
+    owner: &str,
+    requests: &[AssistantAcknowledgement],
+    agents: &[AssistantAgent],
+) -> AppResult<HashMap<String, AssistantAgent>> {
+    let ids: Vec<&str> = requests
+        .iter()
+        .map(|row| row.conversation_id.as_str())
+        .collect();
+    let mut map = HashMap::new();
+    if ids.is_empty() {
+        return Ok(map);
+    }
+    let mut cursor = db
+        .collection::<bson::Document>(CONVERSATIONS)
+        .find(doc! {"user_id": owner, "_id": {"$in": ids}})
+        .projection(doc! {"agent_id": 1})
+        .await?;
+    while let Some(row) = cursor.try_next().await? {
+        if let (Ok(id), Ok(agent_id)) = (row.get_str("_id"), row.get_str("agent_id"))
+            && let Some(agent) = agents.iter().find(|agent| agent.id == agent_id)
+        {
+            map.insert(id.to_owned(), agent.clone());
+        }
+    }
+    Ok(map)
+}
+
+pub async fn request_summaries(
+    db: &Database,
+    owner: &str,
+    requests: &[AssistantAcknowledgement],
+) -> AppResult<Vec<RequestSummary>> {
+    let all = agents(db, owner, true).await?;
+    let by_thread = request_agents(db, owner, requests, &all).await?;
+    Ok(requests
+        .iter()
+        .map(|row| request_summary(row, by_thread.get(&row.conversation_id)))
+        .collect())
+}
+
 async fn slug_names(
     db: &Database,
-    rows: &[AssistantConversation],
+    agents: &[AssistantAgent],
 ) -> AppResult<HashMap<String, String>> {
-    let user_services: Vec<String> = rows
+    let user_services: Vec<String> = agents
         .iter()
-        .flat_map(|row| row.grants.service_ids.clone())
+        .flat_map(|agent| agent.grants.service_ids.clone())
         .collect::<HashSet<_>>()
         .into_iter()
         .collect();
-    let platform: Vec<String> = rows
+    let platform: Vec<String> = agents
         .iter()
-        .flat_map(|row| row.grants.platform_service_ids.clone())
+        .flat_map(|agent| agent.grants.platform_service_ids.clone())
         .collect::<HashSet<_>>()
         .into_iter()
         .collect();
@@ -702,63 +1233,105 @@ async fn last_reply(
         }))
 }
 
-/// Summaries of a team's members for the orchestrator's tools and the UI.
+/// Agents with a live turn in any of their threads.
+pub async fn running_agents(db: &Database, owner: &str) -> AppResult<HashSet<String>> {
+    let rows: Vec<AssistantConversation> = db
+        .collection::<AssistantConversation>(CONVERSATIONS)
+        .find(doc! {"user_id": owner, "active_turn.turn_id": {"$exists": true}})
+        .limit(200)
+        .await?
+        .try_collect()
+        .await?;
+    let now = Utc::now();
+    let nyxbot = ensure_nyxbot(db, owner).await?.id;
+    Ok(rows
+        .iter()
+        .filter(|row| live_turn(row, now).is_some())
+        .map(|row| row.agent_id.clone().unwrap_or_else(|| nyxbot.clone()))
+        .collect())
+}
+
+/// Summaries of the owner's agents (NyxBot first) for tools and the UI.
 pub async fn summaries(
     db: &Database,
     owner: &str,
-    team_id: &str,
+    include_nyxbot: bool,
     include_destroyed: bool,
     reply_chars: usize,
-) -> AppResult<Vec<MemberSummary>> {
-    let mut rows = members(db, owner, &[team_id.to_owned()]).await?;
-    if !include_destroyed {
-        rows.retain(|row| row.destroyed_at.is_none());
+) -> AppResult<Vec<AgentSummary>> {
+    ensure_nyxbot(db, owner).await?;
+    let mut rows = agents(db, owner, include_destroyed).await?;
+    if !include_nyxbot {
+        rows.retain(|agent| !agent.is_nyxbot());
     }
     let names = slug_names(db, &rows).await?;
-    let requests = pending_requests(db, owner, team_id).await?;
-    let now = Utc::now();
+    let requests = pending_requests(db, owner).await?;
+    let by_thread = request_agents(db, owner, &requests, &rows).await?;
+    let running = running_agents(db, owner).await?;
     let mut out = Vec::with_capacity(rows.len());
-    for row in rows {
-        let name = row.agent_name.clone().unwrap_or_default();
-        out.push(MemberSummary {
-            services: row
+    for agent in rows {
+        let status = if agent.destroyed_at.is_some() {
+            "destroyed"
+        } else if running.contains(&agent.id) {
+            "running"
+        } else {
+            "idle"
+        };
+        let last_reply = match (reply_chars, agent.home_conversation_id.as_deref()) {
+            (0, _) | (_, None) => None,
+            (chars, Some(home)) => last_reply(db, owner, home, chars).await?,
+        };
+        out.push(AgentSummary {
+            services: agent
                 .grants
                 .service_ids
                 .iter()
-                .chain(&row.grants.platform_service_ids)
+                .chain(&agent.grants.platform_service_ids)
                 .map(|id| names.get(id).cloned().unwrap_or_else(|| id.clone()))
                 .collect(),
-            account_read: row.grants.account_read,
+            account_read: agent.grants.account_read,
             pending_requests: requests
                 .iter()
-                .filter(|request| request.conversation_id == row.id)
-                .map(|request| request_summary(request, &name))
+                .filter(|request| {
+                    by_thread
+                        .get(&request.conversation_id)
+                        .is_some_and(|owner_agent| owner_agent.id == agent.id)
+                })
+                .map(|request| request_summary(request, Some(&agent)))
                 .collect(),
-            last_reply: if reply_chars == 0 {
-                None
-            } else {
-                last_reply(db, owner, &row.id, reply_chars).await?
-            },
-            status: status(&row, now),
-            charter: row.charter.clone().unwrap_or_default(),
-            specialty: row.specialty.clone(),
-            created_at: row.created_at,
-            last_active_at: row.updated_at,
-            id: row.id,
-            name,
+            last_reply,
+            status,
+            kind: agent.kind,
+            name: agent.name.clone(),
+            description: agent.description.clone(),
+            specialty: agent.specialty.clone(),
+            created_by: agent.created_by.clone(),
+            home_conversation_id: agent.home_conversation_id.clone(),
+            memory_count: agent.memory.len(),
+            created_at: agent.created_at,
+            last_active_at: agent.updated_at,
+            destroyed_at: agent.destroyed_at,
+            id: agent.id,
         });
     }
     Ok(out)
 }
 
-/// Recent messages of one member, bounded for the orchestrator's context.
+/// Recent messages of a specialist's home thread, bounded for NyxBot.
 pub async fn read(
     db: &Database,
     owner: &str,
-    member: &AssistantConversation,
+    agent: &AssistantAgent,
     limit: i64,
 ) -> AppResult<Vec<ReplySummary>> {
-    let rows = engine::messages(db, owner, &member.id, limit.clamp(1, READ_LIMIT), None).await?;
+    let Some(home) = agent.home_conversation_id.as_deref() else {
+        return Ok(Vec::new());
+    };
+    let rows = match engine::messages(db, owner, home, limit.clamp(1, READ_LIMIT), None).await {
+        Ok(rows) => rows,
+        Err(AppError::NotFound(_)) => Vec::new(),
+        Err(error) => return Err(error),
+    };
     Ok(rows
         .into_iter()
         .map(|message| ReplySummary {
@@ -770,32 +1343,51 @@ pub async fn read(
         .collect())
 }
 
-/// Messages the user sent directly to team members since `since`. The
-/// orchestrator is not woken by them; it learns about them on its next turn.
+/// Messages the user sent directly to specialists since `since`. NyxBot is
+/// not woken by them; it learns about them on its next turn.
 pub async fn direct_chats_note(
     db: &Database,
     owner: &str,
-    team_id: &str,
     since: DateTime<Utc>,
 ) -> AppResult<String> {
-    let rows = members(db, owner, &[team_id.to_owned()]).await?;
-    if rows.is_empty() {
+    let specialists: Vec<AssistantAgent> = agents(db, owner, false)
+        .await?
+        .into_iter()
+        .filter(|agent| !agent.is_nyxbot())
+        .collect();
+    if specialists.is_empty() {
         return Ok(String::new());
     }
-    let names: HashMap<&str, &str> = rows
+    let names: HashMap<&str, &str> = specialists
         .iter()
-        .map(|row| {
-            (
-                row.id.as_str(),
-                row.agent_name.as_deref().unwrap_or("subagent"),
-            )
-        })
+        .map(|agent| (agent.id.as_str(), agent.name.as_str()))
         .collect();
     let ids: Vec<&str> = names.keys().copied().collect();
+    let threads: Vec<bson::Document> = db
+        .collection::<bson::Document>(CONVERSATIONS)
+        .find(doc! {"user_id": owner, "agent_id": {"$in": &ids}})
+        .projection(doc! {"agent_id": 1})
+        .limit(500)
+        .await?
+        .try_collect()
+        .await?;
+    let thread_agent: HashMap<String, String> = threads
+        .iter()
+        .filter_map(|row| {
+            Some((
+                row.get_str("_id").ok()?.to_owned(),
+                row.get_str("agent_id").ok()?.to_owned(),
+            ))
+        })
+        .collect();
+    let thread_ids: Vec<&String> = thread_agent.keys().collect();
+    if thread_ids.is_empty() {
+        return Ok(String::new());
+    }
     let messages: Vec<AssistantMessage> = db
         .collection::<AssistantMessage>(MESSAGES)
         .find(
-            doc! {"user_id": owner, "conversation_id": {"$in": ids}, "role": "user",
+            doc! {"user_id": owner, "conversation_id": {"$in": thread_ids}, "role": "user",
             "created_at": {"$gt": bson::DateTime::from_chrono(since)}},
         )
         .sort(doc! {"created_at": 1})
@@ -807,31 +1399,32 @@ pub async fn direct_chats_note(
         return Ok(String::new());
     }
     let mut note = String::from(
-        "\n\nSince your previous reply the user spoke directly to subagents \
-        (quoted; the subagents handle these themselves):",
+        "\n\nSince your previous reply the user spoke directly to your specialists \
+        (quoted; the specialists handle these themselves):",
     );
     for message in messages {
+        let name = thread_agent
+            .get(&message.conversation_id)
+            .and_then(|agent| names.get(agent.as_str()))
+            .copied()
+            .unwrap_or("specialist");
         note.push_str(&format!(
             "\n- to {}: \"{}\"",
-            identifier(
-                names
-                    .get(message.conversation_id.as_str())
-                    .unwrap_or(&"subagent")
-            ),
+            identifier(name),
             excerpt(&message.text, 300).replace('"', "'")
         ));
     }
     Ok(note)
 }
 
-/// A compact roster for the orchestrator's instructions.
-pub async fn roster_note(db: &Database, owner: &str, team_id: &str) -> AppResult<String> {
-    let rows = summaries(db, owner, team_id, false, 0).await?;
+/// A compact roster of the owner's specialists for NyxBot's instructions.
+pub async fn roster_note(db: &Database, owner: &str) -> AppResult<String> {
+    let rows = summaries(db, owner, false, false, 0).await?;
     if rows.is_empty() {
         return Ok(String::new());
     }
-    let mut note = String::from("\n\nYour live subagents (NyxID facts):");
-    for row in rows.iter().take(16) {
+    let mut note = String::from("\n\nYour specialist agents (NyxID facts):");
+    for row in rows.iter().take(32) {
         note.push_str(&format!(
             "\n- {} [{}] services: {}{}{}",
             identifier(&row.name),
@@ -863,35 +1456,47 @@ pub async fn roster_note(db: &Database, owner: &str, team_id: &str) -> AppResult
     Ok(note)
 }
 
-/// Remove settled-reply events for the given members from the orchestrator's
+/// Remove settled-report events for the given agents from a NyxBot thread's
 /// queue once `wait_for_subagents` has delivered them in-turn.
 pub async fn consume_settled_events(
     db: &Database,
     owner: &str,
-    team_id: &str,
-    member_ids: &[String],
+    conversation_id: &str,
+    agent_ids: &[String],
 ) -> AppResult<()> {
-    if member_ids.is_empty() {
+    if agent_ids.is_empty() {
         return Ok(());
     }
     db.collection::<AssistantConversation>(CONVERSATIONS)
         .update_one(
-            doc! {"_id": team_id, "user_id": owner},
+            doc! {"_id": conversation_id, "user_id": owner},
             doc! {"$pull": {"pending_events": {
-                "kind": "subagent_settled", "subagent_id": {"$in": member_ids},
+                "kind": "subagent_settled", "agent_id": {"$in": agent_ids},
             }}},
         )
         .await?;
     Ok(())
 }
 
-/// Idle agents with queued events whose wake-up was deferred (full pool or a
-/// replica restart). Bounded; loop guards still apply at wake time.
-pub async fn queued(db: &Database) -> AppResult<Vec<AssistantConversation>> {
+/// Idle threads with queued events whose wake-up was deferred (full pool or
+/// a replica restart), oldest first. Bounded; loop guards still apply at wake time.
+pub async fn queued(db: &Database, owner: Option<&str>) -> AppResult<Vec<AssistantConversation>> {
+    // NyxBot threads parked at the streak cap wait for a user message; they
+    // never crowd out threads that can still wake.
+    let mut filter = doc! {
+        "pending_events.created_at": {"$exists": true},
+        "$or": [
+            {"role": "subagent"},
+            {"event_streak": {"$not": {"$gte": MAX_EVENT_STREAK}}},
+        ],
+    };
+    if let Some(owner) = owner {
+        filter.insert("user_id", owner);
+    }
     let rows: Vec<AssistantConversation> = db
         .collection::<AssistantConversation>(CONVERSATIONS)
-        .find(doc! {"pending_events.created_at": {"$exists": true},
-            "destroyed_at": bson::Bson::Null})
+        .find(filter)
+        .sort(doc! {"updated_at": 1})
         .limit(100)
         .await?
         .try_collect()
@@ -903,39 +1508,15 @@ pub async fn queued(db: &Database) -> AppResult<Vec<AssistantConversation>> {
         .collect())
 }
 
-/// Subagents with no activity since `cutoff` and no live turn.
-pub async fn idle_members(
-    db: &Database,
-    cutoff: DateTime<Utc>,
-) -> AppResult<Vec<AssistantConversation>> {
-    let rows: Vec<AssistantConversation> = db
-        .collection::<AssistantConversation>(CONVERSATIONS)
-        .find(doc! {"role": "subagent", "destroyed_at": bson::Bson::Null,
-        "updated_at": {"$lt": bson::DateTime::from_chrono(cutoff)}})
-        .limit(200)
-        .await?
-        .try_collect()
+/// Drop events that reached a destroyed agent's thread after it was destroyed.
+pub async fn drop_events(db: &Database, owner: &str, conversation_id: &str) -> AppResult<()> {
+    db.collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": conversation_id, "user_id": owner},
+            doc! {"$set": {"pending_events": []}},
+        )
         .await?;
-    let now = Utc::now();
-    Ok(rows
-        .into_iter()
-        .filter(|row| live_turn(row, now).is_none())
-        .collect())
-}
-
-/// Destroy idle subagents. One failure never stops the sweep.
-pub async fn sweep_idle(db: &Database) -> AppResult<usize> {
-    let cutoff = Utc::now() - chrono::Duration::days(IDLE_DESTROY_DAYS);
-    let mut destroyed = 0;
-    for row in idle_members(db, cutoff).await? {
-        let Some(team_id) = row.team_id.as_deref() else {
-            continue;
-        };
-        if destroy(db, &row.user_id, team_id, &row.id).await.is_ok() {
-            destroyed += 1;
-        }
-    }
-    Ok(destroyed)
+    Ok(())
 }
 
 async fn audit(db: &Database, owner: &str, event: &str, data: serde_json::Value) {

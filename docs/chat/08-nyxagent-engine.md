@@ -90,28 +90,29 @@ Native chat tools cannot delete, widen, relabel, bind credentials to, or select 
 assistant key as a route agent, including keys belonging to another chat. The user
 deletes the conversation instead. Rotation and revocation remain available to the human user.
 
-## Authority: Full-only orchestrators, granted subagents
+## Authority: Full-only NyxBot, granted specialists
 
-The Ask/Full choice is retired. Every chat is a NyxBot **orchestrator** with Full
-access: `allow_all_services=true`, `allow_all_nodes=true`, auto-connected access and
-the internal `assistant:account` scope. Service and account cards are never created
-for an orchestrator and `chat_access` is `granted` for every listed service/tool.
-Existing per-service proxy approval policies still apply. Destructive account tools
-still require a single-use **action** confirmation card unless the owner turned
-confirmations off in NyxBot settings (`skip_destructive_confirmation`, default
-`false`).
+The Ask/Full choice is retired. Every owner has one persistent **NyxBot** agent;
+its threads run with Full access: `allow_all_services=true`, `allow_all_nodes=true`,
+auto-connected access and the internal `assistant:account` scope. Service and
+account cards are never created for NyxBot and `chat_access` is `granted` for
+every listed service/tool. Existing per-service proxy approval policies still
+apply. Destructive account tools still require a single-use **action** card
+unless the owner turned confirmations off in NyxBot settings
+(`skip_destructive_confirmation`, default `false`).
 
-A **subagent** (see NyxBot team below) holds only the grants its orchestrator made:
-`allow_all_services=false`, `allow_auto_connected_services=false`,
-`allowed_service_ids`/`allowed_platform_service_ids` from its row's `grants`, and
+A **specialist** agent (see NyxBot agents below) holds only its grants on every
+one of its threads: `allow_all_services=false`, `allow_auto_connected_services=false`,
+`allowed_service_ids`/`allowed_platform_service_ids` from the agent's `grants`, and
 `assistant:account` only with an `account_read` grant, which reaches read-only
-account tools. The row's `grants` are the durable source; the key mirrors them.
+account tools. The agent document is the durable source; thread keys mirror it
+at every turn start, rotation and replacement.
 
-Legacy rows deserialize with `access_mode: ask` and role `orchestrator`. The next
-`begin_turn` upgrades them inside the transaction that claims the turn: the row is
-set to `full`, the key converges to Full, and pending service/account cards expire.
-There is no startup sweep, so no upgrade races a live turn. `PATCH
-/conversations/{id}/access-mode` answers `410 Gone` with
+Legacy conversations deserialize with `access_mode: ask` and no `agent_id`. The
+next `begin_turn` adopts them as NyxBot threads inside the transaction that
+claims the turn: the row is set to `full`, the key converges to Full, and pending
+service/account cards expire. There is no startup sweep, so no upgrade races a
+live turn. `PATCH /conversations/{id}/access-mode` answers `410 Gone` with
 `{"error":"access_mode_retired"}`; `POST /turns` still accepts `access_mode` from
 older clients and ignores it. DTOs report `access_mode: "full"`.
 
@@ -125,11 +126,11 @@ redacted. Index `(conversation_id,status,created_at)` has no TTL. Pending reques
 expire lazily after 15 minutes; allowed actions expire after 10 minutes and can
 be consumed only once. Decisions and key mutations serialize against the current
 conversation and credential generation. Service and account requests come only
-from subagents and carry `decider: "orchestrator"`, the team's `team_id`, and a
+from specialist threads and carry `decider: "orchestrator"` (NyxBot decides) and a
 bounded `request_excerpt` of the message that started the requesting work (the
-user's own words when the user spoke to the subagent). Action confirmations keep
-`decider: "user"`. Decided rows record `decided_by` (`user` or `orchestrator`) and
-the orchestrator's bounded `reason`.
+user's own words when the user spoke to the specialist). Action confirmations
+keep `decider: "user"`. Decided rows record `decided_by` (`user` or `orchestrator`)
+and NyxBot's bounded `reason`.
 
 Only keys identified by their actual credential row get this authority; a platform
 label alone grants nothing. Their MCP listing/search includes all services visible
@@ -234,11 +235,12 @@ The virtual `nyxid` service is named **NyxID account**, category `internal`, exe
 and uses `McpToolSource::Internal`. Dispatch is in-process through the same service
 layer as REST; there is no HTTP loopback. Every tool has a closed input schema,
 bounded JSON output (100 list rows, 64 KiB), and an explicit destructive description.
-Orchestrators reach every tool; destructive tools add the single-use action
-confirmation unless the owner turned confirmations off. Subagents reach only the
+NyxBot reaches every tool; destructive tools add the single-use action
+confirmation unless the owner turned confirmations off. Specialists reach only the
 read-only tools (`list_*`, `get_*`) and only with an `account_read` grant; every
-other tool returns `orchestrator_only`. Orchestrators also get the NyxBot team and
-channel tools listed under NyxBot team. The closed account inventory is:
+other tool returns `orchestrator_only`. NyxBot also gets the agent and channel
+tools, and every agent gets its memory tools (see NyxBot agents). The closed
+account inventory is:
 
 | Area | Tools (prefix every name with `nyxid__`) | Destructive |
 | --- | --- | --- |
@@ -278,58 +280,64 @@ execution audits remain unchanged. Service-layer
 errors become bounded `isError` results with existing `AppError` codes and static
 safe messages; internals never enter the model context.
 
-## NyxBot team
+## NyxBot agents
 
-Normative design: [09-nyxbot-orchestrator.md](09-nyxbot-orchestrator.md). A team is
-one orchestrator conversation plus subagent conversations in the same collection
-(`role`, `team_id`, `agent_name`, `charter`, `specialty`, `grants`, `destroyed_at`,
-`pending_events`, `event_streak`). Every agent is an ordinary NyxAgent conversation
-with its own key, transcript and detached turns; NyxAgent is unchanged.
+Normative design: [09-nyxbot-orchestrator.md](09-nyxbot-orchestrator.md).
+`assistant_agents` holds one `nyxbot` per owner (unique partial index, created on
+first use) and persistent `specialist` agents with a name, role description,
+`grants`, `memory` (≤ 50 notes of ≤ 500 characters), `home_conversation_id`,
+`created_by` and `destroyed_at`. Conversations are threads of an agent
+(`agent_id`; legacy rows are NyxBot's) with a denormalized `role`, `report_to`,
+`pending_events` and `event_streak`. NyxAgent is unchanged: every thread is an
+ordinary conversation with its own key.
 
-Orchestrator-only native tools (`nyxid__` prefix): `spawn_subagent`,
-`message_subagent`, `wait_for_subagents` (at most 120 s), `list_subagents`,
-`read_subagent`, `grant_subagent`, `revoke_subagent`, `decide_permission`,
-`destroy_subagent`, `connect_channel_bot`, `list_channel_agents`,
-`disconnect_channel_bot`. A subagent calling them gets `orchestrator_only`. Grants
-resolve slugs or IDs through the owner's MCP catalog, so a subagent can be granted
-only what the orchestrator itself can reach. Spawning fences the orchestrator row;
-the owner's `max_live_subagents` (default 8, at most 32) bounds live members.
+NyxBot-only native tools (`nyxid__` prefix): `spawn_subagent`, `message_subagent`,
+`wait_for_subagents` (at most 120 s), `list_subagents`, `read_subagent`,
+`grant_subagent`, `revoke_subagent`, `update_subagent`, `decide_permission`,
+`destroy_subagent`, `connect_channel_bot`, `link_channel_bot`,
+`list_channel_agents`, `disconnect_channel_bot`. Every agent has `remember` and
+`forget`; its memory is injected into every thread's instructions and refuses
+obvious credential shapes. A specialist calling a NyxBot-only tool gets
+`orchestrator_only`. Grants resolve slugs or IDs through the owner's MCP catalog.
+Creating a specialist fences the owner's NyxBot row; `max_live_subagents`
+(default 8, at most 32) bounds live specialists.
 
-NyxID starts turns itself: subagent work (`origin: orchestrator`), wake-ups
-(`origin: event`) and channel messages (`origin: channel`), with the owner's
-identity and billing. Orchestrator- or event-started subagent turns report back to
-the orchestrator as a `subagent_settled` event; a user's direct chat with a
-subagent does not wake the orchestrator and is listed in its next turn's
-instructions instead. Events queue on `pending_events` (at most 20) and one event
-turn drains them when the agent is idle, so simultaneous reports coalesce. Every
-turn drains the queue; non-event turns carry the drained events in their
-instructions. Loop guards: at most 20 event turns per team per hour, and an
-orchestrator stops after 3 consecutive event turns without a user message (events
-wait for the user). Subagent and event turns draw from a per-team pool of
-`max_concurrent_subagent_turns` (default 3, at most 8) plus one for the
-orchestrator; a full pool returns `pool_full` instead of queueing. A background
-task retries deferred wake-ups each minute and destroys subagents idle for seven
-days. Destroy requests Stop on a live turn, revokes the key and ciphertext, expires
-cards and keeps the transcript read-only. Deleting an orchestrator deletes the
-whole team in one transaction.
+NyxID starts turns itself: specialist work in the agent's home thread
+(`origin: orchestrator`, with `report_to` set to the assigning NyxBot thread),
+wake-ups (`origin: event`) and channel messages (`origin: channel`), with the
+owner's identity and billing. A NyxBot-assigned or event-resumed specialist turn
+reports to `report_to` as a `subagent_settled` event; a direct chat does not wake
+NyxBot and is listed in its next turn's instructions instead. A specialist's
+permission request goes to `report_to` or NyxBot's home thread. Events queue on
+the thread (at most 20) and one event turn drains them when it is idle; other
+turns carry drained events in their instructions. Loop guards: at most 20 event
+turns per owner per hour, and a NyxBot thread stops after 3 consecutive event
+turns without a user message. Specialist and event turns draw from an owner pool
+of `max_concurrent_subagent_turns` (default 3, at most 8) plus one for NyxBot; a
+full pool returns `pool_full`. A background task retries deferred wake-ups each
+minute. Agents are never destroyed automatically. Destroy requests Stop on live
+turns, revokes every thread key and ciphertext, expires cards, disconnects the
+agent's channel bots and keeps read-only threads; a destroyed specialist can be
+deleted with its threads. Deleting a thread deletes only that thread.
 
 Role-to-profile routing (`assistant_profile_routes`, admin
 `GET/PUT /api/v1/admin/assistant/profile-routes`) validates and stores a NyxAgent
-profile per role and per subagent specialty, but is inactive
-(`ROUTING_ACTIVE = false`): every subagent inherits its orchestrator's profile.
+profile per role and per specialist specialty, but is inactive
+(`ROUTING_ACTIVE = false`): specialists inherit NyxBot's profile.
 
 ## Channel bots
 
-`nyxid__connect_channel_bot` (or `POST /channels`) makes NyxBot answer one of the
-owner's channel bots. Telegram bots use the Agent Event Gateway (catalog slug
+`nyxid__connect_channel_bot` (or `POST /channels`) links one of the owner's
+channel bots to NyxBot or a specialist (`link_channel_bot` / `PATCH /channels/{id}`
+relinks it). Telegram bots use the Agent Event Gateway (catalog slug
 `cmaeg`): NyxID mints a dedicated route key and gateway agent key, creates the
 gateway channel as the owner (the gateway verifies the agent key through
 `GET /users/me`), points the route key's callback at the gateway, and is the
 gateway's `nyxbot` provider under `/api/v1/nyxbot` (Agent Card, bindings,
 conversations, Responses SSE, event context). Other platforms use NyxID's own relay:
 the route key's callback is `/api/v1/nyxbot/relay/{id}`, verified with NyxID's
-relay callback token. Each chat partition maps to one orchestrator conversation
-owned by the bot owner (`channel` set on the row). Only senders verified as the
+relay callback token. Each chat partition maps to one thread of the linked
+agent, owned by the bot owner (`channel` set on the row). Only senders verified as the
 owner reach it: NyxID's Telegram notification link, or a one-time link code the
 owner sends from the chat app (a `t.me/<bot>?start=<code>` link for Telegram).
 Other senders get a short refusal in private chats and silence in groups, and no
@@ -345,27 +353,29 @@ Paths below are relative to `/api/v1/assistant/nyxagent`.
 
 | Method and path | Request | Response |
 | --- | --- | --- |
-| `GET /conversations` | `limit` 1–100 (default 50), optional `cursor` | `{conversations,next_cursor}` |
+| `GET /conversations` | `limit` 1–100 (default 50), optional `cursor`, optional `agent_id` | `{conversations,next_cursor}` |
 | `GET /conversations/{id}` | `limit` 1–100 (default 50), optional positive `before_seq` | `{conversation,messages,acknowledgements,approvals,before_seq}` |
 | `PATCH /conversations/{id}` | closed `{title}`; trimmed nonempty, max 200 Unicode scalars | conversation DTO |
 | `DELETE /conversations/{id}` | no body | 204; local hard delete, best-effort upstream session delete |
 | `POST /conversations/{id}/stop` | no body | 204; owner-only, no active turn is a no-op |
 | `PATCH /conversations/{id}/access-mode` | ignored | `410 Gone` (`access_mode_retired`) |
-| `GET /conversations/{id}/team` | no body | `{orchestrator_id,members,pending_requests,limits}` |
-| `POST /conversations/{id}/destroy` | no body; subagents only | `{id,destroyed_at}` |
+| `GET` / `POST /agents` | `POST`: closed `{name,description,services?,account_read?}` | `{agents,limits}` / `201 {id,name,home_conversation_id}` |
+| `GET` / `PATCH` / `DELETE /agents/{id}` | `PATCH`: `{name?,description?}`; `DELETE` only after destroy | `{agent,memory,threads}` / agent / 204 |
+| `PUT /agents/{id}/grants` | closed `{services,account_read}` (specialists) | `{id,services,account_read}` |
+| `POST /agents/{id}/destroy` | no body; specialists only | `{id,destroyed_at}` |
+| `DELETE /agents/{id}/memory/{note_id}` | no body | 204 |
 | `GET` / `PUT /settings` | `PUT`: any of `{skip_destructive_confirmation,max_live_subagents,max_concurrent_subagent_turns}` | settings with limits |
-| `GET` / `POST /channels` | `POST`: closed `{bot_id}` | channel agents / `{channel_agent,link}` |
-| `DELETE /channels/{id}` | no body | `{disconnected,platform,gateway_released}` |
+| `GET` / `POST /channels` | `POST`: closed `{bot_id,agent_id?}` | channel agents / `{channel_agent,link}` |
+| `PATCH` / `DELETE /channels/{id}` | `PATCH`: closed `{agent_id}` | `{channel_agent_id,agent,changed}` / `{disconnected,platform,gateway_released}` |
 | `POST /conversations/{id}/acknowledgements/{ack_id}` | closed `{decision:"allow"|"deny"}` | acknowledgement DTO |
 | `GET /conversations/{id}/attachments/{attachment_id}` | no body | image bytes (owner only; see Tool images) |
-| `POST /turns` | closed `{conversation_id?,text,model?,access_mode?}` (`access_mode` ignored) | NyxID SSE events |
+| `POST /turns` | closed `{conversation_id?,agent_id?,text,model?,access_mode?}` (`agent_id` for new threads; `access_mode` ignored) | NyxID SSE events |
 | `GET /models` | no body | `[{id,label}]` |
 
 Conversation DTO: `id,title,model,access_mode,created_at,last_message_at,message_count,
-pending_acknowledgements,active_turn,context_reset_at,role,team_id,agent_name,charter,
-destroyed_at,pending_events,channel,members`. `access_mode` is always `full`. The index
-lists orchestrators only; `members` nests each team's subagents as
-`{id,name,status,pending_acknowledgements,last_message_at,destroyed_at}`.
+pending_acknowledgements,active_turn,context_reset_at,role,agent,pending_events,channel`.
+`access_mode` is always `full`; `agent` is `{id,kind,name,destroyed}` (a destroyed
+agent's threads are read-only).
 `active_turn` is null or `{turn_id,started_at,activities}`.
 Message DTO: `id,seq,turn_id,role,text,status,error_code,created_at,activities,attachments`,
 where `role` is `user`, `assistant`, `orchestrator` (an instruction the orchestrator

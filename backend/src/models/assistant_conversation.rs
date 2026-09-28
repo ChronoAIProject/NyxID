@@ -13,8 +13,9 @@ pub enum AccessMode {
     Full,
 }
 
-/// A NyxBot team is one orchestrator plus disposable subagents. Rows written
-/// before teams existed deserialize as orchestrators.
+/// The kind of agent a conversation thread belongs to. NyxBot threads act
+/// with Full access; specialist threads act with their agent's grants. Rows
+/// written before agents existed deserialize as NyxBot threads.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentRole {
@@ -23,23 +24,8 @@ pub enum AgentRole {
     Subagent,
 }
 
-/// Authority the orchestrator delegated to a subagent. The subagent's key
-/// mirrors these fields; this copy is re-applied at every turn.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SubagentGrants {
-    /// Owner-visible `UserService` IDs.
-    #[serde(default)]
-    pub service_ids: Vec<String>,
-    /// Platform catalog (`DownstreamService`) IDs.
-    #[serde(default)]
-    pub platform_service_ids: Vec<String>,
-    /// Read-only NyxID account tools.
-    #[serde(default)]
-    pub account_read: bool,
-}
-
-/// Who started a turn. Only orchestrator- and event-started subagent turns
-/// wake the orchestrator when they settle; a user's direct chat does not.
+/// Who started a turn. Only NyxBot- and event-started specialist turns report
+/// back to NyxBot when they settle; a user's direct chat does not.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TurnOrigin {
@@ -59,9 +45,9 @@ pub struct AgentEvent {
     /// `permission_expired`, `message`.
     pub kind: String,
     pub text: String,
-    /// Subagent conversation the event concerns, when any.
+    /// Specialist agent the event concerns, when any.
     #[serde(default)]
-    pub subagent_id: Option<String>,
+    pub agent_id: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
 }
@@ -149,32 +135,24 @@ pub struct AssistantConversation {
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub updated_at: DateTime<Utc>,
+    /// Denormalized from the owning agent's kind.
     #[serde(default)]
     pub role: AgentRole,
-    /// The orchestrator's conversation ID; `None` on orchestrators.
+    /// The agent (`assistant_agents._id`) this thread belongs to. `None` on
+    /// rows written before agents existed; they belong to the owner's NyxBot.
     #[serde(default)]
-    pub team_id: Option<String>,
-    /// Unique within the team; subagents only.
+    pub agent_id: Option<String>,
+    /// Specialist threads only: the NyxBot thread that assigned the current
+    /// work, which receives its report and permission requests.
     #[serde(default)]
-    pub agent_name: Option<String>,
-    /// Task and scope the orchestrator gave a subagent (bounded).
-    #[serde(default)]
-    pub charter: Option<String>,
-    /// Optional subagent specialty (`research`, `writer`, ...) for profile routing.
-    #[serde(default)]
-    pub specialty: Option<String>,
-    #[serde(default)]
-    pub grants: SubagentGrants,
-    /// Set when a subagent is destroyed; the transcript is then read-only.
-    #[serde(default, with = "crate::models::bson_datetime::optional")]
-    pub destroyed_at: Option<DateTime<Utc>>,
+    pub report_to: Option<String>,
     /// Bounded wake-up queue drained by the next event turn.
     #[serde(default)]
     pub pending_events: Vec<AgentEvent>,
     /// Consecutive event turns since the last user message (loop guard).
     #[serde(default)]
     pub event_streak: i32,
-    /// Set on conversations that answer a channel bot.
+    /// Set on threads that answer a channel bot.
     #[serde(default)]
     pub channel: Option<ChannelOrigin>,
 }
@@ -182,10 +160,6 @@ pub struct AssistantConversation {
 impl AssistantConversation {
     pub fn is_subagent(&self) -> bool {
         self.role == AgentRole::Subagent
-    }
-    /// The orchestrator conversation that owns this row's team.
-    pub fn team_root(&self) -> &str {
-        self.team_id.as_deref().unwrap_or(&self.id)
     }
 }
 

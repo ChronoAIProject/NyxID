@@ -1,13 +1,15 @@
-//! NyxBot team orchestration at the HTTP layer: server-started turns, event
-//! wake-ups with loop guards, permission routing between a subagent and its
-//! orchestrator, the orchestrator's native tools, and the team UI endpoints.
+//! NyxBot at the HTTP layer: the owner's persistent personal agent and its
+//! specialist agents. Server-started turns, event wake-ups with loop guards,
+//! permission routing from specialists to NyxBot, the native team and memory
+//! tools, and the agent UI endpoints.
 //!
-//! Every agent is an ordinary conversation, so a server-started turn is the
+//! Every thread is an ordinary conversation, so a server-started turn is the
 //! same detached turn a browser starts, run with the owner's identity and
 //! billed to the owner.
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
+    http::StatusCode,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -21,7 +23,8 @@ use crate::{
     errors::{AppError, AppResult},
     models::{
         assistant_acknowledgement::AssistantAcknowledgement,
-        assistant_conversation::{AgentRole, AssistantConversation, SubagentGrants, TurnOrigin},
+        assistant_agent::{AgentGrants, AssistantAgent},
+        assistant_conversation::{AssistantConversation, TurnOrigin},
     },
     mw::{
         auth::{AuthMethod, AuthUser},
@@ -42,8 +45,8 @@ use crate::{
 /// Channel turns are bounded per owner, separately from browser turns.
 pub const CHANNEL_TURNS_PER_OWNER: u32 = 2;
 
-/// The owner identity NyxID uses for turns it starts itself (subagent work,
-/// wake-ups, channel messages): the same person a browser turn acts for.
+/// The owner identity NyxID uses for turns it starts itself (specialist
+/// work, wake-ups, channel messages): the same person a browser turn acts for.
 pub(crate) fn owner_auth(owner: &str) -> AppResult<AuthUser> {
     let user_id =
         Uuid::parse_str(owner).map_err(|_| AppError::NotFound("Conversation not found".into()))?;
@@ -74,8 +77,8 @@ pub(crate) fn owner_auth(owner: &str) -> AppResult<AuthUser> {
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Pool<'a> {
-    /// A team's subagent and event turns, sized by the owner's setting.
-    Team { team_id: &'a str, limit: u32 },
+    /// The owner's specialist and event turns, sized by the owner's setting.
+    Team { owner: &'a str, limit: u32 },
     /// Channel turns for one owner.
     Channel { owner: &'a str },
 }
@@ -85,7 +88,7 @@ pub(crate) enum Started {
         conversation: Box<AssistantConversation>,
         receiver: broadcast::Receiver<Value>,
     },
-    /// The target already has a live turn.
+    /// The thread already has a live turn.
     Busy,
     /// The pool has no free slot.
     PoolFull,
@@ -93,10 +96,10 @@ pub(crate) enum Started {
 
 async fn acquire(state: &AppState, pool: Pool<'_>) -> AppResult<Option<DirectChatPermit>> {
     match pool {
-        Pool::Team { team_id, limit } => {
+        Pool::Team { owner, limit } => {
             state
                 .direct_chat_limiter
-                .try_acquire_pool("assistant_team", team_id, limit)
+                .try_acquire_pool("assistant_team", owner, limit)
                 .await
         }
         Pool::Channel { owner } => {
@@ -109,7 +112,7 @@ async fn acquire(state: &AppState, pool: Pool<'_>) -> AppResult<Option<DirectCha
 }
 
 /// Start a turn NyxID initiates. Never queues: a full pool or a live turn is
-/// reported so the caller (usually the orchestrator) decides what to wait for.
+/// reported so the caller (usually NyxBot) decides what to wait for.
 pub(crate) async fn start_server_turn(
     state: &AppState,
     owner: &str,
@@ -119,6 +122,15 @@ pub(crate) async fn start_server_turn(
     let Some(permit) = acquire(state, pool).await? else {
         return Ok(Started::PoolFull);
     };
+    start_acquired(state, owner, start, permit).await
+}
+
+async fn start_acquired(
+    state: &AppState,
+    owner: &str,
+    start: TurnStart,
+    permit: DirectChatPermit,
+) -> AppResult<Started> {
     match super::assistant_nyxagent::start_turn(
         state,
         owner_auth(owner)?,
@@ -137,35 +149,61 @@ pub(crate) async fn start_server_turn(
     }
 }
 
-async fn team_pool_limit(state: &AppState, owner: &str) -> u32 {
+pub(crate) async fn team_pool_limit(state: &AppState, owner: &str) -> u32 {
     settings::get(&state.db, owner)
         .await
         .map(|row| row.max_concurrent_subagent_turns.max(1) as u32)
         .unwrap_or(crate::models::assistant_settings::DEFAULT_MAX_CONCURRENT_SUBAGENT_TURNS as u32)
 }
 
-/// Start an event turn draining the agent's queue when it is idle. Loop
-/// guards: an orchestrator stops after `MAX_EVENT_STREAK` consecutive event
-/// turns without a user message, and a team runs at most
+fn event_turn(conversation_id: &str) -> TurnStart {
+    TurnStart {
+        conversation_id: Some(conversation_id.to_owned()),
+        text: String::new(),
+        model: None,
+        origin: TurnOrigin::Event,
+        channel: None,
+        title: None,
+        note: None,
+        new_id: None,
+        agent_id: None,
+        report_to: None,
+    }
+}
+
+/// Start an event turn draining a thread's queue when it is idle. Loop
+/// guards: a NyxBot thread stops after `MAX_EVENT_STREAK` consecutive event
+/// turns without a user message, and an owner runs at most
 /// `EVENT_TURNS_PER_HOUR` event turns per hour. Events stay queued otherwise
 /// and reach the agent with its next turn.
 pub(crate) async fn wake(state: &AppState, owner: &str, id: &str) {
     let result: AppResult<()> = async {
         let row = engine::get(&state.db, owner, id).await?;
-        if row.destroyed_at.is_some()
-            || row.pending_events.is_empty()
-            || live_turn(&row, Utc::now()).is_some()
+        if row.pending_events.is_empty() || live_turn(&row, Utc::now()).is_some() {
+            return Ok(());
+        }
+        if !row.is_subagent() && row.event_streak >= team::MAX_EVENT_STREAK {
+            return Ok(());
+        }
+        // A destroyed agent never runs again; events that reached it late are dropped.
+        if team::agent_for_conversation(&state.db, &row)
+            .await?
+            .destroyed_at
+            .is_some()
         {
-            return Ok(());
+            return team::drop_events(&state.db, owner, id).await;
         }
-        let team_id = row.team_root().to_owned();
-        if row.role == AgentRole::Orchestrator && row.event_streak >= team::MAX_EVENT_STREAK {
+        // Take a pool slot before spending the hourly budget, so a full pool
+        // never uses it up. NyxBot's event turns share the pool with working
+        // specialists.
+        let limit = team_pool_limit(state, owner).await + 1;
+        let Some(permit) = acquire(state, Pool::Team { owner, limit }).await? else {
             return Ok(());
-        }
+        };
         if !RateWindowStore::admit(
             &state.db,
             "assistant_event_turns",
-            &team_id,
+            owner,
             team::EVENT_TURNS_PER_HOUR,
             Duration::from_secs(3600),
         )
@@ -174,30 +212,8 @@ pub(crate) async fn wake(state: &AppState, owner: &str, id: &str) {
         {
             return Ok(());
         }
-        // The orchestrator itself shares the pool with its working subagents.
-        let limit = team_pool_limit(state, owner).await + 1;
-        let start = TurnStart {
-            conversation_id: Some(id.to_owned()),
-            text: String::new(),
-            model: None,
-            origin: TurnOrigin::Event,
-            channel: None,
-            title: None,
-            note: None,
-            new_id: None,
-        };
-        match start_server_turn(
-            state,
-            owner,
-            start,
-            Pool::Team {
-                team_id: &team_id,
-                limit,
-            },
-        )
-        .await
-        {
-            // A drained-then-raced queue is harmless.
+        match start_acquired(state, owner, event_turn(id), permit).await {
+            // A drained-then-raced queue or a just-destroyed agent is harmless.
             Ok(_) | Err(AppError::Conflict(_)) => Ok(()),
             Err(error) => Err(error),
         }
@@ -205,6 +221,27 @@ pub(crate) async fn wake(state: &AppState, owner: &str, id: &str) {
     .await;
     if let Err(error) = result {
         tracing::debug!(conversation_id = %id, %error, "NyxBot wake-up deferred");
+    }
+}
+
+/// NyxBot's home thread, where events land that no thread asked for.
+pub(crate) async fn nyxbot_home(state: &AppState, owner: &str) -> AppResult<AssistantConversation> {
+    let nyxbot = team::ensure_nyxbot(&state.db, owner).await?;
+    team::home_thread(&state.db, &state.encryption_keys, &nyxbot).await
+}
+
+/// Queue events on a thread and wake it.
+pub(crate) async fn notify(
+    state: &AppState,
+    owner: &str,
+    conversation_id: &str,
+    events: Vec<crate::models::assistant_conversation::AgentEvent>,
+) {
+    if engine::push_events(&state.db, owner, conversation_id, events)
+        .await
+        .is_ok()
+    {
+        wake(state, owner, conversation_id).await;
     }
 }
 
@@ -219,9 +256,9 @@ pub(crate) fn after_turn_boxed(
     Box::pin(async move { after_turn(&state, &row, &text, error.as_ref()).await })
 }
 
-/// Runs after a turn's reply is durable: report orchestrator-assigned
-/// subagent work to the orchestrator, drain queues, and deliver asynchronous
-/// replies of channel conversations to their chat.
+/// Runs after a turn's reply is durable: report NyxBot-assigned specialist
+/// work to the NyxBot thread that assigned it, drain queues, and deliver
+/// asynchronous replies of channel threads to their chat.
 pub(crate) async fn after_turn(
     state: &AppState,
     row: &AssistantConversation,
@@ -232,63 +269,73 @@ pub(crate) async fn after_turn(
         return;
     };
     let owner = row.user_id.as_str();
-    // A direct user chat with a subagent does not wake the orchestrator; it
-    // reads those on its next turn.
+    // A direct user chat with a specialist does not wake NyxBot; it reads
+    // those on its next turn.
     if row.is_subagent()
         && matches!(turn.origin, TurnOrigin::Orchestrator | TurnOrigin::Event)
-        && let Some(team_id) = row.team_id.as_deref()
+        && let Some(target) = row.report_to.as_deref()
+        && let Ok(agent) = team::agent_for_conversation(&state.db, row).await
     {
-        let name = identifier(row.agent_name.as_deref().unwrap_or_default());
         let status = match error.map(|error| error.code) {
             None => "replied".to_owned(),
             Some("cancelled") => "was stopped".to_owned(),
             Some(code) => format!("failed ({code})"),
         };
         let note = format!(
-            "Subagent {name} {status}. Reply excerpt: \"{}\" Read more with nyxid__read_subagent.",
+            "Specialist {} {status}. Reply excerpt: \"{}\" Read more with nyxid__read_subagent.",
+            identifier(&agent.name),
             excerpt(text, 1200).replace('"', "'")
         );
-        let _ = engine::push_events(
-            &state.db,
+        notify(
+            state,
             owner,
-            team_id,
-            vec![team::event("subagent_settled", note, Some(&row.id))],
+            target,
+            vec![team::event("subagent_settled", note, Some(&agent.id))],
         )
         .await;
     }
-    // Wake whoever has queued work now that a slot is free: this agent,
-    // its orchestrator, and teammates.
+    // Wake whoever has queued work now that a slot is free.
     wake(state, owner, &row.id).await;
-    let team_id = row.team_root().to_owned();
-    if team_id != row.id {
-        wake(state, owner, &team_id).await;
-    }
-    if let Ok(members) = team::members(&state.db, owner, std::slice::from_ref(&team_id)).await {
-        for member in members.iter().filter(|member| {
-            member.id != row.id
-                && member.destroyed_at.is_none()
-                && !member.pending_events.is_empty()
-        }) {
-            wake(state, owner, &member.id).await;
+    if let Ok(rows) = team::queued(&state.db, Some(owner)).await {
+        for other in rows.iter().filter(|other| other.id != row.id).take(16) {
+            wake(state, owner, &other.id).await;
         }
     }
-    if row.channel.is_some() && turn.origin != TurnOrigin::Channel && error.is_none() {
+    // Only asynchronous event turns reach the chat: a channel turn answers its
+    // own event, and a turn the owner starts in the web app stays in the web app.
+    if row.channel.is_some() && turn.origin == TurnOrigin::Event && error.is_none() {
         super::nyxbot::deliver_update(state, row, text).await;
     }
 }
 
-/// A subagent asked for permission its grants do not cover: queue an event
-/// for the orchestrator and wake it.
+/// Where a specialist's permission request goes: the NyxBot thread that
+/// assigned its current work, otherwise NyxBot's home thread.
+async fn request_target(state: &AppState, chat: &ChatAuthority) -> AppResult<String> {
+    let row = engine::get(&state.db, &chat.user_id, &chat.conversation_id).await?;
+    let assigned = row
+        .active_turn
+        .as_ref()
+        .is_some_and(|turn| matches!(turn.origin, TurnOrigin::Orchestrator | TurnOrigin::Event));
+    if assigned && let Some(target) = row.report_to {
+        return Ok(target);
+    }
+    Ok(nyxbot_home(state, &chat.user_id).await?.id)
+}
+
+/// A specialist asked for permission its grants do not cover: queue an event
+/// for NyxBot and wake it.
 pub(crate) async fn permission_requested(
     state: &AppState,
     chat: &ChatAuthority,
     request: &AssistantAcknowledgement,
 ) {
-    let Some(team_id) = chat.team_id.as_deref() else {
+    if chat.is_orchestrator() {
+        return;
+    }
+    let Ok(target) = request_target(state, chat).await else {
         return;
     };
-    let name = identifier(chat.agent_name.as_deref().unwrap_or_default());
-    let target = match request.kind.as_str() {
+    let target_name = match request.kind.as_str() {
         "service" => format!(
             "service {}",
             identifier(request.service_slug.as_deref().unwrap_or_default())
@@ -296,8 +343,9 @@ pub(crate) async fn permission_requested(
         _ => "read-only account access".into(),
     };
     let note = format!(
-        "Subagent {name} requests {target} (request_id {}). It was working on: {} \
+        "Specialist {} requests {target_name} (request_id {}). It was working on: {} \
         Decide with nyxid__decide_permission: allow only what the user's request needs.",
+        identifier(&chat.agent_name),
         request.id,
         request
             .request_excerpt
@@ -305,25 +353,21 @@ pub(crate) async fn permission_requested(
             .map(|text| format!("\"{}\".", excerpt(text, 600).replace('"', "'")))
             .unwrap_or_else(|| "(no text)".into()),
     );
-    if engine::push_events(
-        &state.db,
+    notify(
+        state,
         &chat.user_id,
-        team_id,
+        &target,
         vec![team::event(
             "permission_requested",
             note,
-            Some(&chat.conversation_id),
+            Some(&chat.agent_id),
         )],
     )
-    .await
-    .is_ok()
-    {
-        wake(state, &chat.user_id, team_id).await;
-    }
+    .await;
 }
 
-/// A subagent's request was decided (by the orchestrator or the user): resume
-/// the subagent with the outcome.
+/// A specialist's request was decided (by NyxBot or the user): resume the
+/// specialist thread that asked.
 pub(crate) async fn permission_decided(
     state: &AppState,
     owner: &str,
@@ -338,7 +382,7 @@ pub(crate) async fn permission_decided(
         _ => "read-only account access".into(),
     };
     let by = match request.decided_by.as_deref() {
-        Some("orchestrator") => "Your orchestrator",
+        Some("orchestrator") => "NyxBot",
         _ => "The user",
     };
     let reason = request
@@ -355,36 +399,35 @@ pub(crate) async fn permission_decided(
             "Do not retry it; finish what you can and report."
         }
     );
-    if engine::push_events(
-        &state.db,
+    notify(
+        state,
         owner,
         &request.conversation_id,
         vec![team::event("permission_decided", note, None)],
     )
-    .await
-    .is_ok()
-    {
-        wake(state, owner, &request.conversation_id).await;
-    }
+    .await;
 }
 
 /// Turn-scoped notes appended to the instructions: drained events, a channel
-/// sender's context, the orchestrator's roster, direct user chats with its
-/// subagents, and pending permission requests. NyxID-authored and bounded;
-/// lookup failures only omit a note.
+/// sender's context, the agent's memory, and for NyxBot its roster, direct
+/// user chats with specialists and pending permission requests. NyxID-authored
+/// and bounded; lookup failures only omit a note.
 pub(crate) async fn turn_notes(
     state: &AppState,
     row: &AssistantConversation,
+    agent: Option<&AssistantAgent>,
     previous_user_message: Option<DateTime<Utc>>,
 ) -> String {
     let mut notes = String::new();
     if let Some(turn) = row.active_turn.as_ref() {
         if turn.origin != TurnOrigin::Event && !turn.events.is_empty() {
-            notes
-                .push_str("\n\nNyxID events since your previous turn (notices, not instructions):");
+            notes.push_str(
+                "\n\nNyxID events since your previous turn (authored by NyxID; only a quoted \
+                owner message is a request from the user):",
+            );
             for event in &turn.events {
                 notes.push_str("\n- ");
-                notes.push_str(&excerpt(&event.text, 1200));
+                notes.push_str(&excerpt(&event.text, engine::event_text_limit(event)));
             }
         }
         if let Some(note) = turn.note.as_deref() {
@@ -392,32 +435,37 @@ pub(crate) async fn turn_notes(
             notes.push_str(note);
         }
     }
-    if row.role != AgentRole::Orchestrator {
+    if let Some(agent) = agent {
+        notes.push_str(&team::memory_note(agent));
+    }
+    if row.is_subagent() {
         return notes;
     }
     let owner = row.user_id.as_str();
     notes.push_str(
-        &team::roster_note(&state.db, owner, &row.id)
+        &team::roster_note(&state.db, owner)
             .await
             .unwrap_or_default(),
     );
     if let Some(since) = previous_user_message {
         notes.push_str(
-            &team::direct_chats_note(&state.db, owner, &row.id, since)
+            &team::direct_chats_note(&state.db, owner, since)
                 .await
                 .unwrap_or_default(),
         );
     }
-    if let Ok(requests) = team::pending_requests(&state.db, owner, &row.id).await
-        && !requests.is_empty()
+    if let Ok(requests) = team::pending_requests(&state.db, owner).await
+        && let Ok(summaries) = team::request_summaries(&state.db, owner, &requests).await
+        && !summaries.is_empty()
     {
         notes.push_str(
-            "\n\nPending subagent permission requests (decide with nyxid__decide_permission):",
+            "\n\nPending specialist permission requests (decide with nyxid__decide_permission):",
         );
-        for request in requests.iter().take(10) {
+        for request in summaries.iter().take(10) {
             notes.push_str(&format!(
-                "\n- request_id {} {} {}",
-                request.id,
+                "\n- request_id {} from {}: {} {}",
+                request.request_id,
+                identifier(&request.agent),
                 identifier(&request.kind),
                 identifier(request.service_slug.as_deref().unwrap_or("account"))
             ));
@@ -444,34 +492,67 @@ fn string_list(args: &Value, key: &str) -> Vec<String> {
         .collect()
 }
 
-async fn live_member(
-    state: &AppState,
-    chat: &ChatAuthority,
-    name_or_id: &str,
-) -> AppResult<AssistantConversation> {
-    let row = team::member(&state.db, &chat.user_id, &chat.conversation_id, name_or_id).await?;
-    if row.destroyed_at.is_some() {
-        return Err(AppError::Conflict("That subagent was destroyed".into()));
-    }
-    Ok(row)
-}
-
 fn started_json(started: Started) -> Value {
     match started {
         Started::Turn { conversation, .. } => json!({
             "status": "started",
             "turn_id": conversation.active_turn.as_ref().map(|turn| turn.turn_id.clone()),
-            "note": "NyxID wakes you with an event when it replies; or use nyxid__wait_for_subagents.",
+            "note": "NyxID wakes you with an event when it reports; or use nyxid__wait_for_subagents.",
         }),
         Started::Busy => json!({"status": "busy",
             "note": "It is already working; wait for it before sending more."}),
         Started::PoolFull => json!({"status": "pool_full",
-            "note": "Too many subagents are working. Wait for one to finish, then retry."}),
+            "note": "Too many specialists are working. Wait for one to finish, then retry."}),
     }
 }
 
-/// Dispatch one orchestrator tool. Returns the MCP result value and whether
-/// it is an error result. Callers verified the key is an orchestrator's.
+/// Give a specialist work in its home thread, reporting to `report_to`.
+pub(crate) async fn assign(
+    state: &AppState,
+    owner: &str,
+    agent: &AssistantAgent,
+    text: &str,
+    report_to: Option<&str>,
+) -> AppResult<Started> {
+    let home = team::home_thread(&state.db, &state.encryption_keys, agent).await?;
+    let limit = team_pool_limit(state, owner).await;
+    start_server_turn(
+        state,
+        owner,
+        TurnStart {
+            conversation_id: Some(home.id),
+            text: text.to_owned(),
+            model: None,
+            origin: TurnOrigin::Orchestrator,
+            channel: None,
+            title: None,
+            note: None,
+            new_id: None,
+            agent_id: None,
+            report_to: report_to.map(str::to_owned),
+        },
+        Pool::Team { owner, limit },
+    )
+    .await
+}
+
+/// Resolve `nyxbot` or a live specialist name/ID to an agent.
+async fn target_agent(
+    state: &AppState,
+    owner: &str,
+    name: Option<&str>,
+) -> AppResult<AssistantAgent> {
+    match name.map(str::trim) {
+        None | Some("") | Some("nyxbot") | Some("NyxBot") => {
+            team::ensure_nyxbot(&state.db, owner).await
+        }
+        Some(name) => team::live_specialist(&state.db, owner, name).await,
+    }
+}
+
+/// Dispatch one native NyxBot tool. Returns the MCP result value and whether
+/// it is an error result. Team and channel tools need a NyxBot thread key;
+/// memory tools belong to every agent.
 pub(crate) async fn execute_tool(
     state: &AppState,
     chat: &ChatAuthority,
@@ -479,10 +560,10 @@ pub(crate) async fn execute_tool(
     args: &Value,
 ) -> (Value, bool) {
     let name = tool_name.strip_prefix("nyxid__").unwrap_or_default();
-    if !chat.is_orchestrator() {
+    if !chat.is_orchestrator() && !assistant_team_tools::is_memory_tool(name) {
         return refusal(
             "orchestrator_only",
-            "Only the orchestrator manages the team. Report what you need in your reply.",
+            "Only NyxBot manages agents and channel bots. Report what you need in your reply.",
         );
     }
     let result = async {
@@ -510,6 +591,7 @@ pub(crate) async fn execute_tool(
         "assistant_team_tool_call",
         Some(json!({
             "conversation_id": chat.conversation_id,
+            "agent_id": chat.agent_id,
             "tool_name": tool_name,
             "outcome": if outcome.1 {"refused"} else {"success"},
         })),
@@ -526,10 +608,24 @@ async fn dispatch(
 ) -> AppResult<(Value, bool)> {
     let db = &state.db;
     let owner = chat.user_id.as_str();
-    let team_id = chat.conversation_id.as_str();
+    let caller = chat.conversation_id.as_str();
     Ok(match name {
+        "remember" => {
+            let note = team::remember(
+                db,
+                owner,
+                &chat.agent_id,
+                text_arg(args, "text"),
+                args["replace_id"].as_str(),
+            )
+            .await?;
+            (json!({"remembered": note.id}), false)
+        }
+        "forget" => {
+            team::forget(db, owner, &chat.agent_id, text_arg(args, "note_id")).await?;
+            (json!({"forgotten": text_arg(args, "note_id")}), false)
+        }
         "spawn_subagent" => {
-            let orchestrator = team::orchestrator(db, owner, team_id).await?;
             let targets = team::resolve_targets(
                 db,
                 state.node_ws_manager.as_ref(),
@@ -537,54 +633,36 @@ async fn dispatch(
                 &string_list(args, "services"),
             )
             .await?;
-            let request = team::SpawnRequest {
+            let request = team::CreateRequest {
                 name: text_arg(args, "name").to_owned(),
-                charter: text_arg(args, "charter").to_owned(),
+                description: text_arg(args, "description").to_owned(),
                 targets: targets.clone(),
                 account_read: args["account_read"].as_bool().unwrap_or(false),
                 specialty: args["specialty"].as_str().map(str::to_owned),
+                created_by: "nyxbot",
             };
-            match team::spawn(db, &state.encryption_keys, owner, &orchestrator, request).await? {
+            match team::create_specialist(db, &state.encryption_keys, owner, request).await? {
                 Err(TeamRefusal::LimitReached { limit }) => (
                     json!({"error": "limit_reached", "limit": limit,
-                        "instructions": "Destroy an idle subagent first, or tell the user they \
-                            can raise the limit in NyxBot settings."}),
+                        "instructions": "Reuse or destroy a specialist first, or tell the user \
+                            they can raise the limit in NyxBot settings."}),
                     true,
                 ),
                 Err(TeamRefusal::NameTaken) => refusal(
                     "name_taken",
-                    "A live subagent already uses this name; pick another or message it.",
+                    "A live specialist already uses this name; message it or pick another name.",
                 ),
-                Ok((row, _)) => {
+                Ok((agent, _)) => {
                     let task = match args["task"].as_str() {
                         Some(task) => {
-                            let limit = team_pool_limit(state, owner).await;
-                            let start = TurnStart {
-                                conversation_id: Some(row.id.clone()),
-                                text: task.to_owned(),
-                                model: None,
-                                origin: TurnOrigin::Orchestrator,
-                                channel: None,
-                                title: None,
-                                note: None,
-                                new_id: None,
-                            };
-                            started_json(
-                                start_server_turn(
-                                    state,
-                                    owner,
-                                    start,
-                                    Pool::Team { team_id, limit },
-                                )
-                                .await?,
-                            )
+                            started_json(assign(state, owner, &agent, task, Some(caller)).await?)
                         }
                         None => json!({"status": "idle",
                             "note": "Give it work with nyxid__message_subagent."}),
                     };
                     (
-                        json!({"subagent": {"id": row.id, "name": row.agent_name,
-                            "services": targets.slugs, "account_read": row.grants.account_read},
+                        json!({"subagent": {"id": agent.id, "name": agent.name,
+                            "services": targets.slugs, "account_read": agent.grants.account_read},
                             "task": task}),
                         false,
                     )
@@ -592,21 +670,10 @@ async fn dispatch(
             }
         }
         "message_subagent" => {
-            let member = live_member(state, chat, text_arg(args, "subagent")).await?;
-            let limit = team_pool_limit(state, owner).await;
-            let start = TurnStart {
-                conversation_id: Some(member.id.clone()),
-                text: text_arg(args, "text").to_owned(),
-                model: None,
-                origin: TurnOrigin::Orchestrator,
-                channel: None,
-                title: None,
-                note: None,
-                new_id: None,
-            };
+            let agent = team::live_specialist(db, owner, text_arg(args, "subagent")).await?;
             (
                 started_json(
-                    start_server_turn(state, owner, start, Pool::Team { team_id, limit }).await?,
+                    assign(state, owner, &agent, text_arg(args, "text"), Some(caller)).await?,
                 ),
                 false,
             )
@@ -616,7 +683,7 @@ async fn dispatch(
             let rows = team::summaries(
                 db,
                 owner,
-                team_id,
+                false,
                 args["include_destroyed"].as_bool().unwrap_or(false),
                 300,
             )
@@ -624,21 +691,18 @@ async fn dispatch(
             (json!({"subagents": rows}), false)
         }
         "read_subagent" => {
-            let member = team::member(db, owner, team_id, text_arg(args, "subagent")).await?;
+            let agent = team::specialist(db, owner, text_arg(args, "subagent")).await?;
             let rows = team::read(
                 db,
                 owner,
-                &member,
+                &agent,
                 args["limit"].as_i64().unwrap_or(team::READ_LIMIT),
             )
             .await?;
-            (
-                json!({"subagent": member.agent_name, "messages": rows}),
-                false,
-            )
+            (json!({"subagent": agent.name, "messages": rows}), false)
         }
         "grant_subagent" | "revoke_subagent" => {
-            let member = live_member(state, chat, text_arg(args, "subagent")).await?;
+            let agent = team::live_specialist(db, owner, text_arg(args, "subagent")).await?;
             let targets = team::resolve_targets(
                 db,
                 state.node_ws_manager.as_ref(),
@@ -646,43 +710,39 @@ async fn dispatch(
                 &string_list(args, "services"),
             )
             .await?;
-            let mut grants: SubagentGrants = member.grants.clone();
-            let grant = name == "grant_subagent";
-            for (list, ids) in [
-                (&mut grants.service_ids, &targets.service_ids),
-                (
-                    &mut grants.platform_service_ids,
-                    &targets.platform_service_ids,
-                ),
-            ] {
-                if grant {
-                    for id in ids {
-                        if !list.contains(id) {
-                            list.push(id.clone());
-                        }
-                    }
-                } else {
-                    list.retain(|id| !ids.contains(id));
-                }
-            }
-            if let Some(account_read) = args["account_read"].as_bool() {
-                grants.account_read = if grant {
-                    grants.account_read || account_read
-                } else {
-                    grants.account_read && !account_read
-                };
-            }
-            let row = team::set_grants(db, owner, team_id, &member.id, grants).await?;
-            let summary = team::summaries(db, owner, team_id, false, 0)
+            let targets = AgentGrants {
+                service_ids: targets.service_ids,
+                platform_service_ids: targets.platform_service_ids,
+                account_read: args["account_read"].as_bool().unwrap_or(false),
+            };
+            let change = if name == "grant_subagent" {
+                team::GrantChange::Add(targets)
+            } else {
+                team::GrantChange::Remove(targets)
+            };
+            let agent = team::set_grants(db, owner, &agent.id, change).await?;
+            let summary = team::summaries(db, owner, false, false, 0)
                 .await?
                 .into_iter()
-                .find(|summary| summary.id == row.id);
+                .find(|summary| summary.id == agent.id);
             (
-                json!({"subagent": row.agent_name,
+                json!({"subagent": agent.name,
                     "services": summary.as_ref().map(|s| s.services.clone()),
-                    "account_read": row.grants.account_read}),
+                    "account_read": agent.grants.account_read}),
                 false,
             )
+        }
+        "update_subagent" => {
+            let agent = team::live_specialist(db, owner, text_arg(args, "subagent")).await?;
+            let agent = team::update_agent(
+                db,
+                owner,
+                &agent.id,
+                args["name"].as_str(),
+                args["description"].as_str(),
+            )
+            .await?;
+            (json!({"subagent": agent.name, "id": agent.id}), false)
         }
         "decide_permission" => {
             let allow = text_arg(args, "decision") == "allow";
@@ -696,7 +756,7 @@ async fn dispatch(
                 None,
                 request_id,
                 allow,
-                Decider::Orchestrator { team_id },
+                Decider::Nyxbot,
                 Some(text_arg(args, "reason")),
             )
             .await?;
@@ -715,17 +775,27 @@ async fn dispatch(
             permission_decided(state, owner, &row).await;
             (
                 json!({"request_id": row.id, "status": row.status,
-                    "note": "The subagent was resumed with your decision."}),
+                    "note": "The specialist was resumed with your decision."}),
                 false,
             )
         }
         "destroy_subagent" => {
-            let member = live_member(state, chat, text_arg(args, "subagent")).await?;
-            let row = team::destroy(db, owner, team_id, &member.id).await?;
-            (json!({"destroyed": row.agent_name}), false)
+            let agent = team::live_specialist(db, owner, text_arg(args, "subagent")).await?;
+            let agent = destroy_agent(state, owner, &agent.id).await?;
+            (json!({"destroyed": agent.name}), false)
         }
         "connect_channel_bot" => {
-            super::nyxbot::connect_tool(state, owner, team_id, text_arg(args, "bot_id")).await?
+            let agent = target_agent(state, owner, args["agent"].as_str()).await?;
+            super::nyxbot::connect_tool(state, owner, caller, text_arg(args, "bot_id"), &agent)
+                .await?
+        }
+        "link_channel_bot" => {
+            let agent = target_agent(state, owner, args["agent"].as_str()).await?;
+            (
+                super::nyxbot::link(state, owner, text_arg(args, "channel_agent_id"), &agent)
+                    .await?,
+                false,
+            )
         }
         "list_channel_agents" => (super::nyxbot::list_tool(state, owner).await?, false),
         "disconnect_channel_bot" => (
@@ -736,13 +806,30 @@ async fn dispatch(
     })
 }
 
+/// Destroy a specialist and disconnect every channel bot linked to it.
+pub(crate) async fn destroy_agent(
+    state: &AppState,
+    owner: &str,
+    agent_id: &str,
+) -> AppResult<AssistantAgent> {
+    let agent = team::destroy(&state.db, owner, agent_id).await?;
+    for channel in super::nyxbot::list(state, owner).await? {
+        if channel.agent_id.as_deref() == Some(agent.id.as_str())
+            && let Err(error) = super::nyxbot::disconnect(state, owner, &channel.id).await
+        {
+            tracing::warn!(%error, "Channel of a destroyed agent was not disconnected");
+        }
+    }
+    Ok(agent)
+}
+
 /// Bounded wait. Returns settled replies, who is still running, and pending
-/// permission requests; delivered settlements are removed from the
-/// orchestrator's queue so they do not also wake it later.
+/// permission requests; delivered settlements are removed from the calling
+/// thread's queue so they do not also wake it later.
 async fn wait_for(state: &AppState, chat: &ChatAuthority, args: &Value) -> AppResult<Value> {
     let db = &state.db;
     let owner = chat.user_id.as_str();
-    let team_id = chat.conversation_id.as_str();
+    let caller = chat.conversation_id.as_str();
     let timeout = args["timeout_secs"]
         .as_u64()
         .unwrap_or(60)
@@ -750,44 +837,32 @@ async fn wait_for(state: &AppState, chat: &ChatAuthority, args: &Value) -> AppRe
     let names = string_list(args, "subagents");
     let mut targets = Vec::new();
     if names.is_empty() {
-        targets = team::members(db, owner, &[team_id.to_owned()])
+        targets = team::agents(db, owner, false)
             .await?
             .into_iter()
-            .filter(|row| row.destroyed_at.is_none())
-            .map(|row| row.id)
+            .filter(|agent| !agent.is_nyxbot())
+            .map(|agent| agent.id)
             .collect();
     } else {
         for name in &names {
-            targets.push(team::member(db, owner, team_id, name).await?.id);
+            targets.push(team::specialist(db, owner, name).await?.id);
         }
     }
-    let own_turn = engine::get(db, owner, team_id)
+    let own_turn = engine::get(db, owner, caller)
         .await?
         .active_turn
         .map(|turn| turn.turn_id);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout);
     loop {
-        let now = Utc::now();
-        let rows = team::members(db, owner, &[team_id.to_owned()]).await?;
-        let rows: Vec<_> = rows
-            .into_iter()
-            .filter(|row| targets.contains(&row.id))
-            .collect();
-        let running: Vec<_> = rows
-            .iter()
-            .filter(|row| row.destroyed_at.is_none() && live_turn(row, now).is_some())
-            .collect();
-        let requests = team::pending_requests(db, owner, team_id).await?;
+        let running = team::running_agents(db, owner).await?;
+        let busy = targets.iter().any(|id| running.contains(id));
+        let requests = team::pending_requests(db, owner).await?;
         let stopped = match own_turn.as_deref() {
-            Some(turn_id) => engine::stop_requested(db, owner, team_id, turn_id).await?,
+            Some(turn_id) => engine::stop_requested(db, owner, caller, turn_id).await?,
             None => false,
         };
-        if running.is_empty()
-            || !requests.is_empty()
-            || stopped
-            || tokio::time::Instant::now() >= deadline
-        {
-            let summaries = team::summaries(db, owner, team_id, true, team::REPLY_EXCERPT_CHARS)
+        if !busy || !requests.is_empty() || stopped || tokio::time::Instant::now() >= deadline {
+            let summaries = team::summaries(db, owner, false, true, team::REPLY_EXCERPT_CHARS)
                 .await?
                 .into_iter()
                 .filter(|summary| targets.contains(&summary.id))
@@ -797,21 +872,14 @@ async fn wait_for(state: &AppState, chat: &ChatAuthority, args: &Value) -> AppRe
                 .filter(|summary| summary.status != "running")
                 .map(|summary| summary.id.clone())
                 .collect();
-            team::consume_settled_events(db, owner, team_id, &settled).await?;
-            let names: std::collections::HashMap<String, String> = rows
-                .iter()
-                .map(|row| (row.id.clone(), row.agent_name.clone().unwrap_or_default()))
-                .collect();
+            team::consume_settled_events(db, owner, caller, &settled).await?;
             return Ok(json!({
                 "settled": summaries.iter().filter(|s| s.status != "running").map(|s| json!({
                     "name": s.name, "status": s.status, "reply": s.last_reply,
                 })).collect::<Vec<_>>(),
                 "running": summaries.iter().filter(|s| s.status == "running")
                     .map(|s| s.name.clone()).collect::<Vec<_>>(),
-                "pending_requests": requests.iter().map(|request| team::request_summary(
-                    request,
-                    names.get(&request.conversation_id).map(String::as_str).unwrap_or("subagent"),
-                )).collect::<Vec<_>>(),
+                "pending_requests": team::request_summaries(db, owner, &requests).await?,
             }));
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -819,71 +887,286 @@ async fn wait_for(state: &AppState, chat: &ChatAuthority, args: &Value) -> AppRe
 }
 
 // ---------------------------------------------------------------------------
-// Team UI endpoints (human-only router)
+// Agent UI endpoints (human-only router)
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize)]
-pub struct TeamResponse {
-    orchestrator_id: String,
-    members: Vec<team::MemberSummary>,
-    pending_requests: Vec<team::RequestSummary>,
-    limits: SettingsResponse,
+pub struct ChannelLinkResponse {
+    id: String,
+    platform: String,
+    bot_label: String,
+    status: String,
 }
 
-pub async fn get_team(
+#[derive(Serialize)]
+pub struct AgentResponse {
+    #[serde(flatten)]
+    summary: team::AgentSummary,
+    pending_acknowledgements: usize,
+    channels: Vec<ChannelLinkResponse>,
+}
+
+async fn agent_responses(
+    state: &AppState,
+    owner: &str,
+    include_destroyed: bool,
+) -> AppResult<Vec<AgentResponse>> {
+    let nyxbot = team::ensure_nyxbot(&state.db, owner).await?;
+    let summaries = team::summaries(&state.db, owner, true, include_destroyed, 300).await?;
+    let channels = super::nyxbot::list(state, owner).await?;
+    Ok(summaries
+        .into_iter()
+        .map(|summary| {
+            let linked = channels
+                .iter()
+                .filter(|channel| {
+                    channel.agent_id.as_deref().unwrap_or(nyxbot.id.as_str()) == summary.id
+                })
+                .map(|channel| ChannelLinkResponse {
+                    id: channel.id.clone(),
+                    platform: channel.platform.clone(),
+                    bot_label: channel.bot_label.clone(),
+                    status: channel.status.clone(),
+                })
+                .collect();
+            AgentResponse {
+                pending_acknowledgements: summary.pending_requests.len(),
+                channels: linked,
+                summary,
+            }
+        })
+        .collect())
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentsQuery {
+    include_destroyed: Option<bool>,
+}
+
+/// The owner's NyxBot and specialists. Creates NyxBot on first use.
+pub async fn list_agents(
     State(state): State<AppState>,
     auth: AuthUser,
-    Path(id): Path<String>,
-) -> AppResult<Json<TeamResponse>> {
+    Query(query): Query<AgentsQuery>,
+) -> AppResult<Json<Value>> {
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
-    let row = engine::get(&state.db, &owner, &id).await?;
-    let team_id = row.team_root().to_owned();
-    let members = team::summaries(&state.db, &owner, &team_id, true, 600).await?;
-    let names: std::collections::HashMap<&str, &str> = members
-        .iter()
-        .map(|member| (member.id.as_str(), member.name.as_str()))
-        .collect();
-    let requests = team::pending_requests(&state.db, &owner, &team_id).await?;
-    let pending_requests = requests
-        .iter()
-        .map(|request| {
-            team::request_summary(
-                request,
-                names
-                    .get(request.conversation_id.as_str())
-                    .copied()
-                    .unwrap_or("subagent"),
-            )
-        })
-        .collect();
-    Ok(Json(TeamResponse {
-        orchestrator_id: team_id,
-        pending_requests,
-        members,
-        limits: settings::get(&state.db, &owner).await?.into(),
-    }))
+    let agents = agent_responses(&state, &owner, query.include_destroyed.unwrap_or(false)).await?;
+    Ok(Json(json!({
+        "agents": agents,
+        "limits": SettingsResponse::from(settings::get(&state.db, &owner).await?),
+    })))
 }
 
-/// Destroy a subagent from the UI. The transcript stays read-only.
-pub async fn destroy_member(
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateAgentRequest {
+    name: String,
+    description: String,
+    #[serde(default)]
+    services: Vec<String>,
+    #[serde(default)]
+    account_read: bool,
+}
+
+/// The owner creates a specialist directly.
+pub async fn create_agent(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(body): Json<CreateAgentRequest>,
+) -> AppResult<(StatusCode, Json<Value>)> {
+    let owner = auth.user_id.to_string();
+    engine::require_enabled(&state.db, &owner).await?;
+    let targets = team::resolve_targets(
+        &state.db,
+        state.node_ws_manager.as_ref(),
+        &owner,
+        &body.services,
+    )
+    .await?;
+    let request = team::CreateRequest {
+        name: body.name,
+        description: body.description,
+        targets,
+        account_read: body.account_read,
+        specialty: None,
+        created_by: "user",
+    };
+    match team::create_specialist(&state.db, &state.encryption_keys, &owner, request).await? {
+        Err(TeamRefusal::LimitReached { limit }) => Err(AppError::Conflict(format!(
+            "You already have {limit} live agents; destroy one or raise the limit in settings"
+        ))),
+        Err(TeamRefusal::NameTaken) => Err(AppError::Conflict(
+            "A live agent already uses that name".into(),
+        )),
+        Ok((agent, home)) => Ok((
+            StatusCode::CREATED,
+            Json(json!({"id": agent.id, "name": agent.name, "home_conversation_id": home.id})),
+        )),
+    }
+}
+
+#[derive(Serialize)]
+pub struct MemoryNoteResponse {
+    id: String,
+    text: String,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+/// One agent with its memory, threads and pending requests.
+pub async fn get_agent(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
-    let row = engine::get(&state.db, &owner, &id).await?;
-    let Some(team_id) = row.team_id.clone() else {
-        return Err(AppError::ValidationError(
-            "Only subagents can be destroyed; delete the chat instead".into(),
-        ));
-    };
-    let row = team::destroy(&state.db, &owner, &team_id, &row.id).await?;
+    let agent = team::agent(&state.db, &owner, &id).await?;
+    let response = agent_responses(&state, &owner, true)
+        .await?
+        .into_iter()
+        .find(|row| row.summary.id == agent.id)
+        .ok_or_else(|| AppError::NotFound("Agent not found".into()))?;
+    let now = Utc::now();
+    let threads: Vec<Value> = team::threads(&state.db, &agent, 100)
+        .await?
+        .into_iter()
+        .map(|row| {
+            let running = live_turn(&row, now).is_some();
+            json!({"id": row.id, "title": row.title, "last_message_at": row.updated_at,
+                "channel": row.channel.map(|channel| json!({"platform": channel.platform})),
+                "running": running})
+        })
+        .collect();
+    let memory: Vec<MemoryNoteResponse> = agent
+        .memory
+        .into_iter()
+        .map(|note| MemoryNoteResponse {
+            id: note.id,
+            text: note.text,
+            created_at: note.created_at,
+            updated_at: note.updated_at,
+        })
+        .collect();
     Ok(Json(
-        json!({"id": row.id, "destroyed_at": row.destroyed_at}),
+        json!({"agent": response, "memory": memory, "threads": threads}),
     ))
 }
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateAgentRequest {
+    name: Option<String>,
+    description: Option<String>,
+}
+
+pub async fn update_agent(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+    Json(body): Json<UpdateAgentRequest>,
+) -> AppResult<Json<Value>> {
+    let owner = auth.user_id.to_string();
+    engine::require_enabled(&state.db, &owner).await?;
+    let agent = team::update_agent(
+        &state.db,
+        &owner,
+        &id,
+        body.name.as_deref(),
+        body.description.as_deref(),
+    )
+    .await?;
+    Ok(Json(
+        json!({"id": agent.id, "name": agent.name, "description": agent.description}),
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GrantsRequest {
+    services: Vec<String>,
+    account_read: bool,
+}
+
+/// The owner sets a specialist's grants directly (replacing them).
+pub async fn set_agent_grants(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+    Json(body): Json<GrantsRequest>,
+) -> AppResult<Json<Value>> {
+    let owner = auth.user_id.to_string();
+    engine::require_enabled(&state.db, &owner).await?;
+    let targets = team::resolve_targets(
+        &state.db,
+        state.node_ws_manager.as_ref(),
+        &owner,
+        &body.services,
+    )
+    .await?;
+    let agent = team::set_grants(
+        &state.db,
+        &owner,
+        &id,
+        team::GrantChange::Replace(AgentGrants {
+            service_ids: targets.service_ids,
+            platform_service_ids: targets.platform_service_ids,
+            account_read: body.account_read,
+        }),
+    )
+    .await?;
+    Ok(Json(json!({"id": agent.id, "services": targets.slugs,
+        "account_read": agent.grants.account_read})))
+}
+
+pub async fn destroy_agent_route(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    let owner = auth.user_id.to_string();
+    engine::require_enabled(&state.db, &owner).await?;
+    let agent = team::agent(&state.db, &owner, &id).await?;
+    if agent.is_nyxbot() {
+        return Err(AppError::ValidationError(
+            "NyxBot cannot be destroyed; delete individual threads instead".into(),
+        ));
+    }
+    let agent = destroy_agent(&state, &owner, &agent.id).await?;
+    Ok(Json(
+        json!({"id": agent.id, "destroyed_at": agent.destroyed_at}),
+    ))
+}
+
+/// Permanently delete a destroyed specialist and its threads.
+pub async fn delete_agent(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+) -> AppResult<StatusCode> {
+    let owner = auth.user_id.to_string();
+    engine::require_enabled(&state.db, &owner).await?;
+    team::purge(&state.db, &owner, &id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn delete_memory(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((id, note_id)): Path<(String, String)>,
+) -> AppResult<StatusCode> {
+    let owner = auth.user_id.to_string();
+    engine::require_enabled(&state.db, &owner).await?;
+    team::agent(&state.db, &owner, &id).await?;
+    team::forget(&state.db, &owner, &id, &note_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
 
 #[derive(Serialize)]
 pub struct SettingsResponse {
@@ -1033,21 +1316,16 @@ pub async fn put_profile_routes(
     Ok(Json(routes_response(Some(row))))
 }
 
-/// Background sweep: destroy subagents idle for `IDLE_DESTROY_DAYS` and
-/// retry wake-ups whose pool was full when their events arrived.
+/// Background task: retry wake-ups whose pool was full (or whose replica
+/// restarted) when their events arrived. Agents are persistent, so nothing
+/// is destroyed automatically.
 pub fn spawn_sweeps(state: AppState) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(60));
-        let mut ticks: u64 = 0;
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
-            ticks += 1;
-            if ticks.is_multiple_of(team::IDLE_SWEEP_INTERVAL_SECS / 60)
-                && let Err(error) = team::sweep_idle(&state.db).await
-            {
-                tracing::warn!(%error, "NyxBot idle subagent sweep failed");
-            }
-            if let Ok(rows) = team::queued(&state.db).await {
+            if let Ok(rows) = team::queued(&state.db, None).await {
                 for row in rows {
                     wake(&state, &row.user_id, &row.id).await;
                 }

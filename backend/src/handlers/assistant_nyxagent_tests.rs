@@ -131,7 +131,7 @@ fn turn_request(id: Option<&str>) -> Request<Body> {
 async fn settled(state: &AppState) -> AssistantConversation {
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {
-            if let Some(row) = engine::list(&state.db, OWNER, 1, None)
+            if let Some(row) = engine::list(&state.db, OWNER, 1, None, None)
                 .await
                 .unwrap()
                 .into_iter()
@@ -209,7 +209,7 @@ async fn stop_persists_partial_reply_clears_binding_and_emits_cancelled() {
     .await
     .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let row = engine::list(&state.db, OWNER, 1, None)
+    let row = engine::list(&state.db, OWNER, 1, None, None)
         .await
         .unwrap()
         .remove(0);
@@ -256,6 +256,7 @@ async fn lost_session_rebinds_with_recap_and_same_turn_id() {
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            agent_id: None,
             conversation_id: None,
             text: "old question".into(),
             model: None,
@@ -511,6 +512,7 @@ async fn stale_fences_are_hidden_in_index_and_history_dtos() {
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            agent_id: None,
             conversation_id: None,
             text: "interrupted".into(),
             model: None,
@@ -560,6 +562,7 @@ async fn settlement_failure_is_bounded_emits_terminal_error_and_releases_permit(
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            agent_id: None,
             conversation_id: None,
             text: "question".into(),
             model: None,
@@ -688,6 +691,7 @@ async fn model_fallbacks_are_uncached_and_successes_are_cached() {
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            agent_id: None,
             conversation_id: None,
             text: "models".into(),
             model: None,
@@ -735,6 +739,7 @@ async fn invalid_and_wrong_owner_turns_do_not_consume_rate_limit() {
         &state.db,
         "other",
         &engine::TurnRequest {
+            agent_id: None,
             conversation_id: None,
             text: "private".into(),
             model: None,
@@ -817,13 +822,17 @@ async fn acknowledgements_are_owner_scoped_sanitized_decided_once_and_audited() 
     .await
     .unwrap()
     .0;
-    // The index lists the orchestrator; the subagent's pending card is
-    // counted on its nested member entry.
-    assert_eq!(index.conversations[0].pending_acknowledgements, 0);
-    assert_eq!(index.conversations[0].members.len(), 1);
+    // The index lists every thread with its agent; the specialist's pending
+    // card is counted on its own thread.
+    let thread = index
+        .conversations
+        .iter()
+        .find(|row| row.id == f.row.id)
+        .unwrap();
+    assert_eq!(thread.pending_acknowledgements, 1);
     assert_eq!(
-        index.conversations[0].members[0].pending_acknowledgements,
-        1
+        thread.agent.as_ref().map(|agent| agent.name.as_str()),
+        Some("worker")
     );
     let other = Uuid::new_v4().to_string();
     let result = decide_acknowledgement(
@@ -928,6 +937,7 @@ async fn history_surfaces_pending_proxy_approvals_raised_by_the_chat_key() {
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            agent_id: None,
             conversation_id: None,
             text: "read my github profile".into(),
             model: None,
@@ -1014,6 +1024,7 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            agent_id: None,
             conversation_id: None,
             text: "use github".into(),
             model: None,
@@ -1047,7 +1058,6 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
         decided_at: decided,
         expires_at: Utc::now() + chrono::Duration::minutes(10),
         decider: "user".into(),
-        team_id: None,
         request_excerpt: None,
         decided_by: None,
         reason: None,

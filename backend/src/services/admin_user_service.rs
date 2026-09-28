@@ -496,6 +496,7 @@ async fn delete_user_cascade_internal(
         REFRESH_TOKENS,
         API_KEYS,
         crate::models::assistant_acknowledgement::COLLECTION_NAME,
+        crate::models::assistant_agent::COLLECTION_NAME,
         crate::models::assistant_attachment::COLLECTION_NAME,
         crate::models::assistant_agent_credential::COLLECTION_NAME,
         crate::models::assistant_conversation::COLLECTION_NAME,

@@ -154,6 +154,8 @@ pub struct ChannelAgentResponse {
     status: String,
     last_error: Option<String>,
     owner_linked: bool,
+    /// The agent this bot reaches; `None` means the owner's NyxBot.
+    agent_id: Option<String>,
     created_at: chrono::DateTime<Utc>,
 }
 impl From<&NyxbotChannel> for ChannelAgentResponse {
@@ -168,6 +170,7 @@ impl From<&NyxbotChannel> for ChannelAgentResponse {
             status: row.status.clone(),
             last_error: row.last_error.clone(),
             owner_linked: !row.owner_sender_ids.is_empty(),
+            agent_id: row.agent_id.clone(),
             created_at: row.created_at,
         }
     }
@@ -264,14 +267,19 @@ async fn known_owner_senders(state: &AppState, owner: &str, platform: &str) -> V
         .unwrap_or_default()
 }
 
-/// Connect NyxBot to one of the owner's channel bots. Idempotent: an active
-/// connection returns itself with a fresh link code.
+/// Link one of the owner's channel bots to an agent (NyxBot or a specialist).
+/// Idempotent: an active connection is relinked to `agent` if needed and
+/// returns itself with a fresh link code.
 pub async fn connect(
     state: &AppState,
     owner: &str,
     source_conversation_id: Option<&str>,
     bot_id: &str,
+    agent: &crate::models::assistant_agent::AssistantAgent,
 ) -> AppResult<(NyxbotChannel, LinkInstructions)> {
+    if agent.destroyed_at.is_some() {
+        return Err(AppError::Conflict("That agent was destroyed".into()));
+    }
     let bot: ChannelBot = channel_bot_service::get_bot_for_user(&state.db, bot_id, owner).await?;
     if !bot.is_active {
         return Err(AppError::ValidationError(
@@ -289,6 +297,8 @@ pub async fn connect(
                 None => true,
             };
         if existing.status == "active" && keys_alive {
+            link(state, owner, &existing.id, agent).await?;
+            let existing = load_channel(state, owner, &existing.id).await?;
             let link = refresh_link_code(state, &existing).await?;
             return Ok((existing, link));
         }
@@ -393,6 +403,7 @@ pub async fn connect(
         link_code_hash: None,
         link_code_expires_at: None,
         source_conversation_id: source_conversation_id.map(str::to_owned),
+        agent_id: Some(agent.id.clone()),
         created_at: now,
         updated_at: now,
     };
@@ -726,7 +737,10 @@ pub async fn disconnect(state: &AppState, owner: &str, id: &str) -> AppResult<Va
         gateway_released = gateway_call(
             state,
             reqwest::Method::DELETE,
-            &format!("/channels/{}?expected_version={version}", urlencode(channel_id)),
+            &format!(
+                "/channels/{}?expected_version={version}",
+                urlencode(channel_id)
+            ),
             &agent_key,
             None,
             None,
@@ -803,20 +817,67 @@ pub(crate) async fn connect_tool(
     owner: &str,
     source_conversation_id: &str,
     bot_id: &str,
+    agent: &crate::models::assistant_agent::AssistantAgent,
 ) -> AppResult<(Value, bool)> {
-    let (row, link) = connect(state, owner, Some(source_conversation_id), bot_id).await?;
+    let (row, link) = connect(state, owner, Some(source_conversation_id), bot_id, agent).await?;
     Ok((
         json!({
             "channel_agent": ChannelAgentResponse::from(&row),
+            "agent": agent.name,
             "link": link_json(&row, &link),
             "note": if row.owner_sender_ids.is_empty() {
-                "Give the user the link (or code). Until they use it, NyxBot answers nobody."
+                "Give the user the link (or code). Until they use it, the bot answers nobody."
             } else {
-                "The user's linked account already reaches NyxBot; the link adds another."
+                "The user's linked account already reaches the bot; the link adds another."
             },
         }),
         false,
     ))
+}
+
+/// Point a connected bot at another agent. Existing chats keep their history
+/// with the previous agent; new messages start threads with the new one.
+pub async fn link(
+    state: &AppState,
+    owner: &str,
+    channel_id: &str,
+    agent: &crate::models::assistant_agent::AssistantAgent,
+) -> AppResult<Value> {
+    if agent.destroyed_at.is_some() {
+        return Err(AppError::Conflict("That agent was destroyed".into()));
+    }
+    let row = load_channel(state, owner, channel_id).await?;
+    if row.agent_id.as_deref() == Some(agent.id.as_str())
+        || (row.agent_id.is_none() && agent.is_nyxbot())
+    {
+        return Ok(json!({"channel_agent_id": row.id, "agent": agent.name, "changed": false}));
+    }
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .update_one(
+            doc! {"_id": &row.id, "user_id": owner},
+            doc! {"$set": {"agent_id": &agent.id, "updated_at": bson::DateTime::now()}},
+        )
+        .await?;
+    state
+        .db
+        .collection::<NyxbotThread>(THREADS)
+        .update_many(
+            doc! {"channel_id": &row.id, "user_id": owner},
+            doc! {"$set": {"conversation_id": bson::Bson::Null}},
+        )
+        .await?;
+    audit(
+        state,
+        owner,
+        "nyxbot_channel_linked",
+        json!({
+            "channel_agent_id": &row.id, "agent_id": &agent.id,
+        }),
+    )
+    .await;
+    Ok(json!({"channel_agent_id": row.id, "agent": agent.name, "changed": true}))
 }
 
 pub(crate) async fn list_tool(state: &AppState, owner: &str) -> AppResult<Value> {
@@ -857,6 +918,19 @@ pub async fn list_channels(
 #[serde(deny_unknown_fields)]
 pub struct ConnectRequest {
     bot_id: String,
+    /// The agent to reach; the owner's NyxBot by default.
+    agent_id: Option<String>,
+}
+
+async fn requested_agent(
+    state: &AppState,
+    owner: &str,
+    agent_id: Option<&str>,
+) -> AppResult<crate::models::assistant_agent::AssistantAgent> {
+    match agent_id {
+        Some(id) => crate::services::assistant_team_service::agent(&state.db, owner, id).await,
+        None => crate::services::assistant_team_service::ensure_nyxbot(&state.db, owner).await,
+    }
 }
 
 pub async fn connect_channel(
@@ -866,11 +940,30 @@ pub async fn connect_channel(
 ) -> AppResult<Json<Value>> {
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
-    let (row, link) = connect(&state, &owner, None, &body.bot_id).await?;
+    let agent = requested_agent(&state, &owner, body.agent_id.as_deref()).await?;
+    let (row, link) = connect(&state, &owner, None, &body.bot_id, &agent).await?;
     Ok(Json(json!({
         "channel_agent": ChannelAgentResponse::from(&row),
         "link": link_json(&row, &link),
     })))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinkRequest {
+    agent_id: String,
+}
+
+pub async fn link_channel(
+    State(state): State<AppState>,
+    auth: crate::mw::auth::AuthUser,
+    Path(id): Path<String>,
+    Json(body): Json<LinkRequest>,
+) -> AppResult<Json<Value>> {
+    let owner = auth.user_id.to_string();
+    engine::require_enabled(&state.db, &owner).await?;
+    let agent = requested_agent(&state, &owner, Some(&body.agent_id)).await?;
+    Ok(Json(link(&state, &owner, &id, &agent).await?))
 }
 
 pub async fn disconnect_channel(
@@ -889,7 +982,7 @@ pub async fn disconnect_channel(
 
 /// What an inbound channel message resolved to.
 enum Inbound {
-    /// The owner: a NyxBot turn is running.
+    /// The owner: a turn with the linked agent is running.
     Turn(broadcast::Receiver<Value>),
     /// A reply without a turn (link confirmation, refusal, busy notice).
     Reply(String),
@@ -1046,6 +1139,15 @@ async fn start_owner_turn(
         }),
         title: Some(format!("{} · {}", row.platform, row.bot_label)),
         note: Some(note),
+        agent_id: Some(match row.agent_id.clone() {
+            Some(agent_id) => agent_id,
+            None => {
+                crate::services::assistant_team_service::ensure_nyxbot(&state.db, &row.user_id)
+                    .await?
+                    .id
+            }
+        }),
+        report_to: None,
     };
     match start_server_turn(
         state,
@@ -1058,6 +1160,34 @@ async fn start_owner_turn(
     .await
     {
         Ok(Started::Turn { receiver, .. }) => Ok(Inbound::Turn(receiver)),
+        // The chat is busy (or the owner's channel pool is full): queue the
+        // message for NyxBot's next turn instead of bouncing it. Its reply is
+        // an asynchronous update delivered back to this chat.
+        Ok(Started::Busy | Started::PoolFull) if exists => {
+            let note = format!(
+                "The owner sent another {} message while you were working. Answer it \
+                next; your reply is delivered to the chat: \"{}\"",
+                identifier(&row.platform),
+                excerpt(text, 3000).replace('"', "'")
+            );
+            let queued = engine::push_events(
+                &state.db,
+                &row.user_id,
+                &conversation_id,
+                vec![crate::services::assistant_team_service::event(
+                    "message", note, None,
+                )],
+            )
+            .await?;
+            if queued.is_none() {
+                return Ok(Inbound::Busy);
+            }
+            super::assistant_team::wake(state, &row.user_id, &conversation_id).await;
+            Ok(Inbound::Reply(
+                "Got it. I'm finishing your previous request and will answer this right after."
+                    .into(),
+            ))
+        }
         Ok(Started::Busy | Started::PoolFull) => Ok(Inbound::Busy),
         // A concurrent first message created the chat: it now exists.
         Err(AppError::Conflict(_)) | Err(AppError::DatabaseError(_)) if !exists => {
@@ -1638,6 +1768,11 @@ pub async fn deliver_update(
             .find_one(doc! {"channel_id": &channel.id, "partition": &origin.partition})
             .await?
             .ok_or_else(|| AppError::NotFound("Channel thread not found".into()))?;
+        // A relinked chat belongs to another agent now; this thread's late
+        // replies stay in the app.
+        if thread.conversation_id.as_deref() != Some(row.id.as_str()) {
+            return Ok(());
+        }
         let reply = bounded_reply(text);
         if channel.transport == "gateway" {
             let (Some(ciphertext), Some(expires_at)) = (

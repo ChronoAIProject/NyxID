@@ -112,12 +112,47 @@ async fn transcript(state: &AppState, id: &str) -> Vec<AssistantMessage> {
         .unwrap()
 }
 
+/// Run one user turn; `conversation_id` None starts a new thread with
+/// `agent_id` (NyxBot by default).
+async fn user_turn(
+    state: &AppState,
+    conversation_id: Option<&str>,
+    agent_id: Option<&str>,
+    text: &str,
+) -> AssistantConversation {
+    let permit = state.direct_chat_limiter.try_acquire(OWNER).await.unwrap();
+    let (row, _) = super::super::assistant_nyxagent::start_turn(
+        state,
+        test_auth_user(OWNER),
+        &TurnStart::from(&engine::TurnRequest {
+            agent_id: agent_id.map(str::to_owned),
+            conversation_id: conversation_id.map(str::to_owned),
+            text: text.into(),
+            model: None,
+            access_mode: None,
+        }),
+        Some(super::super::assistant_nyxagent::SERVER_TURN_POLICY),
+        permit,
+    )
+    .await
+    .unwrap();
+    idle_row(state, &row.id).await
+}
+
+async fn chat_for(state: &AppState, row: &AssistantConversation) -> ChatAuthority {
+    acks::for_key(&state.db, OWNER, Some(&row.credential_api_key_id))
+        .await
+        .unwrap()
+        .unwrap()
+}
+
 async fn orchestrator(state: &AppState) -> (AssistantConversation, ChatAuthority) {
     let permit = state.direct_chat_limiter.try_acquire(OWNER).await.unwrap();
     let (row, _) = super::super::assistant_nyxagent::start_turn(
         state,
         test_auth_user(OWNER),
         &TurnStart::from(&engine::TurnRequest {
+            agent_id: None,
             conversation_id: None,
             text: "Research the topic with helpers".into(),
             model: None,
@@ -142,20 +177,85 @@ async fn spawn(state: &AppState, chat: &ChatAuthority, args: Value) -> Value {
     value
 }
 
+async fn specialist_home(state: &AppState, name: &str) -> AssistantConversation {
+    let agent = team::specialist(&state.db, OWNER, name).await.unwrap();
+    engine::get(
+        &state.db,
+        OWNER,
+        agent.home_conversation_id.as_deref().unwrap(),
+    )
+    .await
+    .unwrap()
+}
+
 #[tokio::test]
-async fn spawned_subagent_works_with_its_own_key_and_wakes_the_orchestrator_with_its_report() {
+async fn nyxbot_is_one_persistent_agent_whose_memory_spans_its_threads() {
+    let (state, calls, server) = setup("team_nyxbot_identity").await;
+    let first = user_turn(&state, None, None, "Hello NyxBot").await;
+    let second = user_turn(&state, None, None, "A second topic").await;
+    let agents = team::agents(&state.db, OWNER, false).await.unwrap();
+    assert_eq!(agents.len(), 1);
+    assert!(agents[0].is_nyxbot());
+    for row in [&first, &second] {
+        assert_eq!(row.agent_id.as_deref(), Some(agents[0].id.as_str()));
+        assert!(!row.is_subagent());
+    }
+    assert_eq!(
+        agents[0].home_conversation_id.as_deref(),
+        Some(first.id.as_str())
+    );
+    // Memory saved in one thread reaches every thread's instructions.
+    let chat = chat_for(&state, &first).await;
+    let (value, error) = execute_tool(
+        &state,
+        &chat,
+        "nyxid__remember",
+        &json!({"text": "The user prefers morning meetings"}),
+    )
+    .await;
+    assert!(!error, "{value}");
+    let (value, error) = execute_tool(
+        &state,
+        &chat,
+        "nyxid__remember",
+        &json!({"text": "my token is nyxid_ag_secretvalue"}),
+    )
+    .await;
+    assert!(error, "{value}");
+    user_turn(&state, Some(&second.id), None, "When should we meet?").await;
+    {
+        let calls = calls.lock().await;
+        let instructions = calls.last().unwrap().body["instructions"].as_str().unwrap();
+        assert!(instructions.contains("The user prefers morning meetings"));
+        assert!(!instructions.contains("nyxid_ag_secretvalue"));
+    }
+    // Deleting a thread leaves the agent and its memory.
+    engine::delete(&state.db, OWNER, &first.id).await.unwrap();
+    let nyxbot = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
+    assert_eq!(nyxbot.id, agents[0].id);
+    assert_eq!(nyxbot.memory.len(), 1);
+    assert!(nyxbot.home_conversation_id.is_none());
+    let home = team::home_thread(&state.db, &state.encryption_keys, &nyxbot)
+        .await
+        .unwrap();
+    assert_eq!(home.id, second.id);
+    server.abort();
+}
+
+#[tokio::test]
+async fn specialist_work_reports_to_the_nyxbot_thread_that_assigned_it() {
     let (state, calls, server) = setup("team_spawn_report").await;
     let (orchestrator, chat) = orchestrator(&state).await;
+    // A second NyxBot thread exists; the report must go to the assigning one.
+    let other = user_turn(&state, None, None, "Unrelated thread").await;
     let result = spawn(
         &state,
         &chat,
-        json!({"name": "researcher", "charter": "Summarize the release notes",
+        json!({"name": "researcher", "description": "Summarize release notes",
             "task": "Summarize the 0.31 release notes"}),
     )
     .await;
     assert_eq!(result["task"]["status"], "started");
-    let sub_id = result["subagent"]["id"].as_str().unwrap().to_owned();
-    // The subagent settles, then its report wakes the idle orchestrator.
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             let events = transcript(&state, &orchestrator.id)
@@ -173,11 +273,17 @@ async fn spawned_subagent_works_with_its_own_key_and_wakes_the_orchestrator_with
         }
     })
     .await
-    .expect("orchestrator woken");
-    let subagent = idle_row(&state, &sub_id).await;
-    assert_eq!(subagent.role, AgentRole::Subagent);
-    assert_eq!(subagent.team_id.as_deref(), Some(orchestrator.id.as_str()));
-    let sub_messages = transcript(&state, &sub_id).await;
+    .expect("assigning thread woken");
+    assert!(
+        transcript(&state, &other.id)
+            .await
+            .iter()
+            .all(|message| message.role != "event")
+    );
+    let home = specialist_home(&state, "researcher").await;
+    let home = idle_row(&state, &home.id).await;
+    assert!(home.is_subagent());
+    let sub_messages = transcript(&state, &home.id).await;
     assert_eq!(sub_messages[0].role, "orchestrator");
     assert_eq!(sub_messages[1].text, "Work finished");
     let event = transcript(&state, &orchestrator.id)
@@ -186,69 +292,86 @@ async fn spawned_subagent_works_with_its_own_key_and_wakes_the_orchestrator_with
         .find(|message| message.role == "event")
         .unwrap();
     assert!(
-        event.text.contains("Subagent researcher replied"),
+        event.text.contains("Specialist researcher replied"),
         "{}",
         event.text
     );
     let calls = calls.lock().await;
-    assert_eq!(calls.len(), 3);
+    assert_eq!(calls.len(), 4);
     let sub_key =
-        credentials::load_for_conversation(&state.db, &state.encryption_keys, OWNER, &sub_id)
+        credentials::load_for_conversation(&state.db, &state.encryption_keys, OWNER, &home.id)
             .await
             .unwrap()
             .unwrap();
-    assert_eq!(
-        calls[1].authorization,
-        format!("Bearer {}", sub_key.raw_key.as_str())
-    );
-    assert_ne!(calls[0].authorization, calls[1].authorization);
-    let instructions = calls[1].body["instructions"].as_str().unwrap();
+    let sub_call = calls
+        .iter()
+        .find(|call| call.authorization == format!("Bearer {}", sub_key.raw_key.as_str()))
+        .unwrap();
+    let instructions = sub_call.body["instructions"].as_str().unwrap();
     assert!(instructions.starts_with(engine::SUBAGENT_PROMPT));
-    assert!(instructions.contains("Summarize the release notes"));
+    assert!(instructions.contains("Summarize release notes"));
+    let report = calls.last().unwrap();
     assert!(
-        calls[2].body["input"]
+        report.body["input"]
             .as_str()
             .unwrap()
-            .contains("Subagent researcher replied")
+            .contains("Specialist researcher replied")
     );
-    // The orchestrator's next instructions list its team.
     assert!(
-        calls[2].body["instructions"]
+        report.body["instructions"]
             .as_str()
             .unwrap()
-            .contains("Your live subagents")
+            .contains("Your specialist agents")
     );
-    // The subagent key is restricted to its (empty) grants.
     let key = key_service::get_api_key(&state.db, OWNER, &sub_key.api_key_id)
         .await
         .unwrap();
     assert!(!key.allow_all_services && key.allowed_service_ids.is_empty());
     assert_eq!(key.scopes, "proxy");
+    drop(calls);
+    // A direct chat keeps the assigning thread, so assigned work resumed
+    // later (after a permission decision) still reports there.
+    let home = user_turn(&state, Some(&home.id), None, "Also add a summary line").await;
+    assert_eq!(home.report_to.as_deref(), Some(orchestrator.id.as_str()));
     server.abort();
 }
 
 #[tokio::test]
-async fn subagents_cannot_use_team_tools_and_destroyed_subagents_are_read_only() {
+async fn specialists_keep_memory_but_not_team_tools_and_destroyed_agents_are_read_only() {
     let (state, _, server) = setup("team_destroy").await;
-    let (orchestrator, chat) = orchestrator(&state).await;
-    let result = spawn(
+    let (_, chat) = orchestrator(&state).await;
+    spawn(
         &state,
         &chat,
-        json!({"name": "mailer", "charter": "Draft emails"}),
+        json!({"name": "mailer", "description": "Draft emails"}),
     )
     .await;
-    let sub_id = result["subagent"]["id"].as_str().unwrap().to_owned();
-    let sub = engine::get(&state.db, OWNER, &sub_id).await.unwrap();
-    let sub_chat = acks::for_key(&state.db, OWNER, Some(&sub.credential_api_key_id))
-        .await
-        .unwrap()
-        .unwrap();
+    let home = specialist_home(&state, "mailer").await;
+    let sub_chat = chat_for(&state, &home).await;
+    assert!(!sub_chat.is_orchestrator());
     for name in assistant_team_tools::TOOL_NAMES {
         let (value, error) =
             execute_tool(&state, &sub_chat, &format!("nyxid__{name}"), &json!({})).await;
         assert!(error, "{name}");
         assert_eq!(value["error"], "orchestrator_only", "{name}");
     }
+    let (value, error) = execute_tool(
+        &state,
+        &sub_chat,
+        "nyxid__remember",
+        &json!({"text": "Sign emails as Kai"}),
+    )
+    .await;
+    assert!(!error, "{value}");
+    let agent = team::specialist(&state.db, OWNER, "mailer").await.unwrap();
+    assert_eq!(agent.memory.len(), 1);
+    assert!(
+        team::ensure_nyxbot(&state.db, OWNER)
+            .await
+            .unwrap()
+            .memory
+            .is_empty()
+    );
     let (value, error) = execute_tool(
         &state,
         &chat,
@@ -258,21 +381,16 @@ async fn subagents_cannot_use_team_tools_and_destroyed_subagents_are_read_only()
     .await;
     assert!(!error, "{value}");
     assert!(
-        key_service::get_api_key(&state.db, OWNER, &sub.credential_api_key_id)
+        key_service::get_api_key(&state.db, OWNER, &home.credential_api_key_id)
             .await
             .is_err()
-    );
-    assert!(
-        credentials::load_for_conversation(&state.db, &state.encryption_keys, OWNER, &sub_id)
-            .await
-            .unwrap()
-            .is_none()
     );
     let result = engine::begin_turn(
         &state.db,
         OWNER,
         &engine::TurnRequest {
-            conversation_id: Some(sub_id.clone()),
+            agent_id: None,
+            conversation_id: Some(home.id.clone()),
             text: "are you there?".into(),
             model: None,
             access_mode: None,
@@ -281,7 +399,6 @@ async fn subagents_cannot_use_team_tools_and_destroyed_subagents_are_read_only()
     )
     .await;
     assert!(matches!(result, Err(AppError::Conflict(_))));
-    // Read-only: still listed and readable, not messageable.
     let (list, _) = execute_tool(
         &state,
         &chat,
@@ -299,74 +416,84 @@ async fn subagents_cannot_use_team_tools_and_destroyed_subagents_are_read_only()
     .await;
     assert!(error, "{value}");
     assert!(
-        engine::history_page(&state.db, OWNER, &sub_id, 10, None)
+        engine::history_page(&state.db, OWNER, &home.id, 10, None)
             .await
             .is_ok()
     );
-    // The name can be reused by a new subagent.
+    // The name can be reused; the destroyed agent can be deleted for good.
     spawn(
         &state,
         &chat,
-        json!({"name": "mailer", "charter": "Draft emails again"}),
+        json!({"name": "mailer", "description": "Draft emails again"}),
     )
     .await;
-    let _ = orchestrator;
+    team::purge(&state.db, OWNER, &agent.id).await.unwrap();
+    assert!(engine::get(&state.db, OWNER, &home.id).await.is_err());
+    assert!(team::agent(&state.db, OWNER, &agent.id).await.is_err());
     server.abort();
 }
 
 #[tokio::test]
-async fn spawn_respects_owner_limits_and_grants_resolve_only_visible_services() {
+async fn owners_create_specialists_within_limits_and_grants_resolve_only_visible_services() {
     let (state, _, server) = setup("team_limits").await;
     let (_, chat) = orchestrator(&state).await;
     let github = connected(&state.db, OWNER, "github", "https://api.github.com").await;
     let other = connected(&state.db, "someone-else", "private", "https://example.com").await;
-    let (value, error) = execute_tool(
-        &state,
-        &chat,
-        "nyxid__spawn_subagent",
-        &json!({"name": "x", "charter": "c", "services": ["does-not-exist"]}),
-    )
-    .await;
-    assert!(error, "{value}");
-    let (value, error) = execute_tool(
-        &state,
-        &chat,
-        "nyxid__spawn_subagent",
-        &json!({"name": "x", "charter": "c", "services": [other]}),
-    )
-    .await;
-    assert!(error, "{value}");
-    let created = spawn(
-        &state,
-        &chat,
-        json!({"name": "coder", "charter": "Review PRs", "services": ["github"]}),
-    )
-    .await;
-    assert_eq!(created["subagent"]["services"], json!(["github"]));
-    let sub = engine::get(
-        &state.db,
-        OWNER,
-        created["subagent"]["id"].as_str().unwrap(),
+    for services in [json!(["does-not-exist"]), json!([other])] {
+        let (value, error) = execute_tool(
+            &state,
+            &chat,
+            "nyxid__spawn_subagent",
+            &json!({"name": "x", "description": "c", "services": services}),
+        )
+        .await;
+        assert!(error, "{value}");
+    }
+    // The owner creates a specialist directly (Grok-style bot).
+    let (status, Json(created)) = create_agent(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        Json(CreateAgentRequest {
+            name: "coder".into(),
+            description: "Review pull requests".into(),
+            services: vec!["github".into()],
+            account_read: false,
+        }),
     )
     .await
     .unwrap();
-    assert_eq!(sub.grants.service_ids, vec![github.clone()]);
-    let key = key_service::get_api_key(&state.db, OWNER, &sub.credential_api_key_id)
+    assert_eq!(status, StatusCode::CREATED);
+    let agent = team::specialist(&state.db, OWNER, "coder").await.unwrap();
+    assert_eq!(agent.created_by, "user");
+    assert_eq!(agent.grants.service_ids, vec![github.clone()]);
+    let home = engine::get(
+        &state.db,
+        OWNER,
+        created["home_conversation_id"].as_str().unwrap(),
+    )
+    .await
+    .unwrap();
+    let key = key_service::get_api_key(&state.db, OWNER, &home.credential_api_key_id)
         .await
         .unwrap();
     assert_eq!(key.allowed_service_ids, vec![github.clone()]);
+    // A second thread of the same specialist shares its grants.
+    let second = user_turn(&state, None, Some(&agent.id), "Another review").await;
+    assert!(second.is_subagent());
     let (value, error) = execute_tool(
         &state,
         &chat,
         "nyxid__revoke_subagent",
-        &json!({"subagent": "coder", "services": ["github"], "account_read": true}),
+        &json!({"subagent": "coder", "services": ["github"]}),
     )
     .await;
     assert!(!error, "{value}");
-    let key = key_service::get_api_key(&state.db, OWNER, &sub.credential_api_key_id)
-        .await
-        .unwrap();
-    assert!(key.allowed_service_ids.is_empty());
+    for row in [&home, &second] {
+        let key = key_service::get_api_key(&state.db, OWNER, &row.credential_api_key_id)
+            .await
+            .unwrap();
+        assert!(key.allowed_service_ids.is_empty());
+    }
     let (_, error) = execute_tool(
         &state,
         &chat,
@@ -375,7 +502,7 @@ async fn spawn_respects_owner_limits_and_grants_resolve_only_visible_services() 
     )
     .await;
     assert!(!error);
-    let key = key_service::get_api_key(&state.db, OWNER, &sub.credential_api_key_id)
+    let key = key_service::get_api_key(&state.db, OWNER, &second.credential_api_key_id)
         .await
         .unwrap();
     assert_eq!(key.allowed_service_ids, vec![github]);
@@ -398,7 +525,7 @@ async fn spawn_respects_owner_limits_and_grants_resolve_only_visible_services() 
         &state,
         &chat,
         "nyxid__spawn_subagent",
-        &json!({"name": "second", "charter": "c"}),
+        &json!({"name": "second", "description": "c"}),
     )
     .await;
     assert!(error);
@@ -424,23 +551,24 @@ async fn spawn_respects_owner_limits_and_grants_resolve_only_visible_services() 
 }
 
 #[tokio::test]
-async fn permission_requests_reach_the_orchestrator_and_its_decision_resumes_the_subagent() {
+async fn permission_requests_reach_nyxbot_and_its_decision_resumes_the_specialist() {
     let (state, _, server) = setup("team_permissions").await;
     let (orchestrator, chat) = orchestrator(&state).await;
     let github = connected(&state.db, OWNER, "github", "https://api.github.com").await;
-    let created = spawn(
+    spawn(
         &state,
         &chat,
-        json!({"name": "coder", "charter": "Review PRs"}),
+        json!({"name": "coder", "description": "Review PRs"}),
     )
     .await;
-    let sub_id = created["subagent"]["id"].as_str().unwrap().to_owned();
-    // The user talks to the subagent directly; keep that turn live.
+    let home = specialist_home(&state, "coder").await;
+    // The user talks to the specialist directly; keep that turn live.
     let sub = engine::begin_turn(
         &state.db,
         OWNER,
         &engine::TurnRequest {
-            conversation_id: Some(sub_id.clone()),
+            agent_id: None,
+            conversation_id: Some(home.id.clone()),
             text: "Please review my open GitHub PRs".into(),
             model: None,
             access_mode: None,
@@ -449,10 +577,7 @@ async fn permission_requests_reach_the_orchestrator_and_its_decision_resumes_the
     )
     .await
     .unwrap();
-    let sub_chat = acks::for_key(&state.db, OWNER, Some(&sub.credential_api_key_id))
-        .await
-        .unwrap()
-        .unwrap();
+    let sub_chat = chat_for(&state, &sub).await;
     let (refusal, request) =
         acks::service_gate(&state.db, &sub_chat, &github, "github", "GitHub", false)
             .await
@@ -468,7 +593,7 @@ async fn permission_requests_reach_the_orchestrator_and_its_decision_resumes_the
             .contains("Please review my open GitHub PRs")
     );
     permission_requested(&state, &sub_chat, &request).await;
-    // The idle orchestrator is woken with the request.
+    // A direct chat's request goes to NyxBot's home thread (the first one).
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             if transcript(&state, &orchestrator.id)
@@ -482,39 +607,20 @@ async fn permission_requests_reach_the_orchestrator_and_its_decision_resumes_the
         }
     })
     .await
-    .expect("orchestrator woken with the request");
+    .expect("NyxBot woken with the request");
     idle_row(&state, &orchestrator.id).await;
-    // Another team cannot decide it; its own orchestrator can.
-    let (other, _) = {
-        let permit = state.direct_chat_limiter.try_acquire(OWNER).await.unwrap();
-        super::super::assistant_nyxagent::start_turn(
-            &state,
-            test_auth_user(OWNER),
-            &TurnStart::from(&engine::TurnRequest {
-                conversation_id: None,
-                text: "Another team".into(),
-                model: None,
-                access_mode: None,
-            }),
-            Some(super::super::assistant_nyxagent::SERVER_TURN_POLICY),
-            permit,
-        )
-        .await
-        .unwrap()
-    };
-    let other = idle_row(&state, &other.id).await;
-    let other_chat = acks::for_key(&state.db, OWNER, Some(&other.credential_api_key_id))
-        .await
-        .unwrap()
-        .unwrap();
+    // A specialist cannot decide; NyxBot (any thread) can.
     let args = json!({"request_id": refusal["acknowledgement_id"], "decision": "allow",
         "reason": "The user asked to review their PRs"});
-    let (_, error) = execute_tool(&state, &other_chat, "nyxid__decide_permission", &args).await;
+    let (_, error) = execute_tool(&state, &sub_chat, "nyxid__decide_permission", &args).await;
     assert!(error);
-    let (value, error) = execute_tool(&state, &chat, "nyxid__decide_permission", &args).await;
+    let other = user_turn(&state, None, None, "Another NyxBot thread").await;
+    let other_chat = chat_for(&state, &other).await;
+    let (value, error) = execute_tool(&state, &other_chat, "nyxid__decide_permission", &args).await;
     assert!(!error, "{value}");
-    let saved = engine::get(&state.db, OWNER, &sub_id).await.unwrap();
-    assert_eq!(saved.grants.service_ids, vec![github.clone()]);
+    let agent = team::specialist(&state.db, OWNER, "coder").await.unwrap();
+    assert_eq!(agent.grants.service_ids, vec![github.clone()]);
+    let saved = engine::get(&state.db, OWNER, &home.id).await.unwrap();
     assert!(
         saved
             .pending_events
@@ -531,7 +637,7 @@ async fn permission_requests_reach_the_orchestrator_and_its_decision_resumes_the
             .unwrap()
             .is_none()
     );
-    let ack = acks::history(&state.db, OWNER, &sub_id).await.unwrap();
+    let ack = acks::history(&state.db, OWNER, &home.id).await.unwrap();
     assert_eq!(ack[0].decided_by.as_deref(), Some("orchestrator"));
     assert!(
         ack[0]
@@ -544,40 +650,30 @@ async fn permission_requests_reach_the_orchestrator_and_its_decision_resumes_the
 }
 
 #[tokio::test]
-async fn loop_guards_and_direct_chats_never_wake_the_orchestrator() {
+async fn loop_guards_and_direct_chats_never_wake_nyxbot() {
     let (state, calls, server) = setup("team_guards").await;
     let (orchestrator, chat) = orchestrator(&state).await;
-    let created = spawn(&state, &chat, json!({"name": "helper", "charter": "Help"})).await;
-    let sub_id = created["subagent"]["id"].as_str().unwrap().to_owned();
-    let before = Utc::now();
-    // A direct user turn on the subagent settles without waking the orchestrator.
-    let permit = state.direct_chat_limiter.try_acquire(OWNER).await.unwrap();
-    super::super::assistant_nyxagent::start_turn(
+    spawn(
         &state,
-        test_auth_user(OWNER),
-        &TurnStart::from(&engine::TurnRequest {
-            conversation_id: Some(sub_id.clone()),
-            text: "Draft the launch post".into(),
-            model: None,
-            access_mode: None,
-        }),
-        Some(super::super::assistant_nyxagent::SERVER_TURN_POLICY),
-        permit,
+        &chat,
+        json!({"name": "helper", "description": "Help"}),
     )
-    .await
-    .unwrap();
-    idle_row(&state, &sub_id).await;
+    .await;
+    let home = specialist_home(&state, "helper").await;
+    let before = Utc::now();
+    // A direct user turn on the specialist settles without waking NyxBot.
+    user_turn(&state, Some(&home.id), None, "Draft the launch post").await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     let row = engine::get(&state.db, OWNER, &orchestrator.id)
         .await
         .unwrap();
     assert!(row.pending_events.is_empty() && row.active_turn.is_none());
     assert_eq!(calls.lock().await.len(), 2);
-    let note = team::direct_chats_note(&state.db, OWNER, &orchestrator.id, before)
+    let note = team::direct_chats_note(&state.db, OWNER, before)
         .await
         .unwrap();
     assert!(note.contains("to helper") && note.contains("Draft the launch post"));
-    // After three consecutive event turns an orchestrator waits for the user.
+    // After three consecutive event turns a NyxBot thread waits for the user.
     state
         .db
         .collection::<bson_doc::Document>(CONVERSATIONS)
@@ -604,22 +700,7 @@ async fn loop_guards_and_direct_chats_never_wake_the_orchestrator() {
     assert_eq!(row.pending_events.len(), 1);
     assert_eq!(calls.lock().await.len(), 2);
     // A user message resets the streak and carries the queued event.
-    let permit = state.direct_chat_limiter.try_acquire(OWNER).await.unwrap();
-    super::super::assistant_nyxagent::start_turn(
-        &state,
-        test_auth_user(OWNER),
-        &TurnStart::from(&engine::TurnRequest {
-            conversation_id: Some(orchestrator.id.clone()),
-            text: "Any news?".into(),
-            model: None,
-            access_mode: None,
-        }),
-        Some(super::super::assistant_nyxagent::SERVER_TURN_POLICY),
-        permit,
-    )
-    .await
-    .unwrap();
-    let row = idle_row(&state, &orchestrator.id).await;
+    let row = user_turn(&state, Some(&orchestrator.id), None, "Any news?").await;
     assert_eq!(row.event_streak, 0);
     assert!(row.pending_events.is_empty());
     let calls = calls.lock().await;
@@ -629,64 +710,211 @@ async fn loop_guards_and_direct_chats_never_wake_the_orchestrator() {
     server.abort();
 }
 
-#[tokio::test]
-async fn deleting_an_orchestrator_deletes_its_team_and_idle_subagents_are_swept() {
-    let (state, _, server) = setup("team_delete").await;
-    let (orchestrator, chat) = orchestrator(&state).await;
-    let mut keys = Vec::new();
-    for name in ["one", "two"] {
-        let created = spawn(&state, &chat, json!({"name": name, "charter": "c"})).await;
-        let row = engine::get(
-            &state.db,
-            OWNER,
-            created["subagent"]["id"].as_str().unwrap(),
+#[test]
+fn grant_changes_merge_against_the_current_grants() {
+    let ids = |ids: &[&str]| ids.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>();
+    let current = AgentGrants {
+        service_ids: ids(&["a", "b"]),
+        platform_service_ids: ids(&["p"]),
+        account_read: true,
+    };
+    // Adds and removes apply to what is stored now, so NyxBot's change never
+    // undoes a concurrent change by the owner (or a card decision).
+    let added = team::GrantChange::Add(AgentGrants {
+        service_ids: ids(&["b", "c"]),
+        ..Default::default()
+    })
+    .apply(&current);
+    assert_eq!(added.service_ids, ids(&["a", "b", "c"]));
+    assert_eq!(added.platform_service_ids, ids(&["p"]));
+    assert!(added.account_read);
+    let removed = team::GrantChange::Remove(AgentGrants {
+        service_ids: ids(&["a"]),
+        platform_service_ids: ids(&["p"]),
+        account_read: false,
+    })
+    .apply(&added);
+    assert_eq!(removed.service_ids, ids(&["b", "c"]));
+    assert!(removed.platform_service_ids.is_empty());
+    assert!(removed.account_read);
+    let revoked = team::GrantChange::Remove(AgentGrants {
+        account_read: true,
+        ..Default::default()
+    })
+    .apply(&removed);
+    assert!(!revoked.account_read);
+    assert_eq!(revoked.service_ids, ids(&["b", "c"]));
+    assert_eq!(
+        team::GrantChange::Replace(AgentGrants::default()).apply(&current),
+        AgentGrants::default()
+    );
+}
+
+async fn event_budget_used(state: &AppState) -> i64 {
+    state
+        .db
+        .collection::<crate::models::coordination::RateWindowRecord>(
+            crate::models::coordination::RATE_WINDOW_COLLECTION_NAME,
         )
+        .find_one(doc! {"namespace": "assistant_event_turns"})
+        .await
+        .unwrap()
+        .map(|row| row.count)
+        .unwrap_or(0)
+}
+
+#[tokio::test]
+async fn grants_decisions_and_destroy_reach_every_live_thread_key() {
+    let (state, calls, server) = setup("team_grant_keys").await;
+    let (orchestrator, chat) = orchestrator(&state).await;
+    let github = connected(&state.db, OWNER, "github", "https://api.github.com").await;
+    let slack = connected(&state.db, OWNER, "slack", "https://slack.com/api").await;
+    spawn(
+        &state,
+        &chat,
+        json!({"name": "coder", "description": "Review PRs", "services": ["github"]}),
+    )
+    .await;
+    let agent = team::specialist(&state.db, OWNER, "coder").await.unwrap();
+    let home = specialist_home(&state, "coder").await;
+    let second = user_turn(&state, None, Some(&agent.id), "Second thread").await;
+    let second_key = second.credential_api_key_id.clone();
+    let home_chat = chat_for(&state, &home).await;
+    let (_, slack_request) =
+        acks::service_gate(&state.db, &home_chat, &slack, "slack", "Slack", false)
+            .await
+            .unwrap()
+            .unwrap();
+    let slack_request = slack_request.expect("a new request");
+    let (_, account_request) = acks::account_gate(&state.db, &home_chat)
+        .await
+        .unwrap()
+        .unwrap();
+    let account_request = account_request.expect("a new request");
+    // An approved request reaches every thread of the agent, not just the
+    // requesting one, and leaves unrelated requests pending.
+    acks::decide_as(
+        &state.db,
+        OWNER,
+        None,
+        &slack_request.id,
+        true,
+        acks::Decider::Nyxbot,
+        None,
+    )
+    .await
+    .unwrap();
+    let key = key_service::get_api_key(&state.db, OWNER, &second_key)
         .await
         .unwrap();
-        keys.push(row.credential_api_key_id);
-    }
-    // The idle sweep destroys only stale subagents.
+    assert!(key.allowed_service_ids.contains(&slack));
+    assert!(key.allowed_service_ids.contains(&github));
+    let status = |rows: &[AssistantAcknowledgement], id: &str| {
+        rows.iter()
+            .find(|row| row.id == id)
+            .map(|row| row.status.clone())
+            .unwrap()
+    };
+    let history = acks::history(&state.db, OWNER, &home.id).await.unwrap();
+    assert_eq!(status(&history, &account_request.id), "pending");
+    // A thread whose recorded key is stale (rotated, or replaced mid-turn)
+    // still converges: grant changes and destroy follow the credential row.
     state
         .db
         .collection::<bson_doc::Document>(CONVERSATIONS)
         .update_one(
-            doc! {"agent_name": "one"},
-            doc! {"$set": {"updated_at": mongodb::bson::DateTime::from_chrono(
-            Utc::now() - chrono::Duration::days(team::IDLE_DESTROY_DAYS + 1))}},
+            doc! {"_id": &second.id},
+            doc! {"$set": {"credential_api_key_id": Uuid::new_v4().to_string()}},
         )
         .await
         .unwrap();
-    assert_eq!(team::sweep_idle(&state.db).await.unwrap(), 1);
-    let summaries = team::summaries(&state.db, OWNER, &orchestrator.id, true, 0)
+    let (value, error) = execute_tool(
+        &state,
+        &chat,
+        "nyxid__revoke_subagent",
+        &json!({"subagent": "coder", "services": ["github"]}),
+    )
+    .await;
+    assert!(!error, "{value}");
+    let key = key_service::get_api_key(&state.db, OWNER, &second_key)
         .await
         .unwrap();
-    assert_eq!(
-        summaries
-            .iter()
-            .filter(|row| row.status == "destroyed")
-            .count(),
-        1
-    );
-    let rows = engine::delete(&state.db, OWNER, &orchestrator.id)
-        .await
-        .unwrap();
-    assert_eq!(rows.len(), 3);
-    for key in keys {
-        assert!(
-            key_service::get_api_key(&state.db, OWNER, &key)
+    assert!(!key.allowed_service_ids.contains(&github));
+    assert!(key.allowed_service_ids.contains(&slack));
+    // Revoking a service never expires an account request.
+    let history = acks::history(&state.db, OWNER, &home.id).await.unwrap();
+    assert_eq!(status(&history, &account_request.id), "pending");
+    // A full pool neither runs a turn nor spends the owner's event budget.
+    let limit = team_pool_limit(&state, OWNER).await + 1;
+    let mut held = Vec::new();
+    for _ in 0..limit {
+        held.push(
+            state
+                .direct_chat_limiter
+                .try_acquire_pool("assistant_team", OWNER, limit)
                 .await
-                .is_err()
+                .unwrap()
+                .unwrap(),
         );
     }
-    assert_eq!(
-        state
-            .db
-            .collection::<bson_doc::Document>(CONVERSATIONS)
-            .count_documents(doc! {"user_id": OWNER})
+    let used = event_budget_used(&state).await;
+    let turns = calls.lock().await.len();
+    engine::push_events(
+        &state.db,
+        OWNER,
+        &home.id,
+        vec![team::event("message", "later".into(), None)],
+    )
+    .await
+    .unwrap();
+    wake(&state, OWNER, &home.id).await;
+    assert_eq!(event_budget_used(&state).await, used);
+    assert_eq!(calls.lock().await.len(), turns);
+    let queued = team::queued(&state.db, Some(OWNER)).await.unwrap();
+    assert!(queued.iter().any(|row| row.id == home.id));
+    drop(held);
+    // Destroy revokes the live key even though the thread recorded a stale one.
+    destroy_agent(&state, OWNER, &agent.id).await.unwrap();
+    assert!(
+        key_service::get_api_key(&state.db, OWNER, &second_key)
             .await
-            .unwrap(),
-        0
+            .map(|key| !key.is_active)
+            .unwrap_or(true)
     );
+    // Events reaching a destroyed agent are dropped without a turn or budget.
+    engine::push_events(
+        &state.db,
+        OWNER,
+        &home.id,
+        vec![team::event("permission_decided", "late".into(), None)],
+    )
+    .await
+    .unwrap();
+    wake(&state, OWNER, &home.id).await;
+    let row = engine::get(&state.db, OWNER, &home.id).await.unwrap();
+    assert!(row.pending_events.is_empty() && row.active_turn.is_none());
+    assert_eq!(event_budget_used(&state).await, used);
+    assert_eq!(calls.lock().await.len(), turns);
+    // NyxBot threads parked at the streak cap never crowd the retry sweep.
+    state
+        .db
+        .collection::<bson_doc::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &orchestrator.id},
+            doc! {"$set": {"event_streak": team::MAX_EVENT_STREAK}},
+        )
+        .await
+        .unwrap();
+    engine::push_events(
+        &state.db,
+        OWNER,
+        &orchestrator.id,
+        vec![team::event("message", "parked".into(), None)],
+    )
+    .await
+    .unwrap();
+    let queued = team::queued(&state.db, None).await.unwrap();
+    assert!(queued.iter().all(|row| row.id != orchestrator.id));
     server.abort();
 }
 

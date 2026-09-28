@@ -28,6 +28,8 @@ pub(crate) struct Fixture {
     pub row: AssistantConversation,
     pub chat: acks::ChatAuthority,
     pub auth: AuthUser,
+    /// The owner's NyxBot thread (the fixture's own row for NyxBot fixtures).
+    pub nyxbot_thread: String,
 }
 impl Fixture {
     pub fn tools(&self) -> tools::AccountTools<'_> {
@@ -92,6 +94,7 @@ async fn chat_fixture(
     state: crate::AppState,
     owner: String,
     row: AssistantConversation,
+    nyxbot_thread: String,
 ) -> Fixture {
     let chat = acks::for_key(&state.db, &owner, Some(&row.credential_api_key_id))
         .await
@@ -109,6 +112,7 @@ async fn chat_fixture(
         row,
         chat,
         auth,
+        nyxbot_thread,
     }
 }
 
@@ -121,6 +125,7 @@ pub(crate) async fn new_orchestrator(
         &state.db,
         owner,
         &engine::TurnRequest {
+            agent_id: None,
             conversation_id: None,
             text: text.into(),
             model: None,
@@ -136,25 +141,26 @@ pub(crate) async fn new_orchestrator(
 pub(crate) async fn orchestrator_fixture(name: &str) -> Fixture {
     let (state, owner) = base(name).await;
     let row = new_orchestrator(&state, &owner, "Please manage my account").await;
-    chat_fixture(state, owner, row).await
+    let thread = row.id.clone();
+    chat_fixture(state, owner, row, thread).await
 }
 
-/// A subagent with no grants, in a live user turn: every service and account
-/// tool is gated and requests go to its orchestrator.
+/// A specialist agent with no grants, in a live user turn in its home
+/// thread: every service and account tool is gated and requests go to NyxBot.
 pub(crate) async fn fixture(name: &str) -> Fixture {
     let (state, owner) = base(name).await;
     let orchestrator = new_orchestrator(&state, &owner, "Coordinate my work").await;
-    let (subagent, _) = super::assistant_team_service::spawn(
+    let (_, home) = super::assistant_team_service::create_specialist(
         &state.db,
         &state.encryption_keys,
         &owner,
-        &orchestrator,
-        super::assistant_team_service::SpawnRequest {
+        super::assistant_team_service::CreateRequest {
             name: "worker".into(),
-            charter: "Help with the user's account".into(),
+            description: "Help with the user's account".into(),
             targets: Default::default(),
             account_read: false,
             specialty: None,
+            created_by: "nyxbot",
         },
     )
     .await
@@ -164,7 +170,8 @@ pub(crate) async fn fixture(name: &str) -> Fixture {
         &state.db,
         &owner,
         &engine::TurnRequest {
-            conversation_id: Some(subagent.id.clone()),
+            agent_id: None,
+            conversation_id: Some(home.id.clone()),
             text: "Please manage my account".into(),
             model: None,
             access_mode: None,
@@ -173,7 +180,7 @@ pub(crate) async fn fixture(name: &str) -> Fixture {
     )
     .await
     .unwrap();
-    chat_fixture(state, owner, row).await
+    chat_fixture(state, owner, row, orchestrator.id).await
 }
 
 fn orchestrator_chat() -> acks::ChatAuthority {
@@ -182,8 +189,8 @@ fn orchestrator_chat() -> acks::ChatAuthority {
         user_id: "owner".into(),
         api_key_id: "key".into(),
         role: crate::models::assistant_conversation::AgentRole::Orchestrator,
-        team_id: None,
-        agent_name: None,
+        agent_id: "agent".into(),
+        agent_name: "NyxBot".into(),
     }
 }
 
@@ -389,6 +396,7 @@ async fn acknowledgements_deny_expire_and_reask_only_after_a_new_user_message() 
         db,
         &f.owner,
         &engine::TurnRequest {
+            agent_id: None,
             conversation_id: Some(f.row.id.clone()),
             text: "Ask for access again".into(),
             model: None,
@@ -480,6 +488,7 @@ async fn action_acknowledgements_bind_arguments_key_conversation_and_are_single_
         db,
         &f.owner,
         &engine::TurnRequest {
+            agent_id: None,
             conversation_id: None,
             text: "other chat".into(),
             model: None,
@@ -652,16 +661,29 @@ fn minimal_args(name: &str, id: &str) -> Value {
 fn native_inventory_is_closed_and_schemas_exclude_secret_inputs() {
     assert_eq!(tools::TOOL_NAMES.len(), 22);
     let service = tools::virtual_service(&orchestrator_chat());
-    // Orchestrators also get the team tools; subagents only read-only tools.
+    // NyxBot also gets the team and memory tools; specialists get read-only
+    // account tools plus their own memory.
+    let team = super::assistant_team_tools::TOOL_NAMES.len();
+    let memory = super::assistant_team_tools::MEMORY_TOOL_NAMES.len();
     assert_eq!(
         service.endpoints.len(),
-        tools::TOOL_NAMES.len() + super::assistant_team_tools::TOOL_NAMES.len()
+        tools::TOOL_NAMES.len() + team + memory
     );
     let mut subagent = orchestrator_chat();
     subagent.role = crate::models::assistant_conversation::AgentRole::Subagent;
     let limited = tools::virtual_service(&subagent);
     assert!(!limited.endpoints.is_empty());
-    assert!(limited.endpoints.iter().all(|e| tools::read_only(&e.name)));
+    assert!(limited.endpoints.iter().all(|e| {
+        tools::read_only(&e.name) || super::assistant_team_tools::is_memory_tool(&e.name)
+    }));
+    assert_eq!(
+        limited
+            .endpoints
+            .iter()
+            .filter(|e| super::assistant_team_tools::is_memory_tool(&e.name))
+            .count(),
+        memory
+    );
     assert_eq!(service.service_slug, "nyxid");
     assert_eq!(service.service_name, "NyxID account");
     assert!(matches!(
@@ -795,7 +817,7 @@ async fn subagents_reach_only_read_tools_after_an_account_grant_and_preserve_own
         .unwrap();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].decider, "orchestrator");
-    assert_eq!(requests[0].team_id, f.chat.team_id);
+    assert!(!f.chat.is_orchestrator());
     assert!(
         requests[0]
             .request_excerpt
@@ -805,8 +827,10 @@ async fn subagents_reach_only_read_tools_after_an_account_grant_and_preserve_own
     acks::decide(&f.state.db, &f.owner, &f.row.id, &requests[0].id, true)
         .await
         .unwrap();
-    let saved = engine::get(&f.state.db, &f.owner, &f.row.id).await.unwrap();
-    assert!(saved.grants.account_read);
+    let agent = super::assistant_team_service::agent(&f.state.db, &f.owner, &f.chat.agent_id)
+        .await
+        .unwrap();
+    assert!(agent.grants.account_read);
     for name in tools::TOOL_NAMES {
         let result = f
             .tools()
@@ -1168,12 +1192,8 @@ async fn legacy_ask_conversation_upgrades_to_full_on_its_next_turn_and_credentia
     for field in [
         "access_mode",
         "role",
-        "team_id",
-        "agent_name",
-        "charter",
-        "specialty",
-        "grants",
-        "destroyed_at",
+        "agent_id",
+        "report_to",
         "pending_events",
         "event_streak",
         "channel",
@@ -1216,6 +1236,7 @@ async fn legacy_ask_conversation_upgrades_to_full_on_its_next_turn_and_credentia
         &f.state.db,
         &f.owner,
         &engine::TurnRequest {
+            agent_id: None,
             conversation_id: Some(f.row.id.clone()),
             text: "Continue".into(),
             model: None,
@@ -1281,6 +1302,7 @@ async fn assert_assistant_key_boundaries(f: &Fixture) {
         &f.state.db,
         &f.owner,
         &engine::TurnRequest {
+            agent_id: None,
             conversation_id: None,
             text: "Another conversation".into(),
             model: None,
@@ -1573,6 +1595,7 @@ async fn conversation_provisioning_rolls_back_its_key_when_the_first_message_can
         db,
         &f.owner,
         &engine::TurnRequest {
+            agent_id: None,
             conversation_id: None,
             text: "reject this message".into(),
             model: None,

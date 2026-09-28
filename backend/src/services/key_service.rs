@@ -1198,10 +1198,15 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                         .session(&mut *session)
                         .await?
                         .ok_or_else(|| AppError::NotFound("Conversation not found".into()))?;
-                    // The successor carries exactly its conversation's authority:
-                    // Full for orchestrators, the durable grants for subagents.
+                    // The successor carries exactly its thread's agent authority:
+                    // Full for NyxBot, the durable grants for a specialist.
                     let authority =
-                        super::assistant_agent_credential_service::KeyAuthority::of(&conversation);
+                        super::assistant_agent_credential_service::authority_in_session(
+                            &db,
+                            &conversation,
+                            &mut *session,
+                        )
+                        .await?;
                     let fields = authority.key_fields();
                     successor.scopes = fields.get_str("scopes").unwrap_or("proxy").to_owned();
                     successor.allow_all_services =
@@ -1210,20 +1215,18 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                     successor.allow_auto_connected_services = fields
                         .get_bool("allow_auto_connected_services")
                         .unwrap_or(false);
-                    successor.allowed_service_ids = conversation.grants.service_ids.clone();
-                    successor.allowed_platform_service_ids = match authority {
+                    match &authority {
                         super::assistant_agent_credential_service::KeyAuthority::Subagent(
                             grants,
-                        ) => grants.platform_service_ids.clone(),
-                        super::assistant_agent_credential_service::KeyAuthority::Orchestrator => {
-                            Vec::new()
+                        ) => {
+                            successor.allowed_service_ids = grants.service_ids.clone();
+                            successor.allowed_platform_service_ids =
+                                grants.platform_service_ids.clone();
                         }
-                    };
-                    if matches!(
-                        authority,
-                        super::assistant_agent_credential_service::KeyAuthority::Orchestrator
-                    ) {
-                        successor.allowed_service_ids.clear();
+                        super::assistant_agent_credential_service::KeyAuthority::Orchestrator => {
+                            successor.allowed_service_ids.clear();
+                            successor.allowed_platform_service_ids.clear();
+                        }
                     }
                     successor.allowed_node_ids.clear();
                     let mut update = fields;

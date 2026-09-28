@@ -237,8 +237,9 @@ fn description(name: &str) -> String {
     )
 }
 
-/// The native `nyxid` service for one chat key. Orchestrators get every account
-/// tool plus the team tools; subagents get read-only account tools only.
+/// The native `nyxid` service for one thread key. NyxBot gets every account
+/// tool plus the team tools; specialists get read-only account tools. Every
+/// agent gets its memory tools.
 pub fn virtual_service(chat: &acks::ChatAuthority) -> McpToolService {
     let mut service = account_service();
     if chat.is_orchestrator() {
@@ -250,9 +251,14 @@ pub fn virtual_service(chat: &acks::ChatAuthority) -> McpToolService {
             .endpoints
             .retain(|endpoint| read_only(&endpoint.name));
         service.description = Some(
-            "Read your NyxID account (subagent: read-only, with the orchestrator's grant).".into(),
+            "Read the user's NyxID account (specialist: read-only, with NyxBot's grant) and \
+            manage your memory."
+                .into(),
         );
     }
+    service
+        .endpoints
+        .extend(super::assistant_team_tools::memory_endpoints());
     service
 }
 

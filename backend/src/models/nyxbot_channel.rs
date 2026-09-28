@@ -5,8 +5,8 @@ pub const COLLECTION_NAME: &str = "nyxbot_channels";
 pub const THREADS_COLLECTION_NAME: &str = "nyxbot_threads";
 pub const EVENTS_COLLECTION_NAME: &str = "nyxbot_events";
 
-/// A channel bot NyxBot answers. Telegram bots are reached through the Agent
-/// Event Gateway (`transport = "gateway"`, NyxID is the gateway's `nyxbot`
+/// A channel bot linked to one of the owner's agents (NyxBot or a
+/// specialist). Telegram bots are reached through the Agent Event Gateway (`transport = "gateway"`, NyxID is the gateway's `nyxbot`
 /// provider); other platforms use NyxID's relay directly (`"direct"`).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct NyxbotChannel {
@@ -57,6 +57,10 @@ pub struct NyxbotChannel {
     /// The NyxBot chat that connected it, when connected from a chat.
     #[serde(default)]
     pub source_conversation_id: Option<String>,
+    /// The agent this bot reaches: the owner's NyxBot (`None` on rows written
+    /// before agents existed) or a specialist.
+    #[serde(default)]
+    pub agent_id: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
