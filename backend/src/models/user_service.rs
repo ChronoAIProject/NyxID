@@ -169,7 +169,7 @@ mod tests {
             auth_method: "bearer".to_string(),
             auth_key_name: "Authorization".to_string(),
             catalog_service_id: Some("svc-id".to_string()),
-            icon_url: None,
+            icon_url: Some("https://example.com/icon.svg".to_string()),
             node_id: Some("node-1".to_string()),
             node_priority: 0,
             service_type: "http".to_string(),
@@ -201,6 +201,7 @@ mod tests {
         assert_eq!(svc.id, restored.id);
         assert_eq!(svc.slug, restored.slug);
         assert_eq!(svc.node_priority, restored.node_priority);
+        assert_eq!(svc.icon_url, restored.icon_url);
         assert_eq!(restored.service_type, "http");
         assert_eq!(restored.identity_propagation_mode, "headers");
         assert!(restored.identity_include_user_id);

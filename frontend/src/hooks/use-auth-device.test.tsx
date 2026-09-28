@@ -193,6 +193,20 @@ const requestResponse = {
 };
 
 describe("useWebAuthDeviceLogin", () => {
+  it("uses the request-bound app transport without adopting a browser session", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-20T10:00:00Z"));
+    const transport = { request: vi.fn().mockResolvedValue(requestResponse), poll: vi.fn().mockResolvedValue(undefined) };
+    const { result } = renderHook(() => useWebAuthDeviceLogin(transport));
+    await act(async () => { result.current.start(); });
+    expect(result.current.phase).toBe("pending");
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    expect(transport.request).toHaveBeenCalledOnce();
+    expect(transport.poll).toHaveBeenCalledWith(requestResponse.device_code, expect.any(Function));
+    expect(result.current.phase).toBe("success");
+    expect(mockPost).not.toHaveBeenCalled();
+    expect(mockCheckAuth).not.toHaveBeenCalled();
+  });
   const restrictedDelivery = {
     ok: false,
     auth_kind: "agent_key",

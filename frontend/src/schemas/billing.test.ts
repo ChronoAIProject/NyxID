@@ -8,6 +8,8 @@ import {
   topUpBillingResponseSchema,
   billingUsageResponseSchema,
   billingUsageRowSchema,
+  BILLING_SERVICE_FILTER_LIMIT,
+  normalizeBillingSearch,
 } from "./billing";
 
 describe("billing schemas", () => {
@@ -181,5 +183,33 @@ describe("billing funding", () => {
         grant_credits_micros: -1,
       }).success,
     ).toBe(false);
+  });
+});
+
+describe("normalizeBillingSearch service filter", () => {
+  it("migrates the legacy single-service param", () => {
+    expect(normalizeBillingSearch({ service: "all" }).services).toEqual([]);
+    expect(normalizeBillingSearch({ service: "svc" }).services).toEqual([
+      "svc",
+    ]);
+    expect(
+      normalizeBillingSearch({ service: "old", services: ["new"] }).services,
+    ).toEqual(["new"]);
+  });
+
+  it("dedupes, drops invalid entries and bounds the list", () => {
+    expect(
+      normalizeBillingSearch({ services: ["a", "a", " ", 7, "b"] }).services,
+    ).toEqual(["a", "b"]);
+    const many = Array.from({ length: 80 }, (_, index) => `s${index}`);
+    expect(normalizeBillingSearch({ services: many }).services).toHaveLength(
+      BILLING_SERVICE_FILTER_LIMIT,
+    );
+    expect(normalizeBillingSearch({ services: "nope" }).services).toEqual([]);
+  });
+
+  it("accepts only the topup action", () => {
+    expect(normalizeBillingSearch({ action: "topup" }).action).toBe("topup");
+    expect(normalizeBillingSearch({ action: "refund" }).action).toBeUndefined();
   });
 });

@@ -106,9 +106,11 @@ frontend/src/hooks/use-theme.ts
 frontend/src/lib/api-client.ts
 frontend/src/lib/assistant/connect-watch.ts
 frontend/src/lib/assistant/identity.ts
+frontend/src/lib/credits-denial.ts
 frontend/src/lib/form-errors.ts
 frontend/src/lib/navigation.ts
 frontend/src/lib/parse-additional-scopes.ts
+frontend/src/lib/public-paths.ts
 frontend/src/lib/telemetry.ts
 frontend/src/lib/utils.ts
 frontend/src/pages/cli-pair/reserve-action.ts
@@ -125,6 +127,7 @@ frontend/src/stores/assistant-context-store.ts
 frontend/src/stores/assistant-draft-store.ts
 frontend/src/stores/assistant-wire-log-store.ts
 frontend/src/stores/auth-store.ts
+frontend/src/stores/credits-denial-store.ts
 frontend/src/stores/theme-store.ts
 frontend/src/types/options.ts
 frontend/src/wizard-entry.tsx

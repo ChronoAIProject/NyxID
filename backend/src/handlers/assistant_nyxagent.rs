@@ -905,6 +905,28 @@ async fn watch_stop(state: &AppState, row: &AssistantConversation, turn_id: &str
     }
 }
 
+/// Typed proxy failures collapse to `assistant_unavailable`, except a billing
+/// refusal, which keeps its stable code so the client can offer a top-up.
+fn proxy_turn_error(error: AppError) -> TurnError {
+    match error {
+        AppError::InsufficientCredits => TurnError::new("insufficient_credits"),
+        _ => TurnError::new("assistant_unavailable"),
+    }
+}
+
+/// Reads the NyxAgent `error.code` envelope, or NyxID's own flat envelope
+/// (`{"error":"insufficient_credits",...}`) on a 402. Other flat categories are
+/// not turn codes and stay unrecognized.
+fn upstream_error_code(status: u16, envelope: &Value) -> &str {
+    if let Some(code) = envelope["error"]["code"].as_str() {
+        return code;
+    }
+    if status == 402 && envelope["error"].as_str() == Some("insufficient_credits") {
+        return "insufficient_credits";
+    }
+    ""
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn execute_turn(
     state: &AppState,
@@ -970,7 +992,7 @@ async fn execute_turn(
         )
         .await
         .map_err(|_| TurnError::new("first_byte_timeout"))?
-        .map_err(|_| TurnError::new("assistant_unavailable"))?;
+        .map_err(proxy_turn_error)?;
         if !response.status().is_success() {
             let status = response.status().as_u16();
             let bytes = tokio::time::timeout(
@@ -984,7 +1006,7 @@ async fn execute_turn(
                 .as_ref()
                 .and_then(|bytes| serde_json::from_slice(bytes).ok())
                 .unwrap_or(Value::Null);
-            let code = envelope["error"]["code"].as_str().unwrap_or_default();
+            let code = upstream_error_code(status, &envelope);
             match recovery.decide(status, code, binding.is_some()) {
                 RecoveryAction::Rebind => {
                     engine::clear_binding(

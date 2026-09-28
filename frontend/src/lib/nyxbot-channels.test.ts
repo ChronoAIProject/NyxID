@@ -84,6 +84,11 @@ describe("Nyxbot Telegram registration", () => {
       },
       preserveSessionOn401: true,
       signal: expect.any(AbortSignal),
+      // The foreground registration opts into the out-of-credits dialog.
+      creditsDenial: {
+        key: expect.stringMatching(/^op:nyxbot-telegram-register:my_shop_bot:/),
+        payer: "unknown",
+      },
     });
   });
   it("passes the requested active service IDs and removes duplicates", async () => {

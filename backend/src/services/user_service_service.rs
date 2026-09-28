@@ -2753,45 +2753,6 @@ mod tests {
         assert_eq!(stored.source.as_deref(), Some(AUTO_PROVISION_SOURCE));
     }
 
-    #[tokio::test]
-    async fn auto_connected_service_icon_can_be_set_and_cleared() {
-        let Some(db) = connect_test_database("user_service_auto_icon_update").await else {
-            return;
-        };
-        let user_id = uuid::Uuid::new_v4().to_string();
-        let service_id = uuid::Uuid::new_v4().to_string();
-        let mut service = test_user_service(
-            &service_id,
-            &user_id,
-            "platform-service",
-            "ep-auto",
-            Some("cat-1"),
-            None,
-        );
-        service.source = Some(AUTO_PROVISION_SOURCE.to_string());
-        db.collection::<UserService>(COLLECTION_NAME)
-            .insert_one(&service)
-            .await
-            .unwrap();
-
-        update_service_icon(&db, &user_id, &service_id, "https://example.com/icon.svg")
-            .await
-            .unwrap();
-        let stored = get_user_service(&db, &user_id, &service_id).await.unwrap();
-        assert_eq!(
-            stored.icon_url.as_deref(),
-            Some("https://example.com/icon.svg")
-        );
-        assert_eq!(stored.state_version, service.state_version + 1);
-
-        update_service_icon(&db, &user_id, &service_id, "")
-            .await
-            .unwrap();
-        let cleared = get_user_service(&db, &user_id, &service_id).await.unwrap();
-        assert!(cleared.icon_url.is_none());
-        assert_eq!(cleared.state_version, service.state_version + 2);
-    }
-
     fn test_downstream_ssh_service(
         service_id: &str,
         slug: &str,

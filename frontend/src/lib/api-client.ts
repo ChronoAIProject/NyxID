@@ -1,6 +1,11 @@
 import type { ApiErrorResponse } from "@/types/api";
 import { useAuthStore } from "@/stores/auth-store";
 import { isTelemetryActive } from "@/lib/telemetry";
+import {
+  currentCreditsActor,
+  reportCreditsDenialHttp,
+  type CreditsDenialRequest,
+} from "@/lib/credits-denial";
 
 export function apiUrl(endpoint: string, apiBaseUrl = ""): string {
   return `${apiBaseUrl.replace(/\/+$/, "")}/api/v1${endpoint}`;
@@ -37,6 +42,12 @@ interface RequestOptions {
    * that authenticate against NyxID itself must NOT set this.
    */
   readonly preserveSessionOn401?: boolean;
+  /**
+   * Foreground operations only: an HTTP 402 `insufficient_credits` opens the
+   * out-of-credits dialog for this operation key. The `ApiError` is still
+   * thrown so callers keep their inline error handling.
+   */
+  readonly creditsDenial?: CreditsDenialRequest;
 }
 
 // Endpoints that should not clear the global auth state on 401 because they
@@ -135,6 +146,7 @@ export async function apiFetch(
   endpoint: string,
   options: RequestOptions = {},
 ): Promise<Response> {
+  const actorId = options.creditsDenial ? currentCreditsActor() : null;
   const response = await fetch(
     apiUrl(endpoint, options.apiBaseUrl),
     buildFetchConfig(options),
@@ -156,6 +168,12 @@ export async function apiFetch(
   if (!response.ok) {
     const errorBody = await parseErrorResponse(response);
     redirectToConsentIfRequired(errorBody);
+    reportCreditsDenialHttp(
+      options.creditsDenial,
+      response.status,
+      errorBody,
+      actorId,
+    );
     throw new ApiError(response.status, errorBody);
   }
 

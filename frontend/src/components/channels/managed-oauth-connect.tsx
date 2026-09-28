@@ -14,6 +14,7 @@ import {
   postOAuthAck,
 } from "@/lib/oauth-popup";
 import { isOAuthResultMessage } from "@/schemas/oauth-popup";
+import { currentCreditsActor } from "@/lib/credits-denial";
 import {
   startManagedOAuth,
   completeManagedOAuth,
@@ -114,6 +115,7 @@ export function ManagedOAuthConnect({
             },
             controller.signal,
             botId,
+            orgId ?? currentCreditsActor(),
           )
             .then(async (bot) => {
               if (!active) return;

@@ -11,7 +11,7 @@ use crate::{
     crypto::token::{constant_time_eq, generate_random_token, hash_token},
     errors::{AppError, AppResult},
     models::{
-        auth_device_code::AuthDeviceCodeStatus,
+        auth_device_code::{AuthDeviceCode, AuthDeviceCodeStatus, COLLECTION_NAME as DEVICE_CODES},
         login_approval::{COLLECTION_NAME, LoginApproval, LoginFlow},
         user::{COLLECTION_NAME as USERS, User},
     },
@@ -154,6 +154,27 @@ pub async fn verify(
     ip: &str,
     user_agent: Option<&str>,
 ) -> AppResult<(LoginApproval, Option<token_service::IssuedSession>)> {
+    verify_identity(db, row, mfa_verified, ip, user_agent, None).await
+}
+
+pub async fn verify_app(
+    db: &Database,
+    row: &LoginApproval,
+    request: &AuthDeviceCode,
+    ip: &str,
+    user_agent: Option<&str>,
+) -> AppResult<(LoginApproval, Option<token_service::IssuedSession>)> {
+    verify_identity(db, row, true, ip, user_agent, Some(request.id.clone())).await
+}
+
+async fn verify_identity(
+    db: &Database,
+    row: &LoginApproval,
+    mfa_verified: bool,
+    ip: &str,
+    user_agent: Option<&str>,
+    app_request_id: Option<String>,
+) -> AppResult<(LoginApproval, Option<token_service::IssuedSession>)> {
     let db = db.clone();
     let row = row.clone();
     let ip = ip.to_owned();
@@ -161,6 +182,16 @@ pub async fn verify(
     let mut transaction = db.client().start_session().await?;
     transaction.start_transaction().and_run2(async move |session| {
         let result: AppResult<_> = async {
+            if let Some(id) = &app_request_id {
+                let claimed = db.collection::<AuthDeviceCode>(DEVICE_CODES).update_one(
+                    doc! {"_id": id, "login_approval_id": &row.id, "approved_user_id": &row.user_id,
+                        "status": "approved", "approved_session_id": null,
+                        "expires_at": {"$gt": mongodb::bson::DateTime::now()}},
+                    doc! {"$set": {"status": "delivered", "delivered_at": mongodb::bson::DateTime::now(),
+                        "purge_at": mongodb::bson::DateTime::from_chrono(Utc::now() + Duration::days(1))}})
+                    .session(&mut *session).await?;
+                if claimed.modified_count != 1 { return Err(AppError::AuthDeviceCodeAlreadyDelivered); }
+            }
             let verified = db.collection::<LoginApproval>(COLLECTION_NAME).find_one_and_update(
                 doc! {"_id": &row.id, "user_id": &row.user_id, "verified": false, "closed": false, "expires_at": {"$gt": mongodb::bson::DateTime::now()}},
                 doc! {"$set": {"verified": true, "mfa_verified": mfa_verified}})
@@ -173,6 +204,107 @@ pub async fn verify(
         }.await;
         super::api_key_mutation_service::transaction_result(result)
     }).await.map_err(super::api_key_mutation_service::map_transaction_error)
+}
+
+pub async fn begin_app(
+    db: &Database,
+    key: &[u8],
+    row: &LoginApproval,
+    context: device::InitiateInput,
+) -> AppResult<device::InitiateOutput> {
+    live(db, key, row).await?;
+    if row.user_id.is_some() || row.verified {
+        return Err(invalid());
+    }
+    attempt(db, row).await?;
+    let request = device::initiate(db, key, context).await?;
+    let linked = db.collection::<AuthDeviceCode>(DEVICE_CODES).update_one(
+        doc! {"device_code_hmac": device::hmac_hex(key, request.device_code.as_bytes()), "status": "pending"},
+        doc! {"$set": {"login_approval_id": &row.id, "expires_at": mongodb::bson::DateTime::from_chrono(row.expires_at)}})
+        .await?;
+    if linked.modified_count != 1 {
+        return Err(invalid());
+    }
+    Ok(device::InitiateOutput {
+        expires_in: (row.expires_at - Utc::now()).num_seconds().max(0),
+        ..request
+    })
+}
+
+pub async fn approve_app_identity(
+    db: &Database,
+    key: &[u8],
+    request: &AuthDeviceCode,
+    input: &device::ApproveInput,
+) -> AppResult<()> {
+    let id = request.login_approval_id.as_deref().ok_or_else(invalid)?;
+    let approval = db
+        .collection::<LoginApproval>(COLLECTION_NAME)
+        .find_one(doc! {"_id": id, "closed": false, "user_id": null, "verified": false})
+        .await?
+        .ok_or_else(invalid)?;
+    live(db, key, &approval).await?;
+    let actor = db
+        .collection::<User>(USERS)
+        .find_one(doc! {"_id": &input.user_id, "is_active": true})
+        .await?
+        .ok_or_else(invalid)?;
+    auth_service::ensure_person_user(&actor)?;
+    let result = db.collection::<AuthDeviceCode>(DEVICE_CODES).update_one(
+        doc! {"_id": &request.id, "status": "pending", "expires_at": {"$gt": mongodb::bson::DateTime::now()}},
+        doc! {"$set": {"status": "approved", "approved_user_id": &actor.id,
+            "approved_at": mongodb::bson::DateTime::now(),
+            "approver_ip_hmac": input.approver_ip.as_deref().map(|ip| device::hmac_hex(key, ip.as_bytes()))}})
+        .await?;
+    if result.modified_count != 1 {
+        return Err(AppError::AuthDeviceCodeAlreadyDelivered);
+    }
+    super::audit_service::log_async(
+        db.clone(),
+        Some(actor.id),
+        "login_request_app_identity_approved".into(),
+        Some(serde_json::json!({"request_id": request.id, "approval_id": id})),
+        input.approver_ip.clone(),
+        input.approver_user_agent.clone(),
+        None,
+        None,
+    );
+    Ok(())
+}
+
+pub async fn app_identity(
+    db: &Database,
+    key: &[u8],
+    row: &LoginApproval,
+    device_code: &str,
+) -> AppResult<(LoginApproval, AuthDeviceCode)> {
+    live(db, key, row).await?;
+    let request = db.collection::<AuthDeviceCode>(DEVICE_CODES)
+        .find_one(doc! {"device_code_hmac": device::hmac_hex(key, device_code.as_bytes()), "login_approval_id": &row.id})
+        .await?.ok_or(AppError::AuthDeviceCodeNotFound)?;
+    match request.status {
+        AuthDeviceCodeStatus::Denied => return Err(AppError::AuthDeviceCodeDenied),
+        AuthDeviceCodeStatus::Delivered => return Err(AppError::AuthDeviceCodeAlreadyDelivered),
+        _ if request.expires_at <= Utc::now() => return Err(AppError::AuthDeviceCodeExpired),
+        AuthDeviceCodeStatus::Pending => return Err(AppError::AuthDeviceCodePending),
+        AuthDeviceCodeStatus::Expired => return Err(AppError::AuthDeviceCodeExpired),
+        AuthDeviceCodeStatus::Approved => {}
+    }
+    // An older replica may have approved this as an ordinary account-token request.
+    if request.approved_session_id.is_some() {
+        return Err(invalid());
+    }
+    let actor = db
+        .collection::<User>(USERS)
+        .find_one(doc! {"_id": &request.approved_user_id, "is_active": true})
+        .await?
+        .ok_or_else(invalid)?;
+    let row = if row.user_id.as_deref() == Some(&actor.id) && !row.verified {
+        row.clone()
+    } else {
+        identify(db, row, &actor).await?
+    };
+    Ok((row, request))
 }
 
 pub async fn close(db: &Database, row: &LoginApproval) -> AppResult<()> {

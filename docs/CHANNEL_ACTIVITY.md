@@ -110,8 +110,12 @@ Adapters opt into this UI and callback mechanism through `activity_descriptors()
 
 Upgrade every backend replica before selecting the new `chat` or `posts` values: older X bot readers do not understand those enum values. Keep new selections disabled during a rolling upgrade. Before rollback, change selections back to supported values and disable typed callbacks. Isolated notification storage protects old message counts and reply lookups throughout that sequence.
 
+Configure the same X app's OAuth 2.0 Client Secret for `X-Twitter-Webhooks-Signature-OAuth2` and CRC challenges. Legacy `X-Twitter-Webhooks-Signature` uses the separate OAuth 1.0 consumer secret. An invalid modern signature is rejected even if a legacy header is valid. NyxID bot details and X registration use the same shared callback, `{BASE_URL}/api/v1/webhooks/channel/x/platform`.
+
 After deployment, select `chat`, confirm subscription reconciliation succeeds, and send a new encrypted message to the connected account. Verify a new activity ID in the owner API/UI, then enable a receiver that has declared support and verify acceptance of a subsequent signed callback. Existing notifications are not replayed. Test a normal DM and a public mention/reply as well.
+
+For diagnosis, a recorded activity exists before the agent callback runs: a receiver failure leaves the count intact with `callback_status = "failed"`. A missing row requires checking earlier stages, including signature rejection, bot/tag/event selection, live OAuth, billing and routing. Server logs identify fixed rejection stages without payloads or secrets, and `X webhook activity recorded` identifies successful admission. A configured conversation count is not an observation of provider delivery.
 
 Local signed fixtures and mock receivers validate NyxID's implementation. A successful public webhook HTTP 200 only acknowledges the request; it does not establish that X sent the intended event or that a subscribed agent received it. The original incident's screenshots identify encrypted X Chat alongside `dm.received` subscriptions, but production ingress still requires the post-deployment check above.
 
-Provider references: [X Activity API](https://docs.x.com/x-api/activity/introduction), [event payloads](https://docs.x.com/x-api/activity/event-payloads). Related: [Channel Bot Relay](CHANNEL_BOT_RELAY.md), [HTTP Event Gateway / ADR-013](CHANNEL_EVENT_GATEWAY.md).
+Provider references: [X Activity API](https://docs.x.com/x-api/activity/introduction), [event payloads](https://docs.x.com/x-api/activity/event-payloads), [webhook signatures and CRC](https://docs.x.com/x-api/webhooks/quickstart). Related: [Channel Bot Relay](CHANNEL_BOT_RELAY.md), [HTTP Event Gateway / ADR-013](CHANNEL_EVENT_GATEWAY.md).

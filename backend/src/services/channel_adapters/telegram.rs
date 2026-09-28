@@ -396,6 +396,10 @@ impl PlatformAdapter for TelegramAdapter {
         "telegram"
     }
 
+    fn message_ids_are_chat_scoped(&self) -> bool {
+        true
+    }
+
     fn registration(&self) -> super::super::channel_platform::RegistrationDescriptor {
         super::super::channel_platform::RegistrationDescriptor {
             documentation_url: Some("https://core.telegram.org/bots/api#setwebhook"),
@@ -779,10 +783,17 @@ impl PlatformAdapter for TelegramAdapter {
             .get("username")
             .and_then(|v| v.as_str())
             .unwrap_or_default();
+        let display_name = result
+            .get("first_name")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string);
 
         Ok(BotIdentity {
             platform_bot_id: bot_id.to_string(),
             platform_bot_username: username.to_string(),
+            display_name,
         })
     }
 
@@ -1181,6 +1192,49 @@ mod tests {
             } else {
                 result.unwrap();
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn verify_bot_token_reports_display_name() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        for (first_name, expected) in [
+            (serde_json::json!(" Acme Support "), Some("Acme Support")),
+            (serde_json::json!("  "), None),
+            (serde_json::Value::Null, None),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/bottest-token/getMe"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "ok": true,
+                    "result": {"id": 42, "is_bot": true, "first_name": first_name, "username": "acme_bot"}
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let adapter = TelegramAdapter {
+                base_url: format!("{}/bot", server.uri()),
+                file_base_url: format!("{}/file/bot", server.uri()),
+            };
+            let identity = adapter
+                .verify_bot_token(
+                    &reqwest::Client::new(),
+                    &crate::services::channel_platform::BotCredentials {
+                        billing: None,
+                        token: "test-token",
+                        platform_bot_id: None,
+                        platform_secrets: None,
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(identity.platform_bot_id, "42");
+            assert_eq!(identity.platform_bot_username, "acme_bot");
+            assert_eq!(identity.display_name.as_deref(), expected);
         }
     }
 

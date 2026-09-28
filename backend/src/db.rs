@@ -2235,6 +2235,21 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .build(),
         )
         .await?;
+    // Reply edits resolve outbound rows by the caller's key, never by the
+    // platform message ID alone: Telegram IDs repeat across chats and tenants.
+    channel_msgs
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "agent_api_key_id": 1, "platform_message_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("channel_messages_outbound_edit_idx".to_string())
+                        .partial_filter_expression(doc! { "direction": "outbound" })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
 
     // ── reply_token_uses ──
     let reply_token_uses = db.collection::<mongodb::bson::Document>("reply_token_uses");

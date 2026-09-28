@@ -78,7 +78,7 @@ Use `URLSearchParams` to encode values containing `+`, `&`, `=`, spaces, or othe
 
 `label` and `target_org_id` apply across channels. `request_id` resumes a Telegram creation draft; it must be a valid UUID and the signed-in user must have access to the draft. Names such as `field1` and `field2` work when a platform declares those exact names; they are not positional aliases for its first and second fields. The live catalog is authoritative if it differs from this reference.
 
-Use an organization UUID for `target_org_id` and share that link only with its administrators. An invalid or unauthorized organization is rejected by the server; NyxID does not silently create the bot in a different account. The recipient can explicitly choose **Personal** or another eligible organization instead. An omitted or blank `label` uses the default bot name.
+Use an organization UUID for `target_org_id` and share that link only with its administrators. An invalid or unauthorized organization is rejected by the server; NyxID does not silently create the bot in a different account. The recipient can explicitly choose **Personal** or another eligible organization instead. An omitted or blank `label` uses the default bot name. For a Telegram bot token (`/channel-bots/connect/telegram`), the name is optional: a supplied `label` is kept as given, and a blank one is filled with the bot's Telegram name.
 
 For example, construct a Slack link without losing special characters:
 
@@ -152,10 +152,10 @@ channel-bot management retains its existing account authentication requirements.
 
 1. Create a bot with `@BotFather` on Telegram. Copy the bot token (`123456:ABCdef...`).
 2. Open `/channel-bots/connect/telegram`, or select **Telegram bot token** in **Channel Bots → Add Bot**.
-3. Review the bot name (for example, `support-bot`) and paste the bot token.
-4. Click **Create channel bot** on the standalone page, then **Open channel bot** and assign an agent.
+3. Paste the bot token. The bot name is optional: if it is blank, NyxID fills it with the bot's Telegram name as soon as it recognizes the token. A name you typed or received in the link is never replaced.
+4. Click **Connect bot** on the standalone page, then **Open channel bot** and assign an agent.
 
-NyxID calls `/getMe` to verify the token, registers the webhook automatically, and sets the bot status to **active**.
+NyxID calls `/getMe` to verify the token, registers the webhook automatically, and sets the bot status to **active**. If the bot name is still blank at submission, NyxID uses the bot's Telegram display name, or its username when no display name is set.
 
 :::tip
 If the bot status stays at `pending_webhook`, check that the bot token is correct and that your NyxID instance is reachable from the public internet (or that Telegram can reach it). Self-hosted instances behind NAT need a public URL.

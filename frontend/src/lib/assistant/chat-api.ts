@@ -137,6 +137,10 @@ export async function sendChatCommand(
       },
       method: "POST",
       signal,
+      creditsDenial: {
+        key: `assistant:aevatar:${command.conversationId ?? "draft"}:${clientRequestId}`,
+        payer: "unknown",
+      },
     });
   } catch (error) {
     if (error instanceof ApiError) {

@@ -12,6 +12,7 @@ use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, ProxyOperationPolicy,
 };
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
+use crate::models::service_account::{ServiceAccount, ServiceAccountPurpose};
 use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
 use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
 use crate::models::user_provider_token::{
@@ -1125,20 +1126,23 @@ pub async fn resolve_admin_proxy_target(
     })
 }
 
-/// Resolve only the granted catalog endpoint and this service account's credential.
+/// Resolve the granted catalog endpoint without inheriting owner connections.
 pub async fn resolve_curation_proxy_target(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
-    sa_id: &str,
+    sa: &ServiceAccount,
     service_id: &str,
-) -> AppResult<ProxyTarget> {
+    platform_user_rate_limit: crate::mw::rate_limit::PlatformUserRateLimitPolicy,
+) -> AppResult<(ProxyTarget, bool)> {
     let service = db
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
         .find_one(doc! {"_id": service_id, "is_active": true, "service_type": "http"})
         .await?
         .ok_or_else(|| AppError::NotFound("HTTP catalog service not found".into()))?;
     super::retired_service_service::require_available(&service)?;
-    if service.proxy_operation_policy.is_none() {
+    let scope_authorized_editor =
+        sa.purpose == ServiceAccountPurpose::CatalogEditor && sa.catalog_scope_authorized;
+    if !scope_authorized_editor && service.proxy_operation_policy.is_none() {
         return Err(AppError::Forbidden(
             "Curation proxy target requires an explicit proxy operation policy".into(),
         ));
@@ -1150,37 +1154,64 @@ pub async fn resolve_curation_proxy_target(
     }
     let connection = db
         .collection::<UserServiceConnection>(USER_SERVICE_CONNECTIONS)
-        .find_one(doc! {"user_id": sa_id, "service_id": service_id})
+        .find_one(doc! {"user_id": &sa.id, "service_id": service_id})
         .await?;
     if connection.as_ref().is_some_and(|c| !c.is_active) {
         return Err(AppError::Forbidden(
             "Service account connection is disabled".into(),
         ));
     }
-    let credential = match connection.and_then(|c| c.credential_encrypted) {
-        Some(encrypted) => decrypt_user_credential(encryption_keys, &encrypted).await?,
-        None if service.auth_method == "none" && !service.requires_user_credential => String::new(),
+    let (credential, master_credential) = match connection.and_then(|c| c.credential_encrypted) {
+        Some(encrypted) => (
+            decrypt_user_credential(encryption_keys, &encrypted).await?,
+            false,
+        ),
+        None if service.auth_method == "none" && !service.requires_user_credential => {
+            (String::new(), false)
+        }
+        None if scope_authorized_editor
+            && is_valid_master_credential_service(&service)
+            && matches!(service.identity_propagation_mode.as_str(), "jwt" | "both")
+            && service.platform_key.is_none()
+            && service.destination_targets.is_empty() =>
+        {
+            let actor = EffectiveActor::from_user_id(&sa.id);
+            let authorized = authorize_master_credential(db, &service, &actor).await?;
+            crate::mw::rate_limit::enforce_platform_user_limit(
+                db,
+                platform_user_rate_limit,
+                &service.id,
+                &sa.id,
+            )
+            .await?;
+            (
+                decrypt_master_credential_string(encryption_keys, &authorized).await?,
+                true,
+            )
+        }
         None => {
             return Err(AppError::Forbidden(
                 "A dedicated service-account connection credential is required".into(),
             ));
         }
     };
-    Ok(ProxyTarget {
-        workspace_destinations_pending: super::destination_routing::workspace_destinations_pending(
-            &service,
-        ),
-        target_id: None,
-        base_url: service.base_url.clone(),
-        auth_method: service.auth_method.clone(),
-        auth_key_name: service.auth_key_name.clone(),
-        credential,
-        catalog_default_headers: service.default_request_headers.clone().unwrap_or_default(),
-        user_service_default_headers: Vec::new(),
-        ws_frame_injections: Vec::new(),
-        connection_id: None,
-        service,
-    })
+    Ok((
+        ProxyTarget {
+            workspace_destinations_pending:
+                super::destination_routing::workspace_destinations_pending(&service),
+            target_id: None,
+            base_url: service.base_url.clone(),
+            auth_method: service.auth_method.clone(),
+            auth_key_name: service.auth_key_name.clone(),
+            credential,
+            catalog_default_headers: service.default_request_headers.clone().unwrap_or_default(),
+            user_service_default_headers: Vec::new(),
+            ws_frame_injections: Vec::new(),
+            connection_id: None,
+            service,
+        },
+        master_credential,
+    ))
 }
 
 /// Resolve the downstream service and credential for a proxy request.

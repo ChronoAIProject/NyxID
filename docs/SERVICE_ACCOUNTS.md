@@ -514,7 +514,8 @@ The general route table below does not widen CatalogEditor or Curation access. C
 | `ANY /api/v1/llm/{provider}/v1/*` | `proxy`, `proxy:*`, or `llm:proxy` |
 | `ANY /api/v1/llm/gateway/v1/*` | `proxy`, `proxy:*`, or `llm:proxy` |
 | `GET /api/v1/llm/status` | `proxy`, `proxy:*`, or `llm:proxy` |
-| `ANY /api/v1/proxy/{service_id}/*` | `proxy` or `proxy:*`; Curation additionally requires the exact live Ornn target |
+| `ANY /api/v1/proxy/{service_id}/*` | General: `proxy` or `proxy:*`; CatalogEditor/Curation: token and live `proxy` plus the exact live Ornn target |
+| `ANY /api/v1/proxy/s/{slug}/*` | CatalogEditor: token and live `proxy`, resolving only its authorized Ornn catalog slug; legacy Curation cannot use this alias |
 | `GET /api/v1/keys` | CatalogEditor: catalog read scope (legacy role-based editors also need `user-services:read` and a catalog read role); General/Curation: live connection grant and owner access |
 | `GET /api/v1/keys/{uuid}` | Same authority as list; catalog UUID for CatalogEditor, connection UUID for General/Curation |
 | `GET /api/v1/mcp/config` | `proxy` or `proxy:*`; General SAs only, using their own discovery identity |
@@ -684,7 +685,13 @@ For CatalogEditor, `/keys` returns `{"keys":[...]}` with `resource_type: "catalo
 
 Writes use the [machine recommendation API](#machine-recommendation-api) and retain revision conflicts, request replay protection, history, token revocation, and credential-generation checks. Scope, account, and token changes conflict with in-flight mutation transactions and force revalidation; legacy role authority is also fenced. A persisted per-account write window applies across replicas: 60 changed writes per second by default, or `rate_limit_override`. Unchanged writes and committed retries do not consume additional budget. Removing a scope blocks subsequent requests with existing tokens; a newly added scope must also be present on the token.
 
-Ornn HTTP requests require `proxy`. Keep the assigned Ornn role permissions `ornn:skill:read`, `ornn:skill:create`, and `ornn:skill:update` for package content operations. A converted legacy Curation account retains its administrator-selected Ornn target; a fresh editor uses the active HTTP catalog service with slug `ornn-api`. That target must have the explicit operation policy described below. Downstream authentication uses the SA's own credential, unless the target is configured for identity-only/no-auth access. Configure JWT or Both identity propagation so Ornn receives the SA UUID and live Ornn permissions. Ornn still enforces ownership/sharing for package edits. Revoking catalog scopes does not revoke the separate `proxy` capability; remove `proxy`, revoke tokens, or disable the account to stop Ornn access.
+Ornn HTTP requests require `proxy` on both the token and the live account. Keep the assigned Ornn role permissions `ornn:skill:read`, `ornn:skill:create`, and `ornn:skill:update` for package content operations. A converted legacy Curation account retains its administrator-selected Ornn target; a fresh editor uses the active HTTP catalog service with slug `ornn-api`. Both `/api/v1/proxy/{catalog_uuid}/...` and `/api/v1/proxy/s/{target_slug}/...` resolve directly to that catalog target. In particular, `POST /api/v1/proxy/s/ornn-api/api/v1/skill-format/validate` remains available after saving catalog scopes, including with an existing token that already contains `proxy`.
+
+For a scope-authorized editor, an absent `proxy_operation_policy` preserves normal Ornn routing: there is no duplicate per-API allowlist to maintain in NyxID. An explicitly configured policy still applies; an empty policy denies everything. Ornn enforces its own route permissions and object ownership/sharing. Authenticated routes without an Ornn permission requirement also remain reachable, including metered operations subject to Ornn quota. Administrators who want a smaller callable surface can configure an optional operation policy. Legacy role-authorized editors and exact-grant Curation accounts still require a policy.
+
+Downstream authentication first uses the SA's own active connection credential. An explicitly disabled SA connection blocks execution. A no-auth target that does not require a user credential needs no separate credential. Scope-authorized editors can also use the catalog's server credential for an active internal HTTP service with JWT or Both identity propagation, no provider configuration, no `platform_key` configuration, no destination targets, and `requires_user_credential: false`. The shared master-credential ACL and platform rate limit apply to the SA; private catalog access requires the SA's own consent. `PLATFORM_REQUIRE_OPERATION_POLICY`, when enabled, still applies to this credential path. The credential stays on the server, and forwarding requires a successfully generated signed identity assertion containing the SA UUID and live role permissions. Creator credentials, endpoint overrides, gateway URLs, and nodes are never inherited. Legacy editors and Curation have no master-credential fallback.
+
+Configure JWT or Both identity propagation so Ornn receives the SA UUID and live Ornn permissions. Revoking catalog scopes does not revoke the separate `proxy` capability; remove `proxy`, revoke tokens, or disable the account to stop Ornn access.
 
 The account is confined to these metadata/skill routes and its Ornn HTTP target. It cannot manage service definitions, use other proxy targets, select instances, upgrade to WebSocket, or use MCP/LLM/general account administration. Legacy exact grants cannot change a CatalogEditor's purpose or grant fallback authority.
 
@@ -892,9 +899,9 @@ curl --fail-with-body "$NYXID_URL/oauth/token" \
 ```
 
 Use the returned access token as `$CURATION_TOKEN`. The `proxy` scope is required for Ornn content operations; a token containing only the two `catalog:skills:*` scopes can read/assign recommendations but receives `403` from the Ornn proxy.
-After the scope and connection checks pass, a missing operation-policy rule fails
-closed as `404 Service operation not found`; that response means the exact method
-and path still need to be added to the Ornn catalog row's policy.
+When the target has an explicit operation policy, a missing rule fails closed as
+`404 Service operation not found`; the exact method and path must be permitted by
+that policy. Scope-authorized editors do not require a policy when none is configured.
 
 ```sh
 curl --fail-with-body -H "Authorization: Bearer $CURATION_TOKEN" \

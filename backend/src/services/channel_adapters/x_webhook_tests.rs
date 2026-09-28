@@ -136,6 +136,116 @@ fn secrets() -> PlatformVerifySecrets {
     .into()
 }
 
+#[test]
+fn x_oauth2_webhook_signatures_use_client_secret_without_legacy_downgrade() {
+    let credentials: PlatformVerifySecrets = [
+        ("client_secret", "oauth2-secret"),
+        ("consumer_secret", "legacy-secret"),
+    ]
+    .into();
+    let body = br#"{ "data": {"event_type":"chat.received"} }"#;
+    let signature = |secret: &[u8], bytes: &[u8]| {
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret).unwrap();
+        mac.update(bytes);
+        format!("sha256={}", STANDARD.encode(mac.finalize().into_bytes()))
+            .parse::<axum::http::HeaderValue>()
+            .unwrap()
+    };
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-twitter-webhooks-signature-oauth2",
+        signature(b"oauth2-secret", body),
+    );
+    webhooks::verify(&credentials, &headers, body).unwrap();
+    assert!(webhooks::verify(&credentials, &headers, b"different body").is_err());
+    assert!(webhooks::verify(&secrets(), &headers, body).is_err());
+
+    headers.insert(
+        "x-twitter-webhooks-signature",
+        signature(b"legacy-secret", body),
+    );
+    webhooks::verify(&credentials, &headers, body).unwrap();
+    for invalid in [
+        "",
+        "sha256=invalid",
+        "sha256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+    ] {
+        headers.insert(
+            "x-twitter-webhooks-signature-oauth2",
+            invalid.parse().unwrap(),
+        );
+        assert!(webhooks::verify(&credentials, &headers, body).is_err());
+    }
+    headers.insert(
+        "x-twitter-webhooks-signature-oauth2",
+        signature(b"legacy-secret", body),
+    );
+    assert!(webhooks::verify(&credentials, &headers, body).is_err());
+    headers.remove("x-twitter-webhooks-signature-oauth2");
+    webhooks::verify(&credentials, &headers, body).unwrap();
+    assert!(
+        webhooks::verify(&[("client_secret", "legacy-secret")].into(), &headers, body).is_err()
+    );
+}
+
+#[test]
+fn x_oauth2_crc_and_webhook_readiness_do_not_require_consumer_secret() {
+    let credentials: PlatformVerifySecrets = [
+        ("app_bearer_token", "app-token"),
+        ("client_secret", "oauth2-secret"),
+        ("consumer_secret", "legacy-secret"),
+    ]
+    .into();
+    let mut mac = Hmac::<Sha256>::new_from_slice(b"oauth2-secret").unwrap();
+    mac.update(b"challenge");
+    let expected = format!("sha256={}", STANDARD.encode(mac.finalize().into_bytes()));
+    let query = [("crc_token".into(), "challenge".into())].into();
+    let response: Value =
+        serde_json::from_str(&webhooks::handshake(&credentials, &query).unwrap()).unwrap();
+    assert_eq!(response["response_token"], expected);
+    let adapter = XAdapter::default();
+    assert!(adapter.connection_webhook_configured(
+        &[("app_bearer_token", "app"), ("client_secret", "oauth2")].into()
+    ));
+    assert!(adapter.connection_webhook_configured(&secrets()));
+    assert!(!adapter.connection_webhook_configured(&[("client_secret", "oauth2")].into()));
+    assert!(
+        !adapter.connection_webhook_configured(
+            &[
+                ("app_bearer_token", "app"),
+                ("client_secret", ""),
+                ("consumer_secret", "")
+            ]
+            .into()
+        )
+    );
+}
+
+#[test]
+fn x_crc_cannot_sign_webhook_bodies() {
+    let body = json!({"data": {"event_type": "post.create", "filter": {"user_id": "10"},
+        "tag": "nyxid:bot", "payload": {"id": "500", "author_id": "10", "conversation_id": "500"}}})
+    .to_string();
+    assert!(body.len() <= 256);
+    assert_eq!(webhooks::parse(body.as_bytes()).unwrap().len(), 1);
+    for credentials in [secrets(), [("client_secret", "oauth2-secret")].into()] {
+        for token in [body.as_str(), "{}", " \n{} \t"] {
+            assert!(
+                webhooks::handshake(&credentials, &[("crc_token".into(), token.into())].into())
+                    .is_err()
+            );
+        }
+        // Do not assume an undocumented provider alphabet for opaque tokens.
+        assert!(
+            webhooks::handshake(
+                &credentials,
+                &[("crc_token".into(), "opaque{challenge".into())].into()
+            )
+            .is_ok()
+        );
+    }
+}
+
 pub(crate) fn event() -> Value {
     json!({"data": {"event_type": "dm.received", "event_uuid": "delivery-1",
         "filter": {"user_id": "10"}, "payload": {
@@ -156,7 +266,7 @@ fn x_crc_and_signatures_use_api_secret_and_exact_body() {
     let response: Value =
         serde_json::from_str(&webhooks::handshake(&secrets(), &query).unwrap()).unwrap();
     assert_eq!(response["response_token"], expected);
-    assert!(webhooks::handshake(&[("client_secret", "api-secret")].into(), &query).is_err());
+    assert!(webhooks::handshake(&[("app_bearer_token", "api-secret")].into(), &query).is_err());
     assert!(webhooks::crc_token(&[("crc_token".into(), "a".repeat(257))].into()).is_err());
 
     let body = serde_json::to_vec(&event()).unwrap();
@@ -256,6 +366,7 @@ async fn x_webhook_setup_uses_app_token_for_management_and_user_token_for_privat
             },
             &bot(),
             url,
+            &Default::default(),
         )
         .await
         .unwrap();
@@ -323,6 +434,7 @@ async fn x_webhook_repair_reuses_subscriptions_and_delete_preserves_other_channe
             },
             &bot(),
             url,
+            &Default::default(),
         )
         .await
         .unwrap();
@@ -347,7 +459,8 @@ async fn x_webhooks_reject_unsafe_callback_urls_before_provider_effects() {
                         platform_secrets: Some(&secrets()),
                     },
                     &bot(),
-                    url
+                    url,
+                    &Default::default(),
                 )
                 .await
                 .is_err()
@@ -404,6 +517,7 @@ async fn x_webhook_repoint_requires_provider_confirmation() {
                 },
                 &bot(),
                 url,
+                &Default::default(),
             )
             .await;
         assert_eq!(result.is_ok(), confirmed);
@@ -569,6 +683,7 @@ async fn event_selection_reconciles_subscriptions_without_touching_other_channel
             },
             &bot,
             url,
+            &Default::default(),
         )
         .await
         .unwrap();

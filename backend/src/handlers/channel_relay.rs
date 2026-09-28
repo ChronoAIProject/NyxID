@@ -56,7 +56,13 @@ pub struct AsyncReplyRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateReplyRequest {
+    /// Upstream platform message ID. Telegram numbers messages per chat, so
+    /// this alone does not identify one outbound row.
     pub message_id: String,
+    /// NyxID `message_id` returned by `/reply` or `/send`; pins the edit to
+    /// that exact outbound row.
+    #[serde(default)]
+    pub outbound_message_id: Option<String>,
     pub reply: AsyncReplyBody,
 }
 
@@ -403,6 +409,9 @@ struct EditRequestContext {
     conversation: ChannelConversation,
     bot: ChannelBot,
     attributed_api_key_id: String,
+    /// The caller named the exact row, or a reply token's inbound anchor
+    /// bounds it to one chat.
+    row_pinned: bool,
 }
 
 fn extract_bearer_token(headers: &HeaderMap) -> AppResult<Option<String>> {
@@ -583,15 +592,15 @@ async fn reply_token_has_been_consumed(state: &AppState, jti: &str) -> AppResult
 
 async fn check_message_edit_rate_limit(
     state: &AppState,
-    platform_message_id: &str,
+    outbound_message_id: &str,
 ) -> AppResult<()> {
     if !state
         .per_message_edit_limiter
-        .check_shared(platform_message_id)
+        .check_shared(outbound_message_id)
         .await?
     {
         tracing::warn!(
-            platform_message_id = %platform_message_id,
+            outbound_message_id = %outbound_message_id,
             "Per-message edit rate limit exceeded"
         );
         return Err(AppError::RateLimited);
@@ -737,25 +746,18 @@ async fn resolve_reply_token_edit_context(
         ));
     }
 
-    let outbound = channel_relay_service::get_outbound_message_by_platform_id(
+    // The lookup itself binds the row to the token's key, conversation and
+    // inbound anchor.
+    let outbound = channel_relay_service::get_outbound_reply_for_inbound(
         &state.db,
-        &claims.platform,
+        &claims.api_key_id,
+        &claims.conversation_id,
+        &claims.inbound_message_id,
         &body.message_id,
+        body.outbound_message_id.as_deref(),
     )
     .await?;
-
-    if outbound.reply_to_message_id.as_deref() != Some(claims.inbound_message_id.as_str()) {
-        return Err(AppError::Unauthorized(
-            "Reply token inbound_message_id mismatch".to_string(),
-        ));
-    }
-
     let conversation = load_active_conversation(state, &outbound.conversation_id).await?;
-    if claims.conversation_id != conversation.id || outbound.conversation_id != conversation.id {
-        return Err(AppError::Unauthorized(
-            "Reply token conversation mismatch".to_string(),
-        ));
-    }
 
     if claims.platform != outbound.platform || claims.platform != conversation.platform {
         return Err(AppError::Unauthorized(
@@ -775,6 +777,7 @@ async fn resolve_reply_token_edit_context(
         conversation,
         bot,
         attributed_api_key_id: api_key.id,
+        row_pinned: true,
     })
 }
 
@@ -793,6 +796,7 @@ async fn resolve_api_key_edit_context(
         &state.db,
         caller_api_key_id,
         &body.message_id,
+        body.outbound_message_id.as_deref(),
     )
     .await?;
     let conversation = load_active_conversation(state, &outbound.conversation_id).await?;
@@ -814,6 +818,7 @@ async fn resolve_api_key_edit_context(
         conversation,
         bot,
         attributed_api_key_id: caller_api_key_id.to_string(),
+        row_pinned: body.outbound_message_id.is_some(),
     })
 }
 
@@ -1508,10 +1513,10 @@ pub async fn update_reply(
             "Reply updates do not accept attachments".into(),
         ));
     }
-    // Deliberately rate-limit before auth/DB work so unauth floods fail on one cheap hashmap check.
-    check_message_edit_rate_limit(&state, &body.message_id).await?;
-
     let context = resolve_edit_request_context(&state, &headers, auth_user.as_ref(), &body).await?;
+    // Keyed on the resolved row: platform message IDs repeat across chats and
+    // tenants, so keying on them would let unrelated edits drain each other.
+    check_message_edit_rate_limit(&state, &context.outbound.id).await?;
     if is_device_reply_forbidden(&context.outbound.platform, &context.conversation.platform) {
         return Err(AppError::DeviceChannelReplyNotAllowed);
     }
@@ -1545,11 +1550,21 @@ async fn edit_resolved_reply(
         conversation,
         bot,
         attributed_api_key_id,
+        row_pinned,
     } = context;
     if !body.reply.attachments.is_empty() {
         return Err(AppError::ValidationError(
             "Reply updates do not accept attachments".into(),
         ));
+    }
+    // Even a unique match may belong to another chat when the intended row
+    // expired or was never stored, so these platforms need the exact row.
+    if !row_pinned && adapter.message_ids_are_chat_scoped() {
+        return Err(AppError::ValidationError(format!(
+            "outbound_message_id is required to edit {} messages: their message IDs repeat \
+             across chats. Pass the message_id returned by /reply or /send.",
+            bot.platform
+        )));
     }
     validate_reply_for_adapter(&body.reply, adapter)?;
     let inbound = if !outbound
@@ -1927,6 +1942,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::services::channel_platform::PlatformAdapter for RecordingSendAdapter {
+        fn message_ids_are_chat_scoped(&self) -> bool {
+            matches!(self.edit_platform, Some("telegram" | "telegram-new"))
+        }
         fn media_capabilities(&self) -> crate::services::channel_platform::MediaCapabilities {
             if self.media {
                 crate::services::channel_platform::MediaCapabilities::ALL
@@ -2970,6 +2988,7 @@ mod tests {
                     .platform_message_id
                     .clone()
                     .unwrap(),
+                outbound_message_id: Some(fixture.outbound_message.id.clone()),
                 reply: body(Some("Updated digest"), None),
             };
             let context = resolve_edit_request_context(
@@ -3038,9 +3057,7 @@ mod tests {
                     )
                     .await
                     .unwrap_err();
-                    assert!(
-                        matches!(error, AppError::Unauthorized(message) if message.contains("inbound_message_id mismatch"))
-                    );
+                    assert!(matches!(error, AppError::NotFound(_)));
                 }
             } else {
                 assert!(matches!(
@@ -3090,6 +3107,7 @@ mod tests {
         let auth = api_key_auth_user(&fixture.api_key);
         let request = UpdateReplyRequest {
             message_id: "initiated-receipt".into(),
+            outbound_message_id: None,
             reply: body(Some("Updated digest"), None),
         };
         let context =
@@ -3155,9 +3173,7 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(
-            matches!(error, AppError::Unauthorized(message) if message.contains("inbound_message_id mismatch"))
-        );
+        assert!(matches!(error, AppError::NotFound(_)));
         db.drop().await.unwrap();
     }
 
@@ -3435,6 +3451,7 @@ mod tests {
     fn update_reply_request(platform_message_id: &str) -> UpdateReplyRequest {
         UpdateReplyRequest {
             message_id: platform_message_id.to_string(),
+            outbound_message_id: None,
             reply: body(Some("hello"), None),
         }
     }
@@ -4398,8 +4415,9 @@ mod tests {
         .await
         .unwrap_err();
 
+        // Rows outside the token's inbound anchor are not-found-shaped.
         assert!(
-            matches!(err, AppError::Unauthorized(msg) if msg.contains("inbound_message_id mismatch"))
+            matches!(err, AppError::NotFound(msg) if msg.contains("Outbound message not found"))
         );
         db.drop().await.unwrap();
     }
@@ -4485,6 +4503,154 @@ mod tests {
             matches!(err, AppError::NotFound(msg) if msg.contains("Outbound message not found"))
         );
         db.drop().await.unwrap();
+    }
+
+    /// Replaces the fixture reply with another chat's colliding reply followed
+    /// by the fixture reply, so natural order returns the wrong row first.
+    async fn insert_colliding_reply_first(
+        fixture: &ReplyTokenFixture,
+        reply_to_message_id: Option<String>,
+    ) -> ChannelMessage {
+        let messages = fixture
+            .state
+            .db
+            .collection::<ChannelMessage>(crate::models::channel_message::COLLECTION_NAME);
+        messages
+            .delete_one(doc! { "_id": &fixture.outbound_message.id })
+            .await
+            .unwrap();
+        let colliding = ChannelMessage {
+            id: Uuid::new_v4().to_string(),
+            platform_conversation_id: Some("chat_a".into()),
+            reply_to_message_id,
+            ..fixture.outbound_message.clone()
+        };
+        messages.insert_one(&colliding).await.unwrap();
+        messages
+            .insert_one(&fixture.outbound_message)
+            .await
+            .unwrap();
+        colliding
+    }
+
+    #[tokio::test]
+    async fn api_key_edit_never_retargets_another_chats_colliding_reply() {
+        let Some(fixture) = setup_reply_token_fixture("edit_colliding_reply").await else {
+            eprintln!("skipping channel_relay reply-token test: no local MongoDB available");
+            return;
+        };
+        // Telegram numbers messages per chat: customer A's earlier reply in
+        // chat_a shares the ID of customer B's reply in chat_123.
+        insert_colliding_reply_first(&fixture, None).await;
+        let auth = api_key_auth_user(&fixture.api_key);
+        let platform_message_id = "platform_reply_123";
+
+        let unpinned = resolve_edit_request_context(
+            &fixture.state,
+            &HeaderMap::new(),
+            Some(&auth),
+            &update_reply_request(platform_message_id),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(unpinned, AppError::Conflict(_)));
+
+        let request = UpdateReplyRequest {
+            outbound_message_id: Some(fixture.outbound_message.id.clone()),
+            reply: body(Some("Updated digest"), None),
+            ..update_reply_request(platform_message_id)
+        };
+        let context =
+            resolve_edit_request_context(&fixture.state, &HeaderMap::new(), Some(&auth), &request)
+                .await
+                .unwrap();
+        let adapter = RecordingSendAdapter {
+            edit_platform: Some("telegram"),
+            ..Default::default()
+        };
+        let response = edit_resolved_reply(
+            &fixture.state,
+            &HeaderMap::new(),
+            context,
+            request,
+            &adapter,
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(response.upstream_message_id, platform_message_id);
+        assert_eq!(
+            *adapter.edit_calls.lock().unwrap(),
+            vec![("chat_123".into(), platform_message_id.into())]
+        );
+        fixture.state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reply_token_edit_resolves_its_anchor_despite_colliding_replies() {
+        let Some(fixture) = setup_reply_token_fixture("token_edit_colliding_reply").await else {
+            eprintln!("skipping channel_relay reply-token test: no local MongoDB available");
+            return;
+        };
+        insert_colliding_reply_first(&fixture, Some(Uuid::new_v4().to_string())).await;
+        let claims = valid_reply_claims(&fixture);
+        insert_reply_token_use(&fixture, &claims).await;
+
+        let context = resolve_edit_request_context(
+            &fixture.state,
+            &bearer_headers(&encode_reply_claims(&fixture.state, &claims)),
+            None,
+            &update_reply_request("platform_reply_123"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(context.outbound.id, fixture.outbound_message.id);
+        fixture.state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn api_key_telegram_edit_requires_outbound_message_id() {
+        let Some(fixture) = setup_reply_token_fixture("telegram_edit_requires_pin").await else {
+            eprintln!("skipping channel_relay reply-token test: no local MongoDB available");
+            return;
+        };
+        // The only matching row may be another chat's reply once the intended
+        // row has expired, so a unique unpinned match is still not enough.
+        let err = update_reply(
+            State(fixture.state.clone()),
+            HeaderMap::new(),
+            OptionalAuthUser(Some(api_key_auth_user(&fixture.api_key))),
+            Json(update_reply_request("platform_reply_123")),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, AppError::ValidationError(msg) if msg.contains("outbound_message_id is required"))
+        );
+        fixture.state.db.drop().await.unwrap();
+    }
+
+    #[test]
+    fn only_telegram_message_ids_are_chat_scoped() {
+        let cache = std::sync::Arc::new(
+            crate::services::provider_token_exchange_service::TokenExchangeCache::new(),
+        );
+        for (platform, chat_scoped) in [
+            ("telegram", true),
+            ("telegram-new", true),
+            ("discord", false),
+            ("slack", false),
+            ("lark", false),
+            ("feishu", false),
+            ("whatsapp", false),
+        ] {
+            let adapter = resolve_adapter(platform, &cache).expect("registered adapter");
+            assert_eq!(
+                adapter.message_ids_are_chat_scoped(),
+                chat_scoped,
+                "{platform}"
+            );
+        }
     }
 
     #[test]
@@ -4602,15 +4768,33 @@ mod tests {
         db.drop().await.unwrap();
     }
 
+    async fn pinned_edit(
+        state: &AppState,
+        auth: Option<AuthUser>,
+        platform_message_id: &str,
+        outbound_message_id: &str,
+    ) -> AppResult<Json<UpdateReplyResponse>> {
+        update_reply(
+            State(state.clone()),
+            HeaderMap::new(),
+            OptionalAuthUser(auth),
+            Json(UpdateReplyRequest {
+                outbound_message_id: Some(outbound_message_id.to_string()),
+                ..update_reply_request(platform_message_id)
+            }),
+        )
+        .await
+    }
+
     #[tokio::test]
-    async fn update_reply_rate_limits_per_platform_message_id() {
-        let Some(fixture) = setup_reply_token_fixture("update_reply_rate_limit").await else {
+    async fn update_reply_rate_limits_per_outbound_message() {
+        let Some(fixture) = setup_reply_token_fixture("update_reply_outbound_rate_limit").await
+        else {
             eprintln!("skipping channel_relay reply-token test: no local MongoDB available");
             return;
         };
         let db = fixture.state.db.clone();
-        // Use a platform with no edit API so the first request cannot make an
-        // external call. Telegram now implements native editing.
+        // Use a platform with no edit API so no request can make an external call.
         for (collection, id) in [
             (crate::models::channel_bot::COLLECTION_NAME, &fixture.bot.id),
             (CONVERSATIONS, &fixture.conversation.id),
@@ -4627,41 +4811,44 @@ mod tests {
                 .await
                 .unwrap();
         }
+        // Another chat's reply shares the platform message ID, not the bucket.
+        let sibling = ChannelMessage {
+            id: Uuid::new_v4().to_string(),
+            platform: "whatsapp".into(),
+            platform_conversation_id: Some("chat_a".into()),
+            ..fixture.outbound_message.clone()
+        };
+        db.collection::<ChannelMessage>(crate::models::channel_message::COLLECTION_NAME)
+            .insert_one(&sibling)
+            .await
+            .unwrap();
 
         let mut state = fixture.state.clone();
         state.per_message_edit_limiter =
             std::sync::Arc::new(crate::mw::rate_limit::PerMessageEditRateLimiter::new(1, 1));
+        let platform_message_id = "platform_reply_123";
+        let target = fixture.outbound_message.id.as_str();
+        let auth = || Some(api_key_auth_user(&fixture.api_key));
 
-        let platform_message_id = fixture
-            .outbound_message
-            .platform_message_id
-            .as_deref()
-            .expect("outbound platform message id")
-            .to_string();
-
-        let first = update_reply(
-            State(state.clone()),
-            HeaderMap::new(),
-            OptionalAuthUser(Some(api_key_auth_user(&fixture.api_key))),
-            Json(update_reply_request(&platform_message_id)),
-        )
-        .await;
+        // Unauthenticated floods cannot drain an outbound row's bucket.
+        let anonymous = pinned_edit(&state, None, platform_message_id, target).await;
+        assert!(matches!(anonymous, Err(AppError::Unauthorized(_))));
+        let first = pinned_edit(&state, auth(), platform_message_id, target).await;
         assert!(matches!(
             first,
             Err(AppError::ChannelPlatformEditUnsupported)
         ));
-
-        let second = update_reply(
-            State(state),
-            HeaderMap::new(),
-            OptionalAuthUser(None),
-            Json(update_reply_request(&platform_message_id)),
-        )
-        .await;
+        let second = pinned_edit(&state, auth(), platform_message_id, target).await;
         assert!(matches!(second, Err(AppError::RateLimited)));
+        let sibling_edit = pinned_edit(&state, auth(), platform_message_id, &sibling.id).await;
+        assert!(matches!(
+            sibling_edit,
+            Err(AppError::ChannelPlatformEditUnsupported)
+        ));
 
         db.drop().await.unwrap();
     }
+
     fn media_body() -> AsyncReplyBody {
         AsyncReplyBody {
             text: None,
@@ -4823,6 +5010,7 @@ mod tests {
                 OptionalAuthUser(Some(auth)),
                 Json(UpdateReplyRequest {
                     message_id: "platform".into(),
+                    outbound_message_id: None,
                     reply: media_body()
                 })
             )

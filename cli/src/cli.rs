@@ -600,6 +600,9 @@ pub enum PublicCommands {
 // ---- Login ----
 
 #[derive(Args, Default)]
+#[command(
+    after_long_help = "Agent login URL:\n  nyxid login --agent-key --no-wait --output json --profile my-agent\n\nShare verification_uri_complete from the JSON with the human. The request is\nnot approved until they finish the browser review. Resume after approval:\n  nyxid login resume <request_id> --once --output json\n\nAdd --scopes, --service, --service-permission, --key-source, --key-name, and\n--expiry-days to prefill the requested access. Use --device instead of\n--agent-key when either full account or restricted access is acceptable."
+)]
 pub struct LoginArgs {
     /// NyxID base URL, e.g. https://auth.nyxid.dev
     #[arg(long, env = "NYXID_URL", global = true)]
@@ -625,7 +628,7 @@ pub struct LoginArgs {
     /// Agent profile name (isolates tokens)
     #[arg(long, env = "NYXID_PROFILE", global = true)]
     pub profile: Option<String>,
-    /// Print the authorization challenge and exit without polling or opening a browser
+    /// Mint a complete login URL (verification_uri_complete) and exit without polling or opening a browser; combine with --output json for agents
     #[arg(long, conflicts_with_all = ["password", "code"])]
     pub no_wait: bool,
     /// Structured login events on stdout; credentials are never printed
@@ -832,7 +835,7 @@ pub enum CatalogCommands {
         /// Include all active services (including system services without auth)
         #[arg(long)]
         all: bool,
-        /// Discover catalog metadata without sending credentials or starting login
+        /// Send no saved credentials; current catalog routes require authentication (anonymous requests return 401). Before login use /api/v1/public/config, /public/mcp or /api/v1/catalog-specs.
         #[arg(long)]
         public: bool,
         #[command(flatten)]
@@ -842,7 +845,7 @@ pub enum CatalogCommands {
     Show {
         /// Service slug (e.g., llm-openai)
         slug: String,
-        /// Discover catalog metadata without sending credentials or starting login
+        /// Send no saved credentials; current catalog routes require authentication (anonymous requests return 401). Before login use /api/v1/public/config, /public/mcp or /api/v1/catalog-specs.
         #[arg(long)]
         public: bool,
         #[command(flatten)]
@@ -852,7 +855,7 @@ pub enum CatalogCommands {
     Endpoints {
         /// Service slug (e.g., llm-openai)
         slug: String,
-        /// Discover catalog metadata without sending credentials or starting login
+        /// Send no saved credentials; current catalog routes require authentication (anonymous requests return 401). Before login use /api/v1/public/config, /public/mcp or /api/v1/catalog-specs.
         #[arg(long)]
         public: bool,
         #[command(flatten)]

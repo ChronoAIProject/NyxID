@@ -46,3 +46,30 @@ export function total(
   if (rows.some((row) => row[field] == null)) return null;
   return rows.reduce((sum, row) => sum + (row[field] ?? 0), 0);
 }
+
+const DAY_MS = 86_400_000;
+/** Expiry dates this close also show a relative hint. */
+const SOON_DAYS = 14;
+
+/** e.g. "Oct 31 · in 5 days"; the year only when it is not this year. */
+export function expiryLabel(expiresAt: string | null | undefined, now: number) {
+  if (!expiresAt) return "No expiry";
+  const date = new Date(expiresAt);
+  const text = date.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    ...(date.getFullYear() !== new Date(now).getFullYear()
+      ? { year: "numeric" }
+      : {}),
+  });
+  const days = Math.ceil((date.getTime() - now) / DAY_MS);
+  if (days > SOON_DAYS) return text;
+  const relative =
+    days <= 0
+      ? "today"
+      : new Intl.RelativeTimeFormat(undefined, { numeric: "auto" }).format(
+          days,
+          "day",
+        );
+  return `${text} · ${relative}`;
+}

@@ -24,6 +24,7 @@ import {
   channelBotSetupPrefill,
   channelBotSetupUrlValues,
 } from "@/schemas/channel-bot-setup";
+import { labelIsOptional } from "@/schemas/channels";
 
 function setupUrl(platform: ChannelPlatform) {
   return `${window.location.origin}/channel-bots/connect/${encodeURIComponent(platform)}`;
@@ -208,7 +209,9 @@ function PrefilledChannelBotSetup({
       defaultLabel={
         search.label?.trim()
           ? search.label.slice(0, 128)
-          : `${descriptor.platform === "telegram" ? "Telegram" : descriptor.display_name} bot`
+          : labelIsOptional(descriptor.platform)
+            ? ""
+            : `${descriptor.display_name} bot`
       }
       defaultOrgId={search.target_org_id ?? null}
       prefill={prefill}
