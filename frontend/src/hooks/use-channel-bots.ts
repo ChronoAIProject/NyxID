@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api } from "@/lib/api-client";
+import { api, apiClient } from "@/lib/api-client";
+import { mutationCreditsDenial } from "@/lib/credits-denial";
 import type {
   ChannelBotListResponse,
   ChannelBotDetail,
@@ -107,7 +108,13 @@ export function useDeleteChannelBot() {
   });
 }
 
-export function useUpdateChannelBot() {
+/**
+ * `creditsOwnerId` opts the save into the out-of-credits dialog (X event
+ * subscriptions can be billed). The failed save is never replayed.
+ */
+export function useUpdateChannelBot({
+  creditsOwnerId,
+}: { readonly creditsOwnerId?: string } = {}) {
   const queryClient = useQueryClient();
 
   return useMutation({
@@ -119,7 +126,19 @@ export function useUpdateChannelBot() {
       readonly id: string;
       readonly data: UpdateChannelBotRequest;
     }): Promise<ChannelBotDetail> => {
-      return api.patch<ChannelBotDetail>(`/channel-bots/${id}`, data);
+      return apiClient<ChannelBotDetail>(`/channel-bots/${id}`, {
+        method: "PATCH",
+        body: data,
+        ...(creditsOwnerId
+          ? {
+              creditsDenial: mutationCreditsDenial(
+                "channel-bot-update",
+                id,
+                creditsOwnerId,
+              ),
+            }
+          : {}),
+      });
     },
     onSettled: (_data, _error, variables) => {
       void queryClient.invalidateQueries({
@@ -130,12 +149,25 @@ export function useUpdateChannelBot() {
   });
 }
 
-export function useVerifyChannelBot() {
+export function useVerifyChannelBot({
+  creditsOwnerId,
+}: { readonly creditsOwnerId?: string } = {}) {
   const queryClient = useQueryClient();
 
   return useMutation({
     mutationFn: async (id: string): Promise<VerifyChannelBotResponse> => {
-      return api.post<VerifyChannelBotResponse>(`/channel-bots/${id}/verify`);
+      return apiClient<VerifyChannelBotResponse>(`/channel-bots/${id}/verify`, {
+        method: "POST",
+        ...(creditsOwnerId
+          ? {
+              creditsDenial: mutationCreditsDenial(
+                "channel-bot-verify",
+                id,
+                creditsOwnerId,
+              ),
+            }
+          : {}),
+      });
     },
     onSettled: () => {
       return queryClient.invalidateQueries({ queryKey: CHANNEL_BOTS_ROOT });

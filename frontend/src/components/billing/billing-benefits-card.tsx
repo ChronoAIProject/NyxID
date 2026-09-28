@@ -2,25 +2,26 @@ import type {
   CreditGrant,
   UserAllowanceBalance,
 } from "@/schemas/billing-credits";
-import { ChevronDown } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
 import { billingMetricLabel } from "@/lib/billing-units";
 import {
   compact,
-  credits,
   number,
   serviceName,
   timestamp,
   type BillingCatalog,
 } from "@/lib/billing-display";
 import { metricFamily } from "@/lib/billing-usage";
-import { AllowanceChart } from "./allowance-chart";
-import { BenefitHelp, FreeUsageHelp } from "./benefit-help";
+import { StackedMeter, StackSwatch } from "./stacked-meter";
+import { CreditGrantsRow } from "./billing-grants-row";
+import { DetailsAction } from "./details-action";
+import {
+  equalShareStack,
+  stackStatus,
+  stackStatusClass,
+} from "@/lib/benefit-stack";
+import { cn } from "@/lib/utils";
+import { FreeUsageHelp } from "./benefit-help";
 
 function UsedGauge({
   used,
@@ -38,7 +39,14 @@ function UsedGauge({
       ? "<0.01"
       : number(Math.round(percent * 100) / 100);
   return (
-    <span className="benefit-gauge">
+    <span
+      className={cn(
+        "benefit-meter",
+        { exhausted: "is-exhausted", warning: "is-warning", normal: null }[
+          stackStatus(percent)
+        ],
+      )}
+    >
       <span
         className="benefit-track"
         role="meter"
@@ -48,9 +56,14 @@ function UsedGauge({
         aria-valuenow={percent}
         aria-valuetext={`${formatted}% used`}
       >
-        <span style={{ width: `${percent}%` }} />
+        {/* A floor keeps a tiny non-zero value visible as a pill. */}
+        <span
+          style={{
+            width: percent > 0 ? `max(var(--bar-min), ${percent}%)` : 0,
+          }}
+        />
       </span>
-      <span>{formatted}% used</span>
+      <span className="benefit-meter-caption">{formatted}% used</span>
     </span>
   );
 }
@@ -64,13 +77,6 @@ export function BillingBenefitsCard({
   allowances: readonly UserAllowanceBalance[];
   catalog: BillingCatalog;
 }) {
-  const grantGroups = new Map<string, CreditGrant[]>();
-  for (const grant of activeGrants) {
-    const key = grant.scope.all_services
-      ? "all"
-      : [...grant.scope.service_slugs].sort().join("|");
-    grantGroups.set(key, [...(grantGroups.get(key) ?? []), grant]);
-  }
   const services = new Map<string, UserAllowanceBalance[]>();
   for (const balance of allowances) {
     const id = balance.allowance.service_id;
@@ -81,138 +87,9 @@ export function BillingBenefitsCard({
       <CardHeader>
         <CardTitle>Credit grants & free usage</CardTitle>
       </CardHeader>
-      <CardContent>
+      <CardContent className="benefits-container">
         <section className="benefit-section">
-          {[...grantGroups].map(([key, grants]) => {
-            const original = grants.reduce(
-              (sum, grant) => sum + grant.amount_micros,
-              0,
-            );
-            const remaining = grants.reduce(
-              (sum, grant) => sum + grant.remaining_micros,
-              0,
-            );
-            const reserved = grants.reduce(
-              (sum, grant) => sum + grant.reserved_micros,
-              0,
-            );
-            const label =
-              key === "all"
-                ? "All services"
-                : grants[0]!.scope.service_slugs
-                    .map((slug) => serviceName(catalog, slug))
-                    .join(", ");
-            return (
-              <details className="benefit-disclosure" key={key}>
-                <summary>
-                  <div className="compact-benefit-label">
-                    <strong className="benefit-label-with-help">
-                      Credit grants
-                      <BenefitHelp label="Credit grants">
-                        <p>
-                          Credits applied after free usage and before your
-                          wallet. Grants expiring soonest are used first.
-                        </p>
-                        <p>
-                          {key === "all"
-                            ? "These grants cover all services."
-                            : `These grants cover ${label}.`}{" "}
-                          Reserved credits are excluded from the available
-                          balance.
-                        </p>
-                      </BenefitHelp>
-                    </strong>
-                    <span>
-                      {label} · {grants.length}{" "}
-                      {grants.length === 1 ? "grant" : "grants"}
-                    </span>
-                  </div>
-                  <div className="compact-grant-balance">
-                    <Tooltip delayDuration={150}>
-                      <TooltipTrigger asChild>
-                        <strong tabIndex={0}>
-                          {new Intl.NumberFormat("en-US", {
-                            maximumFractionDigits: 2,
-                          }).format(
-                            Math.max(0, remaining - reserved) / 1_000_000,
-                          )}{" "}
-                          <small>credits</small>
-                        </strong>
-                      </TooltipTrigger>
-                      <TooltipContent>
-                        Available: {credits(Math.max(0, remaining - reserved))}{" "}
-                        credits
-                      </TooltipContent>
-                    </Tooltip>
-                    <UsedGauge
-                      used={original - remaining}
-                      limit={original}
-                      label={`${label} grants`}
-                    />
-                  </div>
-                  <span className="compact-benefit-action">
-                    Details{" "}
-                    <ChevronDown size={13} className="disclosure-arrow" />
-                  </span>
-                </summary>
-                <div className="benefit-expanded">
-                  {grants.map((grant) => (
-                    <section key={grant.id}>
-                      <h4>{grant.reason || "Credit grant"}</h4>
-                      <dl className="split-facts">
-                        <div>
-                          <dt>Original grant</dt>
-                          <dd>{credits(grant.amount_micros)} credits</dd>
-                        </div>
-                        <div>
-                          <dt>Used</dt>
-                          <dd>
-                            {credits(
-                              Math.max(
-                                0,
-                                grant.amount_micros - grant.remaining_micros,
-                              ),
-                            )}{" "}
-                            credits
-                          </dd>
-                        </div>
-                        <div>
-                          <dt>Remaining</dt>
-                          <dd>{credits(grant.remaining_micros)} credits</dd>
-                        </div>
-                        <div>
-                          <dt>Reserved</dt>
-                          <dd>{credits(grant.reserved_micros)} credits</dd>
-                        </div>
-                        <div>
-                          <dt>Expires</dt>
-                          <dd>
-                            {grant.expires_at
-                              ? timestamp(grant.expires_at)
-                              : "No expiry"}
-                          </dd>
-                        </div>
-                        <div>
-                          <dt>Issued</dt>
-                          <dd>{timestamp(grant.created_at)}</dd>
-                        </div>
-                        <div>
-                          <dt>Status</dt>
-                          <dd>
-                            {grant.status} ·{" "}
-                            {grant.activation_state.replaceAll("_", " ")}
-                          </dd>
-                        </div>
-                      </dl>
-                    </section>
-                  ))}
-                </div>
-              </details>
-            );
-          })}
-          {!grantGroups.size && (
-            <p className="empty-inline">No active credit grants.</p>
-          )}
+          <CreditGrantsRow grants={activeGrants} catalog={catalog} />
         </section>
         <section className="benefit-section">
           {[...services].map(([id, balances]) => {
@@ -243,49 +120,83 @@ export function BillingBenefitsCard({
                   ),
               }))
               .filter((family) => family.units.length);
+            const stack = equalShareStack(
+              families
+                .flatMap((family) => family.units)
+                .map(([key, rows]) => {
+                  const metric = rows[0]!.allowance.metric;
+                  const limit = rows.reduce(
+                    (sum, row) => sum + row.allowance.quantity,
+                    0,
+                  );
+                  const remaining = rows.reduce(
+                    (sum, row) => sum + row.remaining_quantity,
+                    0,
+                  );
+                  return {
+                    key,
+                    label: sentence(billingMetricLabel(metric)),
+                    short: shortMetric(metric),
+                    used: rows.reduce(
+                      (sum, row) => sum + row.consumed_quantity,
+                      0,
+                    ),
+                    limit,
+                    legend: `${compact(remaining)} left`,
+                    detail: `${compact(remaining)} of ${compact(limit)} left`,
+                  };
+                }),
+            );
+            const unitSteps = new Map(
+              stack.items.map((item) => [item.key, item.step]),
+            );
             return (
-              <details className="benefit-disclosure" key={id}>
-                <summary>
+              <details
+                className={cn(
+                  "benefit-disclosure",
+                  stackStatusClass(stack.status),
+                )}
+                key={id}
+              >
+                <summary className="benefit-summary">
                   <div className="compact-benefit-label">
                     <strong>{serviceName(catalog, slug)}</strong>
                     <span className="benefit-label-with-help">
                       Free usage
                       <FreeUsageHelp balances={balances} />· {balances.length}{" "}
-                      allowances
+                      {balances.length === 1 ? "allowance" : "allowances"}
                     </span>
                   </div>
-                  <span className="compact-benefit-action">
-                    Details{" "}
-                    <ChevronDown size={13} className="disclosure-arrow" />
-                  </span>
-                  <div
-                    className="compact-coverage"
-                    aria-label="Remaining free usage"
-                  >
-                    {families.map((family) => (
-                      <span key={family.name}>
-                        <span>
-                          {family.name === "Other usage"
-                            ? "Other"
-                            : family.name}
-                        </span>
-                        <strong>
-                          {family.units
-                            .map(([, rows]) => {
-                              const remaining = rows.reduce(
-                                (sum, row) => sum + row.remaining_quantity,
-                                0,
-                              );
-                              const metric = rows[0]!.allowance.metric;
-                              return `${compact(remaining)} ${shortMetric(metric)}`;
-                            })
-                            .join(" · ")}
-                        </strong>
-                      </span>
-                    ))}
-                    <small>remaining</small>
-                    <AllowanceChart
-                      units={families.flatMap((family) => family.units)}
+                  <DetailsAction />
+                  <div className="benefit-summary-metric">
+                    <ul
+                      className="compact-coverage stack-legend"
+                      aria-label="Remaining free usage"
+                    >
+                      {stack.entries.map((entry) => (
+                        <li
+                          key={entry.key}
+                          className={cn(
+                            entry.status !== "normal" && `is-${entry.status}`,
+                          )}
+                          title={entry.tooltip}
+                        >
+                          <StackSwatch step={entry.step} />
+                          <span>{entry.short}</span>
+                          {entry.legend && <strong>{entry.legend}</strong>}
+                          {entry.status !== "normal" && (
+                            <span className="sr-only">
+                              {entry.status === "exhausted"
+                                ? "(used up)"
+                                : "(nearly used up)"}
+                            </span>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                    <StackedMeter
+                      stack={stack}
+                      label={`${serviceName(catalog, slug)} free usage`}
                     />
                   </div>
                 </summary>
@@ -311,7 +222,8 @@ export function BillingBenefitsCard({
                             const metric = rows[0]!.allowance.metric;
                             return (
                               <div className="benefit-unit" key={key}>
-                                <span className="capitalize">
+                                <span className="capitalize stack-labelled">
+                                  <StackSwatch step={unitSteps.get(key) ?? 0} />
                                   {billingMetricLabel(metric)}
                                 </span>
                                 <span
@@ -406,15 +318,18 @@ function metricRank(metric: string) {
   const rank = order.indexOf(metric);
   return rank < 0 ? order.length : rank;
 }
+function sentence(text: string) {
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
 function shortMetric(metric: string) {
   return (
     (
       {
-        input_tokens: "in",
-        output_tokens: "out",
-        cache_read_tokens: "read",
-        cache_write_tokens: "write",
+        input_tokens: "Input",
+        output_tokens: "Output",
+        cache_read_tokens: "Cache read",
+        cache_write_tokens: "Cache write",
       } as Record<string, string>
-    )[metric] ?? billingMetricLabel(metric)
+    )[metric] ?? sentence(billingMetricLabel(metric))
   );
 }

@@ -216,6 +216,50 @@ fn recovery_is_bounded_and_never_retries_uncertain_effects() {
 }
 
 #[test]
+fn insufficient_credits_is_a_stable_terminal_code() {
+    let error = TurnError::new("insufficient_credits");
+    assert_eq!(error.code, "insufficient_credits");
+    assert_eq!(
+        error.message,
+        "There aren't enough credits to run this turn."
+    );
+    for (status, bound) in [
+        (402, true),
+        (402, false),
+        (401, true),
+        (403, false),
+        (409, true),
+    ] {
+        assert_eq!(
+            Recovery::default().decide(status, "insufficient_credits", bound),
+            RecoveryAction::Fail
+        );
+    }
+    let mut stream = ResponseStream::default();
+    let mut failed = terminal("response.failed", 1, "partial");
+    failed["response"]["error"] = json!({"code":"insufficient_credits","message":"SECRET"});
+    stream.push(&frame(failed)).unwrap();
+    let result = stream.terminal.unwrap();
+    let error = result.error.unwrap();
+    assert_eq!(error.code, "insufficient_credits");
+    assert_eq!(
+        error.message,
+        "There aren't enough credits to run this turn."
+    );
+    assert_eq!(result.text, "partial");
+    for code in [
+        "nyxid_error",
+        "payment_required",
+        "wallet_suspended",
+        "unknown_code",
+    ] {
+        assert_ne!(TurnError::new(code).code, "insufficient_credits");
+    }
+    assert_eq!(TurnError::new("nyxid_error").code, "nyxid_error");
+    assert_eq!(TurnError::new("unknown_code").code, "assistant_unavailable");
+}
+
+#[test]
 fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
     let messages: Vec<_> = (0..30)
         .map(|i| AssistantMessage {
