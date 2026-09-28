@@ -32,6 +32,19 @@ it("preserves old panel widths and validates persisted sizing", () => {
   ).toBe(false);
 });
 
+it("accepts twenty chart series plus Other", () => {
+  const panel = newPanel({ top: 20 });
+  expect(analyticsPanelSchema.safeParse(panel).success).toBe(true);
+  const result = sampleAnalytics(EMPTY_FILTERS, panel);
+  expect(analyticsResponseSchema.safeParse(result).success).toBe(true);
+  expect(
+    analyticsResponseSchema.safeParse({
+      ...result,
+      series: Array.from({ length: 21 }, () => result.series[0]),
+    }).success,
+  ).toBe(true);
+});
+
 it("aligns calendar intervals in UTC and marks clipped edge buckets", () => {
   expect(
     new Date(
