@@ -496,10 +496,14 @@ async fn delete_user_cascade_internal(
         REFRESH_TOKENS,
         API_KEYS,
         crate::models::assistant_acknowledgement::COLLECTION_NAME,
+        crate::models::assistant_agent::COLLECTION_NAME,
         crate::models::assistant_attachment::COLLECTION_NAME,
         crate::models::assistant_agent_credential::COLLECTION_NAME,
         crate::models::assistant_conversation::COLLECTION_NAME,
         crate::models::assistant_message::COLLECTION_NAME,
+        crate::models::nyxbot_channel::COLLECTION_NAME,
+        crate::models::nyxbot_channel::THREADS_COLLECTION_NAME,
+        crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME,
         USER_SERVICE_CONNECTIONS,
         USER_PROVIDER_TOKENS,
         MFA_FACTORS,
@@ -518,6 +522,10 @@ async fn delete_user_cascade_internal(
             .delete_many(user_filter.clone())
             .await?;
     }
+    // NyxBot settings are keyed by the user ID itself.
+    db.collection::<bson::Document>(crate::models::assistant_settings::COLLECTION_NAME)
+        .delete_one(doc! {"_id": target_user_id})
+        .await?;
 
     // Delete OAuth clients created by the deleted user.
     db.collection::<bson::Document>(OAUTH_CLIENTS)

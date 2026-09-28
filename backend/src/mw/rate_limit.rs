@@ -376,6 +376,37 @@ impl DirectChatRateLimiter {
         }
     }
 
+    /// A capacity slot outside the per-person human window: NyxBot subagent and
+    /// event turns draw from a per-team pool whose size the owner configures.
+    /// `Ok(None)` means the pool is full; callers report `busy` instead of queueing.
+    pub async fn try_acquire_pool(
+        self: &Arc<Self>,
+        namespace: &str,
+        scope: &str,
+        limit: u32,
+    ) -> Result<Option<DirectChatPermit>, AppError> {
+        if let Some(slot_manager) = &self.slot_manager {
+            return Ok(slot_manager
+                .acquire(namespace, scope, limit.max(1))
+                .await?
+                .map(|slot| DirectChatPermit {
+                    slot: Some(slot),
+                    #[cfg(test)]
+                    local_limiter: None,
+                    #[cfg(test)]
+                    user_id: String::new(),
+                }));
+        }
+        #[cfg(not(test))]
+        unreachable!("production direct-chat limiters always have a MongoDB backend");
+        #[cfg(test)]
+        Ok(Some(DirectChatPermit {
+            slot: None,
+            local_limiter: None,
+            user_id: String::new(),
+        }))
+    }
+
     #[cfg(test)]
     pub fn cleanup(&self) {
         let now = Instant::now();

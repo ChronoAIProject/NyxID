@@ -5,6 +5,7 @@ use crate::test_utils::{connect_transaction_test_database, test_app_state, test_
 
 fn request(id: Option<&str>, text: &str) -> TurnRequest {
     TurnRequest {
+        agent_id: None,
         conversation_id: id.map(str::to_owned),
         text: text.into(),
         model: None,
@@ -38,11 +39,6 @@ fn closed_request_grammar_and_unicode_limit() {
         json!({"text":"hello","conversation_id":"chatc-123"}),
         json!({"text":"hello","model":"gpt-5"}),
         json!({"text":"hello","access_mode":"unrestricted"}),
-        json!({
-            "text": "hello",
-            "conversation_id": "nyxa-1234567890abcdef1234567890abcdef",
-            "access_mode": "full",
-        }),
         json!({"text":"hello","conversation_id":"nyxa-ABCDEF1234567890abcdef1234567890"}),
     ] {
         assert!(
@@ -277,7 +273,7 @@ fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
             attachments: Vec::new(),
         })
         .collect();
-    let prompt = instructions(&messages);
+    let prompt = instructions(&stale_test_row(Utc::now()), None, &messages);
     assert!(prompt.starts_with(SYSTEM_PROMPT));
     assert!(prompt.contains("Prior conversation history"));
     assert!(prompt.contains("marker29"));
@@ -329,7 +325,9 @@ async fn persistence_fences_concurrent_turns_scopes_owners_paginates_and_deletes
     for result in [
         get(&db, "other", &first.id).await,
         rename(&db, "other", &first.id, "No").await,
-        delete(&db, "other", &first.id).await,
+        delete(&db, "other", &first.id)
+            .await
+            .map(|mut rows| rows.remove(0)),
     ] {
         assert!(matches!(result, Err(AppError::NotFound(_))));
     }
@@ -396,9 +394,9 @@ async fn persistence_fences_concurrent_turns_scopes_owners_paginates_and_deletes
         rename(&db, &owner, &row.id, "Renamed").await.unwrap().title,
         "Renamed"
     );
-    assert_eq!(list(&db, &owner, 1, None).await.unwrap().len(), 1);
+    assert_eq!(list(&db, &owner, 1, None, None).await.unwrap().len(), 1);
     assert!(
-        list(&db, &owner, 1, Some(&index_cursor(&row)))
+        list(&db, &owner, 1, Some(&index_cursor(&row)), None)
             .await
             .unwrap()
             .is_empty()
@@ -492,13 +490,22 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
             activities: Vec::new(),
             attachments: Vec::new(),
             turn_id: Uuid::new_v4().to_string(),
+            origin: Default::default(),
             started_at: now - chrono::Duration::seconds(ACTIVE_TURN_TTL_SECS),
             stop_requested: false,
+            events: Vec::new(),
+            note: None,
         }),
         context_reset_at: None,
         context_reset_reason: None,
         created_at: now,
         updated_at: now,
+        role: Default::default(),
+        agent_id: None,
+        report_to: None,
+        pending_events: Vec::new(),
+        event_streak: 0,
+        channel: None,
     }
 }
 

@@ -230,8 +230,10 @@ async fn assert_parity(state: &AppState, headers: &HeaderMap, rest: &Value) {
     .await;
     assert_eq!(status, StatusCode::OK, "{listing}");
     let mut services = catalog.services;
-    if auth.chat.is_some() {
-        services.push(crate::services::assistant_account_tools::virtual_service());
+    if let Some(chat) = auth.chat.as_ref() {
+        services.push(crate::services::assistant_account_tools::virtual_service(
+            chat,
+        ));
     }
     let expected: Vec<Value> = mcp_service::generate_tool_definitions(&services, None)
         .iter()

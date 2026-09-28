@@ -1369,8 +1369,10 @@ async fn handle_tools_list(
     };
 
     let mut services = catalog.services;
-    if auth.chat.is_some() {
-        services.push(crate::services::assistant_account_tools::virtual_service());
+    if let Some(chat) = auth.chat.as_ref() {
+        services.push(crate::services::assistant_account_tools::virtual_service(
+            chat,
+        ));
     }
     // Session-backed clients get meta-tools + activated service tools only.
     // Stateless (API-key) clients with no session get the full tool list up front.
@@ -1527,6 +1529,8 @@ async fn dispatch_tools_call(
         );
         let known_account_tool = tool_name.strip_prefix("nyxid__").is_some_and(|name| {
             crate::services::assistant_account_tools::TOOL_NAMES.contains(&name)
+                || crate::services::assistant_team_tools::TOOL_NAMES.contains(&name)
+                || crate::services::assistant_team_tools::MEMORY_TOOL_NAMES.contains(&name)
         });
         let _ = audit_service::log_actor_event(
             state.db.clone(),
@@ -1540,7 +1544,7 @@ async fn dispatch_tools_call(
             "assistant_mcp_tool_call",
             Some(serde_json::json!({
                 "conversation_id": chat.conversation_id,
-                "access_mode": chat.access_mode,
+                "agent_role": chat.role,
                 "tool_name": if known_meta_tool || known_account_tool {
                     tool_name
                 } else {
@@ -1792,7 +1796,7 @@ async fn dispatch_tools_call(
             "tool": tool_name,
             "service_id": service.service_id,
             "response_status": response.status,
-            "access_mode": auth.chat.as_ref().map(|chat| chat.access_mode),
+            "agent_role": auth.chat.as_ref().map(|chat| chat.role),
         })),
         auth.ip_address.clone(),
         auth.user_agent.clone(),
@@ -1976,18 +1980,19 @@ async fn authorize_mcp_operation(
 /// Tells the assistant what each `chat_access` value means so it calls gated
 /// tools instead of telling the user it lacks permission.
 const CHAT_ACCESS_HINT: &str = "chat_access meanings: granted = call freely. \
-    acknowledgement_required = call the tool now; NyxID shows the user an Allow card \
-    in the chat and returns instructions to retry after approval. Never say you lack \
-    permission or send the user to settings, and never ask for Full access. \
-    source meanings: user_service = the user's own connection; platform = NyxID's \
-    shared platform credential, not the user's account. To connect the user's own \
-    account, use nyx__discover_services then nyx__connect_service and give the user \
-    the link; that works in Ask mode.";
+    acknowledgement_required (subagents only) = call the tool now; NyxID asks your \
+    orchestrator for permission and tells you to end your turn; you are resumed with \
+    the decision. source meanings: user_service = the user's own connection; \
+    platform = NyxID's shared platform credential, not the user's account. To connect \
+    the user's own account, use nyx__discover_services then nyx__connect_service and \
+    give the user the link.";
 
 fn chat_access(auth: &McpAuthContext, service: &mcp_service::McpToolService) -> &'static str {
-    let granted = if auth.chat.as_ref().is_some_and(|chat| {
-        chat.access_mode == crate::models::assistant_conversation::AccessMode::Full
-    }) {
+    let granted = if auth
+        .chat
+        .as_ref()
+        .is_some_and(|chat| chat.is_orchestrator())
+    {
         true
     } else if matches!(service.source, mcp_service::McpToolSource::Platform { .. }) {
         auth.allowed_platform_service_ids
@@ -2022,7 +2027,12 @@ async fn chat_service_gate(
     .await;
     match result {
         Ok(None) => None,
-        Ok(Some(value)) => Some(tool_result(request_id, &value.to_string(), true)),
+        Ok(Some((value, request))) => {
+            if let Some(request) = request {
+                super::assistant_team::permission_requested(state, chat, &request).await;
+            }
+            Some(tool_result(request_id, &value.to_string(), true))
+        }
         Err(error) => {
             let result = crate::services::assistant_account_tools::error_result(error);
             Some(tool_result(request_id, &result.value.to_string(), true))
@@ -2077,7 +2087,21 @@ async fn handle_account_tool(
         let result = crate::services::assistant_account_tools::error_result(error);
         return tool_result(request_id, &result.value.to_string(), true);
     }
+    if crate::services::assistant_team_tools::is_team_tool(name) {
+        let Some(chat) = auth.chat.as_ref() else {
+            return tool_result(
+                request_id,
+                "{\"error\":\"conversation_key_required\"}",
+                true,
+            );
+        };
+        let (value, is_error) = super::assistant_team::execute_tool(state, chat, name, args).await;
+        return tool_result(request_id, &value.to_string(), is_error);
+    }
     let result = tools.execute(&user, name, args).await;
+    if let (Some(chat), Some(request)) = (auth.chat.as_ref(), result.permission_request.as_ref()) {
+        super::assistant_team::permission_requested(state, chat, request).await;
+    }
     tool_result(request_id, &result.value.to_string(), result.is_error)
 }
 
@@ -2267,7 +2291,7 @@ async fn handle_meta_call_tool(
             "tool": tool_name,
             "service_id": service.service_id,
             "response_status": response.status,
-            "access_mode": auth.chat.as_ref().map(|chat| chat.access_mode),
+            "agent_role": auth.chat.as_ref().map(|chat| chat.role),
             "via": "nyx__call_tool",
         })),
         auth.ip_address.clone(),
@@ -2376,11 +2400,13 @@ async fn load_all_services_for_meta_tools(
         },
     )
     .await?;
-    if auth.chat.is_some() {
+    if let Some(chat) = auth.chat.as_ref() {
         let mut services = services;
         // Reserve the native namespace against a connected service shadowing it.
         services.retain(|service| service.service_slug != "nyxid");
-        services.push(crate::services::assistant_account_tools::virtual_service());
+        services.push(crate::services::assistant_account_tools::virtual_service(
+            chat,
+        ));
         Ok(services)
     } else {
         Ok(filter_services_by_scope(services, auth))

@@ -4,8 +4,12 @@ import { useAppForm } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { nyxAgentTitleSchema } from "@/schemas/assistant-nyxagent";
 import { isNyxAgentConversationId } from "@/lib/assistant/conversation-ids";
+import { AgentStatusDot } from "@/components/assistant/nyxbot-agent-panels";
+import { AGENT_STATUS_LABEL, channelPlatformName } from "@/lib/assistant/nyxbot-labels";
+import type { AssistantAgent } from "@/schemas/assistant-nyxagent";
 import {
   Activity,
+  Bot,
   ChevronRight,
   FileText,
   LayoutGrid,
@@ -153,7 +157,14 @@ function ConversationRow({
           menuOpen && TITLE_FADE,
         )}
       >
-        <span className="block truncate">{conversation.title}</span>
+        <span className="flex min-w-0 items-center gap-1.5">
+          <span className="min-w-0 truncate">{conversation.title}</span>
+          {conversation.channel ? (
+            <span className="shrink-0 rounded-md border border-hairline bg-overlay px-1 text-[9px] font-medium leading-4 text-text-tertiary">
+              {channelPlatformName(conversation.channel.platform)}
+            </span>
+          ) : null}
+        </span>
         {showDraft && (
           <span
             id={draftPreviewId}
@@ -208,6 +219,159 @@ function ConversationRow({
   );
 }
 
+/** The NyxBot agents section: NyxBot pinned first, then specialists. */
+export interface SidebarAgents {
+  readonly agents: readonly AssistantAgent[];
+  /** The agent whose threads are expanded. */
+  readonly selectedAgentId?: string;
+  /** The selected agent's threads, newest first. */
+  readonly threads: readonly Conversation[];
+  readonly threadsLoading?: boolean;
+  readonly onSelectAgent: (agentId: string) => void;
+  readonly onNewThread: (agentId: string) => void;
+  readonly onNewAgent: () => void;
+}
+
+function agentAccessibleName(agent: AssistantAgent): string {
+  if (agent.kind === "nyxbot") return "NyxBot — your personal agent";
+  const pending = agent.pending_acknowledgements;
+  return `${agent.name}, specialist, ${AGENT_STATUS_LABEL[agent.status]}${
+    pending ? `, ${String(pending)} pending ${pending === 1 ? "request" : "requests"}` : ""
+  }`;
+}
+
+/**
+ * One agent. Selecting it expands its threads beneath it with a
+ * per-agent "New chat"; destroyed specialists are dimmed.
+ */
+function AgentRow({
+  agent,
+  selected,
+  model,
+  renderThread,
+}: {
+  readonly agent: AssistantAgent;
+  readonly selected: boolean;
+  readonly model: SidebarAgents;
+  readonly renderThread: (conversation: Conversation) => ReactNode;
+}) {
+  const nyxbot = agent.kind === "nyxbot";
+  const platforms = [...new Set(agent.channels.map((channel) => channel.platform))];
+  const pending = agent.pending_acknowledgements;
+  const name = nyxbot ? "NyxBot" : agent.name;
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => model.onSelectAgent(agent.id)}
+        aria-label={agentAccessibleName(agent)}
+        aria-expanded={selected}
+        className={cn(
+          "flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-[13px] transition-colors",
+          selected
+            ? "font-medium text-foreground"
+            : "text-muted-foreground hover:bg-overlay hover:text-foreground",
+          agent.status === "destroyed" && "opacity-50",
+        )}
+      >
+        {nyxbot ? (
+          <Bot
+            aria-hidden="true"
+            className={cn("h-4 w-4 shrink-0", selected ? "text-nyx-secondary-400" : "text-text-tertiary")}
+          />
+        ) : (
+          <span className="flex h-4 w-4 shrink-0 items-center justify-center">
+            <AgentStatusDot status={agent.status} />
+          </span>
+        )}
+        <span className="min-w-0 flex-1">
+          <span className="block truncate">{name}</span>
+          {nyxbot ? (
+            <span className="block truncate text-[10px] font-normal text-text-tertiary">
+              Your personal agent
+            </span>
+          ) : null}
+        </span>
+        {platforms.slice(0, 1).map((platform) => (
+          <span
+            key={platform}
+            className="shrink-0 rounded-md border border-hairline bg-overlay px-1 text-[9px] font-medium leading-4 text-text-tertiary"
+          >
+            {channelPlatformName(platform)}
+            {platforms.length > 1 ? ` +${String(platforms.length - 1)}` : ""}
+          </span>
+        ))}
+        {pending > 0 ? (
+          <span className="shrink-0 rounded-md border border-warning/30 bg-warning/10 px-1.5 text-[10px] font-medium text-warning">
+            {pending}
+          </span>
+        ) : null}
+      </button>
+      {selected ? (
+        <div
+          role="group"
+          aria-label={`Threads with ${name}`}
+          className="mb-1 ml-3 mt-0.5 space-y-0.5 border-l border-border/60 pl-1.5"
+        >
+          {model.threads.map((conversation) => renderThread(conversation))}
+          {model.threadsLoading && !model.threads.length ? (
+            <p className="px-3 py-1.5 text-[11px] text-text-tertiary">Loading threads...</p>
+          ) : null}
+          {agent.status === "destroyed" ? null : (
+            <button
+              type="button"
+              onClick={() => model.onNewThread(agent.id)}
+              aria-label={`New chat with ${name}`}
+              className="flex w-full items-center gap-2 rounded-lg px-3 py-1.5 text-left text-[12px] text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
+            >
+              <Plus aria-hidden="true" className="h-3 w-3" />
+              New chat
+            </button>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function AgentsSection({
+  model,
+  renderThread,
+}: {
+  readonly model: SidebarAgents;
+  readonly renderThread: (conversation: Conversation) => ReactNode;
+}) {
+  const [showDestroyed, setShowDestroyed] = useState(false);
+  const destroyed = model.agents.filter((agent) => agent.status === "destroyed");
+  const visible = model.agents
+    .filter((agent) => showDestroyed || agent.status !== "destroyed")
+    // NyxBot pinned first; the server already orders the rest.
+    .sort((a, b) => Number(b.kind === "nyxbot") - Number(a.kind === "nyxbot"));
+  return (
+    <div className="space-y-0.5">
+      {visible.map((agent) => (
+        <AgentRow
+          key={agent.id}
+          agent={agent}
+          selected={agent.id === model.selectedAgentId}
+          model={model}
+          renderThread={renderThread}
+        />
+      ))}
+      {destroyed.length ? (
+        <button
+          type="button"
+          aria-pressed={showDestroyed}
+          onClick={() => setShowDestroyed((value) => !value)}
+          className="w-full rounded-lg px-3 py-1.5 text-left text-[11px] text-text-tertiary transition-colors hover:bg-overlay hover:text-muted-foreground"
+        >
+          {showDestroyed ? "Hide destroyed" : `Show destroyed (${String(destroyed.length)})`}
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 export function AssistantSidebar({
   conversations,
   activeConversationId,
@@ -218,6 +382,7 @@ export function AssistantSidebar({
   onSelect,
   onDelete,
   onRename,
+  agents,
 }: {
   readonly conversations: readonly Conversation[];
   readonly activeConversationId: string | undefined;
@@ -228,6 +393,8 @@ export function AssistantSidebar({
   readonly onSelect: (conversationId: string) => void;
   readonly onDelete: (conversationId: string) => void | Promise<void>;
   readonly onRename?: (conversationId: string, title: string) => Promise<void>;
+  /** NyxBot agents and the selected agent's threads (NyxAgent engine). */
+  readonly agents?: SidebarAgents;
 }) {
   const user = useAuthStore((state) => state.user);
   const counts = useAssistantWorkspaceCounts();
@@ -269,6 +436,22 @@ export function AssistantSidebar({
         return next;
       });
     }
+  }
+
+  function renderRow(conversation: Conversation) {
+    return (
+      <ConversationRow
+        key={conversation.id}
+        conversation={conversation}
+        active={conversation.id === activeConversationId}
+        ownerUserId={user?.id ?? null}
+        onSelect={() => onSelect(conversation.id)}
+        onRequestDelete={() => setDeleteTarget(conversation)}
+        onRequestRename={onRename && isNyxAgentConversationId(conversation.id)
+          ? () => setRenameTarget(conversation)
+          : undefined}
+      />
+    );
   }
 
   return (
@@ -333,7 +516,6 @@ export function AssistantSidebar({
         <ComingSoonItem icon={Activity} label="Activity" />
       </div>
 
-      <GroupLabel>Chats</GroupLabel>
       {notice ? (
         <p
           role="status"
@@ -343,21 +525,30 @@ export function AssistantSidebar({
         </p>
       ) : null}
       <nav className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
-        <div className="space-y-0.5">
-          {conversations.map((conversation) => (
-            <ConversationRow
-              key={conversation.id}
-              conversation={conversation}
-              active={conversation.id === activeConversationId}
-              ownerUserId={user?.id ?? null}
-              onSelect={() => onSelect(conversation.id)}
-              onRequestDelete={() => setDeleteTarget(conversation)}
-              onRequestRename={onRename && isNyxAgentConversationId(conversation.id)
-                ? () => setRenameTarget(conversation)
-                : undefined}
-            />
-          ))}
-        </div>
+        {agents ? (
+          <>
+            <div className="-ml-2 flex items-center justify-between">
+              <GroupLabel>Agents</GroupLabel>
+              <button
+                type="button"
+                aria-label="New agent"
+                onClick={agents.onNewAgent}
+                className="flex h-6 w-6 items-center justify-center rounded-md text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
+              >
+                <Plus className="h-3.5 w-3.5" />
+              </button>
+            </div>
+            <AgentsSection model={agents} renderThread={renderRow} />
+          </>
+        ) : null}
+        {!agents || conversations.length ? (
+          <>
+            <div className="-mx-2">
+              <GroupLabel>Chats</GroupLabel>
+            </div>
+            <div className="space-y-0.5">{conversations.map(renderRow)}</div>
+          </>
+        ) : null}
       </nav>
 
       <div className="shrink-0 border-t border-border/60 p-2">
