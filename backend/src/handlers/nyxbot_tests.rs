@@ -477,6 +477,93 @@ async fn gateway_creator_check_accepts_the_owner_bearer_nyxid_sends() {
     server.abort();
 }
 
+/// Chat apps cannot show NyxID's confirmation cards: the verified owner's
+/// plain "yes" decides the pending one and the agent retries.
+#[tokio::test]
+async fn owners_confirm_actions_by_replying_yes_in_the_chat_app() {
+    use crate::services::assistant_acknowledgement_service as acks;
+    let (state, calls, server) = setup("nyxbot_chat_confirm").await;
+    let (row, agent_key) = channel(&state, "gateway").await;
+    put_binding(
+        State(state.clone()),
+        Path("bnd_confirm".into()),
+        bearer(&agent_key),
+        Json(binding_body(&agent_key, OWNER)),
+    )
+    .await;
+    put_conversation(
+        State(state.clone()),
+        Path(("bnd_confirm".into(), PARTITION.into())),
+        bearer(&agent_key),
+    )
+    .await;
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .update_one(
+            doc! {"_id": &row.id},
+            doc! {"$set": {"owner_sender_ids": ["7"]}},
+        )
+        .await
+        .unwrap();
+    let first = body_text(
+        respond(
+            &state,
+            &agent_key,
+            &event("Delete agent key ci-bot", "7", "evt-1"),
+            "evt_1",
+        )
+        .await,
+    )
+    .await;
+    assert!(first.contains("Here is your answer"), "{first}");
+    let conversation: AssistantConversation = state
+        .db
+        .collection::<AssistantConversation>(CONVERSATIONS)
+        .find_one(doc! {"user_id": OWNER, "channel.nyxbot_channel_id": &row.id})
+        .await
+        .unwrap()
+        .unwrap();
+    // The destructive tool asked for confirmation during that turn.
+    let chat = acks::for_key(&state.db, OWNER, Some(&conversation.credential_api_key_id))
+        .await
+        .unwrap()
+        .unwrap();
+    let (card, _) = acks::request_tracked(
+        &state.db,
+        &chat,
+        acks::Request {
+            kind: "action",
+            service: None,
+            tool: Some("nyxid__delete_agent_key"),
+            arguments: Some(&json!({"key_id": "ci-bot"})),
+            summary: "Delete agent key 'ci-bot'",
+            platform: false,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(card.status, "pending");
+    // An ordinary message does not decide it.
+    assert_eq!(confirmation("what does that do?"), None);
+    let second =
+        body_text(respond(&state, &agent_key, &event("Yes!", "7", "evt-2"), "evt_2").await).await;
+    assert!(second.contains("Here is your answer"), "{second}");
+    let decided = acks::history(&state.db, OWNER, &conversation.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|ack| ack.id == card.id)
+        .unwrap();
+    assert_eq!(decided.status, "allowed");
+    assert_eq!(decided.decided_by.as_deref(), Some("user"));
+    let calls = calls.lock().await;
+    let instructions = calls.last().unwrap()["instructions"].as_str().unwrap();
+    assert!(instructions.contains("the owner confirmed the pending action"));
+    assert!(instructions.contains("give every link"));
+    server.abort();
+}
+
 #[tokio::test]
 async fn relinking_a_bot_to_a_specialist_starts_that_agents_own_thread() {
     let (state, calls, server) = setup("nyxbot_relink").await;
@@ -515,6 +602,8 @@ async fn relinking_a_bot_to_a_specialist_starts_that_agents_own_thread() {
         crate::services::assistant_team_service::CreateRequest {
             name: "support".into(),
             description: "Answer questions from the support chat".into(),
+            display_name: None,
+            persona: None,
             targets: Default::default(),
             account_read: false,
             specialty: None,

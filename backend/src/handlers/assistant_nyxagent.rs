@@ -87,6 +87,7 @@ pub struct AgentRefResponse {
     pub id: String,
     pub kind: crate::models::assistant_agent::AgentKind,
     pub name: String,
+    pub display_name: Option<String>,
     /// Destroyed agents' threads are read-only.
     pub destroyed: bool,
 }
@@ -130,6 +131,7 @@ impl ConversationResponse {
             id: agent.id.clone(),
             kind: agent.kind,
             name: agent.name.clone(),
+            display_name: agent.display_name.clone(),
             destroyed: agent.destroyed_at.is_some(),
         });
         self

@@ -19,6 +19,12 @@ pub const TOOL_NAMES: &[&str] = &[
     "decide_permission",
     "destroy_subagent",
     "update_subagent",
+    "create_group",
+    "list_groups",
+    "post_to_group",
+    "update_group",
+    "delete_group",
+    "settings_link",
     "channel_bot_setup_link",
     "connect_channel_bot",
     "link_channel_bot",
@@ -28,6 +34,69 @@ pub const TOOL_NAMES: &[&str] = &[
 
 /// Every agent (NyxBot and specialists) manages its own memory.
 pub const MEMORY_TOOL_NAMES: &[&str] = &["remember", "forget"];
+
+/// NyxID pages `nyxid__settings_link` can open, and their paths.
+pub const SETTINGS_AREAS: &[&str] = &[
+    "create_agent_key",
+    "agent_keys",
+    "add_service",
+    "services",
+    "service_pools",
+    "channel_bots",
+    "nodes",
+    "approvals",
+    "approval_history",
+    "approval_grants",
+    "notifications",
+    "profile",
+    "security",
+    "sessions",
+    "mcp",
+    "privacy",
+    "billing",
+    "organizations",
+    "triggers",
+    "developer_apps",
+    "devices",
+    "ai_setup",
+];
+
+/// The frontend path (with query) for a settings area.
+pub fn settings_path(area: &str, service: Option<&str>, org_id: Option<&str>) -> Option<String> {
+    let encode =
+        |value: &str| url::form_urlencoded::byte_serialize(value.as_bytes()).collect::<String>();
+    Some(match area {
+        "create_agent_key" => "/keys?tab=nyxid&action=create-key".into(),
+        "agent_keys" => "/keys?tab=nyxid".into(),
+        "add_service" => match service {
+            Some(slug) => format!(
+                "/keys?tab=services&action=add-service&slug={}",
+                encode(slug)
+            ),
+            None => "/keys?tab=services&action=add-service".into(),
+        },
+        "services" => "/keys?tab=services".into(),
+        "service_pools" => "/keys?tab=pools".into(),
+        "channel_bots" => "/channel-bots".into(),
+        "nodes" => "/nodes".into(),
+        "approvals" | "notifications" => "/approvals/settings".into(),
+        "approval_history" => "/approvals/history".into(),
+        "approval_grants" => "/approvals/grants".into(),
+        "profile" | "security" | "sessions" | "mcp" | "privacy" => {
+            format!("/settings?tab={area}")
+        }
+        "billing" => "/billing".into(),
+        "organizations" => match org_id {
+            Some(id) => format!("/orgs/{}", encode(id)),
+            None => "/orgs".into(),
+        },
+        "triggers" => "/triggers".into(),
+        "developer_apps" => "/developer/apps".into(),
+        "devices" => "/settings/devices/onboard".into(),
+        "ai_setup" => "/ai-setup".into(),
+        _ => return None,
+    })
+}
 
 pub fn is_team_tool(tool_name: &str) -> bool {
     tool_name
@@ -63,6 +132,10 @@ pub fn schema(name: &str) -> Value {
                     "description": "Allow read-only NyxID account tools"},
                 "specialty": {"type": "string", "pattern": "^[a-z0-9_-]{1,32}$",
                     "description": "Optional role label such as research or writer"},
+                "display_name": {"type": "string", "minLength": 1, "maxLength": 40,
+                    "description": "Friendly name the user chose, e.g. Luna"},
+                "persona": {"type": "string", "minLength": 1, "maxLength": 2000,
+                    "description": "Personality and tone the user asked for"},
                 "task": {"type": "string", "minLength": 1, "maxLength": 32768,
                     "description": "First instruction; starts the subagent immediately"},
             }),
@@ -100,9 +173,14 @@ pub fn schema(name: &str) -> Value {
         ),
         "destroy_subagent" => (json!({"subagent": subagent}), vec!["subagent"]),
         "update_subagent" => (
-            json!({"subagent": subagent,
+            json!({"subagent": {"type": "string", "minLength": 1, "maxLength": 64,
+                    "description": "Specialist name or id, or \"nyxbot\" for yourself"},
                 "name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$"},
-                "description": {"type": "string", "minLength": 1, "maxLength": 2048}}),
+                "description": {"type": "string", "minLength": 1, "maxLength": 2048},
+                "display_name": {"type": "string", "maxLength": 40,
+                    "description": "Friendly name; empty clears it"},
+                "persona": {"type": "string", "maxLength": 2000,
+                    "description": "Personality and tone; empty clears it"}}),
             vec!["subagent"],
         ),
         "link_channel_bot" => (
@@ -119,6 +197,39 @@ pub fn schema(name: &str) -> Value {
             vec!["text"],
         ),
         "forget" => (json!({"note_id": string(64)}), vec!["note_id"]),
+        "create_group" => (
+            json!({"name": string(60), "members": json!({"type": "array", "minItems": 1, "maxItems": 8,
+                "items": {"type": "string", "minLength": 1, "maxLength": 64},
+                "description": "Agents by name or id; \"nyxbot\" is you"})}),
+            vec!["name", "members"],
+        ),
+        "list_groups" => (json!({}), vec![]),
+        "post_to_group" => (
+            json!({"group": {"type": "string", "minLength": 1, "maxLength": 64,
+                    "description": "Group name or id"},
+                "text": {"type": "string", "minLength": 1, "maxLength": 32768,
+                    "description": "Posted as you; @mention members to address them"}}),
+            vec!["group", "text"],
+        ),
+        "update_group" => (
+            json!({"group": string(64), "name": string(60),
+                "add": json!({"type": "array", "maxItems": 8,
+                "items": {"type": "string", "minLength": 1, "maxLength": 64},
+                "description": "Agents by name or id; \"nyxbot\" is you"}),
+                "remove": json!({"type": "array", "maxItems": 8,
+                "items": {"type": "string", "minLength": 1, "maxLength": 64},
+                "description": "Agents by name or id; \"nyxbot\" is you"})}),
+            vec!["group"],
+        ),
+        "delete_group" => (json!({"group": string(64)}), vec!["group"]),
+        "settings_link" => (
+            json!({"area": {"type": "string", "enum": SETTINGS_AREAS},
+                "service": {"type": "string", "minLength": 1, "maxLength": 100,
+                    "description": "add_service only: catalog slug to preselect"},
+                "org_id": {"type": "string", "minLength": 1, "maxLength": 64,
+                    "description": "organizations only: open this organization"}}),
+            vec!["area"],
+        ),
         "channel_bot_setup_link" => (
             json!({"platform": {"type": "string", "minLength": 1, "maxLength": 32,
                     "description": "Channel to create, e.g. telegram, discord, slack, lark, \
@@ -179,7 +290,27 @@ fn description(name: &str) -> &'static str {
             "Destroy a specialist: stops its work, revokes its keys and disconnects its chat \
             apps. Its threads stay read-only."
         }
-        "update_subagent" => "Rename a specialist or refine its role description.",
+        "update_subagent" => {
+            "Rename a specialist, refine its role, or set the friendly name and persona the user \
+            wants (also for yourself with subagent \"nyxbot\")."
+        }
+        "create_group" => {
+            "Create a group chat of the user and several agents (you and/or specialists). In a \
+            group, a user message goes to the agents it @mentions, else to the lead; agents \
+            hand work to each other with @name."
+        }
+        "list_groups" => "List the user's group chats with their members.",
+        "post_to_group" => {
+            "Post a message to a group as yourself; @mention members to have them answer there."
+        }
+        "update_group" => "Rename a group or add/remove members.",
+        "delete_group" => "Delete a group chat and its transcript.",
+        "settings_link" => {
+            "Link the user to the exact NyxID page for a configuration you cannot or should not \
+            do in chat: creating an agent key (its secret is shown there), security (password, \
+            MFA), profile, sessions, billing, organizations, triggers, developer apps, devices \
+            and more. Use your nyxid__ tools directly for what they cover."
+        }
         "channel_bot_setup_link" => {
             "Help the user create a new channel bot: returns NyxID's one-page setup link (for \
             Telegram, bot creation inside Telegram when available). Secrets are entered on that \
@@ -284,6 +415,24 @@ fn matches_spec(value: &Value, spec: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_settings_area_has_a_page() {
+        for area in SETTINGS_AREAS {
+            assert!(settings_path(area, None, None).is_some(), "{area}");
+        }
+        assert_eq!(settings_path("unknown", None, None), None);
+        assert_eq!(
+            settings_path("add_service", Some("api-github"), None).as_deref(),
+            Some("/keys?tab=services&action=add-service&slug=api-github")
+        );
+        assert_eq!(
+            settings_path("organizations", None, Some("acme corp")).as_deref(),
+            Some("/orgs/acme+corp")
+        );
+        assert!(validate("settings_link", &json!({"area": "security"})).is_ok());
+        assert!(validate("settings_link", &json!({"area": "root_shell"})).is_err());
+    }
 
     #[test]
     fn schemas_reject_unknown_fields_and_bad_values() {

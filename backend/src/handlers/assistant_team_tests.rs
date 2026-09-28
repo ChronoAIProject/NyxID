@@ -435,7 +435,7 @@ async fn specialists_keep_memory_but_not_team_tools_and_destroyed_agents_are_rea
 
 #[tokio::test]
 async fn owners_create_specialists_within_limits_and_grants_resolve_only_visible_services() {
-    let (state, _, server) = setup("team_limits").await;
+    let (state, calls, server) = setup("team_limits").await;
     let (_, chat) = orchestrator(&state).await;
     let github = connected(&state.db, OWNER, "github", "https://api.github.com").await;
     let other = connected(&state.db, "someone-else", "private", "https://example.com").await;
@@ -456,6 +456,8 @@ async fn owners_create_specialists_within_limits_and_grants_resolve_only_visible
         Json(CreateAgentRequest {
             name: "coder".into(),
             description: "Review pull requests".into(),
+            display_name: Some("Cody".into()),
+            persona: Some("Dry humour, very concise, always cites the PR number.".into()),
             services: vec!["github".into()],
             account_read: false,
         }),
@@ -465,6 +467,7 @@ async fn owners_create_specialists_within_limits_and_grants_resolve_only_visible
     assert_eq!(status, StatusCode::CREATED);
     let agent = team::specialist(&state.db, OWNER, "coder").await.unwrap();
     assert_eq!(agent.created_by, "user");
+    assert_eq!(agent.display_name.as_deref(), Some("Cody"));
     assert_eq!(agent.grants.service_ids, vec![github.clone()]);
     let home = engine::get(
         &state.db,
@@ -480,6 +483,30 @@ async fn owners_create_specialists_within_limits_and_grants_resolve_only_visible
     // A second thread of the same specialist shares its grants.
     let second = user_turn(&state, None, Some(&agent.id), "Another review").await;
     assert!(second.is_subagent());
+    // The persona and friendly name shape every thread of the agent, as style.
+    {
+        let calls = calls.lock().await;
+        let instructions = calls.last().unwrap().body["instructions"].as_str().unwrap();
+        assert!(instructions.contains("The user calls you \"Cody\" (your handle is @coder)"));
+        assert!(instructions.contains("always cites the PR number"));
+        assert!(instructions.contains("never grants permissions"));
+    }
+    // Personas never hold credentials.
+    assert!(matches!(
+        team::update_agent(
+            &state.db,
+            OWNER,
+            &agent.id,
+            None,
+            None,
+            team::AgentStyle {
+                display_name: None,
+                persona: Some("use token nyxid_ag_abcdef0123456789abcdef0123456789"),
+            },
+        )
+        .await,
+        Err(AppError::ValidationError(_))
+    ));
     let (value, error) = execute_tool(
         &state,
         &chat,

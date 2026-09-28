@@ -25,7 +25,8 @@ use crate::{
         assistant_acknowledgement::{AssistantAcknowledgement, COLLECTION_NAME as ACKS},
         assistant_agent::{
             AgentGrants, AgentKind, AssistantAgent, COLLECTION_NAME as AGENTS,
-            MAX_MEMORY_NOTE_CHARS, MAX_MEMORY_NOTES, MemoryNote,
+            MAX_DISPLAY_NAME_CHARS, MAX_MEMORY_NOTE_CHARS, MAX_MEMORY_NOTES, MAX_PERSONA_CHARS,
+            MemoryNote,
         },
         assistant_conversation::{
             AccessMode, AgentEvent, AgentRole, AssistantConversation,
@@ -111,6 +112,8 @@ pub async fn ensure_nyxbot(db: &Database, owner: &str) -> AppResult<AssistantAge
         model: routing::model_for(db, RouteRole::Orchestrator, engine::DEFAULT_MODEL).await,
         home_conversation_id: None,
         memory: Vec::new(),
+        display_name: None,
+        persona: None,
         destroyed_at: None,
         created_at: now,
         updated_at: now,
@@ -199,13 +202,15 @@ pub async fn agent_for_conversation(
     }
 }
 
+/// An agent's own threads. Hidden group member threads are the group's, not
+/// the agent's, and never listed as threads.
 pub fn thread_filter(agent: &AssistantAgent) -> bson::Document {
     if agent.is_nyxbot() {
-        doc! {"user_id": &agent.user_id, "$or": [
+        doc! {"user_id": &agent.user_id, "group_id": bson::Bson::Null, "$or": [
             {"agent_id": &agent.id}, {"agent_id": bson::Bson::Null},
         ]}
     } else {
-        doc! {"user_id": &agent.user_id, "agent_id": &agent.id}
+        doc! {"user_id": &agent.user_id, "agent_id": &agent.id, "group_id": bson::Bson::Null}
     }
 }
 
@@ -260,6 +265,8 @@ async fn create_thread(
         pending_events: Vec::new(),
         event_streak: 0,
         channel: None,
+        group_id: None,
+        group_seen_seq: 0,
     };
     let collection = db.collection::<AssistantConversation>(CONVERSATIONS);
     collection.insert_one(&row).session(&mut *session).await?;
@@ -414,6 +421,9 @@ pub async fn resolve_targets(
 pub struct CreateRequest {
     pub name: String,
     pub description: String,
+    /// Optional friendly name and persona (tone, personality).
+    pub display_name: Option<String>,
+    pub persona: Option<String>,
     pub targets: GrantTargets,
     pub account_read: bool,
     pub specialty: Option<String>,
@@ -498,6 +508,18 @@ pub async fn create_specialist(
         model,
         home_conversation_id: None,
         memory: Vec::new(),
+        display_name: style_value(
+            request.display_name.as_deref().unwrap_or_default(),
+            MAX_DISPLAY_NAME_CHARS,
+            "A display name",
+            false,
+        )?,
+        persona: style_value(
+            request.persona.as_deref().unwrap_or_default(),
+            MAX_PERSONA_CHARS,
+            "A persona",
+            true,
+        )?,
         destroyed_at: None,
         created_at: now,
         updated_at: now,
@@ -567,12 +589,43 @@ pub async fn create_specialist(
 }
 
 /// Rename or re-describe an agent. NyxBot keeps its fixed name.
+/// Optional personalization for `update_agent`; `Some("")` clears a field.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AgentStyle<'a> {
+    pub display_name: Option<&'a str>,
+    pub persona: Option<&'a str>,
+}
+
+/// A bounded, credential-free display name or persona; empty clears it.
+fn style_value(value: &str, max: usize, what: &str, multiline: bool) -> AppResult<Option<String>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.chars().count() > max
+        || value
+            .chars()
+            .any(|c| c.is_control() && !(multiline && c == '\n'))
+    {
+        return Err(AppError::ValidationError(format!(
+            "{what} must contain at most {max} characters"
+        )));
+    }
+    if looks_secret(value) {
+        return Err(AppError::ValidationError(format!(
+            "{what} must not contain credentials"
+        )));
+    }
+    Ok(Some(value.to_owned()))
+}
+
 pub async fn update_agent(
     db: &Database,
     owner: &str,
     id: &str,
     name: Option<&str>,
     description: Option<&str>,
+    style: AgentStyle<'_>,
 ) -> AppResult<AssistantAgent> {
     let current = agent(db, owner, id).await?;
     if current.destroyed_at.is_some() {
@@ -609,8 +662,40 @@ pub async fn update_agent(
         }
         set.insert("description", description);
     }
+    let mut unset = doc! {};
+    for (field, value, max, what, multiline) in [
+        (
+            "display_name",
+            style.display_name,
+            MAX_DISPLAY_NAME_CHARS,
+            "A display name",
+            false,
+        ),
+        (
+            "persona",
+            style.persona,
+            MAX_PERSONA_CHARS,
+            "A persona",
+            true,
+        ),
+    ] {
+        match value.map(|value| style_value(value, max, what, multiline)) {
+            Some(Ok(Some(value))) => {
+                set.insert(field, value);
+            }
+            Some(Ok(None)) => {
+                unset.insert(field, "");
+            }
+            Some(Err(error)) => return Err(error),
+            None => {}
+        }
+    }
+    let mut update = doc! {"$set": set};
+    if !unset.is_empty() {
+        update.insert("$unset", unset);
+    }
     db.collection::<AssistantAgent>(AGENTS)
-        .find_one_and_update(doc! {"_id": id, "user_id": owner}, doc! {"$set": set})
+        .find_one_and_update(doc! {"_id": id, "user_id": owner}, update)
         .return_document(ReturnDocument::After)
         .await?
         .ok_or_else(not_found)
@@ -905,7 +990,18 @@ pub async fn purge(db: &Database, owner: &str, agent_id: &str) -> AppResult<()> 
             "Destroy the agent before deleting it".into(),
         ));
     }
-    for row in threads(db, &agent, 1000).await? {
+    // It leaves its groups; its hidden group threads go with its own.
+    super::assistant_group_service::remove_agent(db, owner, &agent.id).await?;
+    let mut rows = threads(db, &agent, 1000).await?;
+    rows.extend(
+        db.collection::<AssistantConversation>(CONVERSATIONS)
+            .find(doc! {"user_id": owner, "agent_id": &agent.id,
+            "group_id": {"$ne": bson::Bson::Null}})
+            .await?
+            .try_collect::<Vec<_>>()
+            .await?,
+    );
+    for row in rows {
         match engine::delete(db, owner, &row.id).await {
             Ok(_) | Err(AppError::NotFound(_)) => {}
             Err(error) => return Err(error),
@@ -1071,6 +1167,8 @@ pub struct AgentSummary {
     pub id: String,
     pub kind: AgentKind,
     pub name: String,
+    pub display_name: Option<String>,
+    pub persona: Option<String>,
     pub description: String,
     pub specialty: Option<String>,
     pub created_by: String,
@@ -1303,6 +1401,8 @@ pub async fn summaries(
             status,
             kind: agent.kind,
             name: agent.name.clone(),
+            display_name: agent.display_name.clone(),
+            persona: agent.persona.clone(),
             description: agent.description.clone(),
             specialty: agent.specialty.clone(),
             created_by: agent.created_by.clone(),

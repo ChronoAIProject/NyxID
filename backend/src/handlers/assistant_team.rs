@@ -168,6 +168,7 @@ fn event_turn(conversation_id: &str) -> TurnStart {
         new_id: None,
         agent_id: None,
         report_to: None,
+        group_id: None,
     }
 }
 
@@ -269,6 +270,11 @@ pub(crate) async fn after_turn(
         return;
     };
     let owner = row.user_id.as_str();
+    // A group member's reply belongs to the group.
+    if turn.origin == TurnOrigin::Group {
+        super::assistant_group::member_settled(state, row, text, error.map(|error| error.code))
+            .await;
+    }
     // A direct user chat with a specialist does not wake NyxBot; it reads
     // those on its next turn.
     if row.is_subagent()
@@ -437,6 +443,10 @@ pub(crate) async fn turn_notes(
     }
     if let Some(agent) = agent {
         notes.push_str(&team::memory_note(agent));
+        if let Some(note) = super::assistant_group::group_note(state, row, agent).await {
+            notes.push_str("\n\n");
+            notes.push_str(&note);
+        }
     }
     if row.is_subagent() {
         return notes;
@@ -530,6 +540,7 @@ pub(crate) async fn assign(
             new_id: None,
             agent_id: None,
             report_to: report_to.map(str::to_owned),
+            group_id: None,
         },
         Pool::Team { owner, limit },
     )
@@ -636,6 +647,8 @@ async fn dispatch(
             let request = team::CreateRequest {
                 name: text_arg(args, "name").to_owned(),
                 description: text_arg(args, "description").to_owned(),
+                display_name: args["display_name"].as_str().map(str::to_owned),
+                persona: args["persona"].as_str().map(str::to_owned),
                 targets: targets.clone(),
                 account_read: args["account_read"].as_bool().unwrap_or(false),
                 specialty: args["specialty"].as_str().map(str::to_owned),
@@ -733,16 +746,25 @@ async fn dispatch(
             )
         }
         "update_subagent" => {
-            let agent = team::live_specialist(db, owner, text_arg(args, "subagent")).await?;
+            // "nyxbot" updates your own display name, persona and description.
+            let agent = target_agent(state, owner, Some(text_arg(args, "subagent"))).await?;
             let agent = team::update_agent(
                 db,
                 owner,
                 &agent.id,
                 args["name"].as_str(),
                 args["description"].as_str(),
+                team::AgentStyle {
+                    display_name: args["display_name"].as_str(),
+                    persona: args["persona"].as_str(),
+                },
             )
             .await?;
-            (json!({"subagent": agent.name, "id": agent.id}), false)
+            (
+                json!({"agent": agent.name, "id": agent.id,
+                    "display_name": agent.display_name, "persona": agent.persona}),
+                false,
+            )
         }
         "decide_permission" => {
             let allow = text_arg(args, "decision") == "allow";
@@ -783,6 +805,107 @@ async fn dispatch(
             let agent = team::live_specialist(db, owner, text_arg(args, "subagent")).await?;
             let agent = destroy_agent(state, owner, &agent.id).await?;
             (json!({"destroyed": agent.name}), false)
+        }
+        "create_group" => {
+            let mut ids = Vec::new();
+            for name in string_list(args, "members") {
+                ids.push(target_agent(state, owner, Some(&name)).await?.id);
+            }
+            let group = crate::services::assistant_group_service::create(
+                db,
+                owner,
+                text_arg(args, "name"),
+                &ids,
+                "nyxbot",
+            )
+            .await?;
+            (
+                json!({"group": {"id": group.id, "name": group.name},
+                    "note": "Post to it with nyxid__post_to_group; the user sees it under Groups."}),
+                false,
+            )
+        }
+        "list_groups" => {
+            let mut rows = Vec::new();
+            for group in crate::services::assistant_group_service::list(db, owner).await? {
+                let members =
+                    crate::services::assistant_group_service::members(db, owner, &group).await?;
+                rows.push(json!({"id": group.id, "name": group.name,
+                    "members": members.iter().map(|agent| agent.name.clone()).collect::<Vec<_>>(),
+                    "messages": group.message_count}));
+            }
+            (json!({"groups": rows}), false)
+        }
+        "post_to_group" => {
+            let group =
+                crate::services::assistant_group_service::find(db, owner, text_arg(args, "group"))
+                    .await?;
+            let author = team::ensure_nyxbot(db, owner).await?;
+            let (message, addressed) = super::assistant_group::post(
+                state,
+                owner,
+                &group.id,
+                text_arg(args, "text"),
+                Some(&author),
+            )
+            .await?;
+            (
+                json!({"posted": message.seq, "addressed_agent_ids": addressed,
+                    "note": "Members reply in the group; you are not woken for their replies."}),
+                false,
+            )
+        }
+        "update_group" => {
+            let group =
+                crate::services::assistant_group_service::find(db, owner, text_arg(args, "group"))
+                    .await?;
+            let mut ids = group.member_agent_ids.clone();
+            for name in string_list(args, "add") {
+                let id = target_agent(state, owner, Some(&name)).await?.id;
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+            for name in string_list(args, "remove") {
+                let id = target_agent(state, owner, Some(&name)).await?.id;
+                ids.retain(|member| member != &id);
+            }
+            let group = crate::services::assistant_group_service::update(
+                db,
+                owner,
+                &group.id,
+                args["name"].as_str(),
+                Some(&ids),
+            )
+            .await?;
+            (
+                json!({"group": {"id": group.id, "name": group.name}}),
+                false,
+            )
+        }
+        "delete_group" => {
+            let group =
+                crate::services::assistant_group_service::find(db, owner, text_arg(args, "group"))
+                    .await?;
+            crate::services::assistant_group_service::delete(db, owner, &group.id).await?;
+            (json!({"deleted": group.name}), false)
+        }
+        "settings_link" => {
+            let area = text_arg(args, "area");
+            let path = crate::services::assistant_team_tools::settings_path(
+                area,
+                args["service"].as_str(),
+                args["org_id"].as_str(),
+            )
+            .ok_or_else(|| AppError::ValidationError("Unknown settings area".into()))?;
+            (
+                json!({"url": format!("{}{path}",
+                    state.config.frontend_url.trim_end_matches('/')),
+                    "area": area,
+                    "note": "Give the user this link; secrets and sign-in-only changes happen \
+                        on that page, never in chat."}),
+                false,
+            )
         }
         "channel_bot_setup_link" => {
             let agent = target_agent(state, owner, args["agent"].as_str()).await?;
@@ -977,6 +1100,10 @@ pub struct CreateAgentRequest {
     name: String,
     description: String,
     #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    persona: Option<String>,
+    #[serde(default)]
     services: Vec<String>,
     #[serde(default)]
     account_read: bool,
@@ -1000,6 +1127,8 @@ pub async fn create_agent(
     let request = team::CreateRequest {
         name: body.name,
         description: body.description,
+        display_name: body.display_name,
+        persona: body.persona,
         targets,
         account_read: body.account_read,
         specialty: None,
@@ -1072,6 +1201,12 @@ pub async fn get_agent(
 pub struct UpdateAgentRequest {
     name: Option<String>,
     description: Option<String>,
+    /// Empty clears it.
+    #[serde(default)]
+    display_name: Option<String>,
+    /// Empty clears it.
+    #[serde(default)]
+    persona: Option<String>,
 }
 
 pub async fn update_agent(
@@ -1088,11 +1223,15 @@ pub async fn update_agent(
         &id,
         body.name.as_deref(),
         body.description.as_deref(),
+        team::AgentStyle {
+            display_name: body.display_name.as_deref(),
+            persona: body.persona.as_deref(),
+        },
     )
     .await?;
-    Ok(Json(
-        json!({"id": agent.id, "name": agent.name, "description": agent.description}),
-    ))
+    Ok(Json(json!({"id": agent.id, "name": agent.name,
+        "description": agent.description, "display_name": agent.display_name,
+        "persona": agent.persona})))
 }
 
 #[derive(Deserialize)]
@@ -1348,6 +1487,14 @@ pub fn spawn_sweeps(state: AppState) {
             if let Ok(rows) = team::queued(&state.db, None).await {
                 for row in rows {
                     wake(&state, &row.user_id, &row.id).await;
+                }
+            }
+            // Group members addressed while busy (or while the pool was full).
+            if let Ok(rows) =
+                crate::services::assistant_group_service::with_pending(&state.db).await
+            {
+                for group in rows {
+                    super::assistant_group::advance(&state, &group.user_id, &group.id).await;
                 }
             }
         }

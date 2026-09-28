@@ -114,6 +114,7 @@ pub mod catalog_curation;
 #[cfg(test)]
 mod catalog_editor_tests;
 
+pub mod assistant_group;
 pub mod assistant_nyxagent;
 pub mod assistant_team;
 pub mod channel_platforms;

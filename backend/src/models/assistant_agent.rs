@@ -6,6 +6,8 @@ pub const COLLECTION_NAME: &str = "assistant_agents";
 /// Bounds for an agent's durable memory.
 pub const MAX_MEMORY_NOTES: usize = 50;
 pub const MAX_MEMORY_NOTE_CHARS: usize = 500;
+pub const MAX_DISPLAY_NAME_CHARS: usize = 40;
+pub const MAX_PERSONA_CHARS: usize = 2000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -71,6 +73,12 @@ pub struct AssistantAgent {
     pub home_conversation_id: Option<String>,
     #[serde(default)]
     pub memory: Vec<MemoryNote>,
+    /// A friendly name the user chose ("Luna"); `name` stays the @handle.
+    #[serde(default)]
+    pub display_name: Option<String>,
+    /// Personality and tone the user asked for. Style only, never authority.
+    #[serde(default)]
+    pub persona: Option<String>,
     /// Destroyed agents keep read-only threads and cannot act.
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub destroyed_at: Option<DateTime<Utc>>,

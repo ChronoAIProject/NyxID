@@ -1494,6 +1494,65 @@ async fn thread_conversation(
     Ok((thread, conversation_id))
 }
 
+/// A plain yes/no from the verified owner in a chat app.
+fn confirmation(text: &str) -> Option<bool> {
+    let normalized = text
+        .trim()
+        .trim_end_matches(['.', '!', '。', '！'])
+        .trim()
+        .to_lowercase();
+    match normalized.as_str() {
+        "yes" | "y" | "yes please" | "confirm" | "confirmed" | "allow" | "approve" | "ok"
+        | "okay" | "go ahead" | "do it" | "是" | "是的" | "确认" | "好" | "好的" | "可以" => {
+            Some(true)
+        }
+        "no" | "n" | "deny" | "cancel" | "stop" | "reject" | "don't" | "do not" | "否" | "不"
+        | "不要" | "取消" => Some(false),
+        _ => None,
+    }
+}
+
+/// Decide the thread's newest pending confirmation card from a chat reply.
+/// Only the owner's own cards (`decider: user`); specialists' requests stay
+/// with NyxBot.
+async fn decide_from_chat(
+    state: &AppState,
+    row: &NyxbotChannel,
+    conversation_id: &str,
+    allow: bool,
+) -> AppResult<bool> {
+    use crate::services::assistant_acknowledgement_service as acks;
+    let now = Utc::now();
+    let Some(pending) = acks::history(&state.db, &row.user_id, conversation_id)
+        .await?
+        .into_iter()
+        .filter(|ack| {
+            ack.kind == "action"
+                && ack.status == "pending"
+                && ack.decider == "user"
+                && ack.expires_at > now
+        })
+        .max_by_key(|ack| ack.created_at)
+    else {
+        return Ok(false);
+    };
+    let decided =
+        acks::decide(&state.db, &row.user_id, conversation_id, &pending.id, allow).await?;
+    acks::audit_decision(
+        &state.db,
+        &crate::services::audit_service::AuditActor {
+            user_id: row.user_id.clone(),
+            ip_address: None,
+            user_agent: None,
+            api_key_id: None,
+            api_key_name: None,
+        },
+        &decided,
+    )
+    .await;
+    Ok(true)
+}
+
 async fn start_owner_turn(
     state: &AppState,
     row: &NyxbotChannel,
@@ -1505,12 +1564,22 @@ async fn start_owner_turn(
     let exists = engine::get(&state.db, &row.user_id, &conversation_id)
         .await
         .is_ok();
+    // A chat app cannot show NyxID's confirmation cards: the verified owner's
+    // plain yes/no decides the thread's newest pending one.
+    let mut answered = None;
+    if exists && let Some(allow) = confirmation(text) {
+        match decide_from_chat(state, row, &conversation_id, allow).await {
+            Ok(true) => answered = Some(allow),
+            Ok(false) => {}
+            Err(error) => tracing::debug!(%error, "Chat confirmation not applied"),
+        }
+    }
     let chat = if sender.private_chat {
         "a private chat"
     } else {
         "a group chat"
     };
-    let note = format!(
+    let mut note = format!(
         "This message came through the owner's {} channel bot {} from {} ({chat}); NyxID \
         verified this sender as the owner.",
         identifier(&row.platform),
@@ -1520,6 +1589,14 @@ async fn start_owner_turn(
             .map(|name| format!("\"{}\"", excerpt(name, 60).replace('"', "'")))
             .unwrap_or_else(|| "the owner".into()),
     );
+    if let Some(allow) = answered {
+        note.push_str(if allow {
+            " With this message the owner confirmed the pending action; retry it with its \
+            acknowledgement_id."
+        } else {
+            " With this message the owner declined the pending action; do not retry it."
+        });
+    }
     let start = TurnStart {
         conversation_id: exists.then(|| conversation_id.clone()),
         new_id: (!exists).then(|| conversation_id.clone()),
@@ -1549,6 +1626,7 @@ async fn start_owner_turn(
             }
         }),
         report_to: None,
+        group_id: None,
     };
     match start_server_turn(
         state,
