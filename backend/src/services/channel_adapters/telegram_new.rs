@@ -65,6 +65,10 @@ impl PlatformAdapter for TelegramNewAdapter {
         PLATFORM
     }
 
+    fn message_ids_are_chat_scoped(&self) -> bool {
+        self.transport.message_ids_are_chat_scoped()
+    }
+
     fn platform_credentials(&self) -> Option<PlatformCredentialDescriptor> {
         Some(credential_descriptor())
     }
