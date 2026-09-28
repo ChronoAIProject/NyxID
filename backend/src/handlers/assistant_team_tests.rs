@@ -931,4 +931,65 @@ async fn grants_decisions_and_destroy_reach_every_live_thread_key() {
     server.abort();
 }
 
+/// A proxy approval decided in the app, on a phone or in Telegram resumes the
+/// chat that asked for it; the user never replies "approved".
+#[tokio::test]
+async fn approvals_decided_elsewhere_resume_the_chat_that_asked() {
+    let (state, calls, server) = setup("team_approval_resume").await;
+    let (orchestrator, _) = orchestrator(&state).await;
+    let key = key_service::get_api_key(&state.db, OWNER, &orchestrator.credential_api_key_id)
+        .await
+        .unwrap();
+    let request = |label: &str| -> crate::models::approval_request::ApprovalRequest {
+        bson_doc::from_document(doc! {
+            "_id": Uuid::new_v4().to_string(), "user_id": OWNER,
+            "service_id": Uuid::new_v4().to_string(), "service_name": "GitHub",
+            "service_slug": "api-github", "requester_type": "user", "requester_id": OWNER,
+            "requester_label": label, "operation_summary": "POST /repos/acme/app/issues",
+            "status": "approved", "decision_channel": "telegram", "idempotency_key": "k",
+            "expires_at": bson_doc::DateTime::now(), "created_at": bson_doc::DateTime::now(),
+        })
+        .unwrap()
+    };
+    // Another agent key's approval never touches the chat.
+    team::approval_decided(&state.db, &request("coding-agent"))
+        .await
+        .unwrap();
+    let row = engine::get(&state.db, OWNER, &orchestrator.id)
+        .await
+        .unwrap();
+    assert!(row.pending_events.is_empty());
+    let before = calls.lock().await.len();
+    team::approval_decided(&state.db, &request(&key.name))
+        .await
+        .unwrap();
+    let row = engine::get(&state.db, OWNER, &orchestrator.id)
+        .await
+        .unwrap();
+    assert_eq!(row.pending_events.len(), 1);
+    assert!(row.pending_events[0].text.contains("approved"));
+    assert!(row.pending_events[0].text.contains("Retry that call now"));
+    // The sweep wakes it.
+    for queued in team::queued(&state.db, Some(OWNER)).await.unwrap() {
+        wake(&state, OWNER, &queued.id).await;
+    }
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if transcript(&state, &orchestrator.id)
+                .await
+                .iter()
+                .any(|message| message.role == "event" && message.text.contains("GitHub"))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("the chat resumed");
+    idle_row(&state, &orchestrator.id).await;
+    assert_eq!(calls.lock().await.len(), before + 1);
+    server.abort();
+}
+
 use mongodb::bson as bson_doc;

@@ -19,6 +19,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "decide_permission",
     "destroy_subagent",
     "update_subagent",
+    "channel_bot_setup_link",
     "connect_channel_bot",
     "link_channel_bot",
     "list_channel_agents",
@@ -118,6 +119,16 @@ pub fn schema(name: &str) -> Value {
             vec!["text"],
         ),
         "forget" => (json!({"note_id": string(64)}), vec!["note_id"]),
+        "channel_bot_setup_link" => (
+            json!({"platform": {"type": "string", "minLength": 1, "maxLength": 32,
+                    "description": "Channel to create, e.g. telegram, discord, slack, lark, \
+                    feishu, whatsapp"},
+                "label": {"type": "string", "minLength": 1, "maxLength": 60,
+                    "description": "Optional bot name"},
+                "agent": {"type": "string", "minLength": 1, "maxLength": 64,
+                    "description": "\"nyxbot\" (default) or a specialist name or id"}}),
+            vec!["platform"],
+        ),
         "connect_channel_bot" => (
             json!({"bot_id": string(64),
                 "agent": {"type": "string", "minLength": 1, "maxLength": 64,
@@ -169,6 +180,12 @@ fn description(name: &str) -> &'static str {
             apps. Its threads stay read-only."
         }
         "update_subagent" => "Rename a specialist or refine its role description.",
+        "channel_bot_setup_link" => {
+            "Help the user create a new channel bot: returns NyxID's one-page setup link (for \
+            Telegram, bot creation inside Telegram when available). Secrets are entered on that \
+            page, never in chat. Once the bot exists NyxID links it to you or the named \
+            specialist automatically and tells you."
+        }
         "connect_channel_bot" => {
             "Link one of the user's channel bots (from nyxid__list_channel_bots) to you or to a \
             specialist. Telegram bots use the Agent Event Gateway; other platforms connect \

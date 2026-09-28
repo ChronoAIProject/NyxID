@@ -566,6 +566,190 @@ async fn relinking_a_bot_to_a_specialist_starts_that_agents_own_thread() {
     server.abort();
 }
 
+async fn wait_for_event(state: &AppState, conversation_id: &str, needle: &str) -> String {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let messages = engine::messages(&state.db, OWNER, conversation_id, 100, None)
+                .await
+                .unwrap();
+            if let Some(message) = messages
+                .iter()
+                .find(|message| message.role == "event" && message.text.contains(needle))
+            {
+                return message.text.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("the waiting chat was resumed")
+}
+
+fn bot_doc(platform: &str, label: &str) -> bson::Document {
+    doc! {
+        "_id": Uuid::new_v4().to_string(), "user_id": OWNER, "platform": platform,
+        "label": label, "platform_bot_id": "123", "platform_bot_username": "helper_bot",
+        "bot_token_encrypted": bson::Binary {
+            subtype: bson::spec::BinarySubtype::Generic, bytes: vec![],
+        },
+        "webhook_secret_hash": "hash", "webhook_registered": true, "status": "active",
+        "is_active": true, "created_at": bson::DateTime::now(),
+        "updated_at": bson::DateTime::now(),
+    }
+}
+
+/// NyxBot hands out NyxID's setup page instead of asking for tokens or
+/// pointing at Studio, and the bot the user creates there is linked and
+/// reported without the user coming back to say so.
+#[tokio::test]
+async fn setup_links_create_bots_that_link_themselves_and_resume_the_chat() {
+    let (state, calls, server) = setup("nyxbot_setup_link").await;
+    let team = crate::services::assistant_team_service::ensure_nyxbot(&state.db, OWNER)
+        .await
+        .unwrap();
+    let home = crate::services::assistant_team_service::home_thread(
+        &state.db,
+        &state.encryption_keys,
+        &team,
+    )
+    .await
+    .unwrap();
+    let unknown = setup_link_tool(&state, OWNER, &home.id, "myspace", None, &team).await;
+    assert!(matches!(unknown, Err(AppError::ValidationError(message)) if message.contains("lark")));
+    // Without an administrator-configured creation manager, Telegram uses
+    // the bot-token page.
+    let (telegram, _) = setup_link_tool(&state, OWNER, &home.id, "telegram", Some("Helper"), &team)
+        .await
+        .unwrap();
+    assert!(
+        telegram["url"]
+            .as_str()
+            .unwrap()
+            .ends_with("/channel-bots/connect/telegram?label=Helper"),
+        "{telegram}"
+    );
+    let (lark, _) = setup_link_tool(&state, OWNER, &home.id, "lark", None, &team)
+        .await
+        .unwrap();
+    assert!(
+        lark["url"]
+            .as_str()
+            .unwrap()
+            .ends_with("/channel-bots/connect/lark")
+    );
+    assert!(
+        lark["note"]
+            .as_str()
+            .unwrap()
+            .contains("Do not ask them to reply")
+    );
+    // Nothing to link yet; a bot created before the link is never taken.
+    let mut older = bot_doc("lark", "Older");
+    older.insert(
+        "created_at",
+        bson::DateTime::from_chrono(Utc::now() - ChronoDuration::hours(1)),
+    );
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .insert_one(older)
+        .await
+        .unwrap();
+    process_watches(&state).await.unwrap();
+    assert_eq!(calls.lock().await.len(), 0);
+    // The user finishes the setup page: NyxID links the new bot and resumes
+    // the chat that asked.
+    let created = bot_doc("lark", "Support desk");
+    let bot_id = created.get_str("_id").unwrap().to_owned();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .insert_one(created)
+        .await
+        .unwrap();
+    process_watches(&state).await.unwrap();
+    let channel = state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .find_one(doc! {"user_id": OWNER, "channel_bot_id": &bot_id})
+        .await
+        .unwrap()
+        .expect("the new bot is linked");
+    assert_eq!(channel.agent_id.as_deref(), Some(team.id.as_str()));
+    let event = wait_for_event(&state, &home.id, "now linked to").await;
+    // Untrusted names reach the model only as sanitized identifiers.
+    assert!(
+        event.contains("Supportdesk") && event.contains("owner-verification"),
+        "{event}"
+    );
+    // Linking happens once.
+    process_watches(&state).await.unwrap();
+    assert_eq!(
+        state
+            .db
+            .collection::<NyxbotChannel>(CHANNELS)
+            .count_documents(doc! {"user_id": OWNER})
+            .await
+            .unwrap(),
+        1
+    );
+    server.abort();
+}
+
+/// A connect link a chat hands out resumes that chat when the user finishes
+/// it; the user never replies "connected".
+#[tokio::test]
+async fn finished_connect_links_resume_the_chat_that_sent_them() {
+    let (state, _, server) = setup("nyxbot_connect_watch").await;
+    let team = crate::services::assistant_team_service::ensure_nyxbot(&state.db, OWNER)
+        .await
+        .unwrap();
+    let home = crate::services::assistant_team_service::home_thread(
+        &state.db,
+        &state.encryption_keys,
+        &team,
+    )
+    .await
+    .unwrap();
+    let link_id = Uuid::new_v4().to_string();
+    let now = bson::DateTime::now();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::connect_link::COLLECTION_NAME)
+        .insert_one(doc! {
+            "_id": &link_id, "user_id": OWNER, "service_slug": "api-github",
+            "service_id": Uuid::new_v4().to_string(), "token_hash": "hash",
+            "status": "pending", "created_at": now,
+            "expires_at": bson::DateTime::from_chrono(Utc::now() + ChronoDuration::minutes(15)),
+        })
+        .await
+        .unwrap();
+    watch_connect_link(&state.db, OWNER, &home.id, &link_id)
+        .await
+        .unwrap();
+    process_watches(&state).await.unwrap();
+    assert!(
+        engine::get(&state.db, OWNER, &home.id)
+            .await
+            .unwrap()
+            .pending_events
+            .is_empty()
+    );
+    state
+        .db
+        .collection::<bson::Document>(crate::models::connect_link::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &link_id},
+            doc! {"$set": {"status": "completed"}},
+        )
+        .await
+        .unwrap();
+    process_watches(&state).await.unwrap();
+    let event = wait_for_event(&state, &home.id, "finished connecting").await;
+    assert!(event.contains("api-github") && event.contains("do not ask them to confirm"));
+    server.abort();
+}
+
 #[tokio::test]
 async fn direct_relay_accepts_only_nyxids_signed_callback_for_the_route_key() {
     let (state, _, server) = setup("nyxbot_direct").await;

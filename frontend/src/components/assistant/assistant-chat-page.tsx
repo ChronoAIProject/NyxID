@@ -458,6 +458,11 @@ export function NyxAgentAssistantChatPage() {
     select: (state) => parseAssistantSearch(state.location.search as Record<string, unknown>),
   });
   const selectedId = search.draft ? undefined : search.c;
+  // Router state is global: while the sidebar navigates to another page this
+  // component is still mounted and sees that page's (thread-less) URL.
+  const onChatRoute = useRouterState({
+    select: (state) => state.location.pathname.replace(/\/+$/, "") === "/assistant",
+  });
   const composerRef = useRef<HTMLDivElement>(null);
   const [composerHeight, setComposerHeight] = useState(0);
   const [focusRequest, setFocusRequest] = useState(0);
@@ -507,13 +512,23 @@ export function NyxAgentAssistantChatPage() {
   // Landing (no thread, no explicit new chat): open the agent's latest thread.
   const latestThreadId = chat.conversations[0]?.id;
   useEffect(() => {
-    if (search.c || search.draft || !chat.threadsLoaded || !latestThreadId) return;
+    if (!onChatRoute || search.c || search.draft || !chat.threadsLoaded || !latestThreadId) {
+      return;
+    }
     void navigate({
       to: "/assistant" as never,
       search: { c: latestThreadId, ...(search.mock ? { mock: 1 } : {}) } as never,
       replace: true,
     });
-  }, [chat.threadsLoaded, latestThreadId, navigate, search.c, search.draft, search.mock]);
+  }, [
+    chat.threadsLoaded,
+    latestThreadId,
+    navigate,
+    onChatRoute,
+    search.c,
+    search.draft,
+    search.mock,
+  ]);
 
   /** Open a thread, or start a new one with the selected agent. */
   function go(id?: string) {

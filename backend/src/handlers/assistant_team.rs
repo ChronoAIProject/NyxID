@@ -784,6 +784,18 @@ async fn dispatch(
             let agent = destroy_agent(state, owner, &agent.id).await?;
             (json!({"destroyed": agent.name}), false)
         }
+        "channel_bot_setup_link" => {
+            let agent = target_agent(state, owner, args["agent"].as_str()).await?;
+            super::nyxbot::setup_link_tool(
+                state,
+                owner,
+                caller,
+                text_arg(args, "platform"),
+                args["label"].as_str(),
+                &agent,
+            )
+            .await?
+        }
         "connect_channel_bot" => {
             let agent = target_agent(state, owner, args["agent"].as_str()).await?;
             super::nyxbot::connect_tool(state, owner, caller, text_arg(args, "bot_id"), &agent)
@@ -1316,15 +1328,23 @@ pub async fn put_profile_routes(
     Ok(Json(routes_response(Some(row))))
 }
 
-/// Background task: retry wake-ups whose pool was full (or whose replica
+/// How often NyxID resolves watches and retries deferred wake-ups.
+const SWEEP_SECS: u64 = 15;
+
+/// Background task: resolve watches (bots created from setup links, finished
+/// connect links) and retry wake-ups whose pool was full (or whose replica
 /// restarted) when their events arrived. Agents are persistent, so nothing
 /// is destroyed automatically.
 pub fn spawn_sweeps(state: AppState) {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        let mut interval = tokio::time::interval(Duration::from_secs(SWEEP_SECS));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
+            // Things the owner finished outside the chat queue events first.
+            if let Err(error) = super::nyxbot::process_watches(&state).await {
+                tracing::debug!(%error, "NyxBot watch sweep deferred");
+            }
             if let Ok(rows) = team::queued(&state.db, None).await {
                 for row in rows {
                     wake(&state, &row.user_id, &row.id).await;

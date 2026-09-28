@@ -2570,8 +2570,36 @@ async fn handle_meta_connect(
     )
     .await
     {
-        Ok(result) => {
+        Ok(mut result) => {
             if result.get("status").and_then(|value| value.as_str()) == Some("pending_connection") {
+                // A chat resumes by itself when the user finishes the link.
+                if let (Some(chat), Some(link_id)) = (
+                    auth.chat.as_ref(),
+                    result
+                        .get("connect_link_id")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_owned),
+                ) {
+                    match super::nyxbot::watch_connect_link(
+                        &state.db,
+                        &chat.user_id,
+                        &chat.conversation_id,
+                        &link_id,
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            result["note"] = serde_json::json!(
+                                "Give the user the link and end your turn. Do not ask them to \
+                                reply when done: NyxID resumes this conversation as soon as \
+                                they finish."
+                            );
+                        }
+                        Err(error) => {
+                            tracing::debug!(%error, "Connect link watch not recorded");
+                        }
+                    }
+                }
                 audit_service::log_async(
                     state.db.clone(),
                     Some(auth.user_id.clone()),

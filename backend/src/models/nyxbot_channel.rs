@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 pub const COLLECTION_NAME: &str = "nyxbot_channels";
 pub const THREADS_COLLECTION_NAME: &str = "nyxbot_threads";
 pub const EVENTS_COLLECTION_NAME: &str = "nyxbot_events";
+pub const WATCHES_COLLECTION_NAME: &str = "nyxbot_watches";
 
 /// A channel bot linked to one of the owner's agents (NyxBot or a
 /// specialist). Telegram bots are reached through the Agent Event Gateway (`transport = "gateway"`, NyxID is the gateway's `nyxbot`
@@ -143,4 +144,41 @@ impl std::fmt::Debug for NyxbotEvent {
             .field("status", &self.status)
             .finish_non_exhaustive()
     }
+}
+
+/// Something the owner is finishing outside the chat that a NyxBot or
+/// specialist thread is waiting on. NyxID notices when it completes and wakes
+/// that thread, so the user never has to come back and say "done".
+/// TTL-expired.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NyxbotWatch {
+    #[serde(rename = "_id")]
+    pub id: String,
+    pub user_id: String,
+    /// `channel_bot` (a bot created from a setup link) or `connect_link`
+    /// (a hosted service connection).
+    pub kind: String,
+    /// The thread that is waiting and receives the outcome.
+    pub conversation_id: String,
+    /// `pending`, `claimed`, `done`, or `failed`.
+    pub status: String,
+    /// channel_bot: canonical platform (`telegram-new` is stored as `telegram`).
+    #[serde(default)]
+    pub platform: Option<String>,
+    /// channel_bot: the agent the new bot is linked to.
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    /// channel_bot: the bot that was linked.
+    #[serde(default)]
+    pub channel_bot_id: Option<String>,
+    /// connect_link: the hosted link being completed.
+    #[serde(default)]
+    pub connect_link_id: Option<String>,
+    /// Stable code only, never upstream prose.
+    #[serde(default)]
+    pub last_error: Option<String>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub created_at: DateTime<Utc>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub expires_at: DateTime<Utc>,
 }

@@ -504,6 +504,7 @@ async fn delete_user_cascade_internal(
         crate::models::nyxbot_channel::COLLECTION_NAME,
         crate::models::nyxbot_channel::THREADS_COLLECTION_NAME,
         crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME,
+        crate::models::nyxbot_channel::WATCHES_COLLECTION_NAME,
         USER_SERVICE_CONNECTIONS,
         USER_PROVIDER_TOKENS,
         MFA_FACTORS,
