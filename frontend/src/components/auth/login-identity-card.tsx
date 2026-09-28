@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { ArrowLeft, Fingerprint, Mail, Monitor } from "lucide-react";
+import { Fingerprint, Monitor } from "lucide-react";
+import { Link } from "@tanstack/react-router";
 import {
   useAppForm,
   Form,
@@ -14,9 +15,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { loginSchema, type LoginFormData } from "@/schemas/auth";
 import { approvalMfaSchema } from "@/schemas/login-approval";
-import { usePublicConfig } from "@/hooks/use-public-config";
 import type { useLoginApproval } from "@/hooks/use-login-approval";
-import { AUTH_PROVIDER_ICONS } from "./provider-icons";
+import { LoginMethods } from "./login-methods";
 
 export function LoginIdentityCard({
   approval,
@@ -29,25 +29,12 @@ export function LoginIdentityCard({
 }) {
   const [keep, setKeep] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [emailSelected, setEmailSelected] = useState(false);
+  const [appOpen, setAppOpen] = useState(false);
   const [error, setError] = useState<string | null>(() =>
     window.location.hash === "#identity-error"
       ? "Identity verification was not completed. Please try again."
       : null,
   );
-  const {
-    data: config,
-    isPending: configLoading,
-    isError: configError,
-    refetch: retryConfig,
-  } = usePublicConfig();
-  const enabledProviders =
-    config?.social_providers.filter(
-      (provider): provider is keyof typeof AUTH_PROVIDER_ICONS =>
-        Object.hasOwn(AUTH_PROVIDER_ICONS, provider),
-    ) ?? [];
-  const showEmail =
-    config?.email_auth_enabled && (emailSelected || !enabledProviders.length);
   const password = useAppForm<LoginFormData>({
     resolver: zodResolver(loginSchema),
     defaultValues: { email: "", password: "" },
@@ -105,7 +92,7 @@ export function LoginIdentityCard({
             key={title}
             type="button"
             aria-pressed={(approval.identity?.keep_signed_in ?? keep) === value}
-            disabled={blocked || !!approval.identity}
+            disabled={blocked || !!approval.identity || appOpen}
             onClick={() => setKeep(value)}
             className={`rounded-lg border p-3 text-left disabled:opacity-60 ${(approval.identity?.keep_signed_in ?? keep) === value ? "border-primary/60" : "border-border hover:bg-white/[0.03]"}`}
           >
@@ -169,68 +156,28 @@ export function LoginIdentityCard({
         </Form>
       ) : (
         <>
-          {configLoading && (
-            <p role="status" className="text-[12px] text-muted-foreground">
-              Loading sign-in methods…
-            </p>
-          )}
-          {configError && (
-            <div className="space-y-2">
-              <p role="alert" className="text-[12px] text-destructive">
-                Could not load sign-in methods.
-              </p>
-              <Button
-                type="button"
-                disabled={blocked}
-                onClick={() => void retryConfig()}
-              >
-                Try again
-              </Button>
-            </div>
-          )}
-          {!showEmail && enabledProviders.length > 0 && (
-            <div className="grid gap-2">
-              {enabledProviders.map((provider) => (
-                <Button
-                  key={provider}
-                  type="button"
-                  className="h-9 w-full rounded-md"
-                  disabled={blocked}
-                  onClick={() =>
-                    void run(async () => {
-                      const result = await approval.beginSocial(keep);
-                      const params = new URLSearchParams({
-                        approval_id: result.id,
-                        return_to: window.location.href,
-                      });
-                      window.location.assign(
-                        `/api/v1/auth/social/${provider}?${params}`,
-                      );
-                    })
-                  }
-                >
-                  {AUTH_PROVIDER_ICONS[provider]}
-                  Continue with{" "}
-                  {
-                    { google: "Google", github: "GitHub", apple: "Apple" }[
-                      provider
-                    ]
-                  }
-                </Button>
-              ))}
-              {config?.email_auth_enabled && (
-                <Button
-                  type="button"
-                  className="h-9 w-full rounded-md"
-                  disabled={blocked}
-                  onClick={() => setEmailSelected(true)}
-                >
-                  <Mail aria-hidden="true" /> Continue with email
-                </Button>
-              )}
-            </div>
-          )}
-          {showEmail && (
+          <LoginMethods
+            returnTo={`${window.location.pathname}${window.location.search}`}
+            disabled={blocked}
+            appTransport={approval.appTransport(keep)}
+            onAppVerified={onVerified}
+            onAppOpenChange={(open) => {
+              setAppOpen(open);
+              if (!open) void run(() => approval.reset());
+            }}
+            onSocial={(provider) =>
+              void run(async () => {
+                const result = await approval.beginSocial(keep);
+                const params = new URLSearchParams({
+                  approval_id: result.id,
+                  return_to: window.location.href,
+                });
+                window.location.assign(
+                  `/api/v1/auth/social/${provider}?${params}`,
+                );
+              })
+            }
+          >
             <Form {...password}>
               <form
                 className="space-y-3"
@@ -243,20 +190,6 @@ export function LoginIdentityCard({
                     }),
                 )}
               >
-                {enabledProviders.length > 0 && (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    disabled={blocked}
-                    onClick={() => {
-                      password.reset();
-                      setEmailSelected(false);
-                    }}
-                  >
-                    <ArrowLeft aria-hidden="true" /> Other sign-in methods
-                  </Button>
-                )}
                 <FormField
                   control={password.control}
                   name="email"
@@ -280,7 +213,15 @@ export function LoginIdentityCard({
                   name="password"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Password</FormLabel>
+                      <div className="flex items-center justify-between">
+                        <FormLabel>Password</FormLabel>
+                        <Link
+                          to={"/forgot-password" as string}
+                          className="text-xs font-medium text-nyx-secondary-400 hover:text-nyx-300"
+                        >
+                          Forgot password?
+                        </Link>
+                      </div>
                       <FormControl>
                         <Input
                           {...field}
@@ -307,27 +248,19 @@ export function LoginIdentityCard({
                 </Button>
               </form>
             </Form>
-          )}
-          {!configLoading &&
-            !configError &&
-            !config?.email_auth_enabled &&
-            !enabledProviders.length && (
-              <p role="alert" className="text-[12px] text-muted-foreground">
-                No sign-in methods are enabled for this deployment. Contact your
-                NyxID administrator.
-              </p>
-            )}
+          </LoginMethods>
         </>
       )}
       {!!approval.identity && (
         <Button
           type="button"
           variant="link"
-          disabled={blocked}
+          disabled={blocked || appOpen}
           onClick={() =>
             void run(async () => {
               await approval.reset();
               setKeep(false);
+              mfa.reset();
             })
           }
         >

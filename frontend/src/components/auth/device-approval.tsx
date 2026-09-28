@@ -975,7 +975,7 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                                     disabled={busy}
                                   >
                                     <Button
-                                      className="border-success/30 bg-success/10 text-success hover:bg-success/20"
+                                      className="border-success bg-success text-white hover:border-success hover:bg-success/90"
                                       disabled={
                                         blocked ||
                                         (!!credentialExpiry &&

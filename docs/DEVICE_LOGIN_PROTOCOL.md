@@ -2,7 +2,7 @@
 
 This describes the implementation in the device-login branch. Deployment and
 physical-device validation are separate steps. See [ADR-015](ADR-015-auth-device-login.md)
-for the required staged issuance gate and [API.md](API.md#selectable-device-login-v2)
+for rollout requirements when upgrading older replicas and [API.md](API.md#selectable-device-login-v2)
 for HTTP response shapes.
 
 ## Request, approval and delivery
@@ -12,9 +12,10 @@ for HTTP response shapes.
   `/api/v1/auth/device/v2/request` (selectable account/Agent Key). The independent
   `/auth/agent-key` exchange is restricted to Agent Keys. The private poll secret
   selects the protocol; human code spelling does not grant capability.
-- Legacy codes remain eight characters, displayed `XXXX-XXXX`. V2 defaults to
-  `2-XXXX-XXXX`; `AUTH_DEVICE_EIGHT_CHAR_CODES=true` enables eight-character v2
-  issuance after incompatible readers/writers are drained. Both readers remain.
+- Legacy and v2 codes default to eight characters, displayed `XXXX-XXXX`, for
+  installed app compatibility. `AUTH_DEVICE_EIGHT_CHAR_CODES=false` restores
+  `2-XXXX-XXXX` v2 issuance for rollout rollback. Incompatible readers/writers
+  must be drained before eight-character v2 issuance. Both readers remain.
   Normalize case, separators and I/L→1, O→0, U→V. Ambiguous retained matches in
   either collection fail closed. Reservations survive insertion failures until TTL.
 - Use the server-returned `verification_uri_complete`, built from configured
@@ -193,19 +194,39 @@ updated approval frontend; this branch specification is not a deployment guarant
 
 ## Service discovery before and after approval
 
-Before authentication, discover the deployment's supported services and scope
-metadata without sending any saved credential:
+Before authentication, call `GET /api/v1/public/config` without an `Authorization`
+header; an Agent Key on this human-only route is rejected. It advertises configured social
+providers, email/password availability and the invite-code registration gate.
+`POST /public/mcp` with JSON-RPC `tools/list` discovers only operations covered by
+enabled anonymous endpoint rules; it is not the full service catalog and cannot
+execute tools. `GET /api/v1/catalog-specs/{spec_key_or_catalog_slug}/openapi.json`
+serves registered static provider overlays, without proving deployment enablement
+or user authorization.
+
+The service catalog requires authentication. With an existing authorized profile:
 
 ```sh
-nyxid catalog list --public --all --base-url https://nyx-api.chrono-ai.fun --output json
-nyxid catalog show api-google-gmail --public --base-url https://nyx-api.chrono-ai.fun --output json
-nyxid catalog endpoints api-google-gmail --public --base-url https://nyx-api.chrono-ai.fun --output json
+nyxid catalog list --all --profile mail-agent --output json
+nyxid catalog show api-google-gmail --profile mail-agent --output json
+nyxid catalog endpoints api-google-gmail --profile mail-agent --output json
 ```
 
-The public catalog describes what can be requested. It does not reveal a person's
-connected accounts or prove the requester may execute a service. `scope_catalog`
-is a curated provider menu, not proof of a connection's actual granted scopes.
-The approval page resolves the human's eligible connections after sign-in.
+`catalog --public` suppresses saved credentials; it does not bypass the current
+catalog routes' authentication requirement. Authenticated catalog metadata
+describes visible service templates. `scope_catalog` is a curated provider menu,
+not proof of a connection's actual granted scopes. `GET /api/v1/keys` returns
+caller-filtered connections, including disabled rows; require `is_active=true`
+before checking credential health.
+
+The approval UI resolves the human's eligible connections after verification.
+With first-party human authentication, `POST /api/v1/auth/device/options` and
+`POST /api/v1/auth/agent-key/options` accept `{"user_code":"<server-issued user_code>"}`.
+`POST /api/v1/auth/login-code/options` takes no body and discovers choices for
+minting one-time login codes. Request-only browser verification uses
+`GET /api/v1/auth/approval/{id}/inventory`, which requires its verified approval
+cookie and returns both `options` and `catalog`. Agents cannot use their keys to
+call human-only options or self-approve; they should share the issued login URL
+and let the human choose.
 
 After delivery, discover operations using the granted profile:
 
@@ -229,8 +250,13 @@ policies, provider permissions and service availability still apply at execution
    `/login/device?user_code=XXXX-XXXX` with the documented hint parameters.
    The code is always a query parameter, preserving installed scanner support.
 2. The signed-out approver chooses **Only for this request** (default) or
-   **Keep me signed in** on the request page. Password and MFA verification stay
-   inline. Configured social providers return to this request with tab-local hints.
+   **Keep me signed in** on the request page. The shared login component offers
+   configured Google, GitHub and Apple providers, the NyxID app, and email/password
+   when enabled. Password and its configured NyxID MFA verification stay inline.
+   Social providers return to this request with tab-local hints and handle their
+   own authentication challenges, matching ordinary social login. They do not
+   trigger an additional NyxID authenticator challenge. The app verifies identity
+   through an existing first-party human session without another MFA prompt.
    The original request expiry keeps running throughout verification.
 3. **Only for this request** creates an opaque, HttpOnly browser proof accepted
    exclusively by `/api/v1/auth/approval`. It is bound to the actual request ID,
@@ -242,20 +268,37 @@ policies, provider permissions and service availability still apply at execution
    persistence and the requester's access are independent choices.
 5. The approver chooses full account access or an eligible existing/new Agent Key,
    then explicitly approves or denies. Verification never approves the requester.
-   MFA-enabled humans must complete MFA before any grant. Successful decisions
+   Password authentication requires NyxID MFA when enabled on the account. Successful decisions
    close the proof; replay cannot grant again. Cancellation and expiry also end it.
 6. An identity change clears key/connection choices. Pending responses from the
    previous identity cannot settle approval. An ended proof must be verified again.
 
 Under `/api/v1/auth/approval`, the dedicated identity API supports begin
 (`POST /` with `flow`, `user_code`, `keep_signed_in`), status/cancel (`GET`/`DELETE
-/{id}`), password/MFA (`POST /{id}/password`, `POST /{id}/mfa`), inventory
+/{id}`), password/MFA (`POST /{id}/password`, `POST /{id}/mfa`), app request/poll
+(`POST /{id}/app`, `POST /{id}/app/poll`), inventory
 (`GET /{id}/inventory`), and final decision (`POST /{id}/approve` or `POST /{id}/deny`).
 Unsafe requests require the configured frontend Origin. The browser proof is a
 host-only cookie scoped to `/api/v1/auth`; responses are `no-store`. Context IDs
 and validated hints may be held in session storage; credentials never appear in
 URLs or storage. Social verification requires tab storage so a provider redirect
 cannot discard the context and silently become a normal login.
+
+App verification requests use the installed eight-character device-code protocol
+and carry a server-only `login_approval_id`. Approval records the verified human
+without issuing tokens or a session. Only the bound browser proof and private
+device secret can complete identity verification. The identity proof, app delivery
+claim, and optional browser session commit together. Ordinary device poll routes
+cannot redeem an app identity request. Identity verification leaves the original
+request pending for explicit access review and approval.
+
+Deploy support for request-bound app verification on every backend replica before
+publishing the approval frontend that offers it. Older replicas do not understand
+`login_approval_id` and must not handle these new identity requests. Existing
+ordinary login and installed app/CLI protocols remain available throughout this
+backend-first rollout. To roll back the backend, first revert the updated approval
+frontend and drain outstanding app identity requests (at most ten minutes). The
+public-code rollout also follows [ADR-015](ADR-015-auth-device-login.md).
 
 Being signed out differs from lacking authority. An Agent Key or third-party OAuth
 credential cannot approve a new login. The approver must prove their human identity

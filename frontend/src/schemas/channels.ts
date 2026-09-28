@@ -38,11 +38,8 @@ export const createChannelBotSchema = z
       .string()
       .max(512, "Bot token is too long")
       .optional(),
-    label: z
-      .string()
-      .min(1, "Label is required")
-      .max(128, "Label must be at most 128 characters")
-      .refine((v) => v.trim().length > 0, "Label must not be blank"),
+    // Blank is allowed only for Telegram bot tokens; see buildCreateChannelBotSchema.
+    label: z.string().max(128, "Label must be at most 128 characters"),
     app_id: z.string().max(256).optional(),
     app_secret: z.string().max(512).optional(),
     verification_token: z.string().max(512).optional(),
@@ -54,8 +51,16 @@ export const createChannelBotSchema = z
     target_org_id: z.string().optional(),
   }).catchall(z.string().optional());
 
+/** A blank Telegram bot-token label is filled with the bot's Telegram name. */
+export function labelIsOptional(platform: string): boolean {
+  return platform === "telegram";
+}
+
 export function buildCreateChannelBotSchema(platforms: readonly ChannelPlatformDescriptor[]) {
   return createChannelBotSchema.superRefine((data, ctx) => {
+    if (!data.label.trim() && !labelIsOptional(data.platform)) {
+      ctx.addIssue({ code: "custom", message: "Label is required", path: ["label"] });
+    }
     const descriptor = platforms.find((p) => p.platform === data.platform && p.enabled);
     if (!descriptor) {
       ctx.addIssue({ code: "custom", message: "Choose an enabled platform", path: ["platform"] });

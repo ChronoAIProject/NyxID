@@ -245,6 +245,7 @@ where
         }
 
         let row = AuthDeviceCode {
+            login_approval_id: None,
             supports_grant_choice,
             id: Uuid::new_v4().to_string(),
             device_code_hmac: hmac_hex(hmac_key, device_code.as_bytes()),
@@ -433,6 +434,10 @@ async fn poll_internal(
         .await?
         .ok_or(AppError::AuthDeviceCodeNotFound)?;
 
+    if row.login_approval_id.is_some() {
+        return Err(AppError::AuthDeviceCodeNotFound);
+    }
+
     tracing::Span::current().record("row_id", row.id.as_str());
 
     if row.expires_at <= now
@@ -556,6 +561,11 @@ pub async fn approve(
     }
     if row.expires_at <= now {
         return Err(AppError::AuthDeviceCodeExpired);
+    }
+
+    if row.login_approval_id.is_some() {
+        return super::login_approval_service::approve_app_identity(db, hmac_key, &row, &input)
+            .await;
     }
 
     let mut transaction = db.client().start_session().await?;
@@ -2498,6 +2508,7 @@ mod tests {
             AuthDeviceCodeStatus::Approved | AuthDeviceCodeStatus::Delivered
         );
         let row = AuthDeviceCode {
+            login_approval_id: None,
             supports_grant_choice: false,
             id: Uuid::new_v4().to_string(),
             device_code_hmac: hmac_hex(TEST_HMAC_KEY, b"device-code"),
@@ -2582,6 +2593,7 @@ mod tests {
     fn make_debug_row() -> AuthDeviceCode {
         let now = Utc::now();
         AuthDeviceCode {
+            login_approval_id: None,
             supports_grant_choice: false,
             id: Uuid::new_v4().to_string(),
             device_code_hmac: "abc123ff".repeat(8),

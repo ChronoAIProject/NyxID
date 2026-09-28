@@ -148,10 +148,19 @@ export interface CreateChannelBotResponse {
   readonly setup_instructions?: readonly string[];
   readonly id: string;
   readonly platform: ChannelPlatform;
+  /** Saved label; for Telegram, the bot's name when the request left it blank. */
+  readonly label?: string;
   readonly platform_bot_username: string;
   readonly status: ChannelBotStatus;
   readonly permission_setup_url?: string | null;
   readonly permission_setup_scopes?: readonly string[] | null;
+}
+
+/** Public Telegram identity for a bot token, used to suggest a label. */
+export interface TelegramBotProfile {
+  readonly username: string;
+  readonly display_name: string | null;
+  readonly label: string | null;
 }
 
 export interface ManagedBotSetup {
