@@ -9217,6 +9217,21 @@ mod proxy_resolution_integration_tests {
         server.abort();
     }
 
+    async fn insert_general_service_account(db: &mongodb::Database, owner_user_id: &str) -> String {
+        let (account, _) = crate::services::service_account_service::create_service_account(
+            db,
+            "General service account",
+            None,
+            "proxy",
+            &[],
+            None,
+            owner_user_id,
+        )
+        .await
+        .expect("create general service account for live purpose check");
+        account.id
+    }
+
     fn service_account_auth(service_account_id: &str, owner_user_id: &str) -> AuthUser {
         AuthUser {
             user_id: Uuid::parse_str(service_account_id).expect("valid service account id"),
@@ -9725,7 +9740,7 @@ mod proxy_resolution_integration_tests {
 
         let (base_url, server) = start_downstream().await;
         let org_id = Uuid::new_v4().to_string();
-        let sa_id = Uuid::new_v4().to_string();
+        let sa_id = insert_general_service_account(&db, &org_id).await;
         db.collection::<crate::models::user::User>(USERS)
             .insert_one(test_user(&org_id, UserType::Org))
             .await
@@ -10144,7 +10159,7 @@ mod proxy_resolution_integration_tests {
         let (base_url, server) = start_downstream().await;
         let org_id = Uuid::new_v4().to_string();
         let admin_id = Uuid::new_v4().to_string();
-        let sa_id = Uuid::new_v4().to_string();
+        let sa_id = insert_general_service_account(&db, &org_id).await;
         seed_org_actor(&db, &org_id, &admin_id, OrgRole::Admin).await;
         db.collection::<NotificationChannel>(NOTIFICATION_CHANNELS)
             .insert_one(notification_channel(&admin_id, 0))
@@ -10191,18 +10206,7 @@ mod proxy_resolution_integration_tests {
 
         let (base_url, server) = start_downstream().await;
         let owner_id = Uuid::new_v4().to_string();
-        let (sa, _) = crate::services::service_account_service::create_service_account(
-            &db,
-            "General service account",
-            None,
-            "proxy",
-            &[],
-            None,
-            &owner_id,
-        )
-        .await
-        .expect("create general service account for live purpose check");
-        let sa_id = sa.id;
+        let sa_id = insert_general_service_account(&db, &owner_id).await;
         let catalog_service_id = Uuid::new_v4().to_string();
         db.collection::<crate::models::user::User>(USERS)
             .insert_one(test_user(&owner_id, UserType::Person))
@@ -10244,7 +10248,7 @@ mod proxy_resolution_integration_tests {
 
         let (base_url, server) = start_downstream().await;
         let org_id = Uuid::new_v4().to_string();
-        let sa_id = Uuid::new_v4().to_string();
+        let sa_id = insert_general_service_account(&db, &org_id).await;
         db.collection::<crate::models::user::User>(USERS)
             .insert_one(test_user(&org_id, UserType::Org))
             .await

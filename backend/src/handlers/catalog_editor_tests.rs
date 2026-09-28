@@ -969,11 +969,7 @@ async fn editor_ornn_optional_policy_preserves_explicit_denies_and_live_authorit
             .unwrap();
         for route in &routes {
             let (status, body) = request(&f.state, "GET", route, &bearer, None).await;
-            assert_eq!(
-                status,
-                StatusCode::NOT_FOUND,
-                "explicit policy {route}: {body}"
-            );
+            assert_eq!(status, StatusCode::NOT_FOUND, "explicit policy: {body}");
         }
     }
     services
@@ -986,7 +982,7 @@ async fn editor_ornn_optional_policy_preserves_explicit_denies_and_live_authorit
     let no_proxy = token(&f, Some("catalog:skills:read catalog:skills:write")).await;
     for route in &routes {
         let (status, body) = request(&f.state, "GET", route, &no_proxy, None).await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "token scope {route}: {body}");
+        assert_eq!(status, StatusCode::FORBIDDEN, "token scope: {body}");
     }
     let other = add_catalog_service(&f, "ornn-api-other").await;
     for route in [
@@ -997,11 +993,7 @@ async fn editor_ornn_optional_policy_preserves_explicit_denies_and_live_authorit
         "/api/v1/proxy/services".into(),
     ] {
         let (status, body) = request(&f.state, "GET", &route, &bearer, None).await;
-        assert_eq!(
-            status,
-            StatusCode::FORBIDDEN,
-            "target boundary {route}: {body}"
-        );
+        assert_eq!(status, StatusCode::FORBIDDEN, "target boundary: {body}");
     }
     {
         use axum::{body::Body, http::Request};
@@ -1023,13 +1015,17 @@ async fn editor_ornn_optional_policy_preserves_explicit_denies_and_live_authorit
                 )
                 .await
                 .unwrap();
-            assert_eq!(response.status(), StatusCode::FORBIDDEN, "upgrade: {route}");
+            assert_eq!(
+                response.status(),
+                StatusCode::FORBIDDEN,
+                "WebSocket upgrades must remain forbidden"
+            );
         }
     }
     save_editor_scopes(&f, "catalog:skills:read catalog:skills:write").await;
     for route in &routes {
         let (status, body) = request(&f.state, "GET", route, &bearer, None).await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "live scope {route}: {body}");
+        assert_eq!(status, StatusCode::FORBIDDEN, "live scope: {body}");
     }
     assert!(upstream.received_requests().await.unwrap().is_empty());
 
@@ -1073,11 +1069,7 @@ async fn editor_ornn_optional_policy_preserves_explicit_denies_and_live_authorit
         .unwrap();
     for route in &routes {
         let (status, body) = request(&f.state, "GET", route, &proxy_only, None).await;
-        assert_eq!(
-            status,
-            StatusCode::UNAUTHORIZED,
-            "revoked token {route}: {body}"
-        );
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "revoked token: {body}");
     }
     assert_eq!(upstream.received_requests().await.unwrap().len(), 2);
 }
@@ -1122,16 +1114,13 @@ async fn editor_ornn_internal_transport_credential_requires_signed_sa_identity()
     }
     for route in &routes {
         let (status, body) = request(&f.state, "GET", route, &bearer, None).await;
-        assert_eq!(status, StatusCode::OK, "internal transport {route}: {body}");
+        assert_eq!(status, StatusCode::OK, "internal transport: {body}");
     }
     let mut broken_signer = f.state.clone();
     broken_signer.jwt_keys.encoding = jsonwebtoken::EncodingKey::from_secret(b"not-an-rsa-key");
     for route in &routes {
         let (status, body) = request(&broken_signer, "GET", route, &bearer, None).await;
-        assert!(
-            status.is_server_error(),
-            "identity signing failure {route}: {body}"
-        );
+        assert!(status.is_server_error(), "identity signing failure: {body}");
     }
     assert_eq!(upstream.received_requests().await.unwrap().len(), 2);
     for (label, changed) in [
@@ -1179,7 +1168,7 @@ async fn editor_ornn_internal_transport_credential_requires_signed_sa_identity()
             .unwrap();
         for route in &routes {
             let (status, body) = request(&f.state, "GET", route, &bearer, None).await;
-            assert_eq!(status, StatusCode::FORBIDDEN, "{label}: {route}: {body}");
+            assert_eq!(status, StatusCode::FORBIDDEN, "{label}: {body}");
         }
         assert_eq!(
             upstream.received_requests().await.unwrap().len(),
@@ -1202,7 +1191,7 @@ async fn editor_ornn_internal_transport_credential_requires_signed_sa_identity()
             assert_eq!(
                 status,
                 StatusCode::NOT_FOUND,
-                "private transport credential without SA consent {route}: {body}"
+                "private transport credential without SA consent: {body}"
             );
         }
         assert_eq!(upstream.received_requests().await.unwrap().len(), 2);
@@ -1217,7 +1206,7 @@ async fn editor_ornn_internal_transport_credential_requires_signed_sa_identity()
         assert_eq!(
             status,
             StatusCode::OK,
-            "dedicated credential precedence {route}: {body}"
+            "dedicated credential precedence: {body}"
         );
     }
     f.state
@@ -1231,11 +1220,7 @@ async fn editor_ornn_internal_transport_credential_requires_signed_sa_identity()
         .unwrap();
     for route in &routes {
         let (status, body) = request(&f.state, "GET", route, &bearer, None).await;
-        assert_eq!(
-            status,
-            StatusCode::FORBIDDEN,
-            "disabled connection {route}: {body}"
-        );
+        assert_eq!(status, StatusCode::FORBIDDEN, "disabled connection: {body}");
     }
     let requests = upstream.received_requests().await.unwrap();
     assert_eq!(requests.len(), 4);
@@ -1266,7 +1251,7 @@ async fn editor_ornn_internal_transport_credential_requires_signed_sa_identity()
         assert_eq!(
             status,
             StatusCode::FORBIDDEN,
-            "legacy editor without policy {route}: {body}"
+            "legacy editor without policy: {body}"
         );
         assert!(
             body["message"]
@@ -1296,7 +1281,7 @@ async fn editor_ornn_internal_transport_credential_requires_signed_sa_identity()
         assert_eq!(
             status,
             StatusCode::FORBIDDEN,
-            "legacy editor without own credential {route}: {body}"
+            "legacy editor without own credential: {body}"
         );
         assert!(
             body["message"]
