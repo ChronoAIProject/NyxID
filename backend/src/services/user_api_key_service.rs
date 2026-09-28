@@ -2538,6 +2538,7 @@ mod tests {
             device_code_encrypted: None,
             user_code_encrypted: None,
             poll_interval: None,
+            last_polled_at: None,
             target_user_id: target_user_id.map(str::to_string),
             credential_user_id: None,
             redirect_path: None,
