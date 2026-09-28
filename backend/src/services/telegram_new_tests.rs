@@ -2301,7 +2301,7 @@ async fn register_manager_channel(
         &state.http_client,
         &adapter,
         actor,
-        "Manager channel",
+        Some("Manager channel"),
         &RegistrationValues([("bot_token", MANAGER)].into()),
     )
     .await
@@ -2647,6 +2647,64 @@ async fn telegram_new_manager_channel_acknowledges_before_callback_and_routes_on
         .unwrap();
     assert_eq!(messages.get_str("agent_api_key_id").unwrap(), agent_id);
     assert!(!messages.to_string().contains("hello agent"));
+}
+
+#[tokio::test]
+async fn telegram_token_bot_label_defaults_to_bot_name_only_when_blank() {
+    let (state, actor, server) = fixture().await;
+    let base = server.uri();
+    let adapter = super::channel_adapters::telegram::TelegramAdapter::media_test_adapter(&base);
+    let api = TelegramApi {
+        http: &state.http_client,
+        base_url: &base,
+    };
+    for (token, body, expected) in [
+        ("111:blank-label", json!({"label": "  "}), "Acme Support"),
+        (
+            "222:kept-label",
+            json!({"label": " Support desk "}),
+            "Support desk",
+        ),
+        ("333:no-label", json!({}), "Acme Support"),
+    ] {
+        Mock::given(method("GET"))
+            .and(path(format!("/bot{token}/getMe")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "ok": true,
+                "result": {"id": token.split(':').next().unwrap().parse::<i64>().unwrap(),
+                    "is_bot": true, "first_name": "Acme Support", "username": "acme_support_bot"}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{token}/setWebhook")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"ok": true, "result": true})),
+            )
+            .mount(&server)
+            .await;
+        let mut request = json!({"platform": "telegram", "bot_token": token});
+        request
+            .as_object_mut()
+            .unwrap()
+            .extend(body.as_object().unwrap().clone());
+        let (status, axum::Json(created)) = crate::handlers::channel_bots::create_bot_with_adapter(
+            &state,
+            crate::test_utils::test_auth_user(&actor),
+            crate::telemetry::TelemetryContext::default(),
+            serde_json::from_value(request).unwrap(),
+            &adapter,
+            &api,
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, axum::http::StatusCode::CREATED);
+        assert_eq!(created.label, expected);
+        let saved = super::channel_bot_service::get_bot(&state.db, &created.id)
+            .await
+            .unwrap();
+        assert_eq!(saved.label, expected);
+    }
 }
 
 #[path = "telegram_manager_public_tests.rs"]

@@ -27,6 +27,13 @@ vi.mock("@/lib/api-client", () => ({
     patch: mockPatch,
     post: mockPost,
   },
+  // Credit-gated mutations use apiClient for the out-of-credits opt-in;
+  // route them to the same per-method spies.
+  apiClient: (endpoint: string, options: { method?: string; body?: unknown } = {}) => {
+    const call = { POST: mockPost, PATCH: mockPatch }[options.method ?? ""];
+    if (!call) throw new Error(`unexpected apiClient ${options.method}`);
+    return options.body === undefined ? call(endpoint) : call(endpoint, options.body);
+  },
 }));
 
 function createWrapper() {

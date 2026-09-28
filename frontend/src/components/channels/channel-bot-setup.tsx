@@ -6,9 +6,13 @@ import { ArrowRight, Check, ExternalLink } from "lucide-react";
 import { toast } from "sonner";
 import { useChannelPlatformViews } from "@/hooks/use-channel-platforms";
 import { useOrgs } from "@/hooks/use-orgs";
-import { useCreateChannelBot } from "@/hooks/use-channel-bots";
+import {
+  useCreateChannelBot,
+  useTelegramBotProfile,
+} from "@/hooks/use-channel-bots";
 import {
   buildCreateChannelBotSchema,
+  labelIsOptional,
   type CreateChannelBotFormData,
 } from "@/schemas/channels";
 import { ApiError } from "@/lib/api-client";
@@ -41,6 +45,10 @@ import type {
   CreateChannelBotResponse,
 } from "@/types/channels";
 import { ChannelBotConnect } from "./channel-bot-connect";
+
+/** Shape of a complete BotFather token; partial input is not looked up. */
+const TELEGRAM_TOKEN = /^\d{5,}:[\w-]{30,}$/;
+const TELEGRAM_LOOKUP_DELAY_MS = 400;
 
 const EMPTY_BOT_CREDENTIALS = {
   bot_token: "",
@@ -121,7 +129,38 @@ export function ChannelBotSetup({
     orgs.isError ||
     orgs.data?.some((org) => org.your_role === "admin");
   const label = useWatch({ control, name: "label" });
+  const botToken = useWatch({ control, name: "bot_token" }) ?? "";
   const previousPlatform = useRef(defaultPlatform);
+  const { mutate: lookupTelegramBot, isPending: lookingUpBot } =
+    useTelegramBotProfile();
+  const suggestedLabel = useRef<string | null>(null);
+  const labelOptional = labelIsOptional(platform);
+
+  // Suggest the bot's Telegram name, but never replace a name the user or
+  // link supplied: only a blank field or our own earlier suggestion changes.
+  useEffect(() => {
+    const token = botToken.trim();
+    if (platform !== "telegram" || !TELEGRAM_TOKEN.test(token)) return;
+    const timer = window.setTimeout(() => {
+      lookupTelegramBot(token, {
+        onSuccess: (profile) => {
+          const current = getValues("label").trim();
+          if (
+            !profile.label ||
+            getValues("bot_token")?.trim() !== token ||
+            (current && current !== suggestedLabel.current)
+          )
+            return;
+          suggestedLabel.current = profile.label;
+          setValue("label", profile.label, {
+            shouldDirty: false,
+            shouldTouch: false,
+          });
+        },
+      });
+    }, TELEGRAM_LOOKUP_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [platform, botToken, getValues, lookupTelegramBot, setValue]);
 
   useEffect(() => {
     for (const [name, value] of Object.entries(prefill ?? {})) {
@@ -265,7 +304,7 @@ export function ChannelBotSetup({
               />
               <div className="space-y-1">
                 <p className="text-[13px] font-medium">
-                  {label || "Channel bot created"}
+                  {createdBot?.label || label || "Channel bot created"}
                 </p>
                 <p className="text-xs leading-relaxed text-muted-foreground">
                   {createdBot?.webhook_secret
@@ -414,9 +453,21 @@ export function ChannelBotSetup({
                   <Input
                     id="label"
                     disabled={disabled}
-                    placeholder={`My ${getPlatform(platform).label} Bot`}
+                    placeholder={
+                      labelOptional
+                        ? "Your bot's Telegram name"
+                        : `My ${getPlatform(platform).label} Bot`
+                    }
+                    aria-describedby={labelOptional ? "label-hint" : undefined}
                     {...register("label")}
                   />
+                  {labelOptional && (
+                    <p id="label-hint" className="text-xs text-muted-foreground">
+                      {lookingUpBot
+                        ? "Looking up your bot's name..."
+                        : "Optional. Leave blank to use the name from your bot token."}
+                    </p>
+                  )}
                   {errors.label && (
                     <p className="text-xs text-destructive">
                       {errors.label.message}

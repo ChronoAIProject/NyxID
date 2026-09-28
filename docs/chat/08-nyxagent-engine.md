@@ -465,6 +465,7 @@ error is null or a stable `{code,message}`. The additive `turn.notice` carries
 | `session_busy`, `capacity_exceeded` | Four jittered delays of approximately 2/4/8/16 seconds, same body and key; fail after five requests |
 | 401/403 or `agent_key_required` | Replace credential, clear binding, emit notice, retry once with recap |
 | `stale_response`, `outcome_unknown` | Fail without retry; discard binding |
+| `insufficient_credits` (typed `AppError::InsufficientCredits`, nested `error.code`, NyxID's flat 402 `{"error":"insufficient_credits"}`, or `response.failed`) | Fail without credential replacement, retry, backoff or rebind, with the fixed message "There aren't enough credits to run this turn." During a rolling deploy old replicas keep reporting `assistant_unavailable`; existing failed rows are not backfilled |
 | Any failed turn, timeout, invalid stream, cancellation or other error | Persist failed partial reply; discard binding immediately with `turn_failed` |
 
 The transcript displays one inline system note for the latest reset, before the

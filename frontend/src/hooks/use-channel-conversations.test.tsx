@@ -17,7 +17,8 @@ import {
   useUpdateChannelConversation,
 } from "./use-channel-conversations";
 
-const { mockDelete, mockGet, mockPost, mockPut } = vi.hoisted(() => ({
+const { mockDelete, mockGet, mockPost, mockPut, mockClientOptions } = vi.hoisted(() => ({
+  mockClientOptions: vi.fn(),
   mockDelete: vi.fn(),
   mockGet: vi.fn(),
   mockPost: vi.fn(),
@@ -30,6 +31,12 @@ vi.mock("@/lib/api-client", () => ({
     get: mockGet,
     post: mockPost,
     put: mockPut,
+  },
+  // The relay send uses apiClient for the out-of-credits opt-in; record the
+  // options so tests can assert whose credits a denial is attributed to.
+  apiClient: (endpoint: string, options: { body?: unknown } = {}) => {
+    mockClientOptions(options);
+    return mockPost(endpoint, options.body);
   },
 }));
 
@@ -158,9 +165,10 @@ describe("initiated messages", () => {
       message_id: "message",
       platform_message_id: "receipt",
     });
-    const { result } = renderHook(() => useSendChannelMessage(), {
-      wrapper: createWrapper(),
-    });
+    const { result } = renderHook(
+      () => useSendChannelMessage({ creditsOwnerId: "org-1" }),
+      { wrapper: createWrapper() },
+    );
     const request = {
       conversation_id: "c1",
       message: { text: "test" },
@@ -171,13 +179,37 @@ describe("initiated messages", () => {
       platform_message_id: "receipt",
     });
     expect(mockPost).toHaveBeenCalledWith("/channel-relay/send", request);
+    // Channel sends bill the bot owner, never an unknown payer.
+    expect(mockClientOptions).toHaveBeenCalledWith(
+      expect.objectContaining({
+        creditsDenial: {
+          key: "op:channel-relay-send:c1:same",
+          payer: { org: { id: "org-1" } },
+        },
+      }),
+    );
+  });
+
+  it("refuses to send before the bot owner is known", async () => {
+    const { result } = renderHook(
+      () => useSendChannelMessage({ creditsOwnerId: undefined }),
+      { wrapper: createWrapper() },
+    );
+    await expect(
+      result.current.mutateAsync({
+        conversation_id: "c1",
+        message: { text: "test" },
+      }),
+    ).rejects.toThrow("Bot details are still loading");
+    expect(mockPost).not.toHaveBeenCalled();
   });
 
   it("does not automatically retry rejected sends", async () => {
     mockPost.mockRejectedValue(new Error("Conversation is not reachable"));
-    const { result } = renderHook(() => useSendChannelMessage(), {
-      wrapper: createWrapper(),
-    });
+    const { result } = renderHook(
+      () => useSendChannelMessage({ creditsOwnerId: "org-1" }),
+      { wrapper: createWrapper() },
+    );
     await expect(
       result.current.mutateAsync({
         conversation_id: "c1",

@@ -1,5 +1,10 @@
 import { ApiError, apiUrl, buildFetchConfig } from "@/lib/api-client";
 import { WireBodyCapture } from "@/lib/assistant/wire-body-capture";
+import {
+  currentCreditsActor,
+  reportCreditsDenialHttp,
+  type CreditsDenialRequest,
+} from "@/lib/credits-denial";
 import type { ApiErrorResponse } from "@/types/api";
 import {
   captureAssistantWireLogHeader,
@@ -23,6 +28,8 @@ export interface AssistantHttpRequest {
   readonly headers?: Readonly<Record<string, string>>;
   readonly method?: AssistantMethod;
   readonly signal?: AbortSignal;
+  /** Foreground sends only; see `RequestOptions.creditsDenial`. */
+  readonly creditsDenial?: CreditsDenialRequest;
 }
 
 export interface AssistantHttpMockRequest {
@@ -155,10 +162,12 @@ function fallbackError(status: number): ApiErrorResponse {
   };
 }
 
-async function parseError(response: Response): Promise<ApiErrorResponse> {
+async function parseError(
+  response: Response,
+): Promise<{ parsed: ApiErrorResponse; raw: unknown }> {
   try {
     const value = (await response.json()) as Record<string, unknown>;
-    return {
+    const parsed: ApiErrorResponse = {
       error: typeof value.error === "string" ? value.error : "unknown_error",
       error_code: typeof value.error_code === "number" ? value.error_code : -1,
       message:
@@ -169,8 +178,9 @@ async function parseError(response: Response): Promise<ApiErrorResponse> {
         ? { consent_url: value.consent_url }
         : {}),
     };
+    return { parsed, raw: value };
   } catch {
-    return fallbackError(response.status);
+    return { parsed: fallbackError(response.status), raw: null };
   }
 }
 
@@ -199,6 +209,7 @@ export async function assistantHttp(
   options: AssistantHttpRequest = {},
 ): Promise<Response> {
   const method = options.method ?? "GET";
+  const actorId = options.creditsDenial ? currentCreditsActor() : null;
   const init = buildFetchConfig({
     ...options,
     method,
@@ -214,7 +225,9 @@ export async function assistantHttp(
   void captureResponse(endpoint, method, response).catch(() => undefined);
   if (response.ok) return response;
 
-  const errorBody = await parseError(response);
+  const { parsed: errorBody, raw } = await parseError(response);
+  // Classify the raw envelope: the parsed shape defaults a missing symbol.
+  reportCreditsDenialHttp(options.creditsDenial, response.status, raw, actorId);
   if (response.status === 401 && DEAD_SESSION_CODES.has(errorBody.error_code)) {
     useAuthStore.getState().setUser(null);
   }

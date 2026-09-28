@@ -25,14 +25,36 @@ describe("createChannelBotSchema base validation", () => {
     ).toBe(true);
   });
 
-  it("requires bot_token and label", () => {
+  it("requires bot_token", () => {
     expect(
       createChannelBotSchema.safeParse({ platform: "telegram", bot_token: "", label: "x" })
         .success,
     ).toBe(false);
+  });
+
+  it("lets Telegram leave the label blank but requires it elsewhere", () => {
+    for (const label of ["", "  "]) {
+      expect(
+        createChannelBotSchema.safeParse({ platform: "telegram", bot_token: "t", label })
+          .success,
+      ).toBe(true);
+      const discord = createChannelBotSchema.safeParse({
+        platform: "discord",
+        bot_token: "t",
+        public_key: "k",
+        label,
+      });
+      expect(discord.success).toBe(false);
+      expect(discord.error?.issues.map((issue) => issue.message)).toContain(
+        "Label is required",
+      );
+    }
     expect(
-      createChannelBotSchema.safeParse({ platform: "telegram", bot_token: "t", label: "" })
-        .success,
+      createChannelBotSchema.safeParse({
+        platform: "telegram",
+        bot_token: "t",
+        label: "a".repeat(129),
+      }).success,
     ).toBe(false);
   });
 });

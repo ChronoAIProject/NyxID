@@ -44,6 +44,9 @@ interface BillingWalletCardProps {
   readonly billingReady: boolean;
   readonly onTopUp: (amountCredits: number) => Promise<void>;
   readonly topUpPending: boolean;
+  /** Controls the Add credits dialog when set (e.g. a top-up deep link). */
+  readonly topUpOpen?: boolean;
+  readonly onTopUpOpenChange?: (open: boolean) => void;
 }
 
 export function BillingWalletCard({
@@ -58,6 +61,8 @@ export function BillingWalletCard({
   billingReady,
   onTopUp,
   topUpPending,
+  topUpOpen,
+  onTopUpOpenChange,
 }: BillingWalletCardProps) {
   const [showBreakdown, setShowBreakdown] = useState(false);
 
@@ -159,6 +164,8 @@ export function BillingWalletCard({
             billingReady={billingReady}
             pending={topUpPending}
             onTopUp={onTopUp}
+            open={topUpOpen}
+            onOpenChange={onTopUpOpenChange}
           />
         </div>
 
@@ -221,12 +228,21 @@ function AddCreditsDialog({
   billingReady,
   pending,
   onTopUp,
+  open: controlledOpen,
+  onOpenChange,
 }: {
   readonly billingReady: boolean;
   readonly pending: boolean;
   readonly onTopUp: (amountCredits: number) => Promise<void>;
+  readonly open?: boolean;
+  readonly onOpenChange?: (open: boolean) => void;
 }) {
-  const [open, setOpen] = useState(false);
+  const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
+  const open = controlledOpen ?? uncontrolledOpen;
+  const setOpen = (next: boolean) => {
+    setUncontrolledOpen(next);
+    onOpenChange?.(next);
+  };
   const [credits, setCredits] = useState(String(DEFAULT_TOP_UP_CREDITS));
   const amount = Number(credits);
   const amountValid =

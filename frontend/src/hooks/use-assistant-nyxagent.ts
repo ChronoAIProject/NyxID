@@ -8,6 +8,37 @@ import type {
 } from "@/schemas/assistant-nyxagent";
 import { useAuthStore } from "@/stores/auth-store";
 import { useDecideApproval } from "@/hooks/use-approvals";
+import {
+  currentCreditsActor,
+  isInsufficientCreditsCode,
+  notifyCreditsDenied,
+} from "@/lib/credits-denial";
+
+function notifyTurnCredits(
+  conversationId: string,
+  turnId: string,
+  code: string | null,
+  actorId: string | null,
+): void {
+  if (!isInsufficientCreditsCode(code)) return;
+  // SSE and the history poll can both deliver one failure; the key dedupes.
+  notifyCreditsDenied(
+    { key: `assistant:nyxagent:${conversationId}:${turnId}`, payer: "self" },
+    actorId,
+  );
+}
+
+/** A foreground send whose live failure may open the out-of-credits dialog. */
+function liveSend(
+  conversationId: string | undefined,
+  text: string,
+  onAdopt: (id: string) => void,
+) {
+  const actorId = currentCreditsActor();
+  return nyxAgentTransport.send(conversationId, text, onAdopt, (id, turnId, code) =>
+    notifyTurnCredits(id, turnId, code, actorId),
+  );
+}
 
 /** The user-visible turn that resumes the assistant after an allowed card. */
 export function continuationText(acknowledgement: NyxAgentAcknowledgement): string {
@@ -86,7 +117,7 @@ export function useNyxAgentAssistantChat({
   const send = useCallback(
     async (text: string) => {
       try {
-        await nyxAgentTransport.send(selectedConversationId, text, onConversationAdopted);
+        await liveSend(selectedConversationId, text, onConversationAdopted);
       } finally {
         // A first turn may have provisioned the credential needed for profile discovery.
         await queryClient.invalidateQueries({
@@ -162,9 +193,35 @@ export function useNyxAgentAssistantChat({
       // Stop means the user wants the assistant to halt; do not resume it.
       const tail = nyxAgentTransport.getHistory(conversationId)?.messages.at(-1);
       if (tail?.error_code === "cancelled") continue;
-      void nyxAgentTransport
-        .send(conversationId, continuationForAll(queued.acknowledgements), onConversationAdopted)
-        .catch(() => undefined);
+      void liveSend(
+        conversationId,
+        continuationForAll(queued.acknowledgements),
+        onConversationAdopted,
+      ).catch(() => undefined);
+    }
+  });
+
+  // Turns seen running on this page. Only their later failures may prompt, so
+  // a transcript that loads already failed (or older pages) never does.
+  const observedTurns = useRef(new Set<string>());
+  useEffect(() => {
+    const id = selectedConversationId;
+    if (!id) return;
+    const messages = nyxAgentTransport.getHistory(id)?.messages ?? [];
+    const activeTurnId = nyxAgentTransport.getActiveTurnId(id);
+    // A turn whose reply is already settled in history was never seen running
+    // here, whatever a stale snapshot claims.
+    const settled = messages.some(
+      (message) => message.turn_id === activeTurnId && message.role === "assistant",
+    );
+    if (activeTurnId && !settled) observedTurns.current.add(`${id}:${activeTurnId}`);
+    for (const message of messages) {
+      if (
+        message.status === "failed" &&
+        observedTurns.current.has(`${id}:${message.turn_id}`)
+      ) {
+        notifyTurnCredits(id, message.turn_id, message.error_code, userId ?? null);
+      }
     }
   });
 

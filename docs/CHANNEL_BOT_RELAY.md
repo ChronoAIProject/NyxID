@@ -1165,7 +1165,8 @@ flowchart TD
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/api/v1/channel-bots` | Register a new bot |
+| `POST` | `/api/v1/channel-bots` | Register a new bot. `label` is required except for `platform: "telegram"`, where a blank label uses the bot's Telegram `first_name`, then its username; a supplied label is stored unchanged. The response includes the saved `label`. |
+| `POST` | `/api/v1/channel-bots/telegram/profile` | `{bot_token}` → `{username, display_name, label}` via Telegram `getMe`, so setup forms can suggest a name. Human-only, 20 requests per user per minute; the token is never stored, logged, or echoed. |
 | `GET` | `/api/v1/channel-bots` | `?scope=user` lists personal bots; `?org_id=<id>` selects an administered org; `?scope=all` combines personal and administered-org bots |
 | `GET` | `/api/v1/channel-bots/{id}` | Get bot details |
 | `PATCH` | `/api/v1/channel-bots/{id}` | Update bot label or platform verification material |

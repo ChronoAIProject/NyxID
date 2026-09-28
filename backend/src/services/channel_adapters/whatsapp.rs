@@ -1059,6 +1059,7 @@ async fn verify_identity_at(
         .unwrap_or(business_object_id);
     Ok(BotIdentity {
         platform_bot_id: business_object_id.to_string(),
+        display_name: None,
         platform_bot_username: username.to_string(),
     })
 }

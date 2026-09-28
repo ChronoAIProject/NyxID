@@ -213,7 +213,7 @@ impl Fixture {
             &state.http_client,
             &adapter,
             &owner,
-            "Mailbox",
+            Some("Mailbox"),
             &fields,
         )
         .await
@@ -828,7 +828,7 @@ async fn aurinko_concurrent_same_account_registration_has_one_owner() {
             &f.state.http_client,
             &f.adapter,
             owner,
-            "New mailbox",
+            Some("New mailbox"),
             &fields,
         )
     };

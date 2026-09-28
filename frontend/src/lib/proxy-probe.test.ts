@@ -520,3 +520,43 @@ describe("probeAgentKey — fetch integration", () => {
     expect(outcome.agentKeyValid).toBe(false);
   });
 });
+
+describe("probeAgentKey credits exhaustion", () => {
+  it("reports NyxID's 402 insufficient_credits inline without opening the dialog", async () => {
+    const { useCreditsDenialStore } = await import(
+      "@/stores/credits-denial-store"
+    );
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          error: "insufficient_credits",
+          error_code: 11300,
+          message: "Insufficient credits",
+        }),
+        { status: 402, headers: { "x-nyxid-agent-id": "ag-1" } },
+      ),
+    );
+    const outcome = await probeAgentKey("llm-openai", {
+      bearerToken: "tok",
+      fetchImpl: fetchMock,
+    });
+    expect(outcome).toMatchObject({
+      httpStatus: 402,
+      agentKeyValid: false,
+      downstreamStatus: "credits_exhausted",
+    });
+    expect(outcome.diagnostic).toContain(
+      "The account this key bills to is out of credits",
+    );
+    expect(useCreditsDenialStore.getState().current).toBeNull();
+  });
+
+  it("treats a downstream's own insufficient_credits as a downstream response", () => {
+    const outcome = classifyProbe("llm-openai", nyxidResponse(402), 402, {
+      error: "insufficient_credits",
+      message: "Upstream quota",
+    });
+    expect(outcome.downstreamStatus).toBe("unexpected");
+    expect(outcome.agentKeyValid).toBe(true);
+  });
+});

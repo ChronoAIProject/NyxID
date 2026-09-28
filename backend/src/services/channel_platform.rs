@@ -95,6 +95,9 @@ impl std::fmt::Debug for PollOutcome {
 pub struct BotIdentity {
     pub platform_bot_id: String,
     pub platform_bot_username: String,
+    /// Human-readable bot name when the platform reports one (Telegram's
+    /// `first_name`); used as the default label when none is supplied.
+    pub display_name: Option<String>,
 }
 
 /// A normalized inbound message parsed from any platform's webhook payload.

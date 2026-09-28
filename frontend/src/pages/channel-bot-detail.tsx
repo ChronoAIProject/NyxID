@@ -1085,7 +1085,7 @@ export function ChannelBotDetailPage() {
 
   const { data: apiKeys } = useApiKeys({ orgId: ownerOrgId });
   const deleteMutation = useDeleteChannelBot();
-  const verifyMutation = useVerifyChannelBot();
+  const verifyMutation = useVerifyChannelBot({ creditsOwnerId: bot?.user_id });
 
   useBreadcrumbLabel(bot?.label);
 
