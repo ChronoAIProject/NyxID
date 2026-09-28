@@ -62,6 +62,8 @@ async fn grant_consent_internal(
         user_id: user_id.to_string(),
         client_id: client_id.to_string(),
         scopes: scopes.to_string(),
+        revision: Some(Uuid::new_v4().to_string()),
+        issuance_fence: None,
         allow_all_services,
         allowed_service_ids: allowed_service_ids.clone(),
         granted_at: now,
@@ -78,19 +80,25 @@ async fn grant_consent_internal(
         Some(ex) => {
             // Update existing consent
             let updated = Consent {
-                id: ex.id,
+                id: ex.id.clone(),
                 user_id: user_id.to_string(),
                 client_id: client_id.to_string(),
                 scopes: scopes.to_string(),
+                revision: Some(Uuid::new_v4().to_string()),
+                issuance_fence: None,
                 allow_all_services,
                 allowed_service_ids,
                 granted_at: now,
                 expires_at: None,
             };
 
-            db.collection::<Consent>(CONSENTS)
-                .replace_one(doc! { "_id": &updated.id }, &updated)
+            let result = db
+                .collection::<Consent>(CONSENTS)
+                .replace_one(version_filter(&ex), &updated)
                 .await?;
+            if result.matched_count != 1 {
+                return Err(grant_changed());
+            }
 
             Ok(updated)
         }
@@ -101,6 +109,75 @@ async fn grant_consent_internal(
             Ok(consent)
         }
     }
+}
+
+pub fn grant_changed() -> AppError {
+    AppError::Conflict(
+        "Service access changed or expired. Restart authorization to review the current grant."
+            .to_string(),
+    )
+}
+
+pub fn version_filter(consent: &Consent) -> bson::Document {
+    // Include the legacy fields as well: during a rolling deploy an older
+    // replica can replace a pre-versioned row without introducing a revision.
+    let mut filter = doc! { "_id": &consent.id, "user_id": &consent.user_id,
+        "client_id": &consent.client_id, "revision": &consent.revision,
+        "scopes": &consent.scopes, "allowed_service_ids": &consent.allowed_service_ids,
+        "granted_at": bson::DateTime::from_chrono(consent.granted_at),
+        "expires_at": consent.expires_at.map(bson::DateTime::from_chrono),
+    };
+    filter.insert(
+        "allow_all_services",
+        if consent.allow_all_services {
+            bson::Bson::Boolean(true)
+        } else {
+            bson::Bson::Document(doc! { "$ne": true })
+        },
+    );
+    filter
+}
+
+pub fn fingerprint(consent: &Consent) -> AppResult<String> {
+    use sha2::{Digest, Sha256};
+    let mut snapshot = consent.clone();
+    snapshot.issuance_fence = None;
+    let bytes = bson::to_vec(&snapshot).map_err(|e| AppError::Internal(e.to_string()))?;
+    Ok(hex::encode(Sha256::digest(bytes)))
+}
+
+/// Compare-and-swap only: a deleted/revoked grant must never be upserted by an
+/// old browser decision. Normal review writes use the same version fence.
+pub async fn replace_incremental_consent(
+    db: &mongodb::Database,
+    existing: &Consent,
+    scopes: &str,
+    allowed_service_ids: Vec<String>,
+) -> AppResult<Consent> {
+    let updated = Consent {
+        scopes: scopes.to_string(),
+        allowed_service_ids: Some(allowed_service_ids),
+        revision: Some(Uuid::new_v4().to_string()),
+        issuance_fence: None,
+        granted_at: Utc::now(),
+        ..existing.clone()
+    };
+    let mut filter = version_filter(existing);
+    filter.insert(
+        "$or",
+        vec![
+            doc! { "expires_at": bson::Bson::Null },
+            doc! { "expires_at": { "$gt": bson::DateTime::now() } },
+        ],
+    );
+    let result = db
+        .collection::<Consent>(CONSENTS)
+        .replace_one(filter, &updated)
+        .await?;
+    if result.matched_count != 1 {
+        return Err(grant_changed());
+    }
+    Ok(updated)
 }
 
 /// Check if a user has granted consent for the requested scopes to a client.
@@ -141,46 +218,39 @@ pub async fn revoke_consent(
     user_id: &str,
     client_id: &str,
 ) -> AppResult<ConsentRevocationResult> {
-    let existing = db
-        .collection::<Consent>(CONSENTS)
-        .find_one(doc! { "user_id": user_id, "client_id": client_id })
-        .await?;
-    if existing.is_none() {
-        return Err(AppError::ConsentNotFound);
-    }
-
-    let now = Utc::now();
-    let revoked_refresh_tokens = if client_id == Uuid::nil().to_string() {
-        0
-    } else {
-        db.collection::<RefreshToken>(REFRESH_TOKENS)
-            .update_many(
-                doc! {
-                    "user_id": user_id,
-                    "client_id": client_id,
-                    "revoked": false,
-                },
-                doc! { "$set": {
-                    "revoked": true,
-                    "revoked_at": bson::DateTime::from_chrono(now),
-                }},
-            )
-            .await?
-            .modified_count
-    };
-
-    let result = db
-        .collection::<Consent>(CONSENTS)
-        .delete_one(doc! { "user_id": user_id, "client_id": client_id })
-        .await?;
-
-    if result.deleted_count == 0 {
-        return Err(AppError::ConsentNotFound);
-    }
-
-    Ok(ConsentRevocationResult {
-        revoked_refresh_tokens,
-    })
+    let mut session = db.client().start_session().await?;
+    let db = db.clone();
+    let user_id = user_id.to_owned();
+    let client_id = client_id.to_owned();
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let result: AppResult<ConsentRevocationResult> = async {
+                let deleted = db
+                    .collection::<Consent>(CONSENTS)
+                    .delete_one(doc! { "user_id": &user_id, "client_id": &client_id })
+                    .session(&mut *session)
+                    .await?;
+                if deleted.deleted_count == 0 {
+                    return Err(AppError::ConsentNotFound);
+                }
+                let revoked_refresh_tokens = if client_id == Uuid::nil().to_string() {
+                    0
+                } else {
+                    db.collection::<RefreshToken>(REFRESH_TOKENS).update_many(
+                    doc! { "user_id": &user_id, "client_id": &client_id, "revoked": false },
+                    doc! { "$set": { "revoked": true, "revoked_at": bson::DateTime::now() } },
+                ).session(&mut *session).await?.modified_count
+                };
+                Ok(ConsentRevocationResult {
+                    revoked_refresh_tokens,
+                })
+            }
+            .await;
+            super::api_key_mutation_service::transaction_result(result)
+        })
+        .await
+        .map_err(super::api_key_mutation_service::map_transaction_error)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

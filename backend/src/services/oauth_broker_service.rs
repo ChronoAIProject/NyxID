@@ -83,6 +83,8 @@ const MAX_BROKER_ROTATION_RETRIES: usize = 3;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BindingGrantSnapshot {
     pub binding_hash: String,
+    pub rotation_version: u32,
+    pub scopes: String,
     pub allowed_service_ids: Vec<String>,
     pub allow_all_services: bool,
 }
@@ -105,6 +107,18 @@ pub async fn resolve_binding_grant(
     external_subject: &ExternalSubjectRef,
     binding_hash: &str,
 ) -> AppResult<BindingGrantSnapshot> {
+    resolve_binding_grant_for_subject(db, client_id, user_id, Some(external_subject), binding_hash)
+        .await
+}
+
+/// Supports ordinary account bindings whose exact external subject is None.
+pub async fn resolve_binding_grant_for_subject(
+    db: &mongodb::Database,
+    client_id: &str,
+    user_id: &str,
+    external_subject: Option<&ExternalSubjectRef>,
+    binding_hash: &str,
+) -> AppResult<BindingGrantSnapshot> {
     if !is_binding_hash(binding_hash) {
         return Err(AppError::InvalidTarget(
             "binding grant is unavailable for review".to_string(),
@@ -124,7 +138,7 @@ pub async fn resolve_binding_grant(
             AppError::InvalidTarget("binding grant is unavailable for review".to_string())
         })?;
 
-    if binding.external_subject.as_ref() != Some(external_subject) {
+    if binding.external_subject.as_ref() != external_subject {
         return Err(AppError::InvalidTarget(
             "binding grant is unavailable for review".to_string(),
         ));
@@ -146,6 +160,8 @@ pub async fn resolve_binding_grant(
 
     Ok(BindingGrantSnapshot {
         binding_hash: binding.id,
+        rotation_version: binding.rotation_version,
+        scopes: refresh.scope.unwrap_or_else(|| binding.scopes.join(" ")),
         allowed_service_ids: refresh.allowed_service_ids,
         allow_all_services: refresh.allow_all_services,
     })
@@ -281,6 +297,7 @@ pub async fn create_binding(
 /// opaque raw binding credential. The update is optimistic against the active
 /// refresh-token pointer so concurrent broker exchanges either finish first or
 /// retry against the newly rotated binding state.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub async fn update_binding_grant(
     db: &mongodb::Database,
@@ -292,6 +309,36 @@ pub async fn update_binding_grant(
     refresh_token_jti: &str,
     scopes: &[String],
     external_subject: Option<&ExternalSubjectRef>,
+) -> AppResult<()> {
+    update_binding_grant_with_version(
+        db,
+        encryption_keys,
+        client_id,
+        user_id,
+        binding_hash,
+        refresh_token,
+        refresh_token_jti,
+        scopes,
+        external_subject,
+        None,
+    )
+    .await
+}
+
+/// Incremental updates must match the reviewed rotation; retries never rebase
+/// an old grant onto a later grant or a different refresh-token generation.
+#[allow(clippy::too_many_arguments)]
+pub async fn update_binding_grant_with_version(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    client_id: &str,
+    user_id: &str,
+    binding_hash: &str,
+    refresh_token: &str,
+    refresh_token_jti: &str,
+    scopes: &[String],
+    external_subject: Option<&ExternalSubjectRef>,
+    expected_rotation_version: Option<u32>,
 ) -> AppResult<()> {
     if !is_binding_hash(binding_hash) {
         return Err(AppError::InvalidTarget(
@@ -315,6 +362,59 @@ pub async fn update_binding_grant(
         .encrypt_with_aad(refresh_token.as_bytes(), binding_hash.as_bytes())
         .await
         .map_err(|error| AppError::Internal(format!("broker binding encrypt failed: {error}")))?;
+
+    if let Some(expected) = expected_rotation_version {
+        let version_condition = if expected == 0 {
+            bson::Bson::Document(doc! { "$in": [0, bson::Bson::Null] })
+        } else {
+            bson::Bson::from(expected)
+        };
+        let mut session = db.client().start_session().await?;
+        let db = db.clone();
+        let client_id = client_id.to_owned();
+        let user_id = user_id.to_owned();
+        let binding_hash = binding_hash.to_owned();
+        let refresh_token_jti = refresh_token_jti.to_owned();
+        let scopes = scopes.to_vec();
+        let external_subject = external_subject.cloned();
+        return session.start_transaction().and_run2(async move |session| {
+            let client_id = client_id.as_str();
+            let user_id = user_id.as_str();
+            let binding_hash = binding_hash.as_str();
+            let refresh_token_jti = refresh_token_jti.as_str();
+            let scopes = scopes.as_slice();
+            let external_subject = external_subject.as_ref();
+            let result: AppResult<()> = async {
+                let binding = db.collection::<OauthBrokerBinding>(OAUTH_BROKER_BINDINGS)
+                    .find_one(doc! { "_id": binding_hash, "client_id": client_id,
+                        "user_id": user_id, "revoked": false, "rotation_version": version_condition.clone() })
+                    .session(&mut *session).await?
+                    .ok_or_else(crate::services::consent_service::grant_changed)?;
+                if binding.external_subject.as_ref() != external_subject {
+                    return Err(AppError::InvalidTarget("binding grant is unavailable for update".to_string()));
+                }
+                let previous = db.collection::<RefreshToken>(REFRESH_TOKENS).update_one(
+                    doc! { "jti": &binding.refresh_token_jti, "client_id": client_id,
+                        "user_id": user_id, "revoked": false,
+                        "expires_at": { "$gt": bson::DateTime::now() } },
+                    doc! { "$set": { "revoked": true, "replaced_by": &replacement_refresh.id,
+                        "revoked_at": bson::DateTime::now() } },
+                ).session(&mut *session).await?;
+                if previous.matched_count != 1 { return Err(crate::services::consent_service::grant_changed()); }
+                let updated = db.collection::<OauthBrokerBinding>(OAUTH_BROKER_BINDINGS).update_one(
+                    doc! { "_id": binding_hash, "revoked": false, "rotation_version": version_condition.clone(),
+                        "refresh_token_jti": &binding.refresh_token_jti },
+                    doc! { "$set": { "refresh_token_encrypted": Binary {
+                        subtype: BinarySubtype::Generic, bytes: encrypted_refresh.clone() },
+                        "refresh_token_jti": refresh_token_jti, "scopes": scopes,
+                        "rotation_version": i64::from(expected) + 1 } },
+                ).session(&mut *session).await?;
+                if updated.matched_count != 1 { return Err(crate::services::consent_service::grant_changed()); }
+                Ok(())
+            }.await;
+            super::api_key_mutation_service::transaction_result(result)
+        }).await.map_err(super::api_key_mutation_service::map_transaction_error);
+    }
 
     for _ in 0..MAX_BROKER_ROTATION_RETRIES {
         let binding = db

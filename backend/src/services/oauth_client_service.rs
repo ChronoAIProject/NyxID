@@ -3101,6 +3101,8 @@ mod tests {
 
             db.collection::<Consent>(CONSENTS)
                 .insert_one(&Consent {
+                    revision: None,
+                    issuance_fence: None,
                     id: format!("consent-{client_id}"),
                     user_id: "user-with-consent".to_string(),
                     client_id: client_id.to_string(),
@@ -3157,6 +3159,7 @@ mod tests {
             let now = Utc::now();
             db.collection::<AuthorizationCode>(AUTH_CODES)
                 .insert_one(&AuthorizationCode {
+                    incremental_consent: None,
                     id: code_id.to_string(),
                     code_hash: format!("hash-{code_id}"),
                     client_id: client_id.to_string(),

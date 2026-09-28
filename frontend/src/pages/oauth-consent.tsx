@@ -17,7 +17,12 @@ import { DetailSection } from "@/components/shared/detail-section";
 import { DetailRow } from "@/components/shared/detail-row";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { useUserServices } from "@/hooks/use-user-services";
-import { oauthConsentServiceAccessSchema } from "@/schemas/oauth-consent";
+import {
+  oauthConsentServiceAccessSchema,
+  readIncrementalConsentRequest,
+} from "@/schemas/oauth-consent";
+
+import { OAuthIncrementalConsentPage } from "./oauth-incremental-consent";
 
 /**
  * Standalone shell for the consent surface, matching `login-device.tsx` — the
@@ -96,6 +101,14 @@ function serviceOrgName(service: ConsentServiceDisplay): string | null {
 }
 
 export function OAuthConsentPage() {
+  const [incremental] = useState(() =>
+    readIncrementalConsentRequest(new URLSearchParams(window.location.search)),
+  );
+  if (incremental) return <OAuthIncrementalConsentPage {...incremental} />;
+  return <StandardConsentPage />;
+}
+
+function StandardConsentPage() {
   useApplyTheme();
   const { data: userServices, isLoading: userServicesLoading } =
     useUserServices();
@@ -332,34 +345,34 @@ export function OAuthConsentPage() {
 
           <DetailSection title="Requested access" className={NESTED_SECTION}>
             {scopes.map((item) => {
-                const meta = OAUTH_SCOPE_META[item] ?? {
-                  title: "Custom permission",
-                  description:
-                    "This app is requesting a non-standard permission.",
-                  risk: "medium" as const,
-                };
-                return (
-                  <div key={`meta-${item}`} className="px-4 py-2.5">
-                    <div className="flex items-start justify-between gap-3">
-                      <p className="min-w-0 break-words text-[12px] font-medium text-foreground">
-                        {meta.title}
-                      </p>
-                      <Badge
-                        variant={scopeRiskBadgeVariant(meta.risk)}
-                        className="shrink-0"
-                      >
-                        {scopeRiskLabel(meta.risk)}
-                      </Badge>
-                    </div>
-                    <p className="mt-1 text-[12px] leading-relaxed text-muted-foreground">
-                      {meta.description}
+              const meta = OAUTH_SCOPE_META[item] ?? {
+                title: "Custom permission",
+                description:
+                  "This app is requesting a non-standard permission.",
+                risk: "medium" as const,
+              };
+              return (
+                <div key={`meta-${item}`} className="px-4 py-2.5">
+                  <div className="flex items-start justify-between gap-3">
+                    <p className="min-w-0 break-words text-[12px] font-medium text-foreground">
+                      {meta.title}
                     </p>
-                    <p className="mt-1.5 break-all font-mono text-[11px] text-text-tertiary">
-                      {item}
-                    </p>
+                    <Badge
+                      variant={scopeRiskBadgeVariant(meta.risk)}
+                      className="shrink-0"
+                    >
+                      {scopeRiskLabel(meta.risk)}
+                    </Badge>
                   </div>
-                );
-              })}
+                  <p className="mt-1 text-[12px] leading-relaxed text-muted-foreground">
+                    {meta.description}
+                  </p>
+                  <p className="mt-1.5 break-all font-mono text-[11px] text-text-tertiary">
+                    {item}
+                  </p>
+                </div>
+              );
+            })}
           </DetailSection>
 
           <DetailSection

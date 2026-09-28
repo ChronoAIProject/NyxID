@@ -78,6 +78,7 @@ vendor retirement](docs/SERVICE_CONFIGURATION.md).
 - **MCP auto-wrap** — REST APIs with OpenAPI specs become [MCP](https://modelcontextprotocol.io/) (Model Context Protocol) tools. `nyxid mcp config --tool cursor` generates the config. Works with Claude Code, Cursor, VS Code, and any MCP client.
 - **Per-agent isolation** — each agent gets a scoped token. Agent A accesses Slack and Gmail. Agent B only accesses your internal API. Revoke any session without touching the underlying credentials.
 - **Full identity layer** — OIDC (OpenID Connect) / OAuth 2.0 with PKCE (Proof Key for Code Exchange), RBAC (Role-Based Access Control), service accounts, transaction approval (Telegram + mobile push), LLM (Large Language Model) gateway for 7 providers.
+- **Add service access when needed** — applications can request [incremental OAuth consent](docs/site/shared/concepts/oauth-oidc.md#adding-service-access-incrementally), showing new services separately while preserving existing access in refresh tokens and broker bindings.
 
 ## See It in Action
 
