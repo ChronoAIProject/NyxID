@@ -382,8 +382,10 @@ it("merges every grant into one row with a soonest-expiring table", async () => 
       .getByText("Credit grants", { selector: "strong" })
       .closest("details")!;
     expect(within(row).getByText("4 grants")).toBeInTheDocument();
-    // Available = sum(remaining - reserved) = 11.84 - 0.5.
-    expect(within(row).getByText("11.34 credits")).toBeInTheDocument();
+    // Available = sum(remaining - reserved) over spendable tranches =
+    // 10.84 - 0.5; the pending 1 credit is not spendable yet.
+    expect(within(row).getByText("10.34 credits")).toBeInTheDocument();
+    expect(within(row).getByText("· 1 pending")).toBeInTheDocument();
     // Segments in consumption order (soonest expiry first), sized by credits.
     expect(
       [...row.querySelectorAll<HTMLElement>("summary .stack-seg")].map(
@@ -424,6 +426,13 @@ it("merges every grant into one row with a soonest-expiring table", async () => 
     ]);
     // Only a non-normal state gets a badge; the last-5% row is flagged.
     expect(within(table).getAllByText("Pending")).toHaveLength(1);
+    // A pending tranche has no bar segment, so its swatch is hollow.
+    expect(rows[3]!.querySelector(".stack-swatch")).toHaveClass(
+      "stack-swatch-empty",
+    );
+    expect(rows[0]!.querySelector(".stack-swatch")).not.toHaveClass(
+      "stack-swatch-empty",
+    );
     expect(within(rows[1]!).getByText("96%")).toHaveClass("text-warning");
     expect(within(rows[0]!).getByText("4%")).not.toHaveClass("text-warning");
     // The two-line phone rows carry the same tranches.

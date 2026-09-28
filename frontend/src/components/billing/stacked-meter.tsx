@@ -13,9 +13,16 @@ import {
 import { cn } from "@/lib/utils";
 
 /** The legend/row marker for one segment, at that segment's opacity step. */
-export function StackSwatch({ step }: { step: number }) {
+/** A `null` step marks an entry that has no segment in the bar (e.g. a pending grant). */
+export function StackSwatch({ step }: { step: number | null }) {
   return (
-    <span className={cn("stack-swatch", `stack-step-${step}`)} aria-hidden />
+    <span
+      className={cn(
+        "stack-swatch",
+        step === null ? "stack-swatch-empty" : `stack-step-${step}`,
+      )}
+      aria-hidden
+    />
   );
 }
 

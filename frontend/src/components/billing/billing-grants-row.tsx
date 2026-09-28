@@ -113,17 +113,25 @@ export function CreditGrantsRow({
     return <p className="empty-inline">No active credit grants.</p>;
   }
   const grants = [...activeGrants].sort(byConsumption);
-  const remaining = grants.reduce(
+  // A pending grant is unspendable until its ledger entry is confirmed, so it
+  // is listed in the table but kept out of the available balance and the bar.
+  const spendable = grants.filter(
+    (grant) => grant.activation_state !== "pending_activation",
+  );
+  const pending = grants
+    .filter((grant) => grant.activation_state === "pending_activation")
+    .reduce((sum, grant) => sum + grant.remaining_micros, 0);
+  const remaining = spendable.reduce(
     (sum, grant) => sum + grant.remaining_micros,
     0,
   );
-  const reserved = grants.reduce(
+  const reserved = spendable.reduce(
     (sum, grant) => sum + grant.reserved_micros,
     0,
   );
   const available = Math.max(0, remaining - reserved);
   const stack = proportionalStack(
-    grants.map((grant) => ({
+    spendable.map((grant) => ({
       key: grant.id,
       label: grantName(grant),
       short: grantName(grant),
@@ -134,12 +142,13 @@ export function CreditGrantsRow({
     })),
   );
   const rows = grants.map((grant) => {
-    const item = stack.items.find((entry) => entry.key === grant.id)!;
+    const item = stack.items.find((entry) => entry.key === grant.id);
+    const percent = item?.percent ?? 0;
     return {
       grant,
-      step: item.step,
-      percent: item.percent,
-      status: stackStatus(item.percent),
+      step: item?.step ?? null,
+      percent,
+      status: stackStatus(percent),
     };
   });
   return (
@@ -155,7 +164,10 @@ export function CreditGrantsRow({
                 Credits applied after free usage and before your wallet. Grants
                 expiring soonest are used first.
               </p>
-              <p>Reserved credits are excluded from the available balance.</p>
+              <p>
+                Reserved credits are excluded from the available balance.
+                Pending grants become available once they are activated.
+              </p>
             </BenefitHelp>
           </strong>
           <span>
@@ -174,6 +186,7 @@ export function CreditGrantsRow({
               </TooltipContent>
             </Tooltip>
             <small>available</small>
+            {pending > 0 && <small>· {amount(pending)} pending</small>}
           </div>
           <StackedMeter stack={stack} label="Credit grants" />
         </div>
