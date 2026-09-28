@@ -129,6 +129,10 @@ it.each([false, true])(
     mocks.available = false;
     render(<ConnectLinkPage />);
     expect(screen.queryByRole("radio")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Authorization")).toHaveAttribute(
+      "placeholder",
+      "Paste API key or token for xAI",
+    );
     await userEvent.type(
       screen.getByLabelText("Authorization"),
       "personal-secret",
@@ -161,7 +165,10 @@ it("prefills an editable gateway URL and submits it with the credential", async 
   render(<ConnectLinkPage />);
   const url = screen.getByRole("textbox", { name: "Service URL" });
   expect(url).toHaveValue("https://gateway.example.test");
-  expect(screen.getByLabelText("Gateway bearer token")).toBeInTheDocument();
+  expect(screen.getByLabelText("Gateway bearer token")).toHaveAttribute(
+    "placeholder",
+    "Paste bearer token for xAI",
+  );
   await userEvent.clear(url);
   await userEvent.type(url, "https://another.example.test");
   await userEvent.type(

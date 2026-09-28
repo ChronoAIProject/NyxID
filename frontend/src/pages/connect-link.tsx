@@ -622,6 +622,9 @@ function CredentialForm({
     (preview.requires_gateway_url
       ? "Gateway bearer token"
       : "API key or token");
+  const credentialPlaceholder = preview.requires_gateway_url
+    ? `Paste bearer token for ${preview.service_name}`
+    : `Paste API key or token for ${preview.service_name}`;
 
   return (
     <Form {...form}>
@@ -633,7 +636,12 @@ function CredentialForm({
             <FormItem>
               <FormLabel>{credentialLabel}</FormLabel>
               <FormControl>
-                <Input type="password" autoComplete="off" {...field} />
+                <Input
+                  type="password"
+                  autoComplete="off"
+                  placeholder={credentialPlaceholder}
+                  {...field}
+                />
               </FormControl>
               <FormMessage />
             </FormItem>
