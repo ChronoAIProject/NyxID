@@ -419,6 +419,64 @@ async fn gateway_turns_admit_once_answer_only_the_verified_owner_and_keep_contex
     server.abort();
 }
 
+/// The gateway authenticates a channel's creator with NyxID
+/// `GET /api/v1/users/me`, classifies the subject with
+/// `GET /api/v1/orgs/{subject}/authorization` (404 means a person), and
+/// requires `profile.metadata.owner.subject` to match. Replays that check with
+/// the exact bearers `connect` uses.
+#[tokio::test]
+async fn gateway_creator_check_accepts_the_owner_bearer_nyxid_sends() {
+    let (state, _, server) = setup("nyxbot_creator_check").await;
+    // `/users/me` resolves the platform role that startup seeds.
+    crate::services::role_service::seed_system_roles(&state.db)
+        .await
+        .unwrap();
+    let (_, private) = crate::routes::build_router_with_state(state.clone());
+    let app = private.with_state(state.clone());
+    let call = |method: &str, path: String, bearer: String| {
+        let app = app.clone();
+        let request = axum::http::Request::builder()
+            .method(method)
+            .uri(path)
+            .header("authorization", format!("Bearer {bearer}"))
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(if method == "GET" {
+                ""
+            } else {
+                "{}"
+            }))
+            .unwrap();
+        async move {
+            let response = tower::ServiceExt::oneshot(app, request).await.unwrap();
+            let status = response.status();
+            (status, body_text(response).await)
+        }
+    };
+    let creator = creator_bearer(&state, OWNER).unwrap();
+    let (status, body) = call("GET", "/api/v1/users/me".into(), creator.to_string()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let me: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(me["id"], OWNER);
+    let (status, body) = call(
+        "GET",
+        format!("/api/v1/orgs/{OWNER}/authorization"),
+        creator.to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    // The creator bearer reads; it cannot change the account.
+    let (status, _) = call("PUT", "/api/v1/users/me".into(), creator.to_string()).await;
+    assert!(status == StatusCode::FORBIDDEN || status == StatusCode::UNAUTHORIZED);
+    // The channel's agent key (the provider bearer) is refused as a creator,
+    // which is why channel management uses the creator bearer.
+    let agent = create_gateway_agent_key(&state, OWNER, "Helper bot")
+        .await
+        .unwrap();
+    let (status, _) = call("GET", "/api/v1/users/me".into(), agent.full_key.clone()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    server.abort();
+}
+
 #[tokio::test]
 async fn relinking_a_bot_to_a_specialist_starts_that_agents_own_thread() {
     let (state, calls, server) = setup("nyxbot_relink").await;

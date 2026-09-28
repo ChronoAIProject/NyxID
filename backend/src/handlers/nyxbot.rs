@@ -87,6 +87,32 @@ async fn gateway_base(state: &AppState) -> AppResult<String> {
     Ok(base)
 }
 
+/// Acting service recorded on creator tokens (`act.sub`).
+const CREATOR_CLIENT_ID: &str = "nyxbot";
+/// A creator token covers one channel-management sequence.
+const CREATOR_TOKEN_TTL_SECS: i64 = 120;
+
+/// The owner's bearer for gateway channel management. The gateway resolves
+/// the creator with `GET /api/v1/users/me`, which refuses API keys, and requires
+/// `profile.metadata.owner.subject` to match. NyxID therefore mints a
+/// short-lived delegated token carrying only `account:read`, the narrowest
+/// credential that endpoint accepts. It is sent only to the gateway and is
+/// never logged or stored.
+fn creator_bearer(state: &AppState, owner: &str) -> AppResult<Zeroizing<String>> {
+    let user_id =
+        Uuid::parse_str(owner).map_err(|_| AppError::Internal("Invalid channel owner".into()))?;
+    crate::crypto::jwt::generate_delegated_access_token(
+        &state.jwt_keys,
+        &state.config,
+        &user_id,
+        crate::mw::auth::ACCOUNT_READ_SCOPE,
+        CREATOR_CLIENT_ID,
+        CREATOR_TOKEN_TTL_SECS,
+        None,
+    )
+    .map(Zeroizing::new)
+}
+
 struct GatewayResponse {
     status: u16,
     body: Value,
@@ -267,6 +293,34 @@ async fn known_owner_senders(state: &AppState, owner: &str, platform: &str) -> V
         .unwrap_or_default()
 }
 
+/// The channel's gateway agent key. It is the creator bearer on channel
+/// management (the gateway resolves the owner through `GET /api/v1/users/me`)
+/// and the bearer the gateway presents to NyxID as provider.
+pub(crate) async fn create_gateway_agent_key(
+    state: &AppState,
+    owner: &str,
+    label: &str,
+) -> AppResult<key_service::CreatedApiKey> {
+    key_service::create_api_key(
+        &state.db,
+        owner,
+        &format!("NyxBot gateway agent {}", identifier(label)),
+        "read proxy",
+        None,
+        Some("Authenticates the Agent Event Gateway to NyxBot. Managed by NyxBot."),
+        Some(&[]),
+        Some(&[]),
+        Some(false),
+        Some(false),
+        Some(false),
+        None,
+        None,
+        Some("generic"),
+        None,
+    )
+    .await
+}
+
 /// Link one of the owner's channel bots to an agent (NyxBot or a specialist).
 /// Idempotent: an active connection is relinked to `agent` if needed and
 /// returns itself with a fresh link code.
@@ -354,24 +408,7 @@ pub async fn connect(
     let mut agent_key_id = None;
     let mut agent_key_ciphertext = None;
     if gateway {
-        let agent = key_service::create_api_key(
-            &state.db,
-            owner,
-            &format!("NyxBot gateway agent {}", identifier(&label)),
-            "read proxy",
-            None,
-            Some("Authenticates the Agent Event Gateway to NyxBot. Managed by NyxBot."),
-            Some(&[]),
-            Some(&[]),
-            Some(false),
-            Some(false),
-            Some(false),
-            None,
-            None,
-            Some("nyxbot-gateway"),
-            None,
-        )
-        .await?;
+        let agent = create_gateway_agent_key(state, owner, &label).await?;
         agent_key_ciphertext = Some(
             state
                 .encryption_keys
@@ -550,6 +587,8 @@ async fn connect_gateway(
     {
         return Err("issuer_unsupported");
     }
+    let creator = creator_bearer(state, &row.user_id).map_err(|_| "creator_unavailable")?;
+    let creator = creator.as_str();
     let record_id = Uuid::new_v4().to_string();
     let mut body = gateway_policy(state, row, bot, &[]);
     body["record_id"] = json!(record_id);
@@ -558,7 +597,7 @@ async fn connect_gateway(
         state,
         reqwest::Method::POST,
         "/channels",
-        agent_key,
+        creator,
         Some(&body),
         Some(&record_id),
     )
@@ -597,7 +636,7 @@ async fn connect_gateway(
                 "/channels/{}?expected_version={version}",
                 urlencode(channel_id)
             ),
-            agent_key,
+            creator,
             None,
             None,
         )
@@ -651,7 +690,7 @@ async fn connect_gateway(
         state,
         reqwest::Method::PUT,
         &format!("/channels/{}", urlencode(channel_id)),
-        agent_key,
+        creator,
         Some(&update),
         None,
     )
@@ -723,17 +762,15 @@ async fn decrypt_agent_key(
 /// the route and both keys. Chats stay in the owner's history.
 pub async fn disconnect(state: &AppState, owner: &str, id: &str) -> AppResult<Value> {
     let row = load_channel(state, owner, id).await?;
-    // Release the gateway channel when we still can. Without a live agent key
-    // the gateway cannot authenticate us; the orphan then has no route, key
-    // or provider binding left to reach, so local cleanup proceeds regardless.
+    // Release the gateway channel as its creator. If the gateway refuses, the
+    // orphan has no route, key or provider binding left to reach, so local
+    // cleanup proceeds regardless.
     let mut gateway_released = row.transport != "gateway";
     if row.transport == "gateway"
-        && let (Some(channel_id), Some(version), Some(agent_key)) = (
-            row.gateway_channel_id.as_deref(),
-            row.gateway_version,
-            decrypt_agent_key(state, &row).await?,
-        )
+        && let (Some(channel_id), Some(version)) =
+            (row.gateway_channel_id.as_deref(), row.gateway_version)
     {
+        let creator = creator_bearer(state, owner)?;
         gateway_released = gateway_call(
             state,
             reqwest::Method::DELETE,
@@ -741,7 +778,7 @@ pub async fn disconnect(state: &AppState, owner: &str, id: &str) -> AppResult<Va
                 "/channels/{}?expected_version={version}",
                 urlencode(channel_id)
             ),
-            &agent_key,
+            creator.as_str(),
             None,
             None,
         )
@@ -1245,6 +1282,7 @@ fn problem(status: StatusCode, code: &str) -> Response {
 }
 
 /// Authenticate the gateway: the bearer is the channel's dedicated agent key.
+#[allow(clippy::result_large_err)]
 async fn provider_channel(
     state: &AppState,
     headers: &HeaderMap,
