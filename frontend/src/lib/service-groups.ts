@@ -4,6 +4,8 @@ export interface ServiceConnectionGroup {
   readonly id: string;
   readonly name: string;
   readonly slug: string | null;
+  readonly iconSlug: string;
+  readonly iconUrl: string | null;
   readonly description: string | null;
   readonly connections: readonly KeyInfo[];
 }
@@ -32,6 +34,8 @@ export function groupServiceConnections(
           ? (entry?.name ?? first.catalog_service_name ?? first.label)
           : first.label,
         slug,
+        iconSlug: first.catalog_service_slug ?? first.slug,
+        iconUrl: connections.length === 1 ? (first.icon_url ?? null) : null,
         description:
           entry?.description ??
           (connections.length === 1 ? first.description : null) ??

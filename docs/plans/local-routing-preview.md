@@ -1,6 +1,11 @@
 # Local routing preview with production metadata
 
-Refreshed 25 September 2026 from main `1b031c77` (frontend v0.30.2).
+Refreshed 28 September 2026 from main `bef3511b` (frontend v0.30.2), including
+the service icon registry and per-connection icon overrides from #1681.
+Grouped cards and service overview headers show the catalog icon; a group with
+one connection also uses its custom icon. Each connection row shows its own icon
+override, with the service glyph as fallback. Auto-connected and custom services
+can resolve their glyph by service slug without a catalog identifier.
 The prior preview is preserved in stash `e71429e8d5d19a1668df4f2e2925abba37625f61`.
 Updated 27 September: the actual React frontend now renders one collapsed card
 per catalog service, with its real configured connections inside. The same

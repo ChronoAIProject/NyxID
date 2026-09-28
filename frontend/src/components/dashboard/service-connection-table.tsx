@@ -8,6 +8,7 @@ import {
   Settings2,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { ServiceIcon } from "@/components/service-icon";
 import { ServiceOwnerAvatar } from "./service-owner-avatar";
 import { ServiceHistory } from "./service-history";
 import {
@@ -208,6 +209,11 @@ export function ServiceConnectionTable({
                       aria-label={`View ${key.label} connection details (${owner})`}
                       className="inline-flex min-w-0 items-center gap-1 rounded-sm font-medium hover:text-primary hover:underline focus-visible:outline-2 focus-visible:outline-ring"
                     >
+                      <ServiceIcon
+                        slug={key.catalog_service_slug ?? key.slug}
+                        iconUrl={key.icon_url}
+                        size="xs"
+                      />
                       <span className="truncate" title={key.label}>
                         {key.label}
                       </span>

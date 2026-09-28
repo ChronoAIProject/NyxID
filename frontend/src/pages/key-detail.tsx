@@ -2396,6 +2396,11 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
   const source = keyInfo.credential_source;
   const isOrgSource = source?.type === "org";
   const readOnly = !canEditConnection(keyInfo);
+  const canEditIcon =
+    !readOnly ||
+    (keyInfo.auto_connected &&
+      (source?.type === "personal" ||
+        (source?.type === "org" && source.role === "admin" && source.allowed)));
   const canReconnect =
     !readOnly &&
     !keyInfo.auto_connected &&
@@ -2454,7 +2459,16 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
         >
           All service connections
         </Link>
-        <PageHeader title={keyInfo.label} />
+        <PageHeader
+          title={keyInfo.label}
+          leading={
+            <ServiceIcon
+              slug={keyInfo.catalog_service_slug ?? keyInfo.slug}
+              iconUrl={keyInfo.icon_url}
+              size="lg"
+            />
+          }
+        />
         <Tabs value={platformTab === "history" ? "history" : "overview"} onValueChange={setPlatformTab}>
           <TabsList>
             <TabsTrigger value="overview">Overview</TabsTrigger>
@@ -2511,7 +2525,7 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
               keyId={keyInfo.id}
               slug={keyInfo.catalog_service_slug ?? keyInfo.slug}
               iconUrl={keyInfo.icon_url}
-              readOnly={readOnly}
+              readOnly={!canEditIcon}
             />
             <div className="flex flex-col gap-2">
               {keyInfo.auto_connected ? (

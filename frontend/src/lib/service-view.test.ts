@@ -12,6 +12,8 @@ const group: ServiceConnectionGroup = {
   id: "catalog:openai",
   name: "OpenAI",
   slug: "openai",
+  iconSlug: "openai",
+  iconUrl: null,
   description: null,
   connections: [
     {

@@ -1,7 +1,7 @@
 import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
 import { useState } from "react";
 import { Link, useParams } from "@tanstack/react-router";
-import { ArrowLeft, Globe } from "lucide-react";
+import { ArrowLeft } from "lucide-react";
 import { useKeys, useCatalog } from "@/hooks/use-keys";
 import { useUserServices } from "@/hooks/use-user-services";
 import { PageHeader } from "@/components/shared/page-header";
@@ -90,11 +90,11 @@ export function ServiceOverviewPage() {
             aria-hidden="true"
             className="flex size-12 items-center justify-center rounded-xl border border-border bg-card"
           >
-            {group.slug ? (
-              <ServiceIcon slug={group.slug} size="lg" />
-            ) : (
-              <Globe className="size-8 text-muted-foreground" />
-            )}
+            <ServiceIcon
+              slug={group.iconSlug}
+              iconUrl={group.iconUrl}
+              size="lg"
+            />
           </div>
         }
         description={

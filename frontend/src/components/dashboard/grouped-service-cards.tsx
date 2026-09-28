@@ -7,7 +7,7 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
-import { ChevronRight, Globe } from "lucide-react";
+import { ChevronRight } from "lucide-react";
 import { useServiceView } from "@/hooks/use-service-view";
 import { useServiceCardTransition } from "@/hooks/use-service-card-transition";
 import { ServiceViewToolbar } from "./service-view-toolbar";
@@ -151,11 +151,11 @@ function GroupCard({
           <div className="flex flex-1 flex-col gap-3 p-5">
             <div className="flex items-start gap-3">
               <div className="flex size-10 shrink-0 items-center justify-center rounded-lg border border-border bg-background/50">
-                {group.slug ? (
-                  <ServiceIcon slug={group.slug} size="md" />
-                ) : (
-                  <Globe className="size-5 text-muted-foreground" />
-                )}
+                <ServiceIcon
+                  slug={group.iconSlug}
+                  iconUrl={group.iconUrl}
+                  size="md"
+                />
               </div>
               <div className="min-w-0 flex-1">
                 <h3
