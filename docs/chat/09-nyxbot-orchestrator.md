@@ -167,7 +167,11 @@ agent, with that agent's authority and memory.
 - **Telegram** (`telegram`, `telegram-new`) uses the Agent Event Gateway,
   following CMA's Bot setup: NyxID mints a route key and a gateway agent key,
   creates the gateway channel as the owner, points the route key's callback at the
-  gateway, creates the default route, and attaches it. NyxID is the gateway's
+  gateway, creates the default route, and attaches it. Channel management
+  (create, attach, delete) authenticates as the owner with a 120-second delegated
+  token carrying only `account:read`, because the gateway resolves creators with
+  `GET /api/v1/users/me`, which refuses API keys. The agent key is the channel's
+  provider and event-tool bearer, never a creator bearer. NyxID is the gateway's
   `nyxbot` provider (`/api/v1/nyxbot/{agent-card,bindings/…,responses}`) and
   streams only the final answer as a committed message; `event_context` is stored
   encrypted and served verbatim for `readEventContext`.
