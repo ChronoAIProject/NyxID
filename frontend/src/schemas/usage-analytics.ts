@@ -61,7 +61,7 @@ export const analyticsPanelSchema = z
     measure: z.enum(ANALYTICS_MEASURES),
     metric: z.enum(BILLING_METRICS),
     breakdown: z.enum(["service", "user", "owner", "credential_class"]),
-    top: z.union([z.literal(0), z.literal(5), z.literal(10)]),
+    top: z.union([z.literal(0), z.literal(5), z.literal(10), z.literal(20)]),
     wide: z.boolean(),
     span: z.union([z.literal(1), z.literal(2), z.literal(3)]).optional(),
     height: z.enum(["compact", "standard", "tall"]).optional(),
@@ -124,7 +124,7 @@ export const analyticsResponseSchema = z.object({
         points: z.array(analyticsPointSchema),
       }),
     )
-    .max(11),
+    .max(21),
   slices: z.array(
     z.object({
       id: z.string().nullable(),

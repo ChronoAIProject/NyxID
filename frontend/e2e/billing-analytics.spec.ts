@@ -165,6 +165,130 @@ test("Operations adds and restores more than twelve panels and loads charts as t
   ).toHaveAttribute("aria-pressed", "true");
 });
 
+test("Operations drag resizing persists and exposes twenty chart colors", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1600, height: 900 });
+  await page.goto("/admin/usage?mock=1&sample=operations");
+  const panel = page.locator(".analytics-grid-item").first();
+  const grip = page.getByRole("button", { name: "Resize Request traffic" });
+  await expect(grip).toBeVisible();
+  await grip.scrollIntoViewIfNeeded();
+  await expect(grip).toHaveCSS("opacity", "0");
+  const width = (await panel.boundingBox())!.width;
+  const box = (await grip.boundingBox())!;
+  await page.mouse.move(box.x - 12, box.y + box.height / 2);
+  await expect(grip).toHaveCSS("opacity", "1");
+  expect(
+    await page.evaluate(
+      ({ x, y }) =>
+        document
+          .elementFromPoint(x, y)
+          ?.closest("button")
+          ?.getAttribute("aria-label"),
+      { x: box.x + box.width / 2, y: box.y + box.height / 2 },
+    ),
+  ).toBe("Resize Request traffic");
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await expect(panel).toHaveAttribute("data-resizing", "true");
+  await page.mouse.move(
+    box.x + box.width / 2 + width + 12,
+    box.y + box.height / 2 + 80,
+    {
+      steps: 8,
+    },
+  );
+  await expect(panel).toHaveAttribute("data-span", "2");
+  await page.mouse.up();
+  await expect(panel.locator(".analytics-plot")).toHaveCSS("height", "280px");
+  await expect(
+    page.getByRole("status", { name: "Workspace save status" }),
+  ).toContainText("Saved in this browser");
+  await page.reload();
+  await expect(page.locator(".analytics-grid-item").first()).toHaveAttribute(
+    "data-span",
+    "2",
+  );
+  await expect(
+    page.locator(".analytics-grid-item").first().locator(".analytics-plot"),
+  ).toHaveCSS("height", "280px");
+
+  await page.getByRole("button", { name: "Configure Request traffic" }).click();
+  await select(page, "Show", "Top 20 + Other");
+  await page.evaluate(() => {
+    document.documentElement.classList.remove("theme-light");
+    document.documentElement.classList.add("theme-dark");
+  });
+  const colors = await page
+    .locator(".analytics-chart")
+    .first()
+    .evaluate((chart) => {
+      const style = getComputedStyle(chart);
+      return Array.from({ length: 20 }, (_, index) =>
+        style.getPropertyValue(`--analytics-series-${index + 1}`).trim(),
+      );
+    });
+  expect(colors.every(Boolean)).toBe(true);
+  expect(new Set(colors).size).toBe(20);
+  const appliedColors = await page
+    .locator(".analytics-grid-item")
+    .first()
+    .locator(".analytics-chart span.rounded-full")
+    .evaluateAll((dots) =>
+      dots.map((dot) => getComputedStyle(dot).backgroundColor),
+    );
+  expect(new Set(appliedColors).size).toBeGreaterThan(1);
+  const lightColors = await page
+    .locator(".analytics-chart")
+    .first()
+    .evaluate((chart) => {
+      document.documentElement.classList.remove("theme-dark");
+      document.documentElement.classList.add("theme-light");
+      const style = getComputedStyle(chart);
+      return Array.from({ length: 20 }, (_, index) =>
+        style.getPropertyValue(`--analytics-series-${index + 1}`).trim(),
+      );
+    });
+  expect(new Set(lightColors).size).toBe(20);
+  expect(lightColors).not.toEqual(colors);
+});
+
+test("panel handles and options show action tooltips", async ({ page }) => {
+  await page.goto("/admin/usage?mock=1&sample=operations");
+  const drag = page.getByRole("button", { name: "Drag Request traffic" });
+  await drag.scrollIntoViewIfNeeded();
+  await expect(drag).toHaveCSS("opacity", "0");
+  const dragBox = (await drag.boundingBox())!;
+  await page.mouse.move(dragBox.x - 12, dragBox.y + dragBox.height / 2);
+  await expect(drag).toHaveCSS("opacity", "1");
+  await drag.hover();
+  await expect(page.getByRole("tooltip")).toHaveText("Drag to reorder");
+  await page.mouse.move(0, 0, { steps: 10 });
+  await expect(page.getByRole("tooltip")).toHaveCount(0);
+
+  const resize = page.getByRole("button", { name: "Resize Request traffic" });
+  await resize.scrollIntoViewIfNeeded();
+  const resizeBox = (await resize.boundingBox())!;
+  await page.mouse.move(resizeBox.x - 12, resizeBox.y + resizeBox.height / 2);
+  await expect(resize).toHaveCSS("opacity", "1");
+  await expect(resize.locator("svg")).toHaveClass(/lucide-move-diagonal-2/);
+  await resize.hover();
+  await expect(page.getByRole("tooltip")).toHaveText("Drag to resize");
+  await page.mouse.move(0, 0, { steps: 10 });
+  await expect(page.getByRole("tooltip")).toHaveCount(0);
+
+  const options = page.getByRole("button", {
+    name: "Configure Request traffic",
+  });
+  await options.hover();
+  await expect(page.getByRole("tooltip")).toHaveText("Panel options");
+  await options.click();
+  await expect(
+    page.getByRole("combobox", { name: "Panel width" }),
+  ).toBeVisible();
+});
+
 for (const choice of ["Use saved view", "Restore recovered draft"] as const) {
   test(`an incomplete recovered draft keeps charts visible until ${choice}`, async ({
     page,
