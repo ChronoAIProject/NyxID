@@ -12,6 +12,7 @@ Each verified upstream contract wins over prose. If the deployed or pinned upstr
 1. [Architecture](01-architecture.md) defines default NyxAgent, retained typed `NyxIdChat`, flag-gated stateless Direct, legacy history-only compatibility, ownership, authentication, and the Aevatar cutover gate.
 2. [Wire contract](02-wire-contract.md) specifies every browser call for all implemented engines, strict bodies, legacy read/delete resources, actor `/state`, fences, and retries.
 3. [NyxAgent engine](08-nyxagent-engine.md) is the normative request, persistence, credential, recovery, and Stop contract, verified against NxyAgent `58f647e4`.
+   - Proposed next: [NyxBot orchestrator](09-nyxbot-orchestrator.md) removes Ask mode and adds an orchestrator with disposable, key-scoped subagents (design only, not implemented).
 4. [Direct Chrono-LLM spec](direct-chronollm-spec.md) is the detailed v3.2 contract implemented by the default-off `experimental:direct-chat-engine` surface.
 5. [Endpoint selector addendum](direct-chronollm-endpoints-addendum.md) is a proposed spec v4 follow-up. Its consolidated flag, typed endpoint configuration, `chat-config` API, and gear panel are not implemented by the current branch.
 6. [Stream protocol](03-stream-protocol.md) specifies SSE decoding, typed identity adoption, actor-projection convergence, terminal settlement, and transcript boundaries.
