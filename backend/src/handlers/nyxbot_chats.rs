@@ -29,6 +29,91 @@ pub(super) fn chat_kind(kind: &str) -> &'static str {
     }
 }
 
+/// A private chat's thread on NyxID's relay: one per chat and sender.
+pub(super) fn direct_partition(chat_id: &str, sender_id: &str, thread_id: Option<&str>) -> String {
+    format!(
+        "direct_{}",
+        &sha256_hex(format!(
+            "{chat_id}\0{sender_id}\0{}",
+            thread_id.unwrap_or_default()
+        ))[..32]
+    )
+}
+
+/// A bot moved from NyxID's relay to the gateway keeps its private chats: the
+/// first gateway message of a chat takes over the chat's relay thread (its
+/// agent, settings and conversation) under the gateway's conversation, and
+/// conversations answering into that chat follow it. The gateway reports the
+/// same platform chat and sender IDs NyxID's relay does.
+pub(super) async fn adopt_relay_chat(
+    state: &AppState,
+    row: &NyxbotChannel,
+    partition: &str,
+    chat_id: &str,
+    sender_id: &str,
+    thread_id: Option<&str>,
+) -> AppResult<()> {
+    if sender_id.is_empty() {
+        return Ok(());
+    }
+    let legacy = direct_partition(chat_id, sender_id, thread_id);
+    let threads = state.db.collection::<NyxbotThread>(THREADS);
+    if threads
+        .find_one(doc! {"channel_id": &row.id, "partition": &legacy})
+        .await?
+        .is_none()
+    {
+        return Ok(());
+    }
+    // The gateway conversation carries no chat of its own yet (only its
+    // placeholder from `put_conversation`).
+    if threads
+        .find_one(doc! {"channel_id": &row.id, "partition": partition,
+        "kind": {"$ne": null}})
+        .await?
+        .is_some()
+    {
+        return Ok(());
+    }
+    // The gateway may re-create its placeholder in between: once more then.
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        threads
+            .delete_one(doc! {"channel_id": &row.id, "partition": partition, "kind": null})
+            .await?;
+        match threads
+            .update_one(
+                doc! {"channel_id": &row.id, "partition": &legacy},
+                doc! {"$set": {"partition": partition, "updated_at": bson::DateTime::now()}},
+            )
+            .await
+        {
+            Ok(moved) if moved.matched_count == 1 => break,
+            // Another message of the chat got there first.
+            Ok(_) => return Ok(()),
+            Err(error) if super::is_duplicate(&error) && attempts < 2 => continue,
+            Err(error) if super::is_duplicate(&error) => return Ok(()),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let conversations = state
+        .db
+        .collection::<crate::models::assistant_conversation::AssistantConversation>(
+            crate::models::assistant_conversation::COLLECTION_NAME,
+        );
+    for field in ["channel", "reply_channel"] {
+        conversations
+            .update_many(
+                doc! {"user_id": &row.user_id, format!("{field}.nyxbot_channel_id"): &row.id,
+                format!("{field}.partition"): &legacy},
+                doc! {"$set": {format!("{field}.partition"): partition}},
+            )
+            .await?;
+    }
+    Ok(())
+}
+
 /// The shared thread of a group, channel or topic.
 pub(super) fn group_partition(chat_id: &str, thread_id: Option<&str>) -> String {
     format!(

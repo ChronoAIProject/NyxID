@@ -7,8 +7,11 @@ pub const EVENTS_COLLECTION_NAME: &str = "nyxbot_events";
 pub const WATCHES_COLLECTION_NAME: &str = "nyxbot_watches";
 
 /// A channel bot linked to one of the owner's agents (NyxBot or a
-/// specialist). Telegram bots are reached through the Agent Event Gateway (`transport = "gateway"`, NyxID is the gateway's `nyxbot`
-/// provider); other platforms use NyxID's relay directly (`"direct"`).
+/// specialist). Personal Telegram bots, and personal bots on platforms whose
+/// `nyxbot:gateway-{platform}` feature flag is on for their owner, are reached
+/// through the Agent Event Gateway (`transport = "gateway"`, NyxID is the
+/// gateway's `nyxbot` provider); other bots use NyxID's relay directly
+/// (`"direct"`).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct NyxbotChannel {
     #[serde(rename = "_id")]
@@ -57,6 +60,29 @@ pub struct NyxbotChannel {
     /// `mention_or_reply_to_bot`.
     #[serde(default)]
     pub gateway_groups: Option<String>,
+    /// Gateway only, for platforms other than Telegram: the bot's own user ID
+    /// there (Lark: its `open_id`), pinned on the gateway source so mentions
+    /// of the bot are recognised.
+    #[serde(default)]
+    pub gateway_bot_id: Option<String>,
+    /// When NyxID last tried to move this personal bot onto the gateway
+    /// (its platform's gateway flag is on for the owner); tried daily.
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub gateway_attempted_at: Option<DateTime<Utc>>,
+    /// While a working bot on NyxID's relay is being moved onto the gateway:
+    /// the new gateway agent key, accepted by the provider endpoints before
+    /// the swap because the gateway binds its provider while creating the
+    /// channel. Cleared by the swap or the rollback.
+    #[serde(default)]
+    pub pending_agent_api_key_id: Option<String>,
+    /// While a move is being built: its new route key (reaped with the
+    /// pending agent key if the move never finished).
+    #[serde(default)]
+    pub pending_route_api_key_id: Option<String>,
+    /// When the gateway last refused this bot's platform, so it fell back to
+    /// NyxID's relay.
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub gateway_fallback_at: Option<DateTime<Utc>>,
     /// Gateway only: after the gateway refused an admission update, the
     /// sweep retries it no sooner than this.
     #[serde(default, with = "crate::models::bson_datetime::optional")]
