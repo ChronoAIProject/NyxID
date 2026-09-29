@@ -14,6 +14,15 @@ const PLATFORM_SLUG: Readonly<Record<string, string>> = {
   openclaw: "llm-openclaw",
 };
 
+/** Supported agent platform values shown by the API-key and CLI selectors. */
+export const PLATFORM_ICON_OPTIONS = [
+  { platform: "claude-code", label: "Claude Code" },
+  { platform: "cursor", label: "Cursor" },
+  { platform: "codex", label: "Codex" },
+  { platform: "openclaw", label: "OpenClaw" },
+  { platform: "generic", label: "Generic agent" },
+] as const;
+
 // Mirrors `service-icon.tsx`'s scale exactly, `!important` and all, so a
 // platform icon lines up with a service icon on the same surface and stays
 // robust inside containers that ship a blanket `[&_svg]` size (e.g.

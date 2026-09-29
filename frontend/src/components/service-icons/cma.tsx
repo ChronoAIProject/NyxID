@@ -5,11 +5,18 @@ export default function CmaIcon({ className }: ServiceIconProps) {
   return <CmaGlyph className={className} data-slug="cma" />;
 }
 
+/** Static CMA mark. The supplied animated asset is intentionally rendered as
+ * a still icon so service lists do not shimmer while users scan them. */
 export function CmaGlyph(
   props: SVGProps<SVGSVGElement> & { "data-slug"?: string },
 ) {
   return (
-    <svg viewBox="0 0 100 100" aria-hidden="true" {...props}>
+    <svg
+      viewBox="13 13 74 65"
+      aria-hidden="true"
+      data-cma-glyph="true"
+      {...props}
+    >
       <path
         d="M71 71 A30 30 0 1 0 29 71"
         fill="none"
