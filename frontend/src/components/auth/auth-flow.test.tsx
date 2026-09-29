@@ -14,28 +14,28 @@ const {
   loginFn,
   registerFn,
   toastFns,
-} =
-  vi.hoisted(() => ({
-    config: {
-      value: {
-        email_auth_enabled: true,
-        social_providers: ["google", "github"] as string[],
-      } as Record<string, unknown> | undefined,
-    },
-    deviceState: {
-      phase: "idle" as string,
-      request: null,
-      remainingSeconds: null,
-      error: null,
-    },
-    mockDeviceClose: vi.fn(),
-    mockDeviceStart: vi.fn(),
-    mockNavigate: vi.fn(),
-    mockOpenExternal: vi.fn(),
-    loginFn: vi.fn(),
-    registerFn: vi.fn(),
-    toastFns: { info: vi.fn(), error: vi.fn(), success: vi.fn() },
-  }));
+} = vi.hoisted(() => ({
+  config: {
+    value: {
+      invite_code_required: true,
+      email_auth_enabled: true,
+      social_providers: ["google", "github"] as string[],
+    } as Record<string, unknown> | undefined,
+  },
+  deviceState: {
+    phase: "idle" as string,
+    request: null,
+    remainingSeconds: null,
+    error: null,
+  },
+  mockDeviceClose: vi.fn(),
+  mockDeviceStart: vi.fn(),
+  mockNavigate: vi.fn(),
+  mockOpenExternal: vi.fn(),
+  loginFn: vi.fn(),
+  registerFn: vi.fn(),
+  toastFns: { info: vi.fn(), error: vi.fn(), success: vi.fn() },
+}));
 
 vi.mock("@/hooks/use-public-config", () => ({
   usePublicConfig: () => ({ data: config.value }),
@@ -79,6 +79,7 @@ vi.mock("qrcode", () => ({
 beforeEach(() => {
   vi.clearAllMocks();
   config.value = {
+    invite_code_required: true,
     email_auth_enabled: true,
     social_providers: ["google", "github"],
   };
@@ -125,6 +126,7 @@ describe("AuthFlow — login", () => {
     "renders the always-available app method correctly for social=$social email=$email",
     ({ social, email, divider }) => {
       config.value = {
+        invite_code_required: true,
         email_auth_enabled: email,
         social_providers: social,
       };
@@ -272,8 +274,18 @@ describe("AuthFlow — login", () => {
     );
   });
 
+  it("maps invite_code_already_redeemed to the already-redeemed message", () => {
+    render(
+      <AuthFlow initialPanel={0} socialError="invite_code_already_redeemed" />,
+    );
+    expect(screen.getByTestId("social-error")).toHaveTextContent(
+      "This invite code has already been redeemed with this account.",
+    );
+  });
+
   it("hides the email/password form when email auth is disabled", () => {
     config.value = {
+      invite_code_required: true,
       email_auth_enabled: false,
       social_providers: ["google"],
     };
@@ -290,54 +302,31 @@ describe("AuthFlow — login", () => {
 });
 
 describe("AuthFlow — register", () => {
-  it("opens the email form without an invitation code", async () => {
+  it("allows email registration without a code when the flag is disabled", async () => {
+    config.value = {
+      invite_code_required: false,
+      email_auth_enabled: true,
+      social_providers: ["google"],
+    };
     const user = userEvent.setup();
     render(<AuthFlow initialPanel={1} />);
-    expect(screen.queryByPlaceholderText("NYX-XXXXXXXX")).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Continue with Email" }));
+    await user.click(
+      screen.getByRole("button", { name: /Continue with Email/i }),
+    );
     expect(
-      screen.getByRole("heading", { name: "Email registration" }),
-    ).toBeInTheDocument();
-    expect(registerFn).not.toHaveBeenCalled();
-  });
-
-  it.each(["Google", "GitHub"])(
-    "starts %s signup without an invitation code and preserves return_to",
-    async (provider) => {
-      const user = userEvent.setup();
-      render(<AuthFlow initialPanel={1} returnTo="/team" />);
-      await user.click(
-        screen.getByRole("button", { name: `Continue with ${provider}` }),
-      );
-      const url = new URL(mockOpenExternal.mock.calls[0]![0] as string);
-      expect(url.pathname).toBe(`/api/v1/auth/social/${provider.toLowerCase()}`);
-      expect([...url.searchParams.entries()]).toEqual([["return_to", "/team"]]);
-    },
-  );
-
-  it("keeps email signup unavailable when email auth is disabled", () => {
-    config.value = { email_auth_enabled: false, social_providers: ["google"] };
-    render(<AuthFlow initialPanel={1} />);
-    expect(
-      screen.queryByRole("button", { name: "Continue with Email" }),
+      screen.queryByPlaceholderText("NYX-XXXXXXXX"),
     ).not.toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "Continue with Google" }),
-    ).toBeInTheDocument();
-  });
 
-  it("submits the registration without an invitation code on the happy path", async () => {
     registerFn.mockResolvedValue({ message: "Check your email." });
-    const user = userEvent.setup();
-    render(<AuthFlow initialPanel={1} />);
-    await user.click(screen.getByRole("button", { name: "Continue with Email" }));
-
     await user.type(screen.getByPlaceholderText("John Doe"), "Ada Lovelace");
     await user.type(
       screen.getByPlaceholderText("you@example.com"),
       "ada@example.com",
     );
-    await user.type(screen.getByPlaceholderText("Min 8 characters"), "Hunter22");
+    await user.type(
+      screen.getByPlaceholderText("Min 8 characters"),
+      "Hunter22",
+    );
     await user.type(
       screen.getByPlaceholderText("Re-enter your password"),
       "Hunter22",
@@ -349,6 +338,51 @@ describe("AuthFlow — register", () => {
         display_name: "Ada Lovelace",
         email: "ada@example.com",
         password: "Hunter22",
+        invite_code: "",
+      });
+    });
+  });
+
+  it("blocks the email step and shows the invite gate when no code is entered", async () => {
+    const user = userEvent.setup();
+    render(<AuthFlow initialPanel={1} />);
+
+    await user.click(
+      screen.getByRole("button", { name: /Continue with Email/i }),
+    );
+
+    expect(
+      screen.getByText("An invite code is required to use NyxID at this time."),
+    ).toBeInTheDocument();
+    expect(registerFn).not.toHaveBeenCalled();
+  });
+
+  it("submits the registration with the normalized invite code on the happy path", async () => {
+    registerFn.mockResolvedValue({ message: "Check your email." });
+    const user = userEvent.setup();
+    render(<AuthFlow initialPanel={1} initialInviteCode="nyx-abcd1234" />);
+
+    await user.type(screen.getByPlaceholderText("John Doe"), "Ada Lovelace");
+    await user.type(
+      screen.getByPlaceholderText("you@example.com"),
+      "ada@example.com",
+    );
+    await user.type(
+      screen.getByPlaceholderText("Min 8 characters"),
+      "Hunter22",
+    );
+    await user.type(
+      screen.getByPlaceholderText("Re-enter your password"),
+      "Hunter22",
+    );
+    await user.click(screen.getByRole("button", { name: "Create Account" }));
+
+    await waitFor(() => {
+      expect(registerFn).toHaveBeenCalledWith({
+        display_name: "Ada Lovelace",
+        email: "ada@example.com",
+        password: "Hunter22",
+        invite_code: "NYX-ABCD1234",
       });
     });
     expect(toastFns.info).toHaveBeenCalledWith("Check your email.");
@@ -368,15 +402,17 @@ describe("AuthFlow — register", () => {
       }),
     );
     const user = userEvent.setup();
-    render(<AuthFlow initialPanel={1} />);
-    await user.click(screen.getByRole("button", { name: "Continue with Email" }));
+    render(<AuthFlow initialPanel={1} initialInviteCode="NYX-ABCD1234" />);
 
     await user.type(screen.getByPlaceholderText("John Doe"), "Ada Lovelace");
     await user.type(
       screen.getByPlaceholderText("you@example.com"),
       "ada@example.com",
     );
-    await user.type(screen.getByPlaceholderText("Min 8 characters"), "Hunter22");
+    await user.type(
+      screen.getByPlaceholderText("Min 8 characters"),
+      "Hunter22",
+    );
     await user.type(
       screen.getByPlaceholderText("Re-enter your password"),
       "Hunter22",

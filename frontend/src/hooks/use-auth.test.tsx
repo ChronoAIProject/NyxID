@@ -79,6 +79,7 @@ describe("useRegister", () => {
       email: "new@example.com",
       password: "hunter2hunter2",
       display_name: "New User",
+      invite_code: "INVITE-123",
     };
     await result.current.mutateAsync(credentials);
 

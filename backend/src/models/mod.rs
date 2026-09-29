@@ -43,6 +43,7 @@ pub mod durable_operation_grant;
 pub mod feature_flag_metadata;
 pub mod feature_flag_override;
 pub mod group;
+pub mod invite_code;
 pub mod login_approval;
 pub mod login_client_context;
 pub mod login_code;

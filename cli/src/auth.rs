@@ -1178,6 +1178,7 @@ async fn run_browser_login(
     eprintln!("  {auth_url}");
     eprintln!();
     eprintln!("If login fails, check the browser tab for details");
+    eprintln!("(e.g. \"invite code required\" for new social sign-ups).");
     eprintln!();
 
     if let Err(e) = crate::browser::open_browser(&auth_url) {

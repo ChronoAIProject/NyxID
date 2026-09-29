@@ -41,6 +41,7 @@ export type SubDomain =
   | 'groups'
   | 'service_accounts'
   | 'audit_log'
+  | 'invite_codes'
   | 'orgs'
   | 'devices'
   | 'sessions'
@@ -107,6 +108,7 @@ export type DialogId =
   | 'admin_add_role'
   | 'admin_add_group'
   | 'admin_add_service_account'
+  | 'admin_add_invite_code'
   | 'delete_account_confirm'
   | 'other';
 

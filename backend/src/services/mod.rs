@@ -81,6 +81,7 @@ pub mod group_service;
 pub mod identity_service;
 pub mod ifttt_oauth_service;
 pub mod internal_auth;
+pub mod invite_code_service;
 pub mod key_service;
 pub mod lark_permission;
 pub mod llm_gateway_service;

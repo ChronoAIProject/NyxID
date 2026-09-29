@@ -1000,6 +1000,7 @@ const MOCK_PUBLIC_CONFIG = {
   node_ws_url: "ws://localhost:3001/api/v1/nodes/ws",
   version: "0.1.0-mock",
   social_providers: ["github"],
+  invite_code_required: true,
   email_auth_enabled: true,
 };
 
@@ -1127,8 +1128,8 @@ const MOCK_AUDIT_LOG = [
   { id: "aud-004", user_id: MOCK_ADMIN_USERS[0]!.id, api_key_id: null, api_key_name: null, event_type: "service_account.create", event_data: { name: "CI/CD Pipeline" }, ip_address: "192.168.1.10", user_agent: "Mozilla/5.0 (Macintosh)", created_at: "2026-05-13T14:00:00Z" },
   { id: "aud-005", user_id: MOCK_ADMIN_USERS[2]!.id, api_key_id: null, api_key_name: null, event_type: "mfa.setup", event_data: { method: "totp" }, ip_address: "172.16.0.20", user_agent: "Mozilla/5.0 (Linux)", created_at: "2026-05-13T10:00:00Z" },
   { id: "aud-006", user_id: MOCK_ADMIN_USERS[3]!.id, api_key_id: null, api_key_name: null, event_type: "user.login", event_data: { method: "password" }, ip_address: "192.168.1.42", user_agent: "Mozilla/5.0 (Macintosh)", created_at: "2026-05-14T08:10:00Z" },
-  { id: "aud-007", user_id: MOCK_ADMIN_USERS[0]!.id, api_key_id: null, api_key_name: null, event_type: "user.update", event_data: { display_name: "New name" }, ip_address: "192.168.1.10", user_agent: "Mozilla/5.0 (Macintosh)", created_at: "2026-05-12T15:00:00Z" },
-  { id: "aud-008", user_id: MOCK_ADMIN_USERS[4]!.id, api_key_id: null, api_key_name: null, event_type: "user.register", event_data: { method: "email" }, ip_address: "203.0.113.50", user_agent: "Mozilla/5.0 (iPhone)", created_at: "2026-05-10T15:00:00Z" },
+  { id: "aud-007", user_id: MOCK_ADMIN_USERS[0]!.id, api_key_id: null, api_key_name: null, event_type: "invite_code.create", event_data: { max_uses: 5 }, ip_address: "192.168.1.10", user_agent: "Mozilla/5.0 (Macintosh)", created_at: "2026-05-12T15:00:00Z" },
+  { id: "aud-008", user_id: MOCK_ADMIN_USERS[4]!.id, api_key_id: null, api_key_name: null, event_type: "user.register", event_data: { invite_code: "CHRONO-2026" }, ip_address: "203.0.113.50", user_agent: "Mozilla/5.0 (iPhone)", created_at: "2026-05-10T15:00:00Z" },
   { id: "aud-009", user_id: MOCK_ADMIN_USERS[0]!.id, api_key_id: null, api_key_name: null, event_type: "role.create", event_data: { name: "API Consumer" }, ip_address: "192.168.1.10", user_agent: "Mozilla/5.0 (Macintosh)", created_at: "2026-05-10T11:00:00Z" },
   { id: "aud-010", user_id: MOCK_ADMIN_USERS[0]!.id, api_key_id: null, api_key_name: null, event_type: "user.status_change", event_data: { target_user: "deactivated@example.com", is_active: false }, ip_address: "192.168.1.10", user_agent: "Mozilla/5.0 (Macintosh)", created_at: "2026-05-09T10:00:00Z" },
 ];
@@ -1220,6 +1221,40 @@ const MOCK_AUDIT_LOG_FILTER_OPTIONS = {
     })),
   ],
 };
+
+// ── Admin Invite Codes ──
+const MOCK_INVITE_CODES = [
+  {
+    id: "inv-001", code: "CHRONO-2026", max_uses: 5, used_count: 3, is_active: true,
+    created_by: MOCK_ADMIN_USERS[0]!.id,
+    creator: { email: "dannick@nyxid.dev", display_name: "Donnick Young" },
+    note: "Team onboarding Q1 2026",
+    created_at: "2026-01-10T09:00:00Z", updated_at: "2026-03-20T11:00:00Z",
+    usages: [
+      { user_id: MOCK_ADMIN_USERS[2]!.id, used_at: "2026-01-05T09:00:00Z", user_email: "sarah@chronoai.dev", user_display_name: "Sarah Park" },
+      { user_id: MOCK_ADMIN_USERS[3]!.id, used_at: "2026-02-10T14:00:00Z", user_email: "mike@chronoai.dev", user_display_name: "Mike Torres" },
+      { user_id: MOCK_ADMIN_USERS[4]!.id, used_at: "2026-03-20T11:00:00Z", user_email: "lin@chronoai.dev", user_display_name: "Lin Wei" },
+    ],
+  },
+  {
+    id: "inv-002", code: "PARTNER-VIP", max_uses: 10, used_count: 0, is_active: true,
+    created_by: MOCK_ADMIN_USERS[0]!.id,
+    creator: { email: "dannick@nyxid.dev", display_name: "Dannick Young" },
+    note: "Partner program invites",
+    created_at: "2026-04-01T12:00:00Z", updated_at: "2026-04-01T12:00:00Z",
+    usages: [],
+  },
+  {
+    id: "inv-003", code: "BETA-TEST-42", max_uses: 1, used_count: 1, is_active: false,
+    created_by: MOCK_ADMIN_USERS[1]!.id,
+    creator: { email: "alex@chronoai.dev", display_name: "Alex Chen" },
+    note: null,
+    created_at: "2025-12-20T08:00:00Z", updated_at: "2026-01-05T09:00:00Z",
+    usages: [
+      { user_id: MOCK_ADMIN_USERS[2]!.id, used_at: "2026-01-05T09:00:00Z", user_email: "sarah@chronoai.dev", user_display_name: "Sarah Park" },
+    ],
+  },
+];
 
 // ── Admin Roles ──
 const MOCK_ROLES = [
@@ -1839,6 +1874,9 @@ const MOCK_HANDLERS: MockHandler[] = [
 
   // Admin audit log
   (p) => p.match(/^\/admin\/audit-log/) ? { entries: MOCK_AUDIT_LOG, total: MOCK_AUDIT_LOG.length, page: 1, per_page: 50, filter_options: MOCK_AUDIT_LOG_FILTER_OPTIONS } : undefined,
+
+  // Admin invite codes
+  (p) => p.match(/^\/admin\/invite-codes$/) ? { invite_codes: MOCK_INVITE_CODES } : undefined,
 
   // Admin service accounts
   (p) => {

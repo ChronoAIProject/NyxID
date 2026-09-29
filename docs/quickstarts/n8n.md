@@ -33,7 +33,7 @@ n8n only stores the NyxID Agent Key. It never sees the Gemini or Telegram creden
 
 ### Step 0 — Get NyxID running and create an Agent Key
 
-**Hosted (recommended).** Sign up at [nyx.chrono-ai.fun/register](https://nyx.chrono-ai.fun/register). After signing in, open `AI Services` → `Agent Keys` → `Create API Key`. In the dialog, name the key `n8n`, click the `proxy` badge under `Scopes` so it's highlighted, then click `Create key`. Copy the displayed `nyx_…` value (shown once).
+**Hosted (recommended).** Sign up at [nyx.chrono-ai.fun/register](https://nyx.chrono-ai.fun/register) using the invite code in the [README Getting Started](../../README.md#1-install-nyxid). After signing in, open `AI Services` → `Agent Keys` → `Create API Key`. In the dialog, name the key `n8n`, click the `proxy` badge under `Scopes` so it's highlighted, then click `Create key`. Copy the displayed `nyx_…` value (shown once).
 
 ![Create API Key dialog with proxy scope selected](../connecting-services/img/06-create-agent-key.png)
 

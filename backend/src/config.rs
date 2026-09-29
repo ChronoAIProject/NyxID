@@ -587,7 +587,6 @@ pub struct AppConfig {
     /// platform-only even if legacy catalog records carry resale metadata.
     pub billing_resale_enabled: bool,
 
-    // Email authentication
     /// When `true`, email/password auth UI is shown on `/login` and
     /// `/register`, and `POST /api/v1/auth/register` accepts new accounts.
     /// Defaults to `false` — the self-host quickstart in `README.md` is the

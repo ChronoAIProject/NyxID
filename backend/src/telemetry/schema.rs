@@ -21,18 +21,34 @@ pub enum TelemetryEvent {
     UserSignedUp {
         /// `email` | `google` | `github` | `apple` — the auth method.
         method: String,
-        /// `direct` | `social_oauth` signup attribution.
+        /// `direct` | `invite_code` | `social_oauth` — funnel attribution.
+        /// `direct` is reserved for public-launch (gate disabled) email
+        /// signups that did not carry an invite code.
         source: String,
         /// Lowercased email-domain only (e.g. `gmail.com`). Full email
         /// would be scrubbed at egress; the domain remains usable for
         /// cohort analysis (corporate vs. personal accounts).
         email_domain: Option<String>,
+        /// SHA-256-prefix hash of the redeemed invite code's UUID, when
+        /// signup used one. Raw UUID would be scrubbed at egress; the
+        /// hash correlates this event with `invite.code_generated` /
+        /// `invite.code_redeemed`. `None` when no code was used.
+        invite_code_id: Option<String>,
         /// Bare-domain portion of the HTTP `Referer` header (host only,
         /// scheme/path stripped) when the signup arrived from the web.
         /// Stored as domain — not the full URL — so a referer with PII
         /// in the query string cannot leak through the scrubber. `None`
         /// for non-web signups or when Referer is absent.
         referrer_domain: Option<String>,
+        /// SHA-256-prefix hash of the inviting organization's user_id
+        /// when the invite code was issued by an org user. `None` for
+        /// personal invites or no invite. Hashed so the raw UUID is not
+        /// scrubbed away at egress.
+        via_org: Option<String>,
+        /// Convenience boolean: `true` iff an invite code was redeemed.
+        /// Redundant with `invite_code_id.is_some()` but kept so funnels
+        /// can split without HogQL `IS NOT NULL` checks.
+        invite_code_used: bool,
     },
     UserEmailVerified,
     AuthLoggedIn {
@@ -50,6 +66,26 @@ pub enum TelemetryEvent {
     AuthDelegationRefreshed {
         client_id: String,
     },
+    InviteCodeGenerated {
+        generated_by_role: String,
+    },
+    /// Emitted when a previously-generated invite code is consumed during
+    /// a successful signup. Pairs with `InviteCodeGenerated` to measure
+    /// per-code conversion (codes issued vs. codes redeemed) and
+    /// time-to-redemption distribution.
+    InviteCodeRedeemed {
+        /// SHA-256-prefix hash of the invite code's UUID. Raw UUID would
+        /// be redacted to `[UUID_REDACTED]` at egress.
+        code_id: String,
+        /// SHA-256-prefix hash of the creating admin/org user_id. Used
+        /// for "which inviter's codes convert best" cohort analysis.
+        created_by_user_id: String,
+        /// Days between `InviteCode.created_at` and redemption. Clamped
+        /// at zero so negative clock drift never produces a nonsensical
+        /// negative value.
+        days_to_redemption: u64,
+    },
+
     // --- handlers/users.rs ----------------------------------------------
     UserDeleted {
         reason: Option<String>,
@@ -345,6 +381,8 @@ impl TelemetryEvent {
             Self::AuthTokenRefreshed => "auth.token_refreshed",
             Self::AuthTokenExchanged { .. } => "auth.token_exchanged",
             Self::AuthDelegationRefreshed { .. } => "auth.delegation_refreshed",
+            Self::InviteCodeGenerated { .. } => "invite.code_generated",
+            Self::InviteCodeRedeemed { .. } => "invite.code_redeemed",
             Self::UserDeleted { .. } => "user.deleted",
             Self::MfaEnrollmentStarted { .. } => "mfa.enrollment_started",
             Self::MfaEnrollmentCompleted { .. } => "mfa.enrollment_completed",
@@ -432,12 +470,18 @@ impl TelemetryEvent {
                 method,
                 source,
                 email_domain,
+                invite_code_id,
                 referrer_domain,
+                via_org,
+                invite_code_used,
             } => json!({
                 "method": method,
                 "source": source,
                 "email_domain": email_domain,
+                "invite_code_id": invite_code_id,
                 "referrer_domain": referrer_domain,
+                "via_org": via_org,
+                "invite_code_used": invite_code_used,
             }),
             Self::UserEmailVerified => json!({}),
             Self::AuthLoggedIn {
@@ -459,6 +503,18 @@ impl TelemetryEvent {
                 "exchange_provider": exchange_provider,
             }),
             Self::AuthDelegationRefreshed { client_id } => json!({ "client_id": client_id }),
+            Self::InviteCodeGenerated { generated_by_role } => json!({
+                "generated_by_role": generated_by_role,
+            }),
+            Self::InviteCodeRedeemed {
+                code_id,
+                created_by_user_id,
+                days_to_redemption,
+            } => json!({
+                "code_id": code_id,
+                "created_by_user_id": created_by_user_id,
+                "days_to_redemption": days_to_redemption,
+            }),
             Self::UserDeleted { reason } => json!({ "reason": reason }),
             Self::MfaEnrollmentStarted { factor_type } => json!({ "factor_type": factor_type }),
             Self::MfaEnrollmentCompleted { factor_type } => json!({ "factor_type": factor_type }),
@@ -779,16 +835,38 @@ mod tests {
     }
 
     #[test]
+    fn invite_code_redeemed_uses_pre_hashed_ids() {
+        // The schema scrubber redacts raw UUIDs at egress. Emit sites
+        // must pre-hash IDs so the values survive scrubbing intact —
+        // this test enforces that contract by feeding a hash-shaped
+        // value (hex, length 16) and asserting it passes through.
+        let e = TelemetryEvent::InviteCodeRedeemed {
+            code_id: "a1b2c3d4e5f60718".into(),
+            created_by_user_id: "0123456789abcdef".into(),
+            days_to_redemption: 3,
+        };
+        assert_eq!(e.name(), "invite.code_redeemed");
+        let v = e.properties();
+        assert_eq!(v["code_id"], "a1b2c3d4e5f60718");
+        assert_eq!(v["created_by_user_id"], "0123456789abcdef");
+        assert_eq!(v["days_to_redemption"], 3);
+    }
+
+    #[test]
     fn user_signed_up_carries_funnel_attribution() {
         let e = TelemetryEvent::UserSignedUp {
             method: "email".into(),
-            source: "direct".into(),
+            source: "invite_code".into(),
             email_domain: Some("example.com".into()),
+            invite_code_id: Some("deadbeefdeadbeef".into()),
             referrer_domain: Some("twitter.com".into()),
+            via_org: None,
+            invite_code_used: true,
         };
         let v = e.properties();
-        assert_eq!(v["source"], "direct");
+        assert_eq!(v["source"], "invite_code");
         assert_eq!(v["email_domain"], "example.com");
+        assert_eq!(v["invite_code_used"], true);
         assert_eq!(v["referrer_domain"], "twitter.com");
     }
 
@@ -853,6 +931,13 @@ mod tests {
                 },
                 "auth.delegation_refreshed",
                 json!({"client_id": "client-1"}),
+            ),
+            (
+                TelemetryEvent::InviteCodeGenerated {
+                    generated_by_role: "admin".into(),
+                },
+                "invite.code_generated",
+                json!({"generated_by_role": "admin"}),
             ),
             (
                 TelemetryEvent::UserDeleted {

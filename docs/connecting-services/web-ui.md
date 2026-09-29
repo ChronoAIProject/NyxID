@@ -10,7 +10,7 @@ Console URL: **https://nyx.chrono-ai.fun**
 
 ### 1. Sign in
 
-If you don't have an account yet, register at [nyx.chrono-ai.fun/register](https://nyx.chrono-ai.fun/register).
+If you don't have an account yet, register at [nyx.chrono-ai.fun/register](https://nyx.chrono-ai.fun/register) with invite code `NYX-FGNY85AF`.
 
 ### 2. Add an AI Service
 

@@ -24,6 +24,7 @@ import {
   Radio,
   KeyRound,
   Bot,
+  Ticket,
   Flag,
   PanelLeftClose,
   PanelLeft,
@@ -73,6 +74,7 @@ export const DEVELOPER_NAV = [
 
 export const ADMIN_NAV = [
   { to: "/admin/users", icon: Users, label: "Users" },
+  { to: "/admin/invite-codes", icon: Ticket, label: "Invite Codes" },
   { to: "/admin/feature-flags", icon: Flag, label: "Feature Flags" },
   { to: "/admin/platform-credentials", icon: KeyRound, label: "Platform Credentials" },
   { to: "/admin/audit-log", icon: ClipboardList, label: "Audit Log" },

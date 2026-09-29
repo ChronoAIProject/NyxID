@@ -225,6 +225,11 @@ export const AdminAuditLogPage = lazy(() =>
     default: m.AdminAuditLogPage,
   })),
 );
+export const AdminInviteCodesPage = lazy(() =>
+  import("@/pages/admin-invite-codes").then((m) => ({
+    default: m.AdminInviteCodesPage,
+  })),
+);
 export const AdminPlatformCredentialsPage = lazy(() => import("./admin-platform-credentials").then((m) => ({ default: m.AdminPlatformCredentialsPage })));
 
 export const AdminFeatureFlagsPage = lazy(() =>

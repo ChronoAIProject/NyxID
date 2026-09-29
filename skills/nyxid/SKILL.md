@@ -55,12 +55,15 @@ nyxid login --base-url https://nyx-api.chrono-ai.fun
 
 The CLI stores tokens at `~/.nyxid/` and auto-refreshes them. The base URL is saved on login -- all subsequent commands use it automatically.
 
-New users can sign up with any configured social provider. When `EMAIL_AUTH_ENABLED=true`, email/password registration is also available:
-
-```bash
-nyxid register --base-url https://nyx-api.chrono-ai.fun \
-  --email you@example.com --name "Your Name"
-```
+> **Registration may require an invite code.** The global `auth:invitation-code` feature flag defaults to enabled and can be toggled by a platform admin. When enabled, users need a code from an admin and can register via the web UI or the CLI:
+>
+> ```bash
+> nyxid register --base-url https://nyx-api.chrono-ai.fun \
+>   --email you@example.com --name "Your Name" \
+>   --invite-code NYX-XXXXXXXX
+> ```
+>
+> When the gate is enabled, social login (Google, GitHub, Apple) only works for **existing** users -- first-time social sign-ups are blocked. Users must register with email + invite code first, then link a social provider afterwards by signing in with the same email. When the gate is disabled (public-launch mode), both email registration and first-time social sign-ups work without an invite code.
 
 ## Updating
 
@@ -130,7 +133,7 @@ Load the matching `references/<file>.md` when the user asks for one of these top
 | "channel bot", "register a bot", conversation routing, proactive / unprompted messages, `/channel-relay/send`, `/channel-relay/conversations`, `/channel-relay/reply`, callback / reply tokens, ADR-013 passthrough semantics, device events / HTTP Event Gateway, `/channel-events/{id}` | `references/channels.md` |
 | "inbound trigger", "webhook trigger", provider event relay, bearer/query/HMAC trigger verification, durable webhook delivery, delivery history/replay, signing-key rotation, Lark Base automation to Aevatar | `references/triggers.md` |
 | OpenClaw setup, `llm-openclaw` transport selection, `x-openclaw-scopes` default header | `references/openclaw.md` |
-| `nyxid whoami / status / profile / mfa / session`, `nyxid admin user list/show/set-role`, platform roles (admin / operator / user), `nyxid mcp config`, error codes (1001/1002/7000/7001/8003, downstream 403 / WAF / User-Agent override) | `references/admin.md` |
+| `nyxid whoami / status / profile / mfa / session`, `nyxid admin user list/show/set-role`, platform roles (admin / operator / user), `nyxid admin invite-code`, `nyxid mcp config`, error codes (1001/1002/7000/7001/8003, downstream 403 / WAF / User-Agent override) | `references/admin.md` |
 | "list / revoke broker authorizations", "what apps hold credentials for me", `/settings/authorizations`, `nyxid oauth bindings`, OAuth `binding_id` / token vault, distinction from "Authorized Apps" (consents) | `references/oauth-broker.md` |
 
 Prefer the canonical reference over guessing. If a topic spans two files (e.g. "create an org-shared API key with rate limits"), load both `organizations.md` and `managing.md`.

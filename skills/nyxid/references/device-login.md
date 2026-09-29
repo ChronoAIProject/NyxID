@@ -10,7 +10,7 @@ Use the target deployment's base URL. These views answer different questions:
 
 | Question | Endpoint | Authentication and result |
 |---|---|---|
-| Which sign-in methods are configured? | `GET /api/v1/public/config` | Public when called without an `Authorization` header; an Agent Key on this human-only route is rejected. `social_providers` lists configured social methods; `email_auth_enabled` gates email/password. The shared login also offers the NyxID app. |
+| Which sign-in methods are configured? | `GET /api/v1/public/config` | Public when called without an `Authorization` header; an Agent Key on this human-only route is rejected. `social_providers` lists configured social methods; `email_auth_enabled` gates email/password; `invite_code_required` describes registration. The shared login also offers the NyxID app. |
 | Which operations are published for anonymous discovery? | `POST /public/mcp` with `{"jsonrpc":"2.0","id":1,"method":"tools/list"}` | Public. Returns only operations covered by enabled anonymous endpoint rules, possibly none. It is not the full service catalog; `tools/call` is unsupported here. |
 | What does a known hosted provider API support? | `GET /api/v1/catalog-specs/{spec_key_or_catalog_slug}/openapi.json` | Public static overlay for registered keys/slugs. It does not prove the deployment enabled that service or a user connected it. Unknown mappings return 404. |
 | Which service templates and provider scopes are visible to this caller? | `GET /api/v1/catalog?include_all=true`, `GET /api/v1/catalog/{slug}`, `GET /api/v1/catalog/{slug}/endpoints` | Authenticated. Catalog metadata and `scope_catalog[].scope`; visibility and live grants apply. Templates are not connected accounts or execution grants. |

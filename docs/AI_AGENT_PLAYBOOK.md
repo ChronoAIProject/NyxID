@@ -144,7 +144,7 @@ header. They describe deployment metadata, anonymous operations or static APIs:
 
 | Endpoint | What it provides |
 |---|---|
-| `GET /api/v1/public/config` | Configured social providers and email/password availability. |
+| `GET /api/v1/public/config` | Configured social providers, email/password availability and registration gates. |
 | `POST /public/mcp` with `{"jsonrpc":"2.0","id":1,"method":"tools/list"}` | Only operations covered by enabled anonymous endpoint rules; possibly none. This surface does not execute tools. |
 | `GET /api/v1/catalog-specs/{spec_key_or_catalog_slug}/openapi.json` | A registered static provider overlay, without proving deployment enablement or user access. |
 
@@ -334,8 +334,8 @@ The old **Connection** and **Provider** concepts are now unified into the AI Ser
 
 ### What the user needs before starting
 
-- A NyxID account. Register at http://localhost:3000/register with a configured social provider, or use email/password when `EMAIL_AUTH_ENABLED=true`. The CLI also supports `nyxid register --base-url <URL> --email <addr>`.
-- For admin operations: an admin account.
+- A NyxID account. Registration requires an **invite code** from an admin. Register via http://localhost:3000/register (web) or `nyxid register ... --invite-code NYX-XXXXXXXX` (CLI). Social login (Google/GitHub/Apple) only works for users who already have a NyxID account -- first-time social sign-ups are rejected because the OAuth redirect cannot carry an invite code.
+- For admin operations: an admin account. Admins can mint new invite codes with `nyxid admin invite-code create` (defaults to 10 uses per code; `--max-uses` accepts 1..1000).
 - An API key for AI agent access (see below)
 
 ### Set up an API key for AI agent access (recommended)

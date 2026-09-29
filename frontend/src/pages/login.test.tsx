@@ -35,7 +35,7 @@ afterEach(() => {
 });
 
 describe("LoginPage", () => {
-  it("renders the login AuthFlow (initialPanel=0) and forwards return_to and social error, ignoring retired code links", () => {
+  it("renders the login AuthFlow (initialPanel=0) and forwards return_to, social error, and invite code", () => {
     window.history.pushState(
       {},
       "",
@@ -50,6 +50,7 @@ describe("LoginPage", () => {
       initialPanel: 0,
       returnTo: "/dashboard",
       socialError: "access_denied",
+      initialInviteCode: "INVITE-5",
     });
   });
 

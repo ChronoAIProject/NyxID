@@ -14,7 +14,7 @@
 
   Missing/invalid steps normalize to Account with history replacement. Page actions push the destination URL; guards and callback cleanup replace it. Browser Back/Forward and refresh use the same route state. No step is inferred from an internal view toggle.
 - `/nyxbot/onboarding?channel=telegram` and `?channel=whatsapp` preselect the corresponding channel. This is a frontend entry convention to give the bot team, not an existing bot session protocol. Direct visits have no preselection.
-- Authentication uses NyxID's existing social endpoints, registration/login routes, trusted same-origin `return_to`, and NyxID app device login. Email and MFA remain in the existing authentication pages.
+- Authentication uses NyxID's existing social endpoints, registration/login routes, trusted same-origin `return_to`, and NyxID app device login. Email, invite codes and MFA remain in the existing authentication pages.
 - The sign-in screen always shows Google, GitHub, Apple and NyxID app in that order. `/public/config` controls whether a social button can begin OAuth, not whether its row exists. An unavailable method explains its state without navigating or creating a fake login. The optional email link follows `email_auth_enabled`.
 - Google Workspace uses the real `api-google` catalog entry, `POST /keys`, provider OAuth initiation with the placeholder key ID, and the existing authorization status query. Both Drive file access and Calendar management must actually be granted. A callback URL saying `status=success` is insufficient.
 - Connect Google is enabled once its provider route is loaded. Clicking creates/reuses the connection and requests both scopes, then navigates to the returned Google authorization URL. Catalog credential flags and scope lists do not suppress the click; the backend resolves credentials and enforces the request. Initiation failures show the API error and keep the account signed in. A failed attempt does not claim user cancellation or consent.
@@ -86,7 +86,7 @@ Using the owner's existing local browser tab/session, `/users/me` authenticated 
 
 ## Local Preview Against Hosted NyxID
 
-The owner selected `https://nyx.chrono-ai.fun` for integration. Its API is `https://nyx-api.chrono-ai.fun`; the public configuration controls the configured social providers and email authentication. Run the existing frontend against that environment from `frontend/`:
+The owner selected `https://nyx.chrono-ai.fun` for integration. Its API is `https://nyx-api.chrono-ai.fun`; the public configuration enables Google, GitHub and Apple, requires invite codes for registration, and disables email authentication. Run the existing frontend against that environment from `frontend/`:
 
 ```sh
 BACKEND_URL=https://nyx-api.chrono-ai.fun \

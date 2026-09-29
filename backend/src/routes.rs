@@ -1052,7 +1052,17 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             "/oauth-clients/{client_id}/consents",
             get(handlers::admin::list_client_consents),
         )
-        .nest("/service-accounts", sa_admin_routes);
+        .nest("/service-accounts", sa_admin_routes)
+        .nest("/invite-codes", {
+            Router::new()
+                .route("/", get(handlers::invite_codes::list_invite_codes))
+                .route("/", post(handlers::invite_codes::create_invite_code))
+                .route("/{id}", patch(handlers::invite_codes::update_invite_code))
+                .route(
+                    "/{id}",
+                    delete(handlers::invite_codes::deactivate_invite_code),
+                )
+        });
 
     let oauth_routes = Router::new()
         .route("/authorize", get(handlers::oauth::authorize))

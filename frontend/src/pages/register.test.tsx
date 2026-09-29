@@ -35,7 +35,7 @@ afterEach(() => {
 });
 
 describe("RegisterPage", () => {
-  it("renders the register AuthFlow (initialPanel=1) and forwards return_to, ignoring retired code links", () => {
+  it("renders the register AuthFlow (initialPanel=1) and forwards parsed return_to + invite code", () => {
     window.history.pushState(
       {},
       "",
@@ -49,10 +49,11 @@ describe("RegisterPage", () => {
     expect(JSON.parse(flow.dataset.props ?? "{}")).toEqual({
       initialPanel: 1,
       returnTo: "/team",
+      initialInviteCode: "INVITE-9",
     });
   });
 
-  it("forwards undefined returnTo when those params are absent", () => {
+  it("forwards undefined returnTo/inviteCode when those params are absent", () => {
     window.history.pushState({}, "", "/register");
 
     render(<RegisterPage />);

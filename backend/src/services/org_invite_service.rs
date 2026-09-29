@@ -1,6 +1,6 @@
 //! One-time org invite token issue and redemption.
 //!
-//! Organization invitations grant membership to an existing account.
+//! Distinct from `invite_code_service` (which gates new-user signup).
 //! Org invites are scoped to a specific org, single-use, TTL-bound, and
 //! redeemed by an existing logged-in person user.
 

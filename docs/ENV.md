@@ -509,7 +509,9 @@ All manual forwarding limits return the structured `request_body_too_large` erro
 | `SSH_CONNECT_TIMEOUT_SECS` | `10` | Timeout for connecting to the downstream SSH target |
 | `SSH_MAX_TUNNEL_DURATION_SECS` | `3600` | Maximum duration for a single SSH tunnel before forced close |
 
-## Email Authentication
+## Registration Gate
+
+Invitation codes are controlled by the global `auth:invitation-code` feature flag under Admin > Feature Flags. It defaults to enabled; disable it for public registration. `INVITE_CODE_REQUIRED` is no longer read.
 
 | Variable | Default | Description |
 |----------|---------|-------------|

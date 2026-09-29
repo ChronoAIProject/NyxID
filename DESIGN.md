@@ -172,7 +172,7 @@
 - **Text:** `text-xs`
 
 ### Sheet (slide-over panel)
-- Used for inline detail/edit on list pages where a full route is overkill (e.g. `admin-users` row detail). `sm:max-w-lg`, otherwise inherits Dialog tokens. Prefer Sheet over Dialog when the panel contains substantial reading content alongside actions.
+- Used for inline detail/edit on list pages where a full route is overkill (e.g. `admin-invite-codes` row detail). `sm:max-w-lg`, otherwise inherits Dialog tokens. Prefer Sheet over Dialog when the panel contains substantial reading content alongside actions.
 
 ## Spacing
 - **Base unit:** 4px
@@ -255,7 +255,7 @@ Sidebar organized into 3 groups (4 with admin) separated by labeled section head
 
 **Developer** — Developer Apps, AI Setup, Integration
 
-**Admin** (visible only to users with admin or operator role; admin pages share the same dashboard chrome — there is no separate admin layout. Operators see admin pages read-only.) — Users, Audit Log, Service Accounts, Roles, Groups, Node Registry, Services, Providers
+**Admin** (visible only to users with admin or operator role; admin pages share the same dashboard chrome — there is no separate admin layout. Operators see admin pages read-only.) — Users, Invite Codes, Audit Log, Service Accounts, Roles, Groups, Node Registry, Services, Providers
 
 ### Naming reconciliation
 The sidebar label and page title can drift; track this when writing breadcrumbs or copy:

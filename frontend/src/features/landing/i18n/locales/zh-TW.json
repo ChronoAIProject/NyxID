@@ -68,8 +68,8 @@
   "carousel.subheading": "每個請求、每個決定、每個憑證 — 對你可見，對其他一切隱藏。",
 
   "beta.heading": "與我們一同步入暗夜",
-  "beta.subheading": "NyxID 已開放註冊。加入我們的 Discord 社群，取得更新和支援。",
-  "beta.socialProof": "開放註冊",
+  "beta.subheading": "NyxID 目前處於封閉內測。加入我們的 Discord，名額開放時團隊將向你發送邀請碼。",
+  "beta.socialProof": "僅限邀請 — 在門檻之上取得",
   "beta.discordCta": "加入 Discord →",
-  "beta.disclaimer": "與社群交流，共同完善 NyxID。"
+  "beta.disclaimer": "邀請名額有限，將隨容量開放滾動發放。絕不發送垃圾郵件。"
 }

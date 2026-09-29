@@ -96,6 +96,9 @@ RUST_LOG=nyxid=info,tower_http=info
 EOF
 ln -sf .env.dev .env.production
 
+# After initial admin setup, disable auth:invitation-code in Admin > Feature Flags
+# if you want public registration without invitation codes.
+
 mkdir -p keys
 openssl genrsa -out keys/private.pem 4096 2>/dev/null
 openssl rsa -in keys/private.pem -RSAPublicKey_out -out keys/public.pem 2>/dev/null \

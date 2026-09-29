@@ -71,7 +71,7 @@ nyxid login --device --base-url <BASE_URL>  # force RFC 8628 device-code flow (n
 nyxid login --agent-key --profile agent --base-url <BASE_URL> # choose/create an Agent Key in the web UI or approve by phone QR
 nyxid login --password --email <addr>    # email + password (only if EMAIL_AUTH_ENABLED)
 nyxid logout                             # clear the stored session
-nyxid register --base-url <URL> --email <addr>
+nyxid register --base-url <URL> --email <addr> --invite-code <CODE>
 nyxid verify-email --token <TOKEN>       # confirm a new account
 nyxid forgot-password --email <addr>     # request a reset email
 nyxid reset-password --token <TOKEN>     # set a new password (use --password-env)
@@ -295,6 +295,9 @@ nyxid pairing resume <PAIRING_ID>
 Platform administration — requires the `admin` role.
 
 ```bash
+nyxid admin invite-code create [--max-uses <n>] [--note <text>]
+nyxid admin invite-code list
+nyxid admin invite-code deactivate <id>
 nyxid admin user list [--search <q>] [--page <n>] [--per-page <n>]
 nyxid admin user show <id>
 nyxid admin user set-role <id> --role admin|operator|user

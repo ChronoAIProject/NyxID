@@ -111,6 +111,7 @@ describe("feature flag catalog", () => {
   // failing. Pinning the literals makes a rename a deliberate two-sided edit.
   it("pins the backend registry key literals", () => {
     expect(FEATURE_FLAG).toEqual({
+      INVITATION_CODE: "auth:invitation-code",
       AI_ASSISTANT: "experimental:ai-assistant",
       NYXAGENT_ENGINE: "assistant:nyxagent-engine",
       BILLING: "experimental:billing",

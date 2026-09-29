@@ -123,8 +123,16 @@ const NYXAGENT_ENGINE_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: true,
 };
 
+pub const INVITATION_CODE_FLAG_KEY: &str = "auth:invitation-code";
+const INVITATION_CODE_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: INVITATION_CODE_FLAG_KEY,
+    description: "Require an invitation code for new account registration (global only).",
+    default_enabled: true,
+};
+
 #[cfg(not(test))]
 pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
+    INVITATION_CODE_FLAG,
     NYXAGENT_ENGINE_FLAG,
     AI_ASSISTANT_FLAG,
     BILLING_FLAG,
@@ -136,6 +144,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
 /// can exercise multiple definitions alongside the production registry entry.
 #[cfg(test)]
 pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
+    INVITATION_CODE_FLAG,
     NYXAGENT_ENGINE_FLAG,
     AI_ASSISTANT_FLAG,
     BILLING_FLAG_TEST,
@@ -441,6 +450,22 @@ pub async fn resolve_personal_features(
     ))
 }
 
+/// Signup has no user or organization yet, so only the global override applies.
+pub async fn invitation_code_required(db: &mongodb::Database) -> AppResult<bool> {
+    let override_row = db
+        .collection::<FeatureFlagOverride>(COLLECTION_NAME)
+        .find_one(doc! {
+            "org_user_id": bson::Bson::Null,
+            "flag_key": INVITATION_CODE_FLAG_KEY,
+            "target_kind": FlagTargetKind::Global.as_str(),
+            "target_key": bson::Bson::Null,
+        })
+        .await?;
+    Ok(override_row
+        .map(|row| row.enabled)
+        .unwrap_or(INVITATION_CODE_FLAG.default_enabled))
+}
+
 /// Whether the billing rollout flag is enabled for a billing owner.
 ///
 /// Personal wallets use the person's active org memberships; org wallets use
@@ -649,6 +674,11 @@ pub async fn set_platform_override(
 ) -> AppResult<FeatureFlagOverride> {
     find_flag(flag_key)
         .ok_or_else(|| AppError::BadRequest(format!("unknown feature flag '{flag_key}'")))?;
+    if flag_key == INVITATION_CODE_FLAG_KEY && !matches!(target, FlagTarget::Global) {
+        return Err(AppError::BadRequest(
+            "invitation code flag supports only a global override".to_string(),
+        ));
+    }
     if matches!(target, FlagTarget::Org | FlagTarget::Role(_)) {
         return Err(AppError::BadRequest(
             "org and role targets require an org; use the org feature-flag API".to_string(),
@@ -744,6 +774,11 @@ pub async fn set_platform_org_override(
 ) -> AppResult<FeatureFlagOverride> {
     find_flag(flag_key)
         .ok_or_else(|| AppError::BadRequest(format!("unknown feature flag '{flag_key}'")))?;
+    if flag_key == INVITATION_CODE_FLAG_KEY {
+        return Err(AppError::BadRequest(
+            "invitation code flag supports only a global override".to_string(),
+        ));
+    }
     ensure_org_exists(db, org_user_id).await?;
     upsert_override_row(
         db,
@@ -1052,6 +1087,54 @@ mod tests {
         for def in FEATURE_FLAGS {
             assert!(seen.insert(def.key), "duplicate flag key {}", def.key);
         }
+    }
+
+    #[tokio::test]
+    async fn invitation_code_gate_defaults_on_and_uses_only_global_override() {
+        let Some(db) = connect_test_database("invitation_code_flag").await else {
+            eprintln!("skipping invitation code flag test: no local MongoDB available");
+            return;
+        };
+
+        assert!(invitation_code_required(&db).await.expect("default"));
+        let user_target = FlagTarget::User(Uuid::new_v4().to_string());
+        assert!(matches!(
+            set_platform_override(&db, INVITATION_CODE_FLAG_KEY, &user_target, false, "actor")
+                .await,
+            Err(AppError::BadRequest(_))
+        ));
+        assert!(matches!(
+            set_platform_org_override(
+                &db,
+                &Uuid::new_v4().to_string(),
+                INVITATION_CODE_FLAG_KEY,
+                false,
+                "actor",
+            )
+            .await,
+            Err(AppError::BadRequest(_))
+        ));
+
+        set_platform_override(
+            &db,
+            INVITATION_CODE_FLAG_KEY,
+            &FlagTarget::Global,
+            false,
+            "actor",
+        )
+        .await
+        .expect("disable");
+        assert!(!invitation_code_required(&db).await.expect("disabled"));
+        set_platform_override(
+            &db,
+            INVITATION_CODE_FLAG_KEY,
+            &FlagTarget::Global,
+            true,
+            "actor",
+        )
+        .await
+        .expect("re-enable");
+        assert!(invitation_code_required(&db).await.expect("enabled"));
     }
 
     #[test]

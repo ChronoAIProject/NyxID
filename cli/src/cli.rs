@@ -319,6 +319,11 @@ pub enum AdminCommands {
         #[command(subcommand)]
         command: AdminPlatformCredentialsCommands,
     },
+    /// Manage invite codes used to gate new user registration
+    InviteCode {
+        #[command(subcommand)]
+        command: InviteCodeCommands,
+    },
     /// Inspect users and manage platform roles (admin / operator / user)
     User {
         #[command(subcommand)]
@@ -398,6 +403,33 @@ pub enum AdminUserCommands {
         /// New platform role
         #[arg(long, value_parser = ["admin", "operator", "user"])]
         role: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum InviteCodeCommands {
+    /// Create a new invite code
+    Create {
+        /// Maximum number of registrations this code can grant (1-1000, default 10)
+        #[arg(long)]
+        max_uses: Option<i32>,
+        /// Optional admin note describing the intended recipient(s)
+        #[arg(long)]
+        note: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// List all invite codes
+    List {
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Deactivate an invite code by ID
+    Deactivate {
+        /// Invite code ID (UUID)
+        id: String,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -638,6 +670,9 @@ pub struct RegisterArgs {
     /// Read password from this environment variable
     #[arg(long)]
     pub password_env: Option<String>,
+    /// Invite code (required — request one from an admin)
+    #[arg(long)]
+    pub invite_code: String,
 }
 
 // ---- VerifyEmail (C2) ----

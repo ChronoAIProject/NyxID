@@ -800,6 +800,7 @@ mod tests {
                 is_operator: false,
                 role_ids: Vec::new(),
                 group_ids: Vec::new(),
+                invite_code_id: None,
                 mfa_enabled: false,
                 social_provider: None,
                 social_provider_id: None,

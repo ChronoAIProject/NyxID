@@ -490,6 +490,7 @@ TRIGGER_RATE_LIMIT_BURST=20
 TRIGGER_PAYLOAD_MAX_BYTES=262144
 TRIGGER_DELIVERY_RETENTION_HOURS=72  # 0 keeps metadata only and disables replay
 
+# Registration is gated by the default-on auth:invitation-code feature flag.
 AUTO_VERIFY_EMAIL=false             # Dev only: skip email verification on registration
 
 # Optional

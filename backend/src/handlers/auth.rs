@@ -15,8 +15,11 @@ use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::{ACCESS_TOKEN_COOKIE_NAME, AuthUser, SESSION_COOKIE_NAME};
-use crate::services::{audit_service, auth_service, role_service, token_service};
-use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
+use crate::services::{
+    audit_service, auth_service, feature_flag_service, invite_code_service, role_service,
+    token_service,
+};
+use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event, hash_short_id};
 
 // --- Request / Response types ---
 
@@ -30,6 +33,9 @@ pub struct RegisterRequest {
         message = "Password must be between 8 and 128 characters"
     ))]
     pub password: String,
+    /// Required when the invitation-code feature flag is enabled.
+    #[serde(default)]
+    pub invite_code: Option<String>,
     pub display_name: Option<String>,
 }
 
@@ -348,14 +354,98 @@ pub async fn register(
     body.validate()
         .map_err(|e| AppError::ValidationError(e.to_string()))?;
 
-    let result = auth_service::register_user(
+    // When the invite-code gate is enabled, an invite code is mandatory and
+    // we reserve one slot up front. When it is disabled (public launch),
+    // any invite code the client sent is ignored and registration proceeds
+    // without reserving anything.
+    let invite_code_id = if feature_flag_service::invitation_code_required(&state.db).await? {
+        let raw_code = body
+            .invite_code
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| AppError::ValidationError("Invite code is required".to_string()))?;
+        match invite_code_service::reserve_invite_code(&state.db, raw_code, &body.email).await {
+            Ok(id) => Some(id),
+            // Enumeration-safe: treat an already-redeemed code as if the
+            // email address simply doesn't exist yet. Return the same
+            // fake-success response used for duplicate-email registrations so
+            // callers cannot distinguish "code used" from "email unknown".
+            // Nothing was reserved, so there is nothing to release. We mirror
+            // the duplicate-email path's audit side-effect (and add a warn) so
+            // the two paths are indistinguishable AND the reuse attempt is
+            // still recorded for audit/monitoring.
+            Err(AppError::InviteCodeAlreadyRedeemed) => {
+                tracing::warn!("Registration attempt with an already-redeemed invite code");
+                let message = if state.config.auto_verify_email {
+                    "Registration processed. You can now sign in.".to_string()
+                } else {
+                    "Check your email for a verification link to complete registration.".to_string()
+                };
+                let fake_user_id = uuid::Uuid::new_v4().to_string();
+                audit_service::log_async(
+                    state.db.clone(),
+                    Some(fake_user_id.clone()),
+                    "register".to_string(),
+                    Some(serde_json::json!({ "email": body.email })),
+                    extract_ip(&headers, Some(peer)),
+                    extract_user_agent(&headers),
+                    None,
+                    None,
+                );
+                return Ok(Json(RegisterResponse {
+                    user_id: fake_user_id,
+                    message,
+                }));
+            }
+            Err(e) => return Err(e),
+        }
+    } else {
+        None
+    };
+
+    let register_result = auth_service::register_user(
         &state.db,
         &body.email,
         &body.password,
         body.display_name.as_deref(),
+        invite_code_id.as_deref(),
         state.config.auto_verify_email,
     )
-    .await?;
+    .await;
+
+    let result = match register_result {
+        Ok(r) if r.actually_created => {
+            if let Some(ref code_id) = invite_code_id {
+                invite_code_service::record_usage(&state.db, code_id, &r.user_id, &body.email)
+                    .await;
+            }
+            r
+        }
+        // The two arms below silently no-op the invite-code accounting:
+        // `Ok(_)` is the email-enumeration-protection fake-success branch
+        // (no real user was created); `Err(_)` is a downstream failure.
+        // In both cases we release the reservation and do NOT emit
+        // `invite.code_redeemed` — only an actually-redeemed code counts.
+        Ok(r) => {
+            // Email already existed: the service returned a fake-success to
+            // prevent enumeration. The invite code slot (if any) was never
+            // actually used, so release it before returning the fake
+            // result to the caller.
+            if let Some(ref code_id) = invite_code_id {
+                invite_code_service::release_reservation(&state.db, code_id).await;
+            }
+            r
+        }
+        Err(e) => {
+            // Registration failed for another reason (hash, DB write, etc).
+            // Release any reservation before surfacing the error.
+            if let Some(ref code_id) = invite_code_id {
+                invite_code_service::release_reservation(&state.db, code_id).await;
+            }
+            return Err(e);
+        }
+    };
 
     audit_service::log_async(
         state.db.clone(),
@@ -396,6 +486,12 @@ pub async fn register(
     // `result.actually_created` is false there and no real user exists.
     // Emitting would inflate signup counts with phantom users.
     if result.actually_created {
+        let invite_code_id_hash = invite_code_id.as_deref().map(hash_short_id);
+        let source = if invite_code_id.is_some() {
+            "invite_code".to_string()
+        } else {
+            "direct".to_string()
+        };
         emit_event(
             state.telemetry.as_deref(),
             &result.user_id,
@@ -403,11 +499,36 @@ pub async fn register(
             &tele,
             TelemetryEvent::UserSignedUp {
                 method: "email".to_string(),
-                source: "direct".to_string(),
+                source,
                 email_domain: extract_email_domain(&body.email),
+                invite_code_id: invite_code_id_hash,
                 referrer_domain: extract_referrer_domain(&headers),
+                via_org: None,
+                invite_code_used: invite_code_id.is_some(),
             },
         );
+
+        // Emit `invite.code_redeemed` after the user is actually created so
+        // the funnel (`invite.code_generated` → `invite.code_redeemed`)
+        // counts only successful conversions. Metadata is best-effort:
+        // a missing fetch result drops the event rather than fabricating
+        // placeholder ids.
+        if let Some(ref code_id) = invite_code_id
+            && let Some(meta) = invite_code_service::fetch_telemetry_meta(&state.db, code_id).await
+        {
+            let days = (chrono::Utc::now() - meta.created_at).num_days().max(0) as u64;
+            emit_event(
+                state.telemetry.as_deref(),
+                &result.user_id,
+                None,
+                &tele,
+                TelemetryEvent::InviteCodeRedeemed {
+                    code_id: hash_short_id(code_id),
+                    created_by_user_id: hash_short_id(&meta.created_by),
+                    days_to_redemption: days,
+                },
+            );
+        }
     }
 
     Ok(Json(RegisterResponse {
@@ -940,6 +1061,7 @@ pub async fn setup(
         &body.email,
         &body.password,
         body.display_name.as_deref(),
+        None,
         true, // Admin setup always auto-verifies
     )
     .await?;
@@ -1057,83 +1179,6 @@ pub struct CliTokenResponse {
 mod tests {
     use super::*;
     use axum::body::Bytes;
-
-    #[tokio::test]
-    async fn registration_without_invitation_code_preserves_verification_and_duplicate_protection()
-    {
-        let Some(db) = crate::test_utils::connect_test_database("auth_public_register").await
-        else {
-            return;
-        };
-        role_service::seed_system_roles(&db).await.unwrap();
-        let mut config = crate::test_utils::test_app_config();
-        config.email_auth_enabled = true;
-        config.auto_verify_email = false;
-        let state = crate::test_utils::test_app_state_with_config(db.clone(), config);
-        let request = || {
-            serde_json::from_value::<RegisterRequest>(serde_json::json!({
-                "email": "new@example.com",
-                "password": "Password123",
-                "display_name": "New user"
-            }))
-            .unwrap()
-        };
-        let peer = "127.0.0.1:12345".parse().unwrap();
-        let first = register(
-            State(state.clone()),
-            ConnectInfo(peer),
-            HeaderMap::new(),
-            Json(request()),
-        )
-        .await
-        .expect("registration needs only account details")
-        .0;
-        let user = db
-            .collection::<User>(USERS)
-            .find_one(doc! { "_id": &first.user_id })
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(!user.email_verified);
-        assert!(user.email_verification_token.is_some());
-        assert_eq!(user.display_name.as_deref(), Some("New user"));
-
-        let duplicate = register(
-            State(state),
-            ConnectInfo(peer),
-            HeaderMap::new(),
-            Json(request()),
-        )
-        .await
-        .expect("duplicate registration keeps the generic success response")
-        .0;
-        assert_eq!(duplicate.message, first.message);
-        assert_ne!(duplicate.user_id, first.user_id);
-        assert_eq!(
-            db.collection::<User>(USERS)
-                .count_documents(doc! {})
-                .await
-                .unwrap(),
-            1
-        );
-    }
-
-    #[tokio::test]
-    async fn registration_still_requires_enabled_email_auth() {
-        let state = crate::test_utils::test_app_state_no_db().await;
-        let result = register(
-            State(state),
-            ConnectInfo("127.0.0.1:12345".parse().unwrap()),
-            HeaderMap::new(),
-            Json(RegisterRequest {
-                email: "new@example.com".into(),
-                password: uuid::Uuid::new_v4().to_string(),
-                display_name: None,
-            }),
-        )
-        .await;
-        assert!(matches!(result, Err(AppError::EmailSignupDisabled)));
-    }
 
     #[test]
     fn email_domain_extracts_lowercased_host_portion() {

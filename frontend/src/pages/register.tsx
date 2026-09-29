@@ -7,6 +7,7 @@ export function RegisterPage() {
 
   const params = new URLSearchParams(window.location.search);
   const returnTo = params.get("return_to") ?? undefined;
+  const inviteCode = params.get("code") ?? undefined;
 
   if (mfaRequired) {
     return <MfaVerifyForm returnTo={returnTo} />;
@@ -16,6 +17,7 @@ export function RegisterPage() {
     <AuthFlow
       initialPanel={1}
       returnTo={returnTo}
+      initialInviteCode={inviteCode}
     />
   );
 }
