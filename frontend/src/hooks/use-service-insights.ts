@@ -6,6 +6,7 @@ import {
   type ServiceInsight,
 } from "@/schemas/service-insights";
 import type { KeyInfo } from "@/types/keys";
+import { loadConfiguredServiceInsights } from "@/lib/service-insights-compat";
 
 export interface ServiceInsightsState {
   readonly connections: ReadonlyMap<string, ServiceInsight>;
@@ -30,15 +31,39 @@ export function useServiceInsights(
         { length: Math.ceil(ids.length / 100) },
         (_, i) => ids.slice(i * 100, (i + 1) * 100),
       );
-      const results = await Promise.all(
-        batches.map(async (batch) => {
-          const response = await api.get<unknown>(
-            `/service-insights?ids=${encodeURIComponent(batch.join(","))}${apiKeyId ? `&api_key_id=${encodeURIComponent(apiKeyId)}` : ""}`,
-          );
-          return serviceInsightsResponseSchema.parse(response).connections;
-        }),
-      );
-      return results.flat();
+      try {
+        const results = await Promise.allSettled(
+          batches.map(async (batch) => {
+            const response = await api.get<unknown>(
+              `/service-insights?ids=${encodeURIComponent(batch.join(","))}${apiKeyId ? `&api_key_id=${encodeURIComponent(apiKeyId)}` : ""}`,
+            );
+            return serviceInsightsResponseSchema.parse(response).connections;
+          }),
+        );
+        const failures = results.flatMap((result) =>
+          result.status === "rejected" ? [result.reason as unknown] : [],
+        );
+        const blockingFailure = failures.find(
+          (error) =>
+            !(
+              error instanceof ApiError &&
+              [404, 405, 501].includes(error.status)
+            ),
+        );
+        if (failures.length) throw blockingFailure ?? failures[0];
+        return results.flatMap((result) =>
+          result.status === "fulfilled" ? result.value : [],
+        );
+      } catch (error) {
+        if (
+          !apiKeyId &&
+          error instanceof ApiError &&
+          [404, 405, 501].includes(error.status)
+        ) {
+          return loadConfiguredServiceInsights(connections, identity!);
+        }
+        throw error;
+      }
     },
     retry: false,
     staleTime: 30_000,

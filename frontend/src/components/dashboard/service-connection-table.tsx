@@ -324,19 +324,40 @@ export function ServiceConnectionTable({
                     className="inline-flex items-center gap-1.5 rounded-sm text-xs font-medium text-primary hover:underline focus-visible:outline-2 focus-visible:outline-ring"
                   >
                     <UsersRound className="size-3.5 shrink-0" />
-                    {usage
+                    {usage && usage.access.visibility !== "unavailable"
                       ? `${usage.access.keys.length}${usage.access.truncated ? "+" : ""} agent ${usage.access.keys.length === 1 ? "key" : "keys"}`
-                      : insightStatusLabel(insights.status, "Access")}
+                      : insightStatusLabel(
+                          usage ? "error" : insights.status,
+                          "Access",
+                        )}
                   </button>
                   {usage && (
                     <p className="mt-1 text-[10px] text-muted-foreground">
-                      {usage.access.visibility === "own_keys"
-                        ? "Your keys with access"
-                        : "Managed keys with access"}
+                      {usage.access.basis === "configuration"
+                        ? `Configured scope${usage.access.incomplete ? " · partial inventory" : ""}`
+                        : usage.access.visibility === "own_keys"
+                          ? "Your keys with access"
+                          : "Managed keys with access"}
                       {usage.access.keys.some(
                         (agent) => agent.credential_override,
                       ) &&
                         ` · ${usage.access.keys.filter((agent) => agent.credential_override).length} overrides`}
+                    </p>
+                  )}
+                  {!!usage?.access.keys.length && (
+                    <p
+                      className="mt-1 max-w-52 truncate text-[11px]"
+                      title={usage.access.keys
+                        .map((agent) => agent.name)
+                        .join(" · ")}
+                    >
+                      {usage.access.keys
+                        .slice(0, 2)
+                        .map((agent) => agent.name)
+                        .join(" · ")}
+                      {usage.access.keys.length > 2
+                        ? ` +${usage.access.keys.length - 2}`
+                        : ""}
                     </p>
                   )}
                   <button
@@ -362,9 +383,11 @@ export function ServiceConnectionTable({
                       )}
                       {latest
                         ? callerLabel(latest.caller)
-                        : usage
-                          ? "No recorded requests · 30d"
-                          : insightStatusLabel(insights.status, "Activity")}
+                        : usage?.activity.tracking === "unavailable"
+                          ? "Caller history unavailable"
+                          : usage && usage.activity.tracking !== "unavailable"
+                            ? "No recorded requests · 30d"
+                            : insightStatusLabel(insights.status, "Activity")}
                       {latest && (
                         <span className="ml-1 font-normal text-muted-foreground">
                           · {formatRelativeTime(latest.occurred_at)}
@@ -389,10 +412,12 @@ export function ServiceConnectionTable({
                     className="block w-full rounded-sm text-left text-xs hover:text-primary focus-visible:outline-2 focus-visible:outline-ring"
                   >
                     <span className="mb-1 block text-[10px] text-muted-foreground">
-                      {billing?.status === "unavailable" ||
-                      billing?.status === "restricted"
-                        ? "Billing preview"
-                        : "For your requests"}
+                      {billing?.context === "configuration"
+                        ? "Expected payer · connection default"
+                        : billing?.status === "unavailable" ||
+                            billing?.status === "restricted"
+                          ? "Billing preview"
+                          : "For your requests"}
                     </span>
                     <span className="flex items-start gap-1.5 font-medium">
                       <CreditCard className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />

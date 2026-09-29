@@ -261,9 +261,16 @@ and permitted change history retain their existing access boundaries.
 
 The implementation includes `GET /api/v1/service-insights` and exact request
 attribution in the HTTP proxy, both LLM routes, and MCP. The endpoint is allowed
-through the local preview's read-only gateway. Its production backend must deploy
-this endpoint before these fields populate: an older server shows Not reported,
-with an explanatory inline message. It never fabricates payer or caller data.
+through the local preview's read-only gateway. When an older server returns
+404, 405 or 501, the frontend reads existing agent-key inventories, credential
+binding metadata and catalog prices. The comparison table shows key names and
+configured scope, plus expected payer and configured rates. Its inline billing
+flow separates credential supply, expected payer and NyxID charges. Pending or
+failed price synchronization stays visible. The compatibility view does not
+resolve per-agent billing or claim recorded use; exact caller history and the
+managed-key billing selector require the new endpoint. Authorization and network
+failures never trigger this fallback. Partial key inventories and unknown
+credential overrides are labelled explicitly.
 Older request history remains partial after deployment. Rates are current billing
 previews; settled transaction history is not added by this revision.
 
@@ -277,3 +284,14 @@ real MongoDB privacy, payer/override, exact request capture, metering, and rollu
 checks. TypeScript, the production frontend build, Rust formatting, targeted ESLint,
 and diff whitespace checks passed. Full ESLint has zero errors and 27 existing
 warnings. The committed CLI wizard source-closure hash remains current.
+
+The compact sticky filter now preserves its expanded height in normal page flow.
+This prevents shrinking scroll height from clamping the scroll position back
+across the sticky threshold. Its visible surface, cover, service-header offset and
+card reveal still use the actual compact height; the reserved flow space is
+transparent and does not intercept clicks. A regression test models repeated
+resize/scroll frames near the bottom of a short filtered list.
+Configured agent-key names also appear on collapsed cards when exact request
+history is unavailable. Validation for this revision: 124 frontend tests,
+TypeScript, production build, and changed-file ESLint passed. The running preview
+serves the updated modules; signed-in visual verification remains outstanding.

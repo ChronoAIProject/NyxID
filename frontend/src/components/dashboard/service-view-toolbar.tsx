@@ -211,11 +211,11 @@ export function ServiceViewToolbar({
       role="region"
       aria-label="Service filters"
       data-stuck={stuck}
-      className="service-filter-toolbar sticky top-0 z-20"
+      className="service-filter-toolbar pointer-events-none sticky top-0 z-20"
     >
       <div
         className={cn(
-          "relative rounded-xl border border-border/60 bg-card transition-shadow duration-200 motion-reduce:transition-none",
+          "pointer-events-auto relative rounded-xl border border-border/60 bg-card transition-shadow duration-200 motion-reduce:transition-none",
           stuck
             ? "border-x-transparent border-t-transparent shadow-[0_4px_8px_-4px_rgb(0_0_0/0.4),0_16px_32px_-16px_rgb(0_0_0/0.6)] light:shadow-[0_4px_8px_-4px_rgb(0_0_0/0.12),0_16px_32px_-16px_rgb(0_0_0/0.2)]"
             : "shadow-sm",

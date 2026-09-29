@@ -63,11 +63,14 @@ describe("service card scrolling", () => {
     act(() => result.current(() => {}, card, toolbar));
     expect(scroller.scrollTo).not.toHaveBeenCalled();
     toolbar.getBoundingClientRect = () => new DOMRect(0, 116, 800, 280);
+    const surface = document.createElement("div");
+    surface.getBoundingClientRect = () => new DOMRect(0, 116, 800, 100);
+    toolbar.append(surface);
     await act(async () => {
       finish();
     });
     expect(scroller.scrollTo).toHaveBeenCalledWith({
-      top: 260,
+      top: 440,
       behavior: "smooth",
     });
     expect(scroll).not.toHaveBeenCalled();

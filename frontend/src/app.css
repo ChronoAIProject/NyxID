@@ -830,7 +830,7 @@ html.theme-dark .assistant-halo--visible {
   position: absolute;
   pointer-events: none;
   top: -100vh;
-  bottom: -28px;
+  height: calc(100vh + var(--service-filters-height, 0px) + 28px);
   left: calc(-1 * var(--service-filter-gutter-left, 0px));
   right: calc(-1 * var(--service-filter-gutter-right, 0px));
   background: var(--color-background);

@@ -1,6 +1,12 @@
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
-import { ArrowUpRight, Bot, CreditCard, UsersRound } from "lucide-react";
+import {
+  ArrowRight,
+  ArrowUpRight,
+  Bot,
+  CreditCard,
+  UsersRound,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -83,42 +89,60 @@ function ConnectionBillingPanel({
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h4 className="inline-flex items-center gap-2 text-sm font-medium">
-          <CreditCard className="size-4 text-primary" /> Billing resolution
+          <CreditCard className="size-4 text-primary" /> Billing flow
         </h4>
         <div className="flex items-center gap-2 text-xs">
-          <span className="text-muted-foreground">For</span>
-          <Select value={caller} onValueChange={setCaller}>
-            <SelectTrigger
-              aria-label="Preview billing for"
-              className="h-8 w-52"
-            >
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="you">You · connection default</SelectItem>
-              {insight.usage?.access.keys.map((key) => (
-                <SelectItem key={key.id} value={key.id}>
-                  {key.name} · agent key
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          {insight.billing?.context === "configuration" ? (
+            <Badge variant="secondary">Connection default · configured</Badge>
+          ) : (
+            <>
+              <span className="text-muted-foreground">For</span>
+              <Select value={caller} onValueChange={setCaller}>
+                <SelectTrigger
+                  aria-label="Preview billing for"
+                  className="h-8 w-52"
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="you">You · connection default</SelectItem>
+                  {insight.usage?.access.keys.map((key) => (
+                    <SelectItem key={key.id} value={key.id}>
+                      {key.name} · agent key
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </>
+          )}
         </div>
       </div>
       {bill ? (
         <>
-          <dl className="grid gap-4 text-xs sm:grid-cols-3">
-            <div>
+          <dl className="grid items-center gap-3 text-xs sm:grid-cols-[1fr_auto_1fr_auto_1fr]">
+            <div className="self-stretch rounded-lg border border-border/60 bg-muted/20 p-3">
               <dt className="text-muted-foreground">Credential</dt>
               <dd className="mt-1 font-medium">
                 {credentialLabel(connection, bill)}
               </dd>
             </div>
-            <div>
-              <dt className="text-muted-foreground">Billing account</dt>
+            <ArrowRight
+              className="hidden size-4 text-muted-foreground sm:block"
+              aria-hidden="true"
+            />
+            <div className="self-stretch rounded-lg border border-border/60 bg-muted/20 p-3">
+              <dt className="text-muted-foreground">
+                {bill.context === "configuration"
+                  ? "Expected payer"
+                  : "Billing account"}
+              </dt>
               <dd className="mt-1 font-medium">{billingAccountLabel(bill)}</dd>
             </div>
-            <div>
+            <ArrowRight
+              className="hidden size-4 text-muted-foreground sm:block"
+              aria-hidden="true"
+            />
+            <div className="self-stretch rounded-lg border border-border/60 bg-muted/20 p-3">
               <dt className="text-muted-foreground">NyxID charges</dt>
               <dd className="mt-1 font-medium">
                 {bill.charge_status === "not_charged"
@@ -135,7 +159,11 @@ function ConnectionBillingPanel({
             <div className="overflow-x-auto rounded-lg border border-border/60">
               <table
                 className="w-full text-left text-xs"
-                aria-label="Applicable NyxID rates"
+                aria-label={
+                  bill.context === "configuration"
+                    ? "Configured NyxID rates"
+                    : "Applicable NyxID rates"
+                }
               >
                 <thead className="bg-muted/30 text-muted-foreground">
                   <tr>
@@ -144,6 +172,9 @@ function ConnectionBillingPanel({
                     <th className="px-3 py-2 text-right font-medium">
                       Credits per unit
                     </th>
+                    {bill.context === "configuration" && (
+                      <th className="px-3 py-2 font-medium">Price sync</th>
+                    )}
                   </tr>
                 </thead>
                 <tbody>
@@ -163,6 +194,17 @@ function ConnectionBillingPanel({
                       <td className="px-3 py-2 text-right font-mono">
                         {rate.credits_per_unit ?? "Plan rate not reported"}
                       </td>
+                      {bill.context === "configuration" && (
+                        <td className="px-3 py-2">
+                          {rate.sync_status === "synced"
+                            ? "Synced"
+                            : rate.sync_status === "pending"
+                              ? "Pending"
+                              : rate.sync_status === "failed"
+                                ? "Failed"
+                                : "Not reported"}
+                        </td>
+                      )}
                     </tr>
                   ))}
                 </tbody>
@@ -175,12 +217,13 @@ function ConnectionBillingPanel({
               charges are not included in these NyxID rates.
             </p>
           )}
-          {bill.provider_billing === "nyxid_credential" && (
-            <p className="text-xs text-muted-foreground">
-              NyxID supplies this credential. The billing account above pays the
-              applicable NyxID charges.
-            </p>
-          )}
+          {bill.provider_billing === "nyxid_credential" &&
+            bill.context !== "configuration" && (
+              <p className="text-xs text-muted-foreground">
+                NyxID supplies this credential. The billing account above pays
+                the applicable NyxID charges.
+              </p>
+            )}
           {bill.notes.map((note) => (
             <p key={note} className="text-xs text-muted-foreground">
               {note}
@@ -226,8 +269,10 @@ export function ConnectionInsightPanel({
       >
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h4 className="inline-flex items-center gap-2 text-sm font-medium">
-            <UsersRound className="size-4 text-primary" /> Agent keys with
-            access
+            <UsersRound className="size-4 text-primary" />{" "}
+            {usage.access.basis === "configuration"
+              ? "Agent keys in scope"
+              : "Agent keys with access"}
           </h4>
           <span className="text-[11px] text-muted-foreground">
             {usage.access.visibility === "own_keys"
@@ -275,7 +320,9 @@ export function ConnectionInsightPanel({
                       {accessReasonLabel(key.permission)}
                     </td>
                     <td className="px-3 py-2.5">
-                      {key.credential_override ? (
+                      {key.credential_override === null ? (
+                        "Override not reported"
+                      ) : key.credential_override ? (
                         <Badge variant="secondary">Credential override</Badge>
                       ) : (
                         "Connection default"
@@ -288,8 +335,11 @@ export function ConnectionInsightPanel({
           </div>
         ) : (
           <p className="text-xs text-muted-foreground">
-            No agent keys in your permitted inventory currently have scope
-            access to this connection.
+            {usage.access.visibility === "unavailable"
+              ? "Agent key inventory could not be loaded."
+              : usage.access.incomplete
+                ? "No matching keys in the available inventory. Some key inventories could not be checked."
+                : "No agent keys in your permitted inventory currently include this connection in their scope."}
           </p>
         )}
         {usage.access.keys.length > 3 && (
@@ -310,8 +360,28 @@ export function ConnectionInsightPanel({
           </p>
         )}
         <p className="text-[11px] text-muted-foreground">
+          {usage.access.basis === "configuration"
+            ? "Configured scope; live permissions and credentials are checked at execution. "
+            : ""}
+          {usage.access.incomplete && usage.access.keys.length > 0
+            ? "Some key inventories could not be checked. "
+            : ""}
           Scope access does not prove a working connection or previous use. Open
           a key to manage its service scope or credential override.
+        </p>
+      </section>
+    );
+  if (usage.activity.tracking === "unavailable")
+    return (
+      <section
+        className="space-y-2 p-3 text-xs"
+        aria-label={`Recent requests for ${connection.label}`}
+      >
+        <h4 className="font-medium">Request attribution unavailable</h4>
+        <p className="text-muted-foreground">
+          This server does not yet report which agent key or application used
+          this exact connection. Configured key access is shown separately; it
+          is not evidence of use.
         </p>
       </section>
     );

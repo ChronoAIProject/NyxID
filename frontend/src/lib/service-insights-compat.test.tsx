@@ -1,0 +1,271 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+  type MockInstance,
+} from "vitest";
+import type { ReactNode } from "react";
+import { api, ApiError } from "@/lib/api-client";
+import { useServiceInsights } from "@/hooks/use-service-insights";
+import {
+  loadConfiguredServiceInsights,
+  configuredBilling,
+} from "./service-insights-compat";
+import type { KeyInfo } from "@/types/keys";
+
+vi.mock("@/stores/auth-store", () => ({
+  useAuthStore: (selector: (state: { user: { id: string } }) => unknown) =>
+    selector({ user: { id: "person" } }),
+}));
+const personal = {
+  id: "personal",
+  label: "OpenAI",
+  catalog_service_slug: "openai",
+  credential_source: { type: "personal" },
+  credential_binding: "user",
+  auth_method: "bearer",
+  is_active: true,
+} as KeyInfo;
+const org = {
+  ...personal,
+  id: "org-service",
+  credential_source: {
+    type: "org",
+    org_id: "org",
+    org_name: "ChronoAI",
+    role: "admin",
+    allowed: true,
+  },
+} as KeyInfo;
+const key = {
+  id: "key",
+  name: "Codex",
+  platform: "codex",
+  purpose: "general",
+  is_active: true,
+  expires_at: null,
+  scopes: "proxy",
+  allow_all_services: false,
+  allowed_service_ids: ["personal"],
+  bindings_count: 0,
+};
+const responses = new Map<string, unknown>();
+const unavailable = (status = 404) =>
+  new ApiError(status, {
+    error: "unavailable",
+    error_code: status,
+    message: "Unavailable",
+  });
+let get: MockInstance<typeof api.get>;
+beforeEach(() => {
+  responses.clear();
+  responses.set("/api-keys", { keys: [key] });
+  responses.set("/orgs", { orgs: [{ id: "org", your_role: "admin" }] });
+  responses.set("/api-keys?org_id=org", {
+    keys: [{ ...key, id: "org-key", allow_all_services: true }],
+  });
+  responses.set("/catalog", {
+    entries: [
+      {
+        slug: "openai",
+        byok_pricing: {
+          metric: "requests",
+          credits_per_unit: "0.12",
+          sync_status: "synced",
+        },
+      },
+    ],
+  });
+  get = vi.spyOn(api, "get").mockImplementation(async (path) => {
+    const response = responses.get(path);
+    if (response instanceof Error) throw response;
+    if (!response) throw unavailable();
+    return response;
+  });
+});
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
+function mount(connections: KeyInfo[] = [personal]) {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  return renderHook(() => useServiceInsights(connections), {
+    wrapper: ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    ),
+  });
+}
+
+describe("deployed service insight compatibility", () => {
+  it("uses live scope and catalog metadata when the insights route is absent, without inventing recorded use or settled billing", async () => {
+    const { result } = mount();
+    await waitFor(() => expect(result.current.status).toBe("ready"));
+    const insight = result.current.connections.get(personal.id)!;
+    expect(insight.usage?.access.keys.map((item) => item.name)).toEqual([
+      "Codex",
+    ]);
+    expect(insight.usage?.access.basis).toBe("configuration");
+    expect(insight.usage?.activity.tracking).toBe("unavailable");
+    expect(insight.billing).toMatchObject({
+      status: "conditional",
+      context: "configuration",
+      account: null,
+      payer_rule: "Your personal account",
+      rates: [{ credits_per_unit: "0.12", sync_status: "synced" }],
+    });
+  });
+  it.each([403, 500])(
+    "does not fall back on an insights %s failure",
+    async (status) => {
+      responses.set("/service-insights?ids=personal", unavailable(status));
+      const { result } = mount();
+      await waitFor(() =>
+        expect(result.current.status).toBe(
+          status === 403 ? "restricted" : "error",
+        ),
+      );
+      expect(get).toHaveBeenCalledTimes(1);
+      expect(result.current.connections.size).toBe(0);
+    },
+  );
+  it("clears prior insight data when a refresh loses permission", async () => {
+    const { result } = mount();
+    await waitFor(() => expect(result.current.connections.size).toBe(1));
+    responses.set("/service-insights?ids=personal", unavailable(403));
+    act(() => result.current.refresh());
+    await waitFor(() => expect(result.current.status).toBe("restricted"));
+    expect(result.current.connections.size).toBe(0);
+  });
+  it("does not hide an authorization failure in a second batch behind an unsupported first batch", async () => {
+    get
+      .mockRejectedValueOnce(unavailable())
+      .mockRejectedValueOnce(unavailable(403));
+    const { result } = mount(
+      Array.from({ length: 101 }, (_, index) => ({
+        ...personal,
+        id: `connection-${index}`,
+      })),
+    );
+    await waitFor(() => expect(result.current.status).toBe("restricted"));
+    expect(get).toHaveBeenCalledTimes(2);
+    expect(result.current.connections.size).toBe(0);
+  });
+  it("matches exact connection ids, scope, active keys, expiry and purpose", async () => {
+    responses.set("/api-keys", {
+      keys: [
+        key,
+        { ...key, id: "catalog-only", allowed_service_ids: ["openai"] },
+        { ...key, id: "expired", expires_at: "2000-01-01T00:00:00Z" },
+        { ...key, id: "inactive", is_active: false },
+        { ...key, id: "read-only", scopes: "account:read" },
+        { ...key, id: "scheduled", purpose: "scheduled_invocation" },
+        { ...key, id: "unknown-purpose", purpose: undefined },
+        { ...key, id: "wide", scopes: "llm:proxy", allow_all_services: true },
+      ],
+    });
+    const [a, duplicate] = await loadConfiguredServiceInsights(
+      [personal, { ...personal, id: "duplicate" }],
+      "person",
+    );
+    expect(a!.usage!.access.keys.map((item) => item.id)).toEqual([
+      "key",
+      "wide",
+    ]);
+    expect(duplicate!.usage!.access.keys.map((item) => item.id)).toEqual([
+      "wide",
+    ]);
+    expect(a!.usage!.access.incomplete).toBe(true);
+  });
+  it("keeps organization keys within their owner and personal keys within permitted org scope", async () => {
+    responses.set("/api-keys", {
+      keys: [{ ...key, allow_all_services: true }],
+    });
+    const [a, b, c] = await loadConfiguredServiceInsights(
+      [
+        personal,
+        org,
+        {
+          ...org,
+          id: "excluded",
+          credential_source: {
+            ...org.credential_source!,
+            type: "org",
+            org_id: "other",
+            org_name: "Other",
+            role: "viewer",
+            allowed: false,
+          },
+        },
+      ],
+      "person",
+    );
+    expect(a!.usage!.access.keys.map((item) => item.id)).toEqual(["key"]);
+    expect(b!.usage!.access.keys.map((item) => item.id)).toEqual([
+      "key",
+      "org-key",
+    ]);
+    expect(c!.usage!.access.keys).toEqual([]);
+    expect(get).not.toHaveBeenCalledWith("/api-keys?org_id=other");
+  });
+  it("matches overrides by both key and exact connection, and preserves unknown overrides on failures", async () => {
+    responses.set("/api-keys", {
+      keys: [
+        { ...key, id: "bound", allow_all_services: true, bindings_count: 1 },
+        { ...key, id: "unknown", bindings_count: 1 },
+      ],
+    });
+    responses.set("/api-keys/bound/bindings", {
+      bindings: [{ api_key_id: "bound", user_service_id: "personal" }],
+    });
+    const [a, b] = await loadConfiguredServiceInsights(
+      [personal, { ...personal, id: "duplicate" }],
+      "person",
+    );
+    expect(
+      a!.usage!.access.keys.map((item) => item.credential_override),
+    ).toEqual([true, null]);
+    expect(
+      b!.usage!.access.keys.map((item) => item.credential_override),
+    ).toEqual([false]);
+  });
+  it("marks an unavailable key inventory instead of reporting zero accessible keys", async () => {
+    responses.set("/api-keys", unavailable(403));
+    const [a] = await loadConfiguredServiceInsights([personal], "person");
+    expect(a!.usage!.access.visibility).toBe("unavailable");
+    expect(a!.usage!.access.incomplete).toBe(true);
+  });
+  it("keeps platform credential supply separate from who pays and flags unsynced prices", () => {
+    const bill = configuredBilling({
+      ...org,
+      credential_binding: "platform",
+      platform_key_pricing: {
+        metric: "requests",
+        credits_per_unit: "0.01",
+        sync_status: "pending",
+        components: [
+          {
+            metric: "output_tokens",
+            credits_per_unit: "0.000000000012",
+            sync_status: "failed",
+          },
+        ],
+      },
+    });
+    expect(bill.payer_rule).toBe("Acting user's personal account");
+    expect(bill.account).toBeNull();
+    expect(bill.rates.map((rate) => rate.sync_status)).toEqual([
+      "pending",
+      "failed",
+    ]);
+    expect(bill.charge_status).toBe("conditional");
+    expect(configuredBilling(org).payer_rule).toBe("ChronoAI · organization");
+    expect(configuredBilling(personal).charge_status).not.toBe("not_charged");
+  });
+});

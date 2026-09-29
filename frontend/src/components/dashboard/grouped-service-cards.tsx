@@ -99,7 +99,8 @@ function GroupCard({
     observer.observe(header);
     observer.observe(scroller);
     if (finalRowsStart) observer.observe(finalRowsStart);
-    if (filtersRef.current) observer.observe(filtersRef.current);
+    const filterSurface = filtersRef.current?.firstElementChild;
+    if (filterSurface) observer.observe(filterSurface);
     scroller.addEventListener("scroll", update, { passive: true });
     return () => {
       observer.disconnect();
@@ -141,14 +142,37 @@ function GroupCard({
   const ownRequests = connectionInsights.every(
     (item) => item?.usage?.activity.visibility === "own_requests",
   );
+  const configuredAccess = connectionInsights.every(
+    (item) =>
+      item?.usage?.access.basis === "configuration" &&
+      item.usage.activity.tracking === "unavailable",
+  );
+  const configuredKeys = [
+    ...new Map(
+      connectionInsights.flatMap((item) =>
+        (item?.usage?.access.keys ?? []).map(
+          (key) => [key.id, key.name] as const,
+        ),
+      ),
+    ).values(),
+  ];
   const callerSummary =
     insights.status !== "ready"
       ? insightStatusLabel(insights.status, "Activity")
       : recent
         ? `${callerLabel(recent.caller)} · ${formatRelativeTime(recent.occurred_at)}`
-        : connectionInsights.every((item) => item?.usage)
-          ? "No recorded requests · 30d"
-          : "Activity not reported";
+        : configuredAccess
+          ? configuredKeys.length
+            ? `${configuredKeys.slice(0, 2).join(" · ")}${configuredKeys.length > 2 ? ` +${configuredKeys.length - 2}` : ""}`
+            : connectionInsights.some((item) => item?.usage?.access.incomplete)
+              ? "Key inventory incomplete"
+              : "No matching keys"
+          : connectionInsights.every(
+                (item) =>
+                  item?.usage && item.usage.activity.tracking !== "unavailable",
+              )
+            ? "No recorded requests · 30d"
+            : "Activity not reported";
 
   return (
     <section
@@ -240,17 +264,21 @@ function GroupCard({
                   onClick={() => onToggle(cardRef.current)}
                   aria-expanded={expanded}
                   aria-controls={contentId}
-                  aria-label={`Expand ${group.name} to compare caller activity`}
+                  aria-label={`Expand ${group.name} to compare ${configuredAccess ? "agent key scope" : "caller activity"}`}
                   className="grid w-full grid-cols-[6rem_1fr] items-center gap-2 rounded-sm text-left focus-visible:outline-2 focus-visible:outline-ring"
                 >
                   <span className="text-muted-foreground">
-                    {ownRequests ? "Your latest" : "Latest request"}
+                    {configuredAccess
+                      ? "Agent keys"
+                      : ownRequests
+                        ? "Your latest"
+                        : "Latest request"}
                   </span>
                   <span className="flex min-w-0 items-center gap-1.5">
                     <UsersRound className="size-3.5 shrink-0 text-muted-foreground" />
                     <span
                       className="truncate"
-                      title={`Latest recorded caller: ${callerSummary}`}
+                      title={`${configuredAccess ? "Configured key scope" : "Latest recorded caller"}: ${callerSummary}`}
                     >
                       {callerSummary}
                     </span>
@@ -362,13 +390,28 @@ export function GroupedServiceCards({
     const container = containerRef.current;
     const toolbar = filtersRef.current;
     if (!container || !toolbar) return;
+    const surface = toolbar.firstElementChild as HTMLElement;
     const scroller = toolbar.closest("main");
+    let pinned = false;
+    let expandedHeight = surface.getBoundingClientRect().height;
     const updateShadow = () => {
       const toolbarTop = toolbar.getBoundingClientRect().top;
-      setFiltersStuck(container.getBoundingClientRect().top < toolbarTop - 1);
+      const next = container.getBoundingClientRect().top < toolbarTop - 1;
+      if (!pinned)
+        expandedHeight = Math.max(
+          surface.getBoundingClientRect().height,
+          Number.parseFloat(toolbar.style.minHeight) || 0,
+        );
+      if (next !== pinned) {
+        // Keep the original flow height: shrinking scrollHeight can clamp
+        // scrollTop back across the pin threshold and repeatedly unpin it.
+        toolbar.style.minHeight = next ? `${expandedHeight}px` : "";
+        pinned = next;
+      }
+      setFiltersStuck(next);
     };
     const measure = () => {
-      const bounds = toolbar.getBoundingClientRect();
+      const bounds = surface.getBoundingClientRect();
       container.style.setProperty(
         "--service-filters-height",
         `${bounds.height}px`,
@@ -389,7 +432,7 @@ export function GroupedServiceCards({
     };
     measure();
     const observer = new ResizeObserver(measure);
-    observer.observe(toolbar);
+    observer.observe(surface);
     if (scroller) observer.observe(scroller);
     scroller?.addEventListener("scroll", updateShadow, { passive: true });
     return () => {

@@ -13,6 +13,7 @@ import type { KeyInfo } from "@/types/keys";
 import type { ServiceInsight } from "@/schemas/service-insights";
 import type { ServiceInsightsState } from "@/hooks/use-service-insights";
 import { billingAccountLabel, summarizeBilling } from "@/lib/service-insights";
+import { configuredBilling } from "@/lib/service-insights-compat";
 import { api } from "@/lib/api-client";
 import { ServiceConnectionTable } from "./service-connection-table";
 
@@ -179,6 +180,62 @@ afterEach(() => {
 });
 
 describe("service card billing and caller details", () => {
+  it("shows configured key access and the billing flow on older servers without claiming recorded use", async () => {
+    const user = userEvent.setup();
+    mount({
+      ...insight,
+      billing: configuredBilling({
+        ...connection,
+        platform_key_pricing: {
+          metric: "requests",
+          credits_per_unit: "0.05",
+          sync_status: "pending",
+        },
+      }),
+      usage: {
+        access: {
+          ...insight.usage!.access,
+          basis: "configuration",
+          keys: [
+            { ...insight.usage!.access.keys[0]!, credential_override: null },
+          ],
+        },
+        activity: {
+          ...insight.usage!.activity,
+          tracking: "unavailable",
+          visibility: "unavailable",
+          request_count: 0,
+          requests: [],
+        },
+      },
+    });
+    expect(screen.getByText("Codex CI")).toBeVisible();
+    expect(screen.getByText("Configured scope")).toBeVisible();
+    expect(screen.getByText("Acting user's personal account")).toBeVisible();
+    expect(screen.queryByText(/No recorded requests/)).not.toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "Billing for Team OpenAI" }),
+    );
+    const panel = screen.getByRole("region", {
+      name: "Billing for Team OpenAI",
+    });
+    expect(within(panel).getByText("Billing flow")).toBeVisible();
+    expect(within(panel).getByText("Expected payer")).toBeVisible();
+    expect(within(panel).getByText("Pending")).toBeVisible();
+    expect(within(panel).queryByRole("combobox")).not.toBeInTheDocument();
+    expect(
+      within(panel).getByRole("table", { name: "Configured NyxID rates" }),
+    ).toBeVisible();
+    await user.click(
+      screen.getByRole("button", { name: "Recent requests for Team OpenAI" }),
+    );
+    expect(screen.getByText("Request attribution unavailable")).toBeVisible();
+    await user.click(
+      screen.getByRole("button", { name: "Agent key access for Team OpenAI" }),
+    );
+    expect(screen.getByText("Agent keys in scope")).toBeVisible();
+    expect(screen.getByText("Override not reported")).toBeVisible();
+  });
   it("exposes payer, credential and actual last caller directly in the expanded table", () => {
     mount();
     expect(screen.getByRole("columnheader", { name: "Billing" })).toBeVisible();

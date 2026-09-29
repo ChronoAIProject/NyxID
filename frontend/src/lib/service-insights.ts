@@ -36,6 +36,8 @@ export function billingAccountLabel(
 ): string {
   if (!billing) return "Billing not reported";
   if (billing.status === "restricted") return "Billing restricted";
+  if (billing.context === "configuration" && billing.payer_rule)
+    return billing.payer_rule;
   if (billing.charge_status === "not_charged") return "Not charged by NyxID";
   if (billing.status === "unavailable") return "Billing unavailable";
   if (billing.account)
@@ -51,6 +53,15 @@ export function rateLabel(billing: ServiceBillingExplanation): string {
   if (billing.charge_status === "not_charged") return "No NyxID charge";
   if (billing.charge_status === "restricted") return "Rates restricted";
   if (!billing.rates.length) return "Rate not reported";
+  if (billing.context === "configuration") {
+    const pending = billing.rates.some((rate) => rate.sync_status !== "synced");
+    const rate = billing.rates[0]!;
+    const label =
+      billing.rates.length === 1
+        ? `${rate.credits_per_unit} credits / ${metricLabel(rate.metric, 1)} · configured`
+        : `${billing.rates.length} configured rates`;
+    return `${label}${pending ? " · sync unconfirmed" : ""}`;
+  }
   if (billing.rates.length > 1) return `${billing.rates.length} metered rates`;
   const rate = billing.rates[0]!;
   return rate.credits_per_unit == null
@@ -129,10 +140,13 @@ export function summarizeBilling(
     bills.some(
       (bill) =>
         bill.account?.id !== first.account?.id ||
+        bill.payer_rule !== first.payer_rule ||
         bill.charge_status !== first.charge_status,
     )
   )
     return "Varies by connection";
+  if (first.context === "configuration")
+    return `Expected: ${billingAccountLabel(first)}`;
   return first.account
     ? `For you: ${billingAccountLabel(first)}`
     : "Depends on execution";

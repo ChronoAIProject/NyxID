@@ -39,7 +39,9 @@ export function useServiceCardTransition() {
                   scroller.getBoundingClientRect().top -
                   scroller.clientTop -
                   padding -
-                  stickyToolbar.getBoundingClientRect().height -
+                  (
+                    stickyToolbar.firstElementChild ?? stickyToolbar
+                  ).getBoundingClientRect().height -
                   inset -
                   32,
               ),

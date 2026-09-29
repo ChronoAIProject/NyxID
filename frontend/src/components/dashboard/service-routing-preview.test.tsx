@@ -4,6 +4,7 @@ import {
   screen,
   cleanup,
   fireEvent,
+  act,
   within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -12,6 +13,8 @@ import type { ReactNode } from "react";
 import type { RoutingCandidate } from "@/lib/service-routing-preview";
 import type { KeyInfo } from "@/types/keys";
 import type { ServicePool } from "@/schemas/pools";
+import type { ServiceInsight } from "@/schemas/service-insights";
+import { configuredBilling } from "@/lib/service-insights-compat";
 
 function render(ui: ReactNode) {
   const client = new QueryClient({
@@ -24,7 +27,8 @@ function render(ui: ReactNode) {
   });
 }
 
-const { records, account, poolState } = vi.hoisted(() => ({
+const { records, account, poolState, insightConnections } = vi.hoisted(() => ({
+  insightConnections: new Map<string, ServiceInsight>(),
   account: { id: "user-a" },
   poolState: { data: [] as ServicePool[], error: null as unknown },
   records: [
@@ -117,8 +121,8 @@ import ServicePoolRoutingPreview from "./service-pool-routing-preview";
 
 vi.mock("@/hooks/use-service-insights", () => ({
   useServiceInsights: () => ({
-    connections: new Map(),
-    status: "unavailable",
+    connections: insightConnections,
+    status: insightConnections.size ? "ready" : "unavailable",
     refresh: vi.fn(),
   }),
 }));
@@ -161,6 +165,7 @@ beforeEach(() => {
   account.id = "user-a";
   poolState.data = [];
   poolState.error = null;
+  insightConnections.clear();
 });
 afterEach(() => {
   cleanup();
@@ -168,6 +173,108 @@ afterEach(() => {
 });
 
 describe("live grouped services", () => {
+  it("shows configured agent associations and expected billing on the collapsed card", () => {
+    insightConnections.set("mine", {
+      service_id: "mine",
+      billing: configuredBilling(records[0]!),
+      usage: {
+        access: {
+          basis: "configuration",
+          visibility: "own_keys",
+          truncated: false,
+          keys: [
+            {
+              id: "agent",
+              name: "Codex CI",
+              platform: "codex",
+              owner_id: "user-a",
+              permission: "selected_service",
+              credential_override: false,
+            },
+          ],
+        },
+        activity: {
+          visibility: "unavailable",
+          tracking: "unavailable",
+          period_days: 30,
+          request_count: 0,
+          requests: [],
+          truncated: false,
+        },
+      },
+    });
+    render(preview());
+    expect(screen.getByText("Agent keys")).toBeVisible();
+    expect(screen.getByText("Codex CI")).toBeVisible();
+    expect(screen.getByText("Expected: Your personal account")).toBeVisible();
+    expect(screen.queryByText("Latest request")).not.toBeInTheDocument();
+    expect(screen.queryByText(/No recorded requests/)).not.toBeInTheDocument();
+  });
+  it("keeps scroll height stable when compacting at the bottom of a short filtered view", () => {
+    const callbacks: ResizeObserverCallback[] = [];
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(callback: ResizeObserverCallback) {
+          callbacks.push(callback);
+        }
+        observe() {}
+        disconnect() {}
+      },
+    );
+    try {
+      render(<main>{preview()}</main>);
+      const main = screen.getByRole("main");
+      const filters = screen.getByRole("region", { name: "Service filters" });
+      const container = filters.parentElement!;
+      const surface = filters.firstElementChild!;
+      surface.getBoundingClientRect = () =>
+        new DOMRect(0, 0, 900, filters.dataset.stuck === "true" ? 80 : 240);
+      container.getBoundingClientRect = () =>
+        new DOMRect(0, 80 - main.scrollTop, 900, 1200);
+      filters.getBoundingClientRect = () =>
+        new DOMRect(
+          0,
+          Math.max(0, 80 - main.scrollTop),
+          900,
+          Math.max(
+            surface.getBoundingClientRect().height,
+            parseFloat(filters.style.minHeight) || 0,
+          ),
+        );
+      act(() =>
+        callbacks.forEach((callback) => callback([], {} as ResizeObserver)),
+      );
+      main.scrollTop = 100;
+      fireEvent.scroll(main);
+      for (let frame = 0; frame < 4; frame++) {
+        // Model the browser clamping scrollTop after scrollHeight shrinks.
+        main.scrollTop = Math.max(
+          0,
+          Math.min(
+            main.scrollTop,
+            100 + filters.getBoundingClientRect().height - 240,
+          ),
+        );
+        act(() =>
+          callbacks.forEach((callback) => callback([], {} as ResizeObserver)),
+        );
+        fireEvent.scroll(main);
+        expect(main.scrollTop).toBe(100);
+        expect(filters).toHaveAttribute("data-stuck", "true");
+        expect(
+          container.style.getPropertyValue("--service-filters-height"),
+        ).toBe("80px");
+      }
+      main.scrollTop = 0;
+      fireEvent.scroll(main);
+      expect(filters).toHaveAttribute("data-stuck", "false");
+      expect(filters.style.minHeight).toBe("");
+      expect(screen.getByRole("button", { name: "Saved views" })).toBeVisible();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
   it("covers the gap above a pinned service header and clears it on return or collapse", async () => {
     const user = userEvent.setup();
     render(<main>{preview()}</main>);

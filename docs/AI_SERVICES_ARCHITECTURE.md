@@ -728,6 +728,17 @@ missing data is never represented as free. Provider charges may be separate, and
 the preview is not a settled debit or proof that a provider credential works.
 Inspecting the page does not decrypt credentials, reserve credits, or call providers.
 
+On servers without the insights route (404/405/501 only), the frontend reads the
+existing managed-key inventories, binding metadata and catalog credential prices.
+This compatibility projection is labelled **configured scope** and **expected
+payer**, with a credential → payer → charges flow inside the connection row.
+It does not assert live execution permission, credential health, a resolved payer,
+or an effective price; synchronization status accompanies configured prices.
+Restricted/network errors do not fall back. Incomplete inventories and unknown
+overrides remain explicit, and exact caller history remains unavailable rather
+than appearing as zero requests. Agent-specific billing remains on the new
+server resolver; the compatibility view only describes the connection default.
+
 Agent access describes current scope grants, not use. Members see their own key
 inventory and requests; scoped organization admins can also inspect organization
 keys and permitted connection activity. Other members' private keys are excluded.
