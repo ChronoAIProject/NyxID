@@ -439,7 +439,7 @@ CHANNEL_RELAY_MAX_BOTS_PER_USER=5
 CHANNEL_RELAY_MESSAGE_TTL_DAYS=30
 CHANNEL_MEDIA_MAX_BYTES=20971520  # Per attachment; only reply/send JSON body caps are raised
 CHANNEL_POLL_INTERVAL_SECS=30       # Adapter-driven poll sweep; 0 disables (X minimum interval: 60s)
-NYXBOT_GATEWAY_PLATFORMS=telegram   # Platforms NyxBot reaches via the Agent Event Gateway (Telegram always included);
+NYXBOT_GATEWAY_PLATFORMS=telegram   # Platforms NyxBot reaches via the Agent Event Gateway (Telegram always; only lark/feishu may be added);
                                     # verified personal bots on newly listed ones move there, unchanged if refused
 CHANNEL_RELAY_EDIT_RATE_LIMIT_PER_SECOND=10   # Per-outbound-message edit rate limit
 CHANNEL_RELAY_EDIT_RATE_LIMIT_BURST=20

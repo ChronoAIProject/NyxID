@@ -188,15 +188,29 @@ impl std::str::FromStr for TrustedProxyRange {
     }
 }
 
+/// Platforms whose raw events the Agent Event Gateway verifies itself. The
+/// gateway accepts channels for others but refuses their messages unless told
+/// to trust NyxID's normalized payload, which loses mention and reply evidence,
+/// so NyxBot keeps those on NyxID's relay.
+pub const GATEWAY_VERIFIED_PLATFORMS: [&str; 3] = ["telegram", "lark", "feishu"];
+
 /// Parse `NYXBOT_GATEWAY_PLATFORMS`: lowercase platform names, always
-/// including `telegram`.
+/// including `telegram`; platforms the gateway cannot verify are ignored.
 pub fn gateway_platforms(value: Option<&str>) -> Vec<String> {
     // Telegram is always relayed by the gateway: listing more adds to it.
     let mut platforms = vec!["telegram".to_owned()];
     for platform in value.unwrap_or_default().split(',') {
         let platform = platform.trim().to_ascii_lowercase();
-        if !platform.is_empty() && !platforms.contains(&platform) {
+        if platform.is_empty() || platforms.contains(&platform) {
+            continue;
+        }
+        if GATEWAY_VERIFIED_PLATFORMS.contains(&platform.as_str()) {
             platforms.push(platform);
+        } else {
+            tracing::warn!(
+                platform = %platform,
+                "NYXBOT_GATEWAY_PLATFORMS: the gateway cannot verify this platform; its bots stay on NyxID's relay"
+            );
         }
     }
     platforms

@@ -3471,6 +3471,12 @@ fn gateway_platforms_are_read_from_the_environment() {
         crate::config::gateway_platforms(Some("Telegram, lark,feishu")),
         vec!["telegram", "lark", "feishu"]
     );
+    // Telegram always stays; repeats and platforms the gateway cannot verify
+    // are dropped.
+    assert_eq!(
+        crate::config::gateway_platforms(Some("lark,Lark,discord,feishu,lark,whatsapp")),
+        vec!["telegram", "lark", "feishu"]
+    );
 }
 
 type GatewayCalls = Arc<Mutex<Vec<(String, String, Value)>>>;

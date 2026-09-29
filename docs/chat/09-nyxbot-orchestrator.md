@@ -280,7 +280,11 @@ settings, or relinked later); each chat becomes a thread of the linked agent
 - **Other NyxID platforms** use NyxID's relay directly (`/api/v1/nyxbot/relay/{id}`,
   verified with NyxID's relay callback token) while the gateway relays Telegram
   only. `NYXBOT_GATEWAY_PLATFORMS` (default `telegram`; Telegram is always
-  included) lists the platforms the gateway takes: once a platform is listed,
+  included) lists the platforms the gateway takes. Only platforms whose raw
+  events the gateway verifies itself are honoured (`GATEWAY_VERIFIED_PLATFORMS`:
+  Telegram, Lark, Feishu); the gateway would accept channels for others but
+  refuse their messages without `trust_normalized`, which loses mention and
+  reply evidence, so they stay on NyxID's relay. Once a platform is listed,
   personal bots on it whose owner has verified move to the gateway by themselves
   (the 15-second sweep moves one bot at a time, each at most daily). A move
   builds first and swaps last: a new route key and gateway agent key, and a
