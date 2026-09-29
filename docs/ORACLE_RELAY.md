@@ -842,6 +842,26 @@ was verified against a live ChatGPT session during this change.
 | Latest-turn `button[data-testid="retry-button"]` | Assumed fallback; no dedicated fixture |
 | Composer stop button test ID and Stop generating/Stop streaming/停止生成 labels; latest-turn `data-is-streaming`, `data-state="streaming"`, `aria-busy`, `.result-streaming` | Verified by test: visible live state, hidden/old-turn exclusion |
 
+### ChatGPT's 2026-09 layout (0.33.1, DOM core 6)
+
+ChatGPT rolls its newer front end ("Chat | Work" home) out account by account,
+so one pool can mix both layouts. The DOM core recognizes both, and the classic
+markup keeps priority, so classic accounts behave exactly as before. The new
+layout was verified live on a Pro account on 2026-09-24; classic behaviour was
+re-verified live on the same day.
+
+| New-layout structure | Handling |
+|---|---|
+| Content search units keyed `…:user` / `…:assistant`; the finished answer's `ChatGPT said:` heading carries `data-conversation-role="assistant"` | Layout-agnostic turn model (`turnNodes`, `turnRole`, `turnContainerOf`); transcript keys fall back to the units' message IDs |
+| Busy `role="status"` "ChatGPT is responding" | Counts as generating |
+| Screen-reader-only labels on the same line as the answer | Removed before text extraction |
+| ProseMirror `[role="textbox"]` "Ask ChatGPT"; `Send` and `Stop` buttons | Composer, send and stop recognition |
+| `button[aria-label="Select ChatGPT model"]` ("Pro"); effort slider inside the "Power" menu item; family in the menu's "Select model" row ("6 Pro") | Structural pill; slider found through its menu item; family read from the "Select model" row, then the version radios |
+
+Workers pick this up with the bundle upgrade (`nyxid oracle worker upgrade`).
+Workers drained because their account moved to the new layout can then be
+resumed.
+
 ## Bundle distribution and trust
 
 The backend embeds `integrations/oracle/cdp-worker/worker.mjs` at compile time.
