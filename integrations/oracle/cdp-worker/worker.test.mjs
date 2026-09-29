@@ -26,6 +26,7 @@ import {
   diagnosticsToPrune,
   settleDom,
   familyFromModelRadios,
+  familyFromPickerItems,
   pillLabelPending,
   switcherMetadataMatches,
   familyUnverifiableButAcceptable,
@@ -1421,4 +1422,14 @@ test("a structural pill whose label is swapped out while its menu closes is retr
   assert.equal(pillLabelPending({ structural: false, form: true, pill: { index: 0 }, observed: "GPT-5.5 High", candidates: ["GPT-5.5 High"] }), false);
   assert.equal(pillLabelPending({ structural: false, form: false, pill: null, observed: null, candidates: [] }), false);
   assert.equal(pillLabelPending(null), false);
+});
+
+test("the picker's Select model row names the family; version radios remain the fallback", () => {
+  const radios = [{ text: "Latest", checked: true }, { text: "GPT-5.6 Sol", checked: false }];
+  assert.equal(familyFromPickerItems([{ text: "6\nPro" }, { text: "" }, ...radios]), "gpt_6_pro");
+  assert.equal(familyFromPickerItems([{ text: "6 High" }, ...radios]), "gpt_6");
+  assert.equal(familyFromPickerItems([{ text: "High" }, ...radios]), "gpt_latest");
+  assert.equal(familyFromPickerItems([{ text: "Pro" }, { text: "GPT-5.5", checked: true }]), "gpt_5_5");
+  assert.equal(familyFromPickerItems([{ text: "Consumes usage limits faster" }]), "absent");
+  assert.equal(familyFromPickerItems([]), "absent");
 });

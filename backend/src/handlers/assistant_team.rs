@@ -1532,6 +1532,10 @@ pub fn spawn_sweeps(state: AppState) {
             if let Err(error) = super::nyxbot::process_watches(&state).await {
                 tracing::debug!(%error, "NyxBot watch sweep deferred");
             }
+            // Linked chat apps whose messages stopped reaching their agent.
+            if let Err(error) = super::nyxbot::check_deliveries(&state).await {
+                tracing::debug!(%error, "NyxBot delivery sweep deferred");
+            }
             if let Ok(rows) = team::queued(&state.db, None).await {
                 for row in rows {
                     wake(&state, &row.user_id, &row.id).await;

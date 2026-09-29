@@ -81,6 +81,7 @@ beforeEach(() => {
     before_seq: null,
     acknowledgements: [],
     approvals: [],
+    waiting: [],
   };
   agents = [agentRow({})];
   globalThis.__nyxidAssistantHttpMock = ({ endpoint, init }) => {

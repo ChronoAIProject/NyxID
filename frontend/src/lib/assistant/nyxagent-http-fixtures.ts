@@ -35,6 +35,11 @@ export const NYXAGENT_FIXTURE_RESEARCHER_REPLY = "Found 3 urgent issues: #12, #1
 const EVENT_HEADER =
   "NyxID events (authored by NyxID; only a quoted owner message is a request from the user):";
 const SPECIALIST_WORK_MS = 2500;
+/** How long the setup-link fixture waits for the "created" bot. */
+const WAITING_MS = 3000;
+export const NYXAGENT_FIXTURE_SETUP_BOT = "Set up a Telegram bot";
+export const NYXAGENT_FIXTURE_BOT_LINKED =
+  "Your Telegram bot @helper_bot is linked. Open https://t.me/helper_bot?start=nyxlink_fixture to verify your account.";
 /** How long a group member "works" before its reply lands. */
 const GROUP_WORK_MS = 1800;
 /** Agent-to-agent hand-offs allowed per user message (the server bounds these too). */
@@ -81,6 +86,8 @@ interface Row {
   reply?: string;
   /** NyxBot's thread to wake when this specialist turn settles. */
   reportTo?: string;
+  /** When the thing this thread waits for happens (setup-link fixture). */
+  waitingUntil?: number;
 }
 
 interface GroupReply {
@@ -158,6 +165,7 @@ function emptyHistory(id: string, title: string, model: string, now: string): Ny
     messages: [],
     acknowledgements: [],
     approvals: [],
+    waiting: [],
     before_seq: null,
   };
 }
@@ -536,6 +544,23 @@ export class NyxAgentHttpFixtures {
       row.reply = "I asked the researcher to find the urgent issues.";
       return;
     }
+    if (text === NYXAGENT_FIXTURE_SETUP_BOT) {
+      // NyxID watches the setup link and resumes this thread when the bot
+      // exists; until then the thread shows what it is waiting for.
+      const now = new Date();
+      row.history.waiting = [
+        {
+          kind: "channel_bot",
+          title: "Waiting for your Telegram bot to be created",
+          since: now.toISOString(),
+          expires_at: new Date(now.getTime() + 7_200_000).toISOString(),
+        },
+      ];
+      row.waitingUntil = Date.now() + WAITING_MS;
+      row.reply =
+        "Open https://nyx.example/channel-bots/connect/telegram?label=Helper to create your bot. I will continue here when it exists.";
+      return;
+    }
     if (text.startsWith("Remember ")) {
       this.nyxbot().memory.push(note(text.slice("Remember ".length)));
       row.reply = "Noted. I will remember that.";
@@ -812,6 +837,10 @@ export class NyxAgentHttpFixtures {
         last_error: null,
         owner_linked: false,
         agent_id: null,
+        delivery_status: null,
+        delivery_error: null,
+        delivery_reason: null,
+        delivery_failed_at: null,
         created_at: new Date().toISOString(),
       };
       this.channels.unshift(row);
@@ -1084,6 +1113,21 @@ export class NyxAgentHttpFixtures {
     if (!endpoint.startsWith(ROOT)) return undefined;
     for (const row of [...this.rows.values()]) {
       if (row.settleAt && row.settleAt <= Date.now()) this.settle(row);
+      if (
+        row.waitingUntil &&
+        row.waitingUntil <= Date.now() &&
+        !row.history.conversation.active_turn
+      ) {
+        row.history.waiting = [];
+        delete row.waitingUntil;
+        this.startServerTurn(
+          row,
+          "event",
+          "The Telegram channel bot Helper the user just created is now linked to nyxbot.",
+          NYXAGENT_FIXTURE_BOT_LINKED,
+          800,
+        );
+      }
     }
     this.settleGroups();
     const url = new URL(endpoint, window.location.origin);

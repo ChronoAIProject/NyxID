@@ -417,3 +417,19 @@ test("agents get a display name and persona, shown with their @handle everywhere
     "Working on it: hello",
   );
 });
+
+test("a thread shows what it is waiting for and resumes by itself when it happens", async ({
+  page,
+}) => {
+  await openAssistant(page, { faults: { nyxagentEnabled: true } });
+  await sendMessage(page, "Set up a Telegram bot");
+  await expect(page.getByText(/to create your bot/)).toBeVisible();
+  const waiting = page.getByRole("status", { name: "Waiting" });
+  await expect(waiting).toContainText("Waiting for your Telegram bot to be created");
+  await expect(waiting).toContainText("NyxBot continues here by itself");
+  // NyxID notices the bot and resumes the thread; the user never replied.
+  await expect(page.getByText(/Your Telegram bot @helper_bot is linked/)).toBeVisible({
+    timeout: 15_000,
+  });
+  await expect(waiting).toHaveCount(0);
+});

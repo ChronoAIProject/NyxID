@@ -6,6 +6,7 @@ import {
   PendingEventsNote,
   TeamStrip,
   ThreadHeader,
+  WaitingNote,
 } from "./nyxbot-agent-panels";
 import { AgentDetailsSheet } from "./nyxbot-agent-details";
 import { NewAgentDialog } from "./nyxbot-agent-forms";
@@ -611,6 +612,9 @@ function NyxAgentThreadPage() {
         ) : null}
         {conversation && !chat.isStreaming ? (
           <PendingEventsNote count={conversation.pending_events} agentName={agentName} />
+        ) : null}
+        {selectedId && !chat.isStreaming ? (
+          <WaitingNote items={chat.waiting} agentName={agentName} />
         ) : null}
       </div>
     </div>
