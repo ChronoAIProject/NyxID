@@ -311,9 +311,13 @@ settings, or relinked later); each chat becomes a thread of the linked agent
   connected through NyxID's relay with a fresh route key the gateway never saw;
   Telegram failures are still reported as errors. Through the gateway, Lark and
   Feishu carry plain text only (images, files and rich posts are refused there,
-  while NyxID's relay passes them on). A message the relay sent in the instant
-  between the swap and the route change is refused and reported like any lost
-  message.
+  while NyxID's relay passes them on). A message whose route the relay looked up
+  just before the swap committed reaches NyxID's relay endpoint after it and is
+  refused and reported like any lost message. A move whose replica stopped
+  midway leaves `pending_agent_api_key_id`/`pending_route_api_key_id`; the sweep
+  deletes those keys after 30 minutes. The swap needs MongoDB transactions (a
+  replica set, as in production); on a standalone development database every
+  move ends as `swap_failed` and the bot stays on NyxID's relay.
 - **Organization bots.** An owner can link bots of organizations they
   administer (the rule for managing org bots), found by id or label:
   `nyxid__list_channel_bots` and the route tools cover personal and administered

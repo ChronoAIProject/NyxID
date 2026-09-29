@@ -654,6 +654,7 @@ pub async fn connect(
         gateway_attempted_at: may_fall_back.then_some(now),
         gateway_fallback_at: (may_fall_back && !gateway).then_some(now),
         pending_agent_api_key_id: None,
+        pending_route_api_key_id: None,
         owner_sender_ids: {
             let mut ids = known_owner_senders(state, owner, &platform).await;
             for id in verified_owners {
@@ -1070,6 +1071,8 @@ async fn bot_user_id(state: &AppState, bot: &ChannelBot) -> Option<String> {
 /// A bot in the middle of answering is looked at again this much later
 /// (not counted as a refusal).
 const MOVE_BUSY_RETRY_MINUTES: i64 = 10;
+/// A move takes seconds; one still pending after this never finished.
+const MOVE_STALE_MINUTES: i64 = 30;
 
 /// Move one personal bot still on NyxID's relay onto the gateway once its
 /// platform is listed in `NYXBOT_GATEWAY_PLATFORMS`: at most one per sweep on
@@ -1085,17 +1088,39 @@ pub(crate) async fn switch_to_gateway(state: &AppState) -> AppResult<()> {
         .map(|platform| canonical_platform(platform))
         .filter(|platform| *platform != "telegram")
         .collect();
+    let now = Utc::now();
+    let channels = state.db.collection::<NyxbotChannel>(CHANNELS);
+    // A move that never finished (its replica stopped) leaves its new keys
+    // behind: they go.
+    if let Some(stuck) = channels
+        .find_one_and_update(
+            doc! {"transport": "direct", "pending_agent_api_key_id": {"$ne": null},
+            "gateway_attempted_at": {"$lt": bson::DateTime::from_chrono(
+                now - ChronoDuration::minutes(MOVE_STALE_MINUTES))}},
+            doc! {"$unset": {"pending_agent_api_key_id": "", "pending_route_api_key_id": "",
+            "binding_id": ""}},
+        )
+        .await?
+    {
+        for key in [
+            stuck.pending_agent_api_key_id,
+            stuck.pending_route_api_key_id,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let _ = key_service::delete_api_key(&state.db, &stuck.user_id, &key).await;
+        }
+    }
     if listed.is_empty() {
         return Ok(());
     }
-    let now = Utc::now();
     let due = bson::DateTime::from_chrono(now - ChronoDuration::hours(GATEWAY_RETRY_HOURS));
     let filter = doc! {"status": "active", "transport": "direct",
     "bot_owner_id": bson::Bson::Null, "platform": {"$in": &listed},
     "owner_sender_ids.0": {"$exists": true},
     "$or": [{"gateway_attempted_at": bson::Bson::Null},
         {"gateway_attempted_at": {"$lt": due}}]};
-    let channels = state.db.collection::<NyxbotChannel>(CHANNELS);
     // Claim it, so replicas do not move the same bot at once; the longest
     // waiting bot first.
     let Some(row) = channels
@@ -1146,7 +1171,10 @@ async fn channel_answering(state: &AppState, row: &NyxbotChannel) -> AppResult<b
     Ok(state
         .db
         .collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
-        .count_documents(doc! {"user_id": &row.user_id, "active_turn": {"$ne": null},
+        .count_documents(doc! {"user_id": &row.user_id,
+        // A turn whose fence expired (a crashed replica) holds nothing up.
+        "active_turn.started_at": {"$gt": bson::DateTime::from_chrono(Utc::now()
+            - ChronoDuration::seconds(crate::services::assistant_nyxagent::ACTIVE_TURN_TTL_SECS))},
         "$or": [{"channel.nyxbot_channel_id": &row.id},
             {"reply_channel.nyxbot_channel_id": &row.id}]})
         .limit(1)
@@ -1317,7 +1345,8 @@ async fn move_to_gateway(state: &AppState, row: &NyxbotChannel) -> Result<(), &'
             .update_one(
                 doc! {"_id": &row.id, "transport": "direct",
                 "pending_agent_api_key_id": &agent.id},
-                doc! {"$unset": {"pending_agent_api_key_id": "", "binding_id": ""}},
+                doc! {"$unset": {"pending_agent_api_key_id": "", "pending_route_api_key_id": "",
+                "binding_id": ""}},
             )
             .await;
         code
@@ -1328,7 +1357,8 @@ async fn move_to_gateway(state: &AppState, row: &NyxbotChannel) -> Result<(), &'
         .update_one(
             doc! {"_id": &row.id, "status": "active", "transport": "direct",
             "route_api_key_id": &row.route_api_key_id},
-            doc! {"$set": {"pending_agent_api_key_id": &agent.id},
+            doc! {"$set": {"pending_agent_api_key_id": &agent.id,
+            "pending_route_api_key_id": &route_key.id},
             "$unset": {"binding_id": ""}},
         )
         .await
@@ -1437,6 +1467,7 @@ async fn move_to_gateway(state: &AppState, row: &NyxbotChannel) -> Result<(), &'
         set.insert("gateway_bot_id", bot_id);
     }
     let swap = doc! {"$set": set, "$unset": {"pending_agent_api_key_id": "",
+    "pending_route_api_key_id": "",
     "gateway_groups": "", "gateway_fallback_at": "", "gateway_groups_retry_at": ""}};
     let fence = doc! {"_id": &row.id, "status": "active", "transport": "direct",
     "route_api_key_id": &row.route_api_key_id, "pending_agent_api_key_id": &agent.id};
@@ -1480,7 +1511,15 @@ async fn move_to_gateway(state: &AppState, row: &NyxbotChannel) -> Result<(), &'
     match swapped {
         Ok(true) => {}
         Ok(false) => return Err(discard(opened, "channel_changed").await),
-        Err(_) => return Err(discard(opened, "swap_failed").await),
+        Err(_) => {
+            // The commit may have landed even though its answer was lost.
+            let landed = load_channel(state, owner, &row.id)
+                .await
+                .is_ok_and(|now| now.route_api_key_id == route_key.id);
+            if !landed {
+                return Err(discard(opened, "swap_failed").await);
+            }
+        }
     }
     let _ = key_service::delete_api_key(&state.db, owner, &row.route_api_key_id).await;
     // Group chats that answer everything need every group message.
@@ -3375,7 +3414,9 @@ async fn gateway_inbound(
     let chat_id = conversation["id"].as_str().unwrap_or_default();
     let thread_id = conversation["thread_id"].as_str();
     let chat_partition = if kind == "private" {
-        // A bot moved from NyxID's relay keeps the chat's thread.
+        // A bot moved from NyxID's relay keeps the chat's thread. The gateway
+        // copies the actor and chat IDs from NyxID's relay payload (and Lark's
+        // topic from the same `message.thread_id`), so they match the relay's.
         chats::adopt_relay_chat(state, row, partition, chat_id, sender.id, thread_id).await?;
         partition.to_owned()
     } else {

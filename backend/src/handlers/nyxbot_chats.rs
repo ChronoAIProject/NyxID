@@ -75,21 +75,27 @@ pub(super) async fn adopt_relay_chat(
     {
         return Ok(());
     }
-    threads
-        .delete_one(doc! {"channel_id": &row.id, "partition": partition, "kind": null})
-        .await?;
-    match threads
-        .update_one(
-            doc! {"channel_id": &row.id, "partition": &legacy},
-            doc! {"$set": {"partition": partition, "updated_at": bson::DateTime::now()}},
-        )
-        .await
-    {
-        Ok(moved) if moved.matched_count == 1 => {}
-        // Another message of the chat got there first.
-        Ok(_) => return Ok(()),
-        Err(error) if super::is_duplicate(&error) => return Ok(()),
-        Err(error) => return Err(error.into()),
+    // The gateway may re-create its placeholder in between: once more then.
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        threads
+            .delete_one(doc! {"channel_id": &row.id, "partition": partition, "kind": null})
+            .await?;
+        match threads
+            .update_one(
+                doc! {"channel_id": &row.id, "partition": &legacy},
+                doc! {"$set": {"partition": partition, "updated_at": bson::DateTime::now()}},
+            )
+            .await
+        {
+            Ok(moved) if moved.matched_count == 1 => break,
+            // Another message of the chat got there first.
+            Ok(_) => return Ok(()),
+            Err(error) if super::is_duplicate(&error) && attempts < 2 => continue,
+            Err(error) if super::is_duplicate(&error) => return Ok(()),
+            Err(error) => return Err(error.into()),
+        }
     }
     let conversations = state
         .db

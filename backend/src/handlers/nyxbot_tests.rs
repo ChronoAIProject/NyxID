@@ -132,6 +132,7 @@ async fn channel(state: &AppState, transport: &str) -> (NyxbotChannel, String) {
         gateway_attempted_at: None,
         gateway_fallback_at: None,
         pending_agent_api_key_id: None,
+        pending_route_api_key_id: None,
         owner_sender_ids: Vec::new(),
         link_code_hash: None,
         link_code_expires_at: None,
@@ -2649,6 +2650,7 @@ fn telegram_mentions_and_replies_to_the_bot_are_recognised() {
             gateway_attempted_at: None,
             gateway_fallback_at: None,
             pending_agent_api_key_id: None,
+            pending_route_api_key_id: None,
             owner_sender_ids: vec!["ou_alice".into()],
             link_code_hash: None,
             link_code_expires_at: None,
@@ -3759,7 +3761,7 @@ async fn personal_bots_move_to_the_gateway_once_it_takes_their_platform() {
     conversations
         .insert_one(doc! {"_id": "answering", "user_id": OWNER,
         "reply_channel": {"nyxbot_channel_id": &before.id, "partition": "p", "platform": "lark"},
-        "active_turn": {"turn_id": "t"}})
+        "active_turn": {"turn_id": "t", "started_at": bson::DateTime::now()}})
         .await
         .unwrap();
     a_day_later().await;
@@ -3902,6 +3904,34 @@ async fn personal_bots_move_to_the_gateway_once_it_takes_their_platform() {
         .unwrap();
     assert_eq!(lobby.transport, "direct");
     assert!(calls.lock().await.is_empty());
+    // A move whose replica stopped midway: its new keys are reaped.
+    let (stuck_agent, stuck_route) = (
+        key(&state, "stuck agent").await,
+        key(&state, "stuck route").await,
+    );
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .update_one(
+            doc! {"_id": &lobby.id},
+            doc! {"$set": {"pending_agent_api_key_id": &stuck_agent.id,
+            "pending_route_api_key_id": &stuck_route.id,
+            "gateway_attempted_at": bson::DateTime::from_chrono(
+                Utc::now() - ChronoDuration::hours(1))}},
+        )
+        .await
+        .unwrap();
+    switch_to_gateway(&state).await.unwrap();
+    let reaped = load_channel(&state, OWNER, &lobby.id).await.unwrap();
+    assert!(reaped.pending_agent_api_key_id.is_none() && reaped.pending_route_api_key_id.is_none());
+    for stuck in [&stuck_agent.id, &stuck_route.id] {
+        assert!(
+            !key_service::get_api_key(&state.db, OWNER, stuck)
+                .await
+                .is_ok_and(|key| key.is_active)
+        );
+    }
+    assert_eq!(reaped.transport, "direct");
     // Bob's first message through the gateway continues his relay-era chat:
     // same thread and settings, and conversations answering into it follow.
     let gateway_partition = format!("conv_{}", "b".repeat(32));

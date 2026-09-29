@@ -74,6 +74,10 @@ pub struct NyxbotChannel {
     /// channel. Cleared by the swap or the rollback.
     #[serde(default)]
     pub pending_agent_api_key_id: Option<String>,
+    /// While a move is being built: its new route key (reaped with the
+    /// pending agent key if the move never finished).
+    #[serde(default)]
+    pub pending_route_api_key_id: Option<String>,
     /// When the gateway last refused this bot's platform, so it fell back to
     /// NyxID's relay.
     #[serde(default, with = "crate::models::bson_datetime::optional")]
