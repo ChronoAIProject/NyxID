@@ -2587,7 +2587,10 @@ async fn chat_posting_is_opt_in_and_chat_agents_survive_relinks() {
     let refused = chats::post(&state, OWNER, &chat.id, "Standup in 5", None)
         .await
         .unwrap_err();
-    assert!(matches!(refused, AppError::Forbidden(_)), "{refused:?}");
+    assert!(
+        matches!(refused, AppError::Forbidden(_)),
+        "posting must be off by default"
+    );
     chats::update_chat(
         &state,
         OWNER,
@@ -2603,7 +2606,10 @@ async fn chat_posting_is_opt_in_and_chat_agents_survive_relinks() {
     let refused = chats::post(&state, OWNER, &chat.id, "Hello", Some(&support.id))
         .await
         .unwrap_err();
-    assert!(matches!(refused, AppError::Forbidden(_)), "{refused:?}");
+    assert!(
+        matches!(refused, AppError::Forbidden(_)),
+        "only the chat's agent or NyxBot posts"
+    );
     // NyxBot gets past the checks to the platform send (this fixture's bot
     // has no usable token, so the send itself fails).
     let mut bot = bot_doc("lark", "Helper bot");
@@ -2629,7 +2635,7 @@ async fn chat_posting_is_opt_in_and_chat_agents_survive_relinks() {
             attempted,
             Err(AppError::Forbidden(_)) | Err(AppError::Conflict(_))
         ),
-        "{attempted:?}"
+        "NyxBot must get past the posting checks"
     );
     // Giving the chat its own agent starts a new thread with it.
     let updated = chats::update_chat(
@@ -2664,7 +2670,10 @@ async fn chat_posting_is_opt_in_and_chat_agents_survive_relinks() {
     let refused = chats::post(&state, OWNER, &chat.id, "Hello", Some(&sales.id))
         .await
         .unwrap_err();
-    assert!(matches!(refused, AppError::Forbidden(_)), "{refused:?}");
+    assert!(
+        matches!(refused, AppError::Forbidden(_)),
+        "a specialist that no longer answers the chat cannot post"
+    );
     // Destroying the chat's agent gives the chat back to the bot's agent.
     crate::handlers::assistant_team::destroy_agent(&state, OWNER, &support.id)
         .await
