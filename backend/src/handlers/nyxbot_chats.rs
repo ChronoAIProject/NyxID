@@ -143,6 +143,8 @@ pub(super) struct ChatFacts {
     pub kind: &'static str,
     pub chat_id: String,
     pub thread_id: Option<String>,
+    /// Private chats: the sender is the verified owner.
+    pub owner: bool,
     /// The group's name, or the sender's name in a private chat.
     pub title: Option<String>,
 }
@@ -159,6 +161,9 @@ pub(super) async fn record_chat(
     let now = bson::DateTime::now();
     let mut set = doc! {"updated_at": now, "last_message_at": now, "kind": facts.kind,
     "platform_chat_id": &facts.chat_id};
+    if facts.kind == "private" {
+        set.insert("owner_chat", facts.owner);
+    }
     if let Some(thread_id) = facts.thread_id.as_deref() {
         set.insert("platform_thread_id", thread_id);
     }
@@ -190,13 +195,15 @@ pub(super) async fn record_chat(
         .ok_or_else(|| AppError::Internal("Channel chat unavailable".into()))
 }
 
-/// A private chat's name: "You" for the owner, else the sender's name, else
-/// the platform and the end of their ID (some platforms send no names).
+/// A private chat's name: "You" for the owner, else the sender's name (never
+/// "You"), else the platform and the end of their ID (some platforms send no
+/// names).
 pub(super) fn private_title(row: &NyxbotChannel, sender_id: &str, name: Option<&str>) -> String {
     if row.owner_sender_ids.iter().any(|id| id == sender_id) {
         return "You".into();
     }
     match name.and_then(clean_title) {
+        Some(name) if name.eq_ignore_ascii_case("you") => format!("{name} (guest)"),
         Some(name) => name,
         None => {
             let tail: String = sender_id
@@ -454,7 +461,9 @@ pub(super) fn admission(
         Admission::Owner
     } else if members_may_talk(chat) {
         Admission::Guest
-    } else if chat.members.is_none() && addressed {
+    } else if chat.members.is_none() && addressed && chat.kind.as_deref() == Some("group") {
+        // A broadcast channel's posts come from the channel, never the owner:
+        // no promise that cannot come true.
         Admission::Waiting
     } else {
         Admission::Silent
@@ -673,6 +682,8 @@ pub struct ChannelChatResponse {
     members_setting: Option<String>,
     /// Groups: the owner has talked to the bot there.
     owner_seen: bool,
+    /// Private chats: the owner's own chat with the bot.
+    owner: bool,
     allow_posts: bool,
     conversation_id: Option<String>,
     last_message_at: Option<chrono::DateTime<Utc>>,
@@ -701,6 +712,7 @@ fn chat_response(row: &NyxbotChannel, chat: &NyxbotThread) -> ChannelChatRespons
         },
         members_setting: chat.members.clone(),
         owner_seen: chat.owner_seen,
+        owner: chat.owner_chat,
         allow_posts: chat.allow_posts,
         conversation_id: chat.conversation_id.clone(),
         last_message_at: chat.last_message_at,

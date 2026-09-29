@@ -117,7 +117,7 @@ function ChatRow({
             ? "only you can talk to it"
             : "only you until you talk to the bot here"
       }`
-    : chat.title === "You"
+    : chat.owner
       ? "Your private chat with the bot"
       : `A private chat with ${title}, as a guest`;
 

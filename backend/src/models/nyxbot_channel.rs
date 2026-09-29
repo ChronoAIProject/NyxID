@@ -160,6 +160,9 @@ pub struct NyxbotThread {
     pub members: Option<String>,
     #[serde(default)]
     pub owner_seen: bool,
+    /// Private chats: the other side is the verified owner.
+    #[serde(default)]
+    pub owner_chat: bool,
     /// When members were last told the agent answers them only once the
     /// owner has talked to the bot in this group (at most daily).
     #[serde(default, with = "crate::models::bson_datetime::optional")]

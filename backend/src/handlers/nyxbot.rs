@@ -2841,6 +2841,7 @@ async fn gateway_inbound(
             kind,
             chat_id: chat_id.to_owned(),
             thread_id: thread_id.map(str::to_owned),
+            owner: row.owner_sender_ids.iter().any(|id| id == sender.id),
             title: (kind == "private")
                 .then(|| chats::private_title(row, sender.id, sender.display_name)),
         },
@@ -3206,6 +3207,7 @@ pub async fn relay_callback(
                     kind,
                     chat_id: chat_id.clone(),
                     thread_id,
+                    owner: row.owner_sender_ids.iter().any(|id| id == &sender_id),
                     title: if kind == "private" {
                         Some(chats::private_title(&row, &sender_id, display.as_deref()))
                     } else {

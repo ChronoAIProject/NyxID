@@ -124,6 +124,9 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     if let Err(error) = crate::services::assistant_nyxagent::repair_channel_homes(db).await {
         tracing::warn!(%error, "NyxBot home repair deferred");
     }
+    if let Err(error) = crate::services::assistant_nyxagent::reset_direct_reply_channels(db).await {
+        tracing::warn!(%error, "NyxBot reply channel reset deferred");
+    }
     crate::services::coordination_service::ensure_indexes(db).await?;
 
     // ── assistant_wire_logs ──

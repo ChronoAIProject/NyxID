@@ -2476,6 +2476,7 @@ async fn direct_group_messages_need_a_mention_or_a_reply_to_the_bot() {
         "direct_old_misfiled",
         &chats::ChatFacts {
             kind: "private",
+            owner: false,
             chat_id: "oc_group".into(),
             thread_id: None,
             title: None,
@@ -2657,6 +2658,10 @@ fn telegram_mentions_and_replies_to_the_bot_are_recognised() {
         }
     };
     assert_eq!(chats::private_title(&row, "ou_alice", Some("Alice")), "You");
+    assert_eq!(
+        chats::private_title(&row, "ou_mallory", Some("you")),
+        "you (guest)"
+    );
     assert_eq!(chats::private_title(&row, "ou_bob", Some("Bob")), "Bob");
     assert_eq!(
         chats::private_title(&row, "ou_bob1234", None),
@@ -2705,6 +2710,7 @@ async fn chat_posting_is_opt_in_and_chat_agents_survive_relinks() {
         &chats::group_partition("oc_group", None),
         &chats::ChatFacts {
             kind: "group",
+            owner: false,
             chat_id: "oc_group".into(),
             thread_id: None,
             title: Some("  Team\nchat ".into()),
@@ -2856,6 +2862,7 @@ async fn chat_posting_is_opt_in_and_chat_agents_survive_relinks() {
         "direct_private",
         &chats::ChatFacts {
             kind: "private",
+            owner: false,
             chat_id: "ou_bob".into(),
             thread_id: None,
             title: Some("Bob".into()),
@@ -3352,5 +3359,64 @@ async fn startup_repairs_homes_that_are_channel_threads() {
     assert_eq!(home("agent-bad").await, None);
     assert_eq!(home("agent-good").await.as_deref(), Some("nyxa-own"));
     assert_eq!(engine::repair_channel_homes(&state.db).await.unwrap(), 0);
+    server.abort();
+}
+
+/// Once: owner threads forget a directly relayed reply chat (it may have been
+/// a group misfiled as private before 0.36.1); gateway ones are kept.
+#[tokio::test]
+async fn direct_reply_channels_are_reset_once() {
+    let (state, _, server) = setup("nyxbot_reply_channel_reset").await;
+    let conversations = state.db.collection::<bson::Document>(CONVERSATIONS);
+    conversations
+        .insert_many([
+            doc! {"_id": "nyxa-direct", "user_id": OWNER, "reply_channel":
+            {"nyxbot_channel_id": "c", "partition": "direct_abc", "platform": "lark"}},
+            doc! {"_id": "nyxa-gateway", "user_id": OWNER, "reply_channel":
+            {"nyxbot_channel_id": "c", "partition": PARTITION, "platform": "telegram"}},
+        ])
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<bson::Document>("schema_migrations")
+        .delete_many(doc! {})
+        .await
+        .unwrap();
+    assert_eq!(
+        engine::reset_direct_reply_channels(&state.db)
+            .await
+            .unwrap(),
+        1
+    );
+    let kept = |id: &'static str| {
+        let conversations = conversations.clone();
+        async move {
+            conversations
+                .find_one(doc! {"_id": id})
+                .await
+                .unwrap()
+                .unwrap()
+                .contains_key("reply_channel")
+        }
+    };
+    assert!(!kept("nyxa-direct").await);
+    assert!(kept("nyxa-gateway").await);
+    // Never again: a direct reply chat set afterwards stays.
+    conversations
+        .update_one(
+            doc! {"_id": "nyxa-direct"},
+            doc! {"$set": {"reply_channel":
+            {"nyxbot_channel_id": "c", "partition": "direct_def", "platform": "lark"}}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        engine::reset_direct_reply_channels(&state.db)
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(kept("nyxa-direct").await);
     server.abort();
 }

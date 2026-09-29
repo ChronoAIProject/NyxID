@@ -364,7 +364,9 @@ relay passes each message's own chat type (`private`, `group`, `channel`) to
 the agent, never the type configured on the route that caught it (a default
 route answers every kind of chat). Before 0.36.1 a group reached through a
 default route looked like private chats, one per member; those records are
-removed once the group's next message arrives. A bot's chats are threads of their own: each group, channel or forum topic is
+removed once the group's next message arrives, and a startup migration (once)
+forgets directly relayed reply chats of the owner's own threads, which such a
+misfiled group could have set. A bot's chats are threads of their own: each group, channel or forum topic is
 one thread its members share, and each other person's private chat is one
 thread. The owner's own private chats are the exception (§12b): they continue
 the agent's own thread. Messages in
