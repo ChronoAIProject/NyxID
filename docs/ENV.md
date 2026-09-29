@@ -553,7 +553,7 @@ Drive and Workspace editor routing activates automatically at startup for recogn
 
 All service-instance writes require transactions. Startup rejects standalone MongoDB before indexes or migrations. Use MongoDB 8 on a replica set or mongos. Bundled Compose creates authenticated `nyxid-rs` with a persistent internal keyfile and a primary-election initializer; backend startup waits for it. Local host connections to Compose use `directConnection=true`; external databases must use their actual replica-set/mongos URI. Existing data volumes require a coordinated backup and maintenance migration; see [SERVICE_HISTORY.md](SERVICE_HISTORY.md#mongodb-deployment-prerequisite). There is no new history environment variable or TTL.
 
-### Exact billing cutover (0.33.0)
+### Exact billing cutover (0.34.0)
 
 `BILLING_EXACT_CUTOVER_DRAINED=true` is a one-time operator acknowledgement
 required before the background task migrates existing wallets/grants. Pending

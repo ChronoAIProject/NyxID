@@ -368,7 +368,7 @@ cargo test -p nyxid --bin nyxid-server services::admin_usage_service::tests --no
 cargo test -p nyxid --bin nyxid-server usage_workspace --no-default-features
 ```
 
-Exact accounting (0.33.0): cost analytics expose `exact_value` and `exact_total` as
+Exact accounting (0.34.0): cost analytics expose `exact_value` and `exact_total` as
 additive strings. Hourly/daily buckets sum Decimal128 credits, converting legacy
 integer micro measures before each increment. Totals truncate only when producing
 legacy integer response fields. Sorting uses exact values; chart labels retain

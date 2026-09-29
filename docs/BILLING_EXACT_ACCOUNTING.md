@@ -1,6 +1,6 @@
 # Exact credit accounting
 
-NyxID 0.33.0 implements exact credit accounting for issue #1672.
+NyxID 0.34.0 implements exact credit accounting for issue #1672.
 
 ## Invariants
 
@@ -366,7 +366,7 @@ Named regressions include:
 After normalization, the covered reduction reads flat Decimal128 money mirrors
 from index slots and aggregates exact credits before truncating compatibility
 displays. Before integration with main, the density benchmark compared base
-0.30.2 against the exact-accounting implementation retained in 0.33.0, using
+0.30.2 against the exact-accounting implementation retained in 0.34.0, using
 sequential runs with the same fixture timestamp and document/key counts. The
 table reports the unfiltered medians from those completed runs; these are not
 measurements of the integrated release.
