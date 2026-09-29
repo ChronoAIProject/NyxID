@@ -433,3 +433,34 @@ test("a thread shows what it is waiting for and resumes by itself when it happen
   });
   await expect(waiting).toHaveCount(0);
 });
+
+test("the transcript never shows through around or below the composer", async ({ page }) => {
+  await openAssistant(page, { faults: { nyxagentEnabled: true } });
+  for (const text of ["List connected services", "Use GitHub", "Manage my account"]) {
+    await sendMessage(page, text);
+    await expect(page.getByRole("button", { name: "Stop" })).toHaveCount(0, { timeout: 15_000 });
+  }
+  // Scroll the transcript up so its text sits behind the composer.
+  await page.mouse.move(400, 300);
+  await page.mouse.wheel(0, -200);
+  const band = page.locator("[data-composer-band]");
+  const background = await band.evaluate((element) => getComputedStyle(element).backgroundColor);
+  expect(background).not.toBe("rgba(0, 0, 0, 0)");
+  expect(background).not.toBe("transparent");
+  await expect(band.locator("[data-composer-fade]")).toHaveCount(1);
+});
+
+test("with NyxID's live stream a waiting thread resumes as soon as it happens, not on a poll", async ({
+  page,
+}) => {
+  await openAssistant(page, { faults: { nyxagentEnabled: true, nyxagentLive: true } });
+  await sendMessage(page, "Set up a Telegram bot");
+  const waiting = page.getByRole("status", { name: "Waiting" });
+  await expect(waiting).toContainText("Waiting for your Telegram bot to be created");
+  // The fixture creates the bot 3 s after the request; the waiting poll alone
+  // would only notice it 10 s later.
+  await expect(page.getByText(/Your Telegram bot @helper_bot is linked/)).toBeVisible({
+    timeout: 7000,
+  });
+  await expect(waiting).toHaveCount(0);
+});

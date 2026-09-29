@@ -16,6 +16,8 @@ type JsonRecord = Record<string, unknown>;
 
 export interface AssistantHttpFixtureFaults {
   readonly nyxagentEnabled?: boolean;
+  /** Serve NyxAgent's live change stream (otherwise it answers 404). */
+  readonly nyxagentLive?: boolean;
   readonly historyDelayMs?: number;
   readonly historyErrorStatus?: number;
   readonly sendSilent?: boolean;

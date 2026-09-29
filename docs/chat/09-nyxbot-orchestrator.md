@@ -171,13 +171,33 @@ ends its turn; NyxID resumes that thread with an event as soon as it happens:
   would run the call twice.
 
 Watches are TTL-expired and claimed atomically, so replicas never link or report
-twice.
+twice. They resolve **as soon as it happens**: every replica follows one MongoDB
+change stream (`services/assistant_live.rs`; NyxID already requires a replica
+set or mongos), projected inside MongoDB to identifiers, owner and status only.
+A connect link reaching a terminal status, or a new (or reactivated) channel
+bot of the owner, resolves the matching watches at once on whichever replica
+sees it first; the atomic claim keeps the others out. A new bot is linked as
+soon as it is saved, even while its webhook is still being verified. After a
+stream reopens, every consumer re-reads what it may have missed, and the
+15-second sweep remains the backstop.
+
+Browsers get the same changes over `GET /assistant/nyxagent/live` (human-only,
+server-sent events, reopened by the client): frames carry only
+`{type, id, group_id, turn_id, messages}` for the owner's conversations and
+groups,
+`channels` when a bot changes, and `resync` when changes may have been missed.
+Each owner has their own channel and at most eight open streams (429 beyond);
+a replica whose change stream is not delivering answers 503, and streams end
+after five minutes so the browser re-authenticates.
+The page refreshes exactly the affected thread, lists and group; its polls
+drop to a 30-second backstop while the stream is open and return to their
+normal cadence without it (an older server answers 404).
 
 While a thread waits, its history carries `waiting` items (`channel_bot`,
 `connect_link`, `owner_verification`, each with a title and expiry). The chat
-shows them under the header with "continues here by itself", and the browser
-polls the thread every 10 seconds until they clear, so the resumed turn appears
-without a reload.
+shows them under the header with "continues here by itself"; the live stream
+shows the resumed turn at once (without it, the thread is polled every 10
+seconds until the items clear).
 
 ## 10. Talking to agents directly
 

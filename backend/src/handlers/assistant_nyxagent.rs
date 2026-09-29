@@ -855,6 +855,12 @@ fn subscribe_events(mut receiver: broadcast::Receiver<Value>) -> Response {
             }
         }
     };
+    sse_response(stream)
+}
+
+fn sse_response(
+    stream: impl futures::Stream<Item = Result<Event, Infallible>> + Send + 'static,
+) -> Response {
     let mut response = Sse::new(stream)
         .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
         .into_response();
@@ -865,6 +871,76 @@ fn subscribe_events(mut receiver: broadcast::Receiver<Value>) -> Response {
         .headers_mut()
         .insert("cache-control", "no-cache, no-transform".parse().unwrap());
     response
+}
+
+/// How long one live stream stays open before the browser reconnects (and
+/// is authenticated again).
+const LIVE_STREAM_SECS: u64 = 300;
+
+/// `GET /assistant/nyxagent/live`: the owner's assistant changes as they
+/// happen, so the browser refreshes a thread, the agents or a group the
+/// moment NyxID changes it instead of polling. Frames carry identifiers
+/// only, each also naming its `type`: `ready`, `conversation` `{id,
+/// group_id, turn_id, messages}`, `group` `{id}`, `channels`, and `resync`
+/// when changes may have been missed. 503 while this replica's change stream
+/// is not delivering, 429 past the per-owner stream cap: the browser keeps
+/// polling and retries.
+pub async fn live(State(state): State<AppState>, auth: AuthUser) -> AppResult<Response> {
+    use crate::services::assistant_live::LiveEvent;
+    let user_id = auth.user_id.to_string();
+    engine::require_enabled(&state.db, &user_id).await?;
+    // Promise live updates only while this replica's change stream delivers;
+    // otherwise the browser keeps polling and retries shortly.
+    let mut open = state.assistant_live.watch_open();
+    if !*open.borrow_and_update() {
+        let mut response = StatusCode::SERVICE_UNAVAILABLE.into_response();
+        response
+            .headers_mut()
+            .insert("retry-after", "5".parse().unwrap());
+        return Ok(response);
+    }
+    let Some(mut subscription) = state.assistant_live.subscribe_owner(&user_id) else {
+        let mut response = StatusCode::TOO_MANY_REQUESTS.into_response();
+        response
+            .headers_mut()
+            .insert("retry-after", "30".parse().unwrap());
+        return Ok(response);
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(LIVE_STREAM_SECS);
+    let stream = async_stream::stream! {
+        yield Ok::<_, Infallible>(
+            Event::default().event("ready").data(json!({"type": "ready"}).to_string()),
+        );
+        loop {
+            let event = tokio::select! {
+                event = subscription.events.recv() => event,
+                _ = tokio::time::sleep_until(deadline) => break,
+                // The change stream dropped: end, so the browser polls again.
+                _ = open.wait_for(|open| !*open) => break,
+            };
+            let (name, data) = match event {
+                Ok(LiveEvent::Conversation { id, user_id: owner, group_id, turn_id, messages })
+                    if owner == user_id =>
+                {
+                    ("conversation", json!({"type": "conversation", "id": id,
+                        "group_id": group_id, "turn_id": turn_id, "messages": messages}))
+                }
+                Ok(LiveEvent::Group { id, user_id: owner }) if owner == user_id => {
+                    ("group", json!({"type": "group", "id": id}))
+                }
+                Ok(LiveEvent::ChannelBot { user_id: owner, .. }) if owner == user_id => {
+                    ("channels", json!({"type": "channels"}))
+                }
+                Ok(LiveEvent::Resync) | Err(broadcast::error::RecvError::Lagged(_)) => {
+                    ("resync", json!({"type": "resync"}))
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+                Ok(_) => continue,
+            };
+            yield Ok(Event::default().event(name).data(data.to_string()));
+        }
+    };
+    Ok(sse_response(stream))
 }
 
 #[allow(clippy::too_many_arguments)]

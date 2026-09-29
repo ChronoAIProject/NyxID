@@ -260,10 +260,13 @@ pub fn schema(name: &str) -> Value {
 fn description(name: &str) -> &'static str {
     match name {
         "spawn_subagent" => {
-            "Create a persistent specialist agent with its own key, memory and threads. Give \
-            it a clear description of its role and only the services it needs; with task it \
-            starts working immediately and NyxID wakes you when it reports. The user can open \
-            it, talk to it directly, and link a chat app to it."
+            "Create a new agent: a persistent specialist with its own keys, memory and \
+            threads. Use it whenever the user asks you to create, make or set up an agent, \
+            assistant or bot for a job. Its keys can use only the services listed in \
+            services and nothing else, so list exactly the services the job needs. Put its \
+            role, scope and any usage rules in description; with task it starts working \
+            immediately and NyxID wakes you when it reports. The user can open it, talk to \
+            it directly, and link a chat app to it."
         }
         "message_subagent" => {
             "Give a specialist work in its home thread. Never blocks: returns started, busy \

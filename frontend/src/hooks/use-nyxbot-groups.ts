@@ -9,6 +9,7 @@ import type {
   AssistantGroupMessages,
   AssistantGroupUpdate,
 } from "@/schemas/assistant-nyxagent";
+import { livePollInterval, useNyxAgentLiveConnected } from "@/hooks/use-nyxagent-live-status";
 import { useAuthStore } from "@/stores/auth-store";
 
 export const nyxBotGroupKeys = {
@@ -39,15 +40,19 @@ export function groupPollInterval(
 /** Newest activity first. Re-read while any group has an agent working. */
 export function useNyxBotGroups(enabled = true) {
   const userId = useAuthStore((state) => state.user?.id);
+  const live = useNyxAgentLiveConnected();
   return useQuery({
     queryKey: [...nyxBotGroupKeys.all(userId), "list"],
     queryFn: () => nyxBotApi.groups(),
     enabled: enabled && Boolean(userId),
     retry: false,
     refetchInterval: (query) =>
-      query.state.data?.some((group) => group.working_agent_ids.length > 0)
-        ? GROUPS_WORKING_POLL_MS
-        : false,
+      livePollInterval(
+        query.state.data?.some((group) => group.working_agent_ids.length > 0)
+          ? GROUPS_WORKING_POLL_MS
+          : false,
+        live,
+      ),
   });
 }
 
@@ -75,6 +80,7 @@ function patchGroupList(
  */
 export function useNyxBotGroupMessages(groupId: string | undefined) {
   const userId = useAuthStore((state) => state.user?.id);
+  const live = useNyxAgentLiveConnected();
   const queryClient = useQueryClient();
   const key = nyxBotGroupKeys.messages(userId, groupId);
   const fastUntil = useRef(0);
@@ -99,7 +105,8 @@ export function useNyxBotGroupMessages(groupId: string | undefined) {
     },
     enabled: Boolean(userId && groupId),
     retry: false,
-    refetchInterval: (state) => groupPollInterval(state.state.data, fastUntil.current),
+    refetchInterval: (state) =>
+      livePollInterval(groupPollInterval(state.state.data, fastUntil.current), live),
   });
 
   const loadOlder = useCallback(async () => {

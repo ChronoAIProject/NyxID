@@ -1035,3 +1035,41 @@ impl UuidSafe {
         uuid::Uuid::parse_str(id).is_ok()
     }
 }
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    /// NyxBot finds its own tools through search. A request to create an
+    /// agent for a connected service must surface agent creation first,
+    /// ahead of that service's many operations (the native service is listed
+    /// last, as in production).
+    #[test]
+    fn asking_for_an_agent_finds_agent_creation_first() {
+        let mut nyxid = account_service();
+        nyxid
+            .endpoints
+            .extend(super::super::assistant_team_tools::endpoints());
+        let mut home = account_service();
+        home.service_id = "home".into();
+        home.service_slug = "home-assistant-office".into();
+        home.service_name = "Home Assistant at office".into();
+        home.endpoints = (0..40)
+            .map(|i| McpToolEndpoint {
+                endpoint_id: format!("home{i}"),
+                name: format!("get_states_{i}"),
+                description: Some("Home Assistant REST API: read entity states".into()),
+                ..Default::default()
+            })
+            .collect();
+        let services = vec![home, nyxid];
+        for query in [
+            "create agent home assistant",
+            "create an agent",
+            "create agent only allowed to use one service",
+        ] {
+            let found = crate::services::mcp_service::search_all_tools(&services, query);
+            assert_eq!(found.matches[0].name, "nyxid__spawn_subagent", "{query}");
+        }
+    }
+}

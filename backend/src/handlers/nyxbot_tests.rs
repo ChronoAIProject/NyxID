@@ -1241,3 +1241,212 @@ async fn direct_relay_accepts_only_nyxids_signed_callback_for_the_route_key() {
     );
     server.abort();
 }
+
+/// Start this state's change stream and NyxBot's live dispatch, and return
+/// once the stream is delivering changes.
+async fn start_live(state: &AppState) -> tokio::task::JoinHandle<()> {
+    use crate::services::assistant_live::LiveEvent;
+    let mut probe = state.assistant_live.subscribe();
+    spawn_live_dispatch(state.clone());
+    let runner = {
+        let live = state.assistant_live.clone();
+        let db = state.db.clone();
+        tokio::spawn(async move { live.run(db).await })
+    };
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            state
+                .db
+                .collection::<bson::Document>(CONVERSATIONS)
+                .update_one(
+                    doc! {"_id": "live-probe"},
+                    doc! {"$set": {"user_id": "probe", "at": bson::DateTime::now()}},
+                )
+                .upsert(true)
+                .await
+                .unwrap();
+            let deadline = tokio::time::sleep(Duration::from_millis(300));
+            tokio::pin!(deadline);
+            loop {
+                tokio::select! {
+                    event = probe.recv() => {
+                        if matches!(event, Ok(LiveEvent::Conversation { ref id, .. }) if id == "live-probe") {
+                            return;
+                        }
+                    }
+                    _ = &mut deadline => break,
+                }
+            }
+        }
+    })
+    .await
+    .expect("the change stream opens");
+    runner
+}
+
+/// With the change stream running, a finished connect link and a newly
+/// active bot resume the waiting chat at once; no sweep runs here.
+#[tokio::test]
+async fn live_changes_resume_waiting_chats_without_the_sweep() {
+    let (state, _, server) = setup("nyxbot_live_resume").await;
+    let runner = start_live(&state).await;
+    let team = crate::services::assistant_team_service::ensure_nyxbot(&state.db, OWNER)
+        .await
+        .unwrap();
+    let home = crate::services::assistant_team_service::home_thread(
+        &state.db,
+        &state.encryption_keys,
+        &team,
+    )
+    .await
+    .unwrap();
+    // A connect link the chat handed out.
+    let link_id = Uuid::new_v4().to_string();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::connect_link::COLLECTION_NAME)
+        .insert_one(doc! {
+            "_id": &link_id, "user_id": OWNER, "service_slug": "api-github",
+            "service_id": Uuid::new_v4().to_string(), "token_hash": "hash",
+            "status": "pending", "created_at": bson::DateTime::now(),
+            "expires_at": bson::DateTime::from_chrono(Utc::now() + ChronoDuration::minutes(15)),
+        })
+        .await
+        .unwrap();
+    watch_connect_link(&state.db, OWNER, &home.id, &link_id)
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::connect_link::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &link_id},
+            doc! {"$set": {"status": "completed"}},
+        )
+        .await
+        .unwrap();
+    wait_for_event(&state, &home.id, "finished connecting").await;
+    // A setup link: the bot the user creates is linked the moment it is
+    // saved, even while its webhook is still being verified.
+    setup_link_tool(&state, OWNER, &home.id, "lark", None, &team)
+        .await
+        .unwrap();
+    let mut created = bot_doc("lark", "Support desk");
+    created.insert("status", "pending_webhook");
+    let bot_id = created.get_str("_id").unwrap().to_owned();
+    let linked = || async {
+        state
+            .db
+            .collection::<NyxbotChannel>(CHANNELS)
+            .count_documents(doc! {"user_id": OWNER, "channel_bot_id": &bot_id})
+            .await
+            .unwrap()
+    };
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .insert_one(created)
+        .await
+        .unwrap();
+    wait_for_event(&state, &home.id, "now linked to").await;
+    assert_eq!(linked().await, 1);
+    runner.abort();
+    server.abort();
+}
+
+async fn frame(body: &mut axum::body::BodyDataStream) -> String {
+    use futures::StreamExt;
+    let bytes = tokio::time::timeout(Duration::from_secs(5), body.next())
+        .await
+        .expect("a frame")
+        .expect("an open stream")
+        .unwrap();
+    String::from_utf8(bytes.to_vec()).unwrap()
+}
+
+/// The browser's live stream carries only the owner's changes, as
+/// identifiers, and asks for a resync when changes may have been missed.
+#[tokio::test]
+async fn the_live_stream_pushes_only_the_owners_changes() {
+    use crate::services::assistant_live::LiveEvent;
+    let (state, _, server) = setup("nyxbot_live_stream").await;
+    // Without an open change stream, browsers are told to keep polling.
+    let closed = crate::handlers::assistant_nyxagent::live(
+        State(state.clone()),
+        crate::test_utils::test_auth_user(OWNER),
+    )
+    .await
+    .unwrap();
+    assert_eq!(closed.status(), StatusCode::SERVICE_UNAVAILABLE);
+    state.assistant_live.set_open_for_tests(true);
+    let response = crate::handlers::assistant_nyxagent::live(
+        State(state.clone()),
+        crate::test_utils::test_auth_user(OWNER),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.headers()["content-type"], "text/event-stream");
+    let mut body = response.into_body().into_data_stream();
+    assert!(frame(&mut body).await.contains("event: ready"));
+    state.assistant_live.publish(LiveEvent::Conversation {
+        id: "nyxa-other".into(),
+        user_id: "someone-else".into(),
+        group_id: None,
+        turn_id: None,
+        messages: 1,
+    });
+    state.assistant_live.publish(LiveEvent::Conversation {
+        id: "nyxa-mine".into(),
+        user_id: OWNER.into(),
+        group_id: Some("nyxg-1".into()),
+        turn_id: Some("turn-1".into()),
+        messages: 3,
+    });
+    let pushed = frame(&mut body).await;
+    assert!(
+        pushed.contains("event: conversation")
+            && pushed.contains(r#""type":"conversation""#)
+            && pushed.contains(r#""id":"nyxa-mine""#)
+            && pushed.contains(r#""group_id":"nyxg-1""#)
+            && pushed.contains(r#""turn_id":"turn-1""#)
+            && pushed.contains(r#""messages":3"#)
+            && !pushed.contains("nyxa-other"),
+        "{pushed}"
+    );
+    state.assistant_live.publish(LiveEvent::Resync);
+    assert!(frame(&mut body).await.contains("event: resync"));
+    // One owner may hold only a few streams at once.
+    let mut held = Vec::new();
+    for _ in 1..crate::services::assistant_live::MAX_STREAMS_PER_OWNER {
+        held.push(
+            state
+                .assistant_live
+                .subscribe_owner(OWNER)
+                .expect("under the cap"),
+        );
+    }
+    let refused = crate::handlers::assistant_nyxagent::live(
+        State(state.clone()),
+        crate::test_utils::test_auth_user(OWNER),
+    )
+    .await
+    .unwrap();
+    assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(
+        state
+            .assistant_live
+            .subscribe_owner("someone-else")
+            .is_some(),
+        "the cap is per owner"
+    );
+    drop(held);
+    // The change stream dropping ends the browser's stream.
+    state.assistant_live.set_open_for_tests(false);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), futures::StreamExt::next(&mut body))
+            .await
+            .expect("the stream ends")
+            .is_none()
+    );
+    server.abort();
+}

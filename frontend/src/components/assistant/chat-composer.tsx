@@ -601,11 +601,19 @@ function DraftedChatComposer({
 
   return (
     <div
-      className="shrink-0"
+      // Opaque: the transcript scrolls underneath the composer, so its band
+      // must hide it instead of showing text around and below the input.
+      data-composer-band
+      className="relative shrink-0 bg-background"
       style={{
         width: "calc(100% - var(--assistant-scrollbar-width, 0px))",
       }}
     >
+      <div
+        aria-hidden="true"
+        data-composer-fade
+        className="pointer-events-none absolute inset-x-0 bottom-full h-6 bg-gradient-to-t from-background to-transparent"
+      />
       <div
         className="mx-auto w-full max-w-[758px] px-4 pt-2 sm:px-6"
         style={{ paddingBottom: "max(1rem, var(--sab))" }}

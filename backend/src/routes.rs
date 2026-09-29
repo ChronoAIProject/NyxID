@@ -1902,6 +1902,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         ),
     ));
     let assistant_routes = Router::new()
+        .route("/nyxagent/live", get(handlers::assistant_nyxagent::live))
         .route(
             "/nyxagent/conversations",
             get(handlers::assistant_nyxagent::list),

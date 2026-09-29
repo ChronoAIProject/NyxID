@@ -209,6 +209,10 @@ pub struct AppState {
     /// (the default hard-off state — see `docs/TELEMETRY.md` §3).
     pub telemetry: Option<Arc<telemetry::TelemetryClient>>,
     pub audit_event_types: Arc<services::admin_audit_service::EventTypeCache>,
+    /// Live assistant changes from this process's MongoDB change stream:
+    /// resumes chats waiting on connect links and new bots at once, and
+    /// pushes thread changes to open browsers.
+    pub assistant_live: Arc<services::assistant_live::AssistantLive>,
 }
 
 impl AppState {
@@ -955,6 +959,7 @@ async fn main() {
         billing,
         telemetry: telemetry::TelemetryClient::from_config(&config),
         audit_event_types: Arc::default(),
+        assistant_live: Arc::default(),
     };
 
     // Spawn the telemetry-erasure worker. No-op when `state.telemetry`
@@ -997,6 +1002,14 @@ async fn main() {
 
     // NyxBot: destroy idle subagents and retry deferred team wake-ups.
     handlers::assistant_team::spawn_sweeps(state.clone());
+    // Live assistant changes: one change stream for this process, and the
+    // NyxBot reaction to finished links and new bots.
+    handlers::nyxbot::spawn_live_dispatch(state.clone());
+    {
+        let live = state.assistant_live.clone();
+        let db = state.db.clone();
+        tokio::spawn(async move { live.run(db).await });
+    }
 
     // Revoke abandoned Agent Key exchanges even when the CLI stops polling.
     if config.agent_key_login_sweep_interval_secs > 0 {

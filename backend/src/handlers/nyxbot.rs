@@ -1128,14 +1128,86 @@ pub(crate) async fn process_watches(state: &AppState) -> AppResult<()> {
         )
         .await?;
     for watch in watches {
-        let result = match watch.kind.as_str() {
-            "channel_bot" => channel_bot_watch(state, &watch).await,
-            "connect_link" => connect_link_watch(state, &watch).await,
-            _ => Ok(()),
-        };
-        if let Err(error) = result {
-            tracing::debug!(%error, "NyxBot watch deferred");
+        resolve(state, &watch).await;
+    }
+    Ok(())
+}
+
+async fn resolve(state: &AppState, watch: &NyxbotWatch) {
+    let result = match watch.kind.as_str() {
+        "channel_bot" => channel_bot_watch(state, watch).await,
+        "connect_link" => connect_link_watch(state, watch).await,
+        _ => Ok(()),
+    };
+    if let Err(error) = result {
+        tracing::debug!(%error, "NyxBot watch deferred");
+    }
+}
+
+/// React to live changes at once instead of on the next sweep: a watched
+/// connect link that finished, or a new (or reactivated) bot for an owner
+/// with a pending setup link. The 15-second sweep remains the backstop.
+pub fn spawn_live_dispatch(state: AppState) {
+    use crate::services::assistant_live::LiveEvent;
+    let mut events = state.assistant_live.subscribe();
+    tokio::spawn(async move {
+        loop {
+            let event = match events.recv().await {
+                Ok(event) => event,
+                Err(broadcast::error::RecvError::Lagged(_)) => LiveEvent::Resync,
+                Err(broadcast::error::RecvError::Closed) => break,
+            };
+            let filter = match event {
+                LiveEvent::ConnectLink {
+                    id,
+                    user_id,
+                    status,
+                } if status != "pending" => {
+                    doc! {"user_id": user_id, "kind": "connect_link", "connect_link_id": id}
+                }
+                LiveEvent::ChannelBot {
+                    user_id,
+                    active: true,
+                    ..
+                } => doc! {"user_id": user_id, "kind": "channel_bot"},
+                LiveEvent::Resync => {
+                    let state = state.clone();
+                    tokio::spawn(async move {
+                        if let Err(error) = process_watches(&state).await {
+                            tracing::debug!(%error, "NyxBot watch resync deferred");
+                        }
+                    });
+                    continue;
+                }
+                _ => continue,
+            };
+            // Linking may call the gateway: never hold up the next event.
+            let state = state.clone();
+            tokio::spawn(async move {
+                if let Err(error) = resolve_matching(&state, filter).await {
+                    tracing::debug!(%error, "NyxBot live watch deferred");
+                }
+            });
         }
+    });
+}
+
+/// Resolve the pending watches matching `filter` now. Claims are atomic,
+/// so replicas reacting to the same change never act twice.
+async fn resolve_matching(state: &AppState, mut filter: bson::Document) -> AppResult<()> {
+    filter.insert("status", "pending");
+    filter.insert("expires_at", doc! {"$gt": bson::DateTime::now()});
+    let watches: Vec<NyxbotWatch> = state
+        .db
+        .collection::<NyxbotWatch>(WATCHES)
+        .find(filter)
+        .sort(doc! {"created_at": 1})
+        .limit(20)
+        .await?
+        .try_collect()
+        .await?;
+    for watch in watches {
+        resolve(state, &watch).await;
     }
     Ok(())
 }
