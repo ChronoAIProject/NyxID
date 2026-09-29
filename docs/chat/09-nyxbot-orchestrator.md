@@ -459,7 +459,11 @@ private, group or channel icon. Thread listings carry `channel.channel_agent_id`
 **The owner's own thread.** The owner's private chats with an agent, on every
 bot attached to it (Telegram, Lark, Discord, ...), continue that agent's own
 thread: its home thread in NyxID (a first chat-app message creates it when the
-agent has none; a deleted home is replaced). The app and every chat app share
+agent has none; a deleted home is replaced). A home is never a chat app channel
+thread (a group's or someone else's private chat): such a pointer is replaced
+too, and channel threads never become home. Organization bots are excluded:
+the owner's private chats with an org's bot keep their own thread, so personal
+context never flows through an organization's bot. The app and every chat app share
 that one transcript and live context. The thread is not a channel thread
 (`channel` stays unset, so the sidebar keeps it with the agent's own threads);
 instead `reply_channel` remembers the chat the owner last wrote from. A channel
@@ -483,11 +487,16 @@ short excerpt. When a message arrives while its thread is busy:
   owner asked on Telegram and again on Lark), that chat is added to the running
   answer's recipients (`also_deliver`, at most four), and at settlement the
   answer is sent there too (`deliver_also`, taken once by the settlement hook);
-- if the same question is already queued, it is not queued again.
+- if the same question is already queued, it is not queued again, and a repeat
+  from another chat is added to the queued message's recipients.
 
-The agent is also told, in each owner turn's instructions, what its other
-threads are answering right now (thread title and question excerpt, the same
-question marked), so it does not start that work again.
+Queued messages remember the chats that asked them (`reply_to`); the turn that
+drains them also answers there, even when the owner's next message comes from
+the app. When a turn fails, chats that were promised its answer are told to ask
+again. The agent's own threads are also told, in the owner's turn instructions,
+what its other threads are answering right now (thread title and question
+excerpt, the same question marked), so it does not start that work again;
+channel threads never get this note, so no chat hears about another.
 
 ## 13. No-break guarantees
 

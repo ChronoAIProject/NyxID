@@ -115,6 +115,7 @@ pub fn event(kind: &str, text: String, agent_id: Option<&str>) -> AgentEvent {
         text,
         agent_id: agent_id.map(str::to_owned),
         question_key: None,
+        reply_to: Vec::new(),
         created_at: Utc::now(),
     }
 }
@@ -349,15 +350,25 @@ pub async fn home_thread(
     keys: &std::sync::Arc<EncryptionKeys>,
     agent: &AssistantAgent,
 ) -> AppResult<AssistantConversation> {
+    // An agent's home is one of its own threads, never a chat app channel
+    // thread (a group's, or someone else's private chat).
     if let Some(id) = agent.home_conversation_id.as_deref()
         && let Some(row) = db
             .collection::<AssistantConversation>(CONVERSATIONS)
-            .find_one(doc! {"_id": id, "user_id": &agent.user_id})
+            .find_one(doc! {"_id": id, "user_id": &agent.user_id,
+            "channel": bson::Bson::Null})
             .await?
     {
         return Ok(row);
     }
-    if let Some(row) = threads(db, agent, 1).await?.into_iter().next() {
+    let mut own = thread_filter(agent);
+    own.insert("channel", bson::Bson::Null);
+    let newest = db
+        .collection::<AssistantConversation>(CONVERSATIONS)
+        .find_one(own)
+        .sort(doc! {"updated_at": -1})
+        .await?;
+    if let Some(row) = newest {
         db.collection::<AssistantAgent>(AGENTS)
             .update_one(
                 doc! {"_id": &agent.id},

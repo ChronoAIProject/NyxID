@@ -55,6 +55,10 @@ pub struct AgentEvent {
     /// same question is not queued twice.
     #[serde(default)]
     pub question_key: Option<String>,
+    /// A queued chat message: the chats that asked it, which get the answer
+    /// of the turn that drains it.
+    #[serde(default)]
+    pub reply_to: Vec<ChannelOrigin>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
 }

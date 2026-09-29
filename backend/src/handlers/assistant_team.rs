@@ -318,6 +318,16 @@ pub(crate) async fn after_turn(
         .await
         .unwrap_or_default();
     if error.is_some() {
+        // They were told an answer would come: say it did not.
+        for origin in &also {
+            super::nyxbot::deliver_to(
+                state,
+                row,
+                origin,
+                "I couldn't finish answering that question. Please ask again.",
+            )
+            .await;
+        }
         return;
     }
     // Only asynchronous event turns reach the chat: a channel turn answers its
@@ -520,7 +530,10 @@ pub(crate) async fn turn_notes(
     }
     if let Some(agent) = agent {
         notes.push_str(&team::memory_note(agent));
-        notes.push_str(&in_progress_note(state, row, agent).await);
+        // Only the agent's own threads hear about its other chats.
+        if row.channel.is_none() {
+            notes.push_str(&in_progress_note(state, row, agent).await);
+        }
         if let Some(note) = super::assistant_group::group_note(state, row, agent).await {
             notes.push_str("\n\n");
             notes.push_str(&note);

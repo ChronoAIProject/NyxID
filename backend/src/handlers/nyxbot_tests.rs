@@ -2876,6 +2876,69 @@ async fn the_owners_private_chats_share_the_agents_own_thread() {
         0,
         "no separate chat threads"
     );
+    // A home that is somebody's chat thread (e.g. one that claimed it after
+    // the owner deleted theirs) is never used for the owner's chats.
+    let foreign = format!("nyxa-{}", Uuid::new_v4().simple());
+    let mut group_thread = state
+        .db
+        .collection::<bson::Document>(CONVERSATIONS)
+        .find_one(doc! {"_id": &home})
+        .await
+        .unwrap()
+        .unwrap();
+    group_thread.insert("_id", &foreign);
+    group_thread.insert(
+        "channel",
+        doc! {"nyxbot_channel_id": &telegram.id, "partition": "chat_group", "platform": "telegram"},
+    );
+    group_thread.insert("active_turn", bson::Bson::Null);
+    state
+        .db
+        .collection::<bson::Document>(CONVERSATIONS)
+        .insert_one(group_thread)
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &nyxbot.id},
+            doc! {"$set": {"home_conversation_id": &foreign}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        direct_private(
+            &state,
+            &lark,
+            "msg-s3",
+            "ou_alice",
+            "One more thing about Sunday"
+        )
+        .await,
+        StatusCode::ACCEPTED
+    );
+    wait_for_calls(&calls, 3).await;
+    let rehomed = crate::services::assistant_team_service::ensure_nyxbot(&state.db, OWNER)
+        .await
+        .unwrap()
+        .home_conversation_id
+        .unwrap();
+    assert_ne!(rehomed, foreign);
+    let rehomed_thread = crate::services::assistant_nyxagent::get(&state.db, OWNER, &rehomed)
+        .await
+        .unwrap();
+    assert!(rehomed_thread.channel.is_none());
+    // Back to the original home for the rest of the test.
+    state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &nyxbot.id},
+            doc! {"$set": {"home_conversation_id": &home}},
+        )
+        .await
+        .unwrap();
     // Writing in the app stops asynchronous replies going to a chat app.
     let started = crate::handlers::assistant_team::start_server_turn(
         &state,
@@ -2905,7 +2968,7 @@ async fn the_owners_private_chats_share_the_agents_own_thread() {
         started,
         crate::handlers::assistant_team::Started::Turn { .. }
     ));
-    wait_for_calls(&calls, 3).await;
+    wait_for_calls(&calls, 4).await;
     let thread = crate::services::assistant_nyxagent::get(&state.db, OWNER, &home)
         .await
         .unwrap();
@@ -3037,10 +3100,22 @@ async fn the_same_question_is_not_worked_on_twice() {
     let repeat =
         body_text(respond(&state, &agent_key, &event(other, "7", "evt-q5"), "evt_q5").await).await;
     assert!(repeat.contains("already queued"), "{repeat}");
+    // The same queued question from Lark: Lark gets that answer too.
+    assert_eq!(
+        direct_private(&state, &lark, "msg-q6", "ou_alice", other).await,
+        StatusCode::ACCEPTED
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     let thread = crate::services::assistant_nyxagent::get(&state.db, OWNER, &home)
         .await
         .unwrap();
     assert_eq!(thread.pending_events.len(), 1);
+    let waiting: Vec<&str> = thread.pending_events[0]
+        .reply_to
+        .iter()
+        .map(|origin| origin.nyxbot_channel_id.as_str())
+        .collect();
+    assert_eq!(waiting, vec![telegram.id.as_str(), lark.id.as_str()]);
     assert_eq!(calls.lock().await.len(), 1, "no second turn for either");
     // Settlement hands the waiting chats over once.
     state

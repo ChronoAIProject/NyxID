@@ -309,6 +309,27 @@ pub async fn set_reply_channel(
     Ok(())
 }
 
+/// A repeat of a queued question from another chat: that chat gets the
+/// answer too.
+pub async fn also_reply_to_queued(
+    db: &Database,
+    user_id: &str,
+    id: &str,
+    key: &str,
+    origin: &ChannelOrigin,
+) -> AppResult<()> {
+    let origin =
+        bson::to_bson(origin).map_err(|_| AppError::Internal("Failed to encode chat".into()))?;
+    db.collection::<AssistantConversation>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": id, "user_id": user_id},
+            doc! {"$addToSet": {"pending_events.$[e].reply_to": origin}},
+        )
+        .array_filters(vec![doc! {"e.question_key": key}])
+        .await?;
+    Ok(())
+}
+
 /// Have the running turn `turn_id` also deliver its answer to `origin`.
 /// Returns false when the turn has ended or enough chats already wait.
 pub async fn also_deliver(
@@ -1145,6 +1166,23 @@ pub async fn begin_turn(
                         .flatten(),
                     also_deliver: Vec::new(),
                 });
+                // Chats whose queued messages this turn answers get its reply
+                // too, unless it already goes there.
+                let answered_here = match start.origin {
+                    TurnOrigin::Channel => start.reply_channel.clone().or(start.channel.clone()),
+                    TurnOrigin::Event => row.channel.clone().or(row.reply_channel.clone()),
+                    _ => None,
+                };
+                if let Some(turn) = row.active_turn.as_mut() {
+                    for origin in turn.events.iter().flat_map(|event| event.reply_to.iter()) {
+                        if Some(origin) != answered_here.as_ref()
+                            && !turn.also_deliver.contains(origin)
+                            && turn.also_deliver.len() < MAX_ALSO_DELIVER
+                        {
+                            turn.also_deliver.push(origin.clone());
+                        }
+                    }
+                }
                 // The owner's own thread follows them between the app and their
                 // chat apps: asynchronous replies go where they last wrote.
                 match start.origin {
@@ -1165,8 +1203,8 @@ pub async fn begin_turn(
                     collection.insert_one(&row).session(&mut *session).await?;
                 }
                 // An agent's first own thread becomes its home; a hidden group
-                // member thread never does.
-                if row.group_id.is_none() {
+                // member thread or a chat app channel thread never does.
+                if row.group_id.is_none() && row.channel.is_none() {
                     db.collection::<bson::Document>(
                         crate::models::assistant_agent::COLLECTION_NAME,
                     )

@@ -1981,11 +1981,14 @@ async fn owner_thread(
         crate::services::assistant_team_service::agent(&state.db, &row.user_id, agent_id).await?;
     if let Some(home) = agent.home_conversation_id.as_deref() {
         match engine::get(&state.db, &row.user_id, home).await {
-            Ok(conversation) if conversation.group_id.is_none() => {
+            Ok(conversation)
+                if conversation.group_id.is_none() && conversation.channel.is_none() =>
+            {
                 return Ok((home.to_owned(), true));
             }
-            // A deleted home: the next thread takes its place.
-            _ => {
+            // A deleted home, or one that is not the agent's own thread (a
+            // group's or someone else's chat): the next thread takes its place.
+            Ok(_) | Err(AppError::NotFound(_)) => {
                 state
                     .db
                     .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
@@ -1996,6 +1999,7 @@ async fn owner_thread(
                     )
                     .await?;
             }
+            Err(error) => return Err(error),
         }
     }
     Ok((format!("nyxa-{}", Uuid::new_v4().simple()), false))
@@ -2014,7 +2018,8 @@ async fn start_chat_turn(
     addressed: bool,
 ) -> AppResult<Inbound> {
     let private = chat.kind.as_deref() == Some("private");
-    let shared = private && !guest;
+    // An organization's bot never carries the owner's personal thread.
+    let shared = private && !guest && row.bot_owner_id.is_none();
     let agent_id = match chat.agent_id.clone().or_else(|| row.agent_id.clone()) {
         Some(agent_id) => agent_id,
         None => {
@@ -2198,6 +2203,7 @@ async fn start_chat_turn(
             );
             let mut event = crate::services::assistant_team_service::event("message", note, None);
             event.question_key = question_key;
+            event.reply_to = vec![origin.clone()];
             let queued =
                 engine::push_events(&state.db, &row.user_id, &conversation_id, vec![event]).await?;
             if queued.is_none() {
@@ -2260,6 +2266,7 @@ async fn repeated_question(
         .iter()
         .any(|event| event.question_key.as_deref() == Some(key))
     {
+        engine::also_reply_to_queued(&state.db, &row.user_id, conversation_id, key, origin).await?;
         return Ok(Some(
             "That question is already queued; I'll answer it next.".into(),
         ));
