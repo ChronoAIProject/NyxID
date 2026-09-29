@@ -1969,8 +1969,41 @@ fn platform_name(platform: &str) -> String {
     }
 }
 
+/// The agent's own thread (its home in NyxID) that the owner's private chats
+/// continue: one context across the app and every chat app. Returns the
+/// thread and whether it exists yet (a new one becomes the agent's home).
+async fn owner_thread(
+    state: &AppState,
+    row: &NyxbotChannel,
+    agent_id: &str,
+) -> AppResult<(String, bool)> {
+    let agent =
+        crate::services::assistant_team_service::agent(&state.db, &row.user_id, agent_id).await?;
+    if let Some(home) = agent.home_conversation_id.as_deref() {
+        match engine::get(&state.db, &row.user_id, home).await {
+            Ok(conversation) if conversation.group_id.is_none() => {
+                return Ok((home.to_owned(), true));
+            }
+            // A deleted home: the next thread takes its place.
+            _ => {
+                state
+                    .db
+                    .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+                    .update_one(
+                        doc! {"_id": &agent.id, "user_id": &row.user_id,
+                        "home_conversation_id": home},
+                        doc! {"$set": {"home_conversation_id": bson::Bson::Null}},
+                    )
+                    .await?;
+            }
+        }
+    }
+    Ok((format!("nyxa-{}", Uuid::new_v4().simple()), false))
+}
+
 /// Run the chat's agent on a message from the owner or, as a guest, from
-/// someone else the chat lets talk to it.
+/// someone else the chat lets talk to it. The owner's private chats continue
+/// the agent's own thread; groups and other people's chats have their own.
 async fn start_chat_turn(
     state: &AppState,
     row: &NyxbotChannel,
@@ -1980,10 +2013,40 @@ async fn start_chat_turn(
     guest: bool,
     addressed: bool,
 ) -> AppResult<Inbound> {
-    let (_, conversation_id) = thread_conversation(state, row, &chat.partition).await?;
-    let exists = engine::get(&state.db, &row.user_id, &conversation_id)
-        .await
-        .is_ok();
+    let private = chat.kind.as_deref() == Some("private");
+    let shared = private && !guest;
+    let agent_id = match chat.agent_id.clone().or_else(|| row.agent_id.clone()) {
+        Some(agent_id) => agent_id,
+        None => {
+            crate::services::assistant_team_service::ensure_nyxbot(&state.db, &row.user_id)
+                .await?
+                .id
+        }
+    };
+    let origin = ChannelOrigin {
+        nyxbot_channel_id: row.id.clone(),
+        partition: chat.partition.clone(),
+        platform: row.platform.clone(),
+    };
+    let (conversation_id, exists) = if shared {
+        let (id, exists) = owner_thread(state, row, &agent_id).await?;
+        // The chat now answers into that thread (asynchronous replies and
+        // word confirmations find it there).
+        state
+            .db
+            .collection::<NyxbotThread>(THREADS)
+            .update_one(
+                doc! {"_id": &chat.id},
+                doc! {"$set": {"conversation_id": &id}},
+            )
+            .await?;
+        (id, exists)
+    } else {
+        let (_, id) = thread_conversation(state, row, &chat.partition).await?;
+        let exists = engine::get(&state.db, &row.user_id, &id).await.is_ok();
+        (id, exists)
+    };
+    let question_key = engine::question_key(text);
     // A chat app cannot show NyxID's confirmation cards: the verified owner
     // answers one in words (see `decide_reply` for which card it decides).
     // Nobody else can.
@@ -1994,7 +2057,6 @@ async fn start_chat_turn(
             Err(error) => tracing::debug!(%error, "Chat confirmation not applied"),
         }
     }
-    let private = chat.kind.as_deref() == Some("private");
     let name = sender
         .display_name
         .map(|name| excerpt(name, 60).replace('"', "'"));
@@ -2018,7 +2080,12 @@ async fn start_chat_turn(
             identifier(&row.bot_label),
         )
     };
-    if !private {
+    if shared {
+        note.push_str(
+            " This is your own thread with the owner, which they also reach from the NyxID app \
+            and their other chat apps; your reply goes back to this chat.",
+        );
+    } else if !private {
         note.push_str(
             " Everyone in the chat sees your reply. Messages there start with their sender's \
             name.",
@@ -2040,9 +2107,13 @@ async fn start_chat_turn(
             engine::MAX_MESSAGE_CHARS - 16,
         )
     };
-    let title = if private {
-        name.clone()
-            .unwrap_or_else(|| format!("{} chat", platform_name(&row.platform)))
+    let title = if shared {
+        None
+    } else if private {
+        Some(
+            name.clone()
+                .unwrap_or_else(|| format!("{} chat", platform_name(&row.platform))),
+        )
     } else {
         // A new group thread is named after the group when the platform can
         // say (bounded; best effort).
@@ -2051,15 +2122,7 @@ async fn start_chat_turn(
             None if !exists => chats::look_up_title(state, row, chat).await,
             None => None,
         };
-        looked_up.unwrap_or_else(|| format!("{} group", platform_name(&row.platform)))
-    };
-    let agent_id = match chat.agent_id.clone().or_else(|| row.agent_id.clone()) {
-        Some(agent_id) => agent_id,
-        None => {
-            crate::services::assistant_team_service::ensure_nyxbot(&state.db, &row.user_id)
-                .await?
-                .id
-        }
+        Some(looked_up.unwrap_or_else(|| format!("{} group", platform_name(&row.platform))))
     };
     let start = TurnStart {
         conversation_id: exists.then(|| conversation_id.clone()),
@@ -2074,17 +2137,18 @@ async fn start_chat_turn(
             .await,
         ),
         origin: TurnOrigin::Channel,
-        channel: Some(ChannelOrigin {
-            nyxbot_channel_id: row.id.clone(),
-            partition: chat.partition.clone(),
-            platform: row.platform.clone(),
-        }),
-        title: Some(title),
+        // The owner's own thread is not a channel thread: it only remembers
+        // which chat to answer asynchronously.
+        channel: (!shared).then(|| origin.clone()),
+        title,
         note: Some(note),
         agent_id: Some(agent_id),
         report_to: None,
         group_id: None,
         guest,
+        question_key: question_key.clone(),
+        question: Some(excerpt(text, engine::QUESTION_EXCERPT_CHARS)),
+        reply_channel: shared.then(|| origin.clone()),
     };
     match start_server_turn(
         state,
@@ -2097,41 +2161,110 @@ async fn start_chat_turn(
     .await
     {
         Ok(Started::Turn { receiver, .. }) => Ok(Inbound::Turn(receiver)),
-        // The chat is busy (or the owner's channel pool is full): queue the
-        // message for the agent's next turn instead of bouncing it. Its reply
-        // is an asynchronous update delivered back to this chat.
-        // Someone other than the owner is asked to try again (only when they
-        // spoke to the bot): their messages never queue up as the owner's
-        // work or use the owner's wake-ups.
-        Ok(Started::Busy | Started::PoolFull) if guest && !addressed => Ok(Inbound::Silent),
-        Ok(Started::Busy | Started::PoolFull) if guest => Ok(Inbound::Reply(
-            "I'm answering another message right now. Please try again in a moment.".into(),
-        )),
-        Ok(Started::Busy | Started::PoolFull) if exists => {
+        Ok(Started::Busy | Started::PoolFull) => {
+            // The same question is never worked on twice: a repeat waits for
+            // the answer in progress (sent to this chat too) or already queued.
+            if exists
+                && let Some(key) = question_key.as_deref()
+                && let Some(reply) =
+                    repeated_question(state, row, &conversation_id, key, &origin).await?
+            {
+                return Ok(Inbound::Reply(reply));
+            }
+            // Someone other than the owner is asked to try again (only when
+            // they spoke to the bot): their messages never queue up as the
+            // owner's work or use the owner's wake-ups.
+            if guest {
+                return Ok(if addressed {
+                    Inbound::Reply(
+                        "I'm answering another message right now. Please try again in a moment."
+                            .into(),
+                    )
+                } else {
+                    Inbound::Silent
+                });
+            }
+            if !exists {
+                return Ok(Inbound::Busy);
+            }
+            // The chat is busy (or the owner's channel pool is full): queue the
+            // message for the agent's next turn instead of bouncing it. Its
+            // reply is an asynchronous update delivered back to this chat.
             let note = format!(
                 "{who} sent another {} message in {place} while you were working. Answer it \
                 next; your reply is delivered to the chat: \"{}\"",
                 identifier(&row.platform),
                 excerpt(text, 3000).replace('"', "'")
             );
-            let event = crate::services::assistant_team_service::event("message", note, None);
+            let mut event = crate::services::assistant_team_service::event("message", note, None);
+            event.question_key = question_key;
             let queued =
                 engine::push_events(&state.db, &row.user_id, &conversation_id, vec![event]).await?;
             if queued.is_none() {
                 return Ok(Inbound::Busy);
+            }
+            if shared {
+                engine::set_reply_channel(&state.db, &row.user_id, &conversation_id, &origin)
+                    .await?;
             }
             super::assistant_team::wake(state, &row.user_id, &conversation_id).await;
             Ok(Inbound::Reply(
                 "Got it. I'll answer this right after the message I'm working on.".into(),
             ))
         }
-        Ok(Started::Busy | Started::PoolFull) => Ok(Inbound::Busy),
         // A concurrent first message created the chat: it now exists.
         Err(AppError::Conflict(_)) | Err(AppError::DatabaseError(_)) if !exists => {
             Ok(Inbound::Busy)
         }
         Err(error) => Err(error),
     }
+}
+
+/// When `key` is the question the thread is answering right now, or one
+/// already queued there, the reply to a repeat of it (and the chat is added
+/// to the running answer's recipients).
+async fn repeated_question(
+    state: &AppState,
+    row: &NyxbotChannel,
+    conversation_id: &str,
+    key: &str,
+    origin: &ChannelOrigin,
+) -> AppResult<Option<String>> {
+    let current = engine::get(&state.db, &row.user_id, conversation_id).await?;
+    if let Some(turn) = current
+        .active_turn
+        .as_ref()
+        .filter(|turn| turn.question_key.as_deref() == Some(key))
+    {
+        if turn.asked_from.as_ref() == Some(origin) {
+            return Ok(Some(
+                "I'm still working on that question and will answer it shortly.".into(),
+            ));
+        }
+        let waiting = engine::also_deliver(
+            &state.db,
+            &row.user_id,
+            conversation_id,
+            &turn.turn_id,
+            origin,
+        )
+        .await?;
+        return Ok(Some(if waiting {
+            "I'm already working on that question; I'll send the answer here too.".into()
+        } else {
+            "I'm already working on that question; you'll find the answer in NyxID.".into()
+        }));
+    }
+    if current
+        .pending_events
+        .iter()
+        .any(|event| event.question_key.as_deref() == Some(key))
+    {
+        return Ok(Some(
+            "That question is already queued; I'll answer it next.".into(),
+        ));
+    }
+    Ok(None)
 }
 
 /// Wait for the turn and return its final reply, or `None` on failure.
@@ -2752,9 +2885,21 @@ pub async fn deliver_update(
     row: &crate::models::assistant_conversation::AssistantConversation,
     text: &str,
 ) {
-    let Some(origin) = row.channel.as_ref() else {
+    // A channel thread answers its chat; the owner's own thread answers the
+    // chat they last wrote from.
+    let Some(origin) = row.channel.as_ref().or(row.reply_channel.as_ref()) else {
         return;
     };
+    deliver_to(state, row, origin, text).await;
+}
+
+/// Deliver `text` from the conversation `row` to one chat. Best effort.
+pub async fn deliver_to(
+    state: &AppState,
+    row: &crate::models::assistant_conversation::AssistantConversation,
+    origin: &ChannelOrigin,
+    text: &str,
+) {
     let result: AppResult<()> = async {
         let channel = load_channel(state, &row.user_id, &origin.nyxbot_channel_id).await?;
         if channel.status != "active" {

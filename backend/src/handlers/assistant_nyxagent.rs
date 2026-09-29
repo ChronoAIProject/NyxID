@@ -213,6 +213,8 @@ pub struct MessageResponse {
     created_at: DateTime<Utc>,
     activities: Vec<ActivityResponse>,
     attachments: Vec<AttachmentResponse>,
+    /// A user message written in a chat app: its platform.
+    via: Option<String>,
 }
 impl From<AssistantMessage> for MessageResponse {
     fn from(row: AssistantMessage) -> Self {
@@ -235,6 +237,7 @@ impl From<AssistantMessage> for MessageResponse {
                 .into_iter()
                 .map(AttachmentResponse::from)
                 .collect(),
+            via: row.via,
         }
     }
 }

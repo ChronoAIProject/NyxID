@@ -176,16 +176,42 @@ pub fn base_prompt(
             ));
         }
     }
-    if let Some(channel) = &row.channel {
+    // Where this turn's reply is read: the channel thread's chat, or for the
+    // owner's own thread the chat app that asked (or, for an asynchronous
+    // reply, the one they last wrote from).
+    let chat_app = row
+        .channel
+        .as_ref()
+        .map(|channel| (channel, true))
+        .or_else(|| {
+            let turn = row.active_turn.as_ref()?;
+            match turn.origin {
+                TurnOrigin::Channel => turn.asked_from.as_ref(),
+                TurnOrigin::Event => row.reply_channel.as_ref(),
+                _ => None,
+            }
+            .map(|channel| (channel, false))
+        });
+    if let Some((channel, thread)) = chat_app {
+        let place = if thread {
+            format!(
+                "This thread answers the user's {} channel bot.",
+                identifier(&channel.platform)
+            )
+        } else {
+            format!(
+                "The user is reading this reply in their {} chat app.",
+                identifier(&channel.platform)
+            )
+        };
         prompt.push_str(&format!(
-            "\n\nThis thread answers the user's {} channel bot. Replies are delivered as \
+            "\n\n{place} Replies are delivered as \
             plain text messages: keep them short, avoid tables and wide code blocks, and \
             never paste secrets. The user cannot see NyxID's cards or buttons here: give every \
             link (connect links, setup links) as a full URL in your text, and when an action \
             needs confirmation (acknowledgement_required) ask them to reply with its \
             confirm_phrase (for example \"yes 4821\") or \"no\" with the same code; NyxID \
-            applies their answer.",
-            identifier(&channel.platform)
+            applies their answer."
         ));
     }
     prompt
@@ -232,6 +258,101 @@ pub struct TurnStart {
     pub group_id: Option<String>,
     /// Started by someone other than the owner (a channel chat guest).
     pub guest: bool,
+    /// The question's key and text (without a sender prefix); derived from
+    /// `text` for app messages when unset.
+    pub question_key: Option<String>,
+    pub question: Option<String>,
+    /// The owner's chat that wrote to their agent's own thread (not a channel
+    /// thread): asynchronous replies go there.
+    pub reply_channel: Option<ChannelOrigin>,
+}
+
+/// Question excerpts kept on a running turn for the agent's other threads.
+pub const QUESTION_EXCERPT_CHARS: usize = 200;
+/// Chats that may wait for one running answer besides the one that asked.
+pub const MAX_ALSO_DELIVER: usize = 4;
+
+/// Take the chats still owed the newest turn's answer (once).
+pub async fn take_deliveries(
+    db: &Database,
+    user_id: &str,
+    id: &str,
+) -> AppResult<Vec<ChannelOrigin>> {
+    Ok(db
+        .collection::<AssistantConversation>(CONVERSATIONS)
+        .find_one_and_update(
+            doc! {"_id": id, "user_id": user_id,
+            "deliver_also.0": {"$exists": true}},
+            doc! {"$set": {"deliver_also": []}},
+        )
+        .return_document(mongodb::options::ReturnDocument::Before)
+        .await?
+        .map(|row| row.deliver_also)
+        .unwrap_or_default())
+}
+
+/// The owner's chat that asynchronous replies of their own thread go to.
+pub async fn set_reply_channel(
+    db: &Database,
+    user_id: &str,
+    id: &str,
+    origin: &ChannelOrigin,
+) -> AppResult<()> {
+    let origin =
+        bson::to_bson(origin).map_err(|_| AppError::Internal("Failed to encode chat".into()))?;
+    db.collection::<AssistantConversation>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": id, "user_id": user_id},
+            doc! {"$set": {"reply_channel": origin}},
+        )
+        .await?;
+    Ok(())
+}
+
+/// Have the running turn `turn_id` also deliver its answer to `origin`.
+/// Returns false when the turn has ended or enough chats already wait.
+pub async fn also_deliver(
+    db: &Database,
+    user_id: &str,
+    id: &str,
+    turn_id: &str,
+    origin: &ChannelOrigin,
+) -> AppResult<bool> {
+    let origin =
+        bson::to_bson(origin).map_err(|_| AppError::Internal("Failed to encode chat".into()))?;
+    let limit = format!("active_turn.also_deliver.{}", MAX_ALSO_DELIVER - 1);
+    let updated = db
+        .collection::<AssistantConversation>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": id, "user_id": user_id, "active_turn.turn_id": turn_id,
+            &limit: {"$exists": false}},
+            doc! {"$addToSet": {"active_turn.also_deliver": origin}},
+        )
+        .await?;
+    Ok(updated.matched_count == 1)
+}
+
+/// A digest of a question's words, ignoring case, punctuation, spacing and
+/// leading @mentions, so the same question asked twice is recognized. Short
+/// messages ("yes", "ok", "thanks") are never keyed: repeating them is normal.
+pub fn question_key(text: &str) -> Option<String> {
+    let words: Vec<String> = text
+        .split_whitespace()
+        .skip_while(|word| word.starts_with('@'))
+        .map(|word| {
+            word.chars()
+                .filter(|c| c.is_alphanumeric())
+                .flat_map(char::to_lowercase)
+                .collect::<String>()
+        })
+        .filter(|word| !word.is_empty())
+        .collect();
+    let normalized = words.join(" ");
+    if normalized.chars().filter(|c| c.is_alphanumeric()).count() < 12 {
+        return None;
+    }
+    use sha2::{Digest, Sha256};
+    Some(hex::encode(Sha256::digest(normalized.as_bytes())))
 }
 impl std::fmt::Debug for TurnStart {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -261,6 +382,9 @@ impl From<&TurnRequest> for TurnStart {
             report_to: None,
             group_id: None,
             guest: false,
+            question_key: None,
+            question: None,
+            reply_channel: None,
         }
     }
 }
@@ -855,6 +979,8 @@ pub async fn begin_turn(
                         pending_events: Vec::new(),
                         event_streak: 0,
                         channel: start.channel.clone(),
+                        reply_channel: None,
+                        deliver_also: Vec::new(),
                         group_id: start.group_id.clone(),
                         group_seen_seq: 0,
                         guest_turn: false,
@@ -973,6 +1099,7 @@ pub async fn begin_turn(
                         activities: Vec::new(),
                         attachments: Vec::new(),
                         origin: Some(lost.origin),
+                        via: None,
                     };
                     db.collection::<AssistantMessage>(MESSAGES)
                         .insert_one(message)
@@ -998,7 +1125,35 @@ pub async fn begin_turn(
                     attachments: Vec::new(),
                     events,
                     note: start.note.as_deref().map(|note| excerpt(note, 1200)),
+                    question_key: start.question_key.clone().or_else(|| {
+                        (start.origin == TurnOrigin::User)
+                            .then(|| question_key(&start.text))
+                            .flatten()
+                    }),
+                    question: start
+                        .question
+                        .as_deref()
+                        .or((start.origin == TurnOrigin::User).then_some(start.text.as_str()))
+                        .map(|question| excerpt(question, QUESTION_EXCERPT_CHARS)),
+                    asked_from: (start.origin == TurnOrigin::Channel)
+                        .then(|| {
+                            start
+                                .reply_channel
+                                .clone()
+                                .or_else(|| start.channel.clone())
+                        })
+                        .flatten(),
+                    also_deliver: Vec::new(),
                 });
+                // The owner's own thread follows them between the app and their
+                // chat apps: asynchronous replies go where they last wrote.
+                match start.origin {
+                    TurnOrigin::User => row.reply_channel = None,
+                    TurnOrigin::Channel if start.reply_channel.is_some() => {
+                        row.reply_channel = start.reply_channel.clone();
+                    }
+                    _ => {}
+                }
                 row.updated_at = now;
                 row.message_count += 1;
                 if start.conversation_id.is_some() {
@@ -1037,6 +1192,15 @@ pub async fn begin_turn(
                     activities: Vec::new(),
                     attachments: Vec::new(),
                     origin: Some(start.origin),
+                    via: (start.origin == TurnOrigin::Channel)
+                        .then(|| {
+                            start
+                                .reply_channel
+                                .as_ref()
+                                .or(start.channel.as_ref())
+                                .map(|channel| channel.platform.clone())
+                        })
+                        .flatten(),
                 };
                 db.collection::<AssistantMessage>(MESSAGES)
                     .insert_one(message)
@@ -1261,6 +1425,11 @@ pub async fn finish_turn(
                     == 1;
                 current.message_count += 1;
                 current.updated_at = now;
+                current.deliver_also = current
+                    .active_turn
+                    .as_ref()
+                    .map(|turn| turn.also_deliver.clone())
+                    .unwrap_or_default();
                 current.active_turn = None;
                 if error.is_some() || !credential_alive {
                     current.nyxagent_session_id = None;
@@ -1298,6 +1467,7 @@ pub async fn finish_turn(
                     activities,
                     attachments,
                     origin,
+                    via: None,
                 };
                 db.collection::<AssistantMessage>(MESSAGES)
                     .insert_one(message)

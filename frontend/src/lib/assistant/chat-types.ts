@@ -38,6 +38,8 @@ export interface ChatMessage {
   readonly toolCalls?: RuntimeToolCallInfo[];
   /** Images a tool returned, fetched through the authenticated assistant client. */
   readonly images?: readonly ChatImage[];
+  /** A user message written in a chat app: its platform. */
+  readonly via?: string | null;
 }
 
 export interface ChatImage {

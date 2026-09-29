@@ -27,6 +27,9 @@ pub struct AssistantMessage {
     /// before it was recorded. A chat app saw only channel and event turns.
     #[serde(default)]
     pub origin: Option<super::assistant_conversation::TurnOrigin>,
+    /// A user message written in a chat app: its platform.
+    #[serde(default)]
+    pub via: Option<String>,
 }
 
 impl std::fmt::Debug for AssistantMessage {

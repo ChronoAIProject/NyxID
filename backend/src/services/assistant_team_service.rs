@@ -71,12 +71,50 @@ pub fn valid_name(name: &str) -> bool {
         && name.as_bytes()[0].is_ascii_alphanumeric()
 }
 
+/// What the agent's other threads are answering right now (title, question
+/// excerpt, question key), so it does not do the same work twice. Bounded.
+pub async fn in_progress(
+    db: &Database,
+    owner: &str,
+    agent_id: &str,
+    exclude: &str,
+) -> AppResult<Vec<(String, Option<String>, Option<String>)>> {
+    let fresh = bson::DateTime::from_chrono(
+        Utc::now() - chrono::Duration::seconds(super::assistant_nyxagent::ACTIVE_TURN_TTL_SECS),
+    );
+    let rows: Vec<bson::Document> = db
+        .collection::<bson::Document>(CONVERSATIONS)
+        .find(
+            doc! {"user_id": owner, "agent_id": agent_id, "_id": {"$ne": exclude},
+            "group_id": bson::Bson::Null, "active_turn.started_at": {"$gt": fresh}},
+        )
+        .projection(doc! {"title": 1, "active_turn.question": 1, "active_turn.question_key": 1})
+        .limit(5)
+        .await?
+        .try_collect()
+        .await?;
+    Ok(rows
+        .iter()
+        .map(|row| {
+            let turn = row.get_document("active_turn").ok();
+            (
+                row.get_str("title").unwrap_or_default().to_owned(),
+                turn.and_then(|turn| turn.get_str("question").ok())
+                    .map(str::to_owned),
+                turn.and_then(|turn| turn.get_str("question_key").ok())
+                    .map(str::to_owned),
+            )
+        })
+        .collect())
+}
+
 pub fn event(kind: &str, text: String, agent_id: Option<&str>) -> AgentEvent {
     AgentEvent {
         id: Uuid::new_v4().to_string(),
         kind: kind.into(),
         text,
         agent_id: agent_id.map(str::to_owned),
+        question_key: None,
         created_at: Utc::now(),
     }
 }
@@ -272,6 +310,8 @@ async fn create_thread(
         group_id: None,
         group_seen_seq: 0,
         guest_turn: false,
+        reply_channel: None,
+        deliver_also: Vec::new(),
     };
     let collection = db.collection::<AssistantConversation>(CONVERSATIONS);
     collection.insert_one(&row).session(&mut *session).await?;
