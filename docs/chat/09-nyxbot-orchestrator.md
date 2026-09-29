@@ -279,15 +279,24 @@ settings, or relinked later); each chat becomes a thread of the linked agent
   encrypted and served verbatim for `readEventContext`.
 - **Other NyxID platforms** use NyxID's relay directly (`/api/v1/nyxbot/relay/{id}`,
   verified with NyxID's relay callback token) while the gateway relays Telegram
-  only. `NYXBOT_GATEWAY_PLATFORMS` (default `telegram`) lists the platforms the
-  gateway takes: once a platform is listed, personal bots on it move to the
-  gateway by themselves (the 15-second sweep rebuilds one bot at a time, each at
-  most daily, keeping verified owners, chats, their settings and private-chat
-  access). The gateway source names the platform, and for platforms other than
-  Telegram pins the bot's own user ID (Lark: its `open_id`, looked up with the
-  bot's credentials) instead of a username. If the gateway refuses a newly listed
-  platform, the bot stays on NyxID's relay (`gateway_fallback_at`) and is
-  retried the next day; Telegram failures are still reported as errors.
+  only. `NYXBOT_GATEWAY_PLATFORMS` (default `telegram`; Telegram is always
+  included) lists the platforms the gateway takes: once a platform is listed,
+  personal bots on it whose owner has verified move to the gateway by themselves
+  (the 15-second sweep moves one bot at a time, each at most daily). A move
+  builds first and swaps last: a new route key and gateway agent key, and a
+  gateway channel attached to the bot's existing route, are made beside the
+  working bot; only then are the channel record (compare-and-set on its
+  transport and route key) and the route's key switched in place and the old
+  route key deleted. The connection keeps its id, route, verified owners, chats,
+  settings and link code. The gateway source names the platform, and for
+  platforms other than Telegram pins the bot's own user ID (Lark: its `open_id`,
+  looked up with the bot's credentials) instead of a username. If the gateway
+  refuses, its channel is released, the new keys are deleted and the bot stays
+  exactly as it was (`gateway_fallback_at`), retried the next day; a manual
+  connect never rebuilds a working bot just to change transport. A new bot on a
+  listed platform the gateway refuses is connected through NyxID's relay with a
+  fresh route key the gateway never saw; Telegram failures are still reported as
+  errors.
 - **Organization bots.** An owner can link bots of organizations they
   administer (the rule for managing org bots), found by id or label:
   `nyxid__list_channel_bots` and the route tools cover personal and administered

@@ -188,18 +188,16 @@ impl std::str::FromStr for TrustedProxyRange {
     }
 }
 
-/// Parse `NYXBOT_GATEWAY_PLATFORMS`: lowercase platform names, `telegram` when
-/// unset or empty.
+/// Parse `NYXBOT_GATEWAY_PLATFORMS`: lowercase platform names, always
+/// including `telegram`.
 pub fn gateway_platforms(value: Option<&str>) -> Vec<String> {
-    let mut platforms: Vec<String> = value
-        .unwrap_or_default()
-        .split(',')
-        .map(|platform| platform.trim().to_ascii_lowercase())
-        .filter(|platform| !platform.is_empty())
-        .collect();
-    platforms.dedup();
-    if platforms.is_empty() {
-        platforms.push("telegram".into());
+    // Telegram is always relayed by the gateway: listing more adds to it.
+    let mut platforms = vec!["telegram".to_owned()];
+    for platform in value.unwrap_or_default().split(',') {
+        let platform = platform.trim().to_ascii_lowercase();
+        if !platform.is_empty() && !platforms.contains(&platform) {
+            platforms.push(platform);
+        }
     }
     platforms
 }
