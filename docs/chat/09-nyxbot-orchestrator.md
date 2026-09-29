@@ -461,7 +461,8 @@ bot attached to it (Telegram, Lark, Discord, ...), continue that agent's own
 thread: its home thread in NyxID (a first chat-app message creates it when the
 agent has none; a deleted home is replaced). A home is never a chat app channel
 thread (a group's or someone else's private chat): such a pointer is replaced
-too, and channel threads never become home. Organization bots are excluded:
+(lazily, and for existing agents once at startup), and channel threads never
+become home. Organization bots are excluded:
 the owner's private chats with an org's bot keep their own thread, so personal
 context never flows through an organization's bot. The app and every chat app share
 that one transcript and live context. The thread is not a channel thread
@@ -490,9 +491,12 @@ short excerpt. When a message arrives while its thread is busy:
 - if the same question is already queued, it is not queued again, and a repeat
   from another chat is added to the queued message's recipients.
 
-Queued messages remember the chats that asked them (`reply_to`); the turn that
-drains them also answers there, even when the owner's next message comes from
-the app. When a turn fails, chats that were promised its answer are told to ask
+Queued messages remember the chats that asked them (`reply_to`); on the
+owner's own thread the turn that drains them also answers there, even when the
+owner's next message comes from the app. On a chat app thread (a group's), a
+message the owner writes in the app never takes the chat's queued messages: its
+reply stays in the app, and the queued messages wait for a turn that answers in
+the chat. When a turn fails, chats that were promised its answer are told to ask
 again. The agent's own threads are also told, in the owner's turn instructions,
 what its other threads are answering right now (thread title and question
 excerpt, the same question marked), so it does not start that work again;

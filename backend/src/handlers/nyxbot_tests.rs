@@ -2147,6 +2147,62 @@ async fn group_chats_share_one_thread_and_members_talk_as_guests() {
         .await
         .unwrap();
     assert!(queued.pending_events.is_empty());
+    // The owner's own message while busy is queued for the group...
+    let owner_queued = body_text(
+        respond(
+            &state,
+            &agent_key,
+            &group_event(
+                "@helper_bot and the budget?",
+                "7",
+                "Alice",
+                "evt-g2c",
+                owner_partition,
+                true,
+            ),
+            "evt_g2c",
+        )
+        .await,
+    )
+    .await;
+    assert!(owner_queued.contains("right after"), "{owner_queued}");
+    settle(&state, &thread.id).await;
+    // ...and a message the owner writes in the app on the group's thread does
+    // not take it (its reply stays in the app; the group's answer comes from
+    // a turn that answers in the group).
+    let app = crate::handlers::assistant_team::start_server_turn(
+        &state,
+        OWNER,
+        TurnStart {
+            conversation_id: Some(thread.id.clone()),
+            text: "Private note to myself".into(),
+            model: None,
+            origin: TurnOrigin::User,
+            channel: None,
+            title: None,
+            note: None,
+            new_id: None,
+            agent_id: None,
+            report_to: None,
+            group_id: None,
+            guest: false,
+            question_key: None,
+            question: None,
+            reply_channel: None,
+        },
+        super::super::assistant_team::Pool::Channel { owner: OWNER },
+    )
+    .await
+    .unwrap();
+    let crate::handlers::assistant_team::Started::Turn { conversation, .. } = app else {
+        panic!("the app turn starts");
+    };
+    let turn = conversation.active_turn.as_ref().unwrap();
+    assert!(turn.events.is_empty());
+    assert!(turn.also_deliver.is_empty());
+    assert_eq!(conversation.pending_events.len(), 1);
+    // Let the app turn and the woken group turn finish.
+    wait_for_calls(&calls, 4).await;
     settle(&state, &thread.id).await;
     // The chat is listed with its settings; only the owner may talk there
     // once they say so.
@@ -2197,7 +2253,7 @@ async fn group_chats_share_one_thread_and_members_talk_as_guests() {
     )
     .await;
     assert!(!ignored.contains("output_text"), "{ignored}");
-    assert_eq!(calls.lock().await.len(), 2);
+    assert_eq!(calls.lock().await.len(), 4);
     // Back to the default: members may talk, since the owner has.
     let reset = chats::update_chat(
         &state,
@@ -2263,7 +2319,7 @@ async fn group_chats_share_one_thread_and_members_talk_as_guests() {
     )
     .await;
     assert!(!chatter.contains("output_text"), "{chatter}");
-    assert_eq!(calls.lock().await.len(), 2);
+    assert_eq!(calls.lock().await.len(), 4);
     // Chatter no turn answered keeps no content.
     let dropped = state
         .db
@@ -2300,7 +2356,7 @@ async fn group_chats_share_one_thread_and_members_talk_as_guests() {
     )
     .await;
     assert!(reply.contains("Here is your answer"), "{reply}");
-    assert_eq!(calls.lock().await.len(), 3);
+    assert_eq!(calls.lock().await.len(), 5);
     settle(&state, &thread.id).await;
     // Strangers in private chats are refused until private chats are open;
     // then each gets their own thread, as a guest.
@@ -3157,4 +3213,48 @@ fn questions_are_recognized_whatever_their_spelling() {
     // Short messages are normal to repeat.
     assert_eq!(engine::question_key("yes"), None);
     assert_eq!(engine::question_key("ok thanks!"), None);
+}
+
+/// Agents whose home pointer names a chat app channel thread lose it at
+/// startup; others keep theirs.
+#[tokio::test]
+async fn startup_repairs_homes_that_are_channel_threads() {
+    let (state, _, server) = setup("nyxbot_home_repair").await;
+    let agents = state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME);
+    let conversations = state.db.collection::<bson::Document>(CONVERSATIONS);
+    conversations
+        .insert_many([
+            doc! {"_id": "nyxa-channel", "user_id": OWNER,
+            "channel": {"nyxbot_channel_id": "c", "partition": "chat_x", "platform": "telegram"}},
+            doc! {"_id": "nyxa-own", "user_id": OWNER},
+        ])
+        .await
+        .unwrap();
+    agents
+        .insert_many([
+            doc! {"_id": "agent-bad", "user_id": OWNER, "home_conversation_id": "nyxa-channel"},
+            doc! {"_id": "agent-good", "user_id": OWNER, "home_conversation_id": "nyxa-own"},
+        ])
+        .await
+        .unwrap();
+    assert_eq!(engine::repair_channel_homes(&state.db).await.unwrap(), 1);
+    let home = |id: &'static str| {
+        let agents = agents.clone();
+        async move {
+            agents
+                .find_one(doc! {"_id": id})
+                .await
+                .unwrap()
+                .unwrap()
+                .get_str("home_conversation_id")
+                .ok()
+                .map(str::to_owned)
+        }
+    };
+    assert_eq!(home("agent-bad").await, None);
+    assert_eq!(home("agent-good").await.as_deref(), Some("nyxa-own"));
+    assert_eq!(engine::repair_channel_homes(&state.db).await.unwrap(), 0);
+    server.abort();
 }

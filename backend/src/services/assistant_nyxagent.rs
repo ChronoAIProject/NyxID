@@ -310,24 +310,26 @@ pub async fn set_reply_channel(
 }
 
 /// A repeat of a queued question from another chat: that chat gets the
-/// answer too.
+/// answer too. Returns false when no queued message has that question any
+/// more (a turn just took it).
 pub async fn also_reply_to_queued(
     db: &Database,
     user_id: &str,
     id: &str,
     key: &str,
     origin: &ChannelOrigin,
-) -> AppResult<()> {
+) -> AppResult<bool> {
     let origin =
         bson::to_bson(origin).map_err(|_| AppError::Internal("Failed to encode chat".into()))?;
-    db.collection::<AssistantConversation>(CONVERSATIONS)
+    let updated = db
+        .collection::<AssistantConversation>(CONVERSATIONS)
         .update_one(
-            doc! {"_id": id, "user_id": user_id},
+            doc! {"_id": id, "user_id": user_id, "pending_events.question_key": key},
             doc! {"$addToSet": {"pending_events.$[e].reply_to": origin}},
         )
         .array_filters(vec![doc! {"e.question_key": key}])
         .await?;
-    Ok(())
+    Ok(updated.matched_count == 1)
 }
 
 /// Have the running turn `turn_id` also deliver its answer to `origin`.
@@ -567,6 +569,38 @@ pub async fn warn_at_startup(db: &Database) {
             )
         );
     }
+}
+
+/// Agents whose home pointer names a chat app channel thread (possible
+/// before homes were restricted to agents' own threads) lose it; the next own
+/// thread becomes home. Best effort, idempotent.
+pub async fn repair_channel_homes(db: &Database) -> mongodb::error::Result<u64> {
+    let agents = db.collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME);
+    let rows: Vec<bson::Document> = agents
+        .aggregate(vec![
+            doc! {"$match": {"home_conversation_id": {"$ne": bson::Bson::Null}}},
+            doc! {"$lookup": {"from": CONVERSATIONS, "localField": "home_conversation_id",
+            "foreignField": "_id", "as": "home"}},
+            doc! {"$match": {"home.channel": {"$ne": bson::Bson::Null}}},
+            doc! {"$project": {"_id": 1}},
+        ])
+        .await?
+        .try_collect()
+        .await?;
+    let ids: Vec<&str> = rows
+        .iter()
+        .filter_map(|row| row.get_str("_id").ok())
+        .collect();
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    Ok(agents
+        .update_many(
+            doc! {"_id": {"$in": ids}},
+            doc! {"$set": {"home_conversation_id": bson::Bson::Null}},
+        )
+        .await?
+        .modified_count)
 }
 
 pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
@@ -1044,11 +1078,14 @@ pub async fn begin_turn(
                 }
                 // Queued events are the owner's (guests' messages are never
                 // queued): a guest turn leaves them for the owner's next turn.
-                let events = if start.guest {
-                    Vec::new()
-                } else {
-                    std::mem::take(&mut row.pending_events)
-                };
+                // A chat app thread's queued messages wait for a turn that
+                // answers in that chat, never one the owner starts in the app.
+                let events =
+                    if start.guest || (start.origin == TurnOrigin::User && row.channel.is_some()) {
+                        Vec::new()
+                    } else {
+                        std::mem::take(&mut row.pending_events)
+                    };
                 // A guest turn never inherits the owner's live context (their
                 // tool results may hold more than the chat saw): it starts from
                 // the transcript alone.
@@ -1173,7 +1210,11 @@ pub async fn begin_turn(
                     TurnOrigin::Event => row.channel.clone().or(row.reply_channel.clone()),
                     _ => None,
                 };
-                if let Some(turn) = row.active_turn.as_mut() {
+                // Only on the owner's own thread (not a chat app thread), whose
+                // queued messages come from the owner's own private chats.
+                if row.channel.is_none()
+                    && let Some(turn) = row.active_turn.as_mut()
+                {
                     for origin in turn.events.iter().flat_map(|event| event.reply_to.iter()) {
                         if Some(origin) != answered_here.as_ref()
                             && !turn.also_deliver.contains(origin)

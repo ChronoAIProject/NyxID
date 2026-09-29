@@ -2266,7 +2266,31 @@ async fn repeated_question(
         .iter()
         .any(|event| event.question_key.as_deref() == Some(key))
     {
-        engine::also_reply_to_queued(&state.db, &row.user_id, conversation_id, key, origin).await?;
+        if !engine::also_reply_to_queued(&state.db, &row.user_id, conversation_id, key, origin)
+            .await?
+        {
+            // A turn has just taken it: wait for that turn's answer instead.
+            let current = engine::get(&state.db, &row.user_id, conversation_id).await?;
+            let waiting = match current.active_turn.as_ref() {
+                Some(turn) if turn.asked_from.as_ref() == Some(origin) => true,
+                Some(turn) => {
+                    engine::also_deliver(
+                        &state.db,
+                        &row.user_id,
+                        conversation_id,
+                        &turn.turn_id,
+                        origin,
+                    )
+                    .await?
+                }
+                None => false,
+            };
+            return Ok(Some(if waiting {
+                "I'm already working on that question; I'll send the answer here.".into()
+            } else {
+                "I've just answered that question; you'll find it in NyxID.".into()
+            }));
+        }
         return Ok(Some(
             "That question is already queued; I'll answer it next.".into(),
         ));
