@@ -653,6 +653,7 @@ pub async fn connect(
         gateway_bot_id: None,
         gateway_attempted_at: may_fall_back.then_some(now),
         gateway_fallback_at: (may_fall_back && !gateway).then_some(now),
+        pending_agent_api_key_id: None,
         owner_sender_ids: {
             let mut ids = known_owner_senders(state, owner, &platform).await;
             for id in verified_owners {
@@ -870,9 +871,9 @@ async fn connect_gateway(
     let record_id = Uuid::new_v4().to_string();
     // Other platforms pin the bot's own user ID so mentions of it are known.
     let mut row = row.clone();
-    if row.platform != "telegram"
-        && let Some(bot_id) = bot_user_id(state, bot).await
-    {
+    if row.platform != "telegram" {
+        // Without it a group would never hear the bot addressed.
+        let bot_id = bot_user_id(state, bot).await.ok_or("bot_id_unavailable")?;
         let _ = state
             .db
             .collection::<NyxbotChannel>(CHANNELS)
@@ -1020,8 +1021,22 @@ async fn connect_gateway(
     }
 }
 
+/// Tests: bots' own user IDs by bot ID, instead of asking the platform.
+#[cfg(test)]
+pub(crate) static TEST_BOT_USER_IDS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, String>>,
+> = std::sync::LazyLock::new(Default::default);
+
 /// The bot's own user ID on its platform (best effort).
 async fn bot_user_id(state: &AppState, bot: &ChannelBot) -> Option<String> {
+    #[cfg(test)]
+    if let Some(id) = TEST_BOT_USER_IDS
+        .lock()
+        .ok()
+        .and_then(|ids| ids.get(&bot.id).cloned())
+    {
+        return Some(id);
+    }
     let lookup = async {
         let adapter = crate::services::channel_adapters::resolve_adapter(
             &bot.platform,
@@ -1052,11 +1067,16 @@ async fn bot_user_id(state: &AppState, bot: &ChannelBot) -> Option<String> {
     }
 }
 
+/// A bot in the middle of answering is looked at again this much later
+/// (not counted as a refusal).
+const MOVE_BUSY_RETRY_MINUTES: i64 = 10;
+
 /// Move one personal bot still on NyxID's relay onto the gateway once its
-/// platform is listed in `NYXBOT_GATEWAY_PLATFORMS`: at most one per sweep,
-/// each bot at most daily, only bots whose owner has verified (they are in
-/// use). Building happens beside the working bot and the swap is last, so a
-/// refusal leaves the bot exactly as it was.
+/// platform is listed in `NYXBOT_GATEWAY_PLATFORMS`: at most one per sweep on
+/// each replica, each bot at most daily, only bots whose owner has verified
+/// (they are in use) and none in the middle of answering. Building happens
+/// beside the working bot and the swap is last, so a refusal leaves the bot
+/// exactly as it was.
 pub(crate) async fn switch_to_gateway(state: &AppState) -> AppResult<()> {
     let listed: Vec<&str> = state
         .config
@@ -1068,23 +1088,37 @@ pub(crate) async fn switch_to_gateway(state: &AppState) -> AppResult<()> {
     if listed.is_empty() {
         return Ok(());
     }
-    let due = bson::DateTime::from_chrono(Utc::now() - ChronoDuration::hours(GATEWAY_RETRY_HOURS));
+    let now = Utc::now();
+    let due = bson::DateTime::from_chrono(now - ChronoDuration::hours(GATEWAY_RETRY_HOURS));
     let filter = doc! {"status": "active", "transport": "direct",
     "bot_owner_id": bson::Bson::Null, "platform": {"$in": &listed},
     "owner_sender_ids.0": {"$exists": true},
     "$or": [{"gateway_attempted_at": bson::Bson::Null},
         {"gateway_attempted_at": {"$lt": due}}]};
     let channels = state.db.collection::<NyxbotChannel>(CHANNELS);
-    // Claim it, so replicas do not move the same bot at once.
+    // Claim it, so replicas do not move the same bot at once; the longest
+    // waiting bot first.
     let Some(row) = channels
         .find_one_and_update(
             filter,
             doc! {"$set": {"gateway_attempted_at": bson::DateTime::now()}},
         )
+        .sort(doc! {"gateway_attempted_at": 1})
         .await?
     else {
         return Ok(());
     };
+    if channel_answering(state, &row).await? {
+        channels
+            .update_one(
+                doc! {"_id": &row.id},
+                doc! {"$set": {"gateway_attempted_at": bson::DateTime::from_chrono(
+                now - ChronoDuration::hours(GATEWAY_RETRY_HOURS)
+                    + ChronoDuration::minutes(MOVE_BUSY_RETRY_MINUTES))}},
+            )
+            .await?;
+        return Ok(());
+    }
     let outcome = move_to_gateway(state, &row).await;
     if let Err(code) = outcome {
         channels
@@ -1107,8 +1141,22 @@ pub(crate) async fn switch_to_gateway(state: &AppState) -> AppResult<()> {
     Ok(())
 }
 
-/// Turn a channel whose gateway setup failed into a NyxID relay channel: its
-/// route key calls NyxID, the gateway agent key goes.
+/// Whether a thread answering into this channel has a turn running.
+async fn channel_answering(state: &AppState, row: &NyxbotChannel) -> AppResult<bool> {
+    Ok(state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .count_documents(doc! {"user_id": &row.user_id, "active_turn": {"$ne": null},
+        "$or": [{"channel.nyxbot_channel_id": &row.id},
+            {"reply_channel.nyxbot_channel_id": &row.id}]})
+        .limit(1)
+        .await?
+        > 0)
+}
+
+/// Turn a channel whose gateway setup failed into a NyxID relay channel: a
+/// fresh route key (the gateway may have seen the first one) calls NyxID,
+/// the gateway agent key goes.
 async fn fall_back_to_direct(
     state: &AppState,
     owner: &str,
@@ -1120,12 +1168,12 @@ async fn fall_back_to_direct(
     if let Some(agent_key) = agent_key {
         let _ = key_service::delete_api_key(&state.db, owner, agent_key).await;
     }
-    // A fresh route key: the gateway may have seen the first one.
-    let route_key = new_route_key(state, bot_owner(row), &row.bot_label, callback)
+    let key_owner = bot_owner(row);
+    let route_key = new_route_key(state, key_owner, &row.bot_label, callback)
         .await
         .map_err(|_| "route_key_create_failed")?;
-    let _ = key_service::delete_api_key(&state.db, bot_owner(row), &row.route_api_key_id).await;
-    state
+    let _ = key_service::delete_api_key(&state.db, key_owner, &row.route_api_key_id).await;
+    let stored = state
         .db
         .collection::<NyxbotChannel>(CHANNELS)
         .update_one(
@@ -1136,16 +1184,19 @@ async fn fall_back_to_direct(
                 "gateway_channel_id": "", "gateway_record_id": "", "gateway_version": "",
                 "binding_id": "", "gateway_bot_id": ""}},
         )
-        .await
-        .map_err(|_| "storage_unavailable")?;
-    let mut direct = row.clone();
-    direct.transport = "direct".into();
-    direct.route_api_key_id = route_key.id;
-    direct.agent_api_key_id = None;
-    let outcome = connect_direct(state, &direct, bot).await;
+        .await;
+    let outcome = match stored {
+        Ok(_) => {
+            let mut direct = row.clone();
+            direct.transport = "direct".into();
+            direct.route_api_key_id = route_key.id.clone();
+            direct.agent_api_key_id = None;
+            connect_direct(state, &direct, bot).await
+        }
+        Err(_) => Err("storage_unavailable"),
+    };
     if outcome.is_err() {
-        let _ =
-            key_service::delete_api_key(&state.db, bot_owner(row), &direct.route_api_key_id).await;
+        let _ = key_service::delete_api_key(&state.db, key_owner, &route_key.id).await;
     }
     outcome
 }
@@ -1177,109 +1228,40 @@ async fn new_route_key(
     .await
 }
 
-/// A gateway channel opened for a bot and attached to its existing route.
-struct OpenedGateway {
-    channel_id: String,
-    record_id: String,
-    version: i64,
-    binding_id: Option<String>,
-    callback: String,
-}
-
-/// Open a gateway channel for `row` (its new route and agent keys) and attach
-/// the bot's existing route. Nothing of the working channel changes; on any
-/// failure the gateway channel is released.
-async fn open_gateway_channel(
-    state: &AppState,
-    row: &NyxbotChannel,
-    bot: &ChannelBot,
-    agent_key: &str,
-    route_key: &str,
-    route_id: &str,
-) -> Result<OpenedGateway, &'static str> {
-    if !(state.config.jwt_issuer.starts_with("https://")
-        || state.config.jwt_issuer.starts_with("http://localhost"))
-    {
-        return Err("issuer_unsupported");
-    }
-    let creator = creator_bearer(state, &row.user_id).map_err(|_| "creator_unavailable")?;
-    let creator = creator.as_str();
-    let record_id = Uuid::new_v4().to_string();
-    let mut body = gateway_policy(state, row, bot, &[], GATEWAY_GROUPS_DEFAULT);
-    body["record_id"] = json!(record_id);
-    body["credentials"] = json!({"agent_key": agent_key, "channel_key": route_key});
-    let created = gateway_call(
-        state,
-        reqwest::Method::POST,
-        "/channels",
-        creator,
-        Some(&body),
-        Some(&record_id),
-    )
-    .await
-    .map_err(|_| "gateway_unavailable")?;
-    if created.status != 201 && created.status != 200 {
-        return Err(gateway_error_code(&created));
-    }
-    let (Some(channel_id), Some(callback), Some(version)) = (
-        created.body["channel_id"].as_str(),
-        created.body["endpoints"]["nyxid_callback_url"].as_str(),
-        created.body["version"].as_i64(),
-    ) else {
-        return Err("gateway_invalid_response");
+/// Release a gateway channel NyxID created, at its current version (an
+/// attach whose answer was lost may have moved it on).
+async fn release_gateway_channel(state: &AppState, owner: &str, channel_id: &str, known: i64) {
+    let Ok(creator) = creator_bearer(state, owner) else {
+        return;
     };
-    let mut update = gateway_policy(
-        state,
-        row,
-        bot,
-        &[route_id.to_owned()],
-        GATEWAY_GROUPS_DEFAULT,
-    );
-    update["expected_version"] = json!(version);
-    let attached = gateway_call(
-        state,
-        reqwest::Method::PUT,
-        &format!("/channels/{}", urlencode(channel_id)),
-        creator,
-        Some(&update),
-        None,
-    )
-    .await;
-    let failed = match attached {
+    let path = format!("/channels/{}", urlencode(channel_id));
+    let version = match gateway_call(state, reqwest::Method::GET, &path, &creator, None, None).await
+    {
         Ok(response) if response.status == 200 => {
-            return Ok(OpenedGateway {
-                channel_id: channel_id.to_owned(),
-                record_id,
-                version: response.body["version"].as_i64().unwrap_or(version + 1),
-                binding_id: created.body["provider"]["binding_id"]
-                    .as_str()
-                    .map(str::to_owned),
-                callback: callback.to_owned(),
-            });
+            response.body["version"].as_i64().unwrap_or(known)
         }
-        Ok(response) => gateway_error_code(&response),
-        Err(_) => "gateway_unavailable",
+        _ => known,
     };
     let _ = gateway_call(
         state,
         reqwest::Method::DELETE,
-        &format!(
-            "/channels/{}?expected_version={version}",
-            urlencode(channel_id)
-        ),
-        creator,
+        &format!("{path}?expected_version={version}"),
+        &creator,
         None,
         None,
     )
     .await;
-    Err(failed)
 }
 
 /// Move a working personal bot on NyxID's relay onto the gateway, building
-/// first and swapping last: new keys and a gateway channel attached to the
-/// bot's existing route are made alongside it, then the channel record and
-/// its route switch over in place (same channel, chats, owners and link
-/// code). On any failure the working bot is left exactly as it was.
+/// first and swapping last. Beside the working bot: new route and gateway
+/// agent keys (the agent key registered as pending, since the gateway binds
+/// its provider while creating the channel), a gateway channel, and the
+/// bot's existing route attached to it. Then, in one transaction, the channel
+/// record and its route switch over in place (same channel, route, chats,
+/// owners and link code), and the old route key goes. On any failure the
+/// gateway channel is released, the new keys are deleted and the working bot
+/// is left exactly as it was.
 async fn move_to_gateway(state: &AppState, row: &NyxbotChannel) -> Result<(), &'static str> {
     if row.bot_owner_id.is_some() || row.transport != "direct" {
         return Err("not_movable");
@@ -1291,10 +1273,24 @@ async fn move_to_gateway(state: &AppState, row: &NyxbotChannel) -> Result<(), &'
     if !bot.is_active {
         return Err("bot_inactive");
     }
+    if !(state.config.jwt_issuer.starts_with("https://")
+        || state.config.jwt_issuer.starts_with("http://localhost"))
+    {
+        return Err("issuer_unsupported");
+    }
+    // Mentions of the bot are recognised by its own user ID; without it a
+    // group would never hear the bot addressed.
+    let bot_id = if row.platform == "telegram" {
+        None
+    } else {
+        Some(bot_user_id(state, &bot).await.ok_or("bot_id_unavailable")?)
+    };
     let base = gateway_base(state)
         .await
         .map_err(|_| "gateway_unavailable")?;
+    let creator = creator_bearer(state, &row.user_id).map_err(|_| "creator_unavailable")?;
     let owner = row.user_id.as_str();
+    let channels = state.db.collection::<NyxbotChannel>(CHANNELS);
     let route_key = new_route_key(
         state,
         owner,
@@ -1310,58 +1306,66 @@ async fn move_to_gateway(state: &AppState, row: &NyxbotChannel) -> Result<(), &'
             return Err("agent_key_create_failed");
         }
     };
-    let discard = |code: &'static str| {
-        let route_key = route_key.id.clone();
-        let agent = agent.id.clone();
-        async move {
-            let _ = key_service::delete_api_key(&state.db, owner, &route_key).await;
-            let _ = key_service::delete_api_key(&state.db, owner, &agent).await;
-            code
+    // Undo everything built so far; the working bot keeps its keys.
+    let discard = async |gateway: Option<(&str, i64)>, code: &'static str| {
+        if let Some((channel_id, version)) = gateway {
+            release_gateway_channel(state, owner, channel_id, version).await;
         }
+        let _ = key_service::delete_api_key(&state.db, owner, &route_key.id).await;
+        let _ = key_service::delete_api_key(&state.db, owner, &agent.id).await;
+        let _ = channels
+            .update_one(
+                doc! {"_id": &row.id, "transport": "direct",
+                "pending_agent_api_key_id": &agent.id},
+                doc! {"$unset": {"pending_agent_api_key_id": "", "binding_id": ""}},
+            )
+            .await;
+        code
     };
+    // The gateway's provider binding (made while it creates the channel)
+    // authenticates with the new agent key.
+    match channels
+        .update_one(
+            doc! {"_id": &row.id, "status": "active", "transport": "direct",
+            "route_api_key_id": &row.route_api_key_id},
+            doc! {"$set": {"pending_agent_api_key_id": &agent.id},
+            "$unset": {"binding_id": ""}},
+        )
+        .await
+    {
+        Ok(result) if result.matched_count == 1 => {}
+        _ => return Err(discard(None, "channel_changed").await),
+    }
     let mut next = row.clone();
     next.route_api_key_id = route_key.id.clone();
-    next.agent_api_key_id = Some(agent.id.clone());
-    next.gateway_bot_id = if row.platform == "telegram" {
-        None
-    } else {
-        bot_user_id(state, &bot).await
-    };
-    let opened = match open_gateway_channel(
+    next.gateway_bot_id = bot_id;
+    let record_id = Uuid::new_v4().to_string();
+    let mut body = gateway_policy(state, &next, &bot, &[], GATEWAY_GROUPS_DEFAULT);
+    body["record_id"] = json!(record_id);
+    body["credentials"] = json!({"agent_key": agent.full_key, "channel_key": route_key.full_key});
+    let created = match gateway_call(
         state,
-        &next,
-        &bot,
-        &agent.full_key,
-        &route_key.full_key,
-        &route_id,
+        reqwest::Method::POST,
+        "/channels",
+        &creator,
+        Some(&body),
+        Some(&record_id),
     )
     .await
     {
-        Ok(opened) => opened,
-        Err(code) => return Err(discard(code).await),
+        Ok(created) if matches!(created.status, 200 | 201) => created,
+        Ok(refused) => return Err(discard(None, gateway_error_code(&refused)).await),
+        Err(_) => return Err(discard(None, "gateway_unavailable").await),
     };
-    let release = |code: &'static str| {
-        let channel_id = opened.channel_id.clone();
-        let version = opened.version;
-        async move {
-            if let Ok(creator) = creator_bearer(state, owner) {
-                let _ = gateway_call(
-                    state,
-                    reqwest::Method::DELETE,
-                    &format!(
-                        "/channels/{}?expected_version={version}",
-                        urlencode(&channel_id)
-                    ),
-                    creator.as_str(),
-                    None,
-                    None,
-                )
-                .await;
-            }
-            discard(code).await
-        }
+    let (Some(channel_id), Some(callback), Some(version)) = (
+        created.body["channel_id"].as_str(),
+        created.body["endpoints"]["nyxid_callback_url"].as_str(),
+        created.body["version"].as_i64(),
+    ) else {
+        return Err(discard(None, "gateway_invalid_response").await);
     };
-    // The new route key calls the gateway.
+    let opened = Some((channel_id, version));
+    // The new route key calls the gateway, then the route is attached.
     if key_service::update_api_key_scope_with_scope_authorization(
         &state.db,
         owner,
@@ -1378,73 +1382,105 @@ async fn move_to_gateway(state: &AppState, row: &NyxbotChannel) -> Result<(), &'
         None,
         None,
         None,
-        Some(Some(&opened.callback)),
+        Some(Some(callback)),
         None,
     )
     .await
     .is_err()
     {
-        return Err(release("route_key_update_failed").await);
+        return Err(discard(opened, "route_key_update_failed").await);
     }
+    let mut update = gateway_policy(
+        state,
+        &next,
+        &bot,
+        std::slice::from_ref(&route_id),
+        GATEWAY_GROUPS_DEFAULT,
+    );
+    update["expected_version"] = json!(version);
+    let version = match gateway_call(
+        state,
+        reqwest::Method::PUT,
+        &format!("/channels/{}", urlencode(channel_id)),
+        &creator,
+        Some(&update),
+        None,
+    )
+    .await
+    {
+        Ok(response) if response.status == 200 => {
+            response.body["version"].as_i64().unwrap_or(version + 1)
+        }
+        Ok(response) => return Err(discard(opened, gateway_error_code(&response)).await),
+        Err(_) => return Err(discard(opened, "gateway_unavailable").await),
+    };
+    let opened = Some((channel_id, version));
     let Ok(ciphertext) = state
         .encryption_keys
         .encrypt(agent.full_key.as_bytes())
         .await
     else {
-        return Err(release("encryption_unavailable").await);
+        return Err(discard(opened, "encryption_unavailable").await);
     };
-    // Swap: the channel record first (only if nobody changed it meanwhile),
-    // then its route, then the old route key goes.
+    // Swap the channel record (only if nobody changed it meanwhile) and its
+    // route together.
     let mut set = doc! {"transport": "gateway", "route_api_key_id": &route_key.id,
     "agent_api_key_id": &agent.id,
     "agent_key_ciphertext": bson::Binary {
         subtype: bson::spec::BinarySubtype::Generic, bytes: ciphertext },
-    "gateway_channel_id": &opened.channel_id, "gateway_record_id": &opened.record_id,
-    "gateway_version": opened.version, "updated_at": bson::DateTime::now()};
-    if let Some(binding_id) = opened.binding_id.as_deref() {
+    "gateway_channel_id": channel_id, "gateway_record_id": &record_id,
+    "gateway_version": version, "updated_at": bson::DateTime::now()};
+    if let Some(binding_id) = created.body["provider"]["binding_id"].as_str() {
         set.insert("binding_id", binding_id);
     }
     if let Some(bot_id) = next.gateway_bot_id.as_deref() {
         set.insert("gateway_bot_id", bot_id);
     }
-    let swapped = state
-        .db
-        .collection::<NyxbotChannel>(CHANNELS)
-        .update_one(
-            doc! {"_id": &row.id, "status": "active", "transport": "direct",
-            "route_api_key_id": &row.route_api_key_id},
-            doc! {"$set": set, "$unset": {"gateway_groups": "", "gateway_fallback_at": "",
-            "gateway_groups_retry_at": ""}},
-        )
-        .await;
-    if !matches!(swapped, Ok(ref result) if result.matched_count == 1) {
-        return Err(release("channel_changed").await);
+    let swap = doc! {"$set": set, "$unset": {"pending_agent_api_key_id": "",
+    "gateway_groups": "", "gateway_fallback_at": "", "gateway_groups_retry_at": ""}};
+    let fence = doc! {"_id": &row.id, "status": "active", "transport": "direct",
+    "route_api_key_id": &row.route_api_key_id, "pending_agent_api_key_id": &agent.id};
+    let reroute = doc! {"$set": {"agent_api_key_id": &route_key.id,
+    "updated_at": bson::DateTime::now()}};
+    let swapped: AppResult<bool> = async {
+        let mut session = state.db.client().start_session().await?;
+        let db = state.db.clone();
+        let (route_id, owner) = (route_id.clone(), owner.to_owned());
+        session
+            .start_transaction()
+            .and_run2(async move |session| {
+                let moved = db
+                    .collection::<NyxbotChannel>(CHANNELS)
+                    .update_one(fence.clone(), swap.clone())
+                    .session(&mut *session)
+                    .await?;
+                if moved.matched_count != 1 {
+                    return Ok(false);
+                }
+                let rerouted = db
+                    .collection::<bson::Document>(
+                        crate::models::channel_conversation::COLLECTION_NAME,
+                    )
+                    .update_one(
+                        doc! {"_id": &route_id, "user_id": &owner, "is_active": true},
+                        reroute.clone(),
+                    )
+                    .session(&mut *session)
+                    .await?;
+                if rerouted.matched_count != 1 {
+                    // Abort: the channel record stays on NyxID's relay.
+                    return Err(mongodb::error::Error::custom("route_changed"));
+                }
+                Ok(true)
+            })
+            .await
+            .map_err(AppError::from)
     }
-    let rerouted = state
-        .db
-        .collection::<crate::models::channel_conversation::ChannelConversation>(
-            crate::models::channel_conversation::COLLECTION_NAME,
-        )
-        .update_one(
-            doc! {"_id": &route_id, "user_id": owner},
-            doc! {"$set": {"agent_api_key_id": &route_key.id,
-            "updated_at": bson::DateTime::now()}},
-        )
-        .await;
-    if !matches!(rerouted, Ok(ref result) if result.matched_count == 1) {
-        // Put the channel back on NyxID's relay as it was.
-        let _ = state
-            .db
-            .collection::<NyxbotChannel>(CHANNELS)
-            .update_one(
-                doc! {"_id": &row.id},
-                doc! {"$set": {"transport": "direct", "route_api_key_id": &row.route_api_key_id},
-                "$unset": {"agent_api_key_id": "", "agent_key_ciphertext": "",
-                    "gateway_channel_id": "", "gateway_record_id": "", "gateway_version": "",
-                    "binding_id": "", "gateway_bot_id": ""}},
-            )
-            .await;
-        return Err(release("route_update_failed").await);
+    .await;
+    match swapped {
+        Ok(true) => {}
+        Ok(false) => return Err(discard(opened, "channel_changed").await),
+        Err(_) => return Err(discard(opened, "swap_failed").await),
     }
     let _ = key_service::delete_api_key(&state.db, owner, &row.route_api_key_id).await;
     // Group chats that answer everything need every group message.
@@ -2887,8 +2923,10 @@ async fn provider_channel(
     let row = state
         .db
         .collection::<NyxbotChannel>(CHANNELS)
-        .find_one(doc! {"agent_api_key_id": &key.id, "user_id": &owner,
-        "status": {"$in": ["pending", "active"]}})
+        .find_one(
+            doc! {"user_id": &owner, "status": {"$in": ["pending", "active"]},
+            "$or": [{"agent_api_key_id": &key.id}, {"pending_agent_api_key_id": &key.id}]},
+        )
         .await
         .map_err(|_| problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"))?
         .ok_or_else(|| problem(StatusCode::FORBIDDEN, "forbidden"))?;
@@ -3337,6 +3375,8 @@ async fn gateway_inbound(
     let chat_id = conversation["id"].as_str().unwrap_or_default();
     let thread_id = conversation["thread_id"].as_str();
     let chat_partition = if kind == "private" {
+        // A bot moved from NyxID's relay keeps the chat's thread.
+        chats::adopt_relay_chat(state, row, partition, chat_id, sender.id, thread_id).await?;
         partition.to_owned()
     } else {
         chats::group_partition(chat_id, thread_id)
@@ -3490,7 +3530,10 @@ pub async fn deliver_to(
             return Ok(());
         };
         let reply = bounded_reply(text);
-        if channel.transport == "gateway" {
+        // A chat from before its bot moved to the gateway has no gateway
+        // reference yet: it is answered through NyxID's relay, as before.
+        let relay_era = thread.event_ref_ciphertext.is_none() && thread.last_message_id.is_some();
+        if channel.transport == "gateway" && !relay_era {
             let (Some(ciphertext), Some(expires_at)) = (
                 thread.event_ref_ciphertext.as_ref(),
                 thread.event_ref_expires_at,
@@ -3658,16 +3701,12 @@ pub async fn relay_callback(
     // A private chat is one thread per sender (as before); a group, channel
     // or topic is one thread its members share.
     let partition = if kind == "private" {
-        format!(
-            "direct_{}",
-            &sha256_hex(format!(
-                "{}\0{}\0{}",
-                chat_id,
-                payload["sender"]["platform_id"]
-                    .as_str()
-                    .unwrap_or_default(),
-                thread_id.as_deref().unwrap_or_default()
-            ))[..32]
+        chats::direct_partition(
+            &chat_id,
+            payload["sender"]["platform_id"]
+                .as_str()
+                .unwrap_or_default(),
+            thread_id.as_deref(),
         )
     } else {
         chats::group_partition(&chat_id, thread_id.as_deref())
@@ -3774,15 +3813,23 @@ pub async fn relay_callback(
                         Err(_) => Some("I could not finish that. Please try again.".into()),
                     },
                 };
-            if let Some(reply) = reply {
-                direct_reply(
+            if let Some(reply) = reply
+                && let Err(error) = direct_reply(
                     &state,
                     &row,
                     &message_id,
                     &reply,
                     reply_token.as_deref().map(String::as_str),
                 )
-                .await?;
+                .await
+            {
+                // The bot moved to the gateway while answering: its route now
+                // answers as the new route key.
+                let current = load_channel(&state, &row.user_id, &row.id).await?;
+                if current.route_api_key_id == row.route_api_key_id || current.status != "active" {
+                    return Err(error);
+                }
+                direct_reply(&state, &current, &message_id, &reply, None).await?;
             }
             Ok(())
         }

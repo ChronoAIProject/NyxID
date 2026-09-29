@@ -278,29 +278,42 @@ settings, or relinked later); each chat becomes a thread of the linked agent
   streams only the final answer as a committed message; `event_context` is stored
   encrypted and served verbatim for `readEventContext`.
 - **Other NyxID platforms** use NyxID's relay directly (`/api/v1/nyxbot/relay/{id}`,
-  verified with NyxID's relay callback token) while the gateway relays Telegram
-  only. `NYXBOT_GATEWAY_PLATFORMS` (default `telegram`; Telegram is always
+  verified with NyxID's relay callback token) unless listed for the gateway.
+  `NYXBOT_GATEWAY_PLATFORMS` (default `telegram`; Telegram is always
   included) lists the platforms the gateway takes. Only platforms whose raw
   events the gateway verifies itself are honoured (`GATEWAY_VERIFIED_PLATFORMS`:
   Telegram, Lark, Feishu); the gateway would accept channels for others but
   refuse their messages without `trust_normalized`, which loses mention and
   reply evidence, so they stay on NyxID's relay. Once a platform is listed,
   personal bots on it whose owner has verified move to the gateway by themselves
-  (the 15-second sweep moves one bot at a time, each at most daily). A move
-  builds first and swaps last: a new route key and gateway agent key, and a
-  gateway channel attached to the bot's existing route, are made beside the
-  working bot; only then are the channel record (compare-and-set on its
-  transport and route key) and the route's key switched in place and the old
-  route key deleted. The connection keeps its id, route, verified owners, chats,
-  settings and link code. The gateway source names the platform, and for
+  (each replica's 15-second sweep moves one bot at a time, each at most daily;
+  a bot with a turn running answers first and is looked at again ten minutes
+  later). A move builds first and swaps last. Beside the working bot, NyxID
+  makes a new route key and gateway agent key, registers the agent key as the
+  channel's `pending_agent_api_key_id` (the gateway binds its provider while
+  creating the channel, and the provider endpoints accept that key), creates the
+  gateway channel, points the new route key at it and attaches the bot's
+  existing route. Then one transaction switches the channel record
+  (compare-and-set on its transport, route key and pending key) and the route's
+  key; the old route key is deleted. The connection keeps its id, route,
+  verified owners, chats, settings and link code. A private chat's first
+  gateway message takes over its relay-era thread (the gateway reports the same
+  chat and sender IDs), with conversations answering into it following; until
+  then, and for an answer that raced the move, replies go through NyxID's relay
+  as the new route key. The gateway source names the platform, and for
   platforms other than Telegram pins the bot's own user ID (Lark: its `open_id`,
-  looked up with the bot's credentials) instead of a username. If the gateway
-  refuses, its channel is released, the new keys are deleted and the bot stays
-  exactly as it was (`gateway_fallback_at`), retried the next day; a manual
-  connect never rebuilds a working bot just to change transport. A new bot on a
-  listed platform the gateway refuses is connected through NyxID's relay with a
-  fresh route key the gateway never saw; Telegram failures are still reported as
-  errors.
+  looked up with the bot's credentials) instead of a username; a bot whose ID
+  cannot be looked up stays on NyxID's relay (`bot_id_unavailable`). If the
+  gateway refuses, its channel is released at its current version, the new keys
+  are deleted and the bot stays exactly as it was (`gateway_fallback_at`),
+  retried the next day; a manual connect never rebuilds a working bot just to
+  change transport. A new bot on a listed platform the gateway refuses is
+  connected through NyxID's relay with a fresh route key the gateway never saw;
+  Telegram failures are still reported as errors. Through the gateway, Lark and
+  Feishu carry plain text only (images, files and rich posts are refused there,
+  while NyxID's relay passes them on). A message the relay sent in the instant
+  between the swap and the route change is refused and reported like any lost
+  message.
 - **Organization bots.** An owner can link bots of organizations they
   administer (the rule for managing org bots), found by id or label:
   `nyxid__list_channel_bots` and the route tools cover personal and administered
@@ -344,8 +357,8 @@ settings, or relinked later); each chat becomes a thread of the linked agent
   event subscription / Request URL against the bot's page in NyxID), a message
   another route took, or a message that reached the agent without the code.
   Linking an existing bot also ends the chat's wait for a new one from a setup
-  link. Lark and other non-Telegram bots use NyxID's direct relay, never the
-  Agent Event Gateway.
+  link. Bots on platforms not listed in `NYXBOT_GATEWAY_PLATFORMS` use NyxID's
+  direct relay.
 - **Updates.** Asynchronous replies (event turns, such as a specialist's report)
   are delivered to the chat through the gateway's `replyToEvent` while the newest
   event reference is valid, or through the relay reply API; messages that arrive

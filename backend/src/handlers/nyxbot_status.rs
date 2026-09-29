@@ -8,7 +8,8 @@ use mongodb::bson::{self, doc};
 use serde::Serialize;
 
 use super::{
-    CHANNELS, EVENTS, NyxbotChannel, NyxbotEvent, NyxbotWatch, WATCHES, excerpt, identifier,
+    CHANNELS, EVENTS, NyxbotChannel, NyxbotEvent, NyxbotThread, NyxbotWatch, THREADS, WATCHES,
+    excerpt, identifier,
 };
 use crate::{
     AppState,
@@ -347,6 +348,26 @@ pub(crate) fn failure_reason(code: &str, transport: &str) -> String {
     }
 }
 
+/// Whether an inbound message came from a private chat. Telegram's private
+/// chat ID is the sender's; elsewhere (Lark's `oc_` chats) NyxID knows from the
+/// chat it recorded.
+async fn private_message(state: &AppState, row: &NyxbotChannel, message: &ChannelMessage) -> bool {
+    let Some(chat_id) = message.platform_conversation_id.as_deref() else {
+        return false;
+    };
+    if message.sender_platform_id.as_deref() == Some(chat_id) {
+        return true;
+    }
+    row.platform != "telegram"
+        && state
+            .db
+            .collection::<NyxbotThread>(THREADS)
+            .find_one(doc! {"user_id": &row.user_id, "channel_id": &row.id,
+            "platform_chat_id": chat_id, "kind": "private"})
+            .await
+            .is_ok_and(|chat| chat.is_some())
+}
+
 async fn judge(state: &AppState, row: &NyxbotChannel, message: &ChannelMessage) -> Verdict {
     match message.callback_status.as_deref() {
         Some("failed") => Verdict::Lost(failure_code(message.callback_http_status)),
@@ -357,13 +378,14 @@ async fn judge(state: &AppState, row: &NyxbotChannel, message: &ChannelMessage) 
             // messages outside its admission policy, and anything but plain
             // text (it refuses photos and system events with a 202). Only a
             // private plain-text message must reach the provider.
-            let private = message.platform_conversation_id.is_some()
-                && message.platform_conversation_id == message.sender_platform_id;
             let plain_text = message.content_type == "text"
                 && message.attachments.is_empty()
                 && message.activity.is_none();
             let age = Utc::now() - message.created_at;
-            if !private || !plain_text || age > ChronoDuration::hours(JUDGE_WINDOW_HOURS) {
+            if !plain_text
+                || age > ChronoDuration::hours(JUDGE_WINDOW_HOURS)
+                || !private_message(state, row, message).await
+            {
                 return Verdict::Skip;
             }
             // The gateway's event ID for a relayed message is NyxID's own
