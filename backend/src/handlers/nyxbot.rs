@@ -315,6 +315,8 @@ pub struct ChannelAgentResponse {
     agent_id: Option<String>,
     /// The organization that owns the bot; `None` for the owner's own bot.
     org_id: Option<String>,
+    /// Who may talk to the agent in private chats: `owner` or `everyone`.
+    private_chats: String,
     /// `ok` or `failing` once a message has been judged; `None` before.
     delivery_status: Option<String>,
     /// Stable code of the newest lost message (see `delivery_reason`).
@@ -338,6 +340,10 @@ impl From<&NyxbotChannel> for ChannelAgentResponse {
             owner_linked: !row.owner_sender_ids.is_empty(),
             agent_id: row.agent_id.clone(),
             org_id: row.bot_owner_id.clone(),
+            private_chats: row
+                .private_chats
+                .clone()
+                .unwrap_or_else(|| "owner".into()),
             delivery_status: row.delivery_status.clone(),
             delivery_error: row.delivery_error.clone(),
             delivery_reason: row
@@ -493,6 +499,7 @@ pub async fn connect(
     // Owners verified on a connection being rebuilt stay verified: the bot
     // and their chat-app account are the same.
     let mut verified_owners: Vec<String> = Vec::new();
+    let mut rebuilt_from = None;
     if let Some(existing) = active_for_bot(state, owner, &bot.id).await? {
         let keys_alive =
             key_service::get_api_key(&state.db, bot_owner(&existing), &existing.route_api_key_id)
@@ -532,6 +539,7 @@ pub async fn connect(
         // A half-created or broken connection (e.g. a key was deleted) is
         // released first, then rebuilt from scratch.
         verified_owners = existing.owner_sender_ids.clone();
+        rebuilt_from = Some(existing.id.clone());
         disconnect(state, owner, &existing.id).await?;
     }
     // Never silently replace another agent's default route.
@@ -678,6 +686,14 @@ pub async fn connect(
                 }),
             )
             .await;
+            // A rebuilt connection keeps its chats, their settings and threads.
+            if let Some(previous) = rebuilt_from.as_deref() {
+                chats::carry_over(state, owner, previous, &id).await?;
+            }
+            let row = load_channel(state, owner, &id).await?;
+            if let Some(code) = chats::sync_gateway_groups(state, &row).await? {
+                tracing::warn!(code, "NyxBot gateway group admission not restored");
+            }
             let row = load_channel(state, owner, &id).await?;
             let link = refresh_link_code(state, &row).await?;
             Ok((row, link))
@@ -1677,7 +1693,10 @@ pub async fn connect_channel(
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LinkRequest {
-    agent_id: String,
+    /// Move the bot to this agent.
+    agent_id: Option<String>,
+    /// `owner` or `everyone`: who may talk to the agent in private chats.
+    private_chats: Option<String>,
 }
 
 pub async fn link_channel(
@@ -1688,8 +1707,20 @@ pub async fn link_channel(
 ) -> AppResult<Json<Value>> {
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
-    let agent = requested_agent(&state, &owner, Some(&body.agent_id)).await?;
-    Ok(Json(link(&state, &owner, &id, &agent).await?))
+    if body.agent_id.is_none() && body.private_chats.is_none() {
+        return Err(AppError::ValidationError(
+            "Nothing to change: pass agent_id or private_chats".into(),
+        ));
+    }
+    let mut result = json!({"channel_agent_id": &id});
+    if let Some(access) = body.private_chats.as_deref() {
+        result = chats::set_private_chats(&state, &owner, &id, access).await?;
+    }
+    if let Some(agent_id) = body.agent_id.as_deref() {
+        let agent = requested_agent(&state, &owner, Some(agent_id)).await?;
+        result = link(&state, &owner, &id, &agent).await?;
+    }
+    Ok(Json(result))
 }
 
 pub async fn disconnect_channel(
@@ -1721,12 +1752,35 @@ enum Inbound {
 struct Sender<'a> {
     id: &'a str,
     display_name: Option<&'a str>,
-    private_chat: bool,
 }
 
-/// Link a sender presenting the one-time code, or decide whether this sender
-/// may reach the owner's NyxBot.
-async fn admit_sender(
+const PRIVATE_REFUSAL: &str = "This bot answers only its owner. If this is your bot, ask NyxBot \
+    in NyxID for a link and open it here.";
+
+/// Decide what an inbound chat message leads to: the owner verifying their
+/// account, a turn (as the owner or a guest), a short reply, or nothing.
+async fn inbound_message(
+    state: &AppState,
+    row: &NyxbotChannel,
+    chat: &NyxbotThread,
+    sender: &Sender<'_>,
+    text: &str,
+    addressed: bool,
+) -> AppResult<Inbound> {
+    if let Some(linked) = link_owner(state, row, sender, text).await? {
+        return Ok(linked);
+    }
+    let guest = match chats::admission(row, chat, sender.id, addressed) {
+        chats::Admission::Owner => false,
+        chats::Admission::Guest => true,
+        chats::Admission::Refuse => return Ok(Inbound::Reply(PRIVATE_REFUSAL.into())),
+        chats::Admission::Silent => return Ok(Inbound::Silent),
+    };
+    start_chat_turn(state, row, chat, sender, text, guest).await
+}
+
+/// Link a sender presenting the owner's one-time code.
+async fn link_owner(
     state: &AppState,
     row: &NyxbotChannel,
     sender: &Sender<'_>,
@@ -1801,18 +1855,7 @@ async fn admit_sender(
             account here. Send me anything to get started."
         ))));
     }
-    if row.owner_sender_ids.iter().any(|id| id == sender.id) {
-        return Ok(None);
-    }
-    Ok(Some(if sender.private_chat {
-        Inbound::Reply(
-            "This NyxBot answers only its owner. If this is your bot, ask NyxBot in NyxID \
-            for a link and open it here."
-                .into(),
-        )
-    } else {
-        Inbound::Silent
-    }))
+    Ok(None)
 }
 
 async fn thread_conversation(
@@ -1899,41 +1942,75 @@ async fn reply_decision(
     Ok(Some(decided.status == "allowed"))
 }
 
-async fn start_owner_turn(
+/// The platform's name as people write it.
+fn platform_name(platform: &str) -> String {
+    match canonical_platform(platform) {
+        "whatsapp" => "WhatsApp".into(),
+        "x" => "X".into(),
+        other => {
+            let mut chars = other.chars();
+            chars
+                .next()
+                .map(|first| first.to_uppercase().chain(chars).collect())
+                .unwrap_or_default()
+        }
+    }
+}
+
+/// Run the chat's agent on a message from the owner or, as a guest, from
+/// someone else the chat lets talk to it.
+async fn start_chat_turn(
     state: &AppState,
     row: &NyxbotChannel,
-    partition: &str,
+    chat: &NyxbotThread,
     sender: &Sender<'_>,
     text: &str,
+    guest: bool,
 ) -> AppResult<Inbound> {
-    let (_, conversation_id) = thread_conversation(state, row, partition).await?;
+    let (_, conversation_id) = thread_conversation(state, row, &chat.partition).await?;
     let exists = engine::get(&state.db, &row.user_id, &conversation_id)
         .await
         .is_ok();
     // A chat app cannot show NyxID's confirmation cards: the verified owner
     // answers one in words (see `decide_reply` for which card it decides).
+    // Nobody else can.
     let mut answered = None;
-    if exists {
+    if exists && !guest {
         match reply_decision(state, row, &conversation_id, text).await {
             Ok(decided) => answered = decided,
             Err(error) => tracing::debug!(%error, "Chat confirmation not applied"),
         }
     }
-    let chat = if sender.private_chat {
-        "a private chat"
+    let private = chat.kind.as_deref() == Some("private");
+    let name = sender
+        .display_name
+        .map(|name| excerpt(name, 60).replace('"', "'"));
+    let who = name
+        .as_deref()
+        .map(|name| format!("\"{name}\""))
+        .unwrap_or_else(|| (if guest { "someone" } else { "the owner" }).into());
+    let place = chats::describe(chat);
+    let mut note = if guest {
+        format!(
+            "This message came through the owner's {} channel bot {} from {who} in {place}; \
+            they are not the owner.",
+            identifier(&row.platform),
+            identifier(&row.bot_label),
+        )
     } else {
-        "a group chat"
+        format!(
+            "This message came through the owner's {} channel bot {} from {who} ({place}); \
+            NyxID verified this sender as the owner.",
+            identifier(&row.platform),
+            identifier(&row.bot_label),
+        )
     };
-    let mut note = format!(
-        "This message came through the owner's {} channel bot {} from {} ({chat}); NyxID \
-        verified this sender as the owner.",
-        identifier(&row.platform),
-        identifier(&row.bot_label),
-        sender
-            .display_name
-            .map(|name| format!("\"{}\"", excerpt(name, 60).replace('"', "'")))
-            .unwrap_or_else(|| "the owner".into()),
-    );
+    if !private {
+        note.push_str(
+            " Everyone in the chat sees your reply. Messages there start with their sender's \
+            name.",
+        );
+    }
     if let Some(allow) = answered {
         note.push_str(if allow {
             " With this message the owner confirmed the pending action; retry it with its \
@@ -1942,10 +2019,35 @@ async fn start_owner_turn(
             " With this message the owner declined the pending action; do not retry it."
         });
     }
+    let message = if private {
+        excerpt(text, engine::MAX_MESSAGE_CHARS - 16)
+    } else {
+        let from = name.as_deref().unwrap_or("Someone");
+        excerpt(
+            &format!("{from}: {text}"),
+            engine::MAX_MESSAGE_CHARS - 16,
+        )
+    };
+    let title = if private {
+        name.clone()
+            .unwrap_or_else(|| format!("{} chat", platform_name(&row.platform)))
+    } else {
+        chat.title
+            .clone()
+            .unwrap_or_else(|| format!("{} group", platform_name(&row.platform)))
+    };
+    let agent_id = match chat.agent_id.clone().or_else(|| row.agent_id.clone()) {
+        Some(agent_id) => agent_id,
+        None => {
+            crate::services::assistant_team_service::ensure_nyxbot(&state.db, &row.user_id)
+                .await?
+                .id
+        }
+    };
     let start = TurnStart {
         conversation_id: exists.then(|| conversation_id.clone()),
         new_id: (!exists).then(|| conversation_id.clone()),
-        text: excerpt(text, engine::MAX_MESSAGE_CHARS - 16),
+        text: message,
         model: Some(
             crate::services::assistant_profile_routing::model_for(
                 &state.db,
@@ -1957,22 +2059,15 @@ async fn start_owner_turn(
         origin: TurnOrigin::Channel,
         channel: Some(ChannelOrigin {
             nyxbot_channel_id: row.id.clone(),
-            partition: partition.to_owned(),
+            partition: chat.partition.clone(),
             platform: row.platform.clone(),
         }),
-        title: Some(format!("{} · {}", row.platform, row.bot_label)),
+        title: Some(title),
         note: Some(note),
-        agent_id: Some(match row.agent_id.clone() {
-            Some(agent_id) => agent_id,
-            None => {
-                crate::services::assistant_team_service::ensure_nyxbot(&state.db, &row.user_id)
-                    .await?
-                    .id
-            }
-        }),
+        agent_id: Some(agent_id),
         report_to: None,
         group_id: None,
-        guest: false,
+        guest,
     };
     match start_server_turn(
         state,
@@ -1986,31 +2081,27 @@ async fn start_owner_turn(
     {
         Ok(Started::Turn { receiver, .. }) => Ok(Inbound::Turn(receiver)),
         // The chat is busy (or the owner's channel pool is full): queue the
-        // message for NyxBot's next turn instead of bouncing it. Its reply is
-        // an asynchronous update delivered back to this chat.
+        // message for the agent's next turn instead of bouncing it. Its reply
+        // is an asynchronous update delivered back to this chat.
         Ok(Started::Busy | Started::PoolFull) if exists => {
             let note = format!(
-                "The owner sent another {} message while you were working. Answer it \
+                "{who} sent another {} message in {place} while you were working{}. Answer it \
                 next; your reply is delivered to the chat: \"{}\"",
                 identifier(&row.platform),
+                if guest { " (not the owner)" } else { "" },
                 excerpt(text, 3000).replace('"', "'")
             );
-            let queued = engine::push_events(
-                &state.db,
-                &row.user_id,
-                &conversation_id,
-                vec![crate::services::assistant_team_service::event(
-                    "message", note, None,
-                )],
-            )
-            .await?;
+            let mut event = crate::services::assistant_team_service::event("message", note, None);
+            event.guest = guest;
+            let queued =
+                engine::push_events(&state.db, &row.user_id, &conversation_id, vec![event])
+                    .await?;
             if queued.is_none() {
                 return Ok(Inbound::Busy);
             }
             super::assistant_team::wake(state, &row.user_id, &conversation_id).await;
             Ok(Inbound::Reply(
-                "Got it. I'm finishing your previous request and will answer this right after."
-                    .into(),
+                "Got it. I'll answer this right after the message I'm working on.".into(),
             ))
         }
         Ok(Started::Busy | Started::PoolFull) => Ok(Inbound::Busy),
@@ -2421,23 +2512,6 @@ pub async fn responses(State(state): State<AppState>, headers: HeaderMap, body: 
         // A retry of an admitted event never starts a second turn.
         return replay(&state, &row, &event_key, &response_id).await;
     }
-    // Keep the newest event reference for asynchronous replies (encrypted).
-    if let Some(event_ref) = context["event_ref"].as_str()
-        && let Ok(sealed) = state.encryption_keys.encrypt(event_ref.as_bytes()).await
-    {
-        let _ = state
-            .db
-            .collection::<NyxbotThread>(THREADS)
-            .update_one(
-                doc! {"channel_id": &row.id, "partition": &partition},
-                doc! {"$set": {"event_ref_ciphertext": bson::Binary {
-                    subtype: bson::spec::BinarySubtype::Generic, bytes: sealed },
-                "event_ref_expires_at": bson::DateTime::from_chrono(
-                    now + ChronoDuration::minutes(29)),
-                "updated_at": bson::DateTime::now()}},
-            )
-            .await;
-    }
     let sender_id = activity["actor"]["id"]
         .as_str()
         .unwrap_or_default()
@@ -2445,22 +2519,21 @@ pub async fn responses(State(state): State<AppState>, headers: HeaderMap, body: 
     let display = activity["actor"]["display_name"]
         .as_str()
         .map(str::to_owned);
-    let private_chat = activity["conversation"]["kind"] == "private";
     let human = activity["actor"]["kind"] == "human";
-    let sender = Sender {
-        id: &sender_id,
-        display_name: display.as_deref(),
-        private_chat,
-    };
-    let inbound = if !human || sender_id.is_empty() {
-        Ok(Inbound::Silent)
-    } else {
-        match admit_sender(&state, &row, &sender, &text).await {
-            Ok(Some(decision)) => Ok(decision),
-            Ok(None) => start_owner_turn(&state, &row, &partition, &sender, &text).await,
-            Err(error) => Err(error),
-        }
-    };
+    let inbound = gateway_inbound(
+        &state,
+        &row,
+        &partition,
+        &activity,
+        context["event_ref"].as_str(),
+        &Sender {
+            id: &sender_id,
+            display_name: display.as_deref(),
+        },
+        &text,
+        human,
+    )
+    .await;
     let finish = |status: &'static str, conversation: Option<String>| {
         let state = state.clone();
         let event_key = event_key.clone();
@@ -2533,6 +2606,80 @@ pub async fn responses(State(state): State<AppState>, headers: HeaderMap, body: 
             problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable")
         }
     }
+}
+
+/// A gateway message: record its chat (private chats keep the gateway's
+/// conversation; a group is one thread whatever the sender), keep the newest
+/// event reference there for asynchronous replies, then decide.
+#[allow(clippy::too_many_arguments)]
+async fn gateway_inbound(
+    state: &AppState,
+    row: &NyxbotChannel,
+    partition: &str,
+    activity: &Value,
+    event_ref: Option<&str>,
+    sender: &Sender<'_>,
+    text: &str,
+    human: bool,
+) -> AppResult<Inbound> {
+    let conversation = &activity["conversation"];
+    let kind = chats::chat_kind(conversation["kind"].as_str().unwrap_or("private"));
+    let chat_id = conversation["id"].as_str().unwrap_or_default();
+    let thread_id = conversation["thread_id"].as_str();
+    let chat_partition = if kind == "private" {
+        partition.to_owned()
+    } else {
+        chats::group_partition(chat_id, thread_id)
+    };
+    let chat = chats::record_chat(
+        state,
+        row,
+        &chat_partition,
+        &chats::ChatFacts {
+            kind,
+            chat_id: chat_id.to_owned(),
+            thread_id: thread_id.map(str::to_owned),
+            title: (kind == "private")
+                .then(|| sender.display_name.map(str::to_owned))
+                .flatten(),
+        },
+        None,
+    )
+    .await?;
+    chats::spawn_title_lookup(state, row, &chat);
+    // Encrypted; opaque, never logged.
+    if let Some(event_ref) = event_ref
+        && let Ok(sealed) = state.encryption_keys.encrypt(event_ref.as_bytes()).await
+    {
+        let _ = state
+            .db
+            .collection::<NyxbotThread>(THREADS)
+            .update_one(
+                doc! {"_id": &chat.id},
+                doc! {"$set": {"event_ref_ciphertext": bson::Binary {
+                    subtype: bson::spec::BinarySubtype::Generic, bytes: sealed },
+                "event_ref_expires_at": bson::DateTime::from_chrono(
+                    Utc::now() + ChronoDuration::minutes(29))}},
+            )
+            .await;
+    }
+    if !human || sender.id.is_empty() {
+        return Ok(Inbound::Silent);
+    }
+    // While the gateway admits only mentions and replies in groups, every
+    // group message it passes on is addressed to the bot.
+    let addressed = kind == "private"
+        || activity["kind"]["mentions_bot"] == true
+        || row.gateway_groups.as_deref() != Some("all")
+        || match activity["event_id"].as_str() {
+            Some(message_id) => {
+                let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await?;
+                let reply_to = chats::inbound_reply_to(state, row, message_id).await?;
+                chats::replies_to_bot(state, &bot, chat_id, reply_to.as_deref()).await?
+            }
+            None => false,
+        };
+    inbound_message(state, row, &chat, sender, text, addressed).await
 }
 
 fn is_duplicate(error: &mongodb::error::Error) -> bool {
@@ -2755,19 +2902,29 @@ pub async fn relay_callback(
     // Dedup redeliveries of the same inbound message.
     let event_key = sha256_hex(format!("{}\0{}", row.id, claims.message_id));
     let now = Utc::now();
-    let partition = format!(
-        "direct_{}",
-        &sha256_hex(format!(
-            "{}\0{}\0{}",
-            payload["conversation"]["platform_id"]
-                .as_str()
-                .unwrap_or_default(),
-            payload["sender"]["platform_id"]
-                .as_str()
-                .unwrap_or_default(),
-            payload["thread_id"].as_str().unwrap_or_default()
-        ))[..32]
-    );
+    let kind = chats::chat_kind(payload["conversation"]["type"].as_str().unwrap_or("private"));
+    let chat_id = payload["conversation"]["platform_id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    let thread_id = payload["thread_id"].as_str().map(str::to_owned);
+    // A private chat is one thread per sender (as before); a group, channel
+    // or topic is one thread its members share.
+    let partition = if kind == "private" {
+        format!(
+            "direct_{}",
+            &sha256_hex(format!(
+                "{}\0{}\0{}",
+                chat_id,
+                payload["sender"]["platform_id"]
+                    .as_str()
+                    .unwrap_or_default(),
+                thread_id.as_deref().unwrap_or_default()
+            ))[..32]
+        )
+    } else {
+        chats::group_partition(&chat_id, thread_id.as_deref())
+    };
     let admitted = NyxbotEvent {
         id: event_key,
         channel_id: row.id.clone(),
@@ -2798,52 +2955,73 @@ pub async fn relay_callback(
     let reply_token = payload["reply_token"]
         .as_str()
         .map(|token| Zeroizing::new(token.to_owned()));
-    let sender_id = payload["sender"]["platform_id"]
+    let mut sender_id = payload["sender"]["platform_id"]
         .as_str()
         .unwrap_or_default()
         .to_owned();
-    let display = payload["sender"]["display_name"]
+    let mut display = payload["sender"]["display_name"]
         .as_str()
         .map(str::to_owned);
-    let private_chat = payload["conversation"]["type"] == "private";
+    let raw = payload["raw_platform_data"].clone();
+    let raw_title = ["message", "edited_message", "channel_post"]
+        .iter()
+        .find_map(|key| raw.get(*key))
+        .and_then(|message| message["chat"]["title"].as_str())
+        .map(str::to_owned);
+    // A channel post comes from the channel itself.
+    if sender_id.is_empty() && kind == "channel" {
+        sender_id = format!("channel:{chat_id}");
+        display = display.or_else(|| raw_title.clone());
+    }
+    let reply_to = payload["reply_to_platform_message_id"]
+        .as_str()
+        .map(str::to_owned);
     let message_id = claims.message_id.clone();
     tokio::spawn(async move {
         let result: AppResult<()> = async {
-            state
-                .db
-                .collection::<NyxbotThread>(THREADS)
-                .update_one(
-                    doc! {"channel_id": &row.id, "partition": &partition},
-                    doc! {"$setOnInsert": {"_id": Uuid::new_v4().to_string(),
-                    "user_id": &row.user_id, "created_at": bson::DateTime::now()},
-                    "$set": {"last_message_id": &message_id,
-                        "updated_at": bson::DateTime::now()}},
-                )
-                .upsert(true)
-                .await?;
+            let chat = chats::record_chat(
+                &state,
+                &row,
+                &partition,
+                &chats::ChatFacts {
+                    kind,
+                    chat_id: chat_id.clone(),
+                    thread_id,
+                    title: if kind == "private" {
+                        display.clone()
+                    } else {
+                        raw_title
+                    },
+                },
+                Some(&message_id),
+            )
+            .await?;
+            chats::spawn_title_lookup(&state, &row, &chat);
             if text.trim().is_empty() || sender_id.is_empty() {
                 return Ok(());
             }
+            let addressed = kind == "private" || {
+                let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await?;
+                chats::raw_addressed(&bot, &raw).unwrap_or(true)
+                    || chats::replies_to_bot(&state, &bot, &chat_id, reply_to.as_deref()).await?
+            };
             let sender = Sender {
                 id: &sender_id,
                 display_name: display.as_deref(),
-                private_chat,
             };
-            let inbound = match admit_sender(&state, &row, &sender, &text).await? {
-                Some(decision) => decision,
-                None => start_owner_turn(&state, &row, &partition, &sender, &text).await?,
-            };
-            let reply = match inbound {
-                Inbound::Reply(text) => Some(text),
-                Inbound::Silent => None,
-                Inbound::Busy => Some(
-                    "I'm still working on your previous message. I'll pick this up next.".into(),
-                ),
-                Inbound::Turn(receiver) => match final_reply(receiver).await {
-                    Ok(text) => Some(bounded_reply(&text)),
-                    Err(_) => Some("NyxBot could not finish that. Please try again.".into()),
-                },
-            };
+            let reply =
+                match inbound_message(&state, &row, &chat, &sender, &text, addressed).await? {
+                    Inbound::Reply(text) => Some(text),
+                    Inbound::Silent => None,
+                    Inbound::Busy => Some(
+                        "I'm still working on the previous message. I'll pick this up next."
+                            .into(),
+                    ),
+                    Inbound::Turn(receiver) => match final_reply(receiver).await {
+                        Ok(text) => Some(bounded_reply(&text)),
+                        Err(_) => Some("I could not finish that. Please try again.".into()),
+                    },
+                };
             if let Some(reply) = reply {
                 direct_reply(
                     &state,
@@ -2863,6 +3041,10 @@ pub async fn relay_callback(
     });
     StatusCode::ACCEPTED.into_response()
 }
+
+#[path = "nyxbot_chats.rs"]
+pub(crate) mod chats;
+pub use chats::{list_channel_chats, update_channel_chat};
 
 #[cfg(test)]
 #[path = "nyxbot_tests.rs"]

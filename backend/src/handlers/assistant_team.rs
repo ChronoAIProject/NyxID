@@ -587,7 +587,7 @@ pub(crate) async fn execute_tool(
     args: &Value,
 ) -> (Value, bool) {
     let name = tool_name.strip_prefix("nyxid__").unwrap_or_default();
-    if !chat.is_orchestrator() && !assistant_team_tools::is_memory_tool(name) {
+    if !chat.is_orchestrator() && !assistant_team_tools::is_agent_tool(name) {
         return refusal(
             "orchestrator_only",
             "Only NyxBot manages agents and channel bots. Report what you need in your reply.",
@@ -986,6 +986,66 @@ async fn dispatch(
             )
         }
         "list_channel_agents" => (super::nyxbot::list_tool(state, owner).await?, false),
+        "list_channel_chats" => {
+            let chats = Box::pin(super::nyxbot::chats::list_chats(
+                state,
+                owner,
+                args["channel_agent_id"].as_str(),
+            ))
+            .await?;
+            (json!({"chats": chats}), false)
+        }
+        "update_channel_chat" => {
+            let agent_id = match args["agent"].as_str() {
+                Some("default") => Some("default".to_owned()),
+                Some(name) => Some(target_agent(state, owner, Some(name)).await?.id),
+                None => None,
+            };
+            let settings = super::nyxbot::chats::ChatSettings {
+                reply_mode: args["reply_mode"].as_str().map(str::to_owned),
+                members: args["members"].as_str().map(str::to_owned),
+                allow_posts: args["allow_posts"].as_bool(),
+                agent_id,
+            };
+            // Boxed: the gateway update is a large future.
+            (
+                Box::pin(super::nyxbot::chats::update_chat(
+                    state,
+                    owner,
+                    text_arg(args, "chat_id"),
+                    &settings,
+                ))
+                .await?,
+                false,
+            )
+        }
+        "update_channel_access" => (
+            Box::pin(super::nyxbot::chats::set_private_chats(
+                state,
+                owner,
+                text_arg(args, "channel_agent_id"),
+                text_arg(args, "private_chats"),
+            ))
+            .await?,
+            false,
+        ),
+        "post_to_chat" => {
+            // NyxBot posts to any of the owner's chats; a specialist only to
+            // chats it answers.
+            let agent = (!chat.is_orchestrator()).then_some(chat.agent_id.as_str());
+            // Boxed: the platform send is a large future.
+            (
+                Box::pin(super::nyxbot::chats::post(
+                    state,
+                    owner,
+                    text_arg(args, "chat_id"),
+                    text_arg(args, "text"),
+                    agent,
+                ))
+                .await?,
+                false,
+            )
+        }
         "disconnect_channel_bot" => (
             super::nyxbot::disconnect(state, owner, text_arg(args, "channel_agent_id")).await?,
             false,

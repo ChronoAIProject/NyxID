@@ -401,7 +401,7 @@ async fn gateway_turns_admit_once_answer_only_the_verified_owner_and_keep_contex
         .await,
     )
     .await;
-    assert!(busy.contains("will answer this right after"), "{busy}");
+    assert!(busy.contains("answer this right after"), "{busy}");
     let queued = crate::services::assistant_nyxagent::get(&state.db, OWNER, &conversation.id)
         .await
         .unwrap();
@@ -1869,4 +1869,435 @@ async fn org_admins_link_org_bots_by_label_and_lose_them_with_their_role() {
     );
     assert!(!route_active(again.route_id.clone().unwrap()).await);
     server.abort();
+}
+
+/// A gateway event from `sender` in the group chat `-100200`, whose gateway
+/// conversation (one per sender) is `partition`.
+fn group_event(
+    text: &str,
+    sender: &str,
+    name: &str,
+    event_id: &str,
+    partition: &str,
+    mentions: bool,
+) -> Value {
+    let mut body = event(text, sender, event_id);
+    body["conversation"] = json!(partition);
+    body["event_context"]["conversation_id"] = json!(partition);
+    let activity = &mut body["event_context"]["activity"];
+    activity["conversation"] = json!({"id": "-100200", "kind": "group"});
+    activity["actor"]["display_name"] = json!(name);
+    activity["kind"]["mentions_bot"] = json!(mentions);
+    body
+}
+
+async fn ensure_partition(state: &AppState, agent_key: &str, partition: &str) {
+    let ensured = put_conversation(
+        State(state.clone()),
+        Path(("bnd_chats".into(), partition.into())),
+        bearer(agent_key),
+    )
+    .await;
+    assert_eq!(ensured.status(), StatusCode::OK);
+}
+
+async fn channel_conversations(state: &AppState, channel_id: &str) -> Vec<AssistantConversation> {
+    state
+        .db
+        .collection::<AssistantConversation>(CONVERSATIONS)
+        .find(doc! {"user_id": OWNER, "channel.nyxbot_channel_id": channel_id})
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap()
+}
+
+async fn settle(state: &AppState, conversation_id: &str) {
+    state
+        .db
+        .collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": conversation_id},
+            doc! {"$set": {"active_turn": bson::Bson::Null}},
+        )
+        .await
+        .unwrap();
+}
+
+/// A group is one thread its members share: the owner and other members
+/// talk to the agent there (others as guests), each message attributed, and
+/// only when they mention the bot or reply to it unless the chat is set to
+/// answer everything. Private chats with others stay closed until opened.
+#[tokio::test]
+async fn group_chats_share_one_thread_and_members_talk_as_guests() {
+    use crate::services::assistant_acknowledgement_service as acks;
+    let (state, calls, server) = setup("nyxbot_group_chats").await;
+    let (row, agent_key) = channel(&state, "gateway").await;
+    let mut bot = bot_doc("telegram", "Helper bot");
+    bot.insert("_id", &row.channel_bot_id);
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .insert_one(bot)
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .update_one(
+            doc! {"_id": &row.id},
+            doc! {"$set": {"owner_sender_ids": ["7"]}},
+        )
+        .await
+        .unwrap();
+    let bound = put_binding(
+        State(state.clone()),
+        Path("bnd_chats".into()),
+        bearer(&agent_key),
+        Json(binding_body(&agent_key, OWNER)),
+    )
+    .await;
+    assert_eq!(bound.status(), StatusCode::OK);
+    // The gateway gives each sender in a group its own conversation.
+    let owner_partition = "conv_00000000000000000000000000000007";
+    let guest_partition = "conv_00000000000000000000000000000009";
+    for partition in [owner_partition, guest_partition] {
+        ensure_partition(&state, &agent_key, partition).await;
+    }
+    // A member who is not the owner mentions the bot: a guest turn.
+    let guest = body_text(
+        respond(
+            &state,
+            &agent_key,
+            &group_event(
+                "@helper_bot what is on the menu?",
+                "9",
+                "Bob",
+                "evt-g1",
+                guest_partition,
+                true,
+            ),
+            "evt_g1",
+        )
+        .await,
+    )
+    .await;
+    assert!(guest.contains("Here is your answer"), "{guest}");
+    let group = channel_conversations(&state, &row.id).await;
+    assert_eq!(group.len(), 1);
+    let thread = &group[0];
+    assert!(thread.guest_turn);
+    assert_eq!(
+        thread.channel.as_ref().unwrap().partition,
+        chats::group_partition("-100200", None)
+    );
+    {
+        let calls = calls.lock().await;
+        assert_eq!(calls[0]["input"], "Bob: @helper_bot what is on the menu?");
+        let instructions = calls[0]["instructions"].as_str().unwrap();
+        assert!(instructions.contains("they are not the owner"), "{instructions}");
+        assert!(instructions.contains("only the owner can ask for account actions"));
+        assert!(!instructions.contains("verified this sender as the owner"));
+    }
+    let chat = acks::for_key(&state.db, OWNER, Some(&thread.credential_api_key_id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(chat.guest);
+    settle(&state, &thread.id).await;
+    // The owner mentions it in the same group: the same thread, as the owner.
+    let owner = body_text(
+        respond(
+            &state,
+            &agent_key,
+            &group_event(
+                "@helper_bot book it",
+                "7",
+                "Alice",
+                "evt-g2",
+                owner_partition,
+                true,
+            ),
+            "evt_g2",
+        )
+        .await,
+    )
+    .await;
+    assert!(owner.contains("Here is your answer"), "{owner}");
+    let group = channel_conversations(&state, &row.id).await;
+    assert_eq!(group.len(), 1);
+    assert!(!group[0].guest_turn);
+    {
+        let calls = calls.lock().await;
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1]["input"], "Alice: @helper_bot book it");
+        let instructions = calls[1]["instructions"].as_str().unwrap();
+        assert!(instructions.contains("verified this sender as the owner"));
+    }
+    settle(&state, &thread.id).await;
+    // The chat is listed with its settings; only the owner may talk there
+    // once they say so.
+    let chats = chats::list_chats(&state, OWNER, None).await.unwrap();
+    let listed = serde_json::to_value(&chats).unwrap();
+    let chat_id = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|chat| chat["kind"] == "group")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        listed.as_array().unwrap().len(),
+        1,
+        "sender partitions are not chats: {listed}"
+    );
+    assert_eq!(listed[0]["reply_mode"], "mention");
+    assert_eq!(listed[0]["members"], "everyone");
+    chats::update_chat(
+        &state,
+        OWNER,
+        &chat_id,
+        &chats::ChatSettings {
+            members: Some("owner".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let ignored = body_text(
+        respond(
+            &state,
+            &agent_key,
+            &group_event("@helper_bot hello?", "9", "Bob", "evt-g3", guest_partition, true),
+            "evt_g3",
+        )
+        .await,
+    )
+    .await;
+    assert!(!ignored.contains("output_text"), "{ignored}");
+    assert_eq!(calls.lock().await.len(), 2);
+    // Answering everything needs the gateway to pass every group message on;
+    // without a gateway channel the change is kept and a warning says so.
+    let all = chats::update_chat(
+        &state,
+        OWNER,
+        &chat_id,
+        &chats::ChatSettings {
+            reply_mode: Some("all".into()),
+            members: Some("everyone".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(all["warning"].as_str().unwrap().contains("gateway"), "{all}");
+    // Once the gateway admits every group message, a message that neither
+    // mentions the bot nor replies to it is not for a mention-only chat...
+    chats::update_chat(
+        &state,
+        OWNER,
+        &chat_id,
+        &chats::ChatSettings {
+            reply_mode: Some("mention".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .update_one(
+            doc! {"_id": &row.id},
+            doc! {"$set": {"gateway_groups": "all"}},
+        )
+        .await
+        .unwrap();
+    let chatter = body_text(
+        respond(
+            &state,
+            &agent_key,
+            &group_event("lunch?", "9", "Bob", "evt-g4", guest_partition, false),
+            "evt_g4",
+        )
+        .await,
+    )
+    .await;
+    assert!(!chatter.contains("output_text"), "{chatter}");
+    assert_eq!(calls.lock().await.len(), 2);
+    // ...but a reply to one of the bot's messages is.
+    let messages = state
+        .db
+        .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME);
+    messages
+        .insert_many([
+            doc! {"_id": "evt-g5", "channel_bot_id": &row.channel_bot_id, "direction": "inbound",
+                "platform": "telegram", "platform_conversation_id": "-100200",
+                "reply_to_platform_message_id": "555"},
+            doc! {"_id": Uuid::new_v4().to_string(), "channel_bot_id": &row.channel_bot_id,
+                "direction": "outbound", "platform": "telegram", "platform_message_id": "555",
+                "platform_conversation_id": "-100200"},
+        ])
+        .await
+        .unwrap();
+    let reply = body_text(
+        respond(
+            &state,
+            &agent_key,
+            &group_event("sounds good", "9", "Bob", "evt-g5", guest_partition, false),
+            "evt_g5",
+        )
+        .await,
+    )
+    .await;
+    assert!(reply.contains("Here is your answer"), "{reply}");
+    assert_eq!(calls.lock().await.len(), 3);
+    settle(&state, &thread.id).await;
+    // Strangers in private chats are refused until private chats are open;
+    // then each gets their own thread, as a guest.
+    let private_partition = "conv_00000000000000000000000000000042";
+    ensure_partition(&state, &agent_key, private_partition).await;
+    let mut private = event("hi there", "42", "evt-p1");
+    private["conversation"] = json!(private_partition);
+    private["event_context"]["conversation_id"] = json!(private_partition);
+    private["event_context"]["activity"]["actor"]["display_name"] = json!("Carol");
+    let refused = body_text(respond(&state, &agent_key, &private, "evt_p1").await).await;
+    assert!(refused.contains("answers only its owner"), "{refused}");
+    chats::set_private_chats(&state, OWNER, &row.id, "everyone")
+        .await
+        .unwrap();
+    private["event_context"]["activity"]["event_id"] = json!("evt-p2");
+    let opened = body_text(respond(&state, &agent_key, &private, "evt_p2").await).await;
+    assert!(opened.contains("Here is your answer"), "{opened}");
+    let conversations = channel_conversations(&state, &row.id).await;
+    assert_eq!(conversations.len(), 2);
+    let carol = conversations
+        .iter()
+        .find(|conversation| conversation.id != thread.id)
+        .unwrap();
+    assert!(carol.guest_turn);
+    assert_eq!(carol.title, "Carol");
+    assert_eq!(carol.channel.as_ref().unwrap().partition, private_partition);
+    server.abort();
+}
+
+/// A Lark group reaches the agent only when the bot is mentioned (or a
+/// message replies to it), in one thread for the group.
+#[tokio::test]
+async fn direct_group_messages_need_a_mention_or_a_reply_to_the_bot() {
+    let (state, calls, server) = setup("nyxbot_direct_groups").await;
+    let (row, _) = channel(&state, "direct").await;
+    let mut bot = bot_doc("lark", "Helper bot");
+    bot.insert("_id", &row.channel_bot_id);
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .insert_one(bot)
+        .await
+        .unwrap();
+    let post = |message_id: &str, text: &str, mentions: Value| {
+        let body = json!({
+            "message_id": message_id, "correlation_id": format!("jti-{message_id}"),
+            "platform": "lark",
+            "agent": {"api_key_id": row.route_api_key_id, "name": "route"},
+            "conversation": {"id": "route", "platform_id": "oc_group", "type": "group"},
+            "sender": {"platform_id": "ou_bob", "display_name": "Bob"},
+            "content": {"type": "text", "text": text},
+            "timestamp": "2026-09-28T00:00:00Z",
+            "raw_platform_data": {"event": {"message": {"mentions": mentions}}},
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let token = crate::crypto::jwt::generate_relay_callback_token(
+            &state.jwt_keys,
+            &state.config,
+            &format!("jti-{message_id}"),
+            &row.route_api_key_id,
+            message_id,
+            "lark",
+            &sha256_hex(&bytes),
+        )
+        .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-nyxid-callback-token", token.parse().unwrap());
+        relay_callback(
+            State(state.clone()),
+            Path(row.id.clone()),
+            headers,
+            Bytes::from(bytes),
+        )
+    };
+    assert_eq!(
+        post("msg-1", "lunch?", json!([])).await.status(),
+        StatusCode::ACCEPTED
+    );
+    assert_eq!(
+        post(
+            "msg-2",
+            "@_user_1 what is on the menu?",
+            json!([{"key": "@_user_1", "id": {"open_id": "ou_bot"}, "name": "Helper bot"}]),
+        )
+        .await
+        .status(),
+        StatusCode::ACCEPTED
+    );
+    for _ in 0..100 {
+        if !calls.lock().await.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let calls = calls.lock().await;
+    assert_eq!(calls.len(), 1, "only the mention runs a turn");
+    assert_eq!(calls[0]["input"], "Bob: @_user_1 what is on the menu?");
+    drop(calls);
+    let chats = chats::list_chats(&state, OWNER, Some(&row.id)).await.unwrap();
+    let listed = serde_json::to_value(&chats).unwrap();
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+    assert_eq!(listed[0]["kind"], "group");
+    let conversations = channel_conversations(&state, &row.id).await;
+    assert_eq!(conversations.len(), 1);
+    assert!(conversations[0].guest_turn);
+    server.abort();
+}
+
+#[test]
+fn telegram_mentions_and_replies_to_the_bot_are_recognised() {
+    let bot: ChannelBot = bson::from_document(bot_doc("telegram", "Helper bot")).unwrap();
+    let message = |extra: Value| {
+        let mut message = json!({"message_id": 1, "chat": {"id": -1, "type": "group"},
+            "from": {"id": 9}, "text": "hello"});
+        for (key, value) in extra.as_object().unwrap() {
+            message[key] = value.clone();
+        }
+        json!({"update_id": 1, "message": message})
+    };
+    assert_eq!(chats::raw_addressed(&bot, &message(json!({}))), Some(false));
+    assert_eq!(
+        chats::raw_addressed(&bot, &message(json!({"text": "hey @Helper_Bot, hi"}))),
+        Some(true)
+    );
+    assert_eq!(
+        chats::raw_addressed(&bot, &message(json!({"text": "hey @helper_bots"}))),
+        Some(false)
+    );
+    assert_eq!(
+        chats::raw_addressed(
+            &bot,
+            &message(json!({"reply_to_message": {"from": {"id": 123}}}))
+        ),
+        Some(true)
+    );
+    assert_eq!(
+        chats::raw_addressed(
+            &bot,
+            &message(json!({"entities": [{"type": "text_mention", "user": {"id": 123}}]}))
+        ),
+        Some(true)
+    );
+    let discord: ChannelBot = bson::from_document(bot_doc("discord", "Helper bot")).unwrap();
+    assert_eq!(chats::raw_addressed(&discord, &json!({})), None);
 }

@@ -1530,7 +1530,7 @@ async fn dispatch_tools_call(
         let known_account_tool = tool_name.strip_prefix("nyxid__").is_some_and(|name| {
             crate::services::assistant_account_tools::TOOL_NAMES.contains(&name)
                 || crate::services::assistant_team_tools::TOOL_NAMES.contains(&name)
-                || crate::services::assistant_team_tools::MEMORY_TOOL_NAMES.contains(&name)
+                || crate::services::assistant_team_tools::AGENT_TOOL_NAMES.contains(&name)
         });
         let _ = audit_service::log_actor_event(
             state.db.clone(),

@@ -242,13 +242,17 @@ pub(super) async fn inbound_reply_to(
 ) -> AppResult<Option<String>> {
     Ok(state
         .db
-        .collection::<crate::models::channel_message::ChannelMessage>(
-            crate::models::channel_message::COLLECTION_NAME,
-        )
+        .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
         .find_one(doc! {"_id": message_id, "channel_bot_id": &row.channel_bot_id,
         "direction": "inbound"})
+        .projection(doc! {"reply_to_platform_message_id": 1})
         .await?
-        .and_then(|message| message.reply_to_platform_message_id))
+        .and_then(|message| {
+            message
+                .get_str("reply_to_platform_message_id")
+                .ok()
+                .map(str::to_owned)
+        }))
 }
 
 /// Who an inbound chat message is from, as far as the agent is concerned.
@@ -302,6 +306,36 @@ pub(super) fn describe(chat: &NyxbotThread) -> String {
         Some("channel") => format!("the channel{title}"),
         _ => format!("the group chat{title}"),
     }
+}
+
+/// Move a rebuilt connection's chats (and their threads' channel) to the
+/// new connection. A new gateway channel names its private conversations
+/// anew (`conv_...`), so those start fresh threads, as they always did.
+pub(super) async fn carry_over(
+    state: &AppState,
+    owner: &str,
+    from: &str,
+    to: &str,
+) -> AppResult<()> {
+    let stable = doc! {"$not": {"$regex": "^conv_"}};
+    state
+        .db
+        .collection::<NyxbotThread>(THREADS)
+        .update_many(
+            doc! {"channel_id": from, "user_id": owner, "partition": stable.clone()},
+            doc! {"$set": {"channel_id": to}},
+        )
+        .await?;
+    state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .update_many(
+            doc! {"user_id": owner, "channel.nyxbot_channel_id": from,
+            "channel.partition": stable},
+            doc! {"$set": {"channel.nyxbot_channel_id": to}},
+        )
+        .await?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -425,7 +459,7 @@ fn chat_response(row: &NyxbotChannel, chat: &NyxbotThread) -> ChannelChatRespons
 
 /// Chats of the owner's channels (optionally one channel), most recent
 /// first. Gateway sender partitions of a group are not chats.
-pub(super) async fn list_chats(
+pub(crate) async fn list_chats(
     state: &AppState,
     owner: &str,
     channel_id: Option<&str>,
@@ -492,7 +526,7 @@ pub struct ChatSettings {
     pub agent_id: Option<String>,
 }
 
-pub(super) async fn update_chat(
+pub(crate) async fn update_chat(
     state: &AppState,
     owner: &str,
     chat_id: &str,
@@ -611,7 +645,7 @@ pub(super) async fn update_chat(
 }
 
 /// Who may talk to the agent in the bot's private chats.
-pub(super) async fn set_private_chats(
+pub(crate) async fn set_private_chats(
     state: &AppState,
     owner: &str,
     channel_id: &str,
@@ -642,7 +676,7 @@ pub(super) async fn set_private_chats(
 }
 
 /// Post a message the agent writes on its own into a chat that allows it.
-pub(super) async fn post(
+pub(crate) async fn post(
     state: &AppState,
     owner: &str,
     chat_id: &str,
@@ -694,10 +728,10 @@ pub(super) async fn post(
         ));
     }
     let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
-    super::channel_relay::check_initiate_rate_limit(state, &chat.id).await?;
+    crate::handlers::channel_relay::check_initiate_rate_limit(state, &chat.id).await?;
     let key_owner = bot_owner(&row);
     let key = key_service::get_api_key(&state.db, key_owner, &row.route_api_key_id).await?;
-    let mut auth = super::assistant_team::owner_auth(key_owner)?;
+    let mut auth = crate::handlers::assistant_team::owner_auth(key_owner)?;
     auth.auth_method = crate::mw::auth::AuthMethod::ApiKey;
     auth.api_key_id = Some(key.id.clone());
     auth.api_key_name = Some(key.name.clone());
@@ -722,15 +756,15 @@ pub(super) async fn post(
         created_at: now,
         updated_at: now,
     };
-    let sent = super::channel_relay::deliver_initiated_message(
+    let sent = crate::handlers::channel_relay::deliver_initiated_message(
         state,
         &HeaderMap::new(),
         &auth,
         &conversation,
         &bot,
-        super::channel_relay::SendMessageRequest {
+        crate::handlers::channel_relay::SendMessageRequest {
             conversation_id: conversation.id.clone(),
-            message: super::channel_relay::AsyncReplyBody {
+            message: crate::handlers::channel_relay::AsyncReplyBody {
                 text: Some(text.to_owned()),
                 metadata: None,
                 attachments: Vec::new(),
@@ -749,6 +783,78 @@ pub(super) async fn post(
     )
     .await;
     Ok(json!({"status": "posted", "chat_id": chat.id, "message_id": sent.message_id}))
+}
+
+/// A channel thread's bot and chat, for thread listings.
+pub(crate) struct ChatDetails {
+    pub bot_label: String,
+    pub chat_id: Option<String>,
+    pub kind: Option<String>,
+    pub title: Option<String>,
+}
+
+/// Bot labels and chats of the channel threads among `rows`, by
+/// conversation ID. Two queries, whatever the page size.
+pub(crate) async fn thread_details(
+    state: &AppState,
+    owner: &str,
+    rows: &[&crate::models::assistant_conversation::AssistantConversation],
+) -> AppResult<std::collections::HashMap<String, ChatDetails>> {
+    let mut details = std::collections::HashMap::new();
+    let mut channel_ids: Vec<&str> = rows
+        .iter()
+        .filter_map(|row| row.channel.as_ref())
+        .map(|origin| origin.nyxbot_channel_id.as_str())
+        .collect();
+    if channel_ids.is_empty() {
+        return Ok(details);
+    }
+    channel_ids.sort_unstable();
+    channel_ids.dedup();
+    let channels: Vec<NyxbotChannel> = state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .find(doc! {"_id": {"$in": &channel_ids}, "user_id": owner})
+        .await?
+        .try_collect()
+        .await?;
+    let conversation_ids: Vec<&str> = rows
+        .iter()
+        .filter(|row| row.channel.is_some())
+        .map(|row| row.id.as_str())
+        .collect();
+    let chats: Vec<NyxbotThread> = state
+        .db
+        .collection::<NyxbotThread>(THREADS)
+        .find(doc! {"user_id": owner, "channel_id": {"$in": &channel_ids},
+        "conversation_id": {"$in": &conversation_ids}})
+        .await?
+        .try_collect()
+        .await?;
+    for row in rows {
+        let Some(origin) = row.channel.as_ref() else {
+            continue;
+        };
+        let Some(channel) = channels
+            .iter()
+            .find(|channel| channel.id == origin.nyxbot_channel_id)
+        else {
+            continue;
+        };
+        let chat = chats.iter().find(|chat| {
+            chat.channel_id == channel.id && chat.conversation_id.as_deref() == Some(&row.id)
+        });
+        details.insert(
+            row.id.clone(),
+            ChatDetails {
+                bot_label: channel.bot_label.clone(),
+                chat_id: chat.map(|chat| chat.id.clone()),
+                kind: chat.and_then(|chat| chat.kind.clone()),
+                title: chat.and_then(|chat| chat.title.clone()),
+            },
+        );
+    }
+    Ok(details)
 }
 
 // ---------------------------------------------------------------------------
