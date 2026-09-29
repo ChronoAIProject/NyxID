@@ -458,6 +458,37 @@ pub async fn delete_current_user_cascade(db: &mongodb::Database, user_id: &str) 
     delete_user_cascade_internal(db, user_id).await
 }
 
+async fn release_nyxbot_org_links(db: &mongodb::Database, user_id: &str) -> AppResult<()> {
+    use futures::TryStreamExt;
+    let links: Vec<bson::Document> = db
+        .collection::<bson::Document>(crate::models::nyxbot_channel::COLLECTION_NAME)
+        .find(doc! {"user_id": user_id, "bot_owner_id": {"$type": "string"}})
+        .projection(doc! {"bot_owner_id": 1, "route_id": 1, "route_api_key_id": 1})
+        .await?
+        .try_collect()
+        .await?;
+    for link in links {
+        let Ok(org) = link.get_str("bot_owner_id") else {
+            continue;
+        };
+        if let Ok(route) = link.get_str("route_id") {
+            match crate::services::channel_routing_service::delete_conversation(db, route, org)
+                .await
+            {
+                Ok(()) | Err(AppError::NotFound(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        if let Ok(key) = link.get_str("route_api_key_id") {
+            match crate::services::key_service::delete_api_key(db, org, key).await {
+                Ok(()) | Err(AppError::NotFound(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn delete_user_cascade_internal(
     db: &mongodb::Database,
     target_user_id: &str,
@@ -482,6 +513,10 @@ async fn delete_user_cascade_internal(
             }},
         )
         .await?;
+
+    // Org bots the user linked to their NyxBot keep an org-owned route and
+    // route key; remove them so the org's bot is free for its admins.
+    release_nyxbot_org_links(db, target_user_id).await?;
 
     // Phase 2: cascade delete user-owned documents keyed by user_id
     let user_filter = doc! { "user_id": target_user_id };

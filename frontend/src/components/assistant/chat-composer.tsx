@@ -182,6 +182,16 @@ function DraftedChatComposer({
   const renderedDraftKeyRef = useRef(draftKey);
   const draftTimerRef = useRef<number | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  /** Where the caret goes once an inserted mention is committed. */
+  const pendingCaretRef = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    const element = textareaRef.current;
+    const caret = pendingCaretRef.current;
+    if (!element || caret === null) return;
+    pendingCaretRef.current = null;
+    element.focus();
+    element.setSelectionRange(caret, caret);
+  });
   const composerRef = useRef<HTMLDivElement>(null);
   const controlsRef = useRef<HTMLDivElement>(null);
   const textMeasureRef = useRef<HTMLSpanElement>(null);
@@ -534,13 +544,13 @@ function DraftedChatComposer({
     const element = textareaRef.current;
     if (!element || !mention) return;
     const next = insertMention(content, mention, element.selectionStart, name);
+    // Placed right after React commits the new text (below), before any
+    // further keystroke: a frame later, fast typing would land first and
+    // the caret would jump back in front of it.
+    pendingCaretRef.current = next.caret;
     updateContent(next.text);
     scheduleDraftSave();
     setMention(undefined);
-    requestAnimationFrame(() => {
-      element.focus();
-      element.setSelectionRange(next.caret, next.caret);
-    });
   }
 
   async function submit() {

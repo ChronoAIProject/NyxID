@@ -228,21 +228,23 @@ export function WaitingNote({
       className="space-y-1 rounded-lg border border-border px-3 py-2"
     >
       {items.map((item) => (
-        <p
-          key={`${item.kind}:${item.since}:${item.title}`}
-          className="flex items-center gap-2 text-[12px] text-foreground"
-        >
-          <span
-            aria-hidden="true"
-            className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-success"
-          />
-          <span className="min-w-0 truncate">{item.title}</span>
-          {item.expires_at ? (
-            <span className="ml-auto shrink-0 text-[11px] text-text-tertiary">
-              expires {formatTimeDistance(item.expires_at)}
-            </span>
+        <div key={`${item.kind}:${item.since}:${item.title}`}>
+          <p className="flex items-center gap-2 text-[12px] text-foreground">
+            <span
+              aria-hidden="true"
+              className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-success"
+            />
+            <span className="min-w-0 truncate">{item.title}</span>
+            {item.expires_at ? (
+              <span className="ml-auto shrink-0 text-[11px] text-text-tertiary">
+                expires {formatTimeDistance(item.expires_at)}
+              </span>
+            ) : null}
+          </p>
+          {item.detail ? (
+            <p className="pl-3.5 text-[11px] text-muted-foreground">{item.detail}</p>
           ) : null}
-        </p>
+        </div>
       ))}
       <p className="text-[11px] text-text-tertiary">
         {agentName} continues here by itself when this happens; no need to reply.

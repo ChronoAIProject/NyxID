@@ -954,8 +954,13 @@ async fn dispatch(
         }
         "connect_channel_bot" => {
             let agent = target_agent(state, owner, args["agent"].as_str()).await?;
-            super::nyxbot::connect_tool(state, owner, caller, text_arg(args, "bot_id"), &agent)
-                .await?
+            // By id or by label, among the owner's bots and their orgs' bots.
+            let reference = args["bot"]
+                .as_str()
+                .or_else(|| args["bot_id"].as_str())
+                .ok_or_else(|| AppError::ValidationError("bot is required".into()))?;
+            let bot = super::nyxbot::resolve_bot_ref(state, owner, reference).await?;
+            super::nyxbot::connect_tool(state, owner, caller, &bot.id, &agent).await?
         }
         "link_channel_bot" => {
             let agent = target_agent(state, owner, args["agent"].as_str()).await?;

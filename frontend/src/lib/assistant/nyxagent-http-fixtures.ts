@@ -552,6 +552,7 @@ export class NyxAgentHttpFixtures {
         {
           kind: "channel_bot",
           title: "Waiting for your Telegram bot to be created",
+          detail: null,
           since: now.toISOString(),
           expires_at: new Date(now.getTime() + 7_200_000).toISOString(),
         },
@@ -837,10 +838,12 @@ export class NyxAgentHttpFixtures {
         last_error: null,
         owner_linked: false,
         agent_id: null,
+        org_id: null,
         delivery_status: null,
         delivery_error: null,
         delivery_reason: null,
         delivery_failed_at: null,
+        inbound_hint: null,
         created_at: new Date().toISOString(),
       };
       this.channels.unshift(row);

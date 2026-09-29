@@ -124,6 +124,8 @@ export type NyxAgentApproval = z.infer<typeof nyxAgentApprovalSchema>;
 export const nyxAgentWaitingSchema = z.object({
   kind: z.string(),
   title: z.string(),
+  /** What NyxID has seen so far, when that explains a long wait. */
+  detail: z.string().nullable().default(null),
   since: z.string(),
   expires_at: z.string().nullable().default(null),
 });
@@ -416,12 +418,16 @@ export const nyxAgentChannelAgentSchema = z.object({
   owner_linked: z.boolean(),
   /** The agent this bot reaches; null means the owner's NyxBot. */
   agent_id: z.string().nullable().default(null),
+  /** The organization that owns the bot; null for the user's own bot. */
+  org_id: z.string().nullable().default(null),
   /** `ok` or `failing` once a message has been judged; null before. */
   delivery_status: z.string().nullable().default(null),
   delivery_error: z.string().nullable().default(null),
   /** Plain words for `delivery_error`. */
   delivery_reason: z.string().nullable().default(null),
   delivery_failed_at: z.string().nullable().default(null),
+  /** While the owner has not verified: what NyxID saw from the bot. */
+  inbound_hint: z.string().nullable().default(null),
   created_at: z.string(),
 });
 export type NyxAgentChannelAgent = z.infer<typeof nyxAgentChannelAgentSchema>;

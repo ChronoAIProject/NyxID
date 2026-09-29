@@ -241,10 +241,14 @@ pub fn schema(name: &str) -> Value {
             vec!["platform"],
         ),
         "connect_channel_bot" => (
-            json!({"bot_id": string(64),
+            json!({
+                "bot": {"type": "string", "minLength": 1, "maxLength": 200,
+                    "description": "The bot's id or its label, as nyxid__list_channel_bots shows"},
+                "bot_id": {"type": "string", "minLength": 1, "maxLength": 64,
+                    "description": "Deprecated alias of bot"},
                 "agent": {"type": "string", "minLength": 1, "maxLength": 64,
                     "description": "\"nyxbot\" (default) or a specialist name or id"}}),
-            vec!["bot_id"],
+            vec![],
         ),
         "list_channel_agents" => (json!({}), vec![]),
         "disconnect_channel_bot" => (
@@ -323,9 +327,11 @@ fn description(name: &str) -> &'static str {
             specialist automatically and tells you."
         }
         "connect_channel_bot" => {
-            "Link one of the user's channel bots (from nyxid__list_channel_bots) to you or to a \
-            specialist. Telegram bots use the Agent Event Gateway; other platforms connect \
-            directly. Returns a link the user opens once in the chat app to verify they own it."
+            "Link a channel bot to you or to a specialist: the user's own bots and those of \
+            organizations they administer (nyxid__list_channel_bots lists both, with each \
+            org). Name it by id or label. The user's Telegram bots use the Agent Event Gateway; \
+            org bots and other platforms connect through NyxID directly. Returns a link the \
+            user opens once in the chat app to verify they own it."
         }
         "link_channel_bot" => "Move a connected channel bot to you or to another specialist.",
         "list_channel_agents" => {
