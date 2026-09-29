@@ -58,6 +58,7 @@ function history(): NyxAgentHistory {
     before_seq: null,
     acknowledgements: [],
     approvals: [],
+    waiting: [],
   };
 }
 

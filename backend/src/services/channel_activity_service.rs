@@ -75,6 +75,25 @@ pub async fn update_callback_status(
     Ok(())
 }
 
+/// Mark a callback failed and keep the HTTP status its URL answered with
+/// (`None` when it never answered), so owners can tell a refusal from an
+/// outage. Status code only, never the response body.
+pub async fn record_callback_failure(
+    db: &mongodb::Database,
+    message: &ChannelMessage,
+    http_status: Option<u16>,
+) -> AppResult<()> {
+    db.collection::<Document>(collection(message))
+        .update_one(
+            doc! {"_id": &message.id, "user_id": &message.user_id},
+            doc! {"$set": {"callback_status": "failed",
+            "callback_http_status": http_status.map(i32::from),
+            "updated_at": bson::DateTime::now()}},
+        )
+        .await?;
+    Ok(())
+}
+
 #[derive(Debug)]
 pub struct ActivityPage {
     pub activities: Vec<ChannelMessage>,

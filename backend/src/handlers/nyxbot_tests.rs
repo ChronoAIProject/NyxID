@@ -130,6 +130,12 @@ async fn channel(state: &AppState, transport: &str) -> (NyxbotChannel, String) {
         link_code_expires_at: None,
         source_conversation_id: None,
         agent_id: None,
+        delivery_status: None,
+        delivery_error: None,
+        delivery_failed_at: None,
+        delivery_seen_at: None,
+        delivery_checked_at: None,
+        delivery_notified_at: None,
         created_at: now,
         updated_at: now,
     };
@@ -785,6 +791,16 @@ async fn setup_links_create_bots_that_link_themselves_and_resume_the_chat() {
             .unwrap()
             .contains("Do not ask them to reply")
     );
+    // The chat shows what it is waiting for.
+    let titles = |items: Vec<WaitingItem>| -> Vec<String> {
+        items.into_iter().map(|item| item.title).collect()
+    };
+    let waiting_now = titles(waiting(&state, OWNER, &home.id).await.unwrap());
+    assert!(
+        waiting_now.contains(&"Waiting for your Telegram bot to be created".to_owned())
+            && waiting_now.contains(&"Waiting for your Lark bot to be created".to_owned()),
+        "{waiting_now:?}"
+    );
     // Nothing to link yet; a bot created before the link is never taken.
     let mut older = bot_doc("lark", "Older");
     older.insert(
@@ -824,13 +840,57 @@ async fn setup_links_create_bots_that_link_themselves_and_resume_the_chat() {
         event.contains("Supportdesk") && event.contains("owner-verification"),
         "{event}"
     );
+    // The bot exists; now the chat waits for the owner to verify, and
+    // stops once they have.
+    let waiting_now = titles(waiting(&state, OWNER, &home.id).await.unwrap());
+    assert!(
+        !waiting_now.contains(&"Waiting for your Lark bot to be created".to_owned())
+            && waiting_now.contains(
+                &"Waiting for you to verify your Lark account with @helper_bot".to_owned()
+            ),
+        "{waiting_now:?}"
+    );
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .update_one(
+            doc! {"_id": &channel.id},
+            doc! {"$push": {"owner_sender_ids": "7"}},
+        )
+        .await
+        .unwrap();
+    let waiting_now = titles(waiting(&state, OWNER, &home.id).await.unwrap());
+    assert_eq!(
+        waiting_now,
+        vec!["Waiting for your Telegram bot to be created"]
+    );
+    // Reconnecting a channel whose messages stopped arriving rebuilds it
+    // from scratch, and its verified owner stays verified.
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .update_one(
+            doc! {"_id": &channel.id},
+            doc! {"$set": {"delivery_status": "failing", "delivery_error": "refused_401"}},
+        )
+        .await
+        .unwrap();
+    let (rebuilt, _) = connect(&state, OWNER, Some(&home.id), &bot_id, &team)
+        .await
+        .unwrap();
+    assert_ne!(rebuilt.id, channel.id);
+    assert_eq!(rebuilt.owner_sender_ids, vec!["7".to_owned()]);
+    assert_eq!(rebuilt.delivery_status, None);
+    assert_eq!(delivery(&state, &channel.id).await.status, "disconnected");
+    // Other threads wait for nothing.
+    assert!(waiting(&state, OWNER, "other").await.unwrap().is_empty());
     // Linking happens once.
     process_watches(&state).await.unwrap();
     assert_eq!(
         state
             .db
             .collection::<NyxbotChannel>(CHANNELS)
-            .count_documents(doc! {"user_id": OWNER})
+            .count_documents(doc! {"user_id": OWNER, "status": {"$ne": "disconnected"}})
             .await
             .unwrap(),
         1
@@ -869,6 +929,13 @@ async fn finished_connect_links_resume_the_chat_that_sent_them() {
     watch_connect_link(&state.db, OWNER, &home.id, &link_id)
         .await
         .unwrap();
+    let pending = waiting(&state, OWNER, &home.id).await.unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].kind, "connect_link");
+    assert_eq!(
+        pending[0].title,
+        "Waiting for you to finish connecting api-github"
+    );
     process_watches(&state).await.unwrap();
     assert!(
         engine::get(&state.db, OWNER, &home.id)
@@ -889,6 +956,222 @@ async fn finished_connect_links_resume_the_chat_that_sent_them() {
     process_watches(&state).await.unwrap();
     let event = wait_for_event(&state, &home.id, "finished connecting").await;
     assert!(event.contains("api-github") && event.contains("do not ask them to confirm"));
+    assert!(waiting(&state, OWNER, &home.id).await.unwrap().is_empty());
+    server.abort();
+}
+
+/// An inbound text message on a route; returns its NyxID message ID.
+async fn inbound(
+    state: &AppState,
+    route_id: &str,
+    chat: &str,
+    status: &str,
+    http_status: Option<i32>,
+    age_secs: i64,
+) -> String {
+    inbound_of(state, route_id, chat, "text", status, http_status, age_secs).await
+}
+
+async fn inbound_of(
+    state: &AppState,
+    route_id: &str,
+    chat: &str,
+    content_type: &str,
+    status: &str,
+    http_status: Option<i32>,
+    age_secs: i64,
+) -> String {
+    let id = Uuid::new_v4().to_string();
+    let created_at = bson::DateTime::from_chrono(Utc::now() - ChronoDuration::seconds(age_secs));
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+        .insert_one(doc! {
+            "_id": &id, "conversation_id": route_id,
+            "platform_conversation_id": chat, "sender_platform_id": "7", "user_id": OWNER,
+            "direction": "inbound", "platform": "telegram-new", "content_type": content_type,
+            "callback_status": status, "callback_http_status": http_status,
+            "created_at": created_at,
+        })
+        .await
+        .unwrap();
+    id
+}
+
+fn admission(channel_id: &str, event_id: &str) -> NyxbotEvent {
+    NyxbotEvent {
+        id: Uuid::new_v4().to_string(),
+        channel_id: channel_id.into(),
+        user_id: OWNER.into(),
+        partition: PARTITION.into(),
+        event_id: event_id.into(),
+        event_context_ciphertext: None,
+        status: "completed".into(),
+        conversation_id: None,
+        turn_id: None,
+        created_at: Utc::now(),
+        expires_at: Utc::now() + ChronoDuration::hours(1),
+    }
+}
+
+async fn delivery(state: &AppState, id: &str) -> NyxbotChannel {
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .find_one(doc! {"_id": id})
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+/// A chat app whose messages stop reaching the agent never goes quiet
+/// silently: the channel is flagged and the chat that set it up hears about
+/// it once, in plain words.
+#[tokio::test]
+async fn lost_chat_app_messages_are_reported_to_the_agent_once() {
+    let (state, _, server) = setup("nyxbot_delivery_health").await;
+    let team = crate::services::assistant_team_service::ensure_nyxbot(&state.db, OWNER)
+        .await
+        .unwrap();
+    let home = crate::services::assistant_team_service::home_thread(
+        &state.db,
+        &state.encryption_keys,
+        &team,
+    )
+    .await
+    .unwrap();
+    let (row, _) = channel(&state, "gateway").await;
+    let route_id = Uuid::new_v4().to_string();
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .update_one(
+            doc! {"_id": &row.id},
+            doc! {"$set": {"route_id": &route_id, "source_conversation_id": &home.id,
+            "created_at": bson::DateTime::from_chrono(Utc::now() - ChronoDuration::hours(3))}},
+        )
+        .await
+        .unwrap();
+    // A failure from before the first check's short look-back is not news.
+    inbound(&state, &route_id, "7", "failed", Some(401), 2 * 3600).await;
+    check_deliveries(&state).await.unwrap();
+    assert_eq!(delivery(&state, &row.id).await.delivery_status, None);
+    // The gateway refuses the owner's message: flagged, and the chat is told.
+    inbound(&state, &route_id, "7", "failed", Some(401), 1).await;
+    check_deliveries(&state).await.unwrap();
+    let flagged = delivery(&state, &row.id).await;
+    assert_eq!(flagged.delivery_status.as_deref(), Some("failing"));
+    assert_eq!(flagged.delivery_error.as_deref(), Some("refused_401"));
+    let notice = wait_for_event(&state, &home.id, "are not reaching").await;
+    assert!(
+        notice.contains("Telegram")
+            && notice.contains("Agent Event Gateway refused it (HTTP 401)")
+            && notice.contains("not something they did"),
+        "{notice}"
+    );
+    let listed = list_tool(&state, OWNER).await.unwrap();
+    assert_eq!(listed["channel_agents"][0]["delivery_status"], "failing");
+    assert_eq!(
+        listed["channel_agents"][0]["delivery_reason"],
+        "the Agent Event Gateway refused it (HTTP 401)"
+    );
+    // More of the same raises no second notice.
+    inbound(&state, &route_id, "7", "failed", None, 0).await;
+    check_deliveries(&state).await.unwrap();
+    assert_eq!(
+        delivery(&state, &row.id).await.delivery_error.as_deref(),
+        Some("undelivered")
+    );
+    // An accepted private message still in flight is not judged yet...
+    inbound(&state, &route_id, "7", "delivered", None, 10).await;
+    check_deliveries(&state).await.unwrap();
+    assert_eq!(
+        delivery(&state, &row.id).await.delivery_status.as_deref(),
+        Some("failing")
+    );
+    // ...but a private text the gateway accepted and never passed on counts
+    // as lost, while a photo (which it refuses with a 202) and a group
+    // message it may filter on purpose say nothing.
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+        .delete_many(doc! {"conversation_id": &route_id})
+        .await
+        .unwrap();
+    inbound(&state, &route_id, "-100", "delivered", None, 200).await;
+    inbound(&state, &route_id, "7", "delivered", None, 180).await;
+    inbound_of(&state, &route_id, "7", "image", "delivered", None, 170).await;
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .update_one(
+            doc! {"_id": &row.id},
+            doc! {"$set": {"delivery_seen_at":
+            bson::DateTime::from_chrono(Utc::now() - ChronoDuration::seconds(300))}},
+        )
+        .await
+        .unwrap();
+    check_deliveries(&state).await.unwrap();
+    assert_eq!(
+        delivery(&state, &row.id).await.delivery_error.as_deref(),
+        Some("not_received")
+    );
+    // A newer group message does not make a failing channel look healthy.
+    inbound(&state, &route_id, "-100", "delivered", None, 150).await;
+    check_deliveries(&state).await.unwrap();
+    assert_eq!(
+        delivery(&state, &row.id).await.delivery_status.as_deref(),
+        Some("failing")
+    );
+    // Admission is matched per message: another message's admission does
+    // not vouch for this one.
+    inbound(&state, &route_id, "7", "delivered", None, 130).await;
+    state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .insert_one(admission(&row.id, &Uuid::new_v4().to_string()))
+        .await
+        .unwrap();
+    let before = delivery(&state, &row.id).await.delivery_failed_at;
+    check_deliveries(&state).await.unwrap();
+    let still = delivery(&state, &row.id).await;
+    assert_eq!(still.delivery_error.as_deref(), Some("not_received"));
+    assert!(
+        still.delivery_failed_at > before,
+        "the newer lost message is recorded"
+    );
+    // Once a message reaches the agent again, the channel is healthy.
+    let arrived = inbound(&state, &route_id, "7", "delivered", None, 0).await;
+    let admitted = NyxbotEvent {
+        id: Uuid::new_v4().to_string(),
+        channel_id: row.id.clone(),
+        user_id: OWNER.into(),
+        partition: PARTITION.into(),
+        event_id: arrived.clone(),
+        event_context_ciphertext: None,
+        status: "completed".into(),
+        conversation_id: None,
+        turn_id: None,
+        created_at: Utc::now(),
+        expires_at: Utc::now() + ChronoDuration::hours(1),
+    };
+    state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .insert_one(&admitted)
+        .await
+        .unwrap();
+    check_deliveries(&state).await.unwrap();
+    let healthy = delivery(&state, &row.id).await;
+    assert_eq!(healthy.delivery_status.as_deref(), Some("ok"));
+    assert_eq!(healthy.delivery_error, None);
+    let notices = engine::messages(&state.db, OWNER, &home.id, 100, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|message| message.role == "event" && message.text.contains("are not reaching"))
+        .count();
+    assert_eq!(notices, 1);
     server.abort();
 }
 

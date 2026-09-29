@@ -9,11 +9,12 @@ import {
   agentTitle,
   channelPlatformName,
 } from "@/lib/assistant/nyxbot-labels";
-import { cn } from "@/lib/utils";
+import { cn, formatTimeDistance } from "@/lib/utils";
 import type {
   AssistantAgent,
   AssistantAgentKind,
   AssistantAgentStatus,
+  NyxAgentWaiting,
 } from "@/schemas/assistant-nyxagent";
 
 /** Running = working now; idle = alive, waiting; destroyed = read-only. */
@@ -204,6 +205,49 @@ export function TeamStrip({
         </ul>
       ) : null}
     </section>
+  );
+}
+
+/**
+ * What the thread is waiting for outside the chat (a bot being created, a
+ * service being connected, the owner verifying a chat app). The agent
+ * continues by itself when it happens, so the user never has to say "done".
+ */
+export function WaitingNote({
+  items,
+  agentName,
+}: {
+  readonly items: readonly NyxAgentWaiting[];
+  readonly agentName: string;
+}) {
+  if (!items.length) return null;
+  return (
+    <div
+      role="status"
+      aria-label="Waiting"
+      className="space-y-1 rounded-lg border border-border px-3 py-2"
+    >
+      {items.map((item) => (
+        <p
+          key={`${item.kind}:${item.since}:${item.title}`}
+          className="flex items-center gap-2 text-[12px] text-foreground"
+        >
+          <span
+            aria-hidden="true"
+            className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-success"
+          />
+          <span className="min-w-0 truncate">{item.title}</span>
+          {item.expires_at ? (
+            <span className="ml-auto shrink-0 text-[11px] text-text-tertiary">
+              expires {formatTimeDistance(item.expires_at)}
+            </span>
+          ) : null}
+        </p>
+      ))}
+      <p className="text-[11px] text-text-tertiary">
+        {agentName} continues here by itself when this happens; no need to reply.
+      </p>
+    </div>
   );
 }
 

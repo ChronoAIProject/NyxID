@@ -173,6 +173,12 @@ ends its turn; NyxID resumes that thread with an event as soon as it happens:
 Watches are TTL-expired and claimed atomically, so replicas never link or report
 twice.
 
+While a thread waits, its history carries `waiting` items (`channel_bot`,
+`connect_link`, `owner_verification`, each with a title and expiry). The chat
+shows them under the header with "continues here by itself", and the browser
+polls the thread every 10 seconds until they clear, so the resumed turn appears
+without a reload.
+
 ## 10. Talking to agents directly
 
 The web app lists NyxBot first, then specialists; each agent has threads and a
@@ -258,10 +264,31 @@ agent, with that agent's authority and memory.
   Telegram notification link or a one-time link code (a `t.me/<bot>?start=<code>`
   link for Telegram). Strangers get a short refusal in private chats and silence
   in groups; no turn runs. Each turn names the platform, bot, chat type and sender.
+- **Delivery health.** A linked chat app must never go quiet silently. The
+  15-second sweep judges each active channel's newest inbound message: a failed
+  relay callback (NyxID keeps the HTTP status, never the body) is lost
+  (`refused_{status}`, or `undelivered` when nothing answered or NyxID could not
+  send it). Through the gateway, a private plain-text message that was accepted
+  but has no provider admission for its message ID after two minutes is lost too
+  (`not_received`; the gateway's event ID is NyxID's message ID). Group
+  messages, photos and other events the gateway may drop on purpose are skipped
+  and never change the status. A lost message marks the channel `failing` and
+  tells the thread that set the bot up (else the agent's home), at most once per
+  six hours; the channel list shows the reason, and the next message that
+  arrives marks it `ok`. A channel's first check looks back one hour only.
+  Reconnecting a failing channel rebuilds it from scratch and keeps its verified
+  owners.
 - **Updates.** Asynchronous replies (event turns, such as a specialist's report)
   are delivered to the chat through the gateway's `replyToEvent` while the newest
   event reference is valid, or through the relay reply API; messages that arrive
   while the agent is busy are queued and answered next instead of bounced.
+
+**Managed Telegram bots.** Bots created inside Telegram through NyxID's manager
+bot are `telegram-new`, and NyxID stamps that platform on every relay artifact,
+including the reply token. The gateway must accept the alias for the reply token
+too, not only for the callback claims, header and payload; before that fix it
+refused every such message with 401 `reply_binding_mismatch`, while BotFather
+(`telegram`) bots worked.
 
 **Deployment prerequisite.** The gateway only calls operator-allowlisted
 providers, read once at startup. This entry in `CMAEG_PROVIDERS` (CMA repository,

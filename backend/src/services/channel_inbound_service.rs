@@ -409,10 +409,10 @@ pub(crate) async fn process_inbound_messages(
                     error = %e,
                     "callback delivery failed"
                 );
-                let _ = super::channel_activity_service::update_callback_status(
+                let _ = super::channel_activity_service::record_callback_failure(
                     state.db,
                     &stored_message,
-                    "failed",
+                    delivery.http_status,
                 )
                 .await;
             }

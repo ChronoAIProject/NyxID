@@ -183,6 +183,13 @@ pub struct ChannelAgentResponse {
     owner_linked: bool,
     /// The agent this bot reaches; `None` means the owner's NyxBot.
     agent_id: Option<String>,
+    /// `ok` or `failing` once a message has been judged; `None` before.
+    delivery_status: Option<String>,
+    /// Stable code of the newest lost message (see `delivery_reason`).
+    delivery_error: Option<String>,
+    /// Plain words for `delivery_error`.
+    delivery_reason: Option<String>,
+    delivery_failed_at: Option<chrono::DateTime<Utc>>,
     created_at: chrono::DateTime<Utc>,
 }
 impl From<&NyxbotChannel> for ChannelAgentResponse {
@@ -198,6 +205,13 @@ impl From<&NyxbotChannel> for ChannelAgentResponse {
             last_error: row.last_error.clone(),
             owner_linked: !row.owner_sender_ids.is_empty(),
             agent_id: row.agent_id.clone(),
+            delivery_status: row.delivery_status.clone(),
+            delivery_error: row.delivery_error.clone(),
+            delivery_reason: row
+                .delivery_error
+                .as_deref()
+                .map(|code| status::failure_reason(code, &row.transport)),
+            delivery_failed_at: row.delivery_failed_at,
             created_at: row.created_at,
         }
     }
@@ -341,6 +355,9 @@ pub async fn connect(
             "That channel bot is not active".into(),
         ));
     }
+    // Owners verified on a connection being rebuilt stay verified: the bot
+    // and their chat-app account are the same.
+    let mut verified_owners: Vec<String> = Vec::new();
     if let Some(existing) = active_for_bot(state, owner, &bot.id).await? {
         let keys_alive = key_service::get_api_key(&state.db, owner, &existing.route_api_key_id)
             .await
@@ -351,7 +368,9 @@ pub async fn connect(
                     .is_ok_and(|key| key.is_active),
                 None => true,
             };
-        if existing.status == "active" && keys_alive {
+        // A channel whose messages stopped arriving is rebuilt from scratch.
+        let healthy = existing.delivery_status.as_deref() != Some("failing");
+        if existing.status == "active" && keys_alive && healthy {
             link(state, owner, &existing.id, agent).await?;
             let existing = load_channel(state, owner, &existing.id).await?;
             let link = refresh_link_code(state, &existing).await?;
@@ -359,6 +378,7 @@ pub async fn connect(
         }
         // A half-created or broken connection (e.g. a key was deleted) is
         // released first, then rebuilt from scratch.
+        verified_owners = existing.owner_sender_ids.clone();
         disconnect(state, owner, &existing.id).await?;
     }
     // Never silently replace another agent's default route.
@@ -437,11 +457,25 @@ pub async fn connect(
         gateway_record_id: None,
         gateway_version: None,
         binding_id: None,
-        owner_sender_ids: known_owner_senders(state, owner, &platform).await,
+        owner_sender_ids: {
+            let mut ids = known_owner_senders(state, owner, &platform).await;
+            for id in verified_owners {
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+            ids
+        },
         link_code_hash: None,
         link_code_expires_at: None,
         source_conversation_id: source_conversation_id.map(str::to_owned),
         agent_id: Some(agent.id.clone()),
+        delivery_status: None,
+        delivery_error: None,
+        delivery_failed_at: None,
+        delivery_seen_at: None,
+        delivery_checked_at: None,
+        delivery_notified_at: None,
         created_at: now,
         updated_at: now,
     };
@@ -2500,3 +2534,7 @@ pub async fn relay_callback(
 #[cfg(test)]
 #[path = "nyxbot_tests.rs"]
 mod tests;
+
+#[path = "nyxbot_status.rs"]
+mod status;
+pub(crate) use status::{WaitingItem, check_deliveries, waiting};

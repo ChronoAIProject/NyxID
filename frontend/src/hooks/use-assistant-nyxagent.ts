@@ -111,7 +111,9 @@ export function useNyxAgentAssistantChat({
       if (
         (previous?.conversation.active_turn && !page.conversation.active_turn) ||
         previous?.conversation.pending_acknowledgements !==
-          page.conversation.pending_acknowledgements
+          page.conversation.pending_acknowledgements ||
+        // Something the thread waited for happened: NyxID resumes it.
+        (previous?.waiting.length ?? 0) > page.waiting.length
       ) {
         await Promise.all([
           queryClient.invalidateQueries({ queryKey: threadsKey }),
@@ -130,7 +132,11 @@ export function useNyxAgentAssistantChat({
       query.state.data?.acknowledgements.some((row) => row.status === "pending") ||
       (query.state.data?.approvals.length ?? 0) > 0
         ? 2000
-        : false,
+        : // Waiting on something outside the chat (NyxID checks every 15 s):
+          // notice when it happens.
+          (query.state.data?.waiting.length ?? 0) > 0
+          ? 10_000
+          : false,
   });
   const send = useCallback(
     async (text: string) => {
@@ -270,6 +276,8 @@ export function useNyxAgentAssistantChat({
 
   return {
     approvals: nyxAgentTransport.getHistory(selectedConversationId)?.approvals ?? [],
+    /** What the thread is waiting for outside the chat. */
+    waiting: nyxAgentTransport.getHistory(selectedConversationId)?.waiting ?? [],
     decideApproval,
     /** `threadsAgentId`'s threads, newest first. */
     conversations:

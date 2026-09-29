@@ -531,6 +531,29 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
             doc! {"user_id": 1, "kind": 1, "platform": 1, "status": 1},
             false,
         ),
+        // What a thread is waiting on (history `waiting`).
+        (
+            crate::models::nyxbot_channel::WATCHES_COLLECTION_NAME,
+            doc! {"user_id": 1, "conversation_id": 1, "status": 1},
+            false,
+        ),
+        (
+            crate::models::nyxbot_channel::COLLECTION_NAME,
+            doc! {"user_id": 1, "source_conversation_id": 1},
+            false,
+        ),
+        // Delivery health sweep, least recently checked first.
+        (
+            crate::models::nyxbot_channel::COLLECTION_NAME,
+            doc! {"status": 1, "delivery_checked_at": 1, "created_at": 1},
+            false,
+        ),
+        // Delivery health: was this relayed message admitted?
+        (
+            crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME,
+            doc! {"channel_id": 1, "event_id": 1},
+            false,
+        ),
         (
             crate::models::assistant_attachment::COLLECTION_NAME,
             doc! {"conversation_id": 1, "user_id": 1},
