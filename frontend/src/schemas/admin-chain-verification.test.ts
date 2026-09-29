@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { describe, expect, it } from "vitest";
 import {
   chainVerificationResponseSchema,
@@ -82,4 +83,25 @@ describe("admin chain verification schemas", () => {
       chainVerifyStatusSchema.parse({ ...baseStatus, chain: "wallet" }),
     ).toThrow();
   });
+});
+
+it("adds account verification without changing the cached client's chain enum", () => {
+  const response = {
+    chains: [baseStatus],
+    accounts: { ...baseStatus, chain: "billing_accounts" },
+  };
+  expect(chainVerificationResponseSchema.parse(response).accounts?.chain).toBe(
+    "billing_accounts",
+  );
+  const cachedSchema = z.object({
+    chains: z.array(
+      chainVerifyStatusSchema.extend({
+        chain: z.enum(["audit_log", "billing_ledger"]),
+      }),
+    ),
+  });
+  expect(cachedSchema.parse(response).chains).toHaveLength(1);
+  expect(() =>
+    chainVerificationResponseSchema.parse({ chains: [response.accounts] }),
+  ).toThrow();
 });

@@ -8,15 +8,18 @@
 //! stay mutable by design; this ledger is the append-only journal of
 //! their money-moving transitions.
 
+use crate::models::billing_ledger::{BillingPosting, PostingSide};
+use crate::models::credits::Credits;
 use std::sync::OnceLock;
 
 use chrono::{DateTime, TimeZone, Utc};
+use dashmap::DashMap;
 use futures::TryStreamExt;
 use hmac::{Hmac, Mac};
-use mongodb::bson::doc;
+use mongodb::bson::{Document, doc};
 use rand::Rng;
 use serde::Serialize;
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -33,11 +36,14 @@ type HmacSha256 = Hmac<Sha256>;
 pub const GENESIS_PREV_HASH: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
 const RECORD_SEPARATOR: u8 = 0x1e;
-const MAX_APPEND_ATTEMPTS: usize = 8;
+const APPEND_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+const APPEND_BATCH_MAX: usize = 256;
+const APPEND_BATCH_WAIT: std::time::Duration = std::time::Duration::from_millis(10);
 pub const DEFAULT_VERIFY_LIMIT: i64 = 10_000;
 pub const MAX_VERIFY_LIMIT: i64 = 10_000;
 
 static BILLING_LEDGER_HMAC_KEY: OnceLock<Zeroizing<[u8; 32]>> = OnceLock::new();
+static APPEND_BATCHERS: OnceLock<DashMap<String, std::sync::Arc<AppendBatcher>>> = OnceLock::new();
 
 #[cfg(test)]
 pub(crate) const TEST_BILLING_LEDGER_HMAC_KEY: [u8; 32] = [3_u8; 32];
@@ -48,7 +54,7 @@ pub fn init_billing_ledger_hmac_key(key: Zeroizing<[u8; 32]>) {
     }
 }
 
-fn billing_ledger_hmac_key() -> Option<&'static [u8]> {
+pub(super) fn billing_ledger_hmac_key() -> Option<&'static [u8]> {
     BILLING_LEDGER_HMAC_KEY.get().map(|key| key.as_ref())
 }
 
@@ -111,56 +117,116 @@ fn decode_hmac_seed(encryption_key: Option<&str>) -> Option<Zeroizing<Vec<u8>>> 
     }
 }
 
-/// Record a first-apply charged usage settlement on the ledger, off the
-/// settlement path (spawned, like audit logging). Best-effort: an append
-/// failure must never fail or roll back the settlement itself.
-pub fn record_usage_settled_async(db: mongodb::Database, row: UsageMeterRow, credits: i64) {
-    tokio::spawn(async move {
-        let entry = BillingLedgerEntry {
-            id: Uuid::new_v4().to_string(),
-            seq: 0,
-            prev_hash: String::new(),
-            entry_hash: String::new(),
-            event_type: BillingLedgerEventType::UsageSettled,
-            owner_id: row.billing_owner_id.clone(),
-            reference_id: row.id.clone(),
-            transaction_id: Some(row.transaction_id.clone()),
-            layer: Some(row.layer),
-            metric: Some(row.metric),
-            service_slug: row.service_slug.clone(),
-            model: row.model.clone(),
-            quantity: row.quantity,
-            amount_credits: Some(credits),
-            amount_micros: None,
-            balance_credits: None,
-            dedupe_key: None,
-            wallet_id: row.wallet_id.clone(),
-            created_at: Utc::now(),
-        };
-        append_best_effort(&db, entry).await;
-    });
+/// The wallet's durable settlement lock is retained until this append is confirmed.
+pub async fn record_usage_settled(
+    db: &mongodb::Database,
+    row: &UsageMeterRow,
+    credits: Credits,
+) -> AppResult<()> {
+    if credits == Credits::ZERO {
+        return Ok(());
+    }
+    let entry = exact_entry(
+        &row.billing_owner_id,
+        &row.id,
+        "usage_settled",
+        format!("usage-settled:{}", row.id),
+        transfer(
+            format!("usage:{}", row.id),
+            format!("wallet:{}", row.billing_owner_id),
+            credits,
+        ),
+        Some(row),
+    );
+    if append_and_confirm_dedupe(db, entry).await {
+        Ok(())
+    } else {
+        Err(AppError::Internal("usage ledger append is pending".into()))
+    }
 }
 
-/// Record a charge whose `released` transition committed through the
-/// wallet-lock crash bridge, where only the row id is at hand.
-pub fn record_usage_settled_by_row_id_async(db: mongodb::Database, row_id: String, credits: i64) {
-    tokio::spawn(async move {
-        match db
-            .collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
-            .find_one(doc! { "_id": &row_id })
-            .await
-        {
-            Ok(Some(row)) => {
-                record_usage_settled_async(db, row, credits);
-            }
-            Ok(None) => {
-                tracing::warn!(row_id = %row_id, "settled usage row missing for ledger entry");
-            }
-            Err(error) => {
-                tracing::warn!(%error, row_id = %row_id, "failed to load settled usage row for ledger");
-            }
+pub fn transfer(debit: String, credit: String, amount: Credits) -> Vec<BillingPosting> {
+    if amount == Credits::ZERO {
+        return Vec::new();
+    }
+    vec![
+        BillingPosting {
+            account: debit,
+            side: PostingSide::Debit,
+            amount,
+        },
+        BillingPosting {
+            account: credit,
+            side: PostingSide::Credit,
+            amount,
+        },
+    ]
+}
+
+pub fn exact_entry(
+    owner: &str,
+    reference: &str,
+    movement: &str,
+    dedupe: String,
+    postings: Vec<BillingPosting>,
+    row: Option<&UsageMeterRow>,
+) -> BillingLedgerEntry {
+    BillingLedgerEntry {
+        id: Uuid::new_v4().to_string(),
+        seq: 0,
+        prev_hash: String::new(),
+        entry_hash: String::new(),
+        event_type: BillingLedgerEventType::AccountingV2,
+        movement: Some(movement.into()),
+        postings,
+        owner_id: owner.into(),
+        reference_id: reference.into(),
+        transaction_id: row.map(|r| r.transaction_id.clone()),
+        layer: row.map(|r| r.layer),
+        metric: row.map(|r| r.metric),
+        service_slug: row.and_then(|r| r.service_slug.clone()),
+        model: row.and_then(|r| r.model.clone()),
+        quantity: row.and_then(|r| r.quantity),
+        amount_credits: None,
+        amount_micros: None,
+        balance_credits: None,
+        dedupe_key: Some(dedupe),
+        wallet_id: row.and_then(|r| r.wallet_id.clone()),
+        created_at: Utc::now(),
+    }
+}
+
+pub fn validate_postings(entry: &BillingLedgerEntry) -> AppResult<()> {
+    if entry.event_type != BillingLedgerEventType::AccountingV2 {
+        return Ok(());
+    }
+    let movement = entry
+        .movement
+        .as_deref()
+        .ok_or_else(|| AppError::Internal("v2 movement is missing".into()))?;
+    if entry.postings.is_empty()
+        && matches!(
+            movement,
+            "topup_created" | "opening_balance" | "wallet_credited"
+        )
+    {
+        return Ok(());
+    }
+    let mut debit = Credits::ZERO;
+    let mut credit = Credits::ZERO;
+    for posting in &entry.postings {
+        if posting.amount <= Credits::ZERO || posting.account.is_empty() {
+            return Err(AppError::Internal("invalid v2 posting".into()));
         }
-    });
+        match posting.side {
+            PostingSide::Debit => debit = debit.checked_add(posting.amount)?,
+            PostingSide::Credit => credit = credit.checked_add(posting.amount)?,
+        }
+    }
+    if debit == Credits::ZERO || debit != credit {
+        return Err(AppError::Internal("unbalanced v2 transaction".into()));
+    }
+    Ok(())
 }
 
 /// Record a top-up checkout that was actually created with the provider
@@ -173,27 +239,16 @@ pub async fn record_topup_created(
     amount_credits: i64,
     lago_wallet_id: &str,
 ) {
-    let entry = BillingLedgerEntry {
-        id: Uuid::new_v4().to_string(),
-        seq: 0,
-        prev_hash: String::new(),
-        entry_hash: String::new(),
-        event_type: BillingLedgerEventType::TopupCreated,
-        owner_id: owner_id.to_string(),
-        reference_id: session_id.to_string(),
-        transaction_id: None,
-        layer: None,
-        metric: None,
-        service_slug: None,
-        model: None,
-        quantity: None,
-        amount_credits: Some(amount_credits),
-        amount_micros: None,
-        balance_credits: None,
-        dedupe_key: None,
-        wallet_id: Some(lago_wallet_id.to_string()),
-        created_at: Utc::now(),
-    };
+    let mut entry = exact_entry(
+        owner_id,
+        session_id,
+        "topup_created",
+        format!("topup-created:{session_id}"),
+        Vec::new(),
+        None,
+    );
+    entry.amount_credits = Some(amount_credits);
+    entry.wallet_id = Some(lago_wallet_id.into());
     append_best_effort(db, entry).await;
 }
 
@@ -205,45 +260,20 @@ pub async fn record_wallet_credited(
     db: &mongodb::Database,
     owner_id: &str,
     customer_id: &str,
-    balance_credits: i64,
+    balance_credits: Credits,
     dedupe_key: Option<String>,
 ) {
-    if let Some(key) = dedupe_key.as_deref() {
-        match db
-            .collection::<BillingLedgerEntry>(BILLING_LEDGER)
-            .count_documents(doc! { "event_type": "wallet_credited", "dedupe_key": key })
-            .await
-        {
-            Ok(0) => {}
-            Ok(_) => return,
-            Err(error) => {
-                tracing::warn!(%error, "wallet-credited ledger dedupe check failed");
-                return;
-            }
-        }
-    }
-
-    let entry = BillingLedgerEntry {
-        id: Uuid::new_v4().to_string(),
-        seq: 0,
-        prev_hash: String::new(),
-        entry_hash: String::new(),
-        event_type: BillingLedgerEventType::WalletCredited,
-        owner_id: owner_id.to_string(),
-        reference_id: customer_id.to_string(),
-        transaction_id: None,
-        layer: None,
-        metric: None,
-        service_slug: None,
-        model: None,
-        quantity: None,
-        amount_credits: None,
-        amount_micros: None,
-        balance_credits: Some(balance_credits),
-        dedupe_key,
-        wallet_id: None,
-        created_at: Utc::now(),
-    };
+    // The balance movement was committed by refresh_wallet_balance. This
+    // provider-invoice memo preserves the receipt without double posting it.
+    let mut entry = exact_entry(
+        owner_id,
+        customer_id,
+        "wallet_credited",
+        dedupe_key.unwrap_or_else(|| format!("wallet-credit:{}", Uuid::new_v4())),
+        Vec::new(),
+        None,
+    );
+    entry.balance_credits = Some(balance_credits.display_whole());
     append_best_effort(db, entry).await;
 }
 
@@ -253,7 +283,7 @@ pub async fn record_grant_event(
     event_type: BillingLedgerEventType,
     owner_id: &str,
     grant_id: &str,
-    amount_micros: i64,
+    amount: Credits,
     usage_row: Option<&UsageMeterRow>,
     dedupe_key: String,
 ) -> bool {
@@ -278,82 +308,63 @@ pub async fn record_grant_event(
             return false;
         }
     }
-    let entry = BillingLedgerEntry {
-        id: Uuid::new_v4().to_string(),
-        seq: 0,
-        prev_hash: String::new(),
-        entry_hash: String::new(),
-        event_type,
-        owner_id: owner_id.to_string(),
-        reference_id: grant_id.to_string(),
-        transaction_id: usage_row.map(|row| row.transaction_id.clone()),
-        layer: usage_row.map(|row| row.layer),
-        metric: usage_row.map(|row| row.metric),
-        service_slug: usage_row.and_then(|row| row.service_slug.clone()),
-        model: usage_row.and_then(|row| row.model.clone()),
-        quantity: None,
-        amount_credits: (amount_micros % 1_000_000 == 0).then_some(amount_micros / 1_000_000),
-        amount_micros: Some(amount_micros),
-        balance_credits: None,
-        dedupe_key: Some(dedupe_key),
-        wallet_id: usage_row.and_then(|row| row.wallet_id.clone()),
-        created_at: Utc::now(),
+    let grant = format!("grant:{grant_id}");
+    let postings = match event_type {
+        BillingLedgerEventType::GrantIssued => {
+            transfer(grant, "platform:promotions".into(), amount)
+        }
+        BillingLedgerEventType::GrantConsumed => {
+            let Some(row) = usage_row else {
+                return false;
+            };
+            transfer(format!("usage:{}", row.id), grant, amount)
+        }
+        BillingLedgerEventType::GrantExpired => {
+            transfer("writeoff:grant_expired".into(), grant, amount)
+        }
+        BillingLedgerEventType::GrantRevoked => {
+            transfer("writeoff:grant_revoked".into(), grant, amount)
+        }
+        _ => return false,
     };
+    if amount == Credits::ZERO {
+        return true;
+    }
+    let entry = exact_entry(
+        owner_id,
+        grant_id,
+        event_type.as_str(),
+        dedupe_key,
+        postings,
+        usage_row,
+    );
     append_and_confirm_dedupe(db, entry).await
 }
 
-pub async fn record_topup_expired(
-    db: &mongodb::Database,
-    owner_id: &str,
-    reference_id: &str,
-    wallet_id: &str,
-    amount_micros: i64,
-    void_transaction_id: &str,
-) {
-    let dedupe_key = format!("topup-expired:{reference_id}:{void_transaction_id}");
-    match ledger_dedupe_exists(db, &dedupe_key).await {
-        Ok(true) => return,
-        Ok(false) => {}
-        Err(error) => {
-            tracing::warn!(%error, dedupe_key, "billing-ledger dedupe check failed");
-            return;
-        }
-    }
-    let entry = BillingLedgerEntry {
-        id: Uuid::new_v4().to_string(),
-        seq: 0,
-        prev_hash: String::new(),
-        entry_hash: String::new(),
-        event_type: BillingLedgerEventType::TopupExpired,
-        owner_id: owner_id.to_string(),
-        reference_id: reference_id.to_string(),
-        transaction_id: Some(void_transaction_id.to_string()),
-        layer: None,
-        metric: None,
-        service_slug: None,
-        model: None,
-        quantity: None,
-        amount_credits: (amount_micros % 1_000_000 == 0).then_some(amount_micros / 1_000_000),
-        amount_micros: Some(amount_micros),
-        balance_credits: None,
-        dedupe_key: Some(dedupe_key),
-        wallet_id: Some(wallet_id.to_string()),
-        created_at: Utc::now(),
-    };
-    append_best_effort(db, entry).await;
-}
-
-async fn ledger_dedupe_exists(
+pub(super) async fn ledger_dedupe_exists(
     db: &mongodb::Database,
     dedupe_key: &str,
 ) -> Result<bool, mongodb::error::Error> {
+    if db
+        .collection::<mongodb::bson::Document>(super::exact_migration::ABSORBED)
+        .count_documents(doc! { "_id": dedupe_key })
+        .read_concern(mongodb::options::ReadConcern::majority())
+        .await?
+        > 0
+    {
+        return Ok(true);
+    }
     db.collection::<BillingLedgerEntry>(BILLING_LEDGER)
         .count_documents(doc! { "dedupe_key": dedupe_key })
+        .read_concern(mongodb::options::ReadConcern::majority())
         .await
         .map(|count| count > 0)
 }
 
-async fn append_and_confirm_dedupe(db: &mongodb::Database, entry: BillingLedgerEntry) -> bool {
+pub(super) async fn append_and_confirm_dedupe(
+    db: &mongodb::Database,
+    entry: BillingLedgerEntry,
+) -> bool {
     let Some(key) = billing_ledger_hmac_key() else {
         tracing::warn!(
             event_type = entry.event_type.as_str(),
@@ -396,37 +407,195 @@ async fn append_best_effort(db: &mongodb::Database, entry: BillingLedgerEntry) {
 
 pub async fn append_chained_entry(
     db: &mongodb::Database,
-    mut entry: BillingLedgerEntry,
+    entry: BillingLedgerEntry,
     key: &[u8],
 ) -> Result<BillingLedgerEntry, mongodb::error::Error> {
-    let collection = db.collection::<BillingLedgerEntry>(BILLING_LEDGER);
-    let mut last_error = None;
-
-    for attempt in 1..=MAX_APPEND_ATTEMPTS {
-        let tail = read_tail(db).await?;
-        let (seq, prev_hash) = match tail {
-            Some(tail) => (tail.seq + 1, tail.entry_hash),
-            None => (1, GENESIS_PREV_HASH.to_string()),
+    validate_postings(&entry).map_err(|error| mongodb::error::Error::custom(error.to_string()))?;
+    // Keep the worker strongly reachable so concurrent callers share one
+    // queue and actually receive group commit. A weak-only registry creates a
+    // new worker for every append after the caller drops its temporary Arc.
+    let batchers = APPEND_BATCHERS.get_or_init(Default::default);
+    let key_id = hex::encode(Sha256::digest(key));
+    let slot_key = format!("{}:{key_id}", db.name());
+    for attempt in 0..2 {
+        let batcher = {
+            batchers
+                .entry(slot_key.clone())
+                .or_insert_with(|| {
+                    let (tx, rx) = tokio::sync::mpsc::channel(512);
+                    let batcher = std::sync::Arc::new(AppendBatcher { tx });
+                    tokio::spawn(run_append_batches(
+                        db.clone(),
+                        Zeroizing::new(key.to_vec()),
+                        rx,
+                    ));
+                    batcher
+                })
+                .clone()
         };
+        let (reply, result) = tokio::sync::oneshot::channel();
+        match batcher
+            .tx
+            .send(AppendRequest {
+                entry: entry.clone(),
+                reply,
+            })
+            .await
+        {
+            Ok(()) => {
+                return result
+                    .await
+                    .map_err(|_| {
+                        mongodb::error::Error::custom(
+                            "billing ledger append worker dropped the result",
+                        )
+                    })?
+                    .map_err(mongodb::error::Error::custom);
+            }
+            Err(_) => {
+                batchers.remove_if(&slot_key, |_, current| {
+                    std::sync::Arc::ptr_eq(current, &batcher)
+                });
+                if attempt == 1 {
+                    return Err(mongodb::error::Error::custom(
+                        "billing ledger append worker stopped",
+                    ));
+                }
+            }
+        }
+    }
+    unreachable!("append worker retry loop returns on every iteration")
+}
 
-        entry.created_at = truncate_to_bson_millis(entry.created_at);
-        entry.seq = seq;
-        entry.prev_hash = prev_hash;
-        entry.entry_hash = compute_entry_hash(&entry, key);
+struct AppendRequest {
+    entry: BillingLedgerEntry,
+    reply: tokio::sync::oneshot::Sender<Result<BillingLedgerEntry, String>>,
+}
 
-        match collection.insert_one(&entry).await {
-            Ok(_) => return Ok(entry),
-            Err(error) if is_duplicate_key_error(&error) && attempt < MAX_APPEND_ATTEMPTS => {
-                last_error = Some(error);
+struct AppendBatcher {
+    tx: tokio::sync::mpsc::Sender<AppendRequest>,
+}
+
+async fn run_append_batches(
+    db: mongodb::Database,
+    key: Zeroizing<Vec<u8>>,
+    mut requests: tokio::sync::mpsc::Receiver<AppendRequest>,
+) {
+    while let Some(first) = requests.recv().await {
+        let mut batch = Vec::with_capacity(APPEND_BATCH_MAX);
+        batch.push(first);
+        let deadline = tokio::time::Instant::now() + APPEND_BATCH_WAIT;
+        while batch.len() < APPEND_BATCH_MAX {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match tokio::time::timeout(remaining, requests.recv()).await {
+                Ok(Some(request)) => batch.push(request),
+                _ => break,
+            }
+        }
+        append_batch_with_retry(&db, &key, batch).await;
+    }
+}
+
+async fn append_batch_with_retry(db: &mongodb::Database, key: &[u8], requests: Vec<AppendRequest>) {
+    let deadline = tokio::time::Instant::now() + APPEND_DEADLINE;
+    let mut attempt = 0;
+    loop {
+        let entries = requests
+            .iter()
+            .map(|request| request.entry.clone())
+            .collect::<Vec<_>>();
+        let result = append_entries_transaction(db, key, entries).await;
+        match result {
+            Ok(saved) => {
+                for (request, entry) in requests.into_iter().zip(saved) {
+                    let _ = request.reply.send(Ok(entry));
+                }
+                return;
+            }
+            Err(error)
+                if is_duplicate_key_error(&error) && tokio::time::Instant::now() < deadline =>
+            {
+                attempt += 1;
+                sleep_before_retry(attempt).await;
+            }
+            Err(error) => {
+                if requests.len() > 1 {
+                    // A malformed checkpoint or other account-local problem
+                    // must not poison otherwise valid entries in the group.
+                    append_requests_individually(db, key, requests).await;
+                } else {
+                    let request = requests
+                        .into_iter()
+                        .next()
+                        .expect("single request is present");
+                    let _ = request.reply.send(Err(error.to_string()));
+                }
+                return;
+            }
+        }
+    }
+}
+
+async fn append_entries_transaction(
+    db: &mongodb::Database,
+    key: &[u8],
+    entries: Vec<BillingLedgerEntry>,
+) -> Result<Vec<BillingLedgerEntry>, mongodb::error::Error> {
+    let mut session = db.client().start_session().await?;
+    let database = std::sync::Arc::new(db.clone());
+    let entries = std::sync::Arc::new(entries);
+    let batch_key = std::sync::Arc::new(Zeroizing::new(key.to_vec()));
+    session
+        .start_transaction()
+        .write_concern(
+            mongodb::options::WriteConcern::builder()
+                .w(mongodb::options::Acknowledgment::Majority)
+                .journal(true)
+                .build(),
+        )
+        .and_run2(async move |session| {
+            let result =
+                append_entries_with_key(&database, session, (*entries).clone(), &batch_key).await;
+            crate::services::api_key_mutation_service::transaction_result(result)
+        })
+        .await
+}
+
+async fn append_requests_individually(
+    db: &mongodb::Database,
+    key: &[u8],
+    requests: Vec<AppendRequest>,
+) {
+    for request in requests {
+        let result = append_one_with_retry(db, key, request.entry.clone()).await;
+        let _ = request
+            .reply
+            .send(result.map_err(|error| error.to_string()));
+    }
+}
+
+async fn append_one_with_retry(
+    db: &mongodb::Database,
+    key: &[u8],
+    entry: BillingLedgerEntry,
+) -> Result<BillingLedgerEntry, mongodb::error::Error> {
+    let deadline = tokio::time::Instant::now() + APPEND_DEADLINE;
+    let mut attempt = 0;
+    loop {
+        match append_entries_transaction(db, key, vec![entry.clone()]).await {
+            Ok(mut saved) => return Ok(saved.remove(0)),
+            Err(error)
+                if is_duplicate_key_error(&error) && tokio::time::Instant::now() < deadline =>
+            {
+                attempt += 1;
                 sleep_before_retry(attempt).await;
             }
             Err(error) => return Err(error),
         }
     }
-
-    Err(last_error.unwrap_or_else(|| {
-        mongodb::error::Error::custom("billing ledger append exhausted retries")
-    }))
 }
 
 pub fn compute_entry_hash(entry: &BillingLedgerEntry, key: &[u8]) -> String {
@@ -434,6 +603,62 @@ pub fn compute_entry_hash(entry: &BillingLedgerEntry, key: &[u8]) -> String {
 }
 
 fn canonical_entry_bytes(entry: &BillingLedgerEntry) -> Vec<u8> {
+    if entry.event_type == BillingLedgerEventType::AccountingV2 {
+        // Version marker + length-prefixed fields; posting order is committed.
+        let mut output = b"nyxid:billing-ledger:v2\0".to_vec();
+        let fields = [
+            entry.seq.to_string(),
+            entry.prev_hash.clone(),
+            entry.id.clone(),
+            entry.owner_id.clone(),
+            entry.reference_id.clone(),
+            entry.movement.clone().unwrap_or_default(),
+            entry.transaction_id.clone().unwrap_or_default(),
+            entry
+                .layer
+                .map(|l| l.as_transaction_suffix().into())
+                .unwrap_or_default(),
+            entry.metric.map(|m| m.as_str().into()).unwrap_or_default(),
+            entry.service_slug.clone().unwrap_or_default(),
+            entry.model.clone().unwrap_or_default(),
+            entry.quantity.map(|n| n.to_string()).unwrap_or_default(),
+            entry
+                .amount_credits
+                .map(|n| n.to_string())
+                .unwrap_or_default(),
+            entry
+                .amount_micros
+                .map(|n| n.to_string())
+                .unwrap_or_default(),
+            entry
+                .balance_credits
+                .map(|n| n.to_string())
+                .unwrap_or_default(),
+            entry.dedupe_key.clone().unwrap_or_default(),
+            entry.wallet_id.clone().unwrap_or_default(),
+            entry.created_at.timestamp_millis().to_string(),
+            entry.postings.len().to_string(),
+        ];
+        fn field(output: &mut Vec<u8>, value: &str) {
+            output.extend_from_slice(&(value.len() as u64).to_be_bytes());
+            output.extend_from_slice(value.as_bytes());
+        }
+        for value in &fields {
+            field(&mut output, value);
+        }
+        for posting in &entry.postings {
+            field(&mut output, &posting.account);
+            field(
+                &mut output,
+                match posting.side {
+                    PostingSide::Debit => "debit",
+                    PostingSide::Credit => "credit",
+                },
+            );
+            field(&mut output, &posting.amount.to_string());
+        }
+        return output;
+    }
     let mut fields = vec![
         entry.seq.to_string(),
         entry.prev_hash.clone(),
@@ -485,6 +710,7 @@ fn canonical_entry_bytes(entry: &BillingLedgerEntry) -> Vec<u8> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BillingLedgerBreakKind {
+    Unbalanced,
     Gap,
     LinkMismatch,
     HashMismatch,
@@ -787,6 +1013,19 @@ pub async fn verify_chain(
             ));
         }
 
+        if validate_postings(entry).is_err() {
+            return Ok(broken_report(
+                checked_count,
+                head_seq,
+                head_hash,
+                BillingLedgerBreak {
+                    break_seq: entry.seq,
+                    break_kind: BillingLedgerBreakKind::Unbalanced,
+                    expected: "balanced v2 postings".into(),
+                    actual: "invalid postings".into(),
+                },
+            ));
+        }
         let expected_entry_hash = compute_entry_hash(entry, key);
         if entry.entry_hash != expected_entry_hash {
             return Ok(broken_report(
@@ -830,6 +1069,7 @@ async fn read_tail(db: &mongodb::Database) -> Result<Option<ChainTail>, mongodb:
     let tail = db
         .collection::<BillingLedgerEntry>(BILLING_LEDGER)
         .find(doc! { "seq": { "$exists": true, "$type": "long" } })
+        .read_concern(mongodb::options::ReadConcern::majority())
         .sort(doc! { "seq": -1 })
         .limit(1)
         .await?
@@ -896,18 +1136,228 @@ fn truncate_to_bson_millis(ts: DateTime<Utc>) -> DateTime<Utc> {
         .expect("timestamp_millis from DateTime<Utc> is valid")
 }
 
-fn is_duplicate_key_error(error: &mongodb::error::Error) -> bool {
-    matches!(
-        error.kind.as_ref(),
-        mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(write_error))
-            if write_error.code == 11000
-    )
+pub(super) fn is_duplicate_key_error(error: &mongodb::error::Error) -> bool {
+    use mongodb::error::{ErrorKind, WriteFailure};
+    match error.kind.as_ref() {
+        ErrorKind::Write(WriteFailure::WriteError(error)) => error.code == 11000,
+        ErrorKind::Command(error) => error.code == 11000,
+        ErrorKind::InsertMany(error) => error.write_errors.as_ref().is_some_and(|errors| {
+            !errors.is_empty() && errors.iter().all(|error| error.code == 11000)
+        }),
+        ErrorKind::BulkWrite(error) => {
+            !error.write_errors.is_empty()
+                && error.write_errors.values().all(|error| error.code == 11000)
+        }
+        _ => false,
+    }
 }
 
 async fn sleep_before_retry(attempt: usize) {
     let base_ms = 5_u64.saturating_mul(1_u64 << attempt.min(5));
     let jitter_ms = rand::thread_rng().gen_range(0..=10);
     tokio::time::sleep(std::time::Duration::from_millis(base_ms + jitter_ms)).await;
+}
+
+/// Atomic opening/adjustment append with the caller's balance mutation. The
+/// transaction runner retries write conflicts against the shared chain tail.
+pub(super) async fn append_in_session(
+    db: &mongodb::Database,
+    session: &mut mongodb::ClientSession,
+    entry: BillingLedgerEntry,
+) -> AppResult<()> {
+    let key = billing_ledger_hmac_key()
+        .ok_or_else(|| AppError::Internal("billing ledger key is unavailable".into()))?;
+    append_with_key(db, session, entry, key).await?;
+    Ok(())
+}
+
+async fn append_with_key(
+    db: &mongodb::Database,
+    session: &mut mongodb::ClientSession,
+    entry: BillingLedgerEntry,
+    key: &[u8],
+) -> AppResult<BillingLedgerEntry> {
+    Ok(append_entries_with_key(db, session, vec![entry], key)
+        .await?
+        .remove(0))
+}
+
+async fn append_entries_with_key(
+    db: &mongodb::Database,
+    session: &mut mongodb::ClientSession,
+    entries_to_append: Vec<BillingLedgerEntry>,
+    key: &[u8],
+) -> AppResult<Vec<BillingLedgerEntry>> {
+    for entry in &entries_to_append {
+        validate_postings(entry)?;
+    }
+    let entries = db.collection::<BillingLedgerEntry>(BILLING_LEDGER);
+    let tail = entries
+        .find_one(doc! {})
+        .sort(doc! { "seq": -1 })
+        .session(&mut *session)
+        .await?;
+    let dedupe_keys: Vec<_> = entries_to_append
+        .iter()
+        .filter_map(|entry| entry.dedupe_key.clone())
+        .collect();
+    let mut existing = std::collections::HashMap::new();
+    if !dedupe_keys.is_empty() {
+        let mut cursor = entries
+            .find(doc! { "dedupe_key": { "$in": &dedupe_keys } })
+            .session(&mut *session)
+            .await?;
+        let found: Vec<_> = cursor.stream(&mut *session).try_collect().await?;
+        for entry in found {
+            if let Some(dedupe) = entry.dedupe_key.clone() {
+                existing.insert(dedupe, entry);
+            }
+        }
+    }
+    let mut next_seq = tail.as_ref().map_or(Ok(1), |tail| {
+        tail.seq
+            .checked_add(1)
+            .ok_or(crate::models::credits::CreditsError)
+    })?;
+    let mut previous_hash = tail.map_or_else(|| GENESIS_PREV_HASH.to_string(), |t| t.entry_hash);
+    let mut saved = Vec::with_capacity(entries_to_append.len());
+    let mut new_entries = Vec::new();
+    let mut batch_deduped: std::collections::HashMap<String, BillingLedgerEntry> =
+        std::collections::HashMap::new();
+    for mut entry in entries_to_append {
+        if let Some(dedupe) = entry.dedupe_key.as_ref()
+            && let Some(existing) = existing.get(dedupe)
+        {
+            saved.push(existing.clone());
+            continue;
+        }
+        if let Some(dedupe) = entry.dedupe_key.as_ref()
+            && let Some(inserted) = batch_deduped.get(dedupe)
+        {
+            saved.push(inserted.clone());
+            continue;
+        }
+        validate_postings(&entry)?;
+        entry.seq = next_seq;
+        entry.prev_hash = previous_hash;
+        entry.created_at = truncate_to_bson_millis(entry.created_at);
+        entry.entry_hash = compute_entry_hash(&entry, key);
+        previous_hash = entry.entry_hash.clone();
+        next_seq = next_seq
+            .checked_add(1)
+            .ok_or(crate::models::credits::CreditsError)?;
+        saved.push(entry.clone());
+        if let Some(dedupe) = entry.dedupe_key.clone() {
+            batch_deduped.insert(dedupe, entry.clone());
+        }
+        new_entries.push(entry);
+    }
+    if !new_entries.is_empty() {
+        entries
+            .insert_many(new_entries.clone())
+            .session(&mut *session)
+            .await?;
+    }
+    // Each posting and its account checkpoint commit atomically. Account checks
+    // need one indexed point read, independent of the account's history length.
+    let checkpoints = db.collection::<mongodb::bson::Document>("billing_account_balances");
+    let mut deltas = std::collections::BTreeMap::new();
+    for entry in &new_entries {
+        for posting in &entry.postings {
+            if !is_reconciled_account(&posting.account) {
+                continue;
+            }
+            let delta = match posting.side {
+                PostingSide::Debit => posting.amount,
+                PostingSide::Credit => -posting.amount,
+            };
+            let (previous, _) = deltas
+                .get(&posting.account)
+                .copied()
+                .unwrap_or((Credits::ZERO, 0));
+            deltas.insert(
+                posting.account.clone(),
+                (previous.checked_add(delta)?, entry.seq),
+            );
+        }
+    }
+    let accounts: Vec<_> = deltas.keys().cloned().collect();
+    let mut previous_checkpoints = std::collections::HashMap::new();
+    if !accounts.is_empty() {
+        let mut cursor = checkpoints
+            .find(doc! { "_id": { "$in": &accounts } })
+            .session(&mut *session)
+            .await?;
+        let rows: Vec<Document> = cursor.stream(&mut *session).try_collect().await?;
+        for row in rows {
+            let account = row
+                .get_str("_id")
+                .map_err(|_| AppError::Internal("billing checkpoint has no account".into()))?
+                .to_owned();
+            previous_checkpoints.insert(account, authenticated_checkpoint(&row, key)?);
+        }
+    }
+    let mut checkpoint_updates = Vec::with_capacity(deltas.len());
+    for (account, (delta, through_seq)) in deltas {
+        let balance = previous_checkpoints
+            .get(&account)
+            .map(|(balance, _)| *balance)
+            .unwrap_or(Credits::ZERO);
+        let balance = balance.checked_add(delta)?;
+        checkpoint_updates.push(
+            mongodb::options::UpdateOneModel::builder()
+                .namespace(mongodb::Namespace::new(
+                    db.name(),
+                    "billing_account_balances",
+                ))
+                .filter(doc! { "_id": &account })
+                .update(doc! { "$set": {
+                    "balance": balance, "through_seq": through_seq,
+                    "signature": checkpoint_signature(&account, through_seq, balance, key),
+                }})
+                .upsert(true)
+                .build(),
+        );
+    }
+    if !checkpoint_updates.is_empty() {
+        db.client()
+            .bulk_write(checkpoint_updates)
+            .session(&mut *session)
+            .await?;
+    }
+    Ok(saved)
+}
+
+fn is_reconciled_account(account: &str) -> bool {
+    account.starts_with("wallet:") || account.starts_with("grant:")
+}
+
+fn checkpoint_signature(account: &str, seq: i64, balance: Credits, key: &[u8]) -> String {
+    let mut bytes = b"nyxid:billing-account:v1\0".to_vec();
+    for value in [account.to_string(), seq.to_string(), balance.to_string()] {
+        bytes.extend_from_slice(&(value.len() as u64).to_be_bytes());
+        bytes.extend_from_slice(value.as_bytes());
+    }
+    hmac_sha256_hex(key, &bytes)
+}
+
+pub(super) fn authenticated_checkpoint(
+    row: &mongodb::bson::Document,
+    key: &[u8],
+) -> AppResult<(Credits, i64)> {
+    let invalid = || AppError::Internal("invalid billing account checkpoint".into());
+    let account = row.get_str("_id").map_err(|_| invalid())?;
+    let seq = row.get_i64("through_seq").map_err(|_| invalid())?;
+    let balance = Credits::from_bson(
+        row.get("balance").cloned().ok_or_else(invalid)?,
+        crate::models::credits::SCALE,
+    )?;
+    if row.get_str("signature").ok()
+        != Some(checkpoint_signature(account, seq, balance, key).as_str())
+    {
+        return Err(invalid());
+    }
+    Ok((balance, seq))
 }
 
 #[cfg(test)]
@@ -924,6 +1374,8 @@ mod tests {
             prev_hash: String::new(),
             entry_hash: String::new(),
             event_type: BillingLedgerEventType::UsageSettled,
+            movement: None,
+            postings: Vec::new(),
             owner_id: "owner-1".to_string(),
             reference_id: reference.to_string(),
             transaction_id: Some(format!("{reference}-platform")),
@@ -939,6 +1391,21 @@ mod tests {
             wallet_id: Some("wallet-1".to_string()),
             created_at: Utc::now(),
         }
+    }
+
+    fn v2_entry(reference: &str, debit_account: &str) -> BillingLedgerEntry {
+        exact_entry(
+            "owner-1",
+            reference,
+            "test_transfer",
+            format!("test:{reference}"),
+            transfer(
+                debit_account.to_owned(),
+                "platform:test".to_owned(),
+                Credits::from_whole(1),
+            ),
+            None,
+        )
     }
 
     #[test]
@@ -1196,5 +1663,95 @@ mod tests {
             .await
             .expect("verify");
         assert_eq!(report.status, BillingLedgerStatus::Broken);
+    }
+
+    #[tokio::test]
+    async fn corrupt_checkpoint_does_not_poison_group_commit() {
+        let Some(db) = connect_test_database("billing_ledger_group_isolation").await else {
+            return;
+        };
+        db.collection::<Document>("billing_account_balances")
+            .insert_one(doc! {
+                "_id": "wallet:bad",
+                "balance": Credits::from_whole(1),
+                "through_seq": 0_i64,
+                "signature": "corrupt",
+            })
+            .await
+            .expect("insert corrupt checkpoint");
+
+        // Submit an explicit group so scheduling cannot separate the corrupt
+        // checkpoint from healthy accounts into different transactions.
+        let mut requests = Vec::new();
+        let mut replies = Vec::new();
+        for (reference, account) in [
+            ("bad", "wallet:bad"),
+            ("good", "wallet:good"),
+            ("also-good", "grant:good"),
+        ] {
+            let (reply, result) = tokio::sync::oneshot::channel();
+            requests.push(AppendRequest {
+                entry: v2_entry(reference, account),
+                reply,
+            });
+            replies.push(result);
+        }
+        append_batch_with_retry(&db, TEST_KEY, requests).await;
+        let mut replies = replies.into_iter();
+        let bad_result = replies.next().unwrap().await.unwrap();
+        let good_result = replies.next().unwrap().await.unwrap();
+        assert!(replies.next().unwrap().await.unwrap().is_ok());
+        assert!(bad_result.is_err(), "the corrupt account must fail closed");
+        assert!(
+            good_result.is_ok(),
+            "a valid group member must still commit"
+        );
+        assert_eq!(
+            db.collection::<BillingLedgerEntry>(BILLING_LEDGER)
+                .count_documents(doc! {})
+                .await
+                .expect("count committed entries"),
+            2
+        );
+        assert_eq!(
+            db.collection::<Document>("billing_account_balances")
+                .count_documents(doc! { "_id": "wallet:good" })
+                .await
+                .expect("count good checkpoint"),
+            1
+        );
+        let verified = verify_chain(&db, TEST_KEY, None, None, None).await.unwrap();
+        assert_eq!(verified.status, BillingLedgerStatus::Ok);
+        assert_eq!(verified.checked_count, 2);
+    }
+
+    #[tokio::test]
+    async fn closed_batch_worker_is_replaced_and_retried() {
+        let Some(db) = connect_test_database("billing_ledger_closed_worker").await else {
+            return;
+        };
+        let key_id = hex::encode(Sha256::digest(TEST_KEY));
+        let slot_key = format!("{}:{key_id}", db.name());
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        drop(rx);
+        let closed = std::sync::Arc::new(AppendBatcher { tx });
+        APPEND_BATCHERS
+            .get_or_init(Default::default)
+            .insert(slot_key.clone(), closed.clone());
+
+        let mut invalid = v2_entry("invalid", "wallet:invalid");
+        invalid.postings.pop();
+        assert!(append_chained_entry(&db, invalid, TEST_KEY).await.is_err());
+        let current = APPEND_BATCHERS.get().unwrap().get(&slot_key).unwrap();
+        assert!(
+            std::sync::Arc::ptr_eq(&current, &closed),
+            "validation must precede enqueue"
+        );
+        drop(current);
+
+        let saved = append_chained_entry(&db, entry("after-worker-close"), TEST_KEY)
+            .await
+            .expect("fresh worker append");
+        assert_eq!(saved.seq, 1);
     }
 }

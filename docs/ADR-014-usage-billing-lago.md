@@ -8,6 +8,8 @@
 > **Related:** ADR-013 (pure passthrough), CLAUDE.md §8 (streamlined services), CLAUDE.md §9 (agent isolation),
 > `backend/src/services/llm_usage_service.rs`, `docs/AI_SERVICES_ARCHITECTURE.md`.
 
+> Accounting/storage update: NyxID 0.31 uses [exact Credits and balanced v2 postings](BILLING_EXACT_ACCOUNTING.md). That normative document supersedes this draft’s integer wallet/rounding assumptions and defines the drained-writer cutover.
+
 ## Context
 
 NyxID proxies user/agent traffic to downstream services (OpenAI, Anthropic, custom APIs, SSH, MCP).

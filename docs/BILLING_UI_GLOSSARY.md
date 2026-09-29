@@ -20,8 +20,8 @@ Where the ADR's intent and the shipped code disagree, this doc describes **the c
 
 | Term | Meaning |
 |---|---|
-| **Credit** | The billing unit. **1 credit = 1 USD.** NyxID creates every Lago wallet in USD with `rate_amount: "1"`, so credits are 1:1 with the wallet currency (`services/billing/lago_client.rs:93-95`, `:272-278`). Wallet amounts are always whole integers. |
-| **Credit micros** | One millionth of a credit — fixed-point, no floating point. Any field ending in `_credits_micros` is divided by 1,000,000 for display, with up to 6 decimals (`lib/billing-display.ts`). 4,200 micros → `0.0042 credits`. Usage costs and funding splits use micros; wallet balances and debits use whole credits. The wallet debit rounds its exact funded cost up to a whole credit, so the Usage cost is not the wallet balance change. |
+| **Credit** | The billing unit. **1 credit = 1 USD.** NyxID creates every Lago wallet in USD with `rate_amount: "1"`, so credits are 1:1 with the wallet currency. Wallet amounts retain up to twelve decimal places. Top-up inputs remain whole credits. |
+| **Exact credits / credit micros** | Money uses decimal-credit strings and BigInt picocredits. Legacy integer micros remain display compatibility fields (one millionth of a credit), truncated after aggregation. Wallet debit equals its exact funded share. Normal display uses six decimals; a smaller nonzero value displays `<0.000001`, never zero. |
 | **Layer** | Which of two independent charges produced a usage row. One request can produce several platform component rows and one resale row. |
 
 | Layer | What is being charged |
@@ -42,8 +42,8 @@ grouping by service/model/agent/layer; lane charges retain these dimensions and 
 
 Unit prices allow 12 fractional digits (`PRICE_FRACTIONAL_DIGITS = 12`), with exact
 integer picocredit rates and truncated legacy micro rates for compatibility. Gross
-costs truncate to micros after multiplication; wallet debits ceil the exact remaining
-cost to whole credits. These are different amounts, even for a sub-microcredit cost.
+costs and funding retain all twelve digits; wallet debits equal the exact remaining
+cost. Legacy display projections truncate only after aggregation.
 An allowance covers only rows with its exact component metric, before grants and wallet.
 The server's computed `allowance_metrics` list supplies the dialog's units: configured
 primary/components plus legacy while a primary is unsynced or no lanes exist.
@@ -184,13 +184,13 @@ appears when applicable. Owner IDs and normal collection-state badges are not di
 
 | Label | Meaning | API field |
 |---|---|---|
-| **Available** | Credits spendable now, excluding reservations, unsettled charges and expiry holds. Does not include overdraft. | `available_credits` |
+| **Available** | Credits spendable now, excluding reservations, unsettled charges and expiry holds. Does not include overdraft. | `available` (legacy: `available_credits`) |
 | **Updated** | Relative age of the provider-synced balance. Does not describe usage freshness. | `balance_synced_at` |
-| **Balance** | Last provider-synced balance; whole credits. | `balance_credits` |
-| **Reserved** | Whole-credit holds for in-flight requests. | `reserved_credits` |
-| **Pending** | Charged locally, awaiting provider sync. | `pending_lago_debits` |
-| **Expiring** | Credits held while expired purchases are removed; shown when nonzero. | `pending_topup_expiry_credits` |
-| **Overdraft** | Configured extra capacity, shown when nonzero. Actual eligibility also depends on plan and payment instrument. | `overdraft_cap_credits` |
+| **Balance** | Last provider-synced exact decimal balance. | `balance` (legacy: `balance_credits`) |
+| **Reserved** | Exact credit holds for in-flight requests. | `reserved` (legacy projection: `reserved_credits`) |
+| **Pending** | Charged locally, awaiting provider sync. | `pending_debits` (legacy: `pending_lago_debits`) |
+| **Expiring** | Credits held while expired purchases are removed; shown when nonzero. | `pending_expiry` (legacy: `pending_topup_expiry_credits`) |
+| **Overdraft** | Configured extra capacity, shown when nonzero. Actual eligibility also depends on plan and payment instrument. | `overdraft_cap` (legacy: `overdraft_cap_credits`) |
 | **Plan** | Configured plan kind. | `plan_kind` |
 
 All rows after Updated are in the expandable breakdown. Its formula reads
@@ -202,7 +202,7 @@ All rows after Updated are in the expandable breakdown. Its formula reads
 One compact card uses `GET /billing/grants`, `GET /billing/allowances` and catalog names.
 Grant rows group by eligible service scope and show available credits (remaining minus
 reserved), a used/original gauge and Details. The short amount rounds to two decimals;
-hover/focus and Details retain exact microcredit precision.
+hover/focus and Details use six decimals. Sub-display-precision nonzero values show `<threshold`; accounting remains exact to twelve decimals.
 
 Free usage groups by service, with separate Tokens, Cache and Other coverage values.
 Only identical metrics, recurrence and period boundaries share a subtotal. Unlike units
@@ -283,7 +283,7 @@ never sent to Lago, and render **Free** with **—** cost.
 
 Estimated cost is the gross cost of the full finalized quantity, including benefit-covered
 units. New settlements use persisted exact gross costs; historical rows use current cached
-model/metric rates. Funding is an exact pre-rounding cost, not a whole-credit wallet debit.
+model/metric rates. Funding values are exact credits; wallet-funded cost equals the wallet debit.
 
 **Acknowledged** means Lago accepted a billable event or duplicate, not that an invoice was
 paid. **Pending** means a charged row is unacknowledged; forwarded dead-letter rows can stay
@@ -295,12 +295,12 @@ allowance units are the sum of `allowance_consumptions.quantity`, valued at the 
 Wallet funding is `max(0, estimated gross cost − grant funding − allowance funding)`.
 Rows without funding metadata use the same current-rate estimate, funded entirely by the wallet.
 Missing rates leave unknown estimates null, including groups mixing exact settlements with
-historical usage that cannot be priced. Grant micros remain known from consumption records.
+historical usage that cannot be priced. Grant amounts remain known from consumption records.
 MongoDB aggregates the consumption arrays before responses are built. Costs are summed
 consistently from the API rows into both totals and service rows; non-billable rows contribute zero.
 
 Settlement stores this display metadata atomically with `funding.settled = true`. Retries reuse
-the stored settlement. Funding order (allowances → grants → wallet), rounded wallet debit,
+the stored settlement. Funding order (allowances → grants → wallet), exact wallet debit,
 wallet-funded Lago quantity, usage identity and ledger encoding are unchanged.
 
 Empty state: **No usage in this period.** This means no finalized or forwarded-dead-letter meters
@@ -342,8 +342,8 @@ visible in metric quantities, not in provider token-class totals.
 Costs follow the personal Usage card: exact persisted settlements first, then
 current model-specific/generic rates for legacy billable groups; free events cost
 zero. Known costs are summed, unknown groups remain null and are skipped by totals.
-A **Partial estimate** notice exposes missing historical rates. Grant micros stay
-known even without a rate. Funding amounts are pre-rounding costs, not wallet debits.
+A **Partial estimate** notice exposes missing historical rates. Grant amounts stay
+known even without a rate. The wallet-funded amount equals the wallet debit; other funding comes from allowances and grants.
 Ranking is paged by actor × billing owner × service, descending by requests, cost,
 a selected metric's quantity, or a token class, with stable identity tie-breakers.
 A quantity ranking never adds unlike metrics. Expanding a user shows all their
@@ -359,7 +359,7 @@ for partial edge hours that contain folded data beyond their boundaries; their
 cost scales with those edge rows. One aggregation combines totals, ranking,
 service options and live-tail counts. Covering indexes reduce common hourly and
 daily summaries without fetching their documents. Rates are read once and joined
-through a MongoDB literal lookup map. Legacy per-display-group truncation and
+through a MongoDB literal lookup map. Exact decimal accumulation and
 missing-rate masking remain intact through internal cost partitions; API keys
 and ack state are not dimensions of either tier’s primary key.
 
@@ -466,7 +466,7 @@ numbers and no receipts.
   reported request/byte/event counts remain in expanded details.
 - Historical usage can have unknown costs. The page marks affected totals Unavailable instead
   of displaying a partial sum as complete.
-- Estimated gross cost, settled funding and rounded wallet debits need not be equal.
+- Gross cost equals allowance, grant and wallet funding combined; the wallet debit equals the wallet-funded part.
 - Catalog lookup failures have an explicit retry state; a readable slug fallback remains until
   names load. Catalog names are authoritative even when an administrator chooses a slug-like name.
 - Forwarded dead-letter usage can remain Pending until operator action.

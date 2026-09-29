@@ -1,3 +1,9 @@
+import {
+  decimalCredits,
+  exactCredits,
+  formatExactCredits,
+  parseCredits,
+} from "@/lib/credits";
 import { useState } from "react";
 import type { CreditGrant } from "@/schemas/billing-credits";
 import { Badge } from "@/components/ui/badge";
@@ -51,11 +57,12 @@ function grantName(grant: CreditGrant) {
   return grant.reason || "Credit grant";
 }
 
-/** Numbers with up to two decimals, as credits are shown elsewhere here. */
-const amount = (micros: number) =>
-  new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 }).format(
-    micros / 1_000_000,
-  );
+const grantPico = (
+  grant: CreditGrant,
+  field: "amount" | "remaining" | "reserved",
+) => parseCredits(exactCredits(grant[field], grant[`${field}_micros`]) ?? "0");
+const amount = (pico: bigint) => formatExactCredits(decimalCredits(pico), 2);
+const exact = (pico: bigint) => credits(decimalCredits(pico));
 
 function AppliesTo({
   grant,
@@ -120,25 +127,34 @@ export function CreditGrantsRow({
   );
   const pending = grants
     .filter((grant) => grant.activation_state === "pending_activation")
-    .reduce((sum, grant) => sum + grant.remaining_micros, 0);
+    .reduce((sum, grant) => sum + grantPico(grant, "remaining"), 0n);
   const remaining = spendable.reduce(
-    (sum, grant) => sum + grant.remaining_micros,
-    0,
+    (sum, grant) => sum + grantPico(grant, "remaining"),
+    0n,
   );
   const reserved = spendable.reduce(
-    (sum, grant) => sum + grant.reserved_micros,
-    0,
+    (sum, grant) => sum + grantPico(grant, "reserved"),
+    0n,
   );
-  const available = Math.max(0, remaining - reserved);
+  const available = remaining > reserved ? remaining - reserved : 0n;
+  const limit = spendable.reduce(
+    (sum, grant) => sum + grantPico(grant, "amount"),
+    0n,
+  );
+  // Only normalized drawing proportions become floating point. Money stays bigint.
+  const geometry = (value: bigint) =>
+    limit === 0n ? 0 : Number((value * 1_000_000_000n) / limit);
   const stack = proportionalStack(
     spendable.map((grant) => ({
       key: grant.id,
       label: grantName(grant),
       short: grantName(grant),
-      used: grant.amount_micros - grant.remaining_micros,
-      limit: grant.amount_micros,
-      legend: `${credits(grant.remaining_micros)} left`,
-      detail: `${credits(grant.remaining_micros)} of ${credits(grant.amount_micros)} credits left`,
+      used: geometry(
+        grantPico(grant, "amount") - grantPico(grant, "remaining"),
+      ),
+      limit: geometry(grantPico(grant, "amount")),
+      legend: `${exact(grantPico(grant, "remaining"))} left`,
+      detail: `${exact(grantPico(grant, "remaining"))} of ${exact(grantPico(grant, "amount"))} credits left`,
     })),
   );
   const rows = grants.map((grant) => {
@@ -182,11 +198,11 @@ export function CreditGrantsRow({
                 <strong tabIndex={0}>{amount(available)} credits</strong>
               </TooltipTrigger>
               <TooltipContent>
-                Available: {credits(available)} credits
+                Available: {exact(available)} credits
               </TooltipContent>
             </Tooltip>
             <small>available</small>
-            {pending > 0 && <small>· {amount(pending)} pending</small>}
+            {pending > 0n && <small>· {amount(pending)} pending</small>}
           </div>
           <StackedMeter stack={stack} label="Credit grants" />
         </div>
@@ -217,11 +233,11 @@ export function CreditGrantsRow({
                     <AppliesTo grant={grant} catalog={catalog} />
                   </TableCell>
                   <TableCell className="text-right tabular-nums">
-                    {amount(grant.remaining_micros)} of{" "}
-                    {amount(grant.amount_micros)}
-                    {grant.reserved_micros > 0 && (
+                    {amount(grantPico(grant, "remaining"))} of{" "}
+                    {amount(grantPico(grant, "amount"))}
+                    {grantPico(grant, "reserved") > 0n && (
                       <span className="block text-[11px] text-muted-foreground">
-                        {amount(grant.reserved_micros)} reserved
+                        {amount(grantPico(grant, "reserved"))} reserved
                       </span>
                     )}
                   </TableCell>
@@ -250,10 +266,10 @@ export function CreditGrantsRow({
                 {formatPercent(percent)}% used
               </span>
               <small>
-                {amount(grant.remaining_micros)} of{" "}
-                {amount(grant.amount_micros)} left
-                {grant.reserved_micros > 0 &&
-                  ` · ${amount(grant.reserved_micros)} reserved`}{" "}
+                {amount(grantPico(grant, "remaining"))} of{" "}
+                {amount(grantPico(grant, "amount"))} left
+                {grantPico(grant, "reserved") > 0n &&
+                  ` · ${amount(grantPico(grant, "reserved"))} reserved`}{" "}
                 · <AppliesTo grant={grant} catalog={catalog} /> ·{" "}
                 {expiryLabel(grant.expires_at, now)}
               </small>

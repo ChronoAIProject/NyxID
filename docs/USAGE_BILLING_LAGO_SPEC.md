@@ -194,23 +194,29 @@ dialog consumes it directly. Allowances fund only identical-metric usage rows.
 Omitted allowance metric defaults to BYOK primary, then platform-key primary,
 then legacy; `effective_platform_metric` remains this display default.
 Existing allowances preserve their stored unit on unrelated edits. Periods, recurrence,
-grant expiry, ledger canonical fields/order/hash/dedupe keys and verification are unchanged.
+grant expiry and operation dedupe identities are unchanged. Exact accounting adds versioned ledger postings.
 
 Unit prices support `PRICE_FRACTIONAL_DIGITS = 12` and at most 1,000,000 credits/unit.
 The normalized exact decimal goes to Lago. Optional `credits_per_unit_pico` (10^-12
 credits) is preferred in cache/funding/reservations; legacy `credits_per_unit_micros`
 is still populated by truncation for rolling compatibility. Missing precise fields
-use the old micro rate exactly. All money multiplication uses saturating integer i128
-intermediates. Gross/funding display costs truncate **after** multiplying to micros;
-grant movements remain micros; the exact remaining wallet cost rounds **up** to whole
-credits per component, including sub-microcredit costs. Lago receives the wallet-funded quantity,
-rounded up to its existing micro-unit precision, capped at actual units. No floating
-point is used in rate or cost arithmetic. Ledger amount encoding remains unchanged.
+use the old micro rate exactly. Money uses checked i128 picocredit `Credits`,
+Decimal128 credits in MongoDB, and decimal strings in JSON. Funding calculates
+cost once and subtracts allowance and grants to obtain the exact wallet debit.
+Lago quantities floor cumulatively with durable owner/metric/rate carry; they do
+not round up per row. Balanced v2 ledger postings cover every balance movement;
+v1 canonical bytes remain unchanged. See [exact accounting](BILLING_EXACT_ACCOUNTING.md).
 
 **Rollout:** upgrade ALL replicas before authoring component prices, allowances
 using new metrics, or prices beyond six fractional digits. Old binaries cannot deserialize the new enum variants or charge
-additional components. Defaulted fields require no data migration; existing lanes and
-prices of up to six fractional digits keep their prior accounting.
+additional components. The 0.31 exact-accounting cutover requires draining old billing writers before
+starting the migration with `BILLING_EXACT_CUTOVER_DRAINED=true`; subsequent
+new-version replicas resume the recorded background migration. Pending cutover
+returns 503 for billed admission and pauses money sweeps; the server, nonbilling
+traffic and legacy-tolerant UI reads remain available. Malformed documents are
+isolated and reported through Integrity while other rows continue migrating.
+Old binaries fail to read migrated amounts and must not be restarted. See the
+exact-accounting deployment contract.
 
 **"Billing-active" rollup (R7).** A request is *billing-active* iff `ServiceBilling.resale_billable`
 (and the resolved credential is `NyxidManagedMaster`) **OR** the resolved billing owner is on a
@@ -267,7 +273,7 @@ pub struct UsageMeterRow {
     pub lago_metric_code: String,
     pub credential_class: CredentialClass,               // resale only when NyxidManagedMaster
     #[serde(skip_serializing_if = "Option::is_none")] pub model: Option<String>,
-    #[serde(default)] pub reserved_credits: i64,         // 0/unused in P1 (no wallet); set in P3
+    #[serde(default)] pub reserved_credits: Credits,         // 0/unused in P1 (no wallet); set in P3
     #[serde(skip_serializing_if = "Option::is_none")] pub quantity: Option<i64>, // actual metered (settle)
     #[serde(default, skip_serializing_if = "Option::is_none")] pub pending_resale_quantity: Option<i64>, // multi-layer settle outbox marker
     pub status: UsageStatus,
@@ -310,11 +316,11 @@ pub struct BillingWallet {
     pub lago_customer_id: String,                         // == external_customer_id (unique)
     #[serde(skip_serializing_if = "Option::is_none")] pub lago_subscription_id: Option<String>,
     pub plan_kind: PlanKind,                              // Prepaid | Subscription | Hybrid
-    pub balance_credits: i64,                             // last value SYNCED from Lago
-    pub reserved_credits: i64,                            // open holds (NyxID-owned)
-    pub pending_lago_debits: i64,                         // finalized-but-not-yet-synced burns (R3.1)
+    pub balance_credits: Credits,                             // last value SYNCED from Lago
+    pub reserved_credits: Credits,                            // open holds (NyxID-owned)
+    pub pending_lago_debits: Credits,                         // finalized-but-not-yet-synced burns (R3.1)
     pub has_payment_instrument: bool,                     // gates conditional fail-open
-    pub overdraft_cap_credits: i64,                       // money-denominated, via rate cache
+    pub overdraft_cap_credits: Credits,                       // money-denominated, via rate cache
     pub suspended: bool,
     pub collection_state: CollectionState,               // Good | PastDue | Suspended
     #[serde(with = "...chrono_datetime_as_bson_datetime")] pub balance_synced_at: DateTime<Utc>,
@@ -339,13 +345,12 @@ New code prefers pico (10^-12 credits); missing pico scales the legacy micro rat
 NyxID's `PRICE_FRACTIONAL_DIGITS = 12`, maximum 1,000,000 credits/unit, fits i64.
 Lago receives the normalized decimal string exactly, and `plan_rates` plus reconcile
 preserve all 12 digits when mirroring it. External Lago rates outside the precise
-field's supported numeric syntax/range retain the legacy mirror fallback.
+field's supported numeric syntax/range fail the refresh rather than falling back.
 
-Costs multiply in saturating i128 before conversion. Gross/funding amounts truncate
-to micros; grant amounts and ledger fields stay micros. Wallet debits ceil the exact
-post-grant remainder to whole credits. A tiny positive rate is never turned into a
-free wallet charge by truncating the rate first. Existing <=6-digit prices have
-identical accounting. See §3.1 for component identities, fallback and rollout rules.
+Costs use checked Credits arithmetic with no per-event conversion. Legacy integer
+response fields truncate only after exact aggregation. Grants and wallet remainders
+move precisely the funded amount, including fractions below one microcredit.
+See §3.1 and BILLING_EXACT_ACCOUNTING.md for storage and upgrade requirements.
 
 ## 4. Metering — route context, per-path map, emit API (P1)
 
@@ -543,7 +548,7 @@ pub trait LagoApi {
     async fn record_event(&self, ev: &LagoEvent) -> AppResult<LagoAck>;                    // POST /events
     async fn record_events_batch(&self, evs: &[LagoEvent]) -> AppResult<Vec<LagoAck>>;     // fall back to loop if unsupported
     async fn current_usage(&self, customer_id, sub_id) -> AppResult<LagoUsage>;
-    async fn wallet_balance(&self, customer_id) -> AppResult<i64>;
+    async fn wallet_balance_exact(&self, customer_id) -> AppResult<Credits>;
     async fn entitlements(&self, sub_external_id) -> AppResult<Vec<Entitlement>>;          // endpoint path version-dependent (R11)
 }
 ```

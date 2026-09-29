@@ -218,7 +218,7 @@ impl LagoApi for FakeLago {
         self.wallet_creates.fetch_add(1, Ordering::SeqCst);
         Ok(LagoWallet {
             id: format!("{customer_id}:wallet"),
-            balance_credits: 10_000,
+            balance_credits: crate::models::credits::Credits::from_whole(10_000),
         })
     }
 
@@ -1070,9 +1070,18 @@ async fn billing_service_lifecycle_regression() {
         );
 
         let wallet = wallet(&db, &owner_id).await;
-        assert_eq!(wallet.overdraft_cap_credits, 7);
-        assert_eq!(wallet.reserved_credits, 0);
-        assert_eq!(wallet.pending_lago_debits, expected_quantity);
+        assert_eq!(
+            wallet.overdraft_cap_credits,
+            crate::models::credits::Credits::from_whole(7)
+        );
+        assert_eq!(
+            wallet.reserved_credits,
+            crate::models::credits::Credits::from_whole(0)
+        );
+        assert_eq!(
+            wallet.pending_lago_debits,
+            crate::models::credits::Credits::from_whole(expected_quantity)
+        );
     }
 
     assert_eq!(
@@ -1182,7 +1191,10 @@ async fn settle_after_midstream_suspension_remains_durable() {
     assert_eq!(row.quantity, Some(23));
     let saved_wallet = wallet(&db, &owner_id).await;
     assert!(saved_wallet.suspended);
-    assert_eq!(saved_wallet.pending_lago_debits, 23);
+    assert_eq!(
+        saved_wallet.pending_lago_debits,
+        crate::models::credits::Credits::from_whole(23)
+    );
 }
 
 #[tokio::test]
@@ -1234,8 +1246,14 @@ async fn card_backed_wallet_cannot_reserve_past_the_overdraft_cap() {
 
     let saved_wallet = wallet(&db, &owner_id).await;
     assert_eq!(saved_wallet.plan_kind, PlanKind::Subscription);
-    assert_eq!(saved_wallet.overdraft_cap_credits, 2);
-    assert_eq!(saved_wallet.reserved_credits, 2);
+    assert_eq!(
+        saved_wallet.overdraft_cap_credits,
+        crate::models::credits::Credits::from_whole(2)
+    );
+    assert_eq!(
+        saved_wallet.reserved_credits,
+        crate::models::credits::Credits::from_whole(2)
+    );
     assert!(saved_wallet.suspended);
     assert_eq!(saved_wallet.collection_state, CollectionState::Suspended);
 }
@@ -1360,8 +1378,14 @@ async fn buffered_route_preserves_success_when_settlement_failure_is_replayed() 
         1
     );
     let saved_wallet = wallet(&db, &owner_id).await;
-    assert_eq!(saved_wallet.reserved_credits, 0);
-    assert_eq!(saved_wallet.pending_lago_debits, 1);
+    assert_eq!(
+        saved_wallet.reserved_credits,
+        crate::models::credits::Credits::from_whole(0)
+    );
+    assert_eq!(
+        saved_wallet.pending_lago_debits,
+        crate::models::credits::Credits::from_whole(1)
+    );
     downstream.abort();
 }
 

@@ -1,3 +1,4 @@
+import { creditsSchema } from "./credits";
 import { z } from "zod";
 import { BILLING_METRICS } from "./billing-metrics";
 import { usageStatsSchema } from "./admin-usage";
@@ -97,6 +98,7 @@ const amount = z.number().int().nonnegative().nullable();
 const analyticsPointSchema = z.object({
   bucket: z.iso.datetime({ offset: true }),
   value: amount,
+  exact_value: creditsSchema.nullable().optional(),
   requests: z.number().nonnegative(),
   unknown_cost_events: z.number().nonnegative(),
 });
@@ -114,6 +116,7 @@ export const analyticsResponseSchema = z.object({
   granularity: z.enum(["hour", "day", "week", "month"]),
   unit: z.string(),
   total: amount,
+  exact_total: creditsSchema.nullable().optional(),
   totals: usageStatsSchema,
   points: z.array(analyticsPointSchema),
   series: z
@@ -130,6 +133,7 @@ export const analyticsResponseSchema = z.object({
       id: z.string().nullable(),
       label: z.string(),
       value: amount,
+      exact_value: creditsSchema.nullable().optional(),
       unknown_cost_events: z.number().nonnegative(),
       is_other: z.boolean(),
     }),

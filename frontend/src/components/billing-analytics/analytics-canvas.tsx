@@ -182,7 +182,11 @@ function Summary({
   const stats = [
     {
       label: "Gross cost",
-      value: formatAnalyticsValue(data.total, "microcredits", true),
+      value: formatAnalyticsValue(
+        data.exact_total === undefined ? data.total : data.exact_total,
+        "microcredits",
+        true,
+      ),
       suffix: "credits",
       note: data.totals.unknown_cost_events
         ? "Some costs are unavailable"

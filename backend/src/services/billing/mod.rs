@@ -26,13 +26,123 @@ use crate::config::AppConfig;
 use crate::db::DbHandle;
 use crate::errors::AppResult;
 use crate::models::billing_wallet::{BillingWallet, COLLECTION_NAME as BILLING_WALLET};
+use chrono::{DateTime, Utc};
+use futures::TryStreamExt;
 use lago_client::{LagoApi, LagoClient};
-use mongodb::bson::doc;
+use mongodb::bson::{Document, doc};
 
 pub use meter::MeteredProxyContext;
 pub use owner_resolver::BillingOwnerResolver;
 pub use route_context::{BillingRouteContext, NodeIntent};
 pub use route_inventory::BillingIngress;
+
+#[derive(Clone, Debug)]
+pub struct BillingStartupDiagnostic {
+    pub code: String,
+    pub summary: String,
+    pub detail: String,
+    pub remediation: String,
+    pub detected_at: DateTime<Utc>,
+}
+
+/// Collect billing cutover and provider-rate diagnostics for the admin
+/// integrity surface. Keeping the queries here preserves handler/service
+/// layering and gives operators actionable failed-document identifiers.
+pub async fn startup_diagnostics(
+    db: &mongodb::Database,
+) -> AppResult<Vec<BillingStartupDiagnostic>> {
+    let mut items = Vec::new();
+    let migration = db
+        .collection::<Document>("billing_migrations")
+        .find_one(doc! {
+            "_id": exact_migration::BILLING_MARKER,
+            "completed_at": { "$exists": false },
+        })
+        .await?;
+    if let Some(marker) = migration {
+        let errors = db.collection::<Document>("billing_migration_errors");
+        let count = errors.count_documents(doc! {}).await?;
+        let keys: Vec<String> = errors
+            .find(doc! {})
+            .sort(doc! { "_id": 1 })
+            .limit(5)
+            .await?
+            .try_collect::<Vec<_>>()
+            .await?
+            .into_iter()
+            .filter_map(|row| row.get_str("_id").ok().map(str::to_owned))
+            .collect();
+        let detail = if count == 0 {
+            marker
+                .get_str("detail")
+                .unwrap_or("Migration is running")
+                .to_owned()
+        } else {
+            format!("{count} failed documents; first keys: {}", keys.join(", "))
+        };
+        items.push(BillingStartupDiagnostic {
+            code: "billing_exact_cutover".into(),
+            summary: "Billing cutover is pending".into(),
+            detail,
+            remediation: "Drain old billing writers and acknowledge the exact-accounting cutover"
+                .into(),
+            detected_at: marker
+                .get_datetime("updated_at")
+                .map(|value| value.to_chrono())
+                .unwrap_or_else(|_| Utc::now()),
+        });
+    }
+    let rollup = db
+        .collection::<Document>("billing_migrations")
+        .find_one(doc! {
+            "_id": exact_migration::ROLLUP_MARKER,
+            "completed_at": { "$exists": false },
+        })
+        .await?;
+    if let Some(marker) = rollup {
+        items.push(BillingStartupDiagnostic {
+            code: "billing_rollup_normalization".into(),
+            summary: "Billing analytics normalization is in progress".into(),
+            detail: marker
+                .get_str("detail")
+                .unwrap_or("Derived rollups are still being normalized")
+                .to_owned(),
+            remediation: "Analytics will continue using the legacy-tolerant reduction until normalization completes".into(),
+            detected_at: marker
+                .get_datetime("updated_at")
+                .map(|value| value.to_chrono())
+                .unwrap_or_else(|_| Utc::now()),
+        });
+    }
+    let mut rates = db
+        .collection::<Document>("billing_rate_diagnostics")
+        .find(doc! { "rejected_metrics.0": { "$exists": true } })
+        .await?;
+    while let Some(rate) = rates.try_next().await? {
+        let rejected = rate
+            .get_array("rejected_metrics")
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|value| value.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        items.push(BillingStartupDiagnostic {
+            code: "billing_invalid_rates".into(),
+            summary: "Some Lago metrics cannot be billed".into(),
+            detail: format!("Rejected metrics: {rejected}"),
+            remediation: "Correct negative, overflowing or sub-picocredit rates in the Lago plan"
+                .into(),
+            detected_at: rate
+                .get_datetime("updated_at")
+                .map(|value| value.to_chrono())
+                .unwrap_or_else(|_| Utc::now()),
+        });
+    }
+    Ok(items)
+}
 
 #[derive(Clone)]
 pub struct BillingService {
@@ -169,6 +279,13 @@ impl BillingService {
             return Ok(false);
         };
         pricing::sync_service_price(&self.db, lago, &self.config.lago_plan_code, service).await
+    }
+
+    pub fn spawn_refresh_worker(&self) {
+        if !self.config.billing_enabled {
+            return;
+        }
+        webhook::spawn_refresh_worker(self.db.clone(), self.lago.clone());
     }
 
     pub fn reconciler(&self) -> reconcile::BillingReconciler {
@@ -516,9 +633,18 @@ mod tests {
             .expect("find usage row")
             .expect("row exists");
 
-        assert_eq!(wallet.reserved_credits, 0);
-        assert_eq!(wallet.pending_lago_debits, 0);
-        assert_eq!(row.reserved_credits, 0);
+        assert_eq!(
+            wallet.reserved_credits,
+            crate::models::credits::Credits::from_whole(0)
+        );
+        assert_eq!(
+            wallet.pending_lago_debits,
+            crate::models::credits::Credits::from_whole(0)
+        );
+        assert_eq!(
+            row.reserved_credits,
+            crate::models::credits::Credits::from_whole(0)
+        );
         assert!(row.wallet_id.is_none());
     }
 
@@ -559,7 +685,10 @@ mod tests {
             .expect("row exists");
 
         assert_eq!(row.layer, BillingLayer::Platform);
-        assert_eq!(row.reserved_credits, 0);
+        assert_eq!(
+            row.reserved_credits,
+            crate::models::credits::Credits::from_whole(0)
+        );
         assert!(row.wallet_id.is_none());
     }
 
@@ -704,7 +833,10 @@ mod tests {
             .await
             .expect("count usage rows");
 
-        assert_eq!(wallet.reserved_credits, 1);
+        assert_eq!(
+            wallet.reserved_credits,
+            crate::models::credits::Credits::from_whole(1)
+        );
         assert_eq!(row_count, 1);
     }
 
@@ -781,7 +913,10 @@ mod tests {
             .await
             .expect("find usage row")
             .expect("usage row exists");
-        assert_eq!(wallet.reserved_credits, 0);
+        assert_eq!(
+            wallet.reserved_credits,
+            crate::models::credits::Credits::from_whole(0)
+        );
         assert_eq!(row.status, crate::models::usage_meter::UsageStatus::Failed);
     }
 
@@ -1100,6 +1235,8 @@ mod tests {
                 .await
                 .unwrap();
         assert!(report.break_info.is_none());
+        // Admission no longer migrates this directly inserted wallet fixture:
+        // cutover owns openings, so this chain contains only the two settlements.
         assert_eq!(report.checked_count, 2);
         let stale_snapshot = catalog.clone();
         let mut cleared = ServiceBilling::default();
@@ -1532,12 +1669,18 @@ mod tests {
         ] {
             let row = rows.iter().find(|row| row.metric == metric).unwrap();
             let funding = row.funding.as_ref().unwrap();
-            assert_eq!(funding.total_charge_micros, Some(gross));
             assert_eq!(
-                funding.allowance_funded_micros.unwrap_or(0)
-                    + funding.grant_funded_micros.unwrap_or(0)
-                    + funding.wallet_funded_micros.unwrap_or(0),
-                gross
+                funding.total_charge,
+                Some(crate::models::credits::Credits::from_micros(gross))
+            );
+            assert_eq!(
+                crate::models::credits::Credits::checked_sum([
+                    funding.allowance_funded.unwrap_or_default(),
+                    funding.grant_funded.unwrap_or_default(),
+                    funding.wallet_funded.unwrap_or_default(),
+                ])
+                .unwrap(),
+                crate::models::credits::Credits::from_micros(gross)
             );
             if metric == BillingMetric::InputTokens {
                 assert_eq!(funding.allowance_funded_quantity, Some(4_000_000));
@@ -1546,14 +1689,21 @@ mod tests {
             }
             if metric == BillingMetric::Images {
                 assert_eq!(funding.lago_billable_quantity_micros, Some(0));
-                assert_eq!(funding.wallet_charge_credits, Some(0));
+                assert_eq!(
+                    funding.wallet_charge_credits,
+                    Some(crate::models::credits::Credits::from_whole(0))
+                );
             }
         }
         assert_eq!(
             rows.iter()
-                .map(|r| r.funding.as_ref().unwrap().grant_funded_micros.unwrap_or(0))
-                .sum::<i64>(),
-            1_000_000
+                .map(|r| r.funding.as_ref().unwrap().grant_funded.unwrap_or_default())
+                .try_fold(
+                    crate::models::credits::Credits::ZERO,
+                    crate::models::credits::Credits::checked_add
+                )
+                .unwrap(),
+            crate::models::credits::Credits::from_whole(1)
         );
         let wallet = db
             .collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
@@ -1561,15 +1711,19 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(wallet.reserved_credits, 0);
-        assert_eq!(wallet.pending_lago_debits, 3);
+        assert_eq!(
+            wallet.reserved_credits,
+            crate::models::credits::Credits::from_whole(0)
+        );
+        // Issue #1672: component wallet remainders are no longer rounded up.
+        assert_eq!(wallet.pending_lago_debits.to_string(), "1.500005");
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
                 if db
                     .collection::<mongodb::bson::Document>(
                         crate::models::billing_ledger::COLLECTION_NAME,
                     )
-                    .count_documents(doc! {"event_type":"usage_settled"})
+                    .count_documents(doc! {"movement":"usage_settled"})
                     .await
                     .unwrap()
                     == 2
@@ -1583,7 +1737,7 @@ mod tests {
         .expect("component ledger entries durable");
         let entries: Vec<crate::models::billing_ledger::BillingLedgerEntry> = db
             .collection(crate::models::billing_ledger::COLLECTION_NAME)
-            .find(doc! { "event_type": "usage_settled" })
+            .find(doc! { "movement": "usage_settled" })
             .await
             .unwrap()
             .try_collect()
@@ -1596,13 +1750,13 @@ mod tests {
                 .unwrap();
             assert_eq!(entry.metric, Some(row.metric));
             assert_eq!(
-                entry.amount_credits,
+                entry.postings.first().map(|posting| posting.amount),
                 row.funding.as_ref().unwrap().wallet_charge_credits
             );
         }
         let grant_entries: Vec<crate::models::billing_ledger::BillingLedgerEntry> = db
             .collection(crate::models::billing_ledger::COLLECTION_NAME)
-            .find(doc! { "event_type": "grant_consumed" })
+            .find(doc! { "movement": "grant_consumed" })
             .await
             .unwrap()
             .try_collect()
@@ -1611,9 +1765,13 @@ mod tests {
         assert_eq!(
             grant_entries
                 .iter()
-                .map(|entry| entry.amount_micros.unwrap_or(0))
-                .sum::<i64>(),
-            1_000_000
+                .map(|entry| entry.postings[0].amount)
+                .try_fold(
+                    crate::models::credits::Credits::ZERO,
+                    crate::models::credits::Credits::checked_add
+                )
+                .unwrap(),
+            crate::models::credits::Credits::from_whole(1)
         );
         let report =
             ledger::verify_chain(&db, &ledger::TEST_BILLING_LEDGER_HMAC_KEY, None, None, None)
@@ -1709,7 +1867,7 @@ mod tests {
             self.wallet_creates.fetch_add(1, Ordering::SeqCst);
             Ok(LagoWallet {
                 id: format!("{customer_id}:wallet"),
-                balance_credits: 100,
+                balance_credits: crate::models::credits::Credits::from_whole(100),
             })
         }
 
@@ -1765,12 +1923,12 @@ mod tests {
                 lago_wallet_id: Some(format!("{owner_id}:wallet")),
                 lago_subscription_id: Some(format!("{owner_id}:plan")),
                 plan_kind: PlanKind::Prepaid,
-                balance_credits: 100,
-                reserved_credits: 0,
-                pending_lago_debits: 0,
-                pending_topup_expiry_credits: 0,
+                balance_credits: crate::models::credits::Credits::from_whole(100),
+                reserved_credits: crate::models::credits::Credits::from_whole(0),
+                pending_lago_debits: crate::models::credits::Credits::from_whole(0),
+                pending_topup_expiry_credits: crate::models::credits::Credits::from_whole(0),
                 has_payment_instrument: false,
-                overdraft_cap_credits: 0,
+                overdraft_cap_credits: crate::models::credits::Credits::from_whole(0),
                 suspended: false,
                 collection_state: CollectionState::Good,
                 topup_expiry_checked_at: None,
@@ -1783,3 +1941,15 @@ mod tests {
             .expect("insert wallet");
     }
 }
+
+pub mod lago_carry;
+
+pub mod exact_migration;
+
+pub mod account_reconciliation;
+
+#[cfg(test)]
+mod exact_tests;
+
+#[cfg(test)]
+mod legacy_v1_fixture;

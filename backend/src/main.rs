@@ -424,6 +424,12 @@ async fn main() {
         Some(&jwt_private_key_pem),
     );
     services::billing::ledger::init_billing_ledger_hmac_key(billing_ledger_hmac_key.clone());
+    services::billing::exact_migration::spawn(db.clone(), config.billing_exact_cutover_drained);
+    services::billing::account_reconciliation::spawn(
+        db.clone(),
+        config.billing_enabled,
+        config.chain_verify_interval_secs,
+    );
     let billing_ledger_hmac_key = Arc::new(billing_ledger_hmac_key);
     let internal_dispatch_hmac_key = services::internal_auth::derive_key(
         config.internal_dispatch_hmac_key.as_deref(),
@@ -966,6 +972,7 @@ async fn main() {
         state.billing.reconciler(),
         config.billing_reconcile_interval_secs,
     );
+    state.billing.spawn_refresh_worker();
     spawn_broker_policy_refresh_task(state.clone());
 
     let login_cleanup_db = state.db.clone();

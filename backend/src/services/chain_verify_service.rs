@@ -247,6 +247,8 @@ mod tests {
             prev_hash: String::new(),
             entry_hash: String::new(),
             event_type: BillingLedgerEventType::UsageSettled,
+            movement: None,
+            postings: Vec::new(),
             owner_id: "owner-sweep".to_string(),
             reference_id: reference.to_string(),
             transaction_id: None,

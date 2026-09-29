@@ -445,3 +445,30 @@ it("merges every grant into one row with a soonest-expiring table", async () => 
     vi.useRealTimers();
   }
 });
+
+it("keeps an exact sub-micro grant balance visible", () => {
+  mocks.grants.mockReturnValue({
+    ...query(null),
+    data: {
+      grants: [
+        billingGrant({
+          amount: "1",
+          remaining: "0.0000008",
+          reserved: "0",
+          remaining_micros: 0,
+          reserved_micros: 0,
+        }),
+      ],
+    },
+  });
+  mocks.allowances.mockReturnValue({
+    ...query(null),
+    data: { allowances: [] },
+  });
+  render(<BillingBenefits />);
+  expect(
+    screen.getByText("<0.01 credits", {
+      selector: ".compact-grant-balance > strong",
+    }),
+  ).toBeVisible();
+});

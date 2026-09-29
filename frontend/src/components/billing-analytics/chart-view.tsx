@@ -1,3 +1,4 @@
+import { analyticsAmount, plotAmount } from "@/lib/usage-analytics";
 import { useId, type CSSProperties } from "react";
 import {
   Area,
@@ -119,21 +120,33 @@ export function ChartView({
   const chartId = useId().replace(/:/g, "");
   const seriesData = data.points.map((point, index) => ({
     ...point,
+    value: plotAmount(point),
+    ...Object.fromEntries(
+      data.series.map((series, indexOfSeries) => [
+        `exactseries${indexOfSeries}`,
+        analyticsAmount(series.points[index] ?? { value: null }),
+      ]),
+    ),
     ...Object.fromEntries(
       data.series.map((series, seriesIndex) => [
         `series${seriesIndex}`,
-        series.points[index]?.value ?? null,
+        plotAmount(series.points[index] ?? { value: null }),
       ]),
     ),
   }));
   const temporal = panel.chart === "line" || panel.chart === "combo";
   const color = (index: number, other: boolean) =>
     seriesColor(panel.chart === "bar" ? 0 : index, other);
-  const format = (value: number | null, compact = false) =>
+  const format = (value: string | number | null, compact = false) =>
     formatAnalyticsValue(value, data.unit, compact);
   const unit = unitLabel(data.unit);
   const unknown = data.totals.unknown_cost_events;
-  const pieData = data.slices.filter(
+  const plotSlices = data.slices.map((slice, index) => ({
+    ...slice,
+    value: plotAmount(slice),
+    index,
+  }));
+  const pieData = plotSlices.filter(
     (slice) => slice.value !== null && slice.value > 0,
   );
   const noUsage = data.totals.events === 0;
@@ -202,7 +215,7 @@ export function ChartView({
             {pieData.map((slice, index) => (
               <Cell
                 key={`${slice.id}-${index}`}
-                fill={color(data.slices.indexOf(slice), slice.is_other)}
+                fill={color(slice.index, slice.is_other)}
               />
             ))}
           </Pie>
@@ -211,8 +224,8 @@ export function ChartView({
             itemStyle={tooltipTextStyle}
             labelStyle={tooltipTextStyle}
             filterNull={false}
-            formatter={(v, name) => [
-              `${format(v == null ? null : Number(v))} ${unit}`,
+            formatter={(v, name, item) => [
+              `${format(item.payload?.[`exact${String(item.dataKey)}`] ?? item.payload?.exact_value ?? (v == null ? null : Number(v)))} ${unit}`,
               name,
             ]}
           />
@@ -234,7 +247,7 @@ export function ChartView({
     >
       <BarChart
         accessibilityLayer
-        data={data.slices}
+        data={plotSlices}
         layout="vertical"
         margin={{ top: 8, right: 20, bottom: 4, left: 0 }}
       >
@@ -277,7 +290,9 @@ export function ChartView({
           labelStyle={tooltipTextStyle}
           filterNull={false}
           cursor={{ fill: "var(--color-muted)", opacity: 0.4 }}
-          formatter={(v) => [`${format(v == null ? null : Number(v))} ${unit}`]}
+          formatter={(v, _name, item) => [
+            `${format(item.payload?.[`exact${String(item.dataKey)}`] ?? item.payload?.exact_value ?? (v == null ? null : Number(v)))} ${unit}`,
+          ]}
         />
         <Bar
           dataKey="value"
@@ -356,7 +371,10 @@ export function ChartView({
             formatter={(v, name, item) =>
               item.dataKey === "requests"
                 ? [formatAnalyticsValue(Number(v), "requests"), "Requests"]
-                : [`${format(v == null ? null : Number(v))} ${unit}`, name]
+                : [
+                    `${format(item.payload?.[`exact${String(item.dataKey)}`] ?? item.payload?.exact_value ?? (v == null ? null : Number(v)))} ${unit}`,
+                    name,
+                  ]
             }
           />
           {data.series.map((series, index) => (
@@ -429,8 +447,8 @@ export function ChartView({
             labelStyle={tooltipTextStyle}
             filterNull={false}
             labelFormatter={(label) => timeLabel(String(label))}
-            formatter={(v, name) => [
-              `${format(v == null ? null : Number(v))} ${unit}`,
+            formatter={(v, name, item) => [
+              `${format(item.payload?.[`exact${String(item.dataKey)}`] ?? item.payload?.exact_value ?? (v == null ? null : Number(v)))} ${unit}`,
               name,
             ]}
           />
@@ -490,7 +508,10 @@ export function ChartView({
               compact ? "text-[22px]" : "text-[28px]",
             )}
           >
-            {format(data.total, true)}
+            {format(
+              data.exact_total === undefined ? data.total : data.exact_total,
+              true,
+            )}
           </span>
           <span className="ml-2 text-[11px] text-muted-foreground">{unit}</span>
         </div>
@@ -560,7 +581,7 @@ export function ChartView({
                 "flex items-center justify-between gap-3 text-[11px]",
                 compact && "max-w-[46%]",
               )}
-              title={`${slice.label}: ${format(slice.value)} ${unit}`}
+              title={`${slice.label}: ${format(analyticsAmount(slice))} ${unit}`}
             >
               <div className="flex min-w-0 items-center gap-2">
                 <span
@@ -590,7 +611,7 @@ export function ChartView({
                   compact && "sr-only",
                 )}
               >
-                {format(slice.value)}
+                {format(analyticsAmount(slice))}
               </span>
             </div>
           ))}
@@ -638,7 +659,7 @@ export function ChartView({
                           {timeLabel(point.bucket)}
                         </td>
                         <td className="px-3 py-2 text-right font-mono">
-                          {format(point.value)}
+                          {format(analyticsAmount(point))}
                         </td>
                         {panel.top !== 0 &&
                           data.series.map((series, index) => (
@@ -646,7 +667,11 @@ export function ChartView({
                               key={index}
                               className="px-3 py-2 text-right font-mono"
                             >
-                              {format(series.points[pointIndex]?.value ?? null)}
+                              {format(
+                                analyticsAmount(
+                                  series.points[pointIndex] ?? { value: null },
+                                ),
+                              )}
                             </td>
                           ))}
                         {panel.chart === "combo" && (
@@ -660,7 +685,7 @@ export function ChartView({
                       <tr key={index} className="border-t border-border/40">
                         <td className="px-3 py-2">{slice.label}</td>
                         <td className="px-3 py-2 text-right font-mono">
-                          {format(slice.value)}
+                          {format(analyticsAmount(slice))}
                         </td>
                       </tr>
                     ))}

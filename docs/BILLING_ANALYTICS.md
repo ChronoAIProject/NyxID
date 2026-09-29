@@ -186,7 +186,7 @@ Totals, filters, and whole-window Top N membership are independent of the interv
 | Billing events | Metering records; one request can generate several. |
 | Total, input, output, cache-read, cache-write tokens | Provider-reported token fields on the primary record. Total is input + output; caches may overlap and are not added again. |
 | Billed units | The selected metered quantity: requests, tokens, input/output/cache tokens, bytes, or images. Billed input can differ from provider-reported input. |
-| Gross, wallet, grant, allowance cost | Existing microcredit amounts, displayed as credits. These are usage costs, not fiat revenue or wallet balances. |
+| Gross, wallet, grant, allowance cost | Exact decimal-credit strings; legacy micros are aggregate display projections. These are usage costs, not fiat revenue or wallet balances. |
 | Exact-cost, legacy, uncosted events | Cost provenance counts. Legacy and uncosted can overlap; they are not three mutually exclusive shares. |
 | Active users and services | Existing distinct whole-window totals in the summary. Do not sum distinct counts across groups or periods. |
 
@@ -295,7 +295,7 @@ Ranking uses the complete selected population. Top 5/10 plus Other keeps the sam
 groups throughout a time series. Empty buckets are zero; cost buckets or groups
 containing unpriced usage are unavailable, and line charts leave gaps. The UI
 reports unknown-cost coverage and historical cached-rate estimates. Credit values
-are converted from microcredits only for display. Duplicate display names and real
+use exact decimal strings for totals and labels; only chart coordinates convert to Number. Duplicate display names and real
 entities named Other are disambiguated in both slices and series.
 
 There is no fixed panel-count limit. The server limits each filter to 20 values,
@@ -364,3 +364,18 @@ replica set. From the repository root:
 cargo test -p nyxid --bin nyxid-server services::admin_usage_service::tests --no-default-features
 cargo test -p nyxid --bin nyxid-server usage_workspace --no-default-features
 ```
+
+
+Exact accounting (0.31): cost analytics expose `exact_value` and `exact_total` as
+additive strings. Hourly/daily buckets sum Decimal128 credits, converting legacy
+integer micro measures before each increment. Totals truncate only when producing
+legacy integer response fields. Sorting uses exact values; chart labels retain
+decimals and tiny nonzero costs remain visible. See BILLING_EXACT_ACCOUNTING.md.
+
+Exact monetary BSON keys have no `_micros` suffix and store Decimal128 credits.
+For mixed historical data, use `$ifNull: ["$funding.total_charge",
+{ $divide: [{ $toDecimal: "$funding.total_charge_micros" }, 1000000] }]`
+(and the corresponding funding/cost key) before summing. New keys take precedence.
+The service's `credit_expr` also handles the pre-release Decimal128 legacy-key
+format; production scripts must never infer units from `_micros` alone.
+Rollup `legacy_grant_cost` replaces legacy integer `legacy_grant`.

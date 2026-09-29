@@ -296,7 +296,7 @@ async fn sync_lane_component(
         format!("{path}.metric"): bson::to_bson(&lane.metric).expect("metric serialization"),
     };
     if synced {
-        let micros = super::lago_client::decimal_credits_to_micros(&lane.credits_per_unit)
+        let pico = decimal_to_pico(&lane.credits_per_unit)
             .ok_or_else(|| AppError::Internal("stored lane price is invalid".to_string()))?;
         db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
             .replace_one(
@@ -305,8 +305,8 @@ async fn sync_lane_component(
                     id: BillingRateCache::cache_id(&lane.lago_metric_code, None),
                     lago_metric_code: lane.lago_metric_code.clone(),
                     model: None,
-                    credits_per_unit_micros: micros,
-                    credits_per_unit_pico: decimal_to_pico(&lane.credits_per_unit),
+                    credits_per_unit_micros: pico / 1_000_000,
+                    credits_per_unit_pico: Some(pico),
                     synced_at: Utc::now(),
                 },
             )
@@ -429,10 +429,8 @@ async fn sync_legacy_price(
 
     match lago.sync_standard_charge(plan_code, &input).await {
         Ok(()) => {
-            let micros = super::lago_client::decimal_credits_to_micros(&pricing.credits_per_unit)
-                .ok_or_else(|| {
-                AppError::Internal("stored service price is invalid".to_string())
-            })?;
+            let pico = decimal_to_pico(&pricing.credits_per_unit)
+                .ok_or_else(|| AppError::Internal("stored service price is invalid".to_string()))?;
             if !set_sync_state(
                 db,
                 &service.id,
@@ -468,8 +466,8 @@ async fn sync_legacy_price(
                         id: BillingRateCache::cache_id(&pricing.lago_metric_code, None),
                         lago_metric_code: pricing.lago_metric_code.clone(),
                         model: None,
-                        credits_per_unit_micros: micros,
-                        credits_per_unit_pico: decimal_to_pico(&pricing.credits_per_unit),
+                        credits_per_unit_micros: pico / 1_000_000,
+                        credits_per_unit_pico: Some(pico),
                         synced_at: Utc::now(),
                     },
                 )

@@ -1,3 +1,4 @@
+use crate::models::credits::Credits;
 use std::collections::HashSet;
 
 use chrono::{DateTime, Duration, Utc};
@@ -21,7 +22,7 @@ use crate::models::credit_schedule_period::{
 };
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 
-use super::grants::{CREDIT_MICROS, MAX_GRANT_CREDITS, MAX_GRANT_REASON_LEN};
+use super::grants::{MAX_GRANT_CREDITS, MAX_GRANT_REASON_LEN};
 
 mod progress;
 
@@ -82,7 +83,7 @@ pub async fn create_schedule(
     db: &mongodb::Database,
     input: CreateScheduleInput,
 ) -> AppResult<CreditSchedule> {
-    let amount_micros = validate_amount(input.amount_credits)?;
+    let amount = validate_amount(input.amount_credits)?;
     validate_expiry(&input.expiry)?;
     super::targets::validate_shape(
         input.target_kind,
@@ -104,7 +105,7 @@ pub async fn create_schedule(
     let schedule = CreditSchedule {
         id: Uuid::new_v4().to_string(),
         amount_credits: input.amount_credits,
-        amount_micros,
+        amount,
         recurrence: input.recurrence,
         expiry: input.expiry,
         target_kind: input.target_kind,
@@ -147,7 +148,7 @@ async fn update_schedule_with_current(
     current: CreditSchedule,
 ) -> AppResult<CreditSchedule> {
     let amount_credits = input.amount_credits.unwrap_or(current.amount_credits);
-    let amount_micros = validate_amount(amount_credits)?;
+    let amount = validate_amount(amount_credits)?;
     let expiry = input.expiry.unwrap_or_else(|| current.expiry.clone());
     validate_expiry(&expiry)?;
     let target_kind = input.target_kind.unwrap_or(current.target_kind);
@@ -206,7 +207,7 @@ async fn update_schedule_with_current(
             },
             doc! { "$set": {
                 "amount_credits": amount_credits,
-                "amount_micros": amount_micros,
+                "amount": amount,
                 "expiry": encode(&expiry, "schedule expiry")?,
                 "target_kind": encode(&target_kind, "schedule target kind")?,
                 "target_user_ids": encode(&target_user_ids, "schedule targets")?,
@@ -276,6 +277,7 @@ pub async fn disburse_due(
     now: DateTime<Utc>,
     budget: usize,
 ) -> AppResult<DisbursementStats> {
+    super::exact_migration::require_ready(db).await?;
     let mut stats = DisbursementStats::default();
     abandon_elapsed_periods(db, now, &mut stats).await?;
     if budget == 0 {
@@ -345,7 +347,7 @@ pub async fn disburse_due(
                     BillingLedgerEventType::GrantIssued,
                     &grant.recipient_user_id,
                     &grant.id,
-                    grant.amount_micros,
+                    grant.amount,
                     None,
                     format!("grant-issued:{}", grant.id),
                 )
@@ -434,7 +436,7 @@ async fn claim_period(
             "period_start": bson::DateTime::from_chrono(period.start),
             "period_end": bson::DateTime::from_chrono(period.end),
             "status": "disbursing",
-            "amount_micros": schedule.amount_micros,
+            "amount": schedule.amount,
             "expires_at": resolve_expiry(&schedule.expiry, &period, claim_time)
                 .map_or(Bson::Null, |value| bson::DateTime::from_chrono(value).into()),
             "target_kind": encode(&schedule.target_kind, "period target kind")?,
@@ -565,10 +567,10 @@ fn grants_for_recipients(
             target_kind: period.target_kind,
             target_org_ids: period.target_org_ids.clone(),
             target_group_ids: period.target_group_ids.clone(),
-            amount_credits: period.amount_micros / CREDIT_MICROS,
-            amount_micros: period.amount_micros,
-            remaining_micros: period.amount_micros,
-            reserved_micros: 0,
+            amount_credits: period.amount.display_whole(),
+            amount: period.amount,
+            remaining: period.amount,
+            reserved: Credits::ZERO,
             scope: period.scope.clone(),
             expires_at: period.expires_at,
             reason: period.reason.clone(),
@@ -576,7 +578,7 @@ fn grants_for_recipients(
             status: CreditGrantStatus::Active,
             issued_ledgered_at: None,
             terminal_ledgered_at: None,
-            terminal_amount_micros: 0,
+            terminal_amount: Credits::ZERO,
             active_settlement: None,
             created_at: now,
             updated_at: now,
@@ -769,15 +771,13 @@ async fn abandon_elapsed_periods(
     Ok(())
 }
 
-fn validate_amount(amount_credits: i64) -> AppResult<i64> {
+fn validate_amount(amount_credits: i64) -> AppResult<Credits> {
     if !(1..=MAX_GRANT_CREDITS).contains(&amount_credits) {
         return Err(AppError::ValidationError(format!(
             "amount_credits must be between 1 and {MAX_GRANT_CREDITS}"
         )));
     }
-    amount_credits
-        .checked_mul(CREDIT_MICROS)
-        .ok_or_else(|| AppError::ValidationError("credit schedule amount is too large".to_string()))
+    Ok(Credits::from_whole(amount_credits))
 }
 
 fn validate_expiry(expiry: &CreditExpiryPolicy) -> AppResult<()> {
