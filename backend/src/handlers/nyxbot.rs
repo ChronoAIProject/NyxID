@@ -1118,22 +1118,26 @@ pub(crate) async fn switch_to_gateway(state: &AppState) -> AppResult<()> {
             let _ = key_service::delete_api_key(&state.db, &stuck.user_id, &key).await;
         }
     }
-    // Only platforms whose flag somebody has turned on.
-    let mut enabled: Vec<&str> = Vec::new();
+    // Only platforms whose flag somebody has turned on; a platform piloted on
+    // a few people only looks at their bots.
+    let mut platforms: Vec<bson::Document> = Vec::new();
     for (platform, flag) in feature_flag_service::NYXBOT_GATEWAY_FLAGS {
-        if feature_flag_service::flag_may_be_enabled(&state.db, flag).await? {
-            enabled.push(platform);
+        match feature_flag_service::flag_enabled_people(&state.db, flag).await? {
+            None => platforms.push(doc! {"platform": platform}),
+            Some(people) if !people.is_empty() => {
+                platforms.push(doc! {"platform": platform, "user_id": {"$in": people}});
+            }
+            Some(_) => {}
         }
     }
-    if enabled.is_empty() {
+    if platforms.is_empty() {
         return Ok(());
     }
     let due = bson::DateTime::from_chrono(now - ChronoDuration::hours(GATEWAY_RETRY_HOURS));
     let filter = doc! {"status": "active", "transport": "direct",
-    "bot_owner_id": bson::Bson::Null, "platform": {"$in": &enabled},
-    "owner_sender_ids.0": {"$exists": true},
-    "$or": [{"gateway_attempted_at": bson::Bson::Null},
-        {"gateway_attempted_at": {"$lt": due}}]};
+    "bot_owner_id": bson::Bson::Null, "owner_sender_ids.0": {"$exists": true},
+    "$and": [{"$or": platforms}, {"$or": [{"gateway_attempted_at": bson::Bson::Null},
+        {"gateway_attempted_at": {"$lt": due}}]}]};
     // Claim it, so replicas do not move the same bot at once; the longest
     // waiting bot first.
     let Some(row) = channels

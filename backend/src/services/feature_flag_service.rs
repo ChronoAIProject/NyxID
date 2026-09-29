@@ -582,18 +582,31 @@ pub async fn personal_flag_enabled(
         .any(|key| key == flag_key))
 }
 
-/// Whether a flag can be on for anyone: its default, or any enabling
-/// override. Lets background work skip a flag nobody has turned on.
-pub async fn flag_may_be_enabled(db: &mongodb::Database, flag_key: &str) -> AppResult<bool> {
+/// Who a flag can be on for, so background work can skip a flag nobody has
+/// turned on and narrow one piloted on a few people: `None` when it may be on
+/// for anyone (on by default, or enabled globally or for an org), else exactly
+/// the people with a personal enabling override (empty: nobody).
+pub async fn flag_enabled_people(
+    db: &mongodb::Database,
+    flag_key: &str,
+) -> AppResult<Option<Vec<String>>> {
     if find_flag(flag_key).is_some_and(|flag| flag.default_enabled) {
-        return Ok(true);
+        return Ok(None);
     }
-    Ok(db
+    let rows: Vec<FeatureFlagOverride> = db
         .collection::<FeatureFlagOverride>(COLLECTION_NAME)
-        .count_documents(doc! { "flag_key": flag_key, "enabled": true })
-        .limit(1)
+        .find(doc! { "flag_key": flag_key, "enabled": true })
         .await?
-        > 0)
+        .try_collect()
+        .await?;
+    let mut people = Vec::new();
+    for row in rows {
+        match (row.org_user_id.as_deref(), row.target_kind, row.target_key) {
+            (None, FlagTargetKind::User, Some(user_id)) => people.push(user_id),
+            _ => return Ok(None),
+        }
+    }
+    Ok(Some(people))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

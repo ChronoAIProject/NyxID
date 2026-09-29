@@ -3506,27 +3506,37 @@ async fn gateway_platforms_follow_their_feature_flags() {
             .unwrap()
     );
     assert!(!gateway_enabled(&state, OWNER, "lark").await.unwrap());
-    assert!(
-        !crate::services::feature_flag_service::flag_may_be_enabled(
-            &state.db,
-            gateway_flag("lark").unwrap()
-        )
-        .await
-        .unwrap()
-    );
+    let people = |state: &AppState| {
+        let db = state.db.clone();
+        async move {
+            crate::services::feature_flag_service::flag_enabled_people(
+                &db,
+                gateway_flag("lark").unwrap(),
+            )
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(people(&state).await, Some(Vec::new()));
     enable_gateway_for(&state, "lark", OWNER).await;
     assert!(gateway_enabled(&state, OWNER, "lark").await.unwrap());
     assert!(!gateway_enabled(&state, &other, "lark").await.unwrap());
     assert!(!gateway_enabled(&state, OWNER, "feishu").await.unwrap());
     assert!(!gateway_enabled(&state, OWNER, "openclaw").await.unwrap());
-    assert!(
-        crate::services::feature_flag_service::flag_may_be_enabled(
-            &state.db,
-            gateway_flag("lark").unwrap()
-        )
-        .await
-        .unwrap()
-    );
+    // Piloted on one person: only their bots are looked at; enabled for
+    // everyone: anyone's.
+    assert_eq!(people(&state).await, Some(vec![OWNER.to_owned()]));
+    crate::services::feature_flag_service::set_platform_override(
+        &state.db,
+        gateway_flag("lark").unwrap(),
+        &crate::services::feature_flag_service::FlagTarget::Global,
+        true,
+        OWNER,
+    )
+    .await
+    .unwrap();
+    assert_eq!(people(&state).await, None);
+    assert!(gateway_enabled(&state, &other, "lark").await.unwrap());
     server.abort();
 }
 
@@ -3698,11 +3708,8 @@ async fn personal_bots_move_to_the_gateway_once_it_takes_their_platform() {
     switch_to_gateway(&state).await.unwrap();
     let not_theirs = load_channel(&state, OWNER, &before.id).await.unwrap();
     assert_eq!(not_theirs.transport, "direct");
-    assert!(
-        not_theirs
-            .gateway_attempted_at
-            .is_some_and(|at| at < Utc::now() - ChronoDuration::hours(GATEWAY_RETRY_HOURS - 1))
-    );
+    // Piloted on the other person only: this bot is not even looked at.
+    assert!(not_theirs.gateway_attempted_at.is_none());
     // On for the owner, but nobody has used the bot yet: left alone too.
     enable_gateway_for(&state, "lark", OWNER).await;
     state
