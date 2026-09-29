@@ -60,7 +60,7 @@ function SettingSelect<T extends string>({
 }) {
   return (
     <Select value={value} onValueChange={(next) => onChange(next as T)} disabled={disabled}>
-      <SelectTrigger aria-label={label} className="h-7 w-[150px] rounded-md px-2 text-[12px]">
+      <SelectTrigger aria-label={label} className="h-7 w-full max-w-[220px] rounded-md px-2 text-[12px]">
         <SelectValue />
       </SelectTrigger>
       <SelectContent className="z-[90]">
@@ -107,20 +107,41 @@ function ChatRow({
     }
   }
 
+  const kindLabel =
+    chat.kind === "private" ? "Private chat" : chat.kind === "channel" ? "Channel" : "Group";
+  const summary = group
+    ? `${chat.reply_mode === "all" ? "Answers every message" : "Answers when mentioned or replied to"} · ${
+        chat.members === "everyone"
+          ? "everyone here can talk to it, as guests"
+          : chat.members_setting === "owner"
+            ? "only you can talk to it"
+            : "only you until you talk to the bot here"
+      }`
+    : chat.title === "You"
+      ? "Your private chat with the bot"
+      : `A private chat with ${title}, as a guest`;
+
   return (
     <li className="space-y-2 rounded-md bg-overlay px-2.5 py-2">
       <div className="flex items-center gap-2">
         <ChatKindIcon kind={chat.kind} className="h-3.5 w-3.5 shrink-0 text-text-tertiary" />
         <p className="min-w-0 flex-1 truncate text-[12px] font-medium text-foreground">{title}</p>
+        {chat.kind ? (
+          <span className="shrink-0 rounded-md border border-hairline px-1 text-[10px] text-text-tertiary">
+            {kindLabel}
+          </span>
+        ) : null}
         {chat.last_message_at ? (
           <span className="shrink-0 text-[11px] text-text-tertiary">
             {formatRelativeTime(chat.last_message_at)}
           </span>
         ) : null}
       </div>
-      <div className="flex flex-wrap items-center gap-1.5">
+      <p className="text-[11px] text-muted-foreground">{summary}</p>
+      <div className="grid grid-cols-[auto_1fr] items-center gap-x-3 gap-y-1.5 text-[11px] text-muted-foreground">
         {group ? (
           <>
+            <span>Answers</span>
             <SettingSelect
               label={`Replies in ${title}`}
               value={chat.reply_mode}
@@ -131,6 +152,7 @@ function ChatRow({
               ]}
               onChange={(reply_mode) => void change({ reply_mode })}
             />
+            <span>Who can talk</span>
             <SettingSelect
               label={`Who can talk in ${title}`}
               value={chat.members_setting ?? "default"}
@@ -147,25 +169,24 @@ function ChatRow({
             />
           </>
         ) : null}
+        <span>Answered by</span>
         <SettingSelect
           label={`Agent for ${title}`}
           value={chat.agent_id ?? "default"}
           disabled={update.isPending}
           options={[
-            { value: "default", label: `Bot's agent (${botAgentName})` },
+            { value: "default", label: `${botAgentName} (the bot's agent)` },
             ...agents.map((agent) => ({ value: agent.id, label: agentTitle(agent) })),
           ]}
           onChange={(agent_id) => void change({ agent_id })}
         />
-        <label className="ml-auto flex items-center gap-1.5 text-[11px] text-muted-foreground">
-          <Switch
-            checked={chat.allow_posts}
-            disabled={update.isPending}
-            aria-label={`Let the agent post in ${title} on its own`}
-            onCheckedChange={(allow_posts) => void change({ allow_posts })}
-          />
-          Posts on its own
-        </label>
+        <span>Posts on its own</span>
+        <Switch
+          checked={chat.allow_posts}
+          disabled={update.isPending}
+          aria-label={`Let the agent post in ${title} on its own`}
+          onCheckedChange={(allow_posts) => void change({ allow_posts })}
+        />
       </div>
       {notice ? <p className="text-[11px] text-muted-foreground">{notice}</p> : null}
     </li>

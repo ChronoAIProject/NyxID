@@ -168,9 +168,17 @@ pub(super) async fn record_chat(
     if let Some(message_id) = last_message_id {
         set.insert("last_message_id", message_id);
     }
-    state
-        .db
-        .collection::<NyxbotThread>(THREADS)
+    let threads = state.db.collection::<NyxbotThread>(THREADS);
+    // Before NyxID passed each message's own chat type on, a group reached
+    // through a default route looked like private chats (one per member):
+    // those records go once the group is seen as a group.
+    if facts.kind != "private" {
+        threads
+            .delete_many(doc! {"channel_id": &row.id, "kind": "private",
+            "platform_chat_id": &facts.chat_id, "partition": {"$ne": partition}})
+            .await?;
+    }
+    threads
         .find_one_and_update(
             doc! {"channel_id": &row.id, "partition": partition},
             doc! {"$setOnInsert": {"_id": Uuid::new_v4().to_string(), "user_id": &row.user_id,
@@ -180,6 +188,28 @@ pub(super) async fn record_chat(
         .return_document(mongodb::options::ReturnDocument::After)
         .await?
         .ok_or_else(|| AppError::Internal("Channel chat unavailable".into()))
+}
+
+/// A private chat's name: "You" for the owner, else the sender's name, else
+/// the platform and the end of their ID (some platforms send no names).
+pub(super) fn private_title(row: &NyxbotChannel, sender_id: &str, name: Option<&str>) -> String {
+    if row.owner_sender_ids.iter().any(|id| id == sender_id) {
+        return "You".into();
+    }
+    match name.and_then(clean_title) {
+        Some(name) => name,
+        None => {
+            let tail: String = sender_id
+                .chars()
+                .rev()
+                .take(4)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            format!("{} user …{tail}", super::platform_name(&row.platform))
+        }
+    }
 }
 
 async fn fetch_title(state: &AppState, bot_id: &str, chat_id: &str) -> AppResult<Option<String>> {
@@ -394,6 +424,9 @@ pub(super) enum Admission {
     Refuse,
     /// Not for the agent (not addressed, or members may not talk).
     Silent,
+    /// A member addressed the agent in a group the owner has not talked in
+    /// yet (and has not set who may talk).
+    Waiting,
 }
 
 pub(super) fn admission(
@@ -421,9 +454,32 @@ pub(super) fn admission(
         Admission::Owner
     } else if members_may_talk(chat) {
         Admission::Guest
+    } else if chat.members.is_none() && addressed {
+        Admission::Waiting
     } else {
         Admission::Silent
     }
+}
+
+/// Tell a group, at most daily, why the agent is not answering its members
+/// yet. Returns the reply when it is due.
+pub(super) async fn waiting_hint(
+    state: &AppState,
+    chat: &NyxbotThread,
+) -> AppResult<Option<String>> {
+    let now = Utc::now();
+    let due = bson::DateTime::from_chrono(now - ChronoDuration::hours(24));
+    let claimed = state
+        .db
+        .collection::<NyxbotThread>(THREADS)
+        .update_one(
+            doc! {"_id": &chat.id, "$or": [{"guest_hint_at": bson::Bson::Null},
+            {"guest_hint_at": {"$lt": due}}]},
+            doc! {"$set": {"guest_hint_at": bson::DateTime::from_chrono(now)}},
+        )
+        .await?;
+    Ok((claimed.modified_count == 1)
+        .then(|| "I'll answer everyone here once my owner has talked to me in this chat.".into()))
 }
 
 /// How the agent should picture a chat in its instructions.

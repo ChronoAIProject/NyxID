@@ -1786,6 +1786,12 @@ async fn inbound_message(
         chats::Admission::Guest => true,
         chats::Admission::Refuse => return Ok(Inbound::Reply(PRIVATE_REFUSAL.into())),
         chats::Admission::Silent => return Ok(Inbound::Silent),
+        chats::Admission::Waiting => {
+            return Ok(match chats::waiting_hint(state, chat).await? {
+                Some(hint) => Inbound::Reply(hint),
+                None => Inbound::Silent,
+            });
+        }
     };
     let addressed = chat.kind.as_deref() == Some("private") || addressed == Some(true);
     start_chat_turn(state, row, chat, sender, text, guest, addressed).await
@@ -2115,10 +2121,7 @@ async fn start_chat_turn(
     let title = if shared {
         None
     } else if private {
-        Some(
-            name.clone()
-                .unwrap_or_else(|| format!("{} chat", platform_name(&row.platform))),
-        )
+        Some(chats::private_title(row, sender.id, sender.display_name))
     } else {
         // A new group thread is named after the group when the platform can
         // say (bounded; best effort).
@@ -2839,8 +2842,7 @@ async fn gateway_inbound(
             chat_id: chat_id.to_owned(),
             thread_id: thread_id.map(str::to_owned),
             title: (kind == "private")
-                .then(|| sender.display_name.map(str::to_owned))
-                .flatten(),
+                .then(|| chats::private_title(row, sender.id, sender.display_name)),
         },
         None,
     )
@@ -3205,7 +3207,7 @@ pub async fn relay_callback(
                     chat_id: chat_id.clone(),
                     thread_id,
                     title: if kind == "private" {
-                        display.clone()
+                        Some(chats::private_title(&row, &sender_id, display.as_deref()))
                     } else {
                         raw_title
                     },

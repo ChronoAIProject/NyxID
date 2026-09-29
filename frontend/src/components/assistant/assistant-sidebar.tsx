@@ -141,6 +141,8 @@ function ConversationRow({
       : "",
   );
   const draftPreview = draft.replace(/\s+/g, " ").trim().slice(0, 80);
+  // A chat app thread is named after its chat (group name, or the person).
+  const shownTitle = conversation.channel?.chat_title ?? conversation.title;
   const showDraft = !active && draftPreview.length > 0;
   const draftPreviewId = `assistant-draft-${conversation.id}`;
 
@@ -154,7 +156,7 @@ function ConversationRow({
       <button
         type="button"
         onClick={onSelect}
-        aria-label={conversation.title}
+        aria-label={shownTitle}
         aria-describedby={showDraft ? draftPreviewId : undefined}
         className={cn(
           "w-full overflow-hidden px-3 py-2 text-left text-[13px] transition-colors",
@@ -171,7 +173,7 @@ function ConversationRow({
             kind={conversation.channel?.chat_kind}
             className="h-3 w-3 shrink-0 text-text-tertiary"
           />
-          <span className="min-w-0 truncate">{conversation.title}</span>
+          <span className="min-w-0 truncate">{shownTitle}</span>
         </span>
         {showDraft && (
           <span
@@ -188,7 +190,7 @@ function ConversationRow({
         <DropdownMenuTrigger asChild>
           <button
             type="button"
-            aria-label={`Options for ${conversation.title}`}
+            aria-label={`Options for ${shownTitle}`}
             data-keep-drawer-open=""
             className={cn(
               "absolute right-1 top-1 flex h-6 w-6 items-center justify-center rounded-md bg-card text-muted-foreground shadow-sm outline-none transition-opacity hover:bg-overlay-strong hover:text-foreground",

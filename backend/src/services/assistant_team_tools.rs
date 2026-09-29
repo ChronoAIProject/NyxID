@@ -393,7 +393,10 @@ fn description(name: &str) -> &'static str {
         "list_channel_chats" => {
             "List the chats the user's channel bots are in: each private chat, group, channel \
             and topic, with its title, kind, agent and settings (reply mode, who may talk, \
-            posting). Use the chat id with nyxid__update_channel_chat and nyxid__post_to_chat."
+            posting). NyxID records chats and their kind by itself as messages arrive (a \
+            group appears once the bot gets a message there): never ask the user for chat \
+            IDs or whether a chat is a group. Use the chat id with nyxid__update_channel_chat \
+            and nyxid__post_to_chat."
         }
         "update_channel_chat" => {
             "Change one chat's settings when the user asks: answer every message or only \
