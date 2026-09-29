@@ -98,6 +98,8 @@ function formValues(settings: NyxAgentSettings): NyxAgentSettingsForm {
     confirm_destructive: !settings.skip_destructive_confirmation,
     max_live_subagents: settings.max_live_subagents,
     max_concurrent_subagent_turns: settings.max_concurrent_subagent_turns,
+    max_group_handoffs: settings.max_group_handoffs,
+    max_group_handoffs_per_hour: settings.max_group_handoffs_per_hour,
   };
 }
 
@@ -121,6 +123,10 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
       ...(dirty.max_live_subagents ? { max_live_subagents: values.max_live_subagents } : {}),
       ...(dirty.max_concurrent_subagent_turns
         ? { max_concurrent_subagent_turns: values.max_concurrent_subagent_turns }
+        : {}),
+      ...(dirty.max_group_handoffs ? { max_group_handoffs: values.max_group_handoffs } : {}),
+      ...(dirty.max_group_handoffs_per_hour
+        ? { max_group_handoffs_per_hour: values.max_group_handoffs_per_hour }
         : {}),
     };
     try {
@@ -222,9 +228,62 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
             )}
           />
         </div>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <FormField
+            control={form.control}
+            name="max_group_handoffs"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Group hand-offs per message</FormLabel>
+                <FormControl>
+                  <Input
+                    type="number"
+                    inputMode="numeric"
+                    min={0}
+                    max={settings.max_group_handoffs_limit}
+                    step={1}
+                    {...field}
+                    value={Number.isNaN(field.value) ? "" : field.value}
+                    onChange={(event) => field.onChange(event.target.valueAsNumber)}
+                  />
+                </FormControl>
+                <FormDescription className="text-[11px]">
+                  How many times agents in a group may pass work to each other after one of your
+                  messages. 0 to {settings.max_group_handoffs_limit}; 0 turns hand-offs off.
+                </FormDescription>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+          <FormField
+            control={form.control}
+            name="max_group_handoffs_per_hour"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Group hand-offs per hour</FormLabel>
+                <FormControl>
+                  <Input
+                    type="number"
+                    inputMode="numeric"
+                    min={0}
+                    max={settings.max_group_handoffs_per_hour_limit}
+                    step={1}
+                    {...field}
+                    value={Number.isNaN(field.value) ? "" : field.value}
+                    onChange={(event) => field.onChange(event.target.valueAsNumber)}
+                  />
+                </FormControl>
+                <FormDescription className="text-[11px]">
+                  Across all your groups. 0 to {settings.max_group_handoffs_per_hour_limit}.
+                </FormDescription>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+        </div>
         <p className="text-[11px] text-muted-foreground">
-          Every specialist turn is billed to your credits like any other NyxBot turn, so higher
-          limits can spend credits faster.
+          Every specialist turn and group hand-off is billed to your credits like any other NyxBot
+          turn, so higher limits can spend credits faster.
         </p>
         {error ? (
           <p role="alert" className="text-[12px] text-destructive">
