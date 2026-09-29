@@ -1,3 +1,4 @@
+use crate::models::credits::Credits;
 use std::cmp::Ordering;
 
 use chrono::{DateTime, Duration, Utc};
@@ -20,7 +21,6 @@ use crate::models::usage_meter::{
     UsageFunding, UsageMeterRow,
 };
 
-use super::grants::CREDIT_MICROS;
 use super::reservation::LayerReservation;
 use super::route_context::BillingRouteContext;
 
@@ -29,7 +29,7 @@ const RESOURCE_LOCK_RETRIES: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FundingSettlement {
-    pub wallet_charge_credits: i64,
+    pub wallet_charge_credits: Credits,
     pub lago_billable_quantity_micros: i64,
 }
 
@@ -76,8 +76,7 @@ async fn reserve_layer(
 
     let rate =
         super::amounts::rate_pico(layer.credits_per_unit_pico, layer.credits_per_unit_micros);
-    let estimated_pico = super::amounts::cost_pico(rate, uncovered_quantity);
-    let estimated_micros = super::amounts::cost_micros(rate, uncovered_quantity);
+    let estimated = super::amounts::cost(rate, uncovered_quantity)?;
     layer.grant_reservations = reserve_grants(
         db,
         &ctx.billing_owner_id,
@@ -85,17 +84,15 @@ async fn reserve_layer(
             .as_deref()
             .or(ctx.user_service_id.as_deref()),
         ctx.service_slug.as_deref(),
-        estimated_micros,
+        estimated,
     )
     .await?;
-    let grant_micros: i64 = layer
+    let grant = layer
         .grant_reservations
         .iter()
-        .map(|allocation| allocation.amount_micros)
-        .sum();
-    layer.reserved_credits = super::amounts::whole_credits(
-        estimated_pico.saturating_sub(i128::from(grant_micros) * super::amounts::PICO_PER_MICRO),
-    );
+        .map(|allocation| allocation.amount)
+        .try_fold(Credits::ZERO, Credits::checked_add)?;
+    layer.reserved_credits = estimated.checked_sub(grant)?;
     Ok(())
 }
 
@@ -175,7 +172,7 @@ async fn reserve_grants(
     owner_user_id: &str,
     service_id: Option<&str>,
     service_slug: Option<&str>,
-    amount_micros: i64,
+    amount: Credits,
 ) -> AppResult<Vec<GrantReservationAllocation>> {
     let now = Utc::now();
     let mut grants = super::grants::list_active_for_user(db, owner_user_id, now).await?;
@@ -187,14 +184,14 @@ async fn reserve_grants(
             .then_with(|| left.created_at.cmp(&right.created_at))
     });
 
-    let mut needed = amount_micros.max(0);
+    let mut needed = amount.max(Credits::ZERO);
     let mut allocations = Vec::new();
     for grant in grants {
-        if needed == 0 {
+        if needed == Credits::ZERO {
             break;
         }
-        let wanted = needed.min(super::grants::available_grant_micros(&grant));
-        if wanted <= 0 {
+        let wanted = needed.min(super::grants::available_grant(&grant)?);
+        if wanted <= Credits::ZERO {
             continue;
         }
         let updated = db
@@ -202,7 +199,7 @@ async fn reserve_grants(
             .update_one(
                 spendable_grant_filter(&grant.id, wanted, now),
                 doc! {
-                    "$inc": { "reserved_micros": wanted },
+                    "$inc": { "reserved": wanted },
                     "$set": { "updated_at": bson::DateTime::from_chrono(Utc::now()) },
                 },
             )
@@ -212,9 +209,9 @@ async fn reserve_grants(
         }
         allocations.push(GrantReservationAllocation {
             grant_id: grant.id,
-            amount_micros: wanted,
+            amount: wanted,
         });
-        needed -= wanted;
+        needed = needed.checked_sub(wanted)?;
     }
     Ok(allocations)
 }
@@ -269,8 +266,8 @@ pub async fn release_usage_reservations(
                 row,
                 &reservation.grant_id,
                 &operation_id,
-                reservation.amount_micros.max(0),
-                0,
+                reservation.amount.max(Credits::ZERO),
+                Credits::ZERO,
                 true,
             )
             .await?;
@@ -383,17 +380,17 @@ async fn release_grant_reservation(
     db: &mongodb::Database,
     reservation: &GrantReservationAllocation,
 ) -> AppResult<()> {
-    if reservation.amount_micros <= 0 {
+    if reservation.amount <= Credits::ZERO {
         return Ok(());
     }
     db.collection::<CreditGrant>(CREDIT_GRANTS)
         .update_one(
             doc! {
                 "_id": &reservation.grant_id,
-                "reserved_micros": { "$gte": reservation.amount_micros },
+                "reserved": { "$gte": reservation.amount },
             },
             doc! {
-                "$inc": { "reserved_micros": -reservation.amount_micros },
+                "$inc": { "reserved": -reservation.amount },
                 "$set": { "updated_at": bson::DateTime::from_chrono(Utc::now()) },
             },
         )
@@ -401,7 +398,7 @@ async fn release_grant_reservation(
     Ok(())
 }
 
-fn spendable_grant_filter(grant_id: &str, amount_micros: i64, now: DateTime<Utc>) -> Document {
+fn spendable_grant_filter(grant_id: &str, amount: Credits, now: DateTime<Utc>) -> Document {
     doc! {
         "_id": grant_id,
         "status": "active",
@@ -413,8 +410,8 @@ fn spendable_grant_filter(grant_id: &str, amount_micros: i64, now: DateTime<Utc>
             ] },
             { "$expr": {
                 "$gte": [
-                    { "$subtract": ["$remaining_micros", "$reserved_micros"] },
-                    amount_micros,
+                    { "$subtract": ["$remaining", "$reserved"] },
+                    amount,
                 ]
             } },
         ],
@@ -430,11 +427,6 @@ fn expiry_order(left: Option<DateTime<Utc>>, right: Option<DateTime<Utc>>) -> Or
     }
 }
 
-#[cfg(test)]
-fn saturating_cost_micros(rate_micros: i64, quantity: i64) -> i64 {
-    (i128::from(rate_micros.max(0)) * i128::from(quantity.max(0))).min(i128::from(i64::MAX)) as i64
-}
-
 /// Convert a finalized usage row's funding reservations into actual
 /// consumption. Each allowance/grant document has a single bounded settlement
 /// lock. The resource mutation is applied first, then the operation id is
@@ -444,21 +436,44 @@ pub async fn settle_usage_funding(
     db: &mongodb::Database,
     row: &UsageMeterRow,
 ) -> AppResult<FundingSettlement> {
-    let Some(funding) = row.funding.as_ref() else {
-        let quantity = row.quantity.unwrap_or(0).max(0);
-        return Ok(FundingSettlement {
-            wallet_charge_credits: super::reservation::actual_credits_for_row(
-                db,
-                row,
-                quantity,
-                row.model.as_deref(),
-            )
-            .await?,
-            lago_billable_quantity_micros: quantity_to_micros(quantity),
-        });
-    };
-    if funding.settled {
+    if let Some(funding) = row.funding.as_ref()
+        && funding.settled
+    {
         return Ok(settlement_from_funding(funding));
+    }
+    if row.wallet_id.is_none() {
+        return Ok(FundingSettlement {
+            wallet_charge_credits: Credits::ZERO,
+            lago_billable_quantity_micros: 0,
+        });
+    }
+    // Legacy rows retain wallet-only semantics across retries.
+    if row.funding.is_none() {
+        if row.reserved_credits > Credits::ZERO
+            && super::reservation::find_rate(db, &row.lago_metric_code, row.model.as_deref())
+                .await?
+                .is_none()
+        {
+            return Err(AppError::BillingNotConfigured(
+                "legacy settlement rate unavailable; retaining its hold for recovery".into(),
+            ));
+        }
+        let funding = bson::to_bson(&UsageFunding {
+            wallet_only: true,
+            ..UsageFunding::default()
+        })
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+        db.collection::<UsageMeterRow>(USAGE_METER)
+            .update_one(
+                doc! { "_id": &row.id, "funding": Bson::Null },
+                doc! {
+                    "$set": {
+                        "funding": funding,
+                        "reserved_credits": row.reserved_credits,
+                    },
+                },
+            )
+            .await?;
     }
 
     let claim_id = Uuid::new_v4().to_string();
@@ -507,7 +522,24 @@ pub async fn settle_usage_funding(
     };
 
     let quantity = claimed.quantity.unwrap_or(0).max(0);
-    let rate = settlement_rate_pico(db, &claimed).await?;
+    let rate = if let Some(rate) = claimed.funding.as_ref().and_then(|f| f.settlement_rate) {
+        rate.pico()
+    } else {
+        let rate = settlement_rate_pico(db, &claimed).await?;
+        let frozen = db
+            .collection::<UsageMeterRow>(USAGE_METER)
+            .update_one(
+                doc! { "_id": &claimed.id, "funding.settlement_claim_id": &claim_id },
+                doc! { "$set": { "funding.settlement_rate": Credits::from_pico(rate)? } },
+            )
+            .await?;
+        if frozen.matched_count != 1 {
+            return Err(AppError::Internal(
+                "funding rate freeze lost its settlement claim".into(),
+            ));
+        }
+        rate
+    };
     let mut allowance_covered = claimed
         .funding
         .as_ref()
@@ -553,7 +585,8 @@ pub async fn settle_usage_funding(
         }
     }
 
-    if claimed.layer == BillingLayer::Platform && allowance_covered < quantity {
+    let wallet_only = claimed.funding.as_ref().is_some_and(|f| f.wallet_only);
+    if !wallet_only && claimed.layer == BillingLayer::Platform && allowance_covered < quantity {
         let definitions = super::allowances::applicable_allowances(
             db,
             &claimed.billing_owner_id,
@@ -607,20 +640,22 @@ pub async fn settle_usage_funding(
         }
     }
 
-    let chargeable_quantity = quantity.saturating_sub(allowance_covered);
-    let charge_after_allowance_micros = super::amounts::cost_micros(rate, chargeable_quantity);
-    let mut grant_covered_micros = claimed
+    let total = super::amounts::cost(rate, quantity)?;
+    let allowance = super::amounts::cost(rate, allowance_covered)?;
+    let charge_after_allowance = total.checked_sub(allowance)?;
+    let mut grant_covered = claimed
         .funding
         .as_ref()
         .map(|value| {
             value
                 .grant_consumptions
                 .iter()
-                .map(|allocation| allocation.amount_micros.max(0))
-                .sum::<i64>()
+                .map(|allocation| allocation.amount.max(Credits::ZERO))
+                .try_fold(Credits::ZERO, Credits::checked_add)
         })
-        .unwrap_or(0)
-        .min(charge_after_allowance_micros);
+        .transpose()?
+        .unwrap_or(Credits::ZERO)
+        .min(charge_after_allowance);
     let grant_reservations = claimed
         .funding
         .as_ref()
@@ -633,28 +668,28 @@ pub async fn settle_usage_funding(
             continue;
         }
         let consume = reservation
-            .amount_micros
-            .max(0)
-            .min(charge_after_allowance_micros.saturating_sub(grant_covered_micros));
+            .amount
+            .max(Credits::ZERO)
+            .min(charge_after_allowance.checked_sub(grant_covered)?);
         if settle_grant_resource(
             db,
             &claimed,
             &reservation.grant_id,
             &operation_id,
-            reservation.amount_micros.max(0),
+            reservation.amount.max(Credits::ZERO),
             consume,
             true,
         )
         .await?
         {
-            grant_covered_micros = grant_covered_micros
-                .saturating_add(consume)
-                .min(charge_after_allowance_micros);
+            grant_covered = grant_covered
+                .checked_add(consume)?
+                .min(charge_after_allowance);
             refresh_claimed_funding(db, &mut claimed).await?;
         }
     }
 
-    if grant_covered_micros < charge_after_allowance_micros {
+    if !wallet_only && grant_covered < charge_after_allowance {
         let now = Utc::now();
         let mut grants =
             super::grants::list_active_for_user(db, &claimed.billing_owner_id, now).await?;
@@ -670,7 +705,7 @@ pub async fn settle_usage_funding(
                 .then_with(|| left.created_at.cmp(&right.created_at))
         });
         for grant in grants {
-            if grant_covered_micros >= charge_after_allowance_micros {
+            if grant_covered >= charge_after_allowance {
                 break;
             }
             let operation_id = format!("{}:grant-extra:{}", claimed.id, grant.id);
@@ -678,76 +713,58 @@ pub async fn settle_usage_funding(
                 finish_grant_operation_if_locked(db, &grant.id, &operation_id).await?;
                 continue;
             }
-            let consume = super::grants::available_grant_micros(&grant)
-                .min(charge_after_allowance_micros.saturating_sub(grant_covered_micros));
-            if consume <= 0 {
+            let consume = super::grants::available_grant(&grant)?
+                .min(charge_after_allowance.checked_sub(grant_covered)?);
+            if consume <= Credits::ZERO {
                 continue;
             }
-            if settle_grant_resource(db, &claimed, &grant.id, &operation_id, 0, consume, false)
-                .await?
+            if settle_grant_resource(
+                db,
+                &claimed,
+                &grant.id,
+                &operation_id,
+                Credits::ZERO,
+                consume,
+                false,
+            )
+            .await?
             {
-                grant_covered_micros = grant_covered_micros
-                    .saturating_add(consume)
-                    .min(charge_after_allowance_micros);
+                grant_covered = grant_covered
+                    .checked_add(consume)?
+                    .min(charge_after_allowance);
                 refresh_claimed_funding(db, &mut claimed).await?;
             }
         }
     }
 
-    let wallet_micros = charge_after_allowance_micros.saturating_sub(grant_covered_micros);
-    let wallet_pico = super::amounts::cost_pico(rate, chargeable_quantity)
-        .saturating_sub(i128::from(grant_covered_micros) * super::amounts::PICO_PER_MICRO);
-    let wallet_charge_credits = super::amounts::whole_credits(wallet_pico);
+    let wallet = charge_after_allowance.checked_sub(grant_covered)?;
+    let wallet_charge_credits = wallet;
     // Grant- and allowance-funded usage is deliberately absent from Lago's
     // charging stream. Only the wallet-funded fraction is emitted, so Lago's
     // invoice, NyxID's pending debit, wallet refresh, and drift comparison all
     // describe the same chargeable usage.
-    let lago_billable_quantity_micros =
-        billable_quantity_precise(wallet_pico, rate, chargeable_quantity);
-    let settled_at = Utc::now();
-    let result = db
-        .collection::<UsageMeterRow>(USAGE_METER)
-        .update_one(
-            doc! {
-                "_id": &claimed.id,
-                "funding.settlement_claim_id": &claim_id,
-                "funding.settled": { "$ne": true },
-            },
-            doc! {
-                "$set": {
-                    "funding.settled": true,
-                    "funding.total_charge_micros": super::amounts::cost_micros(rate, quantity),
-                    "funding.allowance_funded_quantity": allowance_covered,
-                    "funding.allowance_funded_micros": super::amounts::cost_micros(rate, quantity).saturating_sub(charge_after_allowance_micros),
-                    "funding.grant_funded_micros": grant_covered_micros,
-                    "funding.wallet_funded_micros": wallet_micros,
-                    "funding.wallet_charge_credits": wallet_charge_credits,
-                    "funding.lago_billable_quantity_micros": lago_billable_quantity_micros,
-                    "funding.settled_at": bson::DateTime::from_chrono(settled_at),
-                    "updated_at": bson::DateTime::from_chrono(settled_at),
-                },
-                "$unset": {
-                    "funding.settlement_claim_id": "",
-                    "funding.settlement_claimed_at": "",
-                },
-            },
-        )
-        .await?;
-    if result.modified_count != 1 {
-        return Err(AppError::Internal(format!(
-            "usage funding settlement lost its claim for row {}",
-            claimed.id
-        )));
-    }
-    Ok(FundingSettlement {
-        wallet_charge_credits,
-        lago_billable_quantity_micros,
-    })
+    let settled_at = bson::DateTime::from_chrono(Utc::now());
+    let fields = doc! {
+        "funding.settled": true,
+        "funding.total_charge": total,
+        "funding.allowance_funded_quantity": allowance_covered,
+        "funding.allowance_funded": allowance,
+        "funding.grant_funded": grant_covered,
+        "funding.wallet_funded": wallet,
+        "funding.wallet_charge_credits": wallet_charge_credits,
+        "funding.settled_at": settled_at,
+        "updated_at": settled_at,
+    };
+    super::lago_carry::commit_settlement(db, &claimed, wallet, Credits::from_pico(rate)?, fields)
+        .await
 }
 
-fn settlement_from_funding(funding: &UsageFunding) -> FundingSettlement {
+pub(super) fn settlement_from_funding(funding: &UsageFunding) -> FundingSettlement {
     FundingSettlement {
-        wallet_charge_credits: funding.wallet_charge_credits.unwrap_or(0).max(0),
+        wallet_charge_credits: funding
+            .wallet_charge_credits
+            .unwrap_or(Credits::ZERO)
+            .max(Credits::ZERO),
         lago_billable_quantity_micros: funding.lago_billable_quantity_micros.unwrap_or(0).max(0),
     }
 }
@@ -1005,15 +1022,15 @@ async fn settle_grant_resource(
     row: &UsageMeterRow,
     grant_id: &str,
     operation_id: &str,
-    reserved_micros: i64,
-    consume_micros: i64,
+    reserved: Credits,
+    consume: Credits,
     honor_reservation: bool,
 ) -> AppResult<bool> {
     let lock = CreditGrantSettlementLock {
         operation_id: operation_id.to_string(),
         usage_row_id: row.id.clone(),
-        reserved_micros,
-        consume_micros,
+        reserved,
+        consume,
         applied: false,
         updated_at: Utc::now(),
     };
@@ -1027,14 +1044,14 @@ async fn settle_grant_resource(
             ],
             "$expr": {
                 "$and": [
-                    { "$gte": ["$reserved_micros", reserved_micros] },
-                    { "$gte": ["$remaining_micros", consume_micros] },
+                    { "$gte": ["$reserved", reserved] },
+                    { "$gte": ["$remaining", consume] },
                     { "$gte": [
                         { "$add": [
-                            { "$subtract": ["$remaining_micros", "$reserved_micros"] },
-                            reserved_micros,
+                            { "$subtract": ["$remaining", "$reserved"] },
+                            reserved,
                         ] },
-                        consume_micros,
+                        consume,
                     ] },
                 ]
             },
@@ -1100,11 +1117,11 @@ async fn complete_grant_lock(
                     "active_settlement.applied": false,
                 },
                 vec![doc! { "$set": {
-                    "reserved_micros": { "$subtract": ["$reserved_micros", lock.reserved_micros] },
-                    "remaining_micros": { "$subtract": ["$remaining_micros", lock.consume_micros] },
+                    "reserved": { "$subtract": ["$reserved", lock.reserved] },
+                    "remaining": { "$subtract": ["$remaining", lock.consume] },
                     "status": { "$cond": [
                         { "$lte": [
-                            { "$subtract": ["$remaining_micros", lock.consume_micros] },
+                            { "$subtract": ["$remaining", lock.consume] },
                             0_i64,
                         ] },
                         "consumed",
@@ -1112,7 +1129,7 @@ async fn complete_grant_lock(
                     ] },
                     "consumed_at": { "$cond": [
                         { "$lte": [
-                            { "$subtract": ["$remaining_micros", lock.consume_micros] },
+                            { "$subtract": ["$remaining", lock.consume] },
                             0_i64,
                         ] },
                         bson::DateTime::from_chrono(now),
@@ -1128,7 +1145,7 @@ async fn complete_grant_lock(
     let allocation = GrantConsumptionAllocation {
         operation_id: lock.operation_id.clone(),
         grant_id: grant_id.to_string(),
-        amount_micros: lock.consume_micros,
+        amount: lock.consume,
     };
     let allocation_bson = bson::to_bson(&allocation).map_err(|error| {
         AppError::Internal(format!("failed to encode grant consumption: {error}"))
@@ -1142,7 +1159,7 @@ async fn complete_grant_lock(
             doc! { "$push": { "funding.grant_consumptions": allocation_bson } },
         )
         .await?;
-    if lock.consume_micros > 0 {
+    if lock.consume > Credits::ZERO {
         if let (Some(grant), Some(usage_row)) = (
             db.collection::<CreditGrant>(CREDIT_GRANTS)
                 .find_one(doc! { "_id": grant_id })
@@ -1156,7 +1173,7 @@ async fn complete_grant_lock(
                 BillingLedgerEventType::GrantConsumed,
                 &grant.recipient_user_id,
                 grant_id,
-                lock.consume_micros,
+                lock.consume,
                 Some(&usage_row),
                 format!("grant-consumed:{}:{}", grant_id, lock.operation_id),
             )
@@ -1190,25 +1207,6 @@ async fn complete_grant_lock(
     Ok(())
 }
 
-fn quantity_to_micros(quantity: i64) -> i64 {
-    (i128::from(quantity.max(0)) * i128::from(CREDIT_MICROS)).min(i128::from(i64::MAX)) as i64
-}
-
-fn billable_quantity_precise(wallet_pico: i128, rate: i128, chargeable_quantity: i64) -> i64 {
-    if wallet_pico <= 0 || rate <= 0 || chargeable_quantity <= 0 {
-        return 0;
-    }
-    // Divide before scaling to avoid overflowing i128 for saturated legacy rates.
-    let whole = wallet_pico / rate;
-    let remainder = wallet_pico % rate;
-    let units = whole
-        .saturating_mul(i128::from(CREDIT_MICROS))
-        .saturating_add((remainder.saturating_mul(i128::from(CREDIT_MICROS)) + rate - 1) / rate);
-    units
-        .min(i128::from(quantity_to_micros(chargeable_quantity)))
-        .min(i128::from(i64::MAX)) as i64
-}
-
 #[cfg(test)]
 mod tests {
     use chrono::{Duration, TimeZone};
@@ -1238,9 +1236,18 @@ mod tests {
     }
 
     #[test]
-    fn cost_multiplication_saturates() {
-        assert_eq!(saturating_cost_micros(125_000, 8), CREDIT_MICROS);
-        assert_eq!(saturating_cost_micros(i64::MAX, 2), i64::MAX);
+    fn cost_multiplication_is_exact_beyond_legacy_micro_range() {
+        assert_eq!(
+            super::super::amounts::cost(super::super::amounts::rate_pico(None, 125_000), 8)
+                .unwrap(),
+            Credits::from_whole(1)
+        );
+        // The old assertion encoded lossy i64 micro saturation.
+        assert_eq!(
+            super::super::amounts::cost(super::super::amounts::rate_pico(None, i64::MAX), 2)
+                .unwrap(),
+            Credits::from_micros(i64::MAX).checked_mul(2).unwrap()
+        );
     }
 
     #[tokio::test]
@@ -1319,9 +1326,9 @@ mod tests {
                 target_org_ids: Vec::new(),
                 target_group_ids: Vec::new(),
                 amount_credits: 2,
-                amount_micros: 2_000_000,
-                remaining_micros: 2_000_000,
-                reserved_micros: 500_000,
+                amount: crate::models::credits::Credits::from_micros(2_000_000),
+                remaining: crate::models::credits::Credits::from_micros(2_000_000),
+                reserved: crate::models::credits::Credits::from_micros(500_000),
                 scope: BillingServiceScope {
                     all_services: true,
                     service_ids: Vec::new(),
@@ -1333,7 +1340,7 @@ mod tests {
                 status: CreditGrantStatus::Active,
                 issued_ledgered_at: Some(now),
                 terminal_ledgered_at: None,
-                terminal_amount_micros: 0,
+                terminal_amount: crate::models::credits::Credits::from_micros(0),
                 active_settlement: None,
                 created_at: now,
                 updated_at: now,
@@ -1362,7 +1369,7 @@ mod tests {
             credential_class: CredentialClass::UserOwned,
             model: None,
             token_breakdown: None,
-            reserved_credits: 0,
+            reserved_credits: crate::models::credits::Credits::from_whole(0),
             funding: Some(UsageFunding {
                 credits_per_unit_micros: 500_000,
                 credits_per_unit_pico: None,
@@ -1373,7 +1380,7 @@ mod tests {
                 }],
                 grant_reservations: vec![GrantReservationAllocation {
                     grant_id: grant_id.to_string(),
-                    amount_micros: 500_000,
+                    amount: crate::models::credits::Credits::from_micros(500_000),
                 }],
                 ..Default::default()
             }),
@@ -1401,7 +1408,8 @@ mod tests {
         let settlement = settle_usage_funding(&db, &row)
             .await
             .expect("settle funding");
-        assert_eq!(settlement.wallet_charge_credits, 2);
+        // Issue #1672: preserve the exact 1.5-credit remainder instead of ceiling to 2.
+        assert_eq!(settlement.wallet_charge_credits.to_string(), "1.5");
         assert_eq!(settlement.lago_billable_quantity_micros, 3_000_000);
 
         let period = db
@@ -1418,8 +1426,14 @@ mod tests {
             .await
             .expect("find grant")
             .expect("grant exists");
-        assert_eq!(grant.remaining_micros, 0);
-        assert_eq!(grant.reserved_micros, 0);
+        assert_eq!(
+            grant.remaining,
+            crate::models::credits::Credits::from_micros(0)
+        );
+        assert_eq!(
+            grant.reserved,
+            crate::models::credits::Credits::from_micros(0)
+        );
         assert_eq!(grant.status, CreditGrantStatus::Consumed);
         let saved = db
             .collection::<UsageMeterRow>(USAGE_METER)
@@ -1448,11 +1462,38 @@ mod tests {
             .delete_one(doc! { "dedupe_key": &dedupe_key })
             .await
             .expect("delete tail ledger entry to simulate crash");
+        // Checkpoints now commit atomically with the append. Recreate the
+        // complete pre-append journal state; deleting only its tail would
+        // simulate tampering, which authenticated checkpoints must reject.
+        let previous: Vec<BillingLedgerEntry> = db
+            .collection::<BillingLedgerEntry>(BILLING_LEDGER)
+            .find(doc! {})
+            .sort(doc! { "seq": 1 })
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        for collection in [BILLING_LEDGER, "billing_account_balances"] {
+            db.collection::<bson::Document>(collection)
+                .delete_many(doc! {})
+                .await
+                .unwrap();
+        }
+        for entry in previous {
+            super::super::ledger::append_chained_entry(
+                &db,
+                entry,
+                &super::super::ledger::TEST_BILLING_LEDGER_HMAC_KEY,
+            )
+            .await
+            .unwrap();
+        }
         let lock = CreditGrantSettlementLock {
             operation_id: allocation.operation_id.clone(),
             usage_row_id: row_id.to_string(),
-            reserved_micros: 0,
-            consume_micros: allocation.amount_micros,
+            reserved: crate::models::credits::Credits::from_micros(0),
+            consume: allocation.amount,
             applied: true,
             updated_at: now,
         };

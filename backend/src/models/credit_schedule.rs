@@ -30,34 +30,40 @@ pub struct SchedulePeriod {
     pub end: DateTime<Utc>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CreditSchedule {
-    #[serde(rename = "_id")]
-    pub id: String,
-    pub amount_credits: i64,
-    pub amount_micros: i64,
-    pub recurrence: ScheduleRecurrence,
-    pub expiry: CreditExpiryPolicy,
-    pub target_kind: BillingTargetKind,
-    #[serde(default)]
-    pub target_user_ids: Vec<String>,
-    #[serde(default)]
-    pub target_org_ids: Vec<String>,
-    #[serde(default)]
-    pub target_group_ids: Vec<String>,
-    pub scope: BillingServiceScope,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    pub is_active: bool,
-    pub created_by: String,
-    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
-    pub created_at: DateTime<Utc>,
-    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
-    pub updated_at: DateTime<Utc>,
-    #[serde(default, with = "crate::models::bson_datetime::optional")]
-    pub last_period_start: Option<DateTime<Utc>>,
-    #[serde(default, with = "crate::models::bson_datetime::optional")]
-    pub last_disbursed_at: Option<DateTime<Utc>>,
-    #[serde(default)]
-    pub skipped_periods: u64,
+crate::exact_credit_model! {
+    [
+        ("amount", "amount_micros"),
+    ]
+    #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+    pub struct CreditSchedule {
+        #[serde(rename = "_id")]
+        pub id: String,
+        pub amount_credits: i64,
+        #[serde(with = "crate::models::credits::whole")]
+        pub amount: crate::models::credits::Credits,
+        pub recurrence: ScheduleRecurrence,
+        pub expiry: CreditExpiryPolicy,
+        pub target_kind: BillingTargetKind,
+        #[serde(default)]
+        pub target_user_ids: Vec<String>,
+        #[serde(default)]
+        pub target_org_ids: Vec<String>,
+        #[serde(default)]
+        pub target_group_ids: Vec<String>,
+        pub scope: BillingServiceScope,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub reason: Option<String>,
+        pub is_active: bool,
+        pub created_by: String,
+        #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+        pub created_at: DateTime<Utc>,
+        #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+        pub updated_at: DateTime<Utc>,
+        #[serde(default, with = "crate::models::bson_datetime::optional")]
+        pub last_period_start: Option<DateTime<Utc>>,
+        #[serde(default, with = "crate::models::bson_datetime::optional")]
+        pub last_disbursed_at: Option<DateTime<Utc>>,
+        #[serde(default)]
+        pub skipped_periods: u64,
+    }
 }

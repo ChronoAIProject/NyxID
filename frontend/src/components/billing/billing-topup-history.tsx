@@ -65,7 +65,7 @@ function TopUpHistory({
     );
   const expiry = (payment: (typeof visible)[number]) =>
     payment.credits_expired_at
-      ? `${date(payment.credits_expired_at)} · ${credits(payment.expired_credits_micros)} credits expired`
+      ? `${date(payment.credits_expired_at)} · ${credits(payment.expired_credits ?? payment.expired_credits_micros)} credits expired`
       : payment.credits_expire_at
         ? date(payment.credits_expire_at)
         : payment.status === "paid"

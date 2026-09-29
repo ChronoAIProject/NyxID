@@ -1,3 +1,4 @@
+import { exactCredits, formatExactCredits } from "@/lib/credits";
 import { billingTargetLabel } from "@/lib/billing-targets";
 import { AlertTriangle, Pencil } from "lucide-react";
 import type {
@@ -54,7 +55,14 @@ export function SchedulesTable({
           {schedules.map((schedule) => (
             <TableRow key={schedule.id}>
               <TableCell className="font-medium">
-                {formatNumber(schedule.amount_credits)} credits
+                {formatExactCredits(
+                  exactCredits(
+                    schedule.amount,
+                    schedule.amount_credits,
+                    "whole",
+                  ) ?? "0",
+                )}{" "}
+                credits
               </TableCell>
               <TableCell className="capitalize">
                 {schedule.recurrence}

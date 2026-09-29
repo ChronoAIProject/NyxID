@@ -1,3 +1,5 @@
+import { credits } from "@/lib/billing-display";
+import { hasCredits } from "@/lib/credits";
 import { billingTargetLabel } from "@/lib/billing-targets";
 import { AlertTriangle, Trash2 } from "lucide-react";
 import type { AdminCreditGrant } from "@/schemas/billing-credits";
@@ -81,9 +83,9 @@ export function CreditGrantsTable({
                   {!grant.recipient_billing_enabled ? <RolloutWarning /> : null}
                 </TableCell>
                 <TableCell>
-                  {formatCredits(grant.remaining_micros)}{" "}
+                  {formatCredits(grant.remaining ?? grant.remaining_micros)}{" "}
                   <span className="text-[11px] text-muted-foreground">
-                    of {formatCredits(grant.amount_micros)}
+                    of {formatCredits(grant.amount ?? grant.amount_micros)}
                   </span>
                 </TableCell>
                 <TableCell>
@@ -108,7 +110,7 @@ export function CreditGrantsTable({
                       title="Revoke grant"
                       disabled={
                         grant.status !== "active" ||
-                        grant.reserved_micros > 0 ||
+                        hasCredits(grant.reserved ?? grant.reserved_micros) ||
                         revokePending
                       }
                       onClick={() => onRevoke(grant)}
@@ -219,8 +221,8 @@ function scopeLabel(allServices: boolean, slugs: readonly string[]) {
       : `${slugs.slice(0, 2).join(", ")} +${String(slugs.length - 2)}`;
 }
 
-function formatCredits(micros: number) {
-  return `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 6 }).format(micros / 1_000_000)} credits`;
+function formatCredits(value: string | number) {
+  return `${credits(value)} credits`;
 }
 
 function formatDateTime(value: string | null | undefined) {

@@ -1,3 +1,4 @@
+import { credits } from "@/lib/billing-display";
 import type { CreditGrant } from "@/schemas/billing-credits";
 import { DialogDescription } from "@/components/ui/dialog";
 
@@ -9,7 +10,8 @@ export function GrantRevokeDescription({
   return (
     <DialogDescription className="space-y-2">
       <span className="block">
-        Revoke the remaining {formatCredits(grant.remaining_micros)} for{" "}
+        Revoke the remaining{" "}
+        {formatCredits(grant.remaining ?? grant.remaining_micros)} for{" "}
         {grant.recipient_display_name ||
           grant.recipient_email ||
           "this recipient"}
@@ -25,6 +27,6 @@ export function GrantRevokeDescription({
   );
 }
 
-function formatCredits(micros: number) {
-  return `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 6 }).format(micros / 1_000_000)} credits`;
+function formatCredits(value: string | number) {
+  return `${credits(value)} credits`;
 }

@@ -19,9 +19,12 @@ import { canAdminWrite } from "@/types/api";
 const CHAIN_LABELS: Record<ChainVerifyStatus["chain"], string> = {
   audit_log: "Audit Log Chain",
   billing_ledger: "Billing Ledger Chain",
+  billing_accounts: "Billing Account Balances",
 };
 
 const CHAIN_DESCRIPTIONS: Record<ChainVerifyStatus["chain"], string> = {
+  billing_accounts:
+    "Exact grant and wallet balances compared with their durable ledger postings in a consistent snapshot.",
   audit_log:
     "Hash-chained audit events. A break means a stored audit row was edited, deleted, or reordered after it was written.",
   billing_ledger:
@@ -50,7 +53,11 @@ function ChainCard({ status }: { readonly status: ChainVerifyStatus }) {
           </CardTitle>
         </div>
         <Badge variant={broken ? "destructive" : "success"}>
-          {broken ? "Broken" : "Intact"}
+          {broken
+            ? "Broken"
+            : status.chain === "billing_accounts" && status.break_detail
+              ? "Pending settlements"
+              : "Intact"}
         </Badge>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -61,7 +68,9 @@ function ChainCard({ status }: { readonly status: ChainVerifyStatus }) {
         {broken ? (
           <div className="rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm">
             <p className="font-medium text-destructive">
-              Integrity break at seq {status.break_seq ?? "unknown"}
+              {status.chain === "billing_accounts"
+                ? "Account balance mismatch"
+                : `Integrity break at seq ${status.break_seq ?? "unknown"}`}
               {status.break_kind ? ` (${status.break_kind})` : ""}
             </p>
             {status.break_detail ? (
@@ -70,9 +79,9 @@ function ChainCard({ status }: { readonly status: ChainVerifyStatus }) {
               </p>
             ) : null}
             <p className="mt-2 text-muted-foreground">
-              Stored history no longer matches its hash chain. Treat as
-              possible tampering and investigate before trusting records at
-              or after this seq.
+              {status.chain === "billing_accounts"
+                ? "A stored balance differs from its journal. Review the account and its settlement recovery state."
+                : "Stored history no longer matches its hash chain. Treat as possible tampering and investigate before trusting records at or after this seq."}
             </p>
           </div>
         ) : null}
@@ -219,16 +228,17 @@ export function AdminIntegrityPage() {
         </div>
       ) : data && data.chains.length > 0 ? (
         <div className="space-y-4">
-          {data.chains.map((status) => (
-            <ChainCard key={status.chain} status={status} />
-          ))}
+          {[...data.chains, ...(data.accounts ? [data.accounts] : [])].map(
+            (status) => (
+              <ChainCard key={status.chain} status={status} />
+            ),
+          )}
         </div>
       ) : (
         <Card>
           <CardContent className="py-8 text-center text-sm text-muted-foreground">
-            No verification runs recorded yet. The background sweep runs on
-            an interval after startup; use Run check now to verify
-            immediately.
+            No verification runs recorded yet. The background sweep runs on an
+            interval after startup; use Run check now to verify immediately.
           </CardContent>
         </Card>
       )}

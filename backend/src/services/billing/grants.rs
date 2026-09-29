@@ -1,3 +1,6 @@
+use crate::models::credits::Credits;
+#[cfg(test)]
+pub const CREDIT_MICROS: i64 = 1_000_000;
 use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
 use mongodb::bson::{self, Bson, doc};
@@ -15,7 +18,6 @@ use crate::models::downstream_service::{
 };
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 
-pub const CREDIT_MICROS: i64 = 1_000_000;
 pub const MAX_GRANT_CREDITS: i64 = 1_000_000;
 pub const MAX_SELECTED_USERS: usize = 500;
 /// Bounded expansion for organization/group one-shot grants.
@@ -27,11 +29,11 @@ const MAX_EXPIRATIONS_PER_TICK: usize = 10_000;
 const LEDGER_RECOVERY_BATCH: i64 = 500;
 pub const INLINE_ISSUANCE_LEDGER_LIMIT: usize = 50;
 
-pub fn available_grant_micros(grant: &CreditGrant) -> i64 {
-    grant
-        .remaining_micros
-        .saturating_sub(grant.reserved_micros)
-        .max(0)
+pub fn available_grant(grant: &CreditGrant) -> AppResult<Credits> {
+    Ok(grant
+        .remaining
+        .checked_sub(grant.reserved)?
+        .max(Credits::ZERO))
 }
 
 pub fn service_scope_applies(
@@ -62,6 +64,7 @@ pub async fn issue_grants(
     db: &mongodb::Database,
     input: IssueCreditGrantInput,
 ) -> AppResult<Vec<CreditGrant>> {
+    super::exact_migration::require_ready(db).await?;
     validate_issue_input(&input)?;
     let recipients = resolve_recipients(
         db,
@@ -79,10 +82,7 @@ pub async fn issue_grants(
     let scope = resolve_service_scope(db, input.all_services, &input.service_refs).await?;
     let now = Utc::now();
     let batch_id = Uuid::new_v4().to_string();
-    let amount_micros = input
-        .amount_credits
-        .checked_mul(CREDIT_MICROS)
-        .ok_or_else(|| AppError::ValidationError("credit grant amount is too large".to_string()))?;
+    let amount = Credits::from_whole(input.amount_credits);
     let reason = input
         .reason
         .as_deref()
@@ -101,9 +101,9 @@ pub async fn issue_grants(
             target_org_ids: input.target_org_ids.clone(),
             target_group_ids: input.target_group_ids.clone(),
             amount_credits: input.amount_credits,
-            amount_micros,
-            remaining_micros: amount_micros,
-            reserved_micros: 0,
+            amount,
+            remaining: amount,
+            reserved: Credits::ZERO,
             scope: scope.clone(),
             expires_at: input.expires_at,
             reason: reason.clone(),
@@ -111,7 +111,7 @@ pub async fn issue_grants(
             status: CreditGrantStatus::Active,
             issued_ledgered_at: None,
             terminal_ledgered_at: None,
-            terminal_amount_micros: 0,
+            terminal_amount: Credits::ZERO,
             active_settlement: None,
             created_at: now,
             updated_at: now,
@@ -133,7 +133,7 @@ pub async fn issue_grants(
             BillingLedgerEventType::GrantIssued,
             &grant.recipient_user_id,
             &grant.id,
-            grant.amount_micros,
+            grant.amount,
             None,
             format!("grant-issued:{}", grant.id),
         )
@@ -187,7 +187,7 @@ pub async fn list_active_for_user(
             "recipient_user_id": user_id,
             "status": "active",
             "issued_ledgered_at": { "$type": "date" },
-            "remaining_micros": { "$gt": 0_i64 },
+            "remaining": { "$gt": 0_i64 },
             "$or": [
                 { "expires_at": Bson::Null },
                 { "expires_at": { "$exists": false } },
@@ -202,6 +202,7 @@ pub async fn list_active_for_user(
 }
 
 pub async fn revoke_grant(db: &mongodb::Database, grant_id: &str) -> AppResult<CreditGrant> {
+    super::exact_migration::require_ready(db).await?;
     let now = Utc::now();
     let previous = db
         .collection::<CreditGrant>(CREDIT_GRANTS)
@@ -209,7 +210,7 @@ pub async fn revoke_grant(db: &mongodb::Database, grant_id: &str) -> AppResult<C
             doc! {
                 "_id": grant_id,
                 "status": "active",
-                "reserved_micros": 0_i64,
+                "reserved": Credits::ZERO,
                 "$or": [
                     { "active_settlement": Bson::Null },
                     { "active_settlement": { "$exists": false } },
@@ -218,9 +219,9 @@ pub async fn revoke_grant(db: &mongodb::Database, grant_id: &str) -> AppResult<C
             vec![doc! {
                 "$set": {
                     "status": "revoked",
-                    "terminal_amount_micros": "$remaining_micros",
-                    "remaining_micros": 0_i64,
-                    "reserved_micros": 0_i64,
+                    "terminal_amount": "$remaining",
+                    "remaining": Credits::ZERO,
+                    "reserved": Credits::ZERO,
                     "revoked_at": bson::DateTime::from_chrono(now),
                     "updated_at": bson::DateTime::from_chrono(now),
                 }
@@ -237,13 +238,13 @@ pub async fn revoke_grant(db: &mongodb::Database, grant_id: &str) -> AppResult<C
                 "credit grant is not active or has an in-flight settlement".to_string(),
             )
         })?;
-    let revoked_micros = previous.remaining_micros.max(0);
+    let revoked_amount = previous.remaining.max(Credits::ZERO);
     if super::ledger::record_grant_event(
         db,
         BillingLedgerEventType::GrantRevoked,
         &previous.recipient_user_id,
         &previous.id,
-        revoked_micros,
+        revoked_amount,
         None,
         format!("grant-revoked:{}", previous.id),
     )
@@ -259,6 +260,7 @@ pub async fn revoke_grant(db: &mongodb::Database, grant_id: &str) -> AppResult<C
 }
 
 pub async fn expire_due_grants(db: &mongodb::Database, now: DateTime<Utc>) -> AppResult<u64> {
+    super::exact_migration::require_ready(db).await?;
     let mut expired = 0;
     let mut examined = 0;
     while examined < MAX_EXPIRATIONS_PER_TICK {
@@ -267,7 +269,7 @@ pub async fn expire_due_grants(db: &mongodb::Database, now: DateTime<Utc>) -> Ap
             .collection::<CreditGrant>(CREDIT_GRANTS)
             .find(doc! {
                 "status": "active",
-                "reserved_micros": 0_i64,
+                "reserved": Credits::ZERO,
                 "expires_at": { "$lte": bson::DateTime::from_chrono(now) },
                 "$or": [
                     { "active_settlement": Bson::Null },
@@ -291,7 +293,7 @@ pub async fn expire_due_grants(db: &mongodb::Database, now: DateTime<Utc>) -> Ap
                     doc! {
                         "_id": &grant.id,
                         "status": "active",
-                        "reserved_micros": 0_i64,
+                        "reserved": Credits::ZERO,
                         "expires_at": { "$lte": bson::DateTime::from_chrono(now) },
                         "$or": [
                             { "active_settlement": Bson::Null },
@@ -300,9 +302,9 @@ pub async fn expire_due_grants(db: &mongodb::Database, now: DateTime<Utc>) -> Ap
                     },
                     vec![doc! { "$set": {
                         "status": "expired",
-                        "terminal_amount_micros": "$remaining_micros",
-                        "remaining_micros": 0_i64,
-                        "reserved_micros": 0_i64,
+                        "terminal_amount": "$remaining",
+                        "remaining": Credits::ZERO,
+                        "reserved": Credits::ZERO,
                         "expired_at": bson::DateTime::from_chrono(now),
                         "updated_at": bson::DateTime::from_chrono(now),
                     } }],
@@ -317,7 +319,7 @@ pub async fn expire_due_grants(db: &mongodb::Database, now: DateTime<Utc>) -> Ap
                 BillingLedgerEventType::GrantExpired,
                 &grant.recipient_user_id,
                 &grant.id,
-                grant.remaining_micros.max(0),
+                grant.remaining.max(Credits::ZERO),
                 None,
                 format!("grant-expired:{}", grant.id),
             )
@@ -342,6 +344,7 @@ pub async fn recover_unledgered_events(
     db: &mongodb::Database,
     now: DateTime<Utc>,
 ) -> AppResult<u64> {
+    super::exact_migration::require_ready(db).await?;
     let grants: Vec<CreditGrant> = db
         .collection::<CreditGrant>(CREDIT_GRANTS)
         .find(doc! {
@@ -370,7 +373,7 @@ pub async fn recover_unledgered_events(
                 BillingLedgerEventType::GrantIssued,
                 &grant.recipient_user_id,
                 &grant.id,
-                grant.amount_micros,
+                grant.amount,
                 None,
                 format!("grant-issued:{}", grant.id),
             )
@@ -383,24 +386,24 @@ pub async fn recover_unledgered_events(
         let terminal = match grant.status {
             CreditGrantStatus::Expired => Some((
                 BillingLedgerEventType::GrantExpired,
-                grant.terminal_amount_micros.max(0),
+                grant.terminal_amount.max(Credits::ZERO),
                 format!("grant-expired:{}", grant.id),
             )),
             CreditGrantStatus::Revoked => Some((
                 BillingLedgerEventType::GrantRevoked,
-                grant.terminal_amount_micros.max(0),
+                grant.terminal_amount.max(Credits::ZERO),
                 format!("grant-revoked:{}", grant.id),
             )),
             CreditGrantStatus::Active | CreditGrantStatus::Consumed => None,
         };
         if grant.terminal_ledgered_at.is_none()
-            && let Some((event_type, amount_micros, dedupe_key)) = terminal
+            && let Some((event_type, amount, dedupe_key)) = terminal
             && super::ledger::record_grant_event(
                 db,
                 event_type,
                 &grant.recipient_user_id,
                 &grant.id,
-                amount_micros,
+                amount,
                 None,
                 dedupe_key,
             )
@@ -703,7 +706,7 @@ mod tests {
         );
         assert_eq!(
             db.collection::<BillingLedgerEntry>(BILLING_LEDGER)
-                .count_documents(doc! { "event_type": "grant_issued" })
+                .count_documents(doc! { "movement": "grant_issued" })
                 .await
                 .expect("count grant ledger entries"),
             2
@@ -799,9 +802,9 @@ mod tests {
             target_org_ids: Vec::new(),
             target_group_ids: Vec::new(),
             amount_credits: 2,
-            amount_micros: 2 * CREDIT_MICROS,
-            remaining_micros: 2 * CREDIT_MICROS,
-            reserved_micros: 0,
+            amount: crate::models::credits::Credits::from_micros(2 * CREDIT_MICROS),
+            remaining: crate::models::credits::Credits::from_micros(2 * CREDIT_MICROS),
+            reserved: Credits::ZERO,
             scope: BillingServiceScope {
                 all_services: true,
                 service_ids: Vec::new(),
@@ -813,7 +816,7 @@ mod tests {
             status: CreditGrantStatus::Active,
             issued_ledgered_at: Some(now),
             terminal_ledgered_at: None,
-            terminal_amount_micros: 0,
+            terminal_amount: Credits::ZERO,
             active_settlement: None,
             created_at: now - chrono::Duration::days(1),
             updated_at: now,
@@ -824,7 +827,7 @@ mod tests {
         let mut reserved = due.clone();
         reserved.id = "grant-reserved".to_string();
         reserved.expires_at = Some(now - chrono::Duration::seconds(1));
-        reserved.reserved_micros = CREDIT_MICROS;
+        reserved.reserved = crate::models::credits::Credits::from_micros(CREDIT_MICROS);
         db.collection::<CreditGrant>(CREDIT_GRANTS)
             .insert_many([due, reserved])
             .await
@@ -846,10 +849,19 @@ mod tests {
             .expect("reserved grant exists");
 
         assert_eq!(due.status, CreditGrantStatus::Expired);
-        assert_eq!(due.remaining_micros, 0);
-        assert_eq!(due.terminal_amount_micros, 2 * CREDIT_MICROS);
+        assert_eq!(
+            due.remaining,
+            crate::models::credits::Credits::from_micros(0)
+        );
+        assert_eq!(
+            due.terminal_amount,
+            crate::models::credits::Credits::from_micros(2 * CREDIT_MICROS)
+        );
         assert_eq!(reserved.status, CreditGrantStatus::Active);
-        assert_eq!(reserved.remaining_micros, 2 * CREDIT_MICROS);
+        assert_eq!(
+            reserved.remaining,
+            crate::models::credits::Credits::from_micros(2 * CREDIT_MICROS)
+        );
     }
 
     #[tokio::test]
@@ -872,9 +884,9 @@ mod tests {
                 target_org_ids: Vec::new(),
                 target_group_ids: Vec::new(),
                 amount_credits: 1,
-                amount_micros: CREDIT_MICROS,
-                remaining_micros: CREDIT_MICROS,
-                reserved_micros: 0,
+                amount: crate::models::credits::Credits::from_micros(CREDIT_MICROS),
+                remaining: crate::models::credits::Credits::from_micros(CREDIT_MICROS),
+                reserved: Credits::ZERO,
                 scope: BillingServiceScope {
                     all_services: true,
                     service_ids: Vec::new(),
@@ -886,7 +898,7 @@ mod tests {
                 status: CreditGrantStatus::Active,
                 issued_ledgered_at: Some(now),
                 terminal_ledgered_at: None,
-                terminal_amount_micros: 0,
+                terminal_amount: Credits::ZERO,
                 active_settlement: None,
                 created_at: now - chrono::Duration::days(1),
                 updated_at: now,
@@ -934,9 +946,9 @@ mod tests {
                 target_org_ids: Vec::new(),
                 target_group_ids: Vec::new(),
                 amount_credits: 3,
-                amount_micros: 3 * CREDIT_MICROS,
-                remaining_micros: 0,
-                reserved_micros: 0,
+                amount: crate::models::credits::Credits::from_micros(3 * CREDIT_MICROS),
+                remaining: crate::models::credits::Credits::from_micros(0),
+                reserved: Credits::ZERO,
                 scope: BillingServiceScope {
                     all_services: true,
                     service_ids: Vec::new(),
@@ -948,7 +960,7 @@ mod tests {
                 status: CreditGrantStatus::Revoked,
                 issued_ledgered_at: None,
                 terminal_ledgered_at: None,
-                terminal_amount_micros: 2_500_000,
+                terminal_amount: crate::models::credits::Credits::from_micros(2_500_000),
                 active_settlement: None,
                 created_at: now - chrono::Duration::minutes(1),
                 updated_at: now,
@@ -994,8 +1006,8 @@ mod tests {
         assert_eq!(entries.len(), 2);
         let revoked = entries
             .iter()
-            .find(|entry| entry.event_type == BillingLedgerEventType::GrantRevoked)
+            .find(|entry| entry.movement.as_deref() == Some("grant_revoked"))
             .expect("revocation entry");
-        assert_eq!(revoked.amount_micros, Some(2_500_000));
+        assert_eq!(revoked.postings[0].amount, Credits::from_micros(2_500_000));
     }
 }

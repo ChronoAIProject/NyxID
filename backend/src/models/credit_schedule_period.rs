@@ -13,43 +13,49 @@ pub enum SchedulePeriodStatus {
     Complete,
 }
 
-/// Derived progress for a schedule walk. Losing this collection may repeat
-/// recipient scans, but deterministic grant ids preserve money accuracy.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CreditSchedulePeriod {
-    #[serde(rename = "_id")]
-    pub id: String,
-    pub schedule_id: String,
-    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
-    pub period_start: DateTime<Utc>,
-    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
-    pub period_end: DateTime<Utc>,
-    pub status: SchedulePeriodStatus,
-    pub amount_micros: i64,
-    #[serde(default, with = "crate::models::bson_datetime::optional")]
-    pub expires_at: Option<DateTime<Utc>>,
-    pub target_kind: BillingTargetKind,
-    #[serde(default)]
-    pub target_user_ids: Vec<String>,
-    #[serde(default)]
-    pub target_org_ids: Vec<String>,
-    #[serde(default)]
-    pub target_group_ids: Vec<String>,
-    pub scope: BillingServiceScope,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cursor_user_id: Option<String>,
-    #[serde(default)]
-    pub disbursed_count: u64,
-    /// An efficiency lease only. The unique deterministic grant id is the
-    /// authority for whether a recipient was paid.
-    #[serde(default, with = "crate::models::bson_datetime::optional")]
-    pub lease_expires_at: Option<DateTime<Utc>>,
-    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
-    pub created_at: DateTime<Utc>,
-    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
-    pub updated_at: DateTime<Utc>,
-    #[serde(default, with = "crate::models::bson_datetime::optional")]
-    pub completed_at: Option<DateTime<Utc>>,
+crate::exact_credit_model! {
+    [
+        ("amount", "amount_micros"),
+    ]
+    /// Derived progress for a schedule walk. Losing this collection may repeat
+    /// recipient scans, but deterministic grant ids preserve money accuracy.
+    #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+    pub struct CreditSchedulePeriod {
+        #[serde(rename = "_id")]
+        pub id: String,
+        pub schedule_id: String,
+        #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+        pub period_start: DateTime<Utc>,
+        #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+        pub period_end: DateTime<Utc>,
+        pub status: SchedulePeriodStatus,
+        #[serde(with = "crate::models::credits::whole")]
+        pub amount: crate::models::credits::Credits,
+        #[serde(default, with = "crate::models::bson_datetime::optional")]
+        pub expires_at: Option<DateTime<Utc>>,
+        pub target_kind: BillingTargetKind,
+        #[serde(default)]
+        pub target_user_ids: Vec<String>,
+        #[serde(default)]
+        pub target_org_ids: Vec<String>,
+        #[serde(default)]
+        pub target_group_ids: Vec<String>,
+        pub scope: BillingServiceScope,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub cursor_user_id: Option<String>,
+        #[serde(default)]
+        pub disbursed_count: u64,
+        /// An efficiency lease only. The unique deterministic grant id is the
+        /// authority for whether a recipient was paid.
+        #[serde(default, with = "crate::models::bson_datetime::optional")]
+        pub lease_expires_at: Option<DateTime<Utc>>,
+        #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+        pub created_at: DateTime<Utc>,
+        #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+        pub updated_at: DateTime<Utc>,
+        #[serde(default, with = "crate::models::bson_datetime::optional")]
+        pub completed_at: Option<DateTime<Utc>>,
+    }
 }

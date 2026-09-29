@@ -1,3 +1,4 @@
+import { credits } from "./billing-display";
 export function formatCredits(value: number): string {
   return `${formatNumber(value)} credits`;
 }
@@ -7,12 +8,10 @@ export function formatNumber(value: number): string {
 }
 
 export function formatEstimatedCredits(
-  value: number | null | undefined,
+  value: string | number | null | undefined,
 ): string {
   if (value === null || value === undefined) {
     return "-";
   }
-  return `${new Intl.NumberFormat(undefined, {
-    maximumFractionDigits: 6,
-  }).format(value / 1_000_000)} credits`;
+  return `${credits(value)} credits`;
 }

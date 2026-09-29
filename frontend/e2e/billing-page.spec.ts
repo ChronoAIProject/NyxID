@@ -115,17 +115,28 @@ for (const width of [1440, 768, 390, 320]) {
         .filter({ hasText: "Example LLM" }),
     ).toHaveCount(1);
     await expect(page.locator(".benefit-expanded").first()).not.toBeVisible();
-    await page.getByRole("img", { name: /Allowance usage/ }).hover();
+    // #1673 replaced the image with a focusable stacked meter. Keyboard
+    // focus exposes the full allowance breakdown for every viewport.
+    await page
+      .getByRole("meter", { name: "Example LLM free usage used" })
+      .focus();
     const tooltip = page.getByRole("tooltip");
-    await expect(tooltip.locator("dl > div")).toHaveCount(5);
-    await expect(tooltip.locator("dd")).toHaveText([
-      "10%",
-      "10%",
-      "10%",
-      "10%",
-      "10%",
+    await expect(tooltip.locator("li")).toHaveCount(5);
+    await expect(tooltip.locator("li")).toHaveText([
+      "Input tokens · 800 of 1K left",
+      "Output tokens · 800 of 1K left",
+      "Cache-read tokens · 800 of 1K left",
+      "Cache-write tokens · 800 of 1K left",
+      "Images · 800 of 1K left",
     ]);
-    await page.keyboard.press("Escape");
+    await expect(
+      page.getByRole("meter", { name: "Example LLM free usage used" }),
+    ).toHaveAttribute(
+      "aria-valuetext",
+      /Input tokens 10% used; Output tokens 10% used; Cache-read tokens 10% used; Cache-write tokens 10% used; Images 10% used/,
+    );
+    // The focus-driven full breakdown closes when focus leaves the meter.
+    await page.keyboard.press("Tab");
     await expect(page.getByRole("tooltip")).toHaveCount(0);
     await page.getByRole("button", { name: "About free usage" }).click();
     await expect(page.getByRole("tooltip")).toContainText(
@@ -135,28 +146,34 @@ for (const width of [1440, 768, 390, 320]) {
     await page.keyboard.press("Escape");
     await expect(page.getByRole("tooltip")).toHaveCount(0);
     await page.getByRole("tab", { name: "Usage", exact: true }).click();
+    await expect(page.getByRole("combobox", { name: "Time range" })).toHaveText(
+      "Last 30 days",
+    );
+    await page.getByRole("button", { name: "Filter services" }).click();
     await expect(
-      page.getByRole("combobox", { name: "Time filter" }),
-    ).toHaveText("Last 30 days");
-    await page.getByRole("combobox", { name: "Service filter" }).click();
-    await expect(
-      page.getByRole("option", { name: "Unused service" }),
+      page.getByRole("dialog").getByRole("button", { name: /Unused service/ }),
     ).toHaveCount(0);
+    // The current service filter stages selections in an accessible picker.
     await page
-      .getByRole("option", { name: "Example LLM", exact: true })
+      .getByRole("dialog")
+      .getByRole("button", { name: /Example LLM/ })
+      .click();
+    await page
+      .getByRole("dialog")
+      .getByRole("button", { name: "Apply", exact: true })
       .click();
     await expect(page.locator(".expandable-name > strong")).toHaveText([
       "Example LLM",
     ]);
     await page.reload();
     await expect(
-      page.getByRole("combobox", { name: "Service filter" }),
-    ).toHaveText("Example LLM");
-    await page.getByRole("combobox", { name: "Time filter" }).click();
+      page.getByRole("button", { name: /Edit Services filter:.*Example LLM/ }),
+    ).toBeVisible();
+    await page.getByRole("combobox", { name: "Time range" }).click();
     await page.getByRole("option", { name: "Last 24 hours" }).click();
     await expect(
-      page.getByRole("combobox", { name: "Service filter" }),
-    ).toHaveText("All active services");
+      page.getByRole("button", { name: "Remove Services filter", exact: true }),
+    ).toHaveCount(0);
     await expect(page.getByText("No usage in this period.")).toBeVisible();
     expect(
       await page.evaluate(

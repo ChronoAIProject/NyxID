@@ -1,3 +1,9 @@
+import {
+  decimalCredits,
+  exactCredits,
+  formatExactCredits,
+  parseCredits,
+} from "./credits";
 import type { BillingUsagePeriod, BillingUsageRow } from "@/schemas/billing";
 import type { CatalogEntry } from "@/types/keys";
 
@@ -15,8 +21,11 @@ export const periods: Record<BillingUsagePeriod, string> = {
 };
 export const number = (value: number) =>
   new Intl.NumberFormat(undefined, { maximumFractionDigits: 6 }).format(value);
-export const credits = (micros: number | null | undefined) =>
-  micros == null ? "Unavailable" : number(micros / 1_000_000);
+export const credits = (value: string | number | null | undefined) => {
+  const exact =
+    typeof value === "string" ? value : exactCredits(undefined, value);
+  return exact === null ? "Unavailable" : formatExactCredits(exact);
+};
 export const compact = (value: number) =>
   new Intl.NumberFormat(undefined, {
     notation: "compact",
@@ -42,9 +51,19 @@ export function total(
     | "wallet_credits_micros"
     | "grant_credits_micros"
     | "allowance_credits_micros",
-): number | null {
-  if (rows.some((row) => row[field] == null)) return null;
-  return rows.reduce((sum, row) => sum + (row[field] ?? 0), 0);
+): string | null {
+  const exactField = field.replace(/_micros$/, "") as
+    | "estimated_credits"
+    | "wallet_credits"
+    | "grant_credits"
+    | "allowance_credits";
+  let sum = 0n;
+  for (const row of rows) {
+    const value = exactCredits(row[exactField], row[field]);
+    if (value === null) return null;
+    sum += parseCredits(value);
+  }
+  return decimalCredits(sum);
 }
 
 const DAY_MS = 86_400_000;

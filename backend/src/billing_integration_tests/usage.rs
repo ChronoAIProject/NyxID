@@ -25,7 +25,7 @@ fn meter(owner: &str, quantity: i64) -> UsageMeterRow {
         credential_class: CredentialClass::NyxidManagedMaster,
         model: Some("test-model".into()),
         token_breakdown: None,
-        reserved_credits: 0,
+        reserved_credits: crate::models::credits::Credits::from_whole(0),
         funding: None,
         quantity: Some(quantity),
         pending_resale_quantity: None,
@@ -176,9 +176,9 @@ async fn exact_funding_costs_survive_retries_repricing_and_missing_rates() {
                     target_org_ids: Vec::new(),
                     target_group_ids: Vec::new(),
                     amount_credits: 1,
-                    amount_micros: grant_micros,
-                    remaining_micros: grant_micros,
-                    reserved_micros: 0,
+                    amount: crate::models::credits::Credits::from_micros(grant_micros),
+                    remaining: crate::models::credits::Credits::from_micros(grant_micros),
+                    reserved: crate::models::credits::Credits::from_micros(0),
                     scope: BillingServiceScope {
                         all_services: true,
                         service_ids: vec![],
@@ -190,7 +190,7 @@ async fn exact_funding_costs_survive_retries_repricing_and_missing_rates() {
                     status: CreditGrantStatus::Active,
                     issued_ledgered_at: Some(now),
                     terminal_ledgered_at: None,
-                    terminal_amount_micros: 0,
+                    terminal_amount: crate::models::credits::Credits::from_micros(0),
                     active_settlement: None,
                     created_at: now,
                     updated_at: now,
@@ -214,7 +214,8 @@ async fn exact_funding_costs_survive_retries_repricing_and_missing_rates() {
         let settlement = settle_usage_funding(&db, &row).await.unwrap();
         assert_eq!(
             settlement.wallet_charge_credits,
-            i64::from(wallet_micros > 0),
+            // Exact wallet shares replace the former whole-credit ceiling (issue #1672).
+            crate::models::credits::Credits::from_micros(wallet_micros),
             "{name}"
         );
         assert_eq!(
@@ -229,11 +230,26 @@ async fn exact_funding_costs_survive_retries_repricing_and_missing_rates() {
             .unwrap()
             .unwrap();
         let funding = saved.funding.as_ref().unwrap();
-        assert_eq!(funding.total_charge_micros, Some(2440), "{name}");
+        assert_eq!(
+            funding.total_charge,
+            Some(crate::models::credits::Credits::from_micros(2440)),
+            "{name}"
+        );
         assert_eq!(funding.allowance_funded_quantity, Some(allowance_units));
-        assert_eq!(funding.allowance_funded_micros, Some(allowance_units));
-        assert_eq!(funding.grant_funded_micros, Some(grant_micros));
-        assert_eq!(funding.wallet_funded_micros, Some(wallet_micros));
+        assert_eq!(
+            funding.allowance_funded,
+            Some(crate::models::credits::Credits::from_micros(
+                allowance_units
+            ))
+        );
+        assert_eq!(
+            funding.grant_funded,
+            Some(crate::models::credits::Credits::from_micros(grant_micros))
+        );
+        assert_eq!(
+            funding.wallet_funded,
+            Some(crate::models::credits::Credits::from_micros(wallet_micros))
+        );
         db.collection::<BillingRateCache>(BILLING_RATE_CACHE)
             .update_many(
                 doc! {},
@@ -304,7 +320,7 @@ async fn historical_funding_uses_model_rate_and_sums_with_exact_and_free_rows() 
     let mut old = meter(&owner, 100);
     old.funding = Some(UsageFunding {
         settled: true,
-        wallet_charge_credits: Some(1),
+        wallet_charge_credits: Some(crate::models::credits::Credits::from_whole(1)),
         allowance_consumptions: vec![AllowanceConsumptionAllocation {
             operation_id: "a".into(),
             allowance_id: "a".into(),
@@ -314,23 +330,33 @@ async fn historical_funding_uses_model_rate_and_sums_with_exact_and_free_rows() 
         grant_consumptions: vec![GrantConsumptionAllocation {
             operation_id: "g".into(),
             grant_id: "g".into(),
-            amount_micros: 50,
+            amount: crate::models::credits::Credits::from_micros(50),
         }],
         ..Default::default()
     });
     let legacy = meter(&owner, 10);
+    // Exact carry assignment is durable, so the recovery fixture must be
+    // persisted before settlement, just as the production meter path does.
+    db.collection::<UsageMeterRow>(USAGE_METER)
+        .insert_one(&legacy)
+        .await
+        .unwrap();
     let legacy_settlement = crate::services::billing::funding::settle_usage_funding(&db, &legacy)
         .await
         .unwrap();
-    assert_eq!(legacy_settlement.wallet_charge_credits, 1);
+    assert_eq!(
+        legacy_settlement.wallet_charge_credits,
+        // #1672: the previous one-credit expectation encoded the ceiling bug.
+        crate::models::credits::Credits::from_micros(20)
+    );
     assert_eq!(legacy_settlement.lago_billable_quantity_micros, 10_000_000);
     let mut exact = meter(&owner, 30);
     exact.funding = Some(UsageFunding {
         settled: true,
-        total_charge_micros: Some(30),
-        wallet_funded_micros: Some(20),
-        grant_funded_micros: Some(10),
-        allowance_funded_micros: Some(0),
+        total_charge: Some(crate::models::credits::Credits::from_micros(30)),
+        wallet_funded: Some(crate::models::credits::Credits::from_micros(20)),
+        grant_funded: Some(crate::models::credits::Credits::from_micros(10)),
+        allowance_funded: Some(crate::models::credits::Credits::from_micros(0)),
         allowance_funded_quantity: Some(0),
         ..Default::default()
     });
@@ -345,15 +371,7 @@ async fn historical_funding_uses_model_rate_and_sums_with_exact_and_free_rows() 
     mixed_historical.lago_metric_code = mixed_exact.lago_metric_code.clone();
     mixed_historical.funding = old.funding.clone();
     db.collection::<UsageMeterRow>(USAGE_METER)
-        .insert_many([
-            old,
-            legacy,
-            exact,
-            free,
-            unknown,
-            mixed_exact,
-            mixed_historical,
-        ])
+        .insert_many([old, exact, free, unknown, mixed_exact, mixed_historical])
         .await
         .unwrap();
     let result = read_usage(&state, &owner).await;
@@ -571,7 +589,10 @@ async fn org_credential_request(platform_key: bool) {
     );
     assert_eq!(row.quantity, Some(5));
     assert!(row.wallet_id.is_some());
-    assert_eq!(wallet(&db, payer).await.pending_lago_debits, 5);
+    assert_eq!(
+        wallet(&db, payer).await.pending_lago_debits,
+        crate::models::credits::Credits::from_whole(5)
+    );
     assert!(state.billing.get_wallet(other).await.unwrap().is_none());
     let personal_usage = read_usage(&state, &actor).await;
     assert_eq!(personal_usage.rows.len(), usize::from(platform_key));

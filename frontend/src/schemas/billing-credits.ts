@@ -1,3 +1,4 @@
+import { creditsSchema } from "./credits";
 import { z } from "zod";
 import { billingMetricSchema } from "@/schemas/billing";
 
@@ -53,8 +54,11 @@ export const creditGrantSchema = z.object({
   target_org_ids: z.array(z.string()).optional(),
   target_group_ids: z.array(z.string()).optional(),
   amount_credits: z.number().int().positive(),
+  amount: creditsSchema.optional(),
   amount_micros: z.number().int().nonnegative(),
+  remaining: creditsSchema.optional(),
   remaining_micros: z.number().int().nonnegative(),
+  reserved: creditsSchema.optional(),
   reserved_micros: z.number().int().nonnegative(),
   scope: billingServiceScopeSchema,
   expires_at: z.string().nullable().optional(),
@@ -92,6 +96,7 @@ export const creditSchedulePeriodSchema = z.object({
   end: z.string(),
   status: z.enum(["disbursing", "complete"]),
   disbursed_count: z.number().int().nonnegative(),
+  amount: creditsSchema.optional(),
   amount_micros: z.number().int().nonnegative(),
   expires_at: z.string().nullable().optional(),
   completed_at: z.string().nullable().optional(),
@@ -107,6 +112,7 @@ export const creditScheduleRecipientSchema = z.object({
 export const creditScheduleSchema = z.object({
   id: z.string(),
   amount_credits: z.number().int().positive(),
+  amount: creditsSchema.optional(),
   amount_micros: z.number().int().nonnegative(),
   recurrence: scheduleRecurrenceSchema,
   expiry: creditExpiryPolicySchema,

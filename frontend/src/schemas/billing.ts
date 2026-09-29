@@ -1,3 +1,4 @@
+import { creditsSchema } from "./credits";
 import { BILLING_METRICS } from "./billing-metrics";
 import { z } from "zod";
 
@@ -52,6 +53,10 @@ export type BillingSearch = ReturnType<typeof normalizeBillingSearch>;
 
 // Optional for compatibility with servers predating exact settlement display.
 const fundingBreakdownShape = {
+  estimated_credits: creditsSchema.nullable().optional(),
+  wallet_credits: creditsSchema.nullable().optional(),
+  grant_credits: creditsSchema.nullable().optional(),
+  allowance_credits: creditsSchema.nullable().optional(),
   wallet_credits_micros: z.number().int().nonnegative().nullable().optional(),
   grant_credits_micros: z.number().int().nonnegative().nullable().optional(),
   allowance_credits_micros: z
@@ -134,6 +139,14 @@ export const billingUsageResponseSchema = z.object({
 });
 
 export const billingWalletResponseSchema = z.object({
+  balance: creditsSchema.optional(),
+  reserved: creditsSchema.optional(),
+  pending_debits: creditsSchema.optional(),
+  pending_expiry: creditsSchema.optional(),
+  available: creditsSchema.optional(),
+  available_with_overdraft: creditsSchema.optional(),
+  overdraft_cap: creditsSchema.optional(),
+
   owner_id: z.string().min(1),
   plan_kind: billingPlanKindSchema,
   collection_state: billingCollectionStateSchema,
@@ -199,6 +212,7 @@ export const topUpHistoryEntrySchema = z.object({
   receipt_available: z.boolean(),
   paid_at: z.string().nullable().optional(),
   credits_expire_at: z.string().nullable().optional(),
+  expired_credits: creditsSchema.optional(),
   expired_credits_micros: z.number().int().nonnegative().default(0),
   credits_expired_at: z.string().nullable().optional(),
 });
