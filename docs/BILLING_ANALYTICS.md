@@ -183,15 +183,15 @@ Partial axis labels carry an asterisk; tooltips and data tables state the actual
 included UTC range.
 Totals, filters, and whole-window Top N membership are independent of the interval.
 
-| Available measure                                    | Meaning                                                                                                                                             |
-| ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Requests                                             | One count from the primary platform metering record; component and resale rows do not count again.                                                  |
-| Billing events                                       | Metering records; one request can generate several.                                                                                                 |
-| Total, input, output, cache-read, cache-write tokens | Provider-reported token fields on the primary record. Total is input + output; caches may overlap and are not added again.                          |
-| Billed units                                         | The selected metered quantity: requests, tokens, input/output/cache tokens, bytes, or images. Billed input can differ from provider-reported input. |
-| Gross, wallet, grant, allowance cost                 | Exact decimal-credit strings; legacy micros are aggregate display projections. These are usage costs, not fiat revenue or wallet balances.          |
-| Exact-cost, legacy, uncosted events                  | Cost provenance counts. Legacy and uncosted can overlap; they are not three mutually exclusive shares.                                              |
-| Active users and services                            | Existing distinct whole-window totals in the summary. Do not sum distinct counts across groups or periods.                                          |
+| Available measure | Meaning |
+| --- | --- |
+| Requests | One count from the primary platform metering record; component and resale rows do not count again. |
+| Billing events | Metering records; one request can generate several. |
+| Total, input, output, cache-read, cache-write tokens | Provider-reported token fields on the primary record. Total is input + output; caches may overlap and are not added again. |
+| Billed units | The selected metered quantity: requests, tokens, input/output/cache tokens, bytes, or images. Billed input can differ from provider-reported input. |
+| Gross, wallet, grant, allowance cost | Exact decimal-credit strings; legacy micros are aggregate display projections. These are usage costs, not fiat revenue or wallet balances. |
+| Exact-cost, legacy, uncosted events | Cost provenance counts. Legacy and uncosted can overlap; they are not three mutually exclusive shares. |
+| Active users and services | Existing distinct whole-window totals in the summary. Do not sum distinct counts across groups or periods. |
 
 Panels can break down by service, acting user, billing account, or credential class.
 Credential classes use the same names as the platform's List view. Service/user/
@@ -272,12 +272,12 @@ axis. Standard-width panels follow their layout's grid; full-width panels span i
 
 ## API and reporting semantics
 
-| Endpoint                            | Behavior                                                                                                              |
-| ----------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `GET /api/v1/admin/usage`           | Existing List report, including the same optional `services`, `actors`, and `owners` multi-selection filters.         |
+| Endpoint | Behavior |
+| --- | --- |
+| `GET /api/v1/admin/usage` | Existing List report, including the same optional `services`, `actors`, and `owners` multi-selection filters. |
 | `GET /api/v1/admin/usage/analytics` | Query a bounded usage snapshot; returns totals, UTC buckets, globally ranked slices and series, units, and freshness. |
-| `GET /api/v1/admin/usage/workspace` | Read the authenticated user's private workspace and revision.                                                         |
-| `PUT /api/v1/admin/usage/workspace` | Validate and conditionally save the authenticated admin's workspace.                                                  |
+| `GET /api/v1/admin/usage/workspace` | Read the authenticated user's private workspace and revision. |
+| `PUT /api/v1/admin/usage/workspace` | Validate and conditionally save the authenticated admin's workspace. |
 
 Analytics accepts `period=24h|7d|30d` or RFC 3339 `from` and `to`, plus optional
 comma-separated `services`, `actors`, and `owners`. `measure`, `metric`,
@@ -368,7 +368,7 @@ cargo test -p nyxid --bin nyxid-server services::admin_usage_service::tests --no
 cargo test -p nyxid --bin nyxid-server usage_workspace --no-default-features
 ```
 
-Exact accounting (0.31): cost analytics expose `exact_value` and `exact_total` as
+Exact accounting (0.33.0): cost analytics expose `exact_value` and `exact_total` as
 additive strings. Hourly/daily buckets sum Decimal128 credits, converting legacy
 integer micro measures before each increment. Totals truncate only when producing
 legacy integer response fields. Sorting uses exact values; chart labels retain

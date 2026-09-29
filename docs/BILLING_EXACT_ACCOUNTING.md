@@ -130,8 +130,9 @@ deletion.
 A billing-enabled runner leases the reconciliation job across replicas and checks
 up to 1,000 wallets and 1,000 grants in one bounded snapshot. It runs at the
 chain-verification cadence, holds the lease for the active pass, and releases it
-when the pass reaches both lexical cursors; deployments with billing disabled
-spawn no runner. Durable lexical cursors make collections
+when the pass reaches both lexical cursors. Deployments with billing disabled or
+`CHAIN_VERIFY_INTERVAL_SECS=0` spawn no account runner; zero also disables
+automatic hash-chain verification. Durable lexical cursors make collections
 that finish early wait for the other collection. Active money locks and
 incomplete journaling defer accounts; a deferred cycle never certifies a full
 pass. Mismatches retain the cursor and report account, stored balance and journal

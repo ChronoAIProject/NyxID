@@ -22,8 +22,9 @@ const STATE: &str = "billing_account_verify_state";
 const LEASE: &str = "billing_account_verify_lease";
 /// One replica advances a pass in bounded batches, then the shared due time
 /// keeps all replicas idle for the configured verification interval.
+/// Disabled billing or a zero verification interval spawns no runner.
 pub fn spawn(db: mongodb::Database, billing_enabled: bool, cadence_secs: u64) {
-    if !billing_enabled {
+    if !billing_enabled || cadence_secs == 0 {
         return;
     }
     tokio::spawn(async move {
@@ -354,6 +355,21 @@ async fn verify_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn disabled_configuration_spawns_no_runner() {
+        let client = mongodb::Client::with_options(Default::default()).unwrap();
+        let db = client.database("account_verify_disabled");
+        // No runtime is entered on this thread: accidentally spawning a task
+        // panics immediately, without relying on sleeps or observing no writes.
+        std::thread::spawn(move || {
+            assert!(tokio::runtime::Handle::try_current().is_err());
+            spawn(db.clone(), true, 0);
+            spawn(db, false, 3600);
+        })
+        .join()
+        .expect("disabled account verification must not spawn a runner");
+    }
 
     #[tokio::test]
     async fn scheduled_pass_is_leased_fenced_and_idles_after_deferred_accounts() {
