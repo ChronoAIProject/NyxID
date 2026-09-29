@@ -100,6 +100,7 @@ async fn channel(state: &AppState, transport: &str) -> (NyxbotChannel, String) {
         id: Uuid::new_v4().to_string(),
         user_id: OWNER.into(),
         channel_bot_id: Uuid::new_v4().to_string(),
+        bot_owner_id: None,
         platform: if transport == "gateway" {
             "telegram"
         } else {
@@ -1239,5 +1240,631 @@ async fn direct_relay_accepts_only_nyxids_signed_callback_for_the_route_key() {
             .unwrap(),
         1
     );
+    server.abort();
+}
+
+/// Start this state's change stream and NyxBot's live dispatch, and return
+/// once the stream is delivering changes.
+async fn start_live(state: &AppState) -> tokio::task::JoinHandle<()> {
+    use crate::services::assistant_live::LiveEvent;
+    let mut probe = state.assistant_live.subscribe();
+    spawn_live_dispatch(state.clone());
+    let runner = {
+        let live = state.assistant_live.clone();
+        let db = state.db.clone();
+        tokio::spawn(async move { live.run(db).await })
+    };
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            state
+                .db
+                .collection::<bson::Document>(CONVERSATIONS)
+                .update_one(
+                    doc! {"_id": "live-probe"},
+                    doc! {"$set": {"user_id": "probe", "at": bson::DateTime::now()}},
+                )
+                .upsert(true)
+                .await
+                .unwrap();
+            let deadline = tokio::time::sleep(Duration::from_millis(300));
+            tokio::pin!(deadline);
+            loop {
+                tokio::select! {
+                    event = probe.recv() => {
+                        if matches!(event, Ok(LiveEvent::Conversation { ref id, .. }) if id == "live-probe") {
+                            return;
+                        }
+                    }
+                    _ = &mut deadline => break,
+                }
+            }
+        }
+    })
+    .await
+    .expect("the change stream opens");
+    runner
+}
+
+/// With the change stream running, a finished connect link and a newly
+/// active bot resume the waiting chat at once; no sweep runs here.
+#[tokio::test]
+async fn live_changes_resume_waiting_chats_without_the_sweep() {
+    let (state, _, server) = setup("nyxbot_live_resume").await;
+    let runner = start_live(&state).await;
+    let team = crate::services::assistant_team_service::ensure_nyxbot(&state.db, OWNER)
+        .await
+        .unwrap();
+    let home = crate::services::assistant_team_service::home_thread(
+        &state.db,
+        &state.encryption_keys,
+        &team,
+    )
+    .await
+    .unwrap();
+    // A connect link the chat handed out.
+    let link_id = Uuid::new_v4().to_string();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::connect_link::COLLECTION_NAME)
+        .insert_one(doc! {
+            "_id": &link_id, "user_id": OWNER, "service_slug": "api-github",
+            "service_id": Uuid::new_v4().to_string(), "token_hash": "hash",
+            "status": "pending", "created_at": bson::DateTime::now(),
+            "expires_at": bson::DateTime::from_chrono(Utc::now() + ChronoDuration::minutes(15)),
+        })
+        .await
+        .unwrap();
+    watch_connect_link(&state.db, OWNER, &home.id, &link_id)
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::connect_link::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &link_id},
+            doc! {"$set": {"status": "completed"}},
+        )
+        .await
+        .unwrap();
+    wait_for_event(&state, &home.id, "finished connecting").await;
+    // A setup link: the bot the user creates is linked the moment it is
+    // saved, even while its webhook is still being verified.
+    setup_link_tool(&state, OWNER, &home.id, "lark", None, &team)
+        .await
+        .unwrap();
+    let mut created = bot_doc("lark", "Support desk");
+    created.insert("status", "pending_webhook");
+    let bot_id = created.get_str("_id").unwrap().to_owned();
+    let linked = || async {
+        state
+            .db
+            .collection::<NyxbotChannel>(CHANNELS)
+            .count_documents(doc! {"user_id": OWNER, "channel_bot_id": &bot_id})
+            .await
+            .unwrap()
+    };
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .insert_one(created)
+        .await
+        .unwrap();
+    wait_for_event(&state, &home.id, "now linked to").await;
+    assert_eq!(linked().await, 1);
+    runner.abort();
+    server.abort();
+}
+
+async fn frame(body: &mut axum::body::BodyDataStream) -> String {
+    use futures::StreamExt;
+    let bytes = tokio::time::timeout(Duration::from_secs(5), body.next())
+        .await
+        .expect("a frame")
+        .expect("an open stream")
+        .unwrap();
+    String::from_utf8(bytes.to_vec()).unwrap()
+}
+
+/// The browser's live stream carries only the owner's changes, as
+/// identifiers, and asks for a resync when changes may have been missed.
+#[tokio::test]
+async fn the_live_stream_pushes_only_the_owners_changes() {
+    use crate::services::assistant_live::LiveEvent;
+    let (state, _, server) = setup("nyxbot_live_stream").await;
+    // Without an open change stream, browsers are told to keep polling.
+    let closed = crate::handlers::assistant_nyxagent::live(
+        State(state.clone()),
+        crate::test_utils::test_auth_user(OWNER),
+    )
+    .await
+    .unwrap();
+    assert_eq!(closed.status(), StatusCode::SERVICE_UNAVAILABLE);
+    state.assistant_live.set_open_for_tests(true);
+    let response = crate::handlers::assistant_nyxagent::live(
+        State(state.clone()),
+        crate::test_utils::test_auth_user(OWNER),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.headers()["content-type"], "text/event-stream");
+    let mut body = response.into_body().into_data_stream();
+    assert!(frame(&mut body).await.contains("event: ready"));
+    state.assistant_live.publish(LiveEvent::Conversation {
+        id: "nyxa-other".into(),
+        user_id: "someone-else".into(),
+        group_id: None,
+        turn_id: None,
+        messages: 1,
+    });
+    state.assistant_live.publish(LiveEvent::Conversation {
+        id: "nyxa-mine".into(),
+        user_id: OWNER.into(),
+        group_id: Some("nyxg-1".into()),
+        turn_id: Some("turn-1".into()),
+        messages: 3,
+    });
+    let pushed = frame(&mut body).await;
+    assert!(
+        pushed.contains("event: conversation")
+            && pushed.contains(r#""type":"conversation""#)
+            && pushed.contains(r#""id":"nyxa-mine""#)
+            && pushed.contains(r#""group_id":"nyxg-1""#)
+            && pushed.contains(r#""turn_id":"turn-1""#)
+            && pushed.contains(r#""messages":3"#)
+            && !pushed.contains("nyxa-other"),
+        "{pushed}"
+    );
+    state.assistant_live.publish(LiveEvent::Resync);
+    assert!(frame(&mut body).await.contains("event: resync"));
+    // One owner may hold only a few streams at once.
+    let mut held = Vec::new();
+    for _ in 1..crate::services::assistant_live::MAX_STREAMS_PER_OWNER {
+        held.push(
+            state
+                .assistant_live
+                .subscribe_owner(OWNER)
+                .expect("under the cap"),
+        );
+    }
+    let refused = crate::handlers::assistant_nyxagent::live(
+        State(state.clone()),
+        crate::test_utils::test_auth_user(OWNER),
+    )
+    .await
+    .unwrap();
+    assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(
+        state
+            .assistant_live
+            .subscribe_owner("someone-else")
+            .is_some(),
+        "the cap is per owner"
+    );
+    drop(held);
+    // The change stream dropping ends the browser's stream.
+    state.assistant_live.set_open_for_tests(false);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), futures::StreamExt::next(&mut body))
+            .await
+            .expect("the stream ends")
+            .is_none()
+    );
+    server.abort();
+}
+
+async fn bot_inbound(state: &AppState, bot_id: &str, route_id: &str, status: &str) {
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+        .insert_one(doc! {
+            "_id": Uuid::new_v4().to_string(), "channel_bot_id": bot_id,
+            "conversation_id": route_id, "platform_conversation_id": "7",
+            "sender_platform_id": "7", "user_id": OWNER, "direction": "inbound",
+            "platform": "lark", "content_type": "text", "callback_status": status,
+            "created_at": bson::DateTime::now(),
+        })
+        .await
+        .unwrap();
+}
+
+/// An owner who "already sent the code twice" learns why it did not work:
+/// nothing arrived, or a route from an earlier setup took the chat, or the
+/// message arrived without the code. A route taking the owner's chat is
+/// reported to the agent with the fix.
+#[tokio::test]
+async fn owner_messages_taken_by_another_route_are_explained() {
+    let (state, _, server) = setup("nyxbot_routed_elsewhere").await;
+    let team = crate::services::assistant_team_service::ensure_nyxbot(&state.db, OWNER)
+        .await
+        .unwrap();
+    let home = crate::services::assistant_team_service::home_thread(
+        &state.db,
+        &state.encryption_keys,
+        &team,
+    )
+    .await
+    .unwrap();
+    let (row, _) = channel(&state, "direct").await;
+    let route_id = Uuid::new_v4().to_string();
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .update_one(
+            doc! {"_id": &row.id},
+            doc! {"$set": {"route_id": &route_id, "source_conversation_id": &home.id}},
+        )
+        .await
+        .unwrap();
+    let row = load_channel(&state, OWNER, &row.id).await.unwrap();
+    refresh_link_code(&state, &row).await.unwrap();
+    let row = load_channel(&state, OWNER, &row.id).await.unwrap();
+    let hint = || async {
+        status::verification_hint(&state, &load_channel(&state, OWNER, &row.id).await.unwrap())
+            .await
+            .unwrap()
+            .unwrap_or_default()
+    };
+    assert!(hint().await.contains("has not received any message"));
+    let waiting_now = waiting(&state, OWNER, &home.id).await.unwrap();
+    assert!(
+        waiting_now[0]
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("event subscription")),
+        "{waiting_now:?}"
+    );
+    // A chat-specific route from an earlier setup takes the owner's chat.
+    let old_route = Uuid::new_v4().to_string();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
+        .insert_one(doc! {"_id": &old_route, "user_id": OWNER,
+        "channel_bot_id": &row.channel_bot_id, "is_active": true})
+        .await
+        .unwrap();
+    assert_eq!(other_routes(&state, &row).await.unwrap(), 1);
+    bot_inbound(&state, &row.channel_bot_id, &old_route, "delivered").await;
+    assert!(hint().await.contains("another route on this bot"));
+    check_deliveries(&state).await.unwrap();
+    assert_eq!(
+        delivery(&state, &row.id).await.delivery_error.as_deref(),
+        Some("routed_elsewhere")
+    );
+    let notice = wait_for_event(&state, &home.id, "are not reaching").await;
+    assert!(
+        notice.contains("different agent")
+            && notice.contains("nyxid__delete_channel_route")
+            && notice.contains("with their OK"),
+        "{notice}"
+    );
+    // Once the chat reaches the agent without the code, that is what it says.
+    bot_inbound(&state, &row.channel_bot_id, &route_id, "delivered").await;
+    assert!(hint().await.contains("not the current code"));
+    let listed = list_tool(&state, OWNER).await.unwrap();
+    assert!(
+        listed["channel_agents"][0]["inbound_hint"]
+            .as_str()
+            .is_some_and(|hint| hint.contains("not the current code"))
+    );
+    server.abort();
+}
+
+/// Linking an existing bot answers the setup link the chat handed out, so
+/// the chat stops showing that it waits for a new bot.
+#[tokio::test]
+async fn linking_an_existing_bot_ends_the_wait_for_a_new_one() {
+    let (state, _, server) = setup("nyxbot_existing_bot_settles_setup").await;
+    let team = crate::services::assistant_team_service::ensure_nyxbot(&state.db, OWNER)
+        .await
+        .unwrap();
+    let home = crate::services::assistant_team_service::home_thread(
+        &state.db,
+        &state.encryption_keys,
+        &team,
+    )
+    .await
+    .unwrap();
+    let mut existing = bot_doc("lark", "Office");
+    existing.insert(
+        "created_at",
+        bson::DateTime::from_chrono(Utc::now() - ChronoDuration::days(3)),
+    );
+    let bot_id = existing.get_str("_id").unwrap().to_owned();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .insert_one(existing)
+        .await
+        .unwrap();
+    setup_link_tool(&state, OWNER, &home.id, "lark", None, &team)
+        .await
+        .unwrap();
+    let kinds = |items: Vec<WaitingItem>| -> Vec<&'static str> {
+        items.into_iter().map(|item| item.kind).collect()
+    };
+    assert_eq!(
+        kinds(waiting(&state, OWNER, &home.id).await.unwrap()),
+        vec!["channel_bot"]
+    );
+    connect_tool(&state, OWNER, &home.id, &bot_id, &team)
+        .await
+        .unwrap();
+    assert_eq!(
+        kinds(waiting(&state, OWNER, &home.id).await.unwrap()),
+        vec!["owner_verification"]
+    );
+    server.abort();
+}
+
+/// The same Lark app registered as two NyxID bots: the app delivers events
+/// to one Request URL only, so the owner is told which bot receives them and
+/// the exact URL this one needs.
+#[tokio::test]
+async fn a_second_bot_for_the_same_app_is_named_with_the_url_to_use() {
+    let (state, _, server) = setup("nyxbot_twin_bot").await;
+    let (row, _) = channel(&state, "direct").await;
+    let bots = state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME);
+    let mut linked = bot_doc("lark", "Office new");
+    linked.insert("_id", &row.channel_bot_id);
+    linked.insert("app_id", "cli_same_app");
+    bots.insert_one(linked).await.unwrap();
+    let mut older = bot_doc("lark", "Office old");
+    let older_id = older.get_str("_id").unwrap().to_owned();
+    older.insert("app_id", "cli_same_app");
+    older.insert("platform_bot_id", "other");
+    bots.insert_one(older).await.unwrap();
+    refresh_link_code(&state, &row).await.unwrap();
+    let row = load_channel(&state, OWNER, &row.id).await.unwrap();
+    let hint = status::verification_hint(&state, &row)
+        .await
+        .unwrap()
+        .unwrap();
+    let url = format!(
+        "{}/api/v1/webhooks/channel/lark/{}",
+        state.config.base_url.trim_end_matches('/'),
+        row.channel_bot_id
+    );
+    assert!(
+        hint.contains("Office old") && hint.contains(&older_id) && hint.contains(&url),
+        "{hint}"
+    );
+    // An unrelated bot of another app is no twin.
+    bots.update_one(
+        doc! {"_id": &older_id},
+        doc! {"$set": {"app_id": "cli_other_app"}},
+    )
+    .await
+    .unwrap();
+    let hint = status::verification_hint(&state, &row)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        hint.contains("has not received any message") && hint.contains(&url),
+        "{hint}"
+    );
+    server.abort();
+}
+
+/// An organization's channel bot can be linked by the org's admins: found
+/// by its label, routed with org-owned route and key through NyxID's relay
+/// (never the per-person gateway), reaching the admin's agent only while
+/// they stay an admin, and cleaned up as the org's on disconnect.
+#[tokio::test]
+async fn org_admins_link_org_bots_by_label_and_lose_them_with_their_role() {
+    use crate::models::org_membership::{COLLECTION_NAME as MEMBERSHIPS, OrgMembership, OrgRole};
+    let (state, _, server) = setup("nyxbot_org_bot").await;
+    let org = Uuid::new_v4().to_string();
+    state
+        .db
+        .collection::<crate::models::user::User>(USERS)
+        .insert_one(test_user(&org, UserType::Org))
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<OrgMembership>(MEMBERSHIPS)
+        .insert_one(crate::test_utils::test_membership(
+            &org,
+            OWNER,
+            OrgRole::Admin,
+            None,
+        ))
+        .await
+        .unwrap();
+    let team = crate::services::assistant_team_service::ensure_nyxbot(&state.db, OWNER)
+        .await
+        .unwrap();
+    let home = crate::services::assistant_team_service::home_thread(
+        &state.db,
+        &state.encryption_keys,
+        &team,
+    )
+    .await
+    .unwrap();
+    // A Telegram org bot: it must still use NyxID's relay.
+    let mut bot = bot_doc("telegram", "Office NyxBot");
+    bot.insert("user_id", &org);
+    let bot_id = bot.get_str("_id").unwrap().to_owned();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .insert_one(bot)
+        .await
+        .unwrap();
+    // Found by label (any case) among the admin's bots and the org's.
+    let found = resolve_bot_ref(&state, OWNER, "office nyxbot")
+        .await
+        .unwrap();
+    assert_eq!(found.id, bot_id);
+    let (value, _) = connect_tool(&state, OWNER, &home.id, &bot_id, &team)
+        .await
+        .unwrap();
+    assert_eq!(value["channel_agent"]["org_id"], org.as_str());
+    let row = active_for_bot(&state, OWNER, &bot_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.transport, "direct");
+    assert_eq!(row.bot_owner_id.as_deref(), Some(org.as_str()));
+    let route = state
+        .db
+        .collection::<crate::models::channel_conversation::ChannelConversation>(
+            crate::models::channel_conversation::COLLECTION_NAME,
+        )
+        .find_one(doc! {"_id": row.route_id.as_deref().unwrap()})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(route.user_id, org);
+    assert_eq!(
+        key_service::get_api_key(&state.db, &org, &row.route_api_key_id)
+            .await
+            .unwrap()
+            .user_id,
+        org
+    );
+    // Its messages reach the admin's agent through NyxID's relay.
+    let body = json!({
+        "message_id": "msg-org", "correlation_id": "jti-org", "platform": "telegram",
+        "reply_token": "not-used", "agent": {"api_key_id": row.route_api_key_id, "name": "route"},
+        "conversation": {"id": "route", "platform_id": "chat", "type": "private"},
+        "sender": {"platform_id": "stranger"}, "content": {"type": "text", "text": "hello"},
+        "timestamp": "2026-09-28T00:00:00Z",
+    });
+    let bytes = serde_json::to_vec(&body).unwrap();
+    let post = |message: &'static str, jti: &'static str, bytes: Vec<u8>| {
+        let token = crate::crypto::jwt::generate_relay_callback_token(
+            &state.jwt_keys,
+            &state.config,
+            jti,
+            &row.route_api_key_id,
+            message,
+            "telegram",
+            &sha256_hex(&bytes),
+        )
+        .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-nyxid-callback-token", token.parse().unwrap());
+        relay_callback(
+            State(state.clone()),
+            Path(row.id.clone()),
+            headers,
+            Bytes::from(bytes),
+        )
+    };
+    assert_eq!(
+        post("msg-org", "jti-org", bytes).await.status(),
+        StatusCode::ACCEPTED
+    );
+    // NyxBot's own replies act as the org's route key, not the person's.
+    let reply = direct_reply(&state, &row, &Uuid::new_v4().to_string(), "hi", None).await;
+    assert!(
+        !matches!(&reply, Err(AppError::NotFound(message)) if message == "API key not found")
+            && !matches!(&reply, Err(AppError::Forbidden(_))),
+        "org replies must use the org's route key"
+    );
+    // A member who does not administer the org cannot link it.
+    let member = Uuid::new_v4().to_string();
+    state
+        .db
+        .collection::<crate::models::user::User>(USERS)
+        .insert_one(test_user(&member, UserType::Person))
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<OrgMembership>(MEMBERSHIPS)
+        .insert_one(crate::test_utils::test_membership(
+            &org,
+            &member,
+            OrgRole::Member,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(
+        accessible_bot(&state, &member, &bot_id).await,
+        Err(AppError::ChannelBotNotFound(_))
+    ));
+    let set_role = |role: &'static str| {
+        let state = state.clone();
+        let org = org.clone();
+        async move {
+            state
+                .db
+                .collection::<OrgMembership>(MEMBERSHIPS)
+                .update_one(
+                    doc! {"org_user_id": &org, "member_user_id": OWNER},
+                    doc! {"$set": {"role": role}},
+                )
+                .await
+                .unwrap();
+        }
+    };
+    let route_active = |route_id: String| {
+        let state = state.clone();
+        async move {
+            state
+                .db
+                .collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
+                .count_documents(doc! {"_id": route_id, "is_active": true})
+                .await
+                .unwrap()
+                > 0
+        }
+    };
+    // Losing the admin role: the next message is refused, and the link is
+    // released (the org's route and key removed) so other admins can link it.
+    set_role("member").await;
+    let body = json!({
+        "message_id": "msg-org-2", "correlation_id": "jti-org-2", "platform": "telegram",
+        "reply_token": "not-used", "agent": {"api_key_id": row.route_api_key_id, "name": "route"},
+        "conversation": {"id": "route", "platform_id": "chat", "type": "private"},
+        "sender": {"platform_id": "stranger"}, "content": {"type": "text", "text": "hi"},
+        "timestamp": "2026-09-28T00:00:00Z",
+    });
+    let refused = post("msg-org-2", "jti-org-2", serde_json::to_vec(&body).unwrap()).await;
+    assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+    let lost = load_channel(&state, OWNER, &row.id).await.unwrap();
+    assert_eq!(lost.status, "failed");
+    assert_eq!(lost.last_error.as_deref(), Some("org_access_lost"));
+    assert!(!route_active(row.route_id.clone().unwrap()).await);
+    assert!(
+        key_service::get_api_key(&state.db, &org, &row.route_api_key_id)
+            .await
+            .is_err()
+    );
+    // Nor can NyxBot still post into the org's bot.
+    assert!(matches!(
+        direct_reply(&state, &row, "msg-org", "hi", None).await,
+        Err(AppError::Forbidden(_))
+    ));
+    // Disconnecting what is left is harmless.
+    disconnect(&state, OWNER, &row.id).await.unwrap();
+    // Promoted again, the admin can link the bot afresh; a later demotion is
+    // noticed by the sweep even when no message arrives.
+    set_role("admin").await;
+    connect_tool(&state, OWNER, &home.id, &bot_id, &team)
+        .await
+        .unwrap();
+    let again = active_for_bot(&state, OWNER, &bot_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(route_active(again.route_id.clone().unwrap()).await);
+    set_role("member").await;
+    check_deliveries(&state).await.unwrap();
+    assert_eq!(
+        load_channel(&state, OWNER, &again.id)
+            .await
+            .unwrap()
+            .last_error
+            .as_deref(),
+        Some("org_access_lost")
+    );
+    assert!(!route_active(again.route_id.clone().unwrap()).await);
     server.abort();
 }

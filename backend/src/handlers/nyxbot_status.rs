@@ -53,6 +53,8 @@ pub struct WaitingItem {
     /// `channel_bot`, `connect_link`, or `owner_verification`.
     pub kind: &'static str,
     pub title: String,
+    /// What NyxID has seen so far, when that explains a long wait.
+    pub detail: Option<String>,
     pub since: DateTime<Utc>,
     pub expires_at: Option<DateTime<Utc>>,
 }
@@ -82,6 +84,7 @@ pub(crate) async fn waiting(
                     "Waiting for your {} bot to be created",
                     platform_name(watch.platform.as_deref().unwrap_or("chat app"))
                 ),
+                detail: None,
                 since: watch.created_at,
                 expires_at: Some(watch.expires_at),
             }),
@@ -95,6 +98,7 @@ pub(crate) async fn waiting(
                         "Waiting for you to finish connecting {}",
                         service_name(state, &link.service_slug).await
                     ),
+                    detail: None,
                     since: watch.created_at,
                     // A flow started before expiry may still finish in its grace.
                     expires_at: Some(link.expires_at).filter(|at| *at > Utc::now()),
@@ -127,6 +131,10 @@ pub(crate) async fn waiting(
                 "Waiting for you to verify your {} account with {bot}",
                 platform_name(&row.platform)
             ),
+            detail: match super::org_access_holds(state, &row).await? {
+                true => verification_hint(state, &row).await?,
+                false => None,
+            },
             since: row.updated_at,
             expires_at: row.link_code_expires_at,
         });
@@ -170,6 +178,128 @@ async fn service_name(state: &AppState, slug: &str) -> String {
         .unwrap_or_else(|| excerpt(slug, 60))
 }
 
+/// While the owner has not verified a channel, what NyxID saw from its bot
+/// since the current code was issued: nothing at all (the platform is not
+/// delivering), a message another route took, or one that reached the agent
+/// without the code. `None` once verified or when no code is out.
+pub(crate) async fn verification_hint(
+    state: &AppState,
+    row: &NyxbotChannel,
+) -> AppResult<Option<String>> {
+    let Some(expires_at) = row.link_code_expires_at else {
+        return Ok(None);
+    };
+    if !row.owner_sender_ids.is_empty() || row.status != "active" || expires_at <= Utc::now() {
+        return Ok(None);
+    }
+    let issued = expires_at - ChronoDuration::hours(super::LINK_CODE_TTL_HOURS);
+    let newest = state
+        .db
+        .collection::<ChannelMessage>(MESSAGES)
+        .find_one(
+            doc! {"user_id": super::bot_owner(row), "channel_bot_id": &row.channel_bot_id,
+            "direction": "inbound", "created_at": {"$gt": bson::DateTime::from_chrono(issued)}},
+        )
+        .sort(doc! {"created_at": -1})
+        .await?;
+    let platform = platform_name(&row.platform);
+    Ok(Some(match newest {
+        None => match twin_bot(state, row).await? {
+            // The same app registered twice: the platform delivers to one.
+            Some(twin) => format!(
+                "NyxID has not received any message for this bot, but another of your NyxID \
+                bots, {} ({}), is registered for the same {platform} app, and the app sends \
+                events to only one of them. Point the app's event subscription at this bot \
+                ({}) and publish a new app version, or link the agent to {} instead and \
+                delete the duplicate.",
+                excerpt(twin.label.trim(), 60),
+                twin.id,
+                webhook_url(state, row),
+                excerpt(twin.label.trim(), 60),
+            ),
+            None if manual_webhook(&row.platform) => format!(
+                "NyxID has not received any message from this bot yet. If the code was already \
+                sent, check the event subscription (Request URL) in the {platform} developer \
+                console: it must be {} and the app version must be published.",
+                webhook_url(state, row),
+            ),
+            None => "NyxID has not received any message from this bot yet. If the code was \
+                already sent, check the bot's event subscription on its page in NyxID."
+                .to_owned(),
+        },
+        Some(message) if row.route_id.as_deref() != Some(message.conversation_id.as_str()) => {
+            if row.bot_owner_id.is_some() {
+                // A shared org bot: the newest message may be anyone's.
+                "Messages to this organization bot reach NyxID, but the newest went to another \
+                route on it. If it was yours, a chat-specific route takes your chat; remove it \
+                so your messages reach the agent."
+                    .to_owned()
+            } else {
+                "A message reached NyxID, but another route on this bot (from an earlier setup) \
+                took it, so it never reached the agent. Remove that route to fix it."
+                    .to_owned()
+            }
+        }
+        Some(_) => "A message reached the agent, but not the current code in a private chat \
+            with the bot."
+            .to_owned(),
+    }))
+}
+
+/// Platforms whose event subscription URL the owner enters by hand (their
+/// stored platform is never canonicalised, so the URL below is exact).
+pub(crate) fn manual_webhook(platform: &str) -> bool {
+    matches!(platform, "lark" | "feishu")
+}
+
+/// Where the platform must deliver this bot's events (exact for platforms
+/// with `manual_webhook`).
+pub(crate) fn webhook_url(state: &AppState, row: &NyxbotChannel) -> String {
+    format!(
+        "{}/api/v1/webhooks/channel/{}/{}",
+        state.config.base_url.trim_end_matches('/'),
+        row.platform,
+        row.channel_bot_id
+    )
+}
+
+/// Another active bot the owner manages (theirs or an org's they administer)
+/// registered for the same platform app (same app ID, or the same platform
+/// bot ID): only one of them can receive the app's events.
+pub(crate) async fn twin_bot(
+    state: &AppState,
+    row: &NyxbotChannel,
+) -> AppResult<Option<crate::models::channel_bot::ChannelBot>> {
+    use crate::models::channel_bot::{COLLECTION_NAME as BOTS, ChannelBot};
+    let bots = state.db.collection::<ChannelBot>(BOTS);
+    let Some(bot) = bots
+        .find_one(doc! {"_id": &row.channel_bot_id, "user_id": super::bot_owner(row)})
+        .await?
+    else {
+        return Ok(None);
+    };
+    let app_id = bot.app_id.as_deref().filter(|id| !id.is_empty());
+    let platform_bot_id = Some(bot.platform_bot_id.as_str()).filter(|id| !id.is_empty());
+    if app_id.is_none() && platform_bot_id.is_none() {
+        return Ok(None);
+    }
+    let family = super::canonical_platform(&bot.platform);
+    // Every bot the owner manages (theirs and their orgs'), newest first: the
+    // other registration may well belong to an org.
+    Ok(
+        crate::services::channel_bot_service::list_all_bots(&state.db, &row.user_id)
+            .await?
+            .into_iter()
+            .find(|other| {
+                other.id != bot.id
+                    && super::canonical_platform(&other.platform) == family
+                    && ((app_id.is_some() && other.app_id.as_deref() == app_id)
+                        || (platform_bot_id.is_some()
+                            && Some(other.platform_bot_id.as_str()) == platform_bot_id))
+            }),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Delivery health
 // ---------------------------------------------------------------------------
@@ -203,6 +333,10 @@ pub(crate) fn failure_reason(code: &str, transport: &str) -> String {
     };
     if code == "not_received" {
         return format!("{receiver} accepted it but never passed it on");
+    }
+    if code == "routed_elsewhere" {
+        return "another route on this bot, from an earlier setup, sent it to a different agent"
+            .into();
     }
     if code == "undelivered" {
         return format!("NyxID could not deliver it to {receiver}");
@@ -285,6 +419,11 @@ pub(crate) async fn check_deliveries(state: &AppState) -> AppResult<()> {
 }
 
 async fn check_delivery(state: &AppState, row: &NyxbotChannel) -> AppResult<()> {
+    // A demoted or removed org admin's link to the org's bot is released,
+    // even if no message ever arrives to trigger it.
+    if !super::org_access_holds(state, row).await? {
+        return super::release_org_channel(state, row).await;
+    }
     let Some(route_id) = row.route_id.as_deref() else {
         return Ok(());
     };
@@ -297,8 +436,10 @@ async fn check_delivery(state: &AppState, row: &NyxbotChannel) -> AppResult<()> 
     let messages: Vec<ChannelMessage> = state
         .db
         .collection::<ChannelMessage>(MESSAGES)
-        .find(doc! {"conversation_id": route_id, "user_id": &row.user_id,
-        "direction": "inbound", "created_at": {"$gt": bson::DateTime::from_chrono(since)}})
+        .find(
+            doc! {"conversation_id": route_id, "user_id": super::bot_owner(row),
+            "direction": "inbound", "created_at": {"$gt": bson::DateTime::from_chrono(since)}},
+        )
         .sort(doc! {"created_at": -1})
         .limit(MESSAGES_PER_CHECK)
         .await?
@@ -324,6 +465,40 @@ async fn check_delivery(state: &AppState, row: &NyxbotChannel) -> AppResult<()> 
                 break;
             }
         }
+    }
+    // The owner's private chat captured by another route on the bot (a
+    // chat-specific route beats this channel's default route): newer than
+    // anything judged here, that is what the owner experiences.
+    let owner_chat_elsewhere = state
+        .db
+        .collection::<ChannelMessage>(MESSAGES)
+        .find_one(
+            doc! {"user_id": super::bot_owner(row), "channel_bot_id": &row.channel_bot_id,
+            "direction": "inbound", "conversation_id": {"$ne": route_id},
+            "created_at": {"$gt": bson::DateTime::from_chrono(since)}},
+        )
+        .sort(doc! {"created_at": -1})
+        .await?
+        .filter(|message| {
+            let private = message.platform_conversation_id.is_some()
+                && message.platform_conversation_id == message.sender_platform_id;
+            // Until the owner verifies, only a personal bot's private chats can
+            // be assumed to be theirs; an org bot's may be any member's.
+            let owner = match row.owner_sender_ids.is_empty() {
+                true => row.bot_owner_id.is_none(),
+                false => message
+                    .sender_platform_id
+                    .as_ref()
+                    .is_some_and(|sender| row.owner_sender_ids.contains(sender)),
+            };
+            private && owner
+        });
+    if let Some(message) = owner_chat_elsewhere
+        && verdict
+            .as_ref()
+            .is_none_or(|(_, at)| message.created_at > *at)
+    {
+        verdict = Some((Verdict::Lost("routed_elsewhere".into()), message.created_at));
     }
     let channels = state.db.collection::<NyxbotChannel>(CHANNELS);
     let active = doc! {"_id": &row.id, "status": "active"};
@@ -439,12 +614,19 @@ async fn notify_failing(
         }
     };
     let platform = platform_name(&row.platform);
+    let remedy = if code == "routed_elsewhere" {
+        "List the bot's routes with nyxid__list_channel_routes, show the user which one takes \
+        their chat, and with their OK remove it with nyxid__delete_channel_route; then ask them \
+        to send their message (or code) again."
+    } else {
+        "Tell the user this is a NyxID delivery problem, not something they did; they can keep \
+        using this chat meanwhile. If it continues, reconnecting the bot \
+        (nyxid__connect_channel_bot) rebuilds its link from scratch (the owner stays verified)."
+    };
     let text = format!(
         "Messages sent to the {platform} bot {} are not reaching {}: {} (newest at {} UTC). \
-        Tell the user plainly that their {platform} messages did not arrive and that this is a \
-        NyxID delivery problem, not something they did; they can keep using this chat \
-        meanwhile. If it continues, reconnecting the bot (nyxid__connect_channel_bot) rebuilds \
-        its link from scratch (the owner stays verified). No confirmation is needed.",
+        Tell the user plainly that their {platform} messages did not arrive. {remedy} No \
+        confirmation is needed.",
         identifier(&row.bot_label),
         identifier(&agent.name),
         failure_reason(code, &row.transport),

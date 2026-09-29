@@ -15,6 +15,12 @@ pub struct NyxbotChannel {
     pub id: String,
     pub user_id: String,
     pub channel_bot_id: String,
+    /// The organization that owns the channel bot, when it is not the
+    /// owner's own bot (`None`: the owner's personal bot). The bot's route
+    /// and route key belong to this org; the owner must stay one of its
+    /// admins for messages to reach their agent.
+    #[serde(default)]
+    pub bot_owner_id: Option<String>,
     /// Canonical platform (`telegram-new` is stored as `telegram`).
     pub platform: String,
     pub bot_label: String,

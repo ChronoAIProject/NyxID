@@ -7,6 +7,7 @@ import type {
   AssistantAgentList,
   NyxAgentSettingsUpdate,
 } from "@/schemas/assistant-nyxagent";
+import { livePollInterval, useNyxAgentLiveConnected } from "@/hooks/use-nyxagent-live-status";
 import { useAuthStore } from "@/stores/auth-store";
 
 export const nyxBotQueryKeys = {
@@ -24,6 +25,8 @@ export const nyxBotQueryKeys = {
     ["assistant", "nyxagent", userId, "settings"] as const,
   channels: (userId: string | undefined) =>
     ["assistant", "nyxagent", userId, "channels"] as const,
+  history: (userId: string | undefined, conversationId: string | null | undefined) =>
+    ["assistant", "nyxagent", userId, "history", conversationId] as const,
 };
 
 const RUNNING_POLL_MS = 3000;
@@ -40,12 +43,13 @@ export function nyxBotOf(agents: readonly AssistantAgent[] | undefined) {
 /** NyxBot and every specialist, destroyed ones included (the UI filters). */
 export function useNyxBotAgents(enabled = true) {
   const userId = useAuthStore((state) => state.user?.id);
+  const live = useNyxAgentLiveConnected();
   return useQuery({
     queryKey: nyxBotQueryKeys.agents(userId),
     queryFn: () => nyxBotApi.agents(true),
     enabled: enabled && Boolean(userId),
     retry: false,
-    refetchInterval: (query) => agentsPollInterval(query.state.data),
+    refetchInterval: (query) => livePollInterval(agentsPollInterval(query.state.data), live),
   });
 }
 

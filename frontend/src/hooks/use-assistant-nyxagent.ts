@@ -9,6 +9,8 @@ import type {
 import { useAuthStore } from "@/stores/auth-store";
 import { useDecideApproval } from "@/hooks/use-approvals";
 import { nyxBotQueryKeys, useNyxBotAgents } from "@/hooks/use-nyxbot-agents";
+import { useNyxAgentLive } from "@/hooks/use-nyxagent-live";
+import { livePollInterval, useNyxAgentLiveConnected } from "@/hooks/use-nyxagent-live-status";
 import {
   currentCreditsActor,
   isInsufficientCreditsCode,
@@ -89,9 +91,11 @@ export function useNyxAgentAssistantChat({
     nyxAgentTransport.getRevision,
   );
   const streaming = nyxAgentTransport.isRunning(selectedConversationId);
+  useNyxAgentLive(enabled);
+  const live = useNyxAgentLiveConnected();
   const threadsKey = nyxBotQueryKeys.threads(userId);
   const agentsKey = nyxBotQueryKeys.agents(userId);
-  const historyKey = ["assistant", "nyxagent", userId, "history", selectedConversationId];
+  const historyKey = nyxBotQueryKeys.history(userId, selectedConversationId);
   const threads = useQuery({
     queryKey: nyxBotQueryKeys.threads(userId, threadsAgentId),
     queryFn: () => nyxAgentTransport.list(threadsAgentId),
@@ -125,18 +129,22 @@ export function useNyxAgentAssistantChat({
     enabled: enabled && Boolean(userId && selectedConversationId),
     retry: false,
     // Polling during a live turn also carries the turn's tool activity.
+    // NyxID pushes changes over the live stream; these polls are the
+    // fallback without it and a slow backstop with it.
     refetchInterval: (query) =>
-      streaming ||
-      selectedAgentRunning ||
-      query.state.data?.conversation.active_turn ||
-      query.state.data?.acknowledgements.some((row) => row.status === "pending") ||
-      (query.state.data?.approvals.length ?? 0) > 0
-        ? 2000
-        : // Waiting on something outside the chat (NyxID checks every 15 s):
-          // notice when it happens.
-          (query.state.data?.waiting.length ?? 0) > 0
-          ? 10_000
-          : false,
+      livePollInterval(
+        streaming ||
+          selectedAgentRunning ||
+          query.state.data?.conversation.active_turn ||
+          query.state.data?.acknowledgements.some((row) => row.status === "pending") ||
+          (query.state.data?.approvals.length ?? 0) > 0
+          ? 2000
+          : // Waiting on something outside the chat: notice when it happens.
+            (query.state.data?.waiting.length ?? 0) > 0
+            ? 10_000
+            : false,
+        live,
+      ),
   });
   const send = useCallback(
     async (text: string) => {

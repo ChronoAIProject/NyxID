@@ -63,6 +63,136 @@ fn canonical_platform(platform: &str) -> &str {
     }
 }
 
+/// Who owns the channel bot (and its route and route key): the org for an
+/// org bot, else the channel's owner.
+pub(crate) fn bot_owner(row: &NyxbotChannel) -> &str {
+    row.bot_owner_id.as_deref().unwrap_or(&row.user_id)
+}
+
+/// Whether `owner` may link and manage `bot`: their own bot, or a bot of an
+/// organization they administer (the rule for managing org bots).
+async fn manages_bot_owner(state: &AppState, owner: &str, bot_owner: &str) -> AppResult<bool> {
+    if owner == bot_owner {
+        return Ok(true);
+    }
+    Ok(matches!(
+        crate::services::org_service::resolve_owner_access(&state.db, owner, bot_owner).await?,
+        crate::services::org_service::OwnerAccess::AsOrgAdmin { .. }
+    ))
+}
+
+/// A channel bot the owner may link: theirs or one of an org they
+/// administer. Anything else is not-found-shaped.
+pub(crate) async fn accessible_bot(
+    state: &AppState,
+    owner: &str,
+    bot_id: &str,
+) -> AppResult<ChannelBot> {
+    let bot = channel_bot_service::get_bot(&state.db, bot_id).await?;
+    if manages_bot_owner(state, owner, &bot.user_id).await? {
+        Ok(bot)
+    } else {
+        Err(AppError::ChannelBotNotFound(bot_id.to_string()))
+    }
+}
+
+/// A bot named by id or by its label (case-insensitive) among the owner's
+/// bots and those of the orgs they administer.
+pub(crate) async fn resolve_bot_ref(
+    state: &AppState,
+    owner: &str,
+    reference: &str,
+) -> AppResult<ChannelBot> {
+    let reference = reference.trim();
+    // Only the canonical hyphenated form can be a stored `_id`.
+    if reference.len() == 36 && Uuid::parse_str(reference).is_ok() {
+        return accessible_bot(state, owner, reference).await;
+    }
+    let wanted = reference.to_lowercase();
+    let bots = channel_bot_service::list_all_bots(&state.db, owner).await?;
+    let matches: Vec<&ChannelBot> = bots
+        .iter()
+        .filter(|bot| bot.label.trim().to_lowercase() == wanted)
+        .collect();
+    match matches.as_slice() {
+        [bot] => Ok((*bot).clone()),
+        [] => Err(AppError::NotFound(format!(
+            "No channel bot is labelled '{}'. Available: {}",
+            excerpt(reference, 60),
+            bots.iter()
+                .take(20)
+                .map(|bot| format!(
+                    "{} ({}, {})",
+                    excerpt(bot.label.trim(), 40),
+                    bot.platform,
+                    bot.id
+                ))
+                .collect::<Vec<_>>()
+                .join("; ")
+        ))),
+        several => Err(AppError::ValidationError(format!(
+            "Several channel bots are labelled '{}'; use one of their ids: {}",
+            excerpt(reference, 60),
+            several
+                .iter()
+                .map(|bot| format!("{} ({})", bot.id, bot.platform))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+    }
+}
+
+/// Whether an org bot's channel may still act: its owner must still
+/// administer the org. Personal channels always may. Database errors are
+/// errors, never a denial.
+pub(crate) async fn org_access_holds(state: &AppState, row: &NyxbotChannel) -> AppResult<bool> {
+    match row.bot_owner_id.as_deref() {
+        Some(org) => manages_bot_owner(state, &row.user_id, org).await,
+        None => Ok(true),
+    }
+}
+
+/// The owner no longer administers the org that owns the channel's bot:
+/// fail the link once and remove its org-owned route and route key, so the
+/// org's bot is free for its admins and no traffic reaches this agent.
+pub(crate) async fn release_org_channel(state: &AppState, row: &NyxbotChannel) -> AppResult<()> {
+    let Some(org) = row.bot_owner_id.as_deref() else {
+        return Ok(());
+    };
+    let failed = state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .update_one(
+            doc! {"_id": &row.id, "status": {"$in": ["pending", "active"]}},
+            doc! {"$set": {"status": "failed", "last_error": "org_access_lost",
+            "updated_at": bson::DateTime::now()},
+            "$unset": {"link_code_hash": "", "link_code_expires_at": ""}},
+        )
+        .await?
+        .modified_count
+        == 1;
+    if let Some(route_id) = row.route_id.as_deref() {
+        match channel_routing_service::delete_conversation(&state.db, route_id, org).await {
+            Ok(()) | Err(AppError::NotFound(_)) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    match key_service::delete_api_key(&state.db, org, &row.route_api_key_id).await {
+        Ok(()) | Err(AppError::NotFound(_)) => {}
+        Err(error) => return Err(error),
+    }
+    if failed {
+        audit(
+            state,
+            &row.user_id,
+            "nyxbot_channel_org_access_lost",
+            json!({"channel_agent_id": &row.id, "platform": &row.platform}),
+        )
+        .await;
+    }
+    Ok(())
+}
+
 fn sha256_hex(value: impl AsRef<[u8]>) -> String {
     hex::encode(Sha256::digest(value.as_ref()))
 }
@@ -183,6 +313,8 @@ pub struct ChannelAgentResponse {
     owner_linked: bool,
     /// The agent this bot reaches; `None` means the owner's NyxBot.
     agent_id: Option<String>,
+    /// The organization that owns the bot; `None` for the owner's own bot.
+    org_id: Option<String>,
     /// `ok` or `failing` once a message has been judged; `None` before.
     delivery_status: Option<String>,
     /// Stable code of the newest lost message (see `delivery_reason`).
@@ -205,6 +337,7 @@ impl From<&NyxbotChannel> for ChannelAgentResponse {
             last_error: row.last_error.clone(),
             owner_linked: !row.owner_sender_ids.is_empty(),
             agent_id: row.agent_id.clone(),
+            org_id: row.bot_owner_id.clone(),
             delivery_status: row.delivery_status.clone(),
             delivery_error: row.delivery_error.clone(),
             delivery_reason: row
@@ -349,7 +482,9 @@ pub async fn connect(
     if agent.destroyed_at.is_some() {
         return Err(AppError::Conflict("That agent was destroyed".into()));
     }
-    let bot: ChannelBot = channel_bot_service::get_bot_for_user(&state.db, bot_id, owner).await?;
+    let bot: ChannelBot = accessible_bot(state, owner, bot_id).await?;
+    // An org bot's route and route key belong to the org.
+    let bot_owner_id = bot.user_id.clone();
     if !bot.is_active {
         return Err(AppError::ValidationError(
             "That channel bot is not active".into(),
@@ -359,17 +494,35 @@ pub async fn connect(
     // and their chat-app account are the same.
     let mut verified_owners: Vec<String> = Vec::new();
     if let Some(existing) = active_for_bot(state, owner, &bot.id).await? {
-        let keys_alive = key_service::get_api_key(&state.db, owner, &existing.route_api_key_id)
-            .await
-            .is_ok_and(|key| key.is_active)
-            && match existing.agent_api_key_id.as_deref() {
-                Some(agent) => key_service::get_api_key(&state.db, owner, agent)
-                    .await
-                    .is_ok_and(|key| key.is_active),
-                None => true,
-            };
-        // A channel whose messages stopped arriving is rebuilt from scratch.
-        let healthy = existing.delivery_status.as_deref() != Some("failing");
+        let keys_alive =
+            key_service::get_api_key(&state.db, bot_owner(&existing), &existing.route_api_key_id)
+                .await
+                .is_ok_and(|key| key.is_active)
+                && match existing.agent_api_key_id.as_deref() {
+                    Some(agent) => key_service::get_api_key(&state.db, owner, agent)
+                        .await
+                        .is_ok_and(|key| key.is_active),
+                    None => true,
+                };
+        // A channel whose messages stopped arriving, whose bot changed owner,
+        // or whose route is gone is rebuilt from scratch.
+        let route_alive = match existing.route_id.as_deref() {
+            Some(route_id) => {
+                state
+                    .db
+                    .collection::<bson::Document>(
+                        crate::models::channel_conversation::COLLECTION_NAME,
+                    )
+                    .count_documents(doc! {"_id": route_id, "user_id": &bot_owner_id,
+                    "is_active": true})
+                    .await?
+                    > 0
+            }
+            None => false,
+        };
+        let healthy = existing.delivery_status.as_deref() != Some("failing")
+            && bot_owner(&existing) == bot_owner_id
+            && route_alive;
         if existing.status == "active" && keys_alive && healthy {
             link(state, owner, &existing.id, agent).await?;
             let existing = load_channel(state, owner, &existing.id).await?;
@@ -383,7 +536,8 @@ pub async fn connect(
     }
     // Never silently replace another agent's default route.
     let routes =
-        channel_routing_service::list_conversations(&state.db, owner, Some(&bot.id)).await?;
+        channel_routing_service::list_conversations(&state.db, &bot_owner_id, Some(&bot.id))
+            .await?;
     if routes
         .iter()
         .any(|route| route.default_agent && route.is_active)
@@ -395,7 +549,8 @@ pub async fn connect(
         ));
     }
     let platform = canonical_platform(&bot.platform).to_owned();
-    let gateway = platform == "telegram";
+    // The gateway binds a channel to one person; org bots use NyxID's relay.
+    let gateway = platform == "telegram" && bot_owner_id == owner;
     let now = Utc::now();
     let id = Uuid::new_v4().to_string();
     let label = excerpt(&bot.label, 60);
@@ -409,7 +564,7 @@ pub async fn connect(
     };
     let route_key = key_service::create_api_key(
         &state.db,
-        owner,
+        &bot_owner_id,
         &format!("NyxBot channel route {}", identifier(&label)),
         "read proxy",
         None,
@@ -443,6 +598,7 @@ pub async fn connect(
         id: id.clone(),
         user_id: owner.into(),
         channel_bot_id: bot.id.clone(),
+        bot_owner_id: (bot_owner_id != owner).then(|| bot_owner_id.clone()),
         platform: platform.clone(),
         bot_label: label.clone(),
         bot_username: Some(bot.platform_bot_username.clone()).filter(|name| !name.is_empty()),
@@ -526,7 +682,7 @@ pub async fn connect(
         }
         Err(code) => {
             // Best-effort rollback of everything this attempt created.
-            let _ = key_service::delete_api_key(&state.db, owner, &route_key.id).await;
+            let _ = key_service::delete_api_key(&state.db, &bot_owner_id, &route_key.id).await;
             if let Some(agent) = &agent_key_id {
                 let _ = key_service::delete_api_key(&state.db, owner, agent).await;
             }
@@ -760,7 +916,7 @@ async fn connect_direct(
 ) -> Result<String, &'static str> {
     channel_routing_service::create_conversation(
         &state.db,
-        &row.user_id,
+        bot_owner(row),
         Some(&bot.id),
         &bot.platform,
         "*",
@@ -821,19 +977,21 @@ pub async fn disconnect(state: &AppState, owner: &str, id: &str) -> AppResult<Va
         .is_ok_and(|response| matches!(response.status, 204 | 200 | 404));
     }
     if let Some(route_id) = row.route_id.as_deref() {
-        match channel_routing_service::delete_conversation(&state.db, route_id, owner).await {
+        match channel_routing_service::delete_conversation(&state.db, route_id, bot_owner(&row))
+            .await
+        {
             Ok(()) | Err(AppError::NotFound(_)) => {}
             Err(error) => return Err(error),
         }
     }
-    for key in [
-        Some(row.route_api_key_id.as_str()),
-        row.agent_api_key_id.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        match key_service::delete_api_key(&state.db, owner, key).await {
+    // The route key belongs to the bot's owner (an org for org bots); the
+    // gateway agent key (personal bots only) to the channel's owner.
+    for (key, key_owner) in [
+        (Some(row.route_api_key_id.as_str()), bot_owner(&row)),
+        (row.agent_api_key_id.as_deref(), owner),
+    ] {
+        let Some(key) = key else { continue };
+        match key_service::delete_api_key(&state.db, key_owner, key).await {
             Ok(()) | Err(AppError::NotFound(_)) => {}
             Err(error) => return Err(error),
         }
@@ -892,19 +1050,75 @@ pub(crate) async fn connect_tool(
     agent: &crate::models::assistant_agent::AssistantAgent,
 ) -> AppResult<(Value, bool)> {
     let (row, link) = connect(state, owner, Some(source_conversation_id), bot_id, agent).await?;
-    Ok((
-        json!({
-            "channel_agent": ChannelAgentResponse::from(&row),
-            "agent": agent.name,
-            "link": link_json(&row, &link),
-            "note": if row.owner_sender_ids.is_empty() {
-                "Give the user the link (or code). Until they use it, the bot answers nobody."
-            } else {
-                "The user's linked account already reaches the bot; the link adds another."
-            },
-        }),
-        false,
-    ))
+    // Linking an existing bot answers a setup link this chat handed out for
+    // the same platform: it is no longer waiting for a new bot.
+    state
+        .db
+        .collection::<NyxbotWatch>(WATCHES)
+        .update_many(
+            doc! {"user_id": owner, "kind": "channel_bot", "conversation_id": source_conversation_id,
+            "platform": &row.platform, "status": "pending"},
+            doc! {"$set": {"status": "done", "channel_bot_id": &row.channel_bot_id}},
+        )
+        .await?;
+    let mut value = json!({
+        "channel_agent": ChannelAgentResponse::from(&row),
+        "agent": agent.name,
+        "link": link_json(&row, &link),
+        "note": if row.owner_sender_ids.is_empty() {
+            "Give the user the link (or code). Until they use it, the bot answers nobody."
+        } else {
+            "The user's linked account already reaches the bot; the link adds another."
+        },
+    });
+    // The same app registered as two NyxID bots: its events reach only one.
+    if let Some(twin) = status::twin_bot(state, &row).await? {
+        value["duplicate_bot"] = json!({"id": twin.id, "label": excerpt(twin.label.trim(), 60)});
+        let point = if status::manual_webhook(&row.platform) {
+            format!(
+                "point the app's event subscription at this bot ({}) and publish a new app version",
+                status::webhook_url(state, &row)
+            )
+        } else {
+            "keep only one of them".to_owned()
+        };
+        value["duplicate_bot_note"] = json!(format!(
+            "Another NyxID bot, {} ({}), is registered for the same app, and the app delivers \
+            events to only one of them. Either {point}, or link the agent to that bot instead \
+            and delete the duplicate.",
+            identifier(&twin.label),
+            twin.id,
+        ));
+    }
+    // Chat-specific routes win over NyxBot's default route: say so now,
+    // instead of the owner's messages silently going elsewhere.
+    let others = other_routes(state, &row).await?;
+    if others > 0 {
+        value["other_routes"] = json!(others);
+        value["other_routes_note"] = json!(format!(
+            "This bot also has {others} chat-specific route(s) to other agents from an earlier \
+            setup. Messages from those chats go there, not to {}; if one is the user's own chat \
+            with the bot, list them with nyxid__list_channel_routes and, with the user's OK, \
+            remove it with nyxid__delete_channel_route.",
+            identifier(&agent.name)
+        ));
+    }
+    Ok((value, false))
+}
+
+/// Active routes on the channel's bot other than its own: they take the
+/// chats they name before NyxBot's default route sees them.
+async fn other_routes(state: &AppState, row: &NyxbotChannel) -> AppResult<u64> {
+    let mut filter = doc! {"user_id": bot_owner(row), "channel_bot_id": &row.channel_bot_id,
+    "is_active": true};
+    if let Some(route_id) = row.route_id.as_deref() {
+        filter.insert("_id", doc! {"$ne": route_id});
+    }
+    Ok(state
+        .db
+        .collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
+        .count_documents(filter)
+        .await?)
 }
 
 /// A pending setup link stays usable this long.
@@ -1128,14 +1342,86 @@ pub(crate) async fn process_watches(state: &AppState) -> AppResult<()> {
         )
         .await?;
     for watch in watches {
-        let result = match watch.kind.as_str() {
-            "channel_bot" => channel_bot_watch(state, &watch).await,
-            "connect_link" => connect_link_watch(state, &watch).await,
-            _ => Ok(()),
-        };
-        if let Err(error) = result {
-            tracing::debug!(%error, "NyxBot watch deferred");
+        resolve(state, &watch).await;
+    }
+    Ok(())
+}
+
+async fn resolve(state: &AppState, watch: &NyxbotWatch) {
+    let result = match watch.kind.as_str() {
+        "channel_bot" => channel_bot_watch(state, watch).await,
+        "connect_link" => connect_link_watch(state, watch).await,
+        _ => Ok(()),
+    };
+    if let Err(error) = result {
+        tracing::debug!(%error, "NyxBot watch deferred");
+    }
+}
+
+/// React to live changes at once instead of on the next sweep: a watched
+/// connect link that finished, or a new (or reactivated) bot for an owner
+/// with a pending setup link. The 15-second sweep remains the backstop.
+pub fn spawn_live_dispatch(state: AppState) {
+    use crate::services::assistant_live::LiveEvent;
+    let mut events = state.assistant_live.subscribe();
+    tokio::spawn(async move {
+        loop {
+            let event = match events.recv().await {
+                Ok(event) => event,
+                Err(broadcast::error::RecvError::Lagged(_)) => LiveEvent::Resync,
+                Err(broadcast::error::RecvError::Closed) => break,
+            };
+            let filter = match event {
+                LiveEvent::ConnectLink {
+                    id,
+                    user_id,
+                    status,
+                } if status != "pending" => {
+                    doc! {"user_id": user_id, "kind": "connect_link", "connect_link_id": id}
+                }
+                LiveEvent::ChannelBot {
+                    user_id,
+                    active: true,
+                    ..
+                } => doc! {"user_id": user_id, "kind": "channel_bot"},
+                LiveEvent::Resync => {
+                    let state = state.clone();
+                    tokio::spawn(async move {
+                        if let Err(error) = process_watches(&state).await {
+                            tracing::debug!(%error, "NyxBot watch resync deferred");
+                        }
+                    });
+                    continue;
+                }
+                _ => continue,
+            };
+            // Linking may call the gateway: never hold up the next event.
+            let state = state.clone();
+            tokio::spawn(async move {
+                if let Err(error) = resolve_matching(&state, filter).await {
+                    tracing::debug!(%error, "NyxBot live watch deferred");
+                }
+            });
         }
+    });
+}
+
+/// Resolve the pending watches matching `filter` now. Claims are atomic,
+/// so replicas reacting to the same change never act twice.
+async fn resolve_matching(state: &AppState, mut filter: bson::Document) -> AppResult<()> {
+    filter.insert("status", "pending");
+    filter.insert("expires_at", doc! {"$gt": bson::DateTime::now()});
+    let watches: Vec<NyxbotWatch> = state
+        .db
+        .collection::<NyxbotWatch>(WATCHES)
+        .find(filter)
+        .sort(doc! {"created_at": 1})
+        .limit(20)
+        .await?
+        .try_collect()
+        .await?;
+    for watch in watches {
+        resolve(state, &watch).await;
     }
     Ok(())
 }
@@ -1293,7 +1579,20 @@ pub async fn link(
 
 pub(crate) async fn list_tool(state: &AppState, owner: &str) -> AppResult<Value> {
     let rows = list(state, owner).await?;
-    Ok(json!({"channel_agents": rows.iter().map(ChannelAgentResponse::from).collect::<Vec<_>>()}))
+    let mut channel_agents = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let mut value = serde_json::to_value(ChannelAgentResponse::from(row))
+            .map_err(|error| AppError::Internal(error.to_string()))?;
+        // While the owner has not verified, say what NyxID saw from the bot
+        // (for an org bot, only while they still administer the org).
+        if org_access_holds(state, row).await?
+            && let Some(hint) = status::verification_hint(state, row).await?
+        {
+            value["inbound_hint"] = json!(hint);
+        }
+        channel_agents.push(value);
+    }
+    Ok(json!({"channel_agents": channel_agents}))
 }
 
 async fn audit(state: &AppState, owner: &str, event: &str, data: Value) {
@@ -2346,10 +2645,16 @@ async fn direct_reply(
             None
         }
         None => {
+            // The route key acts as the bot's owner: the org for an org bot,
+            // and only while the channel's owner still administers it.
+            if !org_access_holds(state, channel).await? {
+                release_org_channel(state, channel).await?;
+                return Err(AppError::Forbidden("org_access_lost".into()));
+            }
+            let key_owner = bot_owner(channel);
             let key =
-                key_service::get_api_key(&state.db, &channel.user_id, &channel.route_api_key_id)
-                    .await?;
-            let mut auth = super::assistant_team::owner_auth(&channel.user_id)?;
+                key_service::get_api_key(&state.db, key_owner, &channel.route_api_key_id).await?;
+            let mut auth = super::assistant_team::owner_auth(key_owner)?;
             auth.auth_method = crate::mw::auth::AuthMethod::ApiKey;
             auth.api_key_id = Some(key.id.clone());
             auth.api_key_name = Some(key.name.clone());
@@ -2418,6 +2723,17 @@ pub async fn relay_callback(
         || payload["correlation_id"] != json!(claims.jti)
     {
         return unauthorized();
+    }
+    // An org bot reaches a person's agent only while they administer the org.
+    match org_access_holds(&state, &row).await {
+        Ok(true) => {}
+        Ok(false) => {
+            if let Err(error) = release_org_channel(&state, &row).await {
+                tracing::warn!(%error, "NyxBot org channel release deferred");
+            }
+            return problem(StatusCode::FORBIDDEN, "org_access_lost");
+        }
+        Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
     }
     // Dedup redeliveries of the same inbound message.
     let event_key = sha256_hex(format!("{}\0{}", row.id, claims.message_id));

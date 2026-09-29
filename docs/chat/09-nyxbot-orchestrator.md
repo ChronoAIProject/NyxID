@@ -171,13 +171,33 @@ ends its turn; NyxID resumes that thread with an event as soon as it happens:
   would run the call twice.
 
 Watches are TTL-expired and claimed atomically, so replicas never link or report
-twice.
+twice. They resolve **as soon as it happens**: every replica follows one MongoDB
+change stream (`services/assistant_live.rs`; NyxID already requires a replica
+set or mongos), projected inside MongoDB to identifiers, owner and status only.
+A connect link reaching a terminal status, or a new (or reactivated) channel
+bot of the owner, resolves the matching watches at once on whichever replica
+sees it first; the atomic claim keeps the others out. A new bot is linked as
+soon as it is saved, even while its webhook is still being verified. After a
+stream reopens, every consumer re-reads what it may have missed, and the
+15-second sweep remains the backstop.
+
+Browsers get the same changes over `GET /assistant/nyxagent/live` (human-only,
+server-sent events, reopened by the client): frames carry only
+`{type, id, group_id, turn_id, messages}` for the owner's conversations and
+groups,
+`channels` when a bot changes, and `resync` when changes may have been missed.
+Each owner has their own channel and at most eight open streams (429 beyond);
+a replica whose change stream is not delivering answers 503, and streams end
+after five minutes so the browser re-authenticates.
+The page refreshes exactly the affected thread, lists and group; its polls
+drop to a 30-second backstop while the stream is open and return to their
+normal cadence without it (an older server answers 404).
 
 While a thread waits, its history carries `waiting` items (`channel_bot`,
 `connect_link`, `owner_verification`, each with a title and expiry). The chat
-shows them under the header with "continues here by itself", and the browser
-polls the thread every 10 seconds until they clear, so the resumed turn appears
-without a reload.
+shows them under the header with "continues here by itself"; the live stream
+shows the resumed turn at once (without it, the thread is polled every 10
+seconds until the items clear).
 
 ## 10. Talking to agents directly
 
@@ -260,6 +280,18 @@ agent, with that agent's authority and memory.
 - **Other NyxID platforms** use NyxID's relay directly (`/api/v1/nyxbot/relay/{id}`,
   verified with NyxID's relay callback token) because the gateway relay supports
   Telegram only today.
+- **Organization bots.** An owner can link bots of organizations they
+  administer (the rule for managing org bots), found by id or label:
+  `nyxid__list_channel_bots` and the route tools cover personal and administered
+  org bots and name each bot's org. The bot's route and route key are owned by
+  the org (the key has no service grants; org routes must use org keys), and org
+  bots always use NyxID's relay, including Telegram, because a gateway channel is
+  bound to one person. Every inbound message re-checks that the owner still
+  administers the org, as does the 15-second sweep (so a demotion or removal is
+  noticed even without traffic) and every reply NyxBot sends; otherwise the link
+  fails with `org_access_lost`, its org route and route key are removed so the
+  org's other admins can link the bot, and nothing reaches or leaves their
+  agent. Disconnecting removes the org's route and key too.
 - **Right user.** Only senders verified as the owner reach the agent: NyxID's
   Telegram notification link or a one-time link code (a `t.me/<bot>?start=<code>`
   link for Telegram). Strangers get a short refusal in private chats and silence
@@ -277,7 +309,19 @@ agent, with that agent's authority and memory.
   six hours; the channel list shows the reason, and the next message that
   arrives marks it `ok`. A channel's first check looks back one hour only.
   Reconnecting a failing channel rebuilds it from scratch and keeps its verified
-  owners.
+  owners. Chat-specific routes win over a channel's default route, so the owner's
+  private messages that another route on the bot takes (typically a leftover
+  from an earlier setup) are lost as `routed_elsewhere`, and the agent is told
+  to show the user that route and remove it with their OK; connecting reports
+  such routes up front (`other_routes`).
+- **Verification hints.** While the owner has not verified a channel, the chat's
+  waiting note and `nyxid__list_channel_agents` (`inbound_hint`) say what NyxID saw
+  from the bot since the code was issued: nothing at all (check the platform's
+  event subscription / Request URL against the bot's page in NyxID), a message
+  another route took, or a message that reached the agent without the code.
+  Linking an existing bot also ends the chat's wait for a new one from a setup
+  link. Lark and other non-Telegram bots use NyxID's direct relay, never the
+  Agent Event Gateway.
 - **Updates.** Asynchronous replies (event turns, such as a specialist's report)
   are delivered to the chat through the gateway's `replyToEvent` while the newest
   event reference is valid, or through the relay reply API; messages that arrive

@@ -198,9 +198,12 @@ History includes all pending and the last 20 decided records, exposing only
 expires_at`. The conversation index includes `pending_acknowledgements`. Pending
 cards appear at the transcript tail; decided cards become compact status lines at
 the request's timestamp. Allow/Deny are explicit human actions with a 750 ms
-minimum throttle. The selected history polls every two seconds while a turn runs
-or a pending card exists. The index refreshes at settlement/count changes and
-mutations; it does not poll every two seconds.
+minimum throttle. The selected history refreshes when the owner's live stream
+(`GET /assistant/nyxagent/live`, identifiers only) reports a change to it; while
+that stream is open, the two-second poll (while a turn runs or a pending card
+exists) becomes a 30-second backstop, and without it the two-second poll
+applies. The index refreshes at settlement/count changes, mutations and live
+events; it does not poll every two seconds.
 
 The refusal tells the model to retry after approval, and NyxAgent cannot wait for
 the decision inside its own turn, so the turn that requested the card ends before
@@ -590,8 +593,9 @@ all raw upstream error bodies. The raw current key is redacted from reflected
 assistant output, including split deltas. Wire-log capture is disabled for this
 surface.
 
-On reload, the client fetches persisted history and polls active history every
-two seconds until its own metadata reports settlement. The index has no periodic
+On reload, the client fetches persisted history and follows active history
+through the live stream (or, without it, polls every two seconds) until its own
+metadata reports settlement. The index has no periodic
 poll: selected-history settlement refreshes it once, as does send completion.
 Unselected active conversations do not trigger expensive index-page polling. Browser subscriptions have a 45-second opening deadline
 and 135-second idle deadline; losing that subscription triggers history refresh without

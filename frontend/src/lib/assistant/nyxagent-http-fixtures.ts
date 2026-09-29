@@ -552,6 +552,7 @@ export class NyxAgentHttpFixtures {
         {
           kind: "channel_bot",
           title: "Waiting for your Telegram bot to be created",
+          detail: null,
           since: now.toISOString(),
           expires_at: new Date(now.getTime() + 7_200_000).toISOString(),
         },
@@ -837,10 +838,12 @@ export class NyxAgentHttpFixtures {
         last_error: null,
         owner_linked: false,
         agent_id: null,
+        org_id: null,
         delivery_status: null,
         delivery_error: null,
         delivery_reason: null,
         delivery_failed_at: null,
+        inbound_hint: null,
         created_at: new Date().toISOString(),
       };
       this.channels.unshift(row);
@@ -1109,8 +1112,57 @@ export class NyxAgentHttpFixtures {
     return undefined;
   }
 
-  readonly handler: AssistantHttpMockHandler = async ({ endpoint, init }) => {
-    if (!endpoint.startsWith(ROOT)) return undefined;
+  /** Open live streams (only when the `nyxagentLive` fault enables them). */
+  private liveStreams = new Set<ReadableStreamDefaultController<Uint8Array>>();
+  private liveTimer: ReturnType<typeof setInterval> | undefined;
+  private liveSignatures = new Map<string, string>();
+
+  /** What a live `conversation`/`group` event would report as changed. */
+  private signatures() {
+    const signatures = new Map<string, string>();
+    for (const [id, row] of this.rows) {
+      const conversation = row.history.conversation;
+      signatures.set(
+        `conversation:${id}`,
+        [
+          row.history.messages.length,
+          conversation.active_turn?.turn_id ?? "",
+          row.history.waiting.length,
+          conversation.pending_events,
+        ].join(":"),
+      );
+    }
+    for (const group of this.groups) {
+      signatures.set(`group:${group.id}`, `${String(group.messages.length)}:${String(group.queue.length)}`);
+    }
+    return signatures;
+  }
+
+  private emitLive() {
+    if (!this.liveStreams.size) return;
+    const encoder = new TextEncoder();
+    const next = this.signatures();
+    for (const [key, signature] of next) {
+      if (this.liveSignatures.get(key) === signature) continue;
+      const [kind, id] = key.split(/:(.*)/s) as [string, string];
+      const row = kind === "conversation" ? this.rows.get(id) : undefined;
+      const event = row
+        ? {
+            type: "conversation",
+            id,
+            group_id: null,
+            turn_id: row.history.conversation.active_turn?.turn_id ?? null,
+            messages: row.history.messages.length,
+          }
+        : { type: "group", id };
+      const frame = encoder.encode(`data: ${JSON.stringify(event)}\n\n`);
+      for (const controller of this.liveStreams) controller.enqueue(frame);
+    }
+    this.liveSignatures = next;
+  }
+
+  /** NyxID's server-side progress: turns settle, waits resolve, groups answer. */
+  private tick() {
     for (const row of [...this.rows.values()]) {
       if (row.settleAt && row.settleAt <= Date.now()) this.settle(row);
       if (
@@ -1130,8 +1182,41 @@ export class NyxAgentHttpFixtures {
       }
     }
     this.settleGroups();
+    this.emitLive();
+  }
+
+  private live(): Response {
+    const encoder = new TextEncoder();
+    let own: ReadableStreamDefaultController<Uint8Array> | undefined;
+    const stream = new ReadableStream<Uint8Array>({
+      start: (controller) => {
+        own = controller;
+        this.liveStreams.add(controller);
+        this.liveSignatures = this.signatures();
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "ready" })}\n\n`));
+        this.liveTimer ??= setInterval(() => this.tick(), 200);
+      },
+      cancel: () => {
+        if (own) this.liveStreams.delete(own);
+        if (!this.liveStreams.size && this.liveTimer) {
+          clearInterval(this.liveTimer);
+          this.liveTimer = undefined;
+        }
+      },
+    });
+    return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+  }
+
+  readonly handler: AssistantHttpMockHandler = async ({ endpoint, init }) => {
+    if (!endpoint.startsWith(ROOT)) return undefined;
+    this.tick();
     const url = new URL(endpoint, window.location.origin);
     const method = init.method ?? "GET";
+    if (url.pathname === `${ROOT}/live`) {
+      return globalThis.__nyxidAssistantHttpFaults?.nyxagentLive
+        ? this.live()
+        : failure(404, "Assistant route not found.");
+    }
     const body = () => JSON.parse(String(init.body)) as Record<string, unknown>;
     const groups = this.groupsRoute(url, method, body);
     if (groups) return groups;
