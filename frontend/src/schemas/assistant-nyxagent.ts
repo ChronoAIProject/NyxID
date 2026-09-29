@@ -118,11 +118,23 @@ export const nyxAgentApprovalSchema = z.object({
 });
 export type NyxAgentApproval = z.infer<typeof nyxAgentApprovalSchema>;
 
+/// Something outside the chat the thread is waiting for (a bot being
+/// created, a service being connected, the owner verifying a chat app).
+/// NyxID resumes the thread by itself when it happens.
+export const nyxAgentWaitingSchema = z.object({
+  kind: z.string(),
+  title: z.string(),
+  since: z.string(),
+  expires_at: z.string().nullable().default(null),
+});
+export type NyxAgentWaiting = z.infer<typeof nyxAgentWaitingSchema>;
+
 export const nyxAgentHistorySchema = z.object({
   conversation: nyxAgentConversationSchema,
   messages: z.array(nyxAgentMessageSchema),
   acknowledgements: z.array(nyxAgentAcknowledgementSchema).default([]),
   approvals: z.array(nyxAgentApprovalSchema).default([]),
+  waiting: z.array(nyxAgentWaitingSchema).default([]),
   before_seq: z.number().int().positive().nullable(),
 });
 export const nyxAgentIndexSchema = z.object({
@@ -404,6 +416,12 @@ export const nyxAgentChannelAgentSchema = z.object({
   owner_linked: z.boolean(),
   /** The agent this bot reaches; null means the owner's NyxBot. */
   agent_id: z.string().nullable().default(null),
+  /** `ok` or `failing` once a message has been judged; null before. */
+  delivery_status: z.string().nullable().default(null),
+  delivery_error: z.string().nullable().default(null),
+  /** Plain words for `delivery_error`. */
+  delivery_reason: z.string().nullable().default(null),
+  delivery_failed_at: z.string().nullable().default(null),
   created_at: z.string(),
 });
 export type NyxAgentChannelAgent = z.infer<typeof nyxAgentChannelAgentSchema>;

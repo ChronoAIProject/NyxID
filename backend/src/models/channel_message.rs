@@ -84,6 +84,10 @@ pub struct ChannelMessage {
     /// Callback delivery status: "pending", "delivered", "failed", "timeout"
     #[serde(default)]
     pub callback_status: Option<String>,
+    /// HTTP status the callback URL answered with when delivery failed, if
+    /// it answered at all. A status code only, never the response body.
+    #[serde(default)]
+    pub callback_http_status: Option<u16>,
     /// Internal message ID this message is a reply to
     #[serde(default)]
     pub reply_to_message_id: Option<String>,
@@ -133,6 +137,7 @@ mod tests {
             thread_id: None,
             agent_api_key_id: None,
             callback_status: None,
+            callback_http_status: None,
             reply_to_message_id: None,
             platform_reply_message_id: None,
             created_at: Utc::now(),

@@ -20,7 +20,7 @@ import {
   useNyxBotChannels,
 } from "@/hooks/use-nyxbot-agents";
 import { agentTitle, channelPlatformName } from "@/lib/assistant/nyxbot-labels";
-import { formatDateTime } from "@/lib/utils";
+import { formatDateTime, formatRelativeTime } from "@/lib/utils";
 import type {
   AssistantAgent,
   NyxAgentChannelAgent,
@@ -188,6 +188,15 @@ export function ChannelBotsManager({
                 </div>
                 {row.last_error ? (
                   <p className="text-[11px] text-destructive">Last error: {row.last_error}</p>
+                ) : null}
+                {row.delivery_status === "failing" ? (
+                  <p className="text-[11px] text-destructive">
+                    Messages are not reaching the agent: {row.delivery_reason ?? "delivery failed"}
+                    {row.delivery_failed_at
+                      ? ` (${formatRelativeTime(row.delivery_failed_at)})`
+                      : ""}
+                    .
+                  </p>
                 ) : null}
                 {confirming === row.id ? (
                   <div className="flex flex-wrap items-center justify-end gap-2 rounded-lg bg-overlay px-3 py-2">

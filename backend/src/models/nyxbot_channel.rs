@@ -62,6 +62,25 @@ pub struct NyxbotChannel {
     /// before agents existed) or a specialist.
     #[serde(default)]
     pub agent_id: Option<String>,
+    /// Whether the chat app's messages reach the agent, judged from the
+    /// newest inbound message: `ok` or `failing`; `None` before any message.
+    #[serde(default)]
+    pub delivery_status: Option<String>,
+    /// Stable code of the newest delivery failure (`refused_{status}`,
+    /// `undelivered`, `not_received`), never upstream prose.
+    #[serde(default)]
+    pub delivery_error: Option<String>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub delivery_failed_at: Option<DateTime<Utc>>,
+    /// Creation time of the newest inbound message the check has judged.
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub delivery_seen_at: Option<DateTime<Utc>>,
+    /// When the sweep last checked this channel (least recent first).
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub delivery_checked_at: Option<DateTime<Utc>>,
+    /// When the agent was last told that delivery is failing.
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub delivery_notified_at: Option<DateTime<Utc>>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
