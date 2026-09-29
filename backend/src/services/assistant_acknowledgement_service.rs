@@ -52,6 +52,15 @@ impl std::fmt::Debug for ChatAuthority {
     }
 }
 
+/// What a guest turn (someone other than the owner) is told when it asks
+/// for something only the owner can ask for.
+pub fn guest_refusal() -> Value {
+    json!({"error": "owner_only", "instructions": "You are answering someone other than the \
+        owner. Only the owner can ask for account actions, new connections, more access or \
+        changes made with their services. Answer in words or with read-only lookups, and say \
+        that only the bot's owner can ask for that."})
+}
+
 pub async fn for_key(
     db: &Database,
     user: &str,
@@ -564,6 +573,10 @@ pub async fn service_gate(
     };
     if granted {
         return Ok(None);
+    }
+    // A guest never widens what the agent may use: no permission request.
+    if chat.guest {
+        return Ok(Some((guest_refusal(), None)));
     }
     let summary = if platform {
         format!("Use {name} (NyxID platform credential)")

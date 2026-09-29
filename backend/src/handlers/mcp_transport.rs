@@ -1557,7 +1557,7 @@ async fn dispatch_tools_call(
     }
 
     if guest_turn(auth) && !guest_tool_allowed(tool_name) {
-        return tool_result(request.id.clone(), GUEST_REFUSAL, true);
+        return guest_refused(request.id.clone());
     }
     if tool_name.starts_with("nyxid__") {
         return handle_account_tool(state, auth, tool_name, &arguments, request.id.clone()).await;
@@ -1870,7 +1870,7 @@ async fn authorize_mcp_operation(
     if guest_turn(auth)
         && operation.verb != crate::models::service_approval_config::ApprovalVerb::Read
     {
-        return Err(tool_result(request_id, GUEST_REFUSAL, true));
+        return Err(guest_refused(request_id));
     }
     let approval_owner_user_id = auth.effective_approval_owner_user_id();
     let approval_outcome = approval_service::evaluate_and_check(
@@ -2049,6 +2049,14 @@ async fn chat_service_gate(
     }
 }
 
+fn guest_refused(request_id: Option<serde_json::Value>) -> Response {
+    tool_result(
+        request_id,
+        &crate::services::assistant_acknowledgement_service::guest_refusal().to_string(),
+        true,
+    )
+}
+
 /// A channel chat member who is not the owner asked for this turn.
 fn guest_turn(auth: &McpAuthContext) -> bool {
     auth.chat.as_ref().is_some_and(|chat| chat.guest)
@@ -2071,10 +2079,7 @@ fn guest_tool_allowed(tool_name: &str) -> bool {
         )
 }
 
-const GUEST_REFUSAL: &str = "{\"error\":\"owner_only\",\"instructions\":\"You are \
-    answering someone other than the owner. Only the owner can ask for account actions, \
-    new connections or changes made with their services. Answer in words or with read-only \
-    lookups, and say that only the bot's owner can ask for that.\"}";
+
 
 async fn handle_account_tool(
     state: &AppState,
@@ -2084,7 +2089,7 @@ async fn handle_account_tool(
     request_id: Option<serde_json::Value>,
 ) -> Response {
     if guest_turn(auth) {
-        return tool_result(request_id, GUEST_REFUSAL, true);
+        return guest_refused(request_id);
     }
     let Ok(user_id) = uuid::Uuid::parse_str(&auth.user_id) else {
         return tool_result(request_id, "{\"error\":\"unauthorized\"}", true);

@@ -1182,3 +1182,38 @@ async fn guest_turns_only_discover_and_read() {
         .unwrap();
     assert!(!String::from_utf8_lossy(&bytes).contains("owner_only"));
 }
+
+/// A guest never widens what a specialist may use: an ungranted service is
+/// refused without a permission request for NyxBot to grant.
+#[tokio::test]
+async fn guests_never_ask_for_more_access() {
+    let f = fixture("chat_guest_gate").await;
+    let mut chat = f.chat.clone();
+    chat.guest = true;
+    let (value, request) =
+        acks::service_gate(&f.state.db, &chat, "service-1", "example", "Example", false)
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(value["error"], "owner_only");
+    assert!(request.is_none());
+    assert_eq!(
+        f.state
+            .db
+            .collection::<mongodb::bson::Document>(
+                crate::models::assistant_acknowledgement::COLLECTION_NAME,
+            )
+            .count_documents(doc! {"conversation_id": &f.row.id})
+            .await
+            .unwrap(),
+        0
+    );
+    // The owner's own turn still asks.
+    chat.guest = false;
+    let (_, request) =
+        acks::service_gate(&f.state.db, &chat, "service-1", "example", "Example", false)
+            .await
+            .unwrap()
+            .unwrap();
+    assert!(request.is_some());
+}

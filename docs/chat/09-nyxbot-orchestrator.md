@@ -253,8 +253,8 @@ Account deletion purges agents, settings, threads and channel records.
 ## 12. Channel bots
 
 Any channel bot can be linked to NyxBot or a specialist (`connect_channel_bot`,
-settings, or relinked later); each chat partition becomes a thread of the linked
-agent, with that agent's authority and memory.
+settings, or relinked later); each chat becomes a thread of the linked agent
+(or of the chat's own agent, §12a), with that agent's authority and memory.
 
 - **Everything is answerable in the chat.** A chat app cannot show NyxID's cards
   or buttons, so channel threads are told to give every link as a full URL and
@@ -292,10 +292,13 @@ agent, with that agent's authority and memory.
   fails with `org_access_lost`, its org route and route key are removed so the
   org's other admins can link the bot, and nothing reaches or leaves their
   agent. Disconnecting removes the org's route and key too.
-- **Right user.** Only senders verified as the owner reach the agent: NyxID's
-  Telegram notification link or a one-time link code (a `t.me/<bot>?start=<code>`
-  link for Telegram). Strangers get a short refusal in private chats and silence
-  in groups; no turn runs. Each turn names the platform, bot, chat type and sender.
+- **Right user.** The owner is verified through NyxID's Telegram notification
+  link or a one-time link code (a `t.me/<bot>?start=<code>` link for Telegram);
+  only they act with the agent's full authority. Everyone else is a guest
+  (§12a): in private chats they get a short refusal unless the owner opened the
+  bot's private chats to everyone; in groups they may talk to the agent unless
+  the owner restricted that chat. Each turn names the platform, bot, chat and
+  sender, and whether the sender is the owner.
 - **Delivery health.** A linked chat app must never go quiet silently. The
   15-second sweep judges each active channel's newest inbound message: a failed
   relay callback (NyxID keeps the HTTP status, never the body) is lost
@@ -353,6 +356,79 @@ channels; each running turn holds a slot for its whole duration. 256 equals
 the gateway-wide ceiling (`CMAEG_PROVIDER_MAX_INFLIGHT`) and `cma_codex`, and
 each provider has its own pool. NyxID still limits each owner to two
 concurrent channel turns and queues the rest.
+
+### 12a. Chats, groups and guests
+
+A bot's chats are threads of their own: each private chat is one thread, and
+each group, channel or forum topic is one thread its members share. Messages in
+a shared thread start with their sender's name, and the agent is told that
+everyone in the chat sees its reply. Chats are recorded in `nyxbot_threads`
+(kind, title, platform chat and topic IDs, settings). Private chats keep their
+earlier partitions (the gateway conversation, or the direct chat-and-sender
+digest), so their history continues; a group's thread is `chat_` plus a digest
+of the chat and topic, whatever the sender. Through the gateway, which keeps
+partitioning by conversation and sender, every sender's gateway conversation in
+a group maps onto the group's one thread. Group titles come from the platform
+payload or, once, from the platform's chat lookup (Telegram `getChat`, Lark
+`im/v1/chats`).
+
+**Per-chat settings** (the owner, via NyxBot's `nyxid__list_channel_chats` and
+`nyxid__update_channel_chat`, or the chats list under each connected bot):
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `reply_mode` | `mention` (groups, channels) | Answer only when the bot is mentioned or a message replies to one of its messages; `all` answers every message. Private chats always answer. |
+| `members` | `everyone` (groups, channels) | Members other than the owner may talk to the agent as guests; `owner` answers only the owner. |
+| `allow_posts` | off | The chat's agent may post there without being asked (`nyxid__post_to_chat`). |
+| agent | the bot's agent | The chat reaches another agent; it starts a new thread with it, and relinking the bot leaves such chats alone. |
+
+Per bot, `private_chats` (`nyxid__update_channel_access`) is `owner` (default)
+or `everyone`: anyone who messages the bot privately gets their own thread, as a
+guest.
+
+**Addressed messages.** Through the gateway, group admission is
+`mention_or_reply_to_bot` unless one of the bot's chats answers everything; then
+the gateway passes every group message on (`all`, recorded as
+`gateway_groups`), and NyxID decides per chat from the gateway's `mentions_bot`
+or a reply to one of the bot's sent messages (NyxID records the platform
+message an inbound message replies to). Directly relayed Telegram messages are
+judged from the update (an @username or text mention, a reply to the bot); Lark
+and Feishu count any @mention (they deliver unmentioned group messages only to
+apps granted every group message); other platforms treat every message as
+addressed. Telegram bots see every group message only with privacy mode off or
+as group admins, and NyxBot says so when a chat is set to `all`.
+
+**Guests.** A turn started by someone other than the verified owner, or one that
+drains such a queued message, is a guest turn (`guest_turn` on the thread,
+`guest` on its chat authority; kept after the turn so late tool calls stay
+restricted):
+
+- no `nyxid__` account, team, memory or posting tools, and no connection, SSH
+  or Oracle tools; discovery and `nyx__call_tool` remain;
+- service operations must be reads (the MCP operation's verb); writes are
+  refused with `owner_only`;
+- an ungranted service is refused without a permission request, so a guest
+  never widens what a specialist may use;
+- the owner's memory, roster, direct chats and pending requests stay out of the
+  turn's instructions, and the first guest turn after an owner turn starts from
+  the transcript rather than the owner's live context (whose tool results may
+  hold more than the chat saw);
+- only the owner's words confirm action cards.
+
+Guest turns still run within the chat agent's own authority: a specialist
+linked to a group reads only with its grants. Guests' turns are billed to the
+owner, like every channel turn, and share the owner's channel pool.
+
+**Posting.** `nyxid__post_to_chat` sends through the bot's own route (NyxID's
+initiated-send path: rate limit, outbound record and audit) into a chat that
+allows posts: the chat's agent or NyxBot, never a guest turn. Posts go to the
+chat itself, not a topic.
+
+**UI.** Under each agent, a bot's chats are one collapsed section (label,
+platform, count, a dot while one is working) that opens for the thread being
+viewed and shows five chats, then more on request. Each thread row shows a
+private, group or channel icon. Thread listings carry `channel.channel_agent_id`,
+`bot_label`, `chat_id`, `chat_kind` and `chat_title`.
 
 ## 13. No-break guarantees
 
