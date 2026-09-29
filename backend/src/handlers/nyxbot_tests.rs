@@ -3029,6 +3029,39 @@ async fn the_owners_private_chats_share_the_agents_own_thread() {
         thread.reply_channel.as_ref().unwrap().nyxbot_channel_id,
         lark.id
     );
+    // Asynchronous replies may go to the owner's own private chat...
+    let target = thread.reply_channel.clone().unwrap();
+    assert!(
+        delivery_target(&state, &thread, &target)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    // ...but never to a group, even one an older replica pointed here.
+    state
+        .db
+        .collection::<NyxbotThread>(THREADS)
+        .update_one(
+            doc! {"channel_id": &lark.id, "partition": &target.partition},
+            doc! {"$set": {"kind": "group"}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        delivery_target(&state, &thread, &target)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    state
+        .db
+        .collection::<NyxbotThread>(THREADS)
+        .update_one(
+            doc! {"channel_id": &lark.id, "partition": &target.partition},
+            doc! {"$set": {"kind": "private"}},
+        )
+        .await
+        .unwrap();
     assert_eq!(
         channel_conversations(&state, &telegram.id).await.len()
             + channel_conversations(&state, &lark.id).await.len(),

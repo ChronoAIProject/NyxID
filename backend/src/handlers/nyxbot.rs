@@ -2939,6 +2939,37 @@ pub async fn deliver_update(
     deliver_to(state, row, origin, text).await;
 }
 
+/// The chat a conversation may deliver to: its own channel thread's chat,
+/// or (for the owner's own thread) one of the owner's verified private chats
+/// that now answers into it. Anything else (a relinked chat, a group) gets
+/// nothing, whatever an older replica may have recorded.
+pub(crate) async fn delivery_target(
+    state: &AppState,
+    row: &crate::models::assistant_conversation::AssistantConversation,
+    origin: &ChannelOrigin,
+) -> AppResult<Option<(NyxbotChannel, NyxbotThread)>> {
+    let channel = load_channel(state, &row.user_id, &origin.nyxbot_channel_id).await?;
+    if channel.status != "active" {
+        return Ok(None);
+    }
+    let Some(thread) = state
+        .db
+        .collection::<NyxbotThread>(THREADS)
+        .find_one(doc! {"channel_id": &channel.id, "partition": &origin.partition})
+        .await?
+    else {
+        return Ok(None);
+    };
+    // A relinked chat belongs to another agent now; this thread's late
+    // replies stay in the app.
+    if thread.conversation_id.as_deref() != Some(row.id.as_str()) {
+        return Ok(None);
+    }
+    let own_chat = row.channel.as_ref() == Some(origin);
+    let owners_private_chat = thread.kind.as_deref() == Some("private") && thread.owner_chat;
+    Ok((own_chat || owners_private_chat).then_some((channel, thread)))
+}
+
 /// Deliver `text` from the conversation `row` to one chat. Best effort.
 pub async fn deliver_to(
     state: &AppState,
@@ -2947,21 +2978,9 @@ pub async fn deliver_to(
     text: &str,
 ) {
     let result: AppResult<()> = async {
-        let channel = load_channel(state, &row.user_id, &origin.nyxbot_channel_id).await?;
-        if channel.status != "active" {
+        let Some((channel, thread)) = delivery_target(state, row, origin).await? else {
             return Ok(());
-        }
-        let thread = state
-            .db
-            .collection::<NyxbotThread>(THREADS)
-            .find_one(doc! {"channel_id": &channel.id, "partition": &origin.partition})
-            .await?
-            .ok_or_else(|| AppError::NotFound("Channel thread not found".into()))?;
-        // A relinked chat belongs to another agent now; this thread's late
-        // replies stay in the app.
-        if thread.conversation_id.as_deref() != Some(row.id.as_str()) {
-            return Ok(());
-        }
+        };
         let reply = bounded_reply(text);
         if channel.transport == "gateway" {
             let (Some(ciphertext), Some(expires_at)) = (
