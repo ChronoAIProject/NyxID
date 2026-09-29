@@ -41,7 +41,7 @@ async fn stale_schedule_update_returns_conflict_without_overwriting_winner() {
             doc! { "_id": &schedule.id },
             doc! { "$set": {
                 "amount_credits": 99_i64,
-                "amount_micros": 99_000_000_i64,
+                "amount": crate::models::credits::Credits::from_whole(99),
                 "updated_at": bson::DateTime::from_chrono(winner_updated_at),
             } },
         )
@@ -71,7 +71,10 @@ async fn stale_schedule_update_returns_conflict_without_overwriting_winner() {
         .expect("reload schedule")
         .expect("schedule exists");
     assert_eq!(stored.amount_credits, 99);
-    assert_eq!(stored.amount_micros, 99_000_000);
+    assert_eq!(
+        stored.amount,
+        crate::models::credits::Credits::from_micros(99_000_000)
+    );
     assert!(stored.is_active);
     assert_eq!(stored.updated_at, winner_updated_at);
 }

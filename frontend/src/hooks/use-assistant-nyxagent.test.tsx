@@ -81,6 +81,7 @@ beforeEach(() => {
     before_seq: null,
     acknowledgements: [],
     approvals: [],
+    waiting: [],
   };
   agents = [agentRow({})];
   globalThis.__nyxidAssistantHttpMock = ({ endpoint, init }) => {
@@ -144,16 +145,19 @@ it("polls only selected history every two seconds and refreshes the agent's thre
   }, 10_000,
 );
 
-it("refreshes profiles after a first send provisions the assistant credential", async () => {
+it("routes models server-side: no profile discovery, and a send refreshes the agents", async () => {
   page.conversation.active_turn = null;
   const send = vi.spyOn(nyxAgentTransport, "send").mockResolvedValue();
   const { result, unmount } = renderHook(() => useNyxAgentAssistantChat({
     onConversationAdopted: vi.fn(),
   }), { wrapper });
-  await waitFor(() => expect(requests.filter((r) => r.endsWith("/models"))).toHaveLength(1));
+  const agentReads = () =>
+    requests.filter((r) => r.includes("/assistant/nyxagent/agents")).length;
+  await waitFor(() => expect(agentReads()).toBe(1));
   await act(() => result.current.send("Question"));
   expect(send).toHaveBeenCalledOnce();
-  expect(requests.filter((r) => r.endsWith("/models"))).toHaveLength(2);
+  expect(agentReads()).toBe(2);
+  expect(requests.some((r) => r.endsWith("/models"))).toBe(false);
   unmount();
 });
 

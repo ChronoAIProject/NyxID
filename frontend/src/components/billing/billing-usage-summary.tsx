@@ -1,3 +1,4 @@
+import { decimalCredits, parseCredits } from "@/lib/credits";
 import { Card } from "@/components/ui/card";
 import type { BillingUsageRow } from "@/schemas/billing";
 import { number, credits, total } from "@/lib/billing-display";
@@ -8,7 +9,9 @@ export function BillingUsageSummary({ rows }: { rows: BillingUsageRow[] }) {
   const grants = total(rows, "grant_credits_micros");
   const allowances = total(rows, "allowance_credits_micros");
   const covered =
-    grants == null || allowances == null ? null : grants + allowances;
+    grants == null || allowances == null
+      ? null
+      : decimalCredits(parseCredits(grants) + parseCredits(allowances));
   const tokenTotal = metrics.get("tokens");
   return (
     <Card className="tab-usage-summary">

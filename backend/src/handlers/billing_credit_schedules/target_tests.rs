@@ -21,7 +21,7 @@ fn schedule_and_frozen_period_dtos_round_trip_target_provenance() {
         let schedule = CreditSchedule {
             id: "schedule".into(),
             amount_credits: 10,
-            amount_micros: 10_000_000,
+            amount: crate::models::credits::Credits::from_micros(10_000_000),
             recurrence: request.recurrence,
             expiry: request.expiry,
             target_kind: request.target_kind,
@@ -47,7 +47,7 @@ fn schedule_and_frozen_period_dtos_round_trip_target_provenance() {
             period_start: now,
             period_end: now + chrono::Duration::days(30),
             status: SchedulePeriodStatus::Disbursing,
-            amount_micros: schedule.amount_micros,
+            amount: schedule.amount,
             expires_at: None,
             target_kind: schedule.target_kind,
             target_user_ids: vec![],

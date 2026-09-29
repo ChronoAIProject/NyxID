@@ -1,6 +1,7 @@
 use super::*;
 use crate::errors::AppResult;
 use crate::models::billing_wallet::BillingWallet;
+use crate::models::credits::Credits;
 use crate::models::service_billing::{
     BillingMetric, LanePricing, PricingSyncStatus, ServiceBilling,
 };
@@ -14,7 +15,9 @@ use crate::services::channel_platform::{BotCredentials, OutboundReply};
 use futures::TryStreamExt;
 use std::sync::Arc;
 
-struct FakeLago;
+struct FakeLago {
+    entitlement: &'static str,
+}
 #[async_trait::async_trait]
 impl LagoApi for FakeLago {
     async fn ensure_customer(&self, owner: &OwnerProvisionInput) -> AppResult<String> {
@@ -28,7 +31,7 @@ impl LagoApi for FakeLago {
     async fn ensure_wallet(&self, customer_id: &str) -> AppResult<LagoWallet> {
         Ok(LagoWallet {
             id: format!("{customer_id}:wallet"),
-            balance_credits: 100,
+            balance_credits: crate::models::credits::Credits::from_whole(100),
         })
     }
 
@@ -65,18 +68,26 @@ impl LagoApi for FakeLago {
 
     async fn entitlements(&self, _subscription_id: &str) -> AppResult<Vec<Entitlement>> {
         Ok(vec![Entitlement {
-            code: "api-twitter".to_string(),
+            code: self.entitlement.to_string(),
             raw: serde_json::json!({}),
         }])
     }
 }
 
 pub(crate) async fn enable_billing(state: &mut AppState, owner: &str) -> String {
+    enable_billing_with_entitlement(state, owner, "api-twitter").await
+}
+
+pub(crate) async fn enable_billing_with_entitlement(
+    state: &mut AppState,
+    owner: &str,
+    entitlement: &'static str,
+) -> String {
     state.config.billing_enabled = true;
     state.billing = Arc::new(BillingService::new_with_lago(
         state.db.clone(),
         Arc::new(state.config.clone()),
-        Arc::new(FakeLago),
+        Arc::new(FakeLago { entitlement }),
     ));
     crate::services::billing::ledger::init_billing_ledger_hmac_key(zeroize::Zeroizing::new(
         crate::services::billing::ledger::TEST_BILLING_LEDGER_HMAC_KEY,
@@ -88,9 +99,10 @@ pub(crate) async fn enable_billing(state: &mut AppState, owner: &str) -> String 
         .insert_one(doc! {
             "_id": uuid::Uuid::new_v4().to_string(), "owner_id": owner,
             "lago_customer_id": owner, "lago_wallet_id": "wallet", "lago_subscription_id": "plan",
-            "plan_kind": "prepaid", "balance_credits": 100_i64, "reserved_credits": 0_i64,
-            "pending_lago_debits": 0_i64, "has_payment_instrument": false,
-            "overdraft_cap_credits": 0_i64, "suspended": false, "collection_state": "good",
+            "plan_kind": "prepaid", "balance_credits": Credits::from_whole(100),
+            "reserved_credits": Credits::ZERO, "pending_lago_debits": Credits::ZERO,
+            "has_payment_instrument": false, "overdraft_cap_credits": Credits::ZERO,
+            "suspended": false, "collection_state": "good",
             "balance_synced_at": now, "created_at": now, "updated_at": now,
         })
         .await
@@ -185,7 +197,7 @@ async fn balance(state: &AppState, owner: &str, amount: i64) {
         .collection::<bson::Document>(crate::models::billing_wallet::COLLECTION_NAME)
         .update_one(
             doc! {"owner_id": owner},
-            doc! {"$set": {"balance_credits": amount}},
+            doc! {"$set": {"balance_credits": Credits::from_whole(amount)}},
         )
         .await
         .unwrap();
@@ -238,8 +250,14 @@ async fn x_billing_incoming_duplicate_uses_owner_shared_oauth_price_and_one_ledg
             CredentialClass::NyxidPlatformOauthApp
         );
         assert_eq!(charged[0].lago_metric_code, "platform_svc_api-twitter_byok");
-        assert_eq!(wallet(&state, &owner).await.pending_lago_debits, 2);
-        assert_eq!(wallet(&state, &owner).await.reserved_credits, 0);
+        assert_eq!(
+            wallet(&state, &owner).await.pending_lago_debits,
+            crate::models::credits::Credits::from_whole(2)
+        );
+        assert_eq!(
+            wallet(&state, &owner).await.reserved_credits,
+            crate::models::credits::Credits::from_whole(0)
+        );
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             while state
                 .db
@@ -248,6 +266,8 @@ async fn x_billing_incoming_duplicate_uses_owner_shared_oauth_price_and_one_ledg
                 .await
                 .unwrap()
                 != 1
+            // Admission no longer adds an opening for a directly seeded wallet;
+            // this is the single charged usage transaction.
             {
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
@@ -323,8 +343,80 @@ async fn x_billing_split_reply_charges_each_success_and_releases_rejected_chunk(
         rows.iter()
             .all(|r| r.api_key_id.as_deref() == Some("reply-agent"))
     );
-    assert_eq!(wallet(&state, &owner).await.pending_lago_debits, 2);
-    assert_eq!(wallet(&state, &owner).await.reserved_credits, 0);
+    assert_eq!(
+        wallet(&state, &owner).await.pending_lago_debits,
+        crate::models::credits::Credits::from_whole(2)
+    );
+    assert_eq!(
+        wallet(&state, &owner).await.reserved_credits,
+        crate::models::credits::Credits::from_whole(0)
+    );
+}
+
+#[tokio::test]
+async fn x_billing_preserves_picocredits_and_obeys_cutover_before_send() {
+    for pending_cutover in [false, true] {
+        let (mut state, _, server, owner, key) = fixture().await;
+        let service = enable_billing(&mut state, &owner).await;
+        let bot = registered(&state, &owner, &key).await;
+        state
+            .db
+            .collection::<bson::Document>(crate::models::downstream_service::COLLECTION_NAME)
+            .update_one(
+                doc! { "_id": &service },
+                doc! { "$set": {
+                    "billing.byok_pricing.credits_per_unit": "0.000000000001",
+                } },
+            )
+            .await
+            .unwrap();
+        state
+            .db
+            .collection::<bson::Document>(crate::models::billing_rate_cache::COLLECTION_NAME)
+            .update_one(
+                doc! { "_id": "platform_svc_api-twitter_byok:*" },
+                doc! { "$set": {
+                    "credits_per_unit_pico": 1_i64, "credits_per_unit_micros": 0_i64,
+                } },
+            )
+            .await
+            .unwrap();
+        if pending_cutover {
+            state
+                .db
+                .collection::<bson::Document>("billing_migrations")
+                .delete_one(doc! { "_id": "exact-v2" })
+                .await
+                .unwrap();
+        }
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(if pending_cutover { 0 } else { 1 })
+            .mount(&server)
+            .await;
+        let billing = ChannelBilling::for_bot(&state.db, &state.billing, &bot, None).unwrap();
+        let result = billing.send(state.http_client.post(server.uri())).await;
+        if pending_cutover {
+            assert!(matches!(
+                result,
+                Err(AppError::BillingProviderUnavailable(_))
+            ));
+            assert!(server.received_requests().await.unwrap().is_empty());
+            assert!(rows(&state).await.is_empty());
+        } else {
+            assert!(result.unwrap().status().is_success());
+            let rows = settled(&state).await;
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].quantity, Some(1));
+            let expected: Credits = "0.000000000001".parse().unwrap();
+            assert_eq!(
+                rows[0].funding.as_ref().unwrap().wallet_funded,
+                Some(expected)
+            );
+            assert_eq!(wallet(&state, &owner).await.pending_lago_debits, expected);
+            assert_eq!(wallet(&state, &owner).await.reserved_credits, Credits::ZERO);
+        }
+    }
 }
 
 #[tokio::test]
@@ -376,8 +468,14 @@ async fn x_billing_unknown_send_keeps_hold_without_charging_or_retrying() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].status, UsageStatus::Forwarded);
     assert_eq!(rows[0].quantity, None);
-    assert_eq!(wallet(&state, &owner).await.pending_lago_debits, 0);
-    assert_eq!(wallet(&state, &owner).await.reserved_credits, 2);
+    assert_eq!(
+        wallet(&state, &owner).await.pending_lago_debits,
+        crate::models::credits::Credits::from_whole(0)
+    );
+    assert_eq!(
+        wallet(&state, &owner).await.reserved_credits,
+        crate::models::credits::Credits::from_whole(2)
+    );
 }
 
 #[tokio::test]
@@ -397,6 +495,17 @@ async fn x_billing_allowance_then_grant_then_wallet() {
         "scope": {"all_services": true}, "granted_by": "admin", "status": "active", "issued_ledgered_at": now,
         "created_at": now, "updated_at": now,
     }).await.unwrap();
+    // This fixture deliberately seeds the legacy grant shape. Remove the fresh
+    // test database's completion marker to exercise the actual cutover.
+    state
+        .db
+        .collection::<bson::Document>("billing_migrations")
+        .delete_one(doc! { "_id": "exact-v2" })
+        .await
+        .unwrap();
+    crate::services::billing::exact_migration::run(&state.db)
+        .await
+        .unwrap();
     let billing = ChannelBilling::for_bot(&state.db, &state.billing, &bot, None).unwrap();
     for event in ["701", "702", "703"] {
         billing.received(event).await.unwrap();
@@ -404,7 +513,10 @@ async fn x_billing_allowance_then_grant_then_wallet() {
     }
     let rows = rows(&state).await;
     assert_eq!(rows.len(), 3);
-    assert_eq!(wallet(&state, &owner).await.pending_lago_debits, 2);
+    assert_eq!(
+        wallet(&state, &owner).await.pending_lago_debits,
+        crate::models::credits::Credits::from_whole(2)
+    );
     let grant = state
         .db
         .collection::<bson::Document>(crate::models::credit_grant::COLLECTION_NAME)
@@ -412,7 +524,10 @@ async fn x_billing_allowance_then_grant_then_wallet() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(grant.get_i64("remaining_micros").unwrap(), 0);
+    assert_eq!(
+        crate::models::credits::Credits::from_bson(grant["remaining"].clone(), 1_000_000).unwrap(),
+        crate::models::credits::Credits::ZERO
+    );
 }
 
 #[tokio::test]
@@ -434,7 +549,10 @@ async fn x_billing_no_agent_route_still_accounts_for_received_event() {
     .unwrap();
     let rows = settled(&state).await;
     assert_eq!(rows.len(), 1);
-    assert_eq!(wallet(&state, &owner).await.pending_lago_debits, 2);
+    assert_eq!(
+        wallet(&state, &owner).await.pending_lago_debits,
+        crate::models::credits::Credits::from_whole(2)
+    );
     assert!(!format!("{rows:?}").contains("private content"));
 }
 
@@ -597,7 +715,10 @@ async fn x_billing_failure_unsubscribes_and_cleanup_rechecks_recovery() {
         .unwrap();
     assert_eq!(active.status, "active");
     assert!(active.webhook_registered);
-    assert_eq!(wallet(&state, &owner).await.reserved_credits, 0);
+    assert_eq!(
+        wallet(&state, &owner).await.reserved_credits,
+        crate::models::credits::Credits::from_whole(0)
+    );
 }
 
 #[tokio::test]
@@ -679,8 +800,14 @@ async fn x_billing_requires_provider_but_allows_explicit_zero_price() {
     let rows = settled(&state).await;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].quantity, Some(1));
-    assert_eq!(wallet(&state, &owner).await.pending_lago_debits, 0);
-    assert_eq!(wallet(&state, &owner).await.reserved_credits, 0);
+    assert_eq!(
+        wallet(&state, &owner).await.pending_lago_debits,
+        crate::models::credits::Credits::from_whole(0)
+    );
+    assert_eq!(
+        wallet(&state, &owner).await.reserved_credits,
+        crate::models::credits::Credits::from_whole(0)
+    );
 }
 
 #[tokio::test]
@@ -703,7 +830,10 @@ async fn x_billing_account_verification_reserves_before_lookup() {
     let rows = settled(&state).await;
     assert_eq!(rows.len(), 1);
     assert!(rows[0].billing_request_id.starts_with("x-account-verify:"));
-    assert_eq!(wallet(&state, &owner).await.pending_lago_debits, 2);
+    assert_eq!(
+        wallet(&state, &owner).await.pending_lago_debits,
+        crate::models::credits::Credits::from_whole(2)
+    );
     balance(&state, &owner, 0).await;
     assert!(matches!(
         adapter
@@ -734,5 +864,8 @@ async fn x_billing_rollout_disabled_meters_without_wallet_charge() {
     let rows = settled(&state).await;
     assert_eq!(rows.len(), 1);
     assert!(rows[0].wallet_id.is_none());
-    assert_eq!(wallet(&state, &owner).await.pending_lago_debits, 0);
+    assert_eq!(
+        wallet(&state, &owner).await.pending_lago_debits,
+        crate::models::credits::Credits::from_whole(0)
+    );
 }

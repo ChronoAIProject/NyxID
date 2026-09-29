@@ -178,6 +178,32 @@ it("validates specialist limits against the server limits before saving", async 
   );
 });
 
+it("saves group hand-off limits within the server's bounds", async () => {
+  const user = renderButton();
+  await user.click(screen.getByRole("button", { name: "NyxBot settings" }));
+  const dialog = await screen.findByRole("dialog", { name: "NyxBot settings" });
+  const perMessage = await within(dialog).findByRole("spinbutton", {
+    name: "Group hand-offs per message",
+  });
+  const perHour = within(dialog).getByRole("spinbutton", { name: "Group hand-offs per hour" });
+  // Older servers omit the fields: the defaults apply.
+  expect(perMessage).toHaveValue(6);
+  expect(perHour).toHaveValue(60);
+  await user.clear(perMessage);
+  await user.type(perMessage, "30");
+  await user.click(within(dialog).getByRole("button", { name: "Save settings" }));
+  expect(await within(dialog).findByText("Must be at most 24")).toBeVisible();
+  expect(writes).toEqual([]);
+  await user.clear(perMessage);
+  await user.type(perMessage, "0");
+  await user.clear(perHour);
+  await user.type(perHour, "120");
+  await user.click(within(dialog).getByRole("button", { name: "Save settings" }));
+  await waitFor(() =>
+    expect(writes.at(-1)?.body).toEqual({ max_group_handoffs: 0, max_group_handoffs_per_hour: 120 }),
+  );
+});
+
 it("lists connected bots with their agent, relinks one, and connects another to a chosen agent", async () => {
   const user = renderButton();
   await user.click(screen.getByRole("button", { name: "NyxBot settings" }));

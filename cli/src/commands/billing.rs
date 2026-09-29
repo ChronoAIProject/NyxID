@@ -10,6 +10,21 @@ use crate::cli::{BillingCommands, BillingUsagePeriodArg, OutputFormat};
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq, Serialize)]
 pub struct BillingWalletResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub balance: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reserved: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_debits: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_expiry: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available_with_overdraft: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overdraft_cap: Option<String>,
+
     pub owner_id: String,
     pub plan_kind: String,
     pub collection_state: String,
@@ -56,9 +71,17 @@ pub struct BillingUsageRow {
     #[serde(default = "default_billable")]
     pub billable: bool,
     pub estimated_credits_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_credits: Option<String>,
     pub wallet_credits_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wallet_credits: Option<String>,
     pub grant_credits_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_credits: Option<String>,
     pub allowance_credits_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowance_credits: Option<String>,
     #[serde(default)]
     pub allowance_quantity: i64,
 }
@@ -74,9 +97,17 @@ pub struct BillingUsageTotals {
     pub bytes: i64,
     pub events: i64,
     pub estimated_credits_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_credits: Option<String>,
     pub wallet_credits_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wallet_credits: Option<String>,
     pub grant_credits_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_credits: Option<String>,
     pub allowance_credits_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowance_credits: Option<String>,
     #[serde(default)]
     pub allowance_quantity: i64,
 }
@@ -253,17 +284,35 @@ async fn verify_topup_flow(
     }
 
     eprintln!("Complete the Stripe sandbox checkout, then leave this command running.");
+    let start_exact = starting_wallet
+        .balance
+        .clone()
+        .unwrap_or_else(|| starting_wallet.balance_credits.to_string());
+    let expected_exact = add_whole_amount(&start_exact, amount_credits)?;
     let deadline = Instant::now() + timeout;
     let mut final_wallet = starting_wallet.clone();
     while Instant::now() < deadline {
         let wallet: BillingWalletResponse = api.get("/billing/wallet").await?;
-        if wallet.balance_credits == starting_wallet.balance_credits + amount_credits {
+        if add_whole_amount(
+            &wallet
+                .balance
+                .clone()
+                .unwrap_or_else(|| wallet.balance_credits.to_string()),
+            0,
+        )? == expected_exact
+        {
             final_wallet = wallet;
             return Ok(TopUpVerificationResponse {
                 topup,
                 starting_balance_credits: starting_wallet.balance_credits,
                 final_balance_credits: final_wallet.balance_credits,
-                expected_balance_credits: starting_wallet.balance_credits + amount_credits,
+                expected_balance_credits: legacy_balance_projection(&expected_exact)?,
+                starting_balance: start_exact.clone(),
+                final_balance: final_wallet
+                    .balance
+                    .clone()
+                    .unwrap_or_else(|| final_wallet.balance_credits.to_string()),
+                expected_balance: expected_exact.clone(),
                 verified: true,
             });
         }
@@ -273,9 +322,12 @@ async fn verify_topup_flow(
 
     bail!(
         "timed out waiting for Lago/Stripe reconciliation: start={} final={} expected={}",
-        starting_wallet.balance_credits,
-        final_wallet.balance_credits,
-        starting_wallet.balance_credits + amount_credits
+        start_exact,
+        final_wallet
+            .balance
+            .clone()
+            .unwrap_or_else(|| final_wallet.balance_credits.to_string()),
+        expected_exact
     )
 }
 
@@ -290,13 +342,40 @@ fn print_wallet(wallet: &BillingWalletResponse, output: OutputFormat) -> Result<
             eprintln!("Owner:             {}", wallet.owner_id);
             eprintln!("Plan:              {}", wallet.plan_kind);
             eprintln!("Status:            {}", wallet.collection_state);
-            eprintln!("Balance:           {} credits", wallet.balance_credits);
-            eprintln!("Available:         {} credits", wallet.available_credits);
-            eprintln!("Reserved:          {} credits", wallet.reserved_credits);
-            eprintln!("Pending Debits:    {} credits", wallet.pending_lago_debits);
+            eprintln!(
+                "Balance:           {} credits",
+                wallet
+                    .balance
+                    .clone()
+                    .unwrap_or_else(|| wallet.balance_credits.to_string())
+            );
+            eprintln!(
+                "Available:         {} credits",
+                wallet
+                    .available
+                    .clone()
+                    .unwrap_or_else(|| wallet.available_credits.to_string())
+            );
+            eprintln!(
+                "Reserved:          {} credits",
+                wallet
+                    .reserved
+                    .clone()
+                    .unwrap_or_else(|| wallet.reserved_credits.to_string())
+            );
+            eprintln!(
+                "Pending Debits:    {} credits",
+                wallet
+                    .pending_debits
+                    .clone()
+                    .unwrap_or_else(|| wallet.pending_lago_debits.to_string())
+            );
             eprintln!(
                 "Overdraft Cap:     {} credits",
-                wallet.overdraft_cap_credits
+                wallet
+                    .overdraft_cap
+                    .clone()
+                    .unwrap_or_else(|| wallet.overdraft_cap_credits.to_string())
             );
             eprintln!("Suspended:         {}", wallet.suspended);
             if wallet.created {
@@ -331,20 +410,37 @@ fn format_usage(usage: &serde_json::Value, output: OutputFormat) -> Result<Strin
         ),
         format!(
             "Estimated Cost:    {}",
-            format_estimated_credits(usage.totals.estimated_credits_micros)
+            format_estimated_credits(
+                usage.totals.estimated_credits.as_deref(),
+                usage.totals.estimated_credits_micros
+            )
         ),
     ];
-    for (label, micros, quantity) in [
-        ("Funded by grants", usage.totals.grant_credits_micros, 0),
+    for (label, exact, micros, quantity) in [
+        (
+            "Funded by grants",
+            usage.totals.grant_credits.as_deref(),
+            usage.totals.grant_credits_micros,
+            0,
+        ),
         (
             "Funded by allowances",
+            usage.totals.allowance_credits.as_deref(),
             usage.totals.allowance_credits_micros,
             usage.totals.allowance_quantity,
         ),
-        ("Charged to wallet", usage.totals.wallet_credits_micros, 0),
+        (
+            "Charged to wallet",
+            usage.totals.wallet_credits.as_deref(),
+            usage.totals.wallet_credits_micros,
+            0,
+        ),
     ] {
-        if micros.is_some_and(|value| value > 0) || quantity > 0 {
-            lines.push(format!("{label}: {}", format_estimated_credits(micros)));
+        if nonzero_amount(exact, micros) || quantity > 0 {
+            lines.push(format!(
+                "{label}: {}",
+                format_estimated_credits(exact, micros)
+            ));
         }
     }
     lines.push(String::new());
@@ -373,7 +469,10 @@ fn format_usage(usage: &serde_json::Value, output: OutputFormat) -> Result<Strin
             row.quantity.to_string(),
             row.events.to_string(),
             if row.billable {
-                format_estimated_credits(row.estimated_credits_micros)
+                format_estimated_credits(
+                    row.estimated_credits.as_deref(),
+                    row.estimated_credits_micros,
+                )
             } else {
                 "free".to_string()
             },
@@ -393,9 +492,11 @@ fn format_usage(usage: &serde_json::Value, output: OutputFormat) -> Result<Strin
 }
 
 fn format_usage_funding(row: &BillingUsageRow) -> String {
-    let grants = row.grant_credits_micros.is_some_and(|value| value > 0);
-    let allowances =
-        row.allowance_credits_micros.is_some_and(|value| value > 0) || row.allowance_quantity > 0;
+    let grants = nonzero_amount(row.grant_credits.as_deref(), row.grant_credits_micros);
+    let allowances = nonzero_amount(
+        row.allowance_credits.as_deref(),
+        row.allowance_credits_micros,
+    ) || row.allowance_quantity > 0;
     if !row.billable || !(grants || allowances) {
         return String::new();
     }
@@ -403,7 +504,7 @@ fn format_usage_funding(row: &BillingUsageRow) -> String {
     if grants {
         parts.push(format!(
             "grants {}",
-            format_estimated_credits(row.grant_credits_micros)
+            format_estimated_credits(row.grant_credits.as_deref(), row.grant_credits_micros)
         ));
     }
     if allowances {
@@ -418,12 +519,15 @@ fn format_usage_funding(row: &BillingUsageRow) -> String {
         };
         parts.push(format!(
             "allowance {}{units}",
-            format_estimated_credits(row.allowance_credits_micros)
+            format_estimated_credits(
+                row.allowance_credits.as_deref(),
+                row.allowance_credits_micros
+            )
         ));
     }
     parts.push(format!(
         "wallet {}",
-        format_estimated_credits(row.wallet_credits_micros)
+        format_estimated_credits(row.wallet_credits.as_deref(), row.wallet_credits_micros)
     ));
     parts.join(" · ")
 }
@@ -452,6 +556,9 @@ fn print_topup(response: &TopUpResponse, output: OutputFormat) -> Result<()> {
 #[derive(Debug, Clone, Serialize)]
 struct TopUpVerificationResponse {
     topup: TopUpResponse,
+    starting_balance: String,
+    final_balance: String,
+    expected_balance: String,
     starting_balance_credits: i64,
     final_balance_credits: i64,
     expected_balance_credits: i64,
@@ -470,18 +577,9 @@ fn print_topup_verification(
             eprintln!("Billing Top-up Verification");
             eprintln!();
             eprintln!("Verified:          {}", response.verified);
-            eprintln!(
-                "Start Balance:     {} credits",
-                response.starting_balance_credits
-            );
-            eprintln!(
-                "Final Balance:     {} credits",
-                response.final_balance_credits
-            );
-            eprintln!(
-                "Expected Balance:  {} credits",
-                response.expected_balance_credits
-            );
+            eprintln!("Start Balance:     {} credits", response.starting_balance);
+            eprintln!("Final Balance:     {} credits", response.final_balance);
+            eprintln!("Expected Balance:  {} credits", response.expected_balance);
             eprintln!("Checkout URL:      {}", response.topup.checkout_url);
             if let Some(provider) = &response.topup.payment_provider {
                 eprintln!("Payment Provider:  {provider}");
@@ -497,11 +595,73 @@ fn print_topup_verification(
     Ok(())
 }
 
-fn format_estimated_credits(value: Option<i64>) -> String {
+fn format_estimated_credits(exact: Option<&str>, value: Option<i64>) -> String {
+    if let Some(exact) = exact {
+        return format!("{exact} credits");
+    }
     match value {
-        Some(micros) => format!("{:.6} credits", micros as f64 / 1_000_000.0),
+        Some(micros) => format!(
+            "{}{}.{:06} credits",
+            if micros < 0 { "-" } else { "" },
+            micros.unsigned_abs() / 1_000_000,
+            micros.unsigned_abs() % 1_000_000
+        ),
         None => "-".to_string(),
     }
+}
+
+fn nonzero_amount(exact: Option<&str>, legacy: Option<i64>) -> bool {
+    exact.map_or_else(
+        || legacy.is_some_and(|n| n > 0),
+        |s| s.bytes().any(|b| matches!(b, b'1'..=b'9')),
+    )
+}
+
+/// Legacy output is only a bounded display projection of the exact result.
+fn legacy_balance_projection(value: &str) -> Result<i64> {
+    let whole = value.split_once('.').map_or(value, |(whole, _)| whole);
+    Ok(whole
+        .parse::<i128>()?
+        .clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64)
+}
+
+/// The verification command only adds a whole-credit checkout amount. Preserve
+/// the decimal fractional suffix exactly, including balances greater than 2^53.
+fn add_whole_amount(value: &str, amount: i64) -> Result<String> {
+    let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
+    let fraction = fraction.trim_end_matches('0');
+    if !fraction.bytes().all(|b| b.is_ascii_digit()) || fraction.len() > 12 {
+        bail!("invalid exact wallet amount");
+    }
+    let scale = 1_000_000_000_000_i128;
+    let integer = whole.parse::<i128>()?;
+    let fractional = if fraction.is_empty() {
+        0
+    } else {
+        fraction
+            .parse::<i128>()?
+            .checked_mul(10_i128.pow(12 - fraction.len() as u32))
+            .ok_or_else(|| anyhow::anyhow!("wallet amount overflow"))?
+    };
+    let signed_fraction = if value.starts_with('-') {
+        -fractional
+    } else {
+        fractional
+    };
+    let total = integer
+        .checked_mul(scale)
+        .and_then(|n| n.checked_add(signed_fraction))
+        .and_then(|n| n.checked_add(i128::from(amount) * scale))
+        .ok_or_else(|| anyhow::anyhow!("wallet amount overflow"))?;
+    let fraction = format!("{:012}", total.unsigned_abs() % scale as u128);
+    let fraction = fraction.trim_end_matches('0');
+    Ok(format!(
+        "{}{}{}{}",
+        if total < 0 { "-" } else { "" },
+        total.unsigned_abs() / scale as u128,
+        if fraction.is_empty() { "" } else { "." },
+        fraction
+    ))
 }
 
 #[cfg(test)]
@@ -511,6 +671,34 @@ mod tests {
     use crate::test_support::{mock_auth, mock_auth_with_output};
     use wiremock::matchers::{body_json, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn exact_output_preserves_sub_micro_and_large_balances() {
+        let mut payload = usage_json();
+        {
+            let item = &mut payload["rows"][0];
+            item["estimated_credits"] = serde_json::json!("0.0356864");
+            item["grant_credits"] = serde_json::json!("0.0356864");
+            item["wallet_credits"] = serde_json::json!("0");
+        }
+        payload["totals"]["estimated_credits"] = serde_json::json!("0.0356864");
+        payload["totals"]["grant_credits"] = serde_json::json!("0.0356864");
+        let output = format_usage(&payload, OutputFormat::Table).unwrap();
+        assert!(output.contains("0.0356864 credits"));
+        assert_eq!(
+            format_estimated_credits(Some("0.0000008"), Some(0)),
+            "0.0000008 credits"
+        );
+        assert_eq!(
+            add_whole_amount("999999999999999999.999999999999", 1).unwrap(),
+            "1000000000000000000.999999999999"
+        );
+        assert_eq!(
+            legacy_balance_projection("9223372036854775808.6").unwrap(),
+            i64::MAX
+        );
+        assert_eq!(legacy_balance_projection("-0.6").unwrap(), 0);
+    }
 
     #[test]
     fn usage_path_targets_billing_usage() {

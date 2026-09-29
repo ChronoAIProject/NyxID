@@ -10,10 +10,12 @@
 //
 // Sources:
 //   - OpenAI, Anthropic, Mistral AI, DeepSeek, X (Twitter), Google, GitHub,
-//     Facebook, Discord, Spotify, Slack, Microsoft, TikTok, Twitch, Reddit,
-//     Telegram, ElevenLabs, Twilio, AWS — path data hand-extracted from Simple
+//     Facebook, WhatsApp, Discord, Spotify, Slack, Microsoft, TikTok, Twitch,
+//     Reddit, Telegram, ElevenLabs, Twilio, AWS — path data hand-extracted from Simple
 //     Icons (https://simpleicons.org, CC0 1.0). No runtime dependency on the
 //     `simple-icons` npm package.
+//   - xAI — supplied polygon mark, tightened to its painted bounds for the
+//     monochrome catalog grid.
 //   - Cohere, Lark, Feishu, OpenClaw — hand-built glyphs (these brands have no
 //     Simple Icons entry and ship no publicly-extractable brand mark).
 //   - OpenRouter — official mark from openrouter.ai's own logo markup.
@@ -35,6 +37,28 @@ export function OpenAiGlyph(props: GlyphProps) {
   return (
     <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" {...props}>
       <path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z" />
+    </svg>
+  );
+}
+
+/**
+ * xAI mark. The compact X silhouette stays legible in the monochrome catalog
+ * grid while remaining distinct from the social X glyph used by Twitter.
+ */
+export function XaiGlyph(props: GlyphProps) {
+  return (
+    <svg
+      viewBox="185 40 472 515"
+      fill="currentColor"
+      aria-hidden="true"
+      {...props}
+    >
+      <g>
+        <polygon points="557.09,211.99 565.4,538.36 631.96,538.36 640.28,93.18" />
+        <polygon points="640.28,56.91 538.72,56.91 379.35,284.53 430.13,357.05" />
+        <polygon points="201.61,538.36 303.17,538.36 353.96,465.84 303.17,393.31" />
+        <polygon points="201.61,211.99 430.13,538.36 531.69,538.36 303.17,211.99" />
+      </g>
     </svg>
   );
 }
@@ -189,6 +213,18 @@ export function FacebookGlyph(props: GlyphProps) {
   return (
     <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" {...props}>
       <path d="M9.101 23.691v-7.98H6.627v-3.667h2.474v-1.58c0-4.085 1.848-5.978 5.858-5.978.401 0 .955.042 1.468.103a8.68 8.68 0 0 1 1.141.195v3.325a8.623 8.623 0 0 0-.653-.036 26.805 26.805 0 0 0-.733-.009c-.707 0-1.259.096-1.675.309a1.686 1.686 0 0 0-.679.622c-.258.42-.374.995-.374 1.752v1.297h3.919l-.386 2.103-.287 1.564h-3.246v8.245C19.396 23.238 24 18.179 24 12.044c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.628 3.874 10.35 9.101 11.647Z" />
+    </svg>
+  );
+}
+
+/**
+ * WhatsApp mark (Simple Icons: whatsapp), flattened to currentColor for the
+ * catalog's monochrome treatment.
+ */
+export function WhatsappGlyph(props: GlyphProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" {...props}>
+      <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.372-.025-.521-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.372-.01-.57-.01-.198 0-.52.075-.792.372-.272.298-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.626.712.226 1.36.194 1.872.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.29.173-1.413-.074-.124-.272-.198-.57-.347zm-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.999-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.886 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.158 11.89c0 2.096.547 4.142 1.588 5.945L.057 24l6.298-1.654a11.882 11.882 0 005.684 1.448h.005c6.554 0 11.89-5.335 11.893-11.89 0-3.177-1.239-6.161-3.486-8.416z" />
     </svg>
   );
 }
@@ -399,13 +435,10 @@ export function OpenClawGlyph(props: GlyphProps) {
 
 /**
  * Shared wrapper for composite icons (vendor brand + function badge). The
- * badge sits at the bottom-right with its own `bg-muted` backdrop + a
- * `ring-2 ring-background` outline so it reads as a sticker peeking out of
- * the brand corner rather than blending into the brand silhouette. Both
- * children inherit `currentColor` from the parent tile (typically
- * `text-muted-foreground`), so the badge and brand glyph render in the same
- * color — visual separation comes from the backdrop + ring, not a second
- * accent color.
+ * badge sits at the bottom-right with its own contrasting backdrop and edge
+ * so it reads as a sticker peeking out of the brand corner rather than
+ * blending into the brand silhouette. The badge uses `text-foreground`
+ * against `bg-card` so small overlays remain readable in both themes.
  *
  * Sizing: the wrapper's box comes entirely from the caller's `className`
  * (e.g. `h-4 w-4`, `h-5 w-5`), defaulting to `h-5 w-5`. The brand glyph and
@@ -431,36 +464,23 @@ export function CompositeBadgeWrapper({
       }`}
     >
       {children}
-      <span
-        aria-hidden="true"
-        className="absolute -bottom-[30%] -right-[30%] inline-flex h-[70%] w-[70%] items-center justify-center rounded-md bg-muted ring-2 ring-background [&>svg]:!h-full [&>svg]:!w-full"
-      >
-        {badge}
-      </span>
+      <IconBadge badge={badge} />
     </span>
   );
 }
 
-export function FlatBadgeWrapper({
-  children,
+/** Shared square overlay badge used by composite marks and wide logos. */
+export function IconBadge({
   badge,
-  className,
 }: {
-  readonly children: ReactNode;
   readonly badge: ReactNode;
-  readonly className?: string;
 }) {
   return (
     <span
-      className={`relative inline-flex shrink-0 items-center justify-center [&>svg]:!h-full [&>svg]:!w-full ${className ?? "h-5 w-5"}`}
+      aria-hidden="true"
+      className="absolute -bottom-[30%] -right-[30%] inline-flex h-[70%] w-[70%] items-center justify-center rounded-md border border-border bg-card text-foreground ring-2 ring-background [&>svg]:!h-full [&>svg]:!w-full"
     >
-      {children}
-      <span
-        aria-hidden="true"
-        className="absolute bottom-[2%] right-[3%] inline-flex h-[clamp(8px,30%,16px)] w-[clamp(8px,30%,16px)] items-center justify-center rounded-[2px] bg-muted p-px [&>svg]:!h-full [&>svg]:!w-full"
-      >
-        {badge}
-      </span>
+      {badge}
     </span>
   );
 }

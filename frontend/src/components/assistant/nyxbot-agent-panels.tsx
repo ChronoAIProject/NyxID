@@ -2,12 +2,19 @@ import { useState } from "react";
 import { ChevronRight, PanelRightOpen, Users } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { AGENT_KIND_LABEL, AGENT_STATUS_LABEL } from "@/lib/assistant/nyxbot-labels";
-import { cn } from "@/lib/utils";
+import { AgentAvatar } from "@/components/assistant/nyxbot-agent-avatar";
+import {
+  AGENT_KIND_LABEL,
+  AGENT_STATUS_LABEL,
+  agentTitle,
+  channelPlatformName,
+} from "@/lib/assistant/nyxbot-labels";
+import { cn, formatTimeDistance } from "@/lib/utils";
 import type {
   AssistantAgent,
   AssistantAgentKind,
   AssistantAgentStatus,
+  NyxAgentWaiting,
 } from "@/schemas/assistant-nyxagent";
 
 /** Running = working now; idle = alive, waiting; destroyed = read-only. */
@@ -39,26 +46,44 @@ export function AgentKindBadge({ kind }: { readonly kind: AssistantAgentKind }) 
   );
 }
 
+/** A thread that came from a chat app (Telegram, ...). */
+export function ChannelBadge({ platform }: { readonly platform: string }) {
+  return <Badge variant="secondary">via {channelPlatformName(platform)}</Badge>;
+}
+
 /**
  * Which agent this thread talks to. Threads of a destroyed specialist are
  * read-only; the banner says so and the page disables the composer.
  */
 export function ThreadHeader({
   name,
+  handle,
   kind,
+  agentId,
   destroyed,
+  channelPlatform,
   onOpenDetails,
 }: {
+  /** The agent's display name (or handle). */
   readonly name: string;
+  /** "@handle", shown when a display name hides it. */
+  readonly handle?: string;
   readonly kind: AssistantAgentKind;
+  /** Picks the specialist's avatar tint. */
+  readonly agentId?: string;
   readonly destroyed: boolean;
+  /** Set when the thread answers one of the user's channel bots. */
+  readonly channelPlatform?: string | null;
   readonly onOpenDetails?: () => void;
 }) {
   return (
     <div className="space-y-2">
       <div className="flex items-center gap-2">
+        <AgentAvatar agent={{ id: agentId ?? name, name, kind }} size="md" />
         <h2 className="min-w-0 truncate text-[13px] font-semibold text-foreground">{name}</h2>
+        {handle ? <span className="shrink-0 text-[11px] text-text-tertiary">{handle}</span> : null}
         <AgentKindBadge kind={kind} />
+        {channelPlatform ? <ChannelBadge platform={channelPlatform} /> : null}
         {onOpenDetails ? (
           <Button
             size="sm"
@@ -141,11 +166,11 @@ export function TeamStrip({
                     onClick={() => onOpenConversation(agent.home_conversation_id!)}
                     className="min-w-0 truncate text-[12px] font-medium text-foreground hover:underline"
                   >
-                    {agent.name}
+                    {agentTitle(agent)}
                   </button>
                 ) : (
                   <span className="min-w-0 truncate text-[12px] font-medium text-foreground">
-                    {agent.name}
+                    {agentTitle(agent)}
                   </span>
                 )}
                 <span className="text-[11px] text-text-tertiary">
@@ -168,7 +193,7 @@ export function TeamStrip({
                   <Button
                     size="sm"
                     variant="outline"
-                    aria-label={`Review ${agent.name}'s request: ${request.summary}`}
+                    aria-label={`Review ${agentTitle(agent)}'s request: ${request.summary}`}
                     onClick={() => onOpenConversation(request.conversation_id)}
                   >
                     Review
@@ -180,6 +205,49 @@ export function TeamStrip({
         </ul>
       ) : null}
     </section>
+  );
+}
+
+/**
+ * What the thread is waiting for outside the chat (a bot being created, a
+ * service being connected, the owner verifying a chat app). The agent
+ * continues by itself when it happens, so the user never has to say "done".
+ */
+export function WaitingNote({
+  items,
+  agentName,
+}: {
+  readonly items: readonly NyxAgentWaiting[];
+  readonly agentName: string;
+}) {
+  if (!items.length) return null;
+  return (
+    <div
+      role="status"
+      aria-label="Waiting"
+      className="space-y-1 rounded-lg border border-border px-3 py-2"
+    >
+      {items.map((item) => (
+        <p
+          key={`${item.kind}:${item.since}:${item.title}`}
+          className="flex items-center gap-2 text-[12px] text-foreground"
+        >
+          <span
+            aria-hidden="true"
+            className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-success"
+          />
+          <span className="min-w-0 truncate">{item.title}</span>
+          {item.expires_at ? (
+            <span className="ml-auto shrink-0 text-[11px] text-text-tertiary">
+              expires {formatTimeDistance(item.expires_at)}
+            </span>
+          ) : null}
+        </p>
+      ))}
+      <p className="text-[11px] text-text-tertiary">
+        {agentName} continues here by itself when this happens; no need to reply.
+      </p>
+    </div>
   );
 }
 

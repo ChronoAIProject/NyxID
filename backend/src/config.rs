@@ -337,6 +337,8 @@ pub struct AppConfig {
     /// hash chaining. Same derivation fallback as the audit chain, with a
     /// distinct `billing-ledger` domain label.
     pub billing_ledger_hmac_key: Option<String>,
+    /// One-time operator acknowledgement that pre-v2 billing writers drained.
+    pub billing_exact_cutover_drained: bool,
 
     /// Interval for the automatic hash-chain verification sweep (audit log
     /// and billing ledger, rolling chunks). 0 disables. Default: 3600.
@@ -1164,6 +1166,7 @@ impl AppConfig {
             billing_ledger_hmac_key: env::var("BILLING_LEDGER_HMAC_KEY")
                 .ok()
                 .filter(|s| !s.trim().is_empty()),
+            billing_exact_cutover_drained: env::var("BILLING_EXACT_CUTOVER_DRAINED").is_ok_and(|v| v == "true"),
             chain_verify_interval_secs: env::var("CHAIN_VERIFY_INTERVAL_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -1932,6 +1935,7 @@ mod tests {
             cli_pairing_hmac_key: None,
             audit_chain_hmac_key: None,
             billing_ledger_hmac_key: None,
+            billing_exact_cutover_drained: false,
             chain_verify_interval_secs: 3600,
             sa_token_ttl_secs: 3600,
             telemetry_dsn: None,

@@ -118,18 +118,29 @@ export const nyxAgentApprovalSchema = z.object({
 });
 export type NyxAgentApproval = z.infer<typeof nyxAgentApprovalSchema>;
 
+/// Something outside the chat the thread is waiting for (a bot being
+/// created, a service being connected, the owner verifying a chat app).
+/// NyxID resumes the thread by itself when it happens.
+export const nyxAgentWaitingSchema = z.object({
+  kind: z.string(),
+  title: z.string(),
+  since: z.string(),
+  expires_at: z.string().nullable().default(null),
+});
+export type NyxAgentWaiting = z.infer<typeof nyxAgentWaitingSchema>;
+
 export const nyxAgentHistorySchema = z.object({
   conversation: nyxAgentConversationSchema,
   messages: z.array(nyxAgentMessageSchema),
   acknowledgements: z.array(nyxAgentAcknowledgementSchema).default([]),
   approvals: z.array(nyxAgentApprovalSchema).default([]),
+  waiting: z.array(nyxAgentWaitingSchema).default([]),
   before_seq: z.number().int().positive().nullable(),
 });
 export const nyxAgentIndexSchema = z.object({
   conversations: z.array(nyxAgentConversationSchema),
   next_cursor: z.string().nullable(),
 });
-export const nyxAgentModelsSchema = z.array(z.object({ id: z.string(), label: z.string() }));
 const block = z.object({ type: z.literal("text"), block_id: z.string(), text: z.string() });
 const base = z.object({ cursor: z.number().int().positive() });
 export const nyxAgentEventSchema = z.discriminatedUnion("event", [
@@ -175,12 +186,22 @@ export const nyxAgentSettingsSchema = z.object({
   max_concurrent_subagent_turns: z.number().int().nonnegative(),
   max_live_subagents_limit: z.number().int().nonnegative(),
   max_concurrent_subagent_turns_limit: z.number().int().positive(),
+  /** Agent-to-agent hand-offs in a group per message you send (0 turns them off). */
+  max_group_handoffs: z.number().int().nonnegative().default(6),
+  /** Hand-offs per hour across all your groups. */
+  max_group_handoffs_per_hour: z.number().int().nonnegative().default(60),
+  max_group_handoffs_limit: z.number().int().nonnegative().default(24),
+  max_group_handoffs_per_hour_limit: z.number().int().nonnegative().default(600),
 });
 export type NyxAgentSettings = z.infer<typeof nyxAgentSettingsSchema>;
 export type NyxAgentSettingsUpdate = Partial<
   Pick<
     NyxAgentSettings,
-    "skip_destructive_confirmation" | "max_live_subagents" | "max_concurrent_subagent_turns"
+    | "skip_destructive_confirmation"
+    | "max_live_subagents"
+    | "max_concurrent_subagent_turns"
+    | "max_group_handoffs"
+    | "max_group_handoffs_per_hour"
   >
 >;
 
@@ -188,6 +209,8 @@ export type NyxAgentSettingsUpdate = Partial<
 export function nyxAgentSettingsFormSchema(limits: {
   readonly max_live_subagents_limit: number;
   readonly max_concurrent_subagent_turns_limit: number;
+  readonly max_group_handoffs_limit: number;
+  readonly max_group_handoffs_per_hour_limit: number;
 }) {
   const whole = (min: number, max: number) =>
     z
@@ -199,6 +222,8 @@ export function nyxAgentSettingsFormSchema(limits: {
     confirm_destructive: z.boolean(),
     max_live_subagents: whole(0, limits.max_live_subagents_limit),
     max_concurrent_subagent_turns: whole(1, limits.max_concurrent_subagent_turns_limit),
+    max_group_handoffs: whole(0, limits.max_group_handoffs_limit),
+    max_group_handoffs_per_hour: whole(0, limits.max_group_handoffs_per_hour_limit),
   });
 }
 export type NyxAgentSettingsForm = z.infer<ReturnType<typeof nyxAgentSettingsFormSchema>>;
@@ -219,10 +244,18 @@ export const assistantAgentRequestSchema = z.object({
 });
 export type AssistantAgentRequest = z.infer<typeof assistantAgentRequestSchema>;
 
+export const ASSISTANT_AGENT_DISPLAY_NAME_MAX = 40;
+export const ASSISTANT_AGENT_PERSONA_MAX = 2000;
+
 export const assistantAgentSchema = z.object({
   id: z.string(),
   kind: assistantAgentKindSchema,
+  /** The @handle (fixed "NyxBot" for NyxBot). */
   name: z.string(),
+  /** A friendly name the user chose ("Luna"); shown instead of the handle. */
+  display_name: z.string().nullable().default(null),
+  /** Personality and tone the user asked for; style only, never authority. */
+  persona: z.string().nullable().default(null),
   description: z.string().default(""),
   specialty: z.string().nullable().default(null),
   created_by: z.enum(["user", "nyxbot"]).catch("user"),
@@ -310,11 +343,29 @@ const agentDescription = z
   .trim()
   .min(1, "Describe what this agent does")
   .max(2048, "Keep the description under 2048 characters");
+/** Empty clears it. */
+const agentDisplayName = z
+  .string()
+  .trim()
+  .max(
+    ASSISTANT_AGENT_DISPLAY_NAME_MAX,
+    `Keep the display name under ${String(ASSISTANT_AGENT_DISPLAY_NAME_MAX)} characters`,
+  );
+/** Empty clears it. */
+const agentPersona = z
+  .string()
+  .trim()
+  .max(
+    ASSISTANT_AGENT_PERSONA_MAX,
+    `Keep the persona under ${String(ASSISTANT_AGENT_PERSONA_MAX)} characters`,
+  );
 
-/** "New agent": a specialist with its role and starting grants. */
+/** "New agent": a specialist with its role, optional style and starting grants. */
 export const assistantAgentCreateSchema = z.object({
   name: agentName,
+  display_name: agentDisplayName.optional(),
   description: agentDescription,
+  persona: agentPersona.optional(),
   services: z.array(z.string()),
   account_read: z.boolean(),
 });
@@ -325,11 +376,23 @@ export function assistantAgentProfileSchema(kind: AssistantAgentKind) {
   return kind === "nyxbot"
     ? z.object({
         name: z.string(),
+        display_name: agentDisplayName,
         description: z.string().trim().max(2048, "Keep the notes under 2048 characters"),
+        persona: agentPersona,
       })
-    : z.object({ name: agentName, description: agentDescription });
+    : z.object({
+        name: agentName,
+        display_name: agentDisplayName,
+        description: agentDescription,
+        persona: agentPersona,
+      });
 }
-export type AssistantAgentProfile = { name: string; description: string };
+export type AssistantAgentProfile = {
+  name: string;
+  display_name: string;
+  description: string;
+  persona: string;
+};
 
 export const assistantAgentGrantsSchema = z.object({
   services: z.array(z.string()),
@@ -353,6 +416,12 @@ export const nyxAgentChannelAgentSchema = z.object({
   owner_linked: z.boolean(),
   /** The agent this bot reaches; null means the owner's NyxBot. */
   agent_id: z.string().nullable().default(null),
+  /** `ok` or `failing` once a message has been judged; null before. */
+  delivery_status: z.string().nullable().default(null),
+  delivery_error: z.string().nullable().default(null),
+  /** Plain words for `delivery_error`. */
+  delivery_reason: z.string().nullable().default(null),
+  delivery_failed_at: z.string().nullable().default(null),
   created_at: z.string(),
 });
 export type NyxAgentChannelAgent = z.infer<typeof nyxAgentChannelAgentSchema>;
@@ -382,3 +451,89 @@ export const nyxAgentChannelLinkedSchema = z.object({
   agent: z.string(),
   changed: z.boolean(),
 });
+
+/// Group chats: the owner plus 1..8 of their agents.
+export const ASSISTANT_GROUP_MAX_MEMBERS = 8;
+export const ASSISTANT_GROUP_NAME_MAX = 60;
+
+export const assistantGroupMemberSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  kind: assistantAgentKindSchema,
+  destroyed: z.boolean().default(false),
+  working: z.boolean().default(false),
+});
+export type AssistantGroupMember = z.infer<typeof assistantGroupMemberSchema>;
+
+export const assistantGroupSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  members: z.array(assistantGroupMemberSchema),
+  /** Answers user messages that mention no one: NyxBot when it is a member. */
+  lead_agent_id: z.string(),
+  working_agent_ids: z.array(z.string()).default([]),
+  message_count: z.number().int().nonnegative().default(0),
+  last_message_at: z.string().nullable().default(null),
+  created_at: z.string(),
+});
+export type AssistantGroup = z.infer<typeof assistantGroupSchema>;
+
+export const assistantGroupListSchema = z.object({ groups: z.array(assistantGroupSchema) });
+
+export const assistantGroupMessageSchema = z.object({
+  id: z.string(),
+  seq: z.number().int().positive(),
+  /** `notice` is a NyxID-authored system line (members joined, renamed, ...). */
+  role: z.enum(["user", "agent", "notice"]),
+  /** The speaking agent, set on `agent` messages. */
+  agent: z
+    .object({ id: z.string(), name: z.string(), kind: assistantAgentKindSchema })
+    .nullable()
+    .default(null),
+  text: z.string(),
+  created_at: z.string(),
+});
+export type AssistantGroupMessage = z.infer<typeof assistantGroupMessageSchema>;
+
+/** A member's action card waiting for the owner; answered by posting its phrase. */
+export const assistantGroupPendingActionSchema = z.object({
+  conversation_id: z.string(),
+  acknowledgement_id: z.string(),
+  agent_id: z.string().nullable().optional(),
+  summary: z.string(),
+  /** "yes 1234": posting it confirms; "no 1234" cancels. */
+  confirm_phrase: z.string().regex(/^yes \d{4}$/),
+  expires_at: z.string(),
+});
+export type AssistantGroupPendingAction = z.infer<typeof assistantGroupPendingActionSchema>;
+
+export const assistantGroupMessagesSchema = z.object({
+  group: assistantGroupSchema,
+  pending_actions: z.array(assistantGroupPendingActionSchema).default([]),
+  /** Ascending by `seq`. */
+  messages: z.array(assistantGroupMessageSchema),
+  /** Pass as `before_seq` to read the next older page; null at the start. */
+  before_seq: z.number().int().positive().nullable().default(null),
+});
+export type AssistantGroupMessages = z.infer<typeof assistantGroupMessagesSchema>;
+
+export const assistantGroupPostedSchema = z.object({
+  message: assistantGroupMessageSchema,
+  addressed_agent_ids: z.array(z.string()).default([]),
+});
+export type AssistantGroupPosted = z.infer<typeof assistantGroupPostedSchema>;
+
+/** "New group" and group settings: a name and its agents. */
+export const assistantGroupFormSchema = z.object({
+  name: z
+    .string()
+    .trim()
+    .min(1, "Name the group")
+    .max(ASSISTANT_GROUP_NAME_MAX, `Keep the name under ${String(ASSISTANT_GROUP_NAME_MAX)} characters`),
+  member_agent_ids: z
+    .array(z.string())
+    .min(1, "Pick at least one agent")
+    .max(ASSISTANT_GROUP_MAX_MEMBERS, `A group has at most ${String(ASSISTANT_GROUP_MAX_MEMBERS)} agents`),
+});
+export type AssistantGroupForm = z.infer<typeof assistantGroupFormSchema>;
+export type AssistantGroupUpdate = Partial<AssistantGroupForm>;

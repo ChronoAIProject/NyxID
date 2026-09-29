@@ -87,6 +87,7 @@ pub struct AgentRefResponse {
     pub id: String,
     pub kind: crate::models::assistant_agent::AgentKind,
     pub name: String,
+    pub display_name: Option<String>,
     /// Destroyed agents' threads are read-only.
     pub destroyed: bool,
 }
@@ -130,6 +131,7 @@ impl ConversationResponse {
             id: agent.id.clone(),
             kind: agent.kind,
             name: agent.name.clone(),
+            display_name: agent.display_name.clone(),
             destroyed: agent.destroyed_at.is_some(),
         });
         self
@@ -294,6 +296,10 @@ pub struct HistoryResponse {
     /// Pending proxy approvals raised by this chat's key; decided through
     /// `POST /approvals/requests/{id}/decide`.
     approvals: Vec<ChatApprovalResponse>,
+    /// Things outside the chat this thread is waiting for (a bot being
+    /// created, a service being connected, the owner verifying a chat app).
+    /// NyxID resumes the thread by itself when each happens.
+    waiting: Vec<super::nyxbot::WaitingItem>,
     before_seq: Option<i64>,
 }
 #[derive(Serialize)]
@@ -343,6 +349,13 @@ pub async fn history(
     let acknowledgements = acknowledgements::history(&state.db, &user_id, &id).await?;
     let approvals =
         engine::pending_approvals(&state.db, &user_id, &conversation.credential_api_key_id).await?;
+    // Best effort: the transcript never fails because of the waiting list.
+    let waiting = super::nyxbot::waiting(&state, &user_id, &conversation.id)
+        .await
+        .unwrap_or_else(|error| {
+            tracing::debug!(%error, "NyxBot waiting list unavailable");
+            Vec::new()
+        });
     let agents = crate::services::assistant_team_service::agents(&state.db, &user_id, true).await?;
     let agent_id = conversation.agent_id.clone();
     let mut conversation =
@@ -355,6 +368,7 @@ pub async fn history(
         conversation,
         acknowledgements: acknowledgements.into_iter().map(Into::into).collect(),
         approvals: approvals.into_iter().map(Into::into).collect(),
+        waiting,
         messages: rows.into_iter().map(Into::into).collect(),
         before_seq,
     }))

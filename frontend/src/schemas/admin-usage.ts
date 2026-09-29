@@ -1,3 +1,4 @@
+import { creditsSchema } from "./credits";
 import { z } from "zod";
 import { BILLING_METRICS } from "./billing-metrics";
 
@@ -12,9 +13,13 @@ export const usageStatsSchema = z.object({
   cached_tokens: count,
   cache_creation_tokens: count,
   total_tokens: count,
+  gross_cost: creditsSchema.nullable().optional(),
   gross_cost_micros: count.nullable(),
+  wallet_cost: creditsSchema.nullable().optional(),
   wallet_cost_micros: count.nullable(),
+  grant_cost: creditsSchema.nullable().optional(),
   grant_cost_micros: count.nullable(),
+  allowance_cost: creditsSchema.nullable().optional(),
   allowance_cost_micros: count.nullable(),
   exact_cost_events: count,
   legacy_cost_events: count,

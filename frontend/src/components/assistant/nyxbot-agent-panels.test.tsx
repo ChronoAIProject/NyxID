@@ -2,7 +2,7 @@ import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import type { AssistantAgent } from "@/schemas/assistant-nyxagent";
-import { PendingEventsNote, TeamStrip, ThreadHeader } from "./nyxbot-agent-panels";
+import { PendingEventsNote, TeamStrip, ThreadHeader, WaitingNote } from "./nyxbot-agent-panels";
 
 afterEach(cleanup);
 
@@ -15,6 +15,8 @@ function agent(fields: Partial<AssistantAgent>): AssistantAgent {
     kind: "nyxbot",
     name: "NyxBot",
     description: "",
+    display_name: null,
+    persona: null,
     specialty: null,
     created_by: "user",
     status: "idle",
@@ -111,4 +113,34 @@ it("notes queued updates only when there are some", () => {
   expect(view.container).toBeEmptyDOMElement();
   view.rerender(<PendingEventsNote count={2} agentName="NyxBot" />);
   expect(screen.getByRole("status")).toHaveTextContent("2 updates waiting for NyxBot's next turn");
+});
+
+it("shows what the thread is waiting for and that the agent continues by itself", () => {
+  const view = render(<WaitingNote items={[]} agentName="NyxBot" />);
+  expect(view.container).toBeEmptyDOMElement();
+  const soon = new Date(Date.now() + 30 * 60_000 + 5_000).toISOString();
+  view.rerender(
+    <WaitingNote
+      agentName="NyxBot"
+      items={[
+        {
+          kind: "channel_bot",
+          title: "Waiting for your Telegram bot to be created",
+          since: at,
+          expires_at: soon,
+        },
+        {
+          kind: "owner_verification",
+          title: "Waiting for you to verify your Telegram account with @helper_bot",
+          since: at,
+          expires_at: null,
+        },
+      ]}
+    />,
+  );
+  const note = screen.getByRole("status", { name: "Waiting" });
+  expect(note).toHaveTextContent("Waiting for your Telegram bot to be created");
+  expect(note).toHaveTextContent("expires in 30m");
+  expect(note).toHaveTextContent("verify your Telegram account with @helper_bot");
+  expect(note).toHaveTextContent("NyxBot continues here by itself when this happens");
 });

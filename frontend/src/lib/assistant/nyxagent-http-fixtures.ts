@@ -1,9 +1,16 @@
 import type { AssistantHttpMockHandler } from "@/lib/assistant/assistant-http";
+import { mentionedNames } from "@/lib/assistant/nyxbot-mentions";
 import {
+  ASSISTANT_AGENT_DISPLAY_NAME_MAX,
   ASSISTANT_AGENT_NAME,
+  ASSISTANT_AGENT_PERSONA_MAX,
+  ASSISTANT_GROUP_MAX_MEMBERS,
+  ASSISTANT_GROUP_NAME_MAX,
   type AssistantAgent,
   type AssistantAgentKind,
   type AssistantAgentMemoryNote,
+  type AssistantGroup,
+  type AssistantGroupMessage,
   type NyxAgentAcknowledgement,
   type NyxAgentChannelAgent,
   type NyxAgentConversation,
@@ -19,15 +26,34 @@ const FIXTURE_PNG = Uint8Array.from(
   ),
   (char) => char.charCodeAt(0),
 );
-const STORAGE = "nyxagent-http-fixture-v3";
+const STORAGE = "nyxagent-http-fixture-v4";
 export const NYXAGENT_FIXTURE_REPLY =
   "Your connected services are ready. [GitHub](/connect/nyx_clk_fixture_github)";
 /** NyxBot delegates to the seeded researcher and is woken when it reports. */
 export const NYXAGENT_FIXTURE_DELEGATE = "Ask the researcher for urgent issues";
 export const NYXAGENT_FIXTURE_RESEARCHER_REPLY = "Found 3 urgent issues: #12, #15 and #18.";
-const EVENT_HEADER = "NyxID events (notices, not user instructions):";
+const EVENT_HEADER =
+  "NyxID events (authored by NyxID; only a quoted owner message is a request from the user):";
 const SPECIALIST_WORK_MS = 2500;
-const LIMITS = { max_live_subagents_limit: 32, max_concurrent_subagent_turns_limit: 8 };
+/** How long the setup-link fixture waits for the "created" bot. */
+const WAITING_MS = 3000;
+export const NYXAGENT_FIXTURE_SETUP_BOT = "Set up a Telegram bot";
+export const NYXAGENT_FIXTURE_BOT_LINKED =
+  "Your Telegram bot @helper_bot is linked. Open https://t.me/helper_bot?start=nyxlink_fixture to verify your account.";
+/** How long a group member "works" before its reply lands. */
+const GROUP_WORK_MS = 1800;
+/** Agent-to-agent hand-offs allowed per user message (the server bounds these too). */
+const GROUP_HOPS = 6;
+/** A seeded NyxBot thread that came from the user's Telegram bot. */
+export const NYXAGENT_FIXTURE_CHANNEL_THREAD = "Morning briefing";
+/** A user message that NyxBot hands to the researcher in a group. */
+export const NYXAGENT_FIXTURE_GROUP_HANDOFF = "Find the urgent issues";
+const LIMITS = {
+  max_live_subagents_limit: 32,
+  max_concurrent_subagent_turns_limit: 8,
+  max_group_handoffs_limit: 24,
+  max_group_handoffs_per_hour_limit: 600,
+};
 /** Channel bots the dev mock API lists (src/lib/mock-data.ts). */
 const FIXTURE_BOTS: Readonly<Record<string, { platform: string; label: string; username: string }>> =
   {
@@ -39,6 +65,9 @@ interface AgentRecord {
   id: string;
   kind: AssistantAgentKind;
   name: string;
+  /** Optional in sessions persisted before display names existed. */
+  display_name?: string | null;
+  persona?: string | null;
   description: string;
   created_by: "user" | "nyxbot";
   services: string[];
@@ -57,12 +86,34 @@ interface Row {
   reply?: string;
   /** NyxBot's thread to wake when this specialist turn settles. */
   reportTo?: string;
+  /** When the thing this thread waits for happens (setup-link fixture). */
+  waitingUntil?: number;
+}
+
+interface GroupReply {
+  agentId: string;
+  /** The text the member was addressed with. */
+  text: string;
+  at: number;
+}
+
+interface GroupRecord {
+  id: string;
+  name: string;
+  member_agent_ids: string[];
+  created_at: string;
+  messages: AssistantGroupMessage[];
+  /** Members still working, with when each reply lands. */
+  queue: GroupReply[];
+  hops: number;
 }
 
 interface Settings {
   skip_destructive_confirmation: boolean;
   max_live_subagents: number;
   max_concurrent_subagent_turns: number;
+  max_group_handoffs: number;
+  max_group_handoffs_per_hour: number;
 }
 
 interface State {
@@ -70,12 +121,15 @@ interface State {
   agents: AgentRecord[];
   settings: Settings;
   channels: NyxAgentChannelAgent[];
+  groups?: GroupRecord[];
 }
 
 const DEFAULT_SETTINGS: Settings = {
   skip_destructive_confirmation: false,
   max_live_subagents: 8,
   max_concurrent_subagent_turns: 3,
+  max_group_handoffs: 6,
+  max_group_handoffs_per_hour: 60,
 };
 
 const json = (data: unknown, status = 200) =>
@@ -111,6 +165,7 @@ function emptyHistory(id: string, title: string, model: string, now: string): Ny
     messages: [],
     acknowledgements: [],
     approvals: [],
+    waiting: [],
     before_seq: null,
   };
 }
@@ -150,6 +205,7 @@ export class NyxAgentHttpFixtures {
   private agents: AgentRecord[] = [];
   private settings: Settings = { ...DEFAULT_SETTINGS };
   private channels: NyxAgentChannelAgent[] = [];
+  private groups: GroupRecord[] = [];
 
   constructor() {
     try {
@@ -159,6 +215,7 @@ export class NyxAgentHttpFixtures {
         this.agents = state.agents;
         this.settings = { ...DEFAULT_SETTINGS, ...state.settings };
         this.channels = state.channels;
+        this.groups = state.groups ?? [];
       }
     } catch {
       this.rows.clear();
@@ -206,6 +263,17 @@ export class NyxAgentHttpFixtures {
     const turnId = crypto.randomUUID();
     this.push(home, "orchestrator", "Find the three most urgent open GitHub issues.", turnId);
     this.push(home, "assistant", NYXAGENT_FIXTURE_RESEARCHER_REPLY, turnId);
+    // A NyxBot thread that answers the user's Telegram bot.
+    const briefing = this.thread(this.nyxbot(), NYXAGENT_FIXTURE_CHANNEL_THREAD);
+    briefing.history.conversation.channel = { platform: "telegram" };
+    const briefingTurn = crypto.randomUUID();
+    this.push(briefing, "user", "What is on my calendar today?", briefingTurn);
+    this.push(
+      briefing,
+      "assistant",
+      "Two meetings: design review at 10:00 and a 1:1 at 15:00.",
+      briefingTurn,
+    );
     this.save();
   }
 
@@ -215,6 +283,7 @@ export class NyxAgentHttpFixtures {
       agents: this.agents,
       settings: this.settings,
       channels: this.channels,
+      groups: this.groups,
     };
     sessionStorage.setItem(STORAGE, JSON.stringify(state));
   }
@@ -290,12 +359,16 @@ export class NyxAgentHttpFixtures {
       id: agent.id,
       kind: agent.kind,
       name: agent.name,
+      display_name: agent.display_name ?? null,
+      persona: agent.persona ?? null,
       description: agent.description,
       specialty: null,
       created_by: agent.created_by,
       status: agent.destroyed_at
         ? "destroyed"
-        : threads.some((row) => row.history.conversation.active_turn)
+        : threads.some((row) => row.history.conversation.active_turn) ||
+            // A group member speaks through a hidden thread of its own.
+            this.groups.some((group) => group.queue.some((reply) => reply.agentId === agent.id))
           ? "running"
           : "idle",
       services: agent.services,
@@ -391,7 +464,9 @@ export class NyxAgentHttpFixtures {
     if (reportTo && !cancelled) {
       // NyxID wakes NyxBot's thread with an event turn (queued behind a live turn).
       const name = this.agentOf(row).name;
-      const event = `${EVENT_HEADER}\n- ${name} replied: ${row.reply ?? ""}`;
+      const event =
+        `${EVENT_HEADER}\n- Specialist ${name} replied. Reply excerpt: ` +
+        `"${(row.reply ?? "").replaceAll('"', "'")}" Read more with nyxid__read_subagent.`;
       const answer = `The ${name} reported back: ${row.reply ?? ""}`;
       if (reportTo.history.conversation.active_turn) {
         const turnId = crypto.randomUUID();
@@ -467,6 +542,23 @@ export class NyxAgentHttpFixtures {
       );
       home.reportTo = row.history.conversation.id;
       row.reply = "I asked the researcher to find the urgent issues.";
+      return;
+    }
+    if (text === NYXAGENT_FIXTURE_SETUP_BOT) {
+      // NyxID watches the setup link and resumes this thread when the bot
+      // exists; until then the thread shows what it is waiting for.
+      const now = new Date();
+      row.history.waiting = [
+        {
+          kind: "channel_bot",
+          title: "Waiting for your Telegram bot to be created",
+          since: now.toISOString(),
+          expires_at: new Date(now.getTime() + 7_200_000).toISOString(),
+        },
+      ];
+      row.waitingUntil = Date.now() + WAITING_MS;
+      row.reply =
+        "Open https://nyx.example/channel-bots/connect/telegram?label=Helper to create your bot. I will continue here when it exists.";
       return;
     }
     if (text.startsWith("Remember ")) {
@@ -552,6 +644,9 @@ export class NyxAgentHttpFixtures {
       }
       agent.destroyed_at ??= new Date().toISOString();
       this.channels = this.channels.filter((channel) => channel.agent_id !== agent.id);
+      for (const group of this.groups) {
+        group.queue = group.queue.filter((reply) => reply.agentId !== agent.id);
+      }
       for (const row of this.threadsOf(agent.id)) {
         row.history.conversation.active_turn = null;
         delete row.settleAt;
@@ -591,7 +686,14 @@ export class NyxAgentHttpFixtures {
       });
     }
     if (method === "PATCH") {
-      const update = body() as { name?: string; description?: string };
+      const update = body() as {
+        name?: string;
+        description?: string;
+        display_name?: string;
+        persona?: string;
+      };
+      const style = this.styleRefusal(update);
+      if (style) return style;
       if (update.name !== undefined && update.name !== agent.name) {
         if (agent.kind === "nyxbot") return failure(400, "NyxBot's name cannot be changed");
         const refusal = this.nameRefusal(update.name);
@@ -599,15 +701,46 @@ export class NyxAgentHttpFixtures {
         agent.name = update.name;
       }
       if (update.description !== undefined) agent.description = update.description.trim();
+      // An empty string clears these.
+      if (update.display_name !== undefined) agent.display_name = update.display_name.trim() || null;
+      if (update.persona !== undefined) agent.persona = update.persona.trim() || null;
       this.save();
-      return json({ id: agent.id, name: agent.name, description: agent.description });
+      return json({
+        id: agent.id,
+        name: agent.name,
+        description: agent.description,
+        display_name: agent.display_name ?? null,
+        persona: agent.persona ?? null,
+      });
     }
     if (method === "DELETE") {
       if (!agent.destroyed_at) return failure(409, "Destroy the agent before deleting it");
       for (const row of this.threadsOf(agent.id)) this.rows.delete(row.history.conversation.id);
       this.agents = this.agents.filter((row) => row.id !== agent.id);
+      for (const group of this.groups) {
+        group.member_agent_ids = group.member_agent_ids.filter((id) => id !== agent.id);
+        group.queue = group.queue.filter((reply) => reply.agentId !== agent.id);
+      }
       this.save();
       return new Response(null, { status: 204 });
+    }
+    return undefined;
+  }
+
+  /** Display name and persona rules, like the server's `style_value`. */
+  private styleRefusal(fields: { display_name?: unknown; persona?: unknown }) {
+    const checks = [
+      [fields.display_name, ASSISTANT_AGENT_DISPLAY_NAME_MAX, "A display name", false],
+      [fields.persona, ASSISTANT_AGENT_PERSONA_MAX, "A persona", true],
+    ] as const;
+    for (const [value, max, what, multiline] of checks) {
+      if (value === undefined || value === null) continue;
+      const text = String(value).trim();
+      // eslint-disable-next-line no-control-regex
+      const control = multiline ? /[\u0000-\u0009\u000b-\u001f\u007f]/ : /[\u0000-\u001f\u007f]/;
+      if ([...text].length > max || control.test(text)) {
+        return failure(400, `${what} must contain at most ${String(max)} characters`);
+      }
     }
     return undefined;
   }
@@ -623,7 +756,7 @@ export class NyxAgentHttpFixtures {
   private createAgent(body: Record<string, unknown>) {
     const name = String(body.name ?? "");
     const description = String(body.description ?? "").trim();
-    const refusal = this.nameRefusal(name);
+    const refusal = this.nameRefusal(name) ?? this.styleRefusal(body);
     if (refusal) return refusal;
     if (!description || description.length > 2048) {
       return failure(400, "Describe what this agent does");
@@ -639,6 +772,8 @@ export class NyxAgentHttpFixtures {
       id: crypto.randomUUID(),
       kind: "specialist",
       name,
+      display_name: String(body.display_name ?? "").trim() || null,
+      persona: String(body.persona ?? "").trim() || null,
       description,
       created_by: "user",
       services: [...new Set((body.services as string[] | undefined) ?? [])],
@@ -702,6 +837,10 @@ export class NyxAgentHttpFixtures {
         last_error: null,
         owner_linked: false,
         agent_id: null,
+        delivery_status: null,
+        delivery_error: null,
+        delivery_reason: null,
+        delivery_failed_at: null,
         created_at: new Date().toISOString(),
       };
       this.channels.unshift(row);
@@ -725,20 +864,277 @@ export class NyxAgentHttpFixtures {
     });
   }
 
+  // ---- Groups -------------------------------------------------------------
+
+  private memberName(agent: AgentRecord): string {
+    return agent.kind === "nyxbot" ? "NyxBot" : agent.name;
+  }
+
+  private membersOf(group: GroupRecord): AgentRecord[] {
+    return group.member_agent_ids
+      .map((id) => this.agents.find((agent) => agent.id === id))
+      .filter((agent): agent is AgentRecord => Boolean(agent));
+  }
+
+  /** NyxBot when it is a member, else the first member. */
+  private leadOf(group: GroupRecord): string {
+    const members = this.membersOf(group);
+    return (members.find((agent) => agent.kind === "nyxbot") ?? members[0])?.id ?? "";
+  }
+
+  private groupView(group: GroupRecord): AssistantGroup {
+    const members = this.membersOf(group);
+    const working = members
+      .filter((agent) => group.queue.some((reply) => reply.agentId === agent.id))
+      .map((agent) => agent.id);
+    return {
+      id: group.id,
+      name: group.name,
+      members: members.map((agent) => ({
+        id: agent.id,
+        name: this.memberName(agent),
+        kind: agent.kind,
+        destroyed: Boolean(agent.destroyed_at),
+        working: working.includes(agent.id),
+      })),
+      lead_agent_id: this.leadOf(group),
+      working_agent_ids: working,
+      message_count: group.messages.length,
+      last_message_at: group.messages.at(-1)?.created_at ?? null,
+      created_at: group.created_at,
+    };
+  }
+
+  private postGroup(
+    group: GroupRecord,
+    role: AssistantGroupMessage["role"],
+    text: string,
+    agent?: AgentRecord,
+  ): AssistantGroupMessage {
+    const message: AssistantGroupMessage = {
+      id: crypto.randomUUID(),
+      seq: (group.messages.at(-1)?.seq ?? 0) + 1,
+      role,
+      agent: agent ? { id: agent.id, name: this.memberName(agent), kind: agent.kind } : null,
+      text,
+      created_at: new Date().toISOString(),
+    };
+    group.messages.push(message);
+    return message;
+  }
+
+  /** Queue a member's reply after whatever it is already working on. */
+  private addressGroup(group: GroupRecord, agentId: string, text: string) {
+    const busyUntil = group.queue
+      .filter((reply) => reply.agentId === agentId)
+      .reduce((latest, reply) => Math.max(latest, reply.at), Date.now());
+    group.queue.push({ agentId, text, at: busyUntil + GROUP_WORK_MS });
+  }
+
+  private groupReply(group: GroupRecord, agent: AgentRecord, text: string): string {
+    const names = this.membersOf(group).map((member) => this.memberName(member));
+    const clean = text.replace(/(^|\s)@[A-Za-z0-9-]+/g, " ").replace(/\s+/g, " ").trim();
+    const researcher = this.membersOf(group).find(
+      (member) => member.name === "researcher" && !member.destroyed_at,
+    );
+    if (agent.kind === "nyxbot" && /urgent issues/i.test(clean) && researcher && names.length > 1) {
+      // NyxBot hands the work to the specialist by mentioning it.
+      return "@researcher can you find the urgent issues?";
+    }
+    if (agent.name === "researcher" && /urgent issues/i.test(clean)) {
+      return NYXAGENT_FIXTURE_RESEARCHER_REPLY;
+    }
+    return agent.kind === "nyxbot" ? `Noted: ${clean}` : `Working on it: ${clean}`;
+  }
+
+  /** Land every reply that is due; replies that mention members hand work on. */
+  private settleGroups() {
+    let changed = false;
+    for (const group of this.groups) {
+      for (;;) {
+        group.queue.sort((a, b) => a.at - b.at);
+        const due = group.queue[0];
+        if (!due || due.at > Date.now()) break;
+        group.queue.shift();
+        const agent = this.agents.find((row) => row.id === due.agentId);
+        if (!agent || agent.destroyed_at) continue;
+        const reply = this.groupReply(group, agent, due.text);
+        this.postGroup(group, "agent", reply, agent);
+        changed = true;
+        const members = this.membersOf(group);
+        const handoffs = mentionedNames(
+          reply,
+          members.map((member) => this.memberName(member)),
+        )
+          .map((name) => members.find((member) => this.memberName(member) === name)!)
+          .filter((member) => member.id !== agent.id && !member.destroyed_at);
+        for (const member of handoffs) {
+          if (group.hops <= 0) break;
+          group.hops -= 1;
+          this.addressGroup(group, member.id, reply);
+        }
+      }
+    }
+    if (changed) this.save();
+  }
+
+  /**
+   * Validation like the server's (services/assistant_group_service.rs):
+   * duplicate ids collapse, unknown agents are 400 and destroyed agents 409,
+   * even when they are already members.
+   */
+  private groupRefusal(name: unknown, memberIds: unknown) {
+    if (name !== undefined) {
+      const trimmed = typeof name === "string" ? name.trim() : "";
+      if (!trimmed || [...trimmed].length > ASSISTANT_GROUP_NAME_MAX) {
+        return failure(400, `A group name has 1 to ${String(ASSISTANT_GROUP_NAME_MAX)} characters`);
+      }
+    }
+    if (memberIds !== undefined) {
+      const ids = [...new Set(Array.isArray(memberIds) ? (memberIds as unknown[]) : [])];
+      for (const id of ids) {
+        const agent = this.agents.find((row) => row.id === id);
+        if (!agent) return failure(400, "Unknown agent in member_agent_ids");
+        if (agent.destroyed_at) return failure(409, `Agent ${agent.name} was destroyed`);
+      }
+      if (!ids.length || ids.length > ASSISTANT_GROUP_MAX_MEMBERS) {
+        return failure(400, `A group has 1 to ${String(ASSISTANT_GROUP_MAX_MEMBERS)} agents`);
+      }
+    }
+    return undefined;
+  }
+
+  private groupsRoute(url: URL, method: string, body: () => Record<string, unknown>) {
+    const match = /^\/assistant\/nyxagent\/groups(?:\/([\w-]+))?(\/messages)?$/.exec(url.pathname);
+    if (!match) return undefined;
+    const [, id, messages] = match;
+    if (!id) {
+      if (method === "POST") {
+        const request = body();
+        const refusal = this.groupRefusal(request.name ?? "", request.member_agent_ids ?? []);
+        if (refusal) return refusal;
+        const group: GroupRecord = {
+          id: `nyxg-${crypto.randomUUID().replaceAll("-", "")}`,
+          name: String(request.name).trim(),
+          member_agent_ids: [...new Set(request.member_agent_ids as string[])],
+          created_at: new Date().toISOString(),
+          messages: [],
+          queue: [],
+          hops: GROUP_HOPS,
+        };
+        this.groups.push(group);
+        const names = this.membersOf(group).map((agent) => this.memberName(agent));
+        this.postGroup(group, "notice", `Group created with ${names.join(", ")}.`);
+        this.save();
+        return json(this.groupView(group), 201);
+      }
+      return json({
+        groups: this.groups
+          .map((group) => this.groupView(group))
+          .sort((a, b) =>
+            (b.last_message_at ?? b.created_at).localeCompare(a.last_message_at ?? a.created_at),
+          ),
+      });
+    }
+    const group = this.groups.find((row) => row.id === id);
+    if (!group) return failure(404, "Group not found");
+    if (messages) {
+      if (method === "POST") {
+        const text = String(body().text ?? "").trim();
+        if (!text || [...text].length > 32768) {
+          return failure(400, "A message has 1 to 32768 characters");
+        }
+        // Like the server: destroyed members cannot be addressed, so a message
+        // that only mentions them goes to the lead (while it is alive).
+        const live = this.membersOf(group).filter((agent) => !agent.destroyed_at);
+        const mentioned = mentionedNames(
+          text,
+          live.map((agent) => this.memberName(agent)),
+        ).map((name) => live.find((agent) => this.memberName(agent) === name)!);
+        const lead = live.find((agent) => agent.id === this.leadOf(group));
+        const addressed = mentioned.length ? mentioned : lead ? [lead] : [];
+        const message = this.postGroup(group, "user", text);
+        group.hops = GROUP_HOPS;
+        for (const agent of addressed) this.addressGroup(group, agent.id, text);
+        this.save();
+        return json({ message, addressed_agent_ids: addressed.map((agent) => agent.id) }, 202);
+      }
+      const limit = Math.min(Number(url.searchParams.get("limit")) || 50, 100);
+      const before = Number(url.searchParams.get("before_seq")) || Number.POSITIVE_INFINITY;
+      const older = group.messages.filter((message) => message.seq < before);
+      const page = older.slice(-limit);
+      return json({
+        group: this.groupView(group),
+        messages: page,
+        before_seq: older.length > page.length ? (page[0]?.seq ?? null) : null,
+      });
+    }
+    if (method === "GET") return json(this.groupView(group));
+    if (method === "DELETE") {
+      if (group.queue.length) {
+        return json(
+          { message: "A turn is already active in this conversation", error: "turn_active" },
+          409,
+        );
+      }
+      this.groups = this.groups.filter((row) => row.id !== group.id);
+      this.save();
+      return new Response(null, { status: 204 });
+    }
+    if (method === "PATCH") {
+      const update = body() as { name?: string; member_agent_ids?: string[] };
+      const refusal = this.groupRefusal(update.name, update.member_agent_ids);
+      if (refusal) return refusal;
+      if (update.name !== undefined) group.name = update.name.trim();
+      if (update.member_agent_ids) {
+        const before = this.membersOf(group);
+        const after = [...new Set(update.member_agent_ids)];
+        group.member_agent_ids = after;
+        group.queue = group.queue.filter((reply) => after.includes(reply.agentId));
+        const names = (agents: AgentRecord[]) =>
+          agents.map((agent) => this.memberName(agent)).join(", ");
+        const joined = this.membersOf(group).filter(
+          (agent) => !before.some((row) => row.id === agent.id),
+        );
+        const left = before.filter((agent) => !after.includes(agent.id));
+        const parts = [
+          ...(joined.length ? [`${names(joined)} joined.`] : []),
+          ...(left.length ? [`${names(left)} left.`] : []),
+        ];
+        if (parts.length) this.postGroup(group, "notice", parts.join(" "));
+      }
+      this.save();
+      return json(this.groupView(group));
+    }
+    return undefined;
+  }
+
   readonly handler: AssistantHttpMockHandler = async ({ endpoint, init }) => {
     if (!endpoint.startsWith(ROOT)) return undefined;
     for (const row of [...this.rows.values()]) {
       if (row.settleAt && row.settleAt <= Date.now()) this.settle(row);
+      if (
+        row.waitingUntil &&
+        row.waitingUntil <= Date.now() &&
+        !row.history.conversation.active_turn
+      ) {
+        row.history.waiting = [];
+        delete row.waitingUntil;
+        this.startServerTurn(
+          row,
+          "event",
+          "The Telegram channel bot Helper the user just created is now linked to nyxbot.",
+          NYXAGENT_FIXTURE_BOT_LINKED,
+          800,
+        );
+      }
     }
+    this.settleGroups();
     const url = new URL(endpoint, window.location.origin);
     const method = init.method ?? "GET";
     const body = () => JSON.parse(String(init.body)) as Record<string, unknown>;
-    if (url.pathname === `${ROOT}/models`) {
-      return json([
-        { id: "nyxagent/chat", label: "chat" },
-        { id: "nyxagent/research", label: "research" },
-      ]);
-    }
+    const groups = this.groupsRoute(url, method, body);
+    if (groups) return groups;
     const agents = this.agentsRoute(url, method, body);
     if (agents) return agents;
     const channels = this.channelsRoute(url, method, body);
@@ -760,10 +1156,15 @@ export class NyxAgentHttpFixtures {
         const update = body() as Partial<Settings>;
         const live = update.max_live_subagents;
         const turns = update.max_concurrent_subagent_turns;
+        const handoffs = update.max_group_handoffs;
+        const hourly = update.max_group_handoffs_per_hour;
         if (
           (live !== undefined && (live < 0 || live > LIMITS.max_live_subagents_limit)) ||
           (turns !== undefined &&
-            (turns < 1 || turns > LIMITS.max_concurrent_subagent_turns_limit))
+            (turns < 1 || turns > LIMITS.max_concurrent_subagent_turns_limit)) ||
+          (handoffs !== undefined &&
+            (handoffs < 0 || handoffs > LIMITS.max_group_handoffs_limit)) ||
+          (hourly !== undefined && (hourly < 0 || hourly > LIMITS.max_group_handoffs_per_hour_limit))
         ) {
           return failure(400, "Setting out of range");
         }
@@ -819,10 +1220,17 @@ export class NyxAgentHttpFixtures {
         if (allow && acknowledgement.service_slug) {
           agent.services = [...new Set([...agent.services, acknowledgement.service_slug])];
         }
+        const target = acknowledgement.service_slug
+          ? `service ${acknowledgement.service_slug}`
+          : "read-only account access";
         this.startServerTurn(
           row,
           "event",
-          `${EVENT_HEADER}\n- The user ${allow ? "allowed" : "denied"} ${service} for this agent.`,
+          `${EVENT_HEADER}\n- The user ${allow ? "allowed" : "denied"} your request for ${target}. ${
+            allow
+              ? "Retry the call now and continue your task."
+              : "Do not retry it; finish what you can and report."
+          }`,
           allow ? `${service} access granted. Lookup succeeded.` : `Understood. I will not use ${service}.`,
         );
       }

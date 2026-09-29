@@ -2864,7 +2864,23 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     billing_ledger
         .create_index(
             IndexModel::builder()
+                .keys(doc! { "postings.account": 1, "seq": 1 })
+                .build(),
+        )
+        .await?;
+
+    billing_ledger
+        .create_index(
+            IndexModel::builder()
                 .keys(doc! { "owner_id": 1, "created_at": -1 })
+                .build(),
+        )
+        .await?;
+
+    db.collection::<mongodb::bson::Document>("billing_wallet_refresh_requests")
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "requested_at": 1 })
                 .build(),
         )
         .await?;

@@ -1,3 +1,4 @@
+import { compareCredits } from "./credits";
 import type { BillingUsageRow } from "@/schemas/billing";
 import { billingMetricLabel } from "@/lib/billing-units";
 import {
@@ -52,9 +53,10 @@ export function groupRows(
   }
   return [...groups.values()].sort(
     (a, b) =>
-      (total(b.rows, "estimated_credits_micros") ?? -1) -
-        (total(a.rows, "estimated_credits_micros") ?? -1) ||
-      a.name.localeCompare(b.name),
+      compareCredits(
+        total(b.rows, "estimated_credits_micros"),
+        total(a.rows, "estimated_credits_micros"),
+      ) || a.name.localeCompare(b.name),
   );
 }
 export function layerName(layer: string) {

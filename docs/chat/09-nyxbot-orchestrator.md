@@ -65,6 +65,7 @@ key, memory-only context, not addressable by the user). NyxAgent needs no change
 | `name`, `description` | NyxBot is fixed; a specialist has a unique slug-like name and a role description (≤ 2 KiB) |
 | `grants` | Specialists: `service_ids`, `platform_service_ids`, `account_read` |
 | `memory` | Up to 50 notes of ≤ 500 characters the agent saved with `nyxid__remember`; the owner can delete them |
+| `display_name`, `persona` | Optional friendly name (≤ 40 characters; `name` stays the `@handle`) and personality/tone (≤ 2000 characters) chosen by the owner or set by NyxBot at the owner's request. Injected as style only, never authority; credential shapes are refused and triple quotes stripped. NyxBot can set its own display name but only the owner changes NyxBot's persona |
 | `home_conversation_id` | The thread NyxID uses for work and events no thread asked for |
 | `created_by` | `user` or `nyxbot` |
 | `destroyed_at` | Destroyed specialists keep read-only threads |
@@ -107,9 +108,15 @@ specialty, optional task), `message_subagent` (runs in the specialist's home
 thread; returns started, busy or pool_full), `wait_for_subagents` (≤ 120 s),
 `list_subagents`, `read_subagent`, `grant_subagent`, `revoke_subagent`,
 `update_subagent`, `decide_permission`, `destroy_subagent`,
-`connect_channel_bot` (to NyxBot or a specialist), `link_channel_bot`,
-`list_channel_agents`, `disconnect_channel_bot`. Every agent: `remember`
-(optional `replace_id`) and `forget`. Memory refuses obvious credential shapes.
+`create_group`, `list_groups`, `post_to_group`, `update_group`, `delete_group`,
+`settings_link` (the exact NyxID page for configuration the tools do not cover,
+such as creating an agent key, security, profile, billing, organizations or
+triggers), `channel_bot_setup_link`, `connect_channel_bot` (to NyxBot or a
+specialist), `link_channel_bot`, `list_channel_agents`, `disconnect_channel_bot`.
+`spawn_subagent` and `update_subagent` also take `display_name` and `persona`
+(`update_subagent` with `nyxbot` sets NyxBot's own). Every agent: `remember`
+(optional `replace_id`) and `forget`. Memory and personas refuse obvious
+credential shapes.
 
 ## 8. Permission requests (specialist → NyxBot)
 
@@ -138,7 +145,39 @@ without a user message. Specialist and event turns share an owner pool of
 `max_concurrent_subagent_turns` (default 3, at most 8; NyxBot gets one extra
 slot); live specialists are capped by `max_live_subagents` (default 8, at most
 32). Both are owner settings because the turns spend the owner's credits. A
-background task retries deferred wake-ups every minute.
+background task runs every 15 seconds: it resolves watches (§9a) and retries
+deferred wake-ups and waiting group members.
+
+### 9a. Finishing outside the chat
+
+The owner never has to come back and say "done", "connected" or "approved".
+When they must finish something elsewhere, the agent tells them what to do and
+ends its turn; NyxID resumes that thread with an event as soon as it happens:
+
+- **Connect links**: a hosted link minted by a chat key is watched
+  (`nyxbot_watches`, kind `connect_link`); completion or decline wakes the thread
+  (an unused link that expires is dropped silently).
+- **Channel bot setup**: `nyxid__channel_bot_setup_link` returns NyxID's
+  onboarding page (`/channel-bots/connect/{platform}`; for Telegram, creation
+  inside Telegram when an administrator configured it, else the token form) and
+  records a `channel_bot` watch. The next active bot of that platform the owner
+  creates is linked to the chosen agent and the thread gets the
+  owner-verification step to pass on. Secrets are entered on the page, never in
+  chat.
+- **Owner verification**: when the owner uses the link or code in the chat app,
+  the thread that set the bot up is told.
+- **Proxy approvals** need no watch: the tool call itself waits for the decision
+  (in the app, on a phone or in Telegram) and continues; an extra "retry" event
+  would run the call twice.
+
+Watches are TTL-expired and claimed atomically, so replicas never link or report
+twice.
+
+While a thread waits, its history carries `waiting` items (`channel_bot`,
+`connect_link`, `owner_verification`, each with a title and expiry). The chat
+shows them under the header with "continues here by itself", and the browser
+polls the thread every 10 seconds until they clear, so the resumed turn appears
+without a reload.
 
 ## 10. Talking to agents directly
 
@@ -148,6 +187,39 @@ grants, read and delete memory notes, and link chat apps to any agent. NyxBot's
 instructions list its specialists, pending requests, its memory, and messages the
 owner sent directly to specialists since the thread's previous user message; it
 is not woken by those direct chats.
+
+### 10a. Group chats
+
+Like Grok Bot's group chats: `assistant_groups` holds the owner plus 1–8 agents;
+`assistant_group_messages` holds the shared transcript (`user`, `agent`,
+`notice`). A user message goes to the members it `@mentions`, else to the lead
+(NyxBot when it is a member, else the first member). A member's reply that
+`@mentions` others hands the work to them, bounded by the owner's settings:
+`max_group_handoffs` per new request (default 6, 0–24; 0 turns hand-offs off)
+and `max_group_handoffs_per_hour` across all their groups (default 60, 0–600). Each member speaks through its own hidden member thread
+(`group_id`, `group_seen_seq`): it keeps its own key, grants and memory, and is
+given only the transcript lines it has not seen (bounded). Member threads never
+appear in thread lists. Members addressed while busy or while the pool is full
+wait on the group and start when they are free (or from the sweep; the unique
+index allows one member thread per agent and group). A new request (the owner's
+message, or NyxBot's `post_to_group` from one of its own threads) refills the
+hand-off budget; NyxBot cannot post into a group from its own member thread.
+When NyxBot posts work into a group from its own thread, that thread follows the
+group: once nobody is working or waiting to answer, it is woken with a
+`group_settled` summary of the members' replies (information only) so it can
+report back or follow up; such wake-ups are ordinary event turns under the
+event-turn guards. Transcript lines are rendered with indented continuations so
+only real user messages start a line with `[user]:`, and specialists cannot be
+named `user`, `nyxbot`, `nyxid`, `owner` or `system`. Every reply of a member
+thread (including event turns) is posted to the group. A member's action card is
+listed as `pending_actions` and answered in the group with its phrase (the web
+page shows Confirm/Cancel, which post it); NyxID decides the card and sends the
+member back to retry. A hidden member thread never becomes an agent's home.
+Deleting a
+group deletes its transcript and member threads; purging an agent removes it
+from its groups. HTTP: `/assistant/nyxagent/groups[/{id}[/messages]]`; NyxBot
+tools: `create_group`, `list_groups`, `post_to_group`, `update_group`,
+`delete_group`.
 
 ## 11. Lifecycle
 
@@ -163,6 +235,16 @@ Account deletion purges agents, settings, threads and channel records.
 Any channel bot can be linked to NyxBot or a specialist (`connect_channel_bot`,
 settings, or relinked later); each chat partition becomes a thread of the linked
 agent, with that agent's authority and memory.
+
+- **Everything is answerable in the chat.** A chat app cannot show NyxID's cards
+  or buttons, so channel threads are told to give every link as a full URL and
+  to ask for confirmations in words. Every action card has a 4-digit code
+  (`confirm_phrase`, e.g. "yes 4821"). The verified owner's reply decides a card
+  only when it quotes that code, or when it is a plain yes/no (English and
+  Chinese short forms) and exactly one card was raised since the owner's
+  previous message, so an answer to another question never confirms a stale
+  card. Decisions are audited like card decisions; asynchronous results
+  (finished links, specialists' reports) are delivered back into the chat.
 
 - **Telegram** (`telegram`, `telegram-new`) uses the Agent Event Gateway,
   following CMA's Bot setup: NyxID mints a route key and a gateway agent key,
@@ -182,10 +264,31 @@ agent, with that agent's authority and memory.
   Telegram notification link or a one-time link code (a `t.me/<bot>?start=<code>`
   link for Telegram). Strangers get a short refusal in private chats and silence
   in groups; no turn runs. Each turn names the platform, bot, chat type and sender.
+- **Delivery health.** A linked chat app must never go quiet silently. The
+  15-second sweep judges each active channel's newest inbound message: a failed
+  relay callback (NyxID keeps the HTTP status, never the body) is lost
+  (`refused_{status}`, or `undelivered` when nothing answered or NyxID could not
+  send it). Through the gateway, a private plain-text message that was accepted
+  but has no provider admission for its message ID after two minutes is lost too
+  (`not_received`; the gateway's event ID is NyxID's message ID). Group
+  messages, photos and other events the gateway may drop on purpose are skipped
+  and never change the status. A lost message marks the channel `failing` and
+  tells the thread that set the bot up (else the agent's home), at most once per
+  six hours; the channel list shows the reason, and the next message that
+  arrives marks it `ok`. A channel's first check looks back one hour only.
+  Reconnecting a failing channel rebuilds it from scratch and keeps its verified
+  owners.
 - **Updates.** Asynchronous replies (event turns, such as a specialist's report)
   are delivered to the chat through the gateway's `replyToEvent` while the newest
   event reference is valid, or through the relay reply API; messages that arrive
   while the agent is busy are queued and answered next instead of bounced.
+
+**Managed Telegram bots.** Bots created inside Telegram through NyxID's manager
+bot are `telegram-new`, and NyxID stamps that platform on every relay artifact,
+including the reply token. The gateway must accept the alias for the reply token
+too, not only for the callback claims, header and payload; before that fix it
+refused every such message with 401 `reply_binding_mismatch`, while BotFather
+(`telegram`) bots worked.
 
 **Deployment prerequisite.** The gateway only calls operator-allowlisted
 providers, read once at startup. This entry in `CMAEG_PROVIDERS` (CMA repository,

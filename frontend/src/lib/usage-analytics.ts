@@ -1,3 +1,4 @@
+import { formatExactCredits, formatCompactCredits } from "./credits";
 import { usageRangeError } from "@/schemas/admin-usage";
 import type {
   AnalyticsFilters,
@@ -240,11 +241,13 @@ export function analyticsPath(
   return `/admin/usage/analytics?${query}`;
 }
 export function formatAnalyticsValue(
-  value: number | null,
+  value: string | number | null,
   unit: string,
   compact = false,
 ): string {
   if (value === null) return "Unknown";
+  if (typeof value === "string")
+    return compact ? formatCompactCredits(value) : formatExactCredits(value);
   const amount = unit === "microcredits" ? value / 1_000_000 : value;
   return new Intl.NumberFormat(undefined, {
     notation: compact ? "compact" : "standard",
@@ -268,4 +271,20 @@ export function bucketLabel(
       : {}),
     ...(full ? { year: "numeric" } : {}),
   }).format(new Date(bucket));
+}
+
+/** The decimal amount is authoritative; legacy integers are display fallback. */
+export function analyticsAmount(item: {
+  value: number | null;
+  exact_value?: string | null;
+}): string | number | null {
+  return item.exact_value === undefined ? item.value : item.exact_value;
+}
+/** Explicit, lossy chart-coordinate boundary. Tables and tooltips retain strings. */
+export function plotAmount(item: {
+  value: number | null;
+  exact_value?: string | null;
+}): number | null {
+  const value = analyticsAmount(item);
+  return typeof value === "string" ? Number(value) * 1_000_000 : value;
 }

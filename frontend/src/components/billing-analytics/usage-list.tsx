@@ -129,13 +129,20 @@ function Quantities({ usage }: { usage: AdminUsageStats }) {
 function Cost({ usage }: { usage: AdminUsageStats }) {
   return (
     <div className="space-y-1 font-mono text-[11px] tabular-nums">
-      <span>{formatEstimatedCredits(usage.gross_cost_micros)}</span>
+      <span>
+        {formatEstimatedCredits(usage.gross_cost ?? usage.gross_cost_micros)}
+      </span>
       <div className="text-muted-foreground">
-        Wallet {formatEstimatedCredits(usage.wallet_cost_micros)}
+        Wallet{" "}
+        {formatEstimatedCredits(usage.wallet_cost ?? usage.wallet_cost_micros)}
         <br />
-        Grants {formatEstimatedCredits(usage.grant_cost_micros)}
+        Grants{" "}
+        {formatEstimatedCredits(usage.grant_cost ?? usage.grant_cost_micros)}
         <br />
-        Allowance {formatEstimatedCredits(usage.allowance_cost_micros)}
+        Allowance{" "}
+        {formatEstimatedCredits(
+          usage.allowance_cost ?? usage.allowance_cost_micros,
+        )}
       </div>
       {usage.unknown_cost_events > 0 && (
         <Badge variant="warning">Partial estimate</Badge>
@@ -487,11 +494,19 @@ export function AdminUsageList({ filters }: { filters: AnalyticsFilters }) {
                 <p className="text-[11px] text-muted-foreground">
                   Gross costs use settled amounts or current rates for legacy
                   events. Wallet{" "}
-                  {formatEstimatedCredits(data.totals.wallet_cost_micros)} ·
-                  Grants {formatEstimatedCredits(data.totals.grant_cost_micros)}{" "}
+                  {formatEstimatedCredits(
+                    data.totals.wallet_cost ?? data.totals.wallet_cost_micros,
+                  )}{" "}
+                  · Grants{" "}
+                  {formatEstimatedCredits(
+                    data.totals.grant_cost ?? data.totals.grant_cost_micros,
+                  )}{" "}
                   · Allowances{" "}
-                  {formatEstimatedCredits(data.totals.allowance_cost_micros)}.
-                  Token total is input + output; provider cache counts can
+                  {formatEstimatedCredits(
+                    data.totals.allowance_cost ??
+                      data.totals.allowance_cost_micros,
+                  )}
+                  . Token total is input + output; provider cache counts can
                   overlap input. Quantities include each billing component and
                   resale event.
                 </p>

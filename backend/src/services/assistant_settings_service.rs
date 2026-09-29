@@ -6,7 +6,7 @@ use crate::{
     errors::{AppError, AppResult},
     models::assistant_settings::{
         AssistantSettings, COLLECTION_NAME, MAX_CONCURRENT_SUBAGENT_TURNS_LIMIT,
-        MAX_LIVE_SUBAGENTS_LIMIT,
+        MAX_GROUP_HANDOFFS_LIMIT, MAX_GROUP_HANDOFFS_PER_HOUR_LIMIT, MAX_LIVE_SUBAGENTS_LIMIT,
     },
 };
 
@@ -24,6 +24,8 @@ pub struct Update {
     pub skip_destructive_confirmation: Option<bool>,
     pub max_live_subagents: Option<i32>,
     pub max_concurrent_subagent_turns: Option<i32>,
+    pub max_group_handoffs: Option<i32>,
+    pub max_group_handoffs_per_hour: Option<i32>,
 }
 
 pub async fn update(db: &Database, user_id: &str, update: Update) -> AppResult<AssistantSettings> {
@@ -44,6 +46,23 @@ pub async fn update(db: &Database, user_id: &str, update: Update) -> AppResult<A
             {MAX_CONCURRENT_SUBAGENT_TURNS_LIMIT}"
         )));
     }
+    if update
+        .max_group_handoffs
+        .is_some_and(|value| !(0..=MAX_GROUP_HANDOFFS_LIMIT).contains(&value))
+    {
+        return Err(AppError::ValidationError(format!(
+            "max_group_handoffs must be between 0 and {MAX_GROUP_HANDOFFS_LIMIT}"
+        )));
+    }
+    if update
+        .max_group_handoffs_per_hour
+        .is_some_and(|value| !(0..=MAX_GROUP_HANDOFFS_PER_HOUR_LIMIT).contains(&value))
+    {
+        return Err(AppError::ValidationError(format!(
+            "max_group_handoffs_per_hour must be between 0 and \
+            {MAX_GROUP_HANDOFFS_PER_HOUR_LIMIT}"
+        )));
+    }
     let current = get(db, user_id).await?;
     let next = AssistantSettings {
         user_id: user_id.into(),
@@ -56,6 +75,12 @@ pub async fn update(db: &Database, user_id: &str, update: Update) -> AppResult<A
         max_concurrent_subagent_turns: update
             .max_concurrent_subagent_turns
             .unwrap_or(current.max_concurrent_subagent_turns),
+        max_group_handoffs: update
+            .max_group_handoffs
+            .unwrap_or(current.max_group_handoffs),
+        max_group_handoffs_per_hour: update
+            .max_group_handoffs_per_hour
+            .unwrap_or(current.max_group_handoffs_per_hour),
         updated_at: Utc::now(),
     };
     db.collection::<AssistantSettings>(COLLECTION_NAME)
@@ -88,6 +113,8 @@ pub async fn audit(
             "previous_skip_destructive_confirmation": before.skip_destructive_confirmation,
             "max_live_subagents": after.max_live_subagents,
             "max_concurrent_subagent_turns": after.max_concurrent_subagent_turns,
+            "max_group_handoffs": after.max_group_handoffs,
+            "max_group_handoffs_per_hour": after.max_group_handoffs_per_hour,
         })),
     )
     .await;

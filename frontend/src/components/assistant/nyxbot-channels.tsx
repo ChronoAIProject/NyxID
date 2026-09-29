@@ -19,8 +19,8 @@ import {
   useLinkNyxBotChannel,
   useNyxBotChannels,
 } from "@/hooks/use-nyxbot-agents";
-import { channelPlatformName } from "@/lib/assistant/nyxbot-labels";
-import { formatDateTime } from "@/lib/utils";
+import { agentTitle, channelPlatformName } from "@/lib/assistant/nyxbot-labels";
+import { formatDateTime, formatRelativeTime } from "@/lib/utils";
 import type {
   AssistantAgent,
   NyxAgentChannelAgent,
@@ -39,7 +39,7 @@ const channelStatus: Record<string, { label: string; variant: "success" | "warni
   };
 
 function agentLabel(agent: AssistantAgent): string {
-  return agent.kind === "nyxbot" ? "NyxBot" : agent.name;
+  return agentTitle(agent);
 }
 
 function AgentSelect({
@@ -188,6 +188,15 @@ export function ChannelBotsManager({
                 </div>
                 {row.last_error ? (
                   <p className="text-[11px] text-destructive">Last error: {row.last_error}</p>
+                ) : null}
+                {row.delivery_status === "failing" ? (
+                  <p className="text-[11px] text-destructive">
+                    Messages are not reaching the agent: {row.delivery_reason ?? "delivery failed"}
+                    {row.delivery_failed_at
+                      ? ` (${formatRelativeTime(row.delivery_failed_at)})`
+                      : ""}
+                    .
+                  </p>
                 ) : null}
                 {confirming === row.id ? (
                   <div className="flex flex-wrap items-center justify-end gap-2 rounded-lg bg-overlay px-3 py-2">

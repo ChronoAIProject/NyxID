@@ -168,6 +168,7 @@ fn event_turn(conversation_id: &str) -> TurnStart {
         new_id: None,
         agent_id: None,
         report_to: None,
+        group_id: None,
     }
 }
 
@@ -269,6 +270,12 @@ pub(crate) async fn after_turn(
         return;
     };
     let owner = row.user_id.as_str();
+    // Every reply of a hidden group member thread belongs to the group,
+    // including event turns (a finished link, a confirmed action).
+    if row.group_id.is_some() {
+        super::assistant_group::member_settled(state, row, text, error.map(|error| error.code))
+            .await;
+    }
     // A direct user chat with a specialist does not wake NyxBot; it reads
     // those on its next turn.
     if row.is_subagent()
@@ -437,6 +444,10 @@ pub(crate) async fn turn_notes(
     }
     if let Some(agent) = agent {
         notes.push_str(&team::memory_note(agent));
+        if let Some(note) = super::assistant_group::group_note(state, row, agent).await {
+            notes.push_str("\n\n");
+            notes.push_str(&note);
+        }
     }
     if row.is_subagent() {
         return notes;
@@ -530,6 +541,7 @@ pub(crate) async fn assign(
             new_id: None,
             agent_id: None,
             report_to: report_to.map(str::to_owned),
+            group_id: None,
         },
         Pool::Team { owner, limit },
     )
@@ -636,6 +648,8 @@ async fn dispatch(
             let request = team::CreateRequest {
                 name: text_arg(args, "name").to_owned(),
                 description: text_arg(args, "description").to_owned(),
+                display_name: args["display_name"].as_str().map(str::to_owned),
+                persona: args["persona"].as_str().map(str::to_owned),
                 targets: targets.clone(),
                 account_read: args["account_read"].as_bool().unwrap_or(false),
                 specialty: args["specialty"].as_str().map(str::to_owned),
@@ -733,16 +747,34 @@ async fn dispatch(
             )
         }
         "update_subagent" => {
-            let agent = team::live_specialist(db, owner, text_arg(args, "subagent")).await?;
+            // "nyxbot" updates your own display name and description. Your own
+            // persona shapes every NyxBot thread's instructions, so only the
+            // owner changes it (agent details), never text you read.
+            let agent = target_agent(state, owner, Some(text_arg(args, "subagent"))).await?;
+            if agent.is_nyxbot() && args.get("persona").is_some() {
+                return Err(AppError::ValidationError(
+                    "Only the user can change NyxBot's persona: ask them to edit it in \
+                    NyxBot's agent details"
+                        .into(),
+                ));
+            }
             let agent = team::update_agent(
                 db,
                 owner,
                 &agent.id,
                 args["name"].as_str(),
                 args["description"].as_str(),
+                team::AgentStyle {
+                    display_name: args["display_name"].as_str(),
+                    persona: args["persona"].as_str(),
+                },
             )
             .await?;
-            (json!({"subagent": agent.name, "id": agent.id}), false)
+            (
+                json!({"agent": agent.name, "id": agent.id,
+                    "display_name": agent.display_name, "persona": agent.persona}),
+                false,
+            )
         }
         "decide_permission" => {
             let allow = text_arg(args, "decision") == "allow";
@@ -783,6 +815,142 @@ async fn dispatch(
             let agent = team::live_specialist(db, owner, text_arg(args, "subagent")).await?;
             let agent = destroy_agent(state, owner, &agent.id).await?;
             (json!({"destroyed": agent.name}), false)
+        }
+        "create_group" => {
+            let mut ids = Vec::new();
+            for name in string_list(args, "members") {
+                ids.push(target_agent(state, owner, Some(&name)).await?.id);
+            }
+            let group = crate::services::assistant_group_service::create(
+                db,
+                owner,
+                text_arg(args, "name"),
+                &ids,
+                "nyxbot",
+            )
+            .await?;
+            (
+                json!({"group": {"id": group.id, "name": group.name},
+                    "note": "Post to it with nyxid__post_to_group; the user sees it under Groups."}),
+                false,
+            )
+        }
+        "list_groups" => {
+            let mut rows = Vec::new();
+            for group in crate::services::assistant_group_service::list(db, owner).await? {
+                let members =
+                    crate::services::assistant_group_service::members(db, owner, &group).await?;
+                rows.push(json!({"id": group.id, "name": group.name,
+                    "members": members.iter().map(|agent| agent.name.clone()).collect::<Vec<_>>(),
+                    "messages": group.message_count}));
+            }
+            (json!({"groups": rows}), false)
+        }
+        "post_to_group" => {
+            let group =
+                crate::services::assistant_group_service::find(db, owner, text_arg(args, "group"))
+                    .await?;
+            // Inside the group, your reply is your post.
+            if engine::get(db, owner, caller).await?.group_id.as_deref() == Some(&group.id) {
+                return Err(AppError::ValidationError(
+                    "You are in this group: reply directly instead of posting to it".into(),
+                ));
+            }
+            let author = team::ensure_nyxbot(db, owner).await?;
+            let (message, addressed) = super::assistant_group::post(
+                state,
+                owner,
+                &group.id,
+                text_arg(args, "text"),
+                Some(&author),
+            )
+            .await?;
+            // This thread is woken with the members' replies once the group
+            // is quiet.
+            if !addressed.is_empty() {
+                crate::services::assistant_group_service::follow(
+                    db,
+                    owner,
+                    &group.id,
+                    caller,
+                    message.seq,
+                )
+                .await?;
+            }
+            (
+                json!({"posted": message.seq, "addressed_agent_ids": addressed,
+                "note": if addressed.is_empty() {
+                    "Nobody was addressed: @mention members to have them answer."
+                } else {
+                    "Members answer in the group. End your turn: NyxID wakes you with \
+                    their replies when the group is quiet."
+                }}),
+                false,
+            )
+        }
+        "update_group" => {
+            let group =
+                crate::services::assistant_group_service::find(db, owner, text_arg(args, "group"))
+                    .await?;
+            let mut ids = group.member_agent_ids.clone();
+            for name in string_list(args, "add") {
+                let id = target_agent(state, owner, Some(&name)).await?.id;
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+            for name in string_list(args, "remove") {
+                let id = target_agent(state, owner, Some(&name)).await?.id;
+                ids.retain(|member| member != &id);
+            }
+            let group = crate::services::assistant_group_service::update(
+                db,
+                owner,
+                &group.id,
+                args["name"].as_str(),
+                Some(&ids),
+            )
+            .await?;
+            (
+                json!({"group": {"id": group.id, "name": group.name}}),
+                false,
+            )
+        }
+        "delete_group" => {
+            let group =
+                crate::services::assistant_group_service::find(db, owner, text_arg(args, "group"))
+                    .await?;
+            crate::services::assistant_group_service::delete(db, owner, &group.id).await?;
+            (json!({"deleted": group.name}), false)
+        }
+        "settings_link" => {
+            let area = text_arg(args, "area");
+            let path = crate::services::assistant_team_tools::settings_path(
+                area,
+                args["service"].as_str(),
+                args["org_id"].as_str(),
+            )
+            .ok_or_else(|| AppError::ValidationError("Unknown settings area".into()))?;
+            (
+                json!({"url": format!("{}{path}",
+                    state.config.frontend_url.trim_end_matches('/')),
+                    "area": area,
+                    "note": "Give the user this link; secrets and sign-in-only changes happen \
+                        on that page, never in chat."}),
+                false,
+            )
+        }
+        "channel_bot_setup_link" => {
+            let agent = target_agent(state, owner, args["agent"].as_str()).await?;
+            super::nyxbot::setup_link_tool(
+                state,
+                owner,
+                caller,
+                text_arg(args, "platform"),
+                args["label"].as_str(),
+                &agent,
+            )
+            .await?
         }
         "connect_channel_bot" => {
             let agent = target_agent(state, owner, args["agent"].as_str()).await?;
@@ -965,6 +1133,10 @@ pub struct CreateAgentRequest {
     name: String,
     description: String,
     #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    persona: Option<String>,
+    #[serde(default)]
     services: Vec<String>,
     #[serde(default)]
     account_read: bool,
@@ -988,6 +1160,8 @@ pub async fn create_agent(
     let request = team::CreateRequest {
         name: body.name,
         description: body.description,
+        display_name: body.display_name,
+        persona: body.persona,
         targets,
         account_read: body.account_read,
         specialty: None,
@@ -1060,6 +1234,12 @@ pub async fn get_agent(
 pub struct UpdateAgentRequest {
     name: Option<String>,
     description: Option<String>,
+    /// Empty clears it.
+    #[serde(default)]
+    display_name: Option<String>,
+    /// Empty clears it.
+    #[serde(default)]
+    persona: Option<String>,
 }
 
 pub async fn update_agent(
@@ -1076,11 +1256,15 @@ pub async fn update_agent(
         &id,
         body.name.as_deref(),
         body.description.as_deref(),
+        team::AgentStyle {
+            display_name: body.display_name.as_deref(),
+            persona: body.persona.as_deref(),
+        },
     )
     .await?;
-    Ok(Json(
-        json!({"id": agent.id, "name": agent.name, "description": agent.description}),
-    ))
+    Ok(Json(json!({"id": agent.id, "name": agent.name,
+        "description": agent.description, "display_name": agent.display_name,
+        "persona": agent.persona})))
 }
 
 #[derive(Deserialize)]
@@ -1175,6 +1359,10 @@ pub struct SettingsResponse {
     max_concurrent_subagent_turns: i32,
     max_live_subagents_limit: i32,
     max_concurrent_subagent_turns_limit: i32,
+    max_group_handoffs: i32,
+    max_group_handoffs_per_hour: i32,
+    max_group_handoffs_limit: i32,
+    max_group_handoffs_per_hour_limit: i32,
 }
 impl From<crate::models::assistant_settings::AssistantSettings> for SettingsResponse {
     fn from(row: crate::models::assistant_settings::AssistantSettings) -> Self {
@@ -1185,6 +1373,11 @@ impl From<crate::models::assistant_settings::AssistantSettings> for SettingsResp
             max_live_subagents_limit: crate::models::assistant_settings::MAX_LIVE_SUBAGENTS_LIMIT,
             max_concurrent_subagent_turns_limit:
                 crate::models::assistant_settings::MAX_CONCURRENT_SUBAGENT_TURNS_LIMIT,
+            max_group_handoffs: row.max_group_handoffs,
+            max_group_handoffs_per_hour: row.max_group_handoffs_per_hour,
+            max_group_handoffs_limit: crate::models::assistant_settings::MAX_GROUP_HANDOFFS_LIMIT,
+            max_group_handoffs_per_hour_limit:
+                crate::models::assistant_settings::MAX_GROUP_HANDOFFS_PER_HOUR_LIMIT,
         }
     }
 }
@@ -1204,6 +1397,10 @@ pub struct SettingsRequest {
     skip_destructive_confirmation: Option<bool>,
     max_live_subagents: Option<i32>,
     max_concurrent_subagent_turns: Option<i32>,
+    #[serde(default)]
+    max_group_handoffs: Option<i32>,
+    #[serde(default)]
+    max_group_handoffs_per_hour: Option<i32>,
 }
 
 pub async fn update_settings(
@@ -1221,6 +1418,8 @@ pub async fn update_settings(
             skip_destructive_confirmation: body.skip_destructive_confirmation,
             max_live_subagents: body.max_live_subagents,
             max_concurrent_subagent_turns: body.max_concurrent_subagent_turns,
+            max_group_handoffs: body.max_group_handoffs,
+            max_group_handoffs_per_hour: body.max_group_handoffs_per_hour,
         },
     )
     .await?;
@@ -1316,18 +1515,38 @@ pub async fn put_profile_routes(
     Ok(Json(routes_response(Some(row))))
 }
 
-/// Background task: retry wake-ups whose pool was full (or whose replica
+/// How often NyxID resolves watches and retries deferred wake-ups.
+const SWEEP_SECS: u64 = 15;
+
+/// Background task: resolve watches (bots created from setup links, finished
+/// connect links) and retry wake-ups whose pool was full (or whose replica
 /// restarted) when their events arrived. Agents are persistent, so nothing
 /// is destroyed automatically.
 pub fn spawn_sweeps(state: AppState) {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        let mut interval = tokio::time::interval(Duration::from_secs(SWEEP_SECS));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
+            // Things the owner finished outside the chat queue events first.
+            if let Err(error) = super::nyxbot::process_watches(&state).await {
+                tracing::debug!(%error, "NyxBot watch sweep deferred");
+            }
+            // Linked chat apps whose messages stopped reaching their agent.
+            if let Err(error) = super::nyxbot::check_deliveries(&state).await {
+                tracing::debug!(%error, "NyxBot delivery sweep deferred");
+            }
             if let Ok(rows) = team::queued(&state.db, None).await {
                 for row in rows {
                     wake(&state, &row.user_id, &row.id).await;
+                }
+            }
+            // Group members addressed while busy (or while the pool was full).
+            if let Ok(rows) =
+                crate::services::assistant_group_service::with_pending(&state.db).await
+            {
+                for group in rows {
+                    super::assistant_group::advance(&state, &group.user_id, &group.id).await;
                 }
             }
         }

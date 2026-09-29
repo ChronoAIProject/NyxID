@@ -634,7 +634,7 @@ async function assertPublicTarget(rawUrl) {
 // Ported from the proven userscript extractors: KaTeX/MathJax → LaTeX, the
 // Pro-reasoning "still generating" probe, latest-answer + full-transcript
 // extraction. Installed on window.__nyx and re-installed after navigation.
-export const DOM_CORE_VERSION = 5;
+export const DOM_CORE_VERSION = 6;
 const DOM_CORE = `
 window.__nyx = (function () {
   const artifactFileId = ${artifactFileId.toString()};
@@ -646,6 +646,10 @@ window.__nyx = (function () {
   function extractTextWithMath(el) {
     if (!el) return "";
     const clone = el.cloneNode(true);
+    // Screen-reader-only labels ("You said:", "ChatGPT said:") share a line
+    // with the first words of the message in the 2026-09 layout, so a
+    // line-based filter cannot drop them. They are never message content.
+    for (const sr of Array.from(clone.querySelectorAll(".sr-only"))) sr.remove();
     for (const ann of Array.from(clone.querySelectorAll('annotation[encoding="application/x-tex"]'))) {
       const latex = (ann.textContent || "").trim();
       if (!latex) continue;
@@ -673,8 +677,9 @@ window.__nyx = (function () {
     return (clone.innerText || "").trim();
   }
 
-  const CHROME_RE = /^(ChatGPT|You said:|ChatGPT said:|Copy code|Copy|Share|Regenerate|4o|o\\d|GPT-|Ask anything|Send a message)$/i;
+  const CHROME_RE = /^(ChatGPT|You said:|ChatGPT said:|Latest response|ChatGPT is responding|Worked for \\d+.*|Thought for \\d+.*|Copy code|Copy|Share|Regenerate|4o|o\\d|GPT-|Ask anything|Send a message)$/i;
   function cleanText(text) {
+    text = String(text || "").replace(/^\\s*(You said:|ChatGPT said:)\\s*/, "");
     return text.split("\\n").filter((line) => {
       const t = line.trim();
       if (!t) return true;
@@ -683,11 +688,49 @@ window.__nyx = (function () {
     }).join("\\n").trim();
   }
 
+  // ChatGPT's 2026-09 home layout ("Chat | Work") drops data-message-author-role
+  // and the conversation-turn test ids. A turn is then identified by its
+  // content search unit (key ending in ":user" / ":assistant") or, for an
+  // answer that has just finished, by the sr-only "ChatGPT said:" heading that
+  // carries data-conversation-role. The classic markup keeps priority so
+  // accounts still on it behave exactly as before.
+  function turnRole(el) {
+    const classic = el.getAttribute('data-message-author-role');
+    if (classic) return classic;
+    const unit = /:(user|assistant)$/.exec(el.getAttribute('data-content-search-unit-key') || '');
+    if (unit) return unit[1];
+    const role = el.getAttribute('data-conversation-role');
+    return role === 'assistant' || role === 'user' ? role : null;
+  }
+  function turnNodes() {
+    const main = document.querySelector('main') || document.body;
+    const classic = [...main.querySelectorAll('[data-message-author-role]')];
+    if (classic.length) return classic.map((el) => ({ el, role: el.getAttribute('data-message-author-role') }));
+    const out = [];
+    for (const el of main.querySelectorAll('[data-content-search-unit-key], [data-conversation-role]')) {
+      const role = turnRole(el);
+      if (role !== 'user' && role !== 'assistant') continue;
+      const heading = el.hasAttribute('data-conversation-role');
+      if (heading && el.closest('[data-content-search-unit-key]')) continue;
+      const node = heading ? (el.parentElement || el) : el;
+      if (out.some((t) => t.el === node || t.el.contains(node))) continue;
+      out.push({ el: node, role });
+    }
+    return out;
+  }
+  function turnContainerOf(el) {
+    return el.closest('[data-message-author-role], [data-content-search-unit-key]');
+  }
+
   function isStillGenerating() {
     const { input } = discoverControls();
     const region = input?.closest("form") || input?.parentElement;
-    const stop = region?.querySelector("button[data-testid='stop-button'], button[aria-label='Stop generating'], button[aria-label='Stop streaming'], button[aria-label='停止生成']");
-    if (stop && pickerElementVisible(stop) && !stop.closest('[data-message-author-role]')) return true;
+    const stop = region?.querySelector("button[data-testid='stop-button'], button[aria-label='Stop generating'], button[aria-label='Stop streaming'], button[aria-label='Stop'], button[aria-label='停止生成']");
+    if (stop && pickerElementVisible(stop) && !turnContainerOf(stop)) return true;
+    // The new layout announces "ChatGPT is responding" through a busy status
+    // span inside main while the answer streams.
+    const main = document.querySelector('main');
+    if (main && [...main.querySelectorAll('[role="status"][aria-busy="true"]')].some(pickerElementVisible)) return true;
     const turn = latestAssistantTurn();
     if (!turn) return false;
     // Explicit live state only. Collapsed reasoning and persistent Pro pills
@@ -700,7 +743,7 @@ window.__nyx = (function () {
   function errorCode() {
     const latest = latestAssistantTurn();
     const banners = [...document.querySelectorAll('[role="alert"], [data-testid="error-message"], [data-testid="conversation-error"]')]
-      .filter(el => pickerElementVisible(el) && (!el.closest('[data-message-author-role]') || latest?.contains(el)));
+      .filter(el => pickerElementVisible(el) && (!turnContainerOf(el) || latest?.contains(el)));
     const composer = discoverControls().input?.closest('form');
     if (composer) banners.push(...composer.querySelectorAll('[role="status"]'));
     for (const banner of banners) {
@@ -716,14 +759,14 @@ window.__nyx = (function () {
     document.querySelectorAll('[data-nyx-composer], [data-nyx-send]').forEach(el => {
       el.removeAttribute('data-nyx-composer'); el.removeAttribute('data-nyx-send');
     });
-    const valid = el => pickerElementVisible(el) && !el.closest('[data-message-author-role], [role="dialog"]') && (el.tagName === 'TEXTAREA' || el.isContentEditable);
+    const valid = el => pickerElementVisible(el) && !el.closest('[data-message-author-role], [data-content-search-unit-key], [role="dialog"]') && (el.tagName === 'TEXTAREA' || el.isContentEditable);
     const exact = [...document.querySelectorAll('#prompt-textarea, [data-testid="prompt-textarea"], [contenteditable="true"][role="textbox"]')].filter(valid);
     const candidates = exact.length ? exact : [...document.querySelectorAll('main form textarea, main form [contenteditable="true"], main [role="textbox"]')].filter(valid);
     const input = candidates.length === 1 ? candidates[0] : null;
     if (!input) return { input: null, send: null };
     input.setAttribute('data-nyx-composer', '');
     let region = input.closest('form') || input.parentElement;
-    const selector = 'button[data-testid="send-button"], button[aria-label="Send prompt"], button[aria-label="发送提示"], button[aria-label="Send message"], button[aria-label="发送消息"]';
+    const selector = 'button[data-testid="send-button"], button[aria-label="Send prompt"], button[aria-label="Send"], button[aria-label="发送提示"], button[aria-label="Send message"], button[aria-label="发送消息"]';
     while (region && region !== document.body && !region.querySelector(selector) && !input.closest('form')) region = region.parentElement;
     const known = [...(region?.querySelectorAll(selector) || [])].filter(pickerElementVisible);
     const fallback = input.closest('form') ? [...input.closest('form').querySelectorAll('button[type="submit"]')].filter(pickerElementVisible) : [];
@@ -735,19 +778,19 @@ window.__nyx = (function () {
 
   function structuralProbe() {
     const { input, send } = discoverControls();
-    const roles = [...document.querySelectorAll('[data-message-author-role]')];
-    const role = roles.at(-1)?.getAttribute('data-message-author-role');
+    const roles = turnNodes();
+    const role = roles.at(-1)?.role;
     const login = [...document.querySelectorAll('a,button')].some(el => /^(log in|sign up|登录|注册)$/i.test((el.textContent || '').trim()));
     const account = document.querySelector('[data-testid="profile-button"], [data-testid="model-switcher-dropdown-button"]') ||
       [...document.querySelectorAll('header button[aria-haspopup]')].find(el => pickerElementVisible(el) && /^(chatgpt|gpt)[\\s_-]*[0-9]{1,3}(?:[._][0-9]{1,3})?(?=$|[\\s_-])/i.test((el.innerText || '').trim()));
-    return { composer_found: !!input, send_found: !!send, pill_found: !!document.querySelector('button.__composer-pill'),
+    return { composer_found: !!input, send_found: !!send, pill_found: !!document.querySelector('button.__composer-pill, button[aria-haspopup="menu"][aria-label="Select ChatGPT model"]'),
       helper_installed: !!window.__nyx, logged_in: !login && !!(input || account),
       url_host: ['chatgpt.com', 'chat.openai.com'].includes(location.hostname) ? location.hostname : 'other',
       error_banner: !!errorCode(), latest_turn_role: ['assistant', 'user'].includes(role) ? role : 'none', turns: roles.length };
   }
 
   function assistantCount() {
-    return document.querySelectorAll("[data-message-author-role='assistant']").length;
+    return turnNodes().filter((turn) => turn.role === 'assistant').length;
   }
 
   // Structure only, never content: what the page looked like when a task
@@ -789,13 +832,13 @@ window.__nyx = (function () {
       const scope = turns[turns.length - 1];
       return scope.querySelector("[data-message-author-role='user']") ? null : scope;
     }
-    const els = main.querySelectorAll("[data-message-author-role]");
-    const last = els[els.length - 1];
-    return last?.getAttribute('data-message-author-role') === 'assistant' ? last : null;
+    const nodes = turnNodes();
+    const last = nodes[nodes.length - 1];
+    return last?.role === 'assistant' ? last.el : null;
   }
 
   function scrollContainer() {
-    const firstMessage = document.querySelector("[data-message-author-role]");
+    const firstMessage = document.querySelector("[data-message-author-role]") || turnNodes()[0]?.el || null;
     let el = firstMessage ? firstMessage.parentElement : null;
     while (el && el !== document.body && el !== document.documentElement) {
       try {
@@ -816,7 +859,8 @@ window.__nyx = (function () {
   function extractResponse() {
     const scope = latestAssistantTurn();
     if (!scope) return "";
-    const assistant = scope.matches("[data-message-author-role='assistant']") ? scope : scope.querySelector("[data-message-author-role='assistant']");
+    const assistant = scope.matches("[data-message-author-role='assistant']") ? scope
+      : (scope.querySelector("[data-message-author-role='assistant']") || (turnRole(scope) === 'assistant' ? scope : null));
     return assistant ? cleanText(extractTextWithMath(assistant)) : "";
   }
 
@@ -886,12 +930,8 @@ window.__nyx = (function () {
 
   // Full conversation: every user/assistant turn in order.
   function extractTranscript() {
-    const main = document.querySelector("main") || document.body;
-    const nodes = main.querySelectorAll("[data-message-author-role]");
     const turns = [];
-    for (const el of nodes) {
-      const role = el.getAttribute("data-message-author-role");
-      if (role !== "user" && role !== "assistant") continue;
+    for (const { el, role } of turnNodes()) {
       const text = cleanText(extractTextWithMath(el));
       if (text) turns.push({ role, text });
     }
@@ -899,15 +939,13 @@ window.__nyx = (function () {
   }
 
   function extractTranscriptKeys() {
-    const main = document.querySelector("main") || document.body;
-    const nodes = Array.from(main.querySelectorAll("[data-message-author-role]"));
+    const nodes = turnNodes();
     const turns = [];
     let fallbackIndex = 0;
-    for (const el of nodes) {
-      const role = el.getAttribute("data-message-author-role");
-      if (role !== "user" && role !== "assistant") continue;
+    for (const { el, role } of nodes) {
       const turn = el.closest('[data-testid^="conversation-turn"]');
-      const testid = turn ? turn.getAttribute("data-testid") : "";
+      const testid = turn ? turn.getAttribute("data-testid")
+        : (el.getAttribute("data-chatgpt-search-message-ids") || el.getAttribute("data-content-search-unit-key") || "");
       let key = testid || role + "#" + fallbackIndex++;
       const text = cleanText(extractTextWithMath(el));
       if (!text) continue;
@@ -1628,7 +1666,7 @@ function observeSubmissionRejection(page) {
 }
 const COMPOSER_SELECTOR = "[data-nyx-composer]";
 const SEND_SELECTOR = "[data-nyx-send]";
-const PILL_SELECTOR = 'button.__composer-pill[aria-haspopup="menu"]:visible:not([data-nyx-switcher])';
+const PILL_SELECTOR = 'button.__composer-pill[aria-haspopup="menu"]:visible:not([data-nyx-switcher]), button[aria-haspopup="menu"][aria-label="Select ChatGPT model"]:visible:not([data-nyx-switcher])';
 const COMPOSER_REGION_XPATH = "xpath=ancestor::*[.//button[@data-testid='send-button' or @aria-label='Send prompt' or @aria-label='发送提示']][1]";
 
 const MODEL_LEVELS = [
@@ -1754,6 +1792,18 @@ export function familyUnverifiableButAcceptable(requested, observed) {
   if (!request || /\d+[._]\d+/.test(request)) return false;
   const targets = modelLevelTargets(request);
   return targets.length > 0 && pillShowsLevel(observed, targets);
+}
+
+// The picker's own "Select model" row ("6 Pro") names the family even when the
+// composer control shows only the level; the version radios remain the fallback.
+export function familyFromPickerItems(items) {
+  for (const item of items || []) {
+    const compact = compactModelLabel(String(item?.text || '').trim().split(/\r?\n/).slice(0, 2).join(' '));
+    if (!compact) continue;
+    const metadata = switcherMetadata(compact);
+    if (metadata !== 'unrecognized') return metadata;
+  }
+  return familyFromModelRadios(items);
 }
 
 export function switcherMetadataMatches(metadata, requested) {
@@ -2121,7 +2171,7 @@ export async function pickerSnapshot(page, budget = interactionBudget(1000)) {
     if (!form) while (region && !region.querySelector(sendSelector)) region = region.parentElement;
     if (region === body || region === document.documentElement) region = null;
     // Model tiers are not effort evidence, even when the trigger looks like a pill.
-    let pills = [...body.querySelectorAll('button.__composer-pill[aria-haspopup="menu"]:not([data-nyx-switcher])')].filter(visible);
+    let pills = [...body.querySelectorAll('button.__composer-pill[aria-haspopup="menu"]:not([data-nyx-switcher]), button[aria-haspopup="menu"][aria-label="Select ChatGPT model"]:not([data-nyx-switcher])')].filter(visible);
     // Self-heal a stranded switcher marker. readModelSwitcher stamps
     // data-nyx-switcher on whichever control it claims, and on a page with no
     // header switcher that claim lands on the composer pill itself - so the
@@ -2134,7 +2184,7 @@ export async function pickerSnapshot(page, budget = interactionBudget(1000)) {
     // load-bearing (it is how the effort step avoids re-picking the switcher)
     // and must stay.
     if (!pills.length) {
-      const stranded = [...body.querySelectorAll('button.__composer-pill[aria-haspopup="menu"][data-nyx-switcher]')].filter(visible);
+      const stranded = [...body.querySelectorAll('button.__composer-pill[aria-haspopup="menu"][data-nyx-switcher], button[aria-haspopup="menu"][aria-label="Select ChatGPT model"][data-nyx-switcher]')].filter(visible);
       if (stranded.length) {
         stranded.forEach((el) => el.removeAttribute('data-nyx-switcher'));
         pills = stranded;
@@ -2267,8 +2317,8 @@ async function closeOpenMenus(page, budget) {
 // Levels are ordered Instant, Medium, High, Extra High, Pro from the minimum.
 // A range shorter than five entries hides the top levels (Pro disappears when
 // its usage limit is reached), never the bottom ones.
-const EFFORT_SLIDER_CONTAINER_SELECTOR = '[data-model-reasoning-effort-slider]';
-const EFFORT_SLIDER_SELECTOR = '[data-model-reasoning-effort-slider] [role="slider"]';
+const EFFORT_SLIDER_CONTAINER_SELECTOR = '[data-model-reasoning-effort-slider], [role="menu"] [role="menuitem"]:has([role="slider"])';
+const EFFORT_SLIDER_SELECTOR = '[data-model-reasoning-effort-slider] [role="slider"], [role="menu"] [role="menuitem"] [role="slider"]';
 const EFFORT_SLIDER_LEVELS = ["Instant", "Medium", "High", "Extra High", "Pro"];
 const EFFORT_SLIDER_STEP_MS = 1000;
 
@@ -2318,7 +2368,7 @@ async function effortSliderState(page, budget) {
     if (Date.now() >= deadline) return null;
     const menus = window.__nyx?.modelPickerMenus(pickerId) || [];
     const slider = [...body.querySelectorAll(selector)].find((el) => {
-      const container = el.closest("[data-model-reasoning-effort-slider]");
+      const container = el.closest('[data-model-reasoning-effort-slider], [role="menuitem"]');
       const rect = container?.getBoundingClientRect();
       return rect && rect.width > 0 && rect.height > 0 && menus.includes(el.closest('[role="menu"], [role="listbox"]'));
     });
@@ -2346,7 +2396,7 @@ async function selectEffortBySlider(page, targets, budget, result, state) {
   if (plan.unavailable && plan.hint === "unsupported") return false;
   budget.picker.recognizedLevels = true;
   // The menu is open here, so this snapshot carries the version radios.
-  budget.picker.family = familyFromModelRadios((await pickerSnapshot(page, budget)).items);
+  budget.picker.family = familyFromPickerItems((await pickerSnapshot(page, budget)).items);
   budget.picker.slider = { min: state.min, max: state.max, before: state.value, hint: plan.hint || null };
   if (plan.unavailable) {
     await closeOpenMenus(page, budget);

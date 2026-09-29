@@ -37,7 +37,8 @@ use crate::{
         channel_bot::ChannelBot,
         nyxbot_channel::{
             COLLECTION_NAME as CHANNELS, EVENTS_COLLECTION_NAME as EVENTS, NyxbotChannel,
-            NyxbotEvent, NyxbotThread, THREADS_COLLECTION_NAME as THREADS,
+            NyxbotEvent, NyxbotThread, NyxbotWatch, THREADS_COLLECTION_NAME as THREADS,
+            WATCHES_COLLECTION_NAME as WATCHES,
         },
     },
     services::{
@@ -182,6 +183,13 @@ pub struct ChannelAgentResponse {
     owner_linked: bool,
     /// The agent this bot reaches; `None` means the owner's NyxBot.
     agent_id: Option<String>,
+    /// `ok` or `failing` once a message has been judged; `None` before.
+    delivery_status: Option<String>,
+    /// Stable code of the newest lost message (see `delivery_reason`).
+    delivery_error: Option<String>,
+    /// Plain words for `delivery_error`.
+    delivery_reason: Option<String>,
+    delivery_failed_at: Option<chrono::DateTime<Utc>>,
     created_at: chrono::DateTime<Utc>,
 }
 impl From<&NyxbotChannel> for ChannelAgentResponse {
@@ -197,6 +205,13 @@ impl From<&NyxbotChannel> for ChannelAgentResponse {
             last_error: row.last_error.clone(),
             owner_linked: !row.owner_sender_ids.is_empty(),
             agent_id: row.agent_id.clone(),
+            delivery_status: row.delivery_status.clone(),
+            delivery_error: row.delivery_error.clone(),
+            delivery_reason: row
+                .delivery_error
+                .as_deref()
+                .map(|code| status::failure_reason(code, &row.transport)),
+            delivery_failed_at: row.delivery_failed_at,
             created_at: row.created_at,
         }
     }
@@ -340,6 +355,9 @@ pub async fn connect(
             "That channel bot is not active".into(),
         ));
     }
+    // Owners verified on a connection being rebuilt stay verified: the bot
+    // and their chat-app account are the same.
+    let mut verified_owners: Vec<String> = Vec::new();
     if let Some(existing) = active_for_bot(state, owner, &bot.id).await? {
         let keys_alive = key_service::get_api_key(&state.db, owner, &existing.route_api_key_id)
             .await
@@ -350,7 +368,9 @@ pub async fn connect(
                     .is_ok_and(|key| key.is_active),
                 None => true,
             };
-        if existing.status == "active" && keys_alive {
+        // A channel whose messages stopped arriving is rebuilt from scratch.
+        let healthy = existing.delivery_status.as_deref() != Some("failing");
+        if existing.status == "active" && keys_alive && healthy {
             link(state, owner, &existing.id, agent).await?;
             let existing = load_channel(state, owner, &existing.id).await?;
             let link = refresh_link_code(state, &existing).await?;
@@ -358,6 +378,7 @@ pub async fn connect(
         }
         // A half-created or broken connection (e.g. a key was deleted) is
         // released first, then rebuilt from scratch.
+        verified_owners = existing.owner_sender_ids.clone();
         disconnect(state, owner, &existing.id).await?;
     }
     // Never silently replace another agent's default route.
@@ -436,11 +457,25 @@ pub async fn connect(
         gateway_record_id: None,
         gateway_version: None,
         binding_id: None,
-        owner_sender_ids: known_owner_senders(state, owner, &platform).await,
+        owner_sender_ids: {
+            let mut ids = known_owner_senders(state, owner, &platform).await;
+            for id in verified_owners {
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+            ids
+        },
         link_code_hash: None,
         link_code_expires_at: None,
         source_conversation_id: source_conversation_id.map(str::to_owned),
         agent_id: Some(agent.id.clone()),
+        delivery_status: None,
+        delivery_error: None,
+        delivery_failed_at: None,
+        delivery_seen_at: None,
+        delivery_checked_at: None,
+        delivery_notified_at: None,
         created_at: now,
         updated_at: now,
     };
@@ -872,6 +907,345 @@ pub(crate) async fn connect_tool(
     ))
 }
 
+/// A pending setup link stays usable this long.
+const SETUP_WATCH_TTL_MINUTES: i64 = 120;
+/// A connect link can finish this long after it expires (OAuth finalization).
+const CONNECT_WATCH_GRACE_MINUTES: i64 = 30;
+
+/// The onboarding page for a platform the owner can register now. Telegram
+/// prefers creation inside Telegram (`telegram-new`) when an administrator has
+/// configured it, else the bot-token form.
+async fn setup_platform(state: &AppState, requested: &str) -> AppResult<(String, String)> {
+    let entries = crate::services::channel_platform_catalog_service::list(
+        &state.db,
+        &state.token_exchange_cache,
+    )
+    .await?;
+    let available =
+        |entry: &crate::services::channel_platform_catalog_service::PlatformCatalogEntry| {
+            entry.registration.enabled
+                && entry
+                    .platform_credentials
+                    .as_ref()
+                    .is_none_or(|(_, configured)| *configured)
+        };
+    let requested = requested.trim().to_ascii_lowercase();
+    let candidates: Vec<&str> = match requested.as_str() {
+        "telegram" => vec!["telegram-new", "telegram"],
+        other => vec![other],
+    };
+    for candidate in candidates {
+        if let Some(entry) = entries
+            .iter()
+            .find(|entry| entry.platform == candidate && available(entry))
+        {
+            return Ok((entry.platform.clone(), entry.display_name.clone()));
+        }
+    }
+    let names: Vec<&str> = entries
+        .iter()
+        .filter(|entry| available(entry))
+        .map(|entry| canonical_platform(&entry.platform))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    Err(AppError::ValidationError(format!(
+        "That channel is not available. Available: {}",
+        names.join(", ")
+    )))
+}
+
+/// Start creating a channel bot: the owner opens NyxID's onboarding page (bot
+/// secrets never pass through chat), and the new bot is linked to `agent`
+/// automatically once it exists.
+pub(crate) async fn setup_link_tool(
+    state: &AppState,
+    owner: &str,
+    source_conversation_id: &str,
+    platform: &str,
+    label: Option<&str>,
+    agent: &crate::models::assistant_agent::AssistantAgent,
+) -> AppResult<(Value, bool)> {
+    if agent.destroyed_at.is_some() {
+        return Err(AppError::Conflict("That agent was destroyed".into()));
+    }
+    let (platform, display_name) = setup_platform(state, platform).await?;
+    let label = label
+        .map(|label| excerpt(label.trim(), 60))
+        .filter(|label| !label.is_empty());
+    let mut url = format!(
+        "{}/channel-bots/connect/{}",
+        state.config.frontend_url.trim_end_matches('/'),
+        urlencode(&platform)
+    );
+    if let Some(label) = &label {
+        url.push_str(&format!("?label={}", urlencode(label)));
+    }
+    let now = Utc::now();
+    let family = canonical_platform(&platform).to_owned();
+    // One pending link per owner and platform: a new link replaces the last.
+    state
+        .db
+        .collection::<NyxbotWatch>(WATCHES)
+        .update_one(
+            doc! {"user_id": owner, "kind": "channel_bot", "platform": &family,
+            "status": "pending"},
+            doc! {
+                "$set": {
+                    "agent_id": &agent.id,
+                    "conversation_id": source_conversation_id,
+                    "created_at": bson::DateTime::from_chrono(now),
+                    "expires_at": bson::DateTime::from_chrono(
+                        now + ChronoDuration::minutes(SETUP_WATCH_TTL_MINUTES)
+                    ),
+                },
+                "$setOnInsert": {"_id": Uuid::new_v4().to_string()},
+            },
+        )
+        .upsert(true)
+        .await?;
+    let steps = if platform == "telegram-new" {
+        "Open the link, check the bot name, and press Continue in Telegram. Telegram creates \
+        the bot; no token to copy."
+    } else if platform == "telegram" {
+        "Create a bot with @BotFather in Telegram, then open the link and paste its token there \
+        (never in this chat)."
+    } else {
+        "Open the link and follow the steps on that page. Enter any keys or secrets there, \
+        never in this chat."
+    };
+    Ok((
+        json!({
+            "url": url,
+            "platform": display_name,
+            "steps": steps,
+            "links_to": agent.name,
+            "expires_in_minutes": SETUP_WATCH_TTL_MINUTES,
+            "note": "Give the user this link and end your turn. Do not ask them to reply when \
+                done: once the bot exists NyxID links it and wakes you with the \
+                owner-verification step to pass on.",
+        }),
+        false,
+    ))
+}
+
+/// Watch a hosted connect link a chat minted, so the chat resumes by itself
+/// when the user finishes (or declines) instead of waiting for "connected".
+pub(crate) async fn watch_connect_link(
+    db: &mongodb::Database,
+    owner: &str,
+    conversation_id: &str,
+    connect_link_id: &str,
+) -> AppResult<()> {
+    let link = db
+        .collection::<crate::models::connect_link::ConnectLink>(
+            crate::models::connect_link::COLLECTION_NAME,
+        )
+        .find_one(doc! {"_id": connect_link_id, "user_id": owner})
+        .await?
+        .ok_or_else(|| AppError::NotFound("Connect link not found".into()))?;
+    let now = Utc::now();
+    db.collection::<NyxbotWatch>(WATCHES)
+        .insert_one(NyxbotWatch {
+            id: Uuid::new_v4().to_string(),
+            user_id: owner.into(),
+            kind: "connect_link".into(),
+            conversation_id: conversation_id.into(),
+            status: "pending".into(),
+            platform: None,
+            agent_id: None,
+            channel_bot_id: None,
+            connect_link_id: Some(connect_link_id.into()),
+            last_error: None,
+            checked_at: None,
+            created_at: now,
+            expires_at: link.expires_at.max(now)
+                + ChronoDuration::minutes(CONNECT_WATCH_GRACE_MINUTES),
+        })
+        .await?;
+    Ok(())
+}
+
+/// Claim a pending watch once across replicas.
+async fn claim(state: &AppState, watch: &NyxbotWatch, extra: bson::Document) -> AppResult<bool> {
+    let mut set = doc! {"status": "claimed"};
+    set.extend(extra);
+    Ok(state
+        .db
+        .collection::<NyxbotWatch>(WATCHES)
+        .update_one(
+            doc! {"_id": &watch.id, "status": "pending"},
+            doc! {"$set": set},
+        )
+        .await?
+        .modified_count
+        == 1)
+}
+
+async fn settle(state: &AppState, watch: &NyxbotWatch, error: Option<&'static str>) {
+    let _ = state
+        .db
+        .collection::<NyxbotWatch>(WATCHES)
+        .update_one(
+            doc! {"_id": &watch.id},
+            doc! {"$set": {"status": if error.is_some() { "failed" } else { "done" },
+            "last_error": error}},
+        )
+        .await;
+}
+
+async fn wake_with(state: &AppState, watch: &NyxbotWatch, kind: &str, text: String) {
+    super::assistant_team::notify(
+        state,
+        &watch.user_id,
+        &watch.conversation_id,
+        vec![crate::services::assistant_team_service::event(
+            kind, text, None,
+        )],
+    )
+    .await;
+}
+
+/// Resolve pending watches: link bots created from setup links, and report
+/// finished connect links, waking the thread that is waiting.
+pub(crate) async fn process_watches(state: &AppState) -> AppResult<()> {
+    let watches: Vec<NyxbotWatch> = state
+        .db
+        .collection::<NyxbotWatch>(WATCHES)
+        .find(doc! {"status": "pending", "expires_at": {"$gt": bson::DateTime::now()}})
+        .sort(doc! {"checked_at": 1, "created_at": 1})
+        .limit(100)
+        .await?
+        .try_collect()
+        .await?;
+    let ids: Vec<&str> = watches.iter().map(|watch| watch.id.as_str()).collect();
+    state
+        .db
+        .collection::<NyxbotWatch>(WATCHES)
+        .update_many(
+            doc! {"_id": {"$in": ids}},
+            doc! {"$set": {"checked_at": bson::DateTime::now()}},
+        )
+        .await?;
+    for watch in watches {
+        let result = match watch.kind.as_str() {
+            "channel_bot" => channel_bot_watch(state, &watch).await,
+            "connect_link" => connect_link_watch(state, &watch).await,
+            _ => Ok(()),
+        };
+        if let Err(error) = result {
+            tracing::debug!(%error, "NyxBot watch deferred");
+        }
+    }
+    Ok(())
+}
+
+async fn channel_bot_watch(state: &AppState, watch: &NyxbotWatch) -> AppResult<()> {
+    let (Some(platform), Some(agent_id)) = (watch.platform.as_deref(), watch.agent_id.as_deref())
+    else {
+        return Ok(());
+    };
+    let owner = watch.user_id.as_str();
+    let mut candidate = None;
+    for bot in channel_bot_service::list_bots(&state.db, owner).await? {
+        // Newest first; only bots created after the link was issued.
+        if bot.created_at < watch.created_at - ChronoDuration::seconds(5) {
+            break;
+        }
+        if canonical_platform(&bot.platform) == platform
+            && active_for_bot(state, owner, &bot.id).await?.is_none()
+        {
+            candidate = Some(bot);
+            break;
+        }
+    }
+    let Some(bot) = candidate else {
+        return Ok(());
+    };
+    if !claim(state, watch, doc! {"channel_bot_id": &bot.id}).await? {
+        return Ok(());
+    }
+    let outcome =
+        match crate::services::assistant_team_service::agent(&state.db, owner, agent_id).await {
+            Ok(agent) => connect_tool(state, owner, &watch.conversation_id, &bot.id, &agent)
+                .await
+                .map(|(value, _)| (agent, value)),
+            Err(error) => Err(error),
+        };
+    let text = match &outcome {
+        Ok((agent, value)) => format!(
+            "The {} channel bot {} the user just created is now linked to {}. Give the user \
+            its owner-verification step: {}",
+            identifier(&bot.platform),
+            identifier(&bot.label),
+            identifier(&agent.name),
+            value["link"]
+        ),
+        Err(error) => format!(
+            "The {} channel bot {} was created but could not be linked ({}). Try \
+            nyxid__connect_channel_bot with bot_id {}.",
+            identifier(&bot.platform),
+            identifier(&bot.label),
+            error_code(error),
+            bot.id
+        ),
+    };
+    settle(state, watch, outcome.as_ref().err().map(error_code)).await;
+    wake_with(state, watch, "channel_bot_linked", text).await;
+    Ok(())
+}
+
+async fn connect_link_watch(state: &AppState, watch: &NyxbotWatch) -> AppResult<()> {
+    use crate::models::connect_link::{COLLECTION_NAME as LINKS, ConnectLink, ConnectLinkStatus};
+    let Some(link_id) = watch.connect_link_id.as_deref() else {
+        return Ok(());
+    };
+    let Some(link) = state
+        .db
+        .collection::<ConnectLink>(LINKS)
+        .find_one(doc! {"_id": link_id, "user_id": &watch.user_id})
+        .await?
+    else {
+        settle(state, watch, Some("not_found")).await;
+        return Ok(());
+    };
+    let text = match link.status {
+        ConnectLinkStatus::Pending => return Ok(()),
+        ConnectLinkStatus::Completed => format!(
+            "The user finished connecting {} (connect_link_id {link_id}). Continue the task \
+            that needed it now; do not ask them to confirm.",
+            identifier(&link.service_slug)
+        ),
+        ConnectLinkStatus::Cancelled => format!(
+            "The user declined connecting {} (connect_link_id {link_id}).",
+            identifier(&link.service_slug)
+        ),
+        // An unused link that ran out needs no reply from anyone.
+        ConnectLinkStatus::Expired => {
+            if claim(state, watch, doc! {}).await? {
+                settle(state, watch, Some("expired")).await;
+            }
+            return Ok(());
+        }
+    };
+    if !claim(state, watch, doc! {}).await? {
+        return Ok(());
+    }
+    settle(state, watch, None).await;
+    wake_with(state, watch, "connection_finished", text).await;
+    Ok(())
+}
+
+/// Stable code for an error, never its prose.
+fn error_code(error: &AppError) -> &'static str {
+    match error {
+        AppError::NotFound(_) => "not_found",
+        AppError::Conflict(_) => "conflict",
+        AppError::ValidationError(_) => "invalid",
+        _ => "unavailable",
+    }
+}
+
 /// Point a connected bot at another agent. Existing chats keep their history
 /// with the previous agent; new messages start threads with the new one.
 pub async fn link(
@@ -1072,11 +1446,45 @@ async fn admit_sender(
             }),
         )
         .await;
-        return Ok(Some(Inbound::Reply(
-            "Linked. I'm your NyxBot: I can use your NyxID services and account here. \
-            Send me anything to get started."
-                .into(),
-        )));
+        let agent_name = match row.agent_id.as_deref() {
+            Some(agent_id) => {
+                crate::services::assistant_team_service::agent(&state.db, &row.user_id, agent_id)
+                    .await
+                    .map(|agent| agent.name)
+                    .unwrap_or_else(|_| "NyxBot".into())
+            }
+            None => "NyxBot".into(),
+        };
+        // The chat that set the bot up hears about it without the user
+        // coming back to say so.
+        if let Some(source) = row.source_conversation_id.clone() {
+            let state = state.clone();
+            let owner = row.user_id.clone();
+            let text = format!(
+                "The user verified their {} account on channel bot {}; it now reaches {} \
+                there. No confirmation is needed.",
+                identifier(&row.platform),
+                identifier(&row.bot_label),
+                identifier(&agent_name)
+            );
+            tokio::spawn(async move {
+                super::assistant_team::notify(
+                    &state,
+                    &owner,
+                    &source,
+                    vec![crate::services::assistant_team_service::event(
+                        "channel_owner_verified",
+                        text,
+                        None,
+                    )],
+                )
+                .await;
+            });
+        }
+        return Ok(Some(Inbound::Reply(format!(
+            "Linked. I'm {agent_name}, your NyxID agent: I can use your NyxID services and \
+            account here. Send me anything to get started."
+        ))));
     }
     if row.owner_sender_ids.iter().any(|id| id == sender.id) {
         return Ok(None);
@@ -1130,6 +1538,52 @@ async fn thread_conversation(
     Ok((thread, conversation_id))
 }
 
+/// Apply the owner's yes/no to a pending card of this chat thread, audited
+/// like a card decision. Returns whether it confirmed.
+async fn reply_decision(
+    state: &AppState,
+    row: &NyxbotChannel,
+    conversation_id: &str,
+    text: &str,
+) -> AppResult<Option<bool>> {
+    use crate::services::assistant_acknowledgement_service as acks;
+    if acks::parse_reply(text).is_none() {
+        return Ok(None);
+    }
+    // The owner's previous message: only cards raised after it are answered
+    // by a plain yes/no.
+    let since = engine::messages(&state.db, &row.user_id, conversation_id, 100, None)
+        .await?
+        .into_iter()
+        .rev()
+        .find(|message| message.role == "user")
+        .map(|message| message.created_at);
+    let Some(decided) = acks::decide_reply(
+        &state.db,
+        &row.user_id,
+        &[conversation_id.to_owned()],
+        text,
+        since,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    acks::audit_decision(
+        &state.db,
+        &crate::services::audit_service::AuditActor {
+            user_id: row.user_id.clone(),
+            ip_address: None,
+            user_agent: None,
+            api_key_id: None,
+            api_key_name: None,
+        },
+        &decided,
+    )
+    .await;
+    Ok(Some(decided.status == "allowed"))
+}
+
 async fn start_owner_turn(
     state: &AppState,
     row: &NyxbotChannel,
@@ -1141,12 +1595,21 @@ async fn start_owner_turn(
     let exists = engine::get(&state.db, &row.user_id, &conversation_id)
         .await
         .is_ok();
+    // A chat app cannot show NyxID's confirmation cards: the verified owner
+    // answers one in words (see `decide_reply` for which card it decides).
+    let mut answered = None;
+    if exists {
+        match reply_decision(state, row, &conversation_id, text).await {
+            Ok(decided) => answered = decided,
+            Err(error) => tracing::debug!(%error, "Chat confirmation not applied"),
+        }
+    }
     let chat = if sender.private_chat {
         "a private chat"
     } else {
         "a group chat"
     };
-    let note = format!(
+    let mut note = format!(
         "This message came through the owner's {} channel bot {} from {} ({chat}); NyxID \
         verified this sender as the owner.",
         identifier(&row.platform),
@@ -1156,6 +1619,14 @@ async fn start_owner_turn(
             .map(|name| format!("\"{}\"", excerpt(name, 60).replace('"', "'")))
             .unwrap_or_else(|| "the owner".into()),
     );
+    if let Some(allow) = answered {
+        note.push_str(if allow {
+            " With this message the owner confirmed the pending action; retry it with its \
+            acknowledgement_id."
+        } else {
+            " With this message the owner declined the pending action; do not retry it."
+        });
+    }
     let start = TurnStart {
         conversation_id: exists.then(|| conversation_id.clone()),
         new_id: (!exists).then(|| conversation_id.clone()),
@@ -1185,6 +1656,7 @@ async fn start_owner_turn(
             }
         }),
         report_to: None,
+        group_id: None,
     };
     match start_server_turn(
         state,
@@ -2062,3 +2534,7 @@ pub async fn relay_callback(
 #[cfg(test)]
 #[path = "nyxbot_tests.rs"]
 mod tests;
+
+#[path = "nyxbot_status.rs"]
+mod status;
+pub(crate) use status::{WaitingItem, check_deliveries, waiting};

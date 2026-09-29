@@ -111,7 +111,9 @@ export function useNyxAgentAssistantChat({
       if (
         (previous?.conversation.active_turn && !page.conversation.active_turn) ||
         previous?.conversation.pending_acknowledgements !==
-          page.conversation.pending_acknowledgements
+          page.conversation.pending_acknowledgements ||
+        // Something the thread waited for happened: NyxID resumes it.
+        (previous?.waiting.length ?? 0) > page.waiting.length
       ) {
         await Promise.all([
           queryClient.invalidateQueries({ queryKey: threadsKey }),
@@ -130,27 +132,20 @@ export function useNyxAgentAssistantChat({
       query.state.data?.acknowledgements.some((row) => row.status === "pending") ||
       (query.state.data?.approvals.length ?? 0) > 0
         ? 2000
-        : false,
-  });
-  const models = useQuery({
-    queryKey: ["assistant", "nyxagent", userId, "models"],
-    queryFn: () => nyxAgentTransport.models(),
-    enabled: enabled && Boolean(userId),
-    staleTime: 60_000,
+        : // Waiting on something outside the chat (NyxID checks every 15 s):
+          // notice when it happens.
+          (query.state.data?.waiting.length ?? 0) > 0
+          ? 10_000
+          : false,
   });
   const send = useCallback(
     async (text: string) => {
       try {
         await liveSend(selectedConversationId, text, onConversationAdopted, draftAgent);
       } finally {
-        // A first turn may have provisioned the credential needed for profile
-        // discovery; a new thread changes its agent's summary.
-        await Promise.all([
-          queryClient.invalidateQueries({
-            queryKey: ["assistant", "nyxagent", userId, "models"],
-          }),
-          queryClient.invalidateQueries({ queryKey: agentsKey }),
-        ]);
+        // A new thread changes its agent's summary. (Model routing is
+        // server-side, so there is no profile list to refresh.)
+        await queryClient.invalidateQueries({ queryKey: agentsKey });
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -281,6 +276,8 @@ export function useNyxAgentAssistantChat({
 
   return {
     approvals: nyxAgentTransport.getHistory(selectedConversationId)?.approvals ?? [],
+    /** What the thread is waiting for outside the chat. */
+    waiting: nyxAgentTransport.getHistory(selectedConversationId)?.waiting ?? [],
     decideApproval,
     /** `threadsAgentId`'s threads, newest first. */
     conversations:
@@ -299,9 +296,6 @@ export function useNyxAgentAssistantChat({
     decidingAcknowledgement: decision.isPending ? decision.variables?.id : undefined,
     deleteConversation: (id: string) => nyxAgentTransport.delete(id),
     renameConversation: (id: string, title: string) => nyxAgentTransport.rename(id, title),
-    model: nyxAgentTransport.getModel(selectedConversationId),
-    setModel: (model: string) => nyxAgentTransport.setModel(model),
-    models: models.data ?? [{ id: "nyxagent/chat", label: "chat" }],
     beforeSeq: nyxAgentTransport.getHistory(selectedConversationId)?.before_seq,
     loadOlder: async () => {
       const before = nyxAgentTransport.getHistory(selectedConversationId)?.before_seq;

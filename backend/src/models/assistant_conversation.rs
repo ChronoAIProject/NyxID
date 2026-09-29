@@ -34,6 +34,9 @@ pub enum TurnOrigin {
     Orchestrator,
     Event,
     Channel,
+    /// A group chat addressed this member (a user message or another member's
+    /// @mention). Its reply is posted to the group.
+    Group,
 }
 
 /// A server-authored wake-up item waiting for the agent's next event turn.
@@ -155,6 +158,13 @@ pub struct AssistantConversation {
     /// Set on threads that answer a channel bot.
     #[serde(default)]
     pub channel: Option<ChannelOrigin>,
+    /// Set on a member's hidden thread in a group chat: the agent speaks in
+    /// the group through it, with its own key and memory.
+    #[serde(default)]
+    pub group_id: Option<String>,
+    /// The newest group message this member has already been given.
+    #[serde(default)]
+    pub group_seen_seq: i64,
 }
 
 impl AssistantConversation {

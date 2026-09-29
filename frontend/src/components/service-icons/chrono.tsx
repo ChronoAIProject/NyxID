@@ -1,5 +1,5 @@
 import type { ReactNode, SVGProps } from "react";
-import { FlatBadgeWrapper } from "./_shared";
+import { IconBadge } from "./_shared";
 
 export function ChronoGlyph(
   props: SVGProps<SVGSVGElement> & { "data-slug"?: string },
@@ -29,8 +29,16 @@ export function ChronoServiceIcon({
   readonly className?: string;
 }) {
   return (
-    <FlatBadgeWrapper className={className} badge={badge}>
-      <ChronoGlyph data-slug={slug} className="h-full w-full" />
-    </FlatBadgeWrapper>
+    // Chrono's source mark is intentionally horizontal (747:444). Keep that
+    // proportion so the glyph is not distorted, while giving it the natural
+    // width needed to reach the same visual height as square service marks.
+    <span
+      className={`relative inline-flex h-full w-full shrink-0 items-center justify-center ${className ?? "h-5 w-5"}`}
+    >
+      <span className="relative inline-flex h-full w-[168%] shrink-0 items-center justify-center [&>svg]:!h-full [&>svg]:!w-full">
+        <ChronoGlyph data-slug={slug} className="h-full w-full" />
+      </span>
+      <IconBadge badge={badge} />
+    </span>
   );
 }

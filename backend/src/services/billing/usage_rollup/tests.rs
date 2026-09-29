@@ -748,14 +748,27 @@ pub(crate) async fn seed_benchmark_day(
         .map(|row| {
             let mut row = row.clone();
             row.insert("hour", bson::DateTime::from_chrono(at));
+            // Money is Decimal128 credits now. The old integer-only fixture
+            // silently replaced those values with zero; the raw oracle and
+            // every benchmark expectation remain unchanged.
             for field in MEASURES {
-                row.insert(*field, integer(row.get(*field)) * hours);
+                if money_measure(field) {
+                    let amount = Credits::from_bson(row[*field].clone(), 1_000_000).unwrap();
+                    row.insert(*field, amount.checked_mul(hours).unwrap());
+                } else {
+                    row.insert(*field, integer(row.get(*field)) * hours);
+                }
             }
             let partitions = row.get_document_mut("cost_partitions").unwrap();
             for (_, value) in partitions.iter_mut() {
                 let part = value.as_document_mut().unwrap();
                 for field in MEASURES {
-                    part.insert(*field, integer(part.get(*field)) * hours);
+                    if money_measure(field) {
+                        let amount = Credits::from_bson(part[*field].clone(), 1_000_000).unwrap();
+                        part.insert(*field, amount.checked_mul(hours).unwrap());
+                    } else {
+                        part.insert(*field, integer(part.get(*field)) * hours);
+                    }
                 }
             }
             bson::from_document(row).unwrap()
@@ -779,4 +792,255 @@ pub(crate) async fn seed_benchmark_day(
         )
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn legacy_integer_hourly_and_daily_buckets_accept_exact_increments_once() {
+    let db = connect_test_database("exact_legacy_bucket_increment")
+        .await
+        .unwrap();
+    ensure_indexes(&db).await.unwrap();
+    let end = hour(Utc::now()) + chrono::Duration::minutes(17);
+    let at = end - chrono::Duration::hours(2);
+    let make = |amount: Credits| {
+        let mut value = row(at);
+        value.insert("wallet_id", "wallet");
+        value.insert("released", true);
+        value.insert("funding", doc! { "settled": true, "total_charge": amount,
+            "wallet_funded": amount, "grant_funded": Credits::ZERO, "allowance_funded": Credits::ZERO });
+        value
+    };
+    db.collection::<Document>(METERS)
+        .insert_one(make(Credits::from_micros(1)))
+        .await
+        .unwrap();
+    while fold_once(&db, end).await.unwrap() > 0 {}
+    // Reproduce the actual old storage scales, including its Decimal128
+    // micros query accelerator. New readers must use normalized measures.
+    for collection in [ROLLUPS, DAILY] {
+        let mut value = db
+            .collection::<Document>(collection)
+            .find_one(doc! {})
+            .await
+            .unwrap()
+            .unwrap();
+        for field in MEASURES.iter().filter(|field| money_measure(field)) {
+            let micros = Credits::from_bson(value[*field].clone(), 1_000_000)
+                .unwrap()
+                .legacy_micros()
+                .unwrap();
+            value.remove(*field);
+            value.insert(legacy_measure(field), micros);
+        }
+        let parts = value.get_document_mut("cost_partitions").unwrap();
+        let keys = parts.keys().cloned().collect::<Vec<_>>();
+        for key in keys {
+            let part = parts.get_document_mut(&key).unwrap();
+            for field in MEASURES.iter().filter(|field| money_measure(field)) {
+                let micros = Credits::from_bson(part[*field].clone(), 1_000_000)
+                    .unwrap()
+                    .legacy_micros()
+                    .unwrap();
+                part.remove(*field);
+                part.insert(legacy_measure(field), micros);
+            }
+        }
+        let mut mirror = Document::new();
+        for field in ["gross_cost", "wallet_cost", "grant_cost", "allowance_cost"] {
+            let old = legacy_measure(field);
+            let amount = value.get_i64(&old).unwrap().to_string();
+            mirror.insert(old, amount.parse::<bson::Decimal128>().unwrap());
+        }
+        value.insert("query_costs", mirror);
+        db.collection::<Document>(collection)
+            .replace_one(doc! { "_id": value.get_str("_id").unwrap() }, &value)
+            .await
+            .unwrap();
+    }
+    db.collection::<Document>("billing_migrations")
+        .delete_one(doc! { "_id": "exact-v2" })
+        .await
+        .unwrap();
+    assert!(
+        !crate::services::billing::exact_migration::rollup_ready(&db)
+            .await
+            .unwrap()
+    );
+    let before_normalization = read(&db, hour(at), end).await;
+    assert_eq!(
+        before_normalization.totals.gross_cost.unwrap(),
+        Credits::from_micros(1)
+    );
+    crate::services::billing::exact_migration::run(&db)
+        .await
+        .unwrap();
+    assert!(
+        crate::services::billing::exact_migration::rollup_ready(&db)
+            .await
+            .unwrap()
+    );
+    // Covered reads must distinguish an absent exact key from an explicit
+    // null; otherwise the legacy microcredit amount disappears before folding.
+    let legacy = read(&db, hour(at), end).await;
+    assert_eq!(legacy.totals.gross_cost.unwrap(), Credits::from_micros(1));
+    db.collection::<Document>(METERS)
+        .insert_one(make("0.0000008".parse().unwrap()))
+        .await
+        .unwrap();
+    while fold_once(&db, end).await.unwrap() > 0 {}
+    assert_eq!(fold_once(&db, end).await.unwrap(), 0);
+    for collection in [ROLLUPS, DAILY] {
+        let value = db
+            .collection::<Document>(collection)
+            .find_one(doc! {})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            Credits::from_bson(value["gross_cost"].clone(), 1_000_000)
+                .unwrap()
+                .to_string(),
+            "0.0000018"
+        );
+    }
+    let report = read(&db, hour(at), end).await;
+    assert_eq!(report.totals.gross_cost.unwrap().to_string(), "0.0000018");
+    assert_eq!(report.totals.gross_cost_micros, Some(1));
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn covering_index_upgrade_retires_only_superseded_definitions() {
+    let db = connect_test_database("rollup_index_upgrade").await.unwrap();
+    for (collection, bucket) in [(ROLLUPS, "hour"), (DAILY, "day")] {
+        let summaries = db.collection::<Document>(collection);
+        // The actual pre-v2 covering definition, retained as an upgrade fixture.
+        let keys = doc! {
+            bucket: 1, "single_display_key": 1,
+            "quantity": 1, "events": 1, "requests": 1,
+            "exact_cost_events": 1, "legacy_cost_events": 1,
+            "legacy_quantity": 1, "legacy_allowance_quantity": 1,
+            "legacy_grant": 1, "gross_cost_micros": 1, "wallet_cost_micros": 1,
+            "grant_cost_micros": 1, "allowance_cost_micros": 1,
+            "prompt_tokens": 1, "completion_tokens": 1, "cached_tokens": 1,
+            "cache_creation_tokens": 1,
+        };
+        let nested_keys: Document = keys
+            .iter()
+            .map(|(field, value)| {
+                let name = MEASURES
+                    .iter()
+                    .find(|measure| money_measure(measure) && legacy_measure(measure) == *field)
+                    .map_or_else(|| field.clone(), |measure| format!("query_costs.{measure}"));
+                (name, value.clone())
+            })
+            .collect();
+        summaries
+            .create_index(
+                IndexModel::builder()
+                    .keys(nested_keys)
+                    .options(
+                        IndexOptions::builder()
+                            .name("usage_rollup_reduce_window_exact_v3".to_string())
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await
+            .unwrap();
+        summaries
+            .create_index(
+                IndexModel::builder()
+                    .keys(keys)
+                    .options(
+                        IndexOptions::builder()
+                            .name("usage_rollup_reduce_window".to_string())
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await
+            .unwrap();
+        summaries
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! { "service_slug": 1 })
+                    .options(
+                        IndexOptions::builder()
+                            .name("custom_service_lookup".to_string())
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await
+            .unwrap();
+    }
+    ensure_indexes(&db).await.unwrap();
+    ensure_indexes(&db).await.unwrap();
+    for collection in [ROLLUPS, DAILY] {
+        let indexes: Vec<_> = db
+            .collection::<Document>(collection)
+            .list_indexes()
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        let names: Vec<_> = indexes
+            .iter()
+            .filter_map(|i| i.options.as_ref()?.name.as_deref())
+            .collect();
+        assert!(!names.contains(&"usage_rollup_reduce_window"));
+        assert!(!names.contains(&"usage_rollup_reduce_window_exact_v3"));
+        assert!(names.contains(&"usage_rollup_reduce_window_exact_v4"));
+        assert!(names.contains(&"custom_service_lookup"));
+    }
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn benchmark_daily_fixture_scales_decimal_money_and_quantities() {
+    let db = connect_test_database("benchmark_decimal_fixture")
+        .await
+        .unwrap();
+    ensure_indexes(&db).await.unwrap();
+    let end = day(Utc::now());
+    let mut value = row(end - chrono::Duration::hours(1));
+    let pico = Credits::from_pico(1).unwrap();
+    value.insert("wallet_id", "wallet");
+    value.insert("released", true);
+    value.insert(
+        "funding",
+        doc! {
+            "settled": true, "total_charge": pico, "wallet_funded": pico,
+            "grant_funded": Credits::ZERO, "allowance_funded": Credits::ZERO,
+        },
+    );
+    db.collection::<Document>(METERS)
+        .insert_one(value)
+        .await
+        .unwrap();
+    while fold_once(&db, end).await.unwrap() > 0 {}
+    let template: Vec<Document> = db
+        .collection::<Document>(ROLLUPS)
+        .find(doc! {})
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    let at = end - chrono::Duration::days(7);
+    seed_benchmark_day(&db, &template, at, 24).await;
+    let report = read(&db, at, at + chrono::Duration::days(1)).await;
+    assert_eq!(report.totals.events, 24);
+    assert_eq!(report.totals.quantities.get("tokens"), Some(&2_400));
+    assert_eq!(
+        report.totals.gross_cost,
+        Some(Credits::from_pico(24).unwrap())
+    );
+    assert_eq!(
+        report.totals.wallet_cost,
+        Some(Credits::from_pico(24).unwrap())
+    );
+    db.drop().await.unwrap();
 }

@@ -58,8 +58,10 @@ frontend/src/components/service-icons/api-tiktok.tsx
 frontend/src/components/service-icons/api-twilio.tsx
 frontend/src/components/service-icons/api-twitch.tsx
 frontend/src/components/service-icons/api-twitter.tsx
+frontend/src/components/service-icons/api-whatsapp-business.tsx
 frontend/src/components/service-icons/aws-cost-explorer.tsx
 frontend/src/components/service-icons/chrono-llm-public.tsx
+frontend/src/components/service-icons/chrono-llm.tsx
 frontend/src/components/service-icons/chrono-sandbox.tsx
 frontend/src/components/service-icons/chrono-storage-service.tsx
 frontend/src/components/service-icons/chrono.tsx
@@ -77,6 +79,7 @@ frontend/src/components/service-icons/llm-openai-codex.tsx
 frontend/src/components/service-icons/llm-openai.tsx
 frontend/src/components/service-icons/llm-openclaw.tsx
 frontend/src/components/service-icons/llm-openrouter.tsx
+frontend/src/components/service-icons/llm-xai.tsx
 frontend/src/components/service-icons/ornn-api.tsx
 frontend/src/components/service-icons/talos.tsx
 frontend/src/components/shared/async-option-select.tsx
