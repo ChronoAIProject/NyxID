@@ -2301,3 +2301,169 @@ fn telegram_mentions_and_replies_to_the_bot_are_recognised() {
     let discord: ChannelBot = bson::from_document(bot_doc("discord", "Helper bot")).unwrap();
     assert_eq!(chats::raw_addressed(&discord, &json!({})), None);
 }
+
+/// Posting needs the owner's opt-in per chat and comes only from the agent
+/// that answers the chat (or NyxBot); a chat given its own agent keeps it
+/// when the bot moves to another agent.
+#[tokio::test]
+async fn chat_posting_is_opt_in_and_chat_agents_survive_relinks() {
+    let (state, _, server) = setup("nyxbot_chat_settings").await;
+    let (row, _) = channel(&state, "direct").await;
+    let chat = chats::record_chat(
+        &state,
+        &row,
+        &chats::group_partition("oc_group", None),
+        &chats::ChatFacts {
+            kind: "group",
+            chat_id: "oc_group".into(),
+            thread_id: None,
+            title: Some("  Team\nchat ".into()),
+        },
+        Some("msg-1"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(chat.title.as_deref(), Some("Team chat"));
+    let (_, conversation_id) = thread_conversation(&state, &row, &chat.partition)
+        .await
+        .unwrap();
+    let specialist = |name: &str| crate::services::assistant_team_service::CreateRequest {
+        name: name.into(),
+        description: "Help the team".into(),
+        display_name: None,
+        persona: None,
+        targets: Default::default(),
+        account_read: false,
+        specialty: None,
+        created_by: "user",
+    };
+    let (support, _) = crate::services::assistant_team_service::create_specialist(
+        &state.db,
+        &state.encryption_keys,
+        OWNER,
+        specialist("support"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let (sales, _) = crate::services::assistant_team_service::create_specialist(
+        &state.db,
+        &state.encryption_keys,
+        OWNER,
+        specialist("sales"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    // Off by default.
+    let refused = chats::post(&state, OWNER, &chat.id, "Standup in 5", None)
+        .await
+        .unwrap_err();
+    assert!(matches!(refused, AppError::Forbidden(_)), "{refused:?}");
+    chats::update_chat(
+        &state,
+        OWNER,
+        &chat.id,
+        &chats::ChatSettings {
+            allow_posts: Some(true),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    // A specialist that does not answer this chat cannot post there.
+    let refused = chats::post(&state, OWNER, &chat.id, "Hello", Some(&support.id))
+        .await
+        .unwrap_err();
+    assert!(matches!(refused, AppError::Forbidden(_)), "{refused:?}");
+    // NyxBot gets past the checks to the platform send (this fixture's bot
+    // has no usable token, so the send itself fails).
+    let mut bot = bot_doc("lark", "Helper bot");
+    bot.insert("_id", &row.channel_bot_id);
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .insert_one(bot)
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .update_one(
+            doc! {"_id": &row.id},
+            doc! {"$set": {"route_id": "route-1"}},
+        )
+        .await
+        .unwrap();
+    let attempted = chats::post(&state, OWNER, &chat.id, "Hello", None).await;
+    assert!(
+        !matches!(
+            attempted,
+            Err(AppError::Forbidden(_)) | Err(AppError::Conflict(_))
+        ),
+        "{attempted:?}"
+    );
+    // Giving the chat its own agent starts a new thread with it.
+    let updated = chats::update_chat(
+        &state,
+        OWNER,
+        &chat.id,
+        &chats::ChatSettings {
+            agent_id: Some(support.id.clone()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(updated["agent"], "support");
+    assert!(updated["chat"]["conversation_id"].is_null());
+    let (_, next) = thread_conversation(&state, &row, &chat.partition)
+        .await
+        .unwrap();
+    assert_ne!(next, conversation_id);
+    // Its agent may post there now; moving the bot keeps the chat's agent.
+    let row = load_channel(&state, OWNER, &row.id).await.unwrap();
+    link(&state, OWNER, &row.id, &sales).await.unwrap();
+    let kept = state
+        .db
+        .collection::<NyxbotThread>(THREADS)
+        .find_one(doc! {"_id": &chat.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(kept.agent_id.as_deref(), Some(support.id.as_str()));
+    assert_eq!(kept.conversation_id.as_deref(), Some(next.as_str()));
+    let refused = chats::post(&state, OWNER, &chat.id, "Hello", Some(&sales.id))
+        .await
+        .unwrap_err();
+    assert!(matches!(refused, AppError::Forbidden(_)), "{refused:?}");
+    // Private chats have no reply mode.
+    let private = chats::record_chat(
+        &state,
+        &row,
+        "direct_private",
+        &chats::ChatFacts {
+            kind: "private",
+            chat_id: "ou_bob".into(),
+            thread_id: None,
+            title: Some("Bob".into()),
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(
+        chats::update_chat(
+            &state,
+            OWNER,
+            &private.id,
+            &chats::ChatSettings {
+                reply_mode: Some("mention".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .is_err()
+    );
+    server.abort();
+}

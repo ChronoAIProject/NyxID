@@ -8,6 +8,8 @@ import {
   assistantGroupMessagesSchema,
   assistantGroupPostedSchema,
   assistantGroupSchema,
+  nyxAgentChannelChatListSchema,
+  nyxAgentChannelChatUpdatedSchema,
   nyxAgentChannelConnectSchema,
   nyxAgentChannelLinkedSchema,
   nyxAgentChannelListSchema,
@@ -16,6 +18,7 @@ import {
   type AssistantAgentGrants,
   type AssistantGroupForm,
   type AssistantGroupUpdate,
+  type NyxAgentChannelChatSettings,
   type NyxAgentSettingsUpdate,
 } from "@/schemas/assistant-nyxagent";
 
@@ -102,6 +105,31 @@ export const nyxBotApi = {
         method: "PATCH",
         body: { agent_id: agentId },
       }),
+    );
+  },
+  /** Who may talk to the agent in the bot's private chats. */
+  async setPrivateChats(channelAgentId: string, privateChats: "owner" | "everyone") {
+    await assistantJson(`${ROOT}/channels/${encodeURIComponent(channelAgentId)}`, {
+      method: "PATCH",
+      body: { private_chats: privateChats },
+    });
+  },
+  /** The bot's chats, most recent first. */
+  async channelChats(channelAgentId: string) {
+    return nyxAgentChannelChatListSchema.parse(
+      await assistantJson(`${ROOT}/channels/${encodeURIComponent(channelAgentId)}/chats`),
+    ).chats;
+  },
+  async updateChannelChat(
+    channelAgentId: string,
+    chatId: string,
+    settings: NyxAgentChannelChatSettings,
+  ) {
+    return nyxAgentChannelChatUpdatedSchema.parse(
+      await assistantJson(
+        `${ROOT}/channels/${encodeURIComponent(channelAgentId)}/chats/${encodeURIComponent(chatId)}`,
+        { method: "PATCH", body: settings },
+      ),
     );
   },
   async disconnectChannel(channelAgentId: string) {

@@ -496,12 +496,15 @@ describe("NyxBot agents in the sidebar", () => {
     const user = userEvent.setup();
     const { onSelect, onNewThread } = renderAgents();
     const nav = screen.getByRole("navigation");
-    // Agent rows are the expandable buttons without a menu; NyxBot is pinned first.
+    // Agent rows are the expandable buttons without a menu (channel bots'
+    // chat sections excepted); NyxBot is pinned first.
     const agentRows = within(nav)
       .getAllByRole("button")
       .filter(
         (button) =>
-          button.hasAttribute("aria-expanded") && !button.hasAttribute("aria-haspopup"),
+          button.hasAttribute("aria-expanded") &&
+          !button.hasAttribute("aria-haspopup") &&
+          !/ on Telegram, /.test(button.getAttribute("aria-label") ?? ""),
       );
     expect(agentRows.map((button) => button.getAttribute("aria-label"))).toEqual([
       "NyxBot — your personal agent",
@@ -511,14 +514,77 @@ describe("NyxBot agents in the sidebar", () => {
     expect(nyxbot).toHaveAttribute("aria-expanded", "true");
     expect(nyxbot).toHaveTextContent("Telegram");
     const threads = within(nav).getByRole("group", { name: "Threads with NyxBot" });
+    // The channel thread sits in its bot's section, open since it is the
+    // open thread.
+    expect(
+      within(threads).getByRole("button", { name: "Telegram bot on Telegram, 1 chat" }),
+    ).toHaveAttribute("aria-expanded", "true");
     const row = within(threads).getByRole("button", { name: "Morning briefing" });
-    expect(row).toHaveTextContent("Telegram");
     await user.click(row);
     expect(onSelect).toHaveBeenCalledWith(thread.id);
     await user.click(within(threads).getByRole("button", { name: "New chat with NyxBot" }));
     expect(onNewThread).toHaveBeenCalledWith("agent-nyxbot");
     // Only the chats of earlier engines are listed under "Chats"; none here.
     expect(screen.queryByText("Chats")).not.toBeInTheDocument();
+  });
+
+  it("groups a bot's chats in a collapsed section with more on request", async () => {
+    const user = userEvent.setup();
+    const own: Conversation = { ...thread, id: `nyxa-${"a".repeat(32)}`, title: "Plans", channel: null };
+    const chats: Conversation[] = Array.from({ length: 7 }, (_, index) => ({
+      ...thread,
+      id: `nyxa-${String(index).repeat(32)}`,
+      title: `Chat ${String(index)}`,
+      channel: {
+        platform: "telegram",
+        channel_agent_id: "c1",
+        bot_label: "Support bot",
+        chat_kind: index === 0 ? "group" : "private",
+      },
+    }));
+    const renderWith = (active: string) =>
+      render(
+        <TooltipProvider>
+          <AssistantSidebar
+            conversations={[]}
+            activeConversationId={active}
+            onNewChat={vi.fn()}
+            onSelect={vi.fn()}
+            onDelete={vi.fn()}
+            agents={{
+              agents,
+              selectedAgentId: "agent-nyxbot",
+              threads: [own, ...chats],
+              onSelectAgent: vi.fn(),
+              onNewThread: vi.fn(),
+              onNewAgent: vi.fn(),
+            }}
+          />
+        </TooltipProvider>,
+      );
+    const { unmount } = renderWith(own.id);
+    const threads = screen.getByRole("group", { name: "Threads with NyxBot" });
+    expect(within(threads).getByRole("button", { name: "Plans" })).toBeInTheDocument();
+    const section = within(threads).getByRole("button", {
+      name: "Support bot on Telegram, 7 chats",
+    });
+    expect(section).toHaveAttribute("aria-expanded", "false");
+    expect(within(threads).queryByRole("button", { name: "Chat 0" })).not.toBeInTheDocument();
+    await user.click(section);
+    expect(section).toHaveAttribute("aria-expanded", "true");
+    expect(within(threads).getByRole("button", { name: "Chat 4" })).toBeInTheDocument();
+    expect(within(threads).queryByRole("button", { name: "Chat 5" })).not.toBeInTheDocument();
+    await user.click(within(threads).getByRole("button", { name: "Show 2 more" }));
+    expect(within(threads).getByRole("button", { name: "Chat 6" })).toBeInTheDocument();
+    unmount();
+    // The open chat's section starts open and shows it even past the first page.
+    renderWith(chats[6]!.id);
+    const reopened = screen.getByRole("group", { name: "Threads with NyxBot" });
+    expect(
+      within(reopened).getByRole("button", { name: "Support bot on Telegram, 7 chats" }),
+    ).toHaveAttribute("aria-expanded", "true");
+    expect(within(reopened).getByRole("button", { name: "Chat 6" })).toBeInTheDocument();
+    expect(within(reopened).queryByRole("button", { name: "Chat 5" })).not.toBeInTheDocument();
   });
 
   it("shows specialist status and pending requests, and selects an agent", async () => {

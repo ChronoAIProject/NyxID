@@ -42,6 +42,18 @@ export type NyxAgentConversationAgent = z.infer<typeof nyxAgentConversationAgent
 
 // `access_mode` is still returned (always "full") for older clients; every
 // chat runs with Full access, so it is deliberately not parsed.
+/** The channel bot and chat a thread answers. */
+export const nyxAgentChannelOriginSchema = z.object({
+  platform: z.string(),
+  /** The channel bot connection; groups the bot's chats in the sidebar. */
+  channel_agent_id: z.string().nullable().default(null),
+  bot_label: z.string().nullable().default(null),
+  chat_id: z.string().nullable().default(null),
+  /** `private`, `group` or `channel`; null for chats not seen since 0.35. */
+  chat_kind: z.string().nullable().default(null),
+  chat_title: z.string().nullable().default(null),
+});
+export type NyxAgentChannelOrigin = z.infer<typeof nyxAgentChannelOriginSchema>;
 export const nyxAgentConversationSchema = z.object({
   id: conversationId,
   title: z.string(),
@@ -66,7 +78,7 @@ export const nyxAgentConversationSchema = z.object({
   /** Wake-up events queued for this thread's next turn. */
   pending_events: z.number().int().nonnegative().default(0),
   /** Set on threads that answer one of the user's channel bots. */
-  channel: z.object({ platform: z.string() }).nullable().default(null),
+  channel: nyxAgentChannelOriginSchema.nullable().default(null),
 });
 /**
  * `orchestrator` is an instruction NyxBot sent to a specialist; `event` is a
@@ -420,6 +432,8 @@ export const nyxAgentChannelAgentSchema = z.object({
   agent_id: z.string().nullable().default(null),
   /** The organization that owns the bot; null for the user's own bot. */
   org_id: z.string().nullable().default(null),
+  /** Who may talk to the agent in private chats with the bot. */
+  private_chats: z.enum(["owner", "everyone"]).catch("owner"),
   /** `ok` or `failing` once a message has been judged; null before. */
   delivery_status: z.string().nullable().default(null),
   delivery_error: z.string().nullable().default(null),
@@ -451,6 +465,43 @@ export const nyxAgentChannelConnectSchema = z.object({
   link: nyxAgentChannelLinkSchema,
 });
 export type NyxAgentChannelConnect = z.infer<typeof nyxAgentChannelConnectSchema>;
+/** A chat a channel bot is in: a private chat, group, channel or topic. */
+export const nyxAgentChannelChatSchema = z.object({
+  id: z.string(),
+  channel_agent_id: z.string(),
+  platform: z.string(),
+  bot_label: z.string(),
+  /** `private`, `group` or `channel`; null until the chat speaks again. */
+  kind: z.string().nullable().default(null),
+  title: z.string().nullable().default(null),
+  /** The agent this chat reaches instead of the bot's; null: the bot's. */
+  agent_id: z.string().nullable().default(null),
+  /** `all` answers every message; `mention` only mentions and replies. */
+  reply_mode: z.enum(["mention", "all"]).catch("mention"),
+  /** Groups: whether members other than the user may talk to the agent. */
+  members: z.enum(["everyone", "owner"]).catch("everyone"),
+  allow_posts: z.boolean().default(false),
+  conversation_id: z.string().nullable().default(null),
+  last_message_at: z.string().nullable().default(null),
+});
+export type NyxAgentChannelChat = z.infer<typeof nyxAgentChannelChatSchema>;
+export const nyxAgentChannelChatListSchema = z.object({
+  chats: z.array(nyxAgentChannelChatSchema),
+});
+export const nyxAgentChannelChatUpdatedSchema = z.object({
+  chat: nyxAgentChannelChatSchema,
+  warning: z.string().optional(),
+  note: z.string().optional(),
+});
+export type NyxAgentChannelChatUpdated = z.infer<typeof nyxAgentChannelChatUpdatedSchema>;
+export type NyxAgentChannelChatSettings = Partial<{
+  reply_mode: "mention" | "all";
+  members: "everyone" | "owner";
+  allow_posts: boolean;
+  /** An agent ID, or `default` for the bot's agent. */
+  agent_id: string;
+}>;
+
 export const nyxAgentChannelLinkedSchema = z.object({
   channel_agent_id: z.string(),
   /** The linked agent's name. */

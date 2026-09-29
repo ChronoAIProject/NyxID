@@ -1082,3 +1082,103 @@ async fn chat_tool_images_become_mcp_image_content_and_owner_only_turn_attachmen
     );
     server.abort();
 }
+
+/// A turn for someone other than the owner (a channel chat guest) only reads:
+/// account, team, memory, connection and Oracle tools and every service
+/// change are refused, whichever way they are called.
+#[tokio::test]
+async fn guest_turns_only_discover_and_read() {
+    let f = orchestrator_fixture("chat_mcp_guest").await;
+    f.state
+        .db
+        .collection::<mongodb::bson::Document>(
+            crate::models::assistant_conversation::COLLECTION_NAME,
+        )
+        .update_one(
+            doc! {"_id": &f.row.id},
+            doc! {"$set": {"guest_turn": true}},
+        )
+        .await
+        .unwrap();
+    let auth = authenticate(&f).await;
+    assert!(auth.chat.as_ref().unwrap().guest);
+    for (name, args) in [
+        ("nyxid__list_agent_keys", json!({})),
+        ("nyxid__remember", json!({"text": "the owner's secret plan"})),
+        ("nyxid__list_channel_chats", json!({})),
+        ("nyx__connect_service", json!({"service": "github"})),
+        ("nyx__oracle_pools", json!({})),
+    ] {
+        let refused = result(direct_call(&f, &auth, name, args).await, true).await;
+        assert_eq!(refused["error"], "owner_only", "{name}: {refused}");
+    }
+    // Through the universal proxy tool too.
+    let refused = result(
+        call(&f, &auth, "nyxid__list_agent_keys", json!({})).await,
+        true,
+    )
+    .await;
+    assert_eq!(refused["error"], "owner_only");
+    // Discovery still works.
+    let search = handle_meta_search(
+        &f.state,
+        &auth,
+        None,
+        &json!({"query": "list"}),
+        None,
+        false,
+    )
+    .await;
+    let bytes = axum::body::to_bytes(search.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    assert!(!String::from_utf8_lossy(&bytes).contains("owner_only"));
+    // Service operations: reads pass on to the usual checks, changes stop.
+    let target = crate::services::mcp_approval::McpApprovalTarget {
+        service_id: uuid::Uuid::new_v4().to_string(),
+        service_name: "Example".into(),
+        service_slug: "example".into(),
+        service_owner_user_id: f.owner.clone(),
+        is_auto_connected: false,
+    };
+    for method in ["POST", "PUT", "PATCH", "DELETE"] {
+        let operation = operation_descriptor::build_mcp_descriptor(method, "/items", None);
+        let refused = authorize_mcp_operation(
+            &f.state,
+            &auth,
+            target.clone(),
+            &operation,
+            Some(json!(1)),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(result(refused, true).await["error"], "owner_only");
+    }
+    let read = operation_descriptor::build_mcp_descriptor("GET", "/items", None);
+    if let Err(response) =
+        authorize_mcp_operation(&f.state, &auth, target.clone(), &read, Some(json!(1))).await
+    {
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("owner_only"));
+    }
+    // The owner's next turn has their tools back.
+    f.state
+        .db
+        .collection::<mongodb::bson::Document>(
+            crate::models::assistant_conversation::COLLECTION_NAME,
+        )
+        .update_one(
+            doc! {"_id": &f.row.id},
+            doc! {"$set": {"guest_turn": false}},
+        )
+        .await
+        .unwrap();
+    let auth = authenticate(&f).await;
+    let listed = direct_call(&f, &auth, "nyxid__list_channel_chats", json!({})).await;
+    let bytes = axum::body::to_bytes(listed.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    assert!(!String::from_utf8_lossy(&bytes).contains("owner_only"));
+}

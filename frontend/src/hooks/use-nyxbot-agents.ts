@@ -5,6 +5,7 @@ import type {
   AssistantAgentCreate,
   AssistantAgentGrants,
   AssistantAgentList,
+  NyxAgentChannelChatSettings,
   NyxAgentSettingsUpdate,
 } from "@/schemas/assistant-nyxagent";
 import { livePollInterval, useNyxAgentLiveConnected } from "@/hooks/use-nyxagent-live-status";
@@ -23,8 +24,11 @@ export const nyxBotQueryKeys = {
       : (["assistant", "nyxagent", userId, "threads", agentId] as const),
   settings: (userId: string | undefined) =>
     ["assistant", "nyxagent", userId, "settings"] as const,
+  /** Prefix of the channel list and every channel's chats. */
   channels: (userId: string | undefined) =>
     ["assistant", "nyxagent", userId, "channels"] as const,
+  channelChats: (userId: string | undefined, channelAgentId: string) =>
+    ["assistant", "nyxagent", userId, "channels", channelAgentId, "chats"] as const,
   history: (userId: string | undefined, conversationId: string | null | undefined) =>
     ["assistant", "nyxagent", userId, "history", conversationId] as const,
 };
@@ -170,6 +174,53 @@ export function useLinkNyxBotChannel() {
       nyxBotApi.linkChannel(channelAgentId, agentId),
     true,
   );
+}
+
+export function useSetNyxBotPrivateChats() {
+  return useAgentsMutation(
+    ({
+      channelAgentId,
+      privateChats,
+    }: {
+      channelAgentId: string;
+      privateChats: "owner" | "everyone";
+    }) => nyxBotApi.setPrivateChats(channelAgentId, privateChats),
+    true,
+  );
+}
+
+/** The chats a channel bot is in (loaded when its list is opened). */
+export function useNyxBotChannelChats(channelAgentId: string, enabled = true) {
+  const userId = useAuthStore((state) => state.user?.id);
+  return useQuery({
+    queryKey: nyxBotQueryKeys.channelChats(userId, channelAgentId),
+    queryFn: () => nyxBotApi.channelChats(channelAgentId),
+    enabled: enabled && Boolean(userId),
+    retry: false,
+  });
+}
+
+/** A chat's own agent starts a new thread, so thread lists refresh too. */
+export function useUpdateNyxBotChannelChat() {
+  const userId = useAuthStore((state) => state.user?.id);
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      channelAgentId,
+      chatId,
+      settings,
+    }: {
+      channelAgentId: string;
+      chatId: string;
+      settings: NyxAgentChannelChatSettings;
+    }) => nyxBotApi.updateChannelChat(channelAgentId, chatId, settings),
+    onSettled: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: nyxBotQueryKeys.channels(userId) }),
+        queryClient.invalidateQueries({ queryKey: nyxBotQueryKeys.threads(userId) }),
+      ]);
+    },
+  });
 }
 
 export function useDisconnectNyxBotChannel() {

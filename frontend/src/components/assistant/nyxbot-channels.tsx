@@ -10,6 +10,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { CopyableField } from "@/components/shared/copyable-field";
+import { ChannelChats } from "@/components/assistant/nyxbot-channel-chats";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { useChannelBots } from "@/hooks/use-channel-bots";
 import { useOrgs } from "@/hooks/use-orgs";
@@ -212,6 +213,16 @@ export function ChannelBotsManager({
                     .
                   </p>
                 ) : null}
+                {row.status === "failed" ? null : (
+                  <ChannelChats
+                    channel={row}
+                    agents={targets}
+                    botAgentName={(() => {
+                      const current = agents.find((candidate) => candidate.id === agentOf(row));
+                      return current ? agentLabel(current) : "NyxBot";
+                    })()}
+                  />
+                )}
                 {confirming === row.id ? (
                   <div className="flex flex-wrap items-center justify-end gap-2 rounded-lg bg-overlay px-3 py-2">
                     <span className="mr-auto text-[12px] text-muted-foreground">

@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   agentHandle,
   agentTitle,
+  channelChatTitle,
+  splitChannelThreads,
   describeEventNotice,
   eventNotices,
   greetingFor,
@@ -174,5 +176,40 @@ describe("agent naming", () => {
       agents,
     );
     expect(group.members.map((member) => member.display_name)).toEqual(["Luna", null]);
+  });
+});
+
+describe("channel chats", () => {
+  const at = "2026-09-29T00:00:00.000Z";
+  const thread = (id: string, channel?: Record<string, string | null>) => ({
+    id,
+    title: id,
+    created_at: at,
+    last_message_at: at,
+    channel: channel ? { platform: "telegram", ...channel } : null,
+  });
+
+  it("splits an agent's own threads from each bot's chats, newest bot first", () => {
+    const split = splitChannelThreads([
+      thread("lark-group", { platform: "lark", channel_agent_id: "b", bot_label: "Office" }),
+      thread("own"),
+      thread("tg-private", { channel_agent_id: "a", bot_label: "Home" }),
+      thread("lark-private", { platform: "lark", channel_agent_id: "b", bot_label: null }),
+      thread("legacy", {}),
+    ]);
+    expect(split.own.map((row) => row.id)).toEqual(["own"]);
+    expect(split.bots.map((group) => [group.key, group.label, group.threads.map((row) => row.id)])).toEqual([
+      ["b", "Office", ["lark-group", "lark-private"]],
+      ["a", "Home", ["tg-private"]],
+      ["platform:telegram", "Telegram bot", ["legacy"]],
+    ]);
+  });
+
+  it("names unnamed chats by kind and platform", () => {
+    expect(channelChatTitle("group", "Team", "telegram")).toBe("Team");
+    expect(channelChatTitle("private", null, "telegram")).toBe("Private Telegram chat");
+    expect(channelChatTitle("group", null, "lark")).toBe("Lark group");
+    expect(channelChatTitle("channel", null, "telegram")).toBe("Telegram channel");
+    expect(channelChatTitle(null, null, "telegram")).toBe("Telegram chat");
   });
 });
