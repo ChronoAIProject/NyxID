@@ -170,17 +170,21 @@ pub struct UserinfoResponse {
 
 // --- Introspection / Revocation types ---
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct IntrospectRequest {
     pub token: String,
     pub token_type_hint: Option<String>,
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
+    /// Catalog service whose registered confidential client verifies an agent key.
+    pub service_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct IntrospectResponse {
     pub active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aud: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2477,9 +2481,10 @@ pub async fn userinfo(
 pub async fn introspect(
     State(state): State<AppState>,
     Form(body): Form<IntrospectRequest>,
-) -> Json<IntrospectResponse> {
+) -> Response {
     let inactive = IntrospectResponse {
         active: false,
+        aud: None,
         scope: None,
         resource: None,
         client_id: None,
@@ -2498,18 +2503,53 @@ pub async fn introspect(
     // Authenticate the calling client (RFC 7662 requirement)
     let caller_client_id = match body.client_id.as_deref() {
         Some(id) if !id.is_empty() => id,
-        _ => return Json(inactive),
+        _ => return Json(inactive).into_response(),
     };
 
-    if oauth_service::authenticate_client(
+    let client = match oauth_service::authenticate_client(
         &state.db,
         caller_client_id,
         body.client_secret.as_deref(),
     )
     .await
-    .is_err()
     {
-        return Json(inactive);
+        Ok(client) => client,
+        Err(AppError::DatabaseError(_) | AppError::Internal(_)) => {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+        Err(_) => return Json(inactive).into_response(),
+    };
+
+    if body.token.starts_with("nyx_") || body.token.starts_with("nyxid_ag_") {
+        let Some(service_id) = body.service_id.as_deref() else {
+            return Json(inactive).into_response();
+        };
+        let evidence = match crate::services::agent_key_introspection::introspect(
+            &state.db,
+            &client,
+            service_id,
+            &body.token,
+        )
+        .await
+        {
+            Ok(evidence) => evidence,
+            Err(AppError::Unauthorized(_)) => return Json(inactive).into_response(),
+            Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        };
+        return Json(IntrospectResponse {
+            active: true,
+            aud: Some(evidence.service_id),
+            sub: Some(evidence.subject),
+            token_type: Some("api_key".into()),
+            scope: Some(evidence.scope),
+            exp: evidence.expires_at.map(|date| date.timestamp()),
+            iat: Some(evidence.created_at.timestamp()),
+            jti: Some(evidence.key_id),
+            permissions: Some(evidence.permissions),
+            iss: Some(state.config.jwt_issuer.clone()),
+            ..inactive
+        })
+        .into_response();
     }
 
     // Broker-binding introspection: detect via the explicit token_type_hint
@@ -2533,11 +2573,12 @@ pub async fn introspect(
         .await
         {
             Ok(binding) if !binding.revoked => binding,
-            _ => return Json(inactive),
+            _ => return Json(inactive).into_response(),
         };
 
         return Json(IntrospectResponse {
             active: true,
+            aud: None,
             scope: Some(binding.scopes.join(" ")),
             resource: None,
             client_id: Some(binding.client_id),
@@ -2551,14 +2592,15 @@ pub async fn introspect(
             roles: None,
             groups: None,
             permissions: None,
-        });
+        })
+        .into_response();
     }
 
     // Try to verify the token
     let claims = match crate::crypto::jwt::verify_token(&state.jwt_keys, &state.config, &body.token)
     {
         Ok(c) => c,
-        Err(_) => return Json(inactive),
+        Err(_) => return Json(inactive).into_response(),
     };
 
     // For refresh tokens, check if revoked in the database
@@ -2572,8 +2614,8 @@ pub async fn introspect(
             .await;
 
         match stored {
-            Ok(Some(rt)) if rt.revoked => return Json(inactive),
-            Err(_) => return Json(inactive),
+            Ok(Some(rt)) if rt.revoked => return Json(inactive).into_response(),
+            Err(_) => return Json(inactive).into_response(),
             _ => {}
         }
     }
@@ -2583,7 +2625,7 @@ pub async fn introspect(
             .await
             .is_err()
     {
-        return Json(inactive);
+        return Json(inactive).into_response();
     }
 
     // Fetch user email for username field
@@ -2603,11 +2645,12 @@ pub async fn introspect(
     let rbac = match crate::services::rbac_helpers::resolve_user_rbac(&state.db, &claims.sub).await
     {
         Ok(rbac) => rbac,
-        Err(_) => return Json(inactive),
+        Err(_) => return Json(inactive).into_response(),
     };
 
     Json(IntrospectResponse {
         active: true,
+        aud: None,
         scope: Some(claims.scope),
         resource: response_resources(claims.resources.unwrap_or_default()),
         client_id: None,
@@ -2622,6 +2665,7 @@ pub async fn introspect(
         groups: Some(rbac.group_slugs),
         permissions: Some(rbac.permissions),
     })
+    .into_response()
 }
 
 /// GET /oauth/bindings?external_subject_*=...

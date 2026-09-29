@@ -74,6 +74,10 @@ pub struct CreateServiceRequest {
     /// Only relevant for private services -- users who consent to any of these
     /// apps will have the service auto-provisioned in their AI Services.
     pub developer_app_ids: Option<Vec<String>>,
+    /// Admin-only confidential OAuth clients trusted for service-bound introspection.
+    /// Omit to preserve; pass [] to clear. Independent of service visibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub introspection_client_ids: Option<Vec<String>>,
     /// Forward the caller's NyxID access token as Authorization: Bearer to downstream
     #[serde(default)]
     pub forward_access_token: bool,
@@ -226,6 +230,10 @@ pub struct ServiceResponse {
     pub proxy_operation_policy: Option<ProxyOperationPolicy>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub developer_app_ids: Option<Vec<String>>,
+    /// Admin-only confidential OAuth clients trusted for service-bound introspection.
+    /// Omit to preserve; pass [] to clear. Independent of service visibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub introspection_client_ids: Option<Vec<String>>,
     pub created_by: String,
     pub owner_user_id: String,
     pub created_at: String,
@@ -451,6 +459,10 @@ pub struct UpdateServiceRequest {
     /// Developer app (OAuth client) IDs that grant access to this service.
     /// Pass `[]` to clear. Only meaningful for private services.
     pub developer_app_ids: Option<Vec<String>>,
+    /// Admin-only confidential OAuth clients trusted for service-bound introspection.
+    /// Omit to preserve; pass [] to clear. Independent of service visibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub introspection_client_ids: Option<Vec<String>>,
     /// Custom User-Agent override for this service. Set to "" to clear.
     pub custom_user_agent: Option<String>,
     /// Replace the admin-configured default request headers for this
@@ -1411,6 +1423,10 @@ async fn create_service_inner(
         validate_developer_app_ids(&state, &auth_user, app_ids).await?;
     }
 
+    if let Some(ref ids) = body.introspection_client_ids {
+        super::services_helpers::validate_introspection_client_ids(&state, &auth_user, ids).await?;
+    }
+
     // Validate & normalize initial default_request_headers (NyxID#356).
     let default_request_headers = match body.default_request_headers.clone() {
         Some(list) => crate::models::default_request_header::validate_headers(list)?,
@@ -1503,6 +1519,7 @@ async fn create_service_inner(
         default_request_headers,
         ws_frame_injections: body.ws_frame_injections.clone(),
         developer_app_ids: body.developer_app_ids.clone(),
+        introspection_client_ids: body.introspection_client_ids.clone(),
         token_exchange_config,
         anonymous_endpoints: body.anonymous_endpoints.clone(),
         proxy_operation_policy,
@@ -2400,6 +2417,12 @@ async fn update_service_inner(
         let bson_ids = bson::to_bson(app_ids)
             .map_err(|e| AppError::Internal(format!("BSON serialization error: {e}")))?;
         set_doc.insert("developer_app_ids", bson_ids);
+    }
+    if let Some(ref ids) = body.introspection_client_ids {
+        super::services_helpers::validate_introspection_client_ids(&state, &auth_user, ids).await?;
+        let values = bson::to_bson(ids)
+            .map_err(|error| AppError::Internal(format!("BSON serialization error: {error}")))?;
+        set_doc.insert("introspection_client_ids", values);
     }
     if let Some(ref ua) = body.custom_user_agent {
         let trimmed = ua.trim();
@@ -3444,6 +3467,7 @@ mod tests {
             examples_url: None,
             recommended_skills: None,
             developer_app_ids: None,
+            introspection_client_ids: None,
             forward_access_token: false,
             token_exchange_config: None,
             default_request_headers: None,
