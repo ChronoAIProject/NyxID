@@ -613,6 +613,7 @@ pub async fn connect(
         gateway_record_id: None,
         gateway_version: None,
         binding_id: None,
+        gateway_groups: None,
         owner_sender_ids: {
             let mut ids = known_owner_senders(state, owner, &platform).await;
             for id in verified_owners {
@@ -626,6 +627,7 @@ pub async fn connect(
         link_code_expires_at: None,
         source_conversation_id: source_conversation_id.map(str::to_owned),
         agent_id: Some(agent.id.clone()),
+        private_chats: None,
         delivery_status: None,
         delivery_error: None,
         delivery_failed_at: None,
@@ -717,11 +719,16 @@ pub async fn connect(
     }
 }
 
+/// Gateway group admission unless one of the channel's chats answers every
+/// message (see `chats::sync_gateway_groups`).
+pub(crate) const GATEWAY_GROUPS_DEFAULT: &str = "mention_or_reply_to_bot";
+
 fn gateway_policy(
     state: &AppState,
     row: &NyxbotChannel,
     bot: &ChannelBot,
     route_ids: &[String],
+    groups: &str,
 ) -> Value {
     let username = bot.platform_bot_username.trim_start_matches('@');
     let mut source = json!({
@@ -731,7 +738,7 @@ fn gateway_policy(
         "route_ids": route_ids,
         "platform": "telegram",
         "admission": {"type": "scoped", "senders": {"type": "open"},
-            "chats": {"type": "open"}, "groups": "mention_or_reply_to_bot"},
+            "chats": {"type": "open"}, "groups": groups},
     });
     let valid_username = (5..=32).contains(&username.len())
         && username
@@ -781,7 +788,7 @@ async fn connect_gateway(
     let creator = creator_bearer(state, &row.user_id).map_err(|_| "creator_unavailable")?;
     let creator = creator.as_str();
     let record_id = Uuid::new_v4().to_string();
-    let mut body = gateway_policy(state, row, bot, &[]);
+    let mut body = gateway_policy(state, row, bot, &[], GATEWAY_GROUPS_DEFAULT);
     body["record_id"] = json!(record_id);
     body["credentials"] = json!({"agent_key": agent_key, "channel_key": route_key});
     let created = gateway_call(
@@ -875,7 +882,13 @@ async fn connect_gateway(
         Ok(route) => route,
         Err(_) => return Err(failed("route_create_failed").await),
     };
-    let mut update = gateway_policy(state, row, bot, std::slice::from_ref(&route.id));
+    let mut update = gateway_policy(
+        state,
+        row,
+        bot,
+        std::slice::from_ref(&route.id),
+        GATEWAY_GROUPS_DEFAULT,
+    );
     update["expected_version"] = json!(version);
     let attached = gateway_call(
         state,
@@ -893,7 +906,9 @@ async fn connect_gateway(
                 .collection::<NyxbotChannel>(CHANNELS)
                 .update_one(
                     doc! {"_id": &row.id},
-                    doc! {"$set": {"gateway_version": version}},
+                    // A new gateway channel starts with the default admission.
+                    doc! {"$set": {"gateway_version": version},
+                    "$unset": {"gateway_groups": ""}},
                 )
                 .await;
             Ok(route.id)
@@ -1561,7 +1576,8 @@ pub async fn link(
         .db
         .collection::<NyxbotThread>(THREADS)
         .update_many(
-            doc! {"channel_id": &row.id, "user_id": owner},
+            // Chats given their own agent keep it.
+            doc! {"channel_id": &row.id, "user_id": owner, "agent_id": bson::Bson::Null},
             doc! {"$set": {"conversation_id": bson::Bson::Null}},
         )
         .await?;
@@ -1956,6 +1972,7 @@ async fn start_owner_turn(
         }),
         report_to: None,
         group_id: None,
+        guest: false,
     };
     match start_server_turn(
         state,

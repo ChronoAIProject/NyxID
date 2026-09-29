@@ -169,6 +169,7 @@ fn event_turn(conversation_id: &str) -> TurnStart {
         agent_id: None,
         report_to: None,
         group_id: None,
+        guest: false,
     }
 }
 
@@ -415,6 +416,13 @@ pub(crate) async fn permission_decided(
     .await;
 }
 
+const GUEST_NOTE: &str = "\n\nThis turn answers someone other than the owner (a member of a \
+    chat your channel bot is in). Help them, reading with your services when useful, but only \
+    the owner can ask for account actions, new connections or changes made with the owner's \
+    services: NyxID refuses those, so say that only the bot's owner can ask for that. Never \
+    reveal the owner's private information (their account, other chats, memory or \
+    credentials).";
+
 /// Turn-scoped notes appended to the instructions: drained events, a channel
 /// sender's context, the agent's memory, and for NyxBot its roster, direct
 /// user chats with specialists and pending permission requests. NyxID-authored
@@ -441,6 +449,12 @@ pub(crate) async fn turn_notes(
             notes.push_str("\n\n");
             notes.push_str(note);
         }
+    }
+    // Someone other than the owner is talking: nothing private to the owner
+    // (memory, other chats, the team, pending requests) goes into this turn.
+    if row.guest_turn {
+        notes.push_str(GUEST_NOTE);
+        return notes;
     }
     if let Some(agent) = agent {
         notes.push_str(&team::memory_note(agent));
@@ -542,6 +556,7 @@ pub(crate) async fn assign(
             agent_id: None,
             report_to: report_to.map(str::to_owned),
             group_id: None,
+            guest: false,
         },
         Pool::Team { owner, limit },
     )

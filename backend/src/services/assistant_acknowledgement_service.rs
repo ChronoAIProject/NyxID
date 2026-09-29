@@ -36,6 +36,9 @@ pub struct ChatAuthority {
     /// The agent this thread belongs to (NyxBot or a specialist).
     pub agent_id: String,
     pub agent_name: String,
+    /// The thread's newest turn acts for a channel chat guest (not the
+    /// owner): read-only service calls only; see `guest_refusal`.
+    pub guest: bool,
 }
 impl ChatAuthority {
     /// NyxBot threads run with Full access; specialists only with their grants.
@@ -80,6 +83,7 @@ pub async fn for_key(
         },
         agent_id: agent.id,
         agent_name: agent.name,
+        guest: conversation.guest_turn,
     }))
 }
 
@@ -692,6 +696,7 @@ pub async fn decide_as(
                     role: target.role,
                     agent_id: target.agent_id.clone().unwrap_or_default(),
                     agent_name: String::new(),
+                    guest: target.guest_turn,
                 };
                 let (_, key) = fence(&db, &chat, session).await?;
                 let subagent = target.role == AgentRole::Subagent;

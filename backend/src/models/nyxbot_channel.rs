@@ -52,6 +52,11 @@ pub struct NyxbotChannel {
     pub gateway_version: Option<i64>,
     #[serde(default)]
     pub binding_id: Option<String>,
+    /// Gateway only: the group admission last set on the gateway channel
+    /// (`all` while one of its chats answers every message); `None` means
+    /// `mention_or_reply_to_bot`.
+    #[serde(default)]
+    pub gateway_groups: Option<String>,
     /// Platform sender IDs verified as the owner. Only these senders reach the
     /// owner's Full-access NyxBot; everyone else gets a short refusal.
     #[serde(default)]
@@ -68,6 +73,11 @@ pub struct NyxbotChannel {
     /// before agents existed) or a specialist.
     #[serde(default)]
     pub agent_id: Option<String>,
+    /// Who may talk to the agent in private chats: `owner` (default: only
+    /// the verified owner) or `everyone` (anyone who messages the bot gets
+    /// their own thread, as a guest).
+    #[serde(default)]
+    pub private_chats: Option<String>,
     /// Whether the chat app's messages reach the agent, judged from the
     /// newest inbound message: `ok` or `failing`; `None` before any message.
     #[serde(default)]
@@ -103,17 +113,50 @@ impl std::fmt::Debug for NyxbotChannel {
     }
 }
 
-/// One chat partition answered by one NyxBot conversation.
+/// One chat the bot is in, answered by one agent conversation: each private
+/// chat, and each group, channel or topic (shared by its members). Gateway
+/// partitions of other senders in a group are also stored here, without a
+/// `kind`, so the gateway's conversation registry keeps working.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct NyxbotThread {
     #[serde(rename = "_id")]
     pub id: String,
     pub channel_id: String,
     pub user_id: String,
-    /// Gateway conversation ID, or a digest of the direct chat/sender.
+    /// Private chats: the gateway conversation ID, or a digest of the direct
+    /// chat and sender. Groups and channels: `chat_` and a digest of the chat
+    /// and topic.
     pub partition: String,
     #[serde(default)]
     pub conversation_id: Option<String>,
+    /// `private`, `group` or `channel`; `None` on gateway sender partitions
+    /// of a group and on chats that have not spoken since this was added.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// The group's name, or the person in a private chat. Bounded.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// The platform's chat ID (to post into the chat) and topic, when any.
+    #[serde(default)]
+    pub platform_chat_id: Option<String>,
+    #[serde(default)]
+    pub platform_thread_id: Option<String>,
+    /// The agent this chat reaches instead of the channel's.
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    /// Groups and channels: `mention` (default: answer only when mentioned
+    /// or replied to) or `all` (answer every message).
+    #[serde(default)]
+    pub reply_mode: Option<String>,
+    /// Groups and channels: `everyone` (default: any member may talk to the
+    /// agent, as a guest) or `owner`.
+    #[serde(default)]
+    pub members: Option<String>,
+    /// The chat's agent may post here without being asked.
+    #[serde(default)]
+    pub allow_posts: bool,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub last_message_at: Option<DateTime<Utc>>,
     /// Gateway only: the newest sealed event reference, encrypted; used to
     /// deliver asynchronous replies while it is unexpired. Opaque, never logged.
     #[serde(default, with = "crate::models::bson_bytes::optional")]

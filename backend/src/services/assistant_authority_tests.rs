@@ -193,6 +193,7 @@ fn orchestrator_chat() -> acks::ChatAuthority {
         role: crate::models::assistant_conversation::AgentRole::Orchestrator,
         agent_id: "agent".into(),
         agent_name: "NyxBot".into(),
+        guest: false,
     }
 }
 

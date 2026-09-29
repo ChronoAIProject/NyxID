@@ -234,6 +234,7 @@ async fn run_member(
         agent_id: Some(agent.id.clone()),
         report_to: None,
         group_id: Some(group.id.clone()),
+        guest: false,
     };
     let limit = team_pool_limit(state, owner).await + 1;
     match start_server_turn(state, owner, start, Pool::Team { owner, limit }).await? {

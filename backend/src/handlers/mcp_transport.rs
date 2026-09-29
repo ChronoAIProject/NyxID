@@ -1556,6 +1556,9 @@ async fn dispatch_tools_call(
         .await;
     }
 
+    if guest_turn(auth) && !guest_tool_allowed(tool_name) {
+        return tool_result(request.id.clone(), GUEST_REFUSAL, true);
+    }
     if tool_name.starts_with("nyxid__") {
         return handle_account_tool(state, auth, tool_name, &arguments, request.id.clone()).await;
     }
@@ -1863,6 +1866,12 @@ async fn authorize_mcp_operation(
     operation: &operation_descriptor::OperationDescriptor,
     request_id: Option<serde_json::Value>,
 ) -> Result<(), Response> {
+    // A guest turn only reads with the chat agent's services.
+    if guest_turn(auth)
+        && operation.verb != crate::models::service_approval_config::ApprovalVerb::Read
+    {
+        return Err(tool_result(request_id, GUEST_REFUSAL, true));
+    }
     let approval_owner_user_id = auth.effective_approval_owner_user_id();
     let approval_outcome = approval_service::evaluate_and_check(
         &state.db,
@@ -2040,6 +2049,33 @@ async fn chat_service_gate(
     }
 }
 
+/// A channel chat member who is not the owner asked for this turn.
+fn guest_turn(auth: &McpAuthContext) -> bool {
+    auth.chat.as_ref().is_some_and(|chat| chat.guest)
+}
+
+/// Guest turns may discover tools and read with services (each operation is
+/// checked in `authorize_mcp_tool_operation`). Account, team, memory,
+/// connection, SSH and Oracle tools act for the owner and are refused.
+fn guest_tool_allowed(tool_name: &str) -> bool {
+    if tool_name.starts_with("nyxid__") {
+        return false;
+    }
+    !tool_name.starts_with("nyx__")
+        || matches!(
+            tool_name,
+            "nyx__search_tools"
+                | "nyx__discover_services"
+                | "nyx__list_connected_services"
+                | "nyx__call_tool"
+        )
+}
+
+const GUEST_REFUSAL: &str = "{\"error\":\"owner_only\",\"instructions\":\"You are \
+    answering someone other than the owner. Only the owner can ask for account actions, \
+    new connections or changes made with their services. Answer in words or with read-only \
+    lookups, and say that only the bot's owner can ask for that.\"}";
+
 async fn handle_account_tool(
     state: &AppState,
     auth: &McpAuthContext,
@@ -2047,6 +2083,9 @@ async fn handle_account_tool(
     args: &serde_json::Value,
     request_id: Option<serde_json::Value>,
 ) -> Response {
+    if guest_turn(auth) {
+        return tool_result(request_id, GUEST_REFUSAL, true);
+    }
     let Ok(user_id) = uuid::Uuid::parse_str(&auth.user_id) else {
         return tool_result(request_id, "{\"error\":\"unauthorized\"}", true);
     };

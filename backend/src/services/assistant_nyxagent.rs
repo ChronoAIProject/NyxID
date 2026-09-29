@@ -227,6 +227,8 @@ pub struct TurnStart {
     pub report_to: Option<String>,
     /// New rows only: the group this member thread speaks in.
     pub group_id: Option<String>,
+    /// Started by someone other than the owner (a channel chat guest).
+    pub guest: bool,
 }
 impl std::fmt::Debug for TurnStart {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -255,6 +257,7 @@ impl From<&TurnRequest> for TurnStart {
             agent_id: request.agent_id.clone(),
             report_to: None,
             group_id: None,
+            guest: false,
         }
     }
 }
@@ -846,6 +849,7 @@ pub async fn begin_turn(
                         channel: start.channel.clone(),
                         group_id: start.group_id.clone(),
                         group_seen_seq: 0,
+                        guest_turn: false,
                     }
                 };
                 // Legacy rows predate agents: they are NyxBot threads.
@@ -884,6 +888,8 @@ pub async fn begin_turn(
                     return Err(AppError::Conflict("No pending events".into()));
                 }
                 let events = std::mem::take(&mut row.pending_events);
+                // A turn that carries a guest's message acts for the guest.
+                row.guest_turn = start.guest || events.iter().any(|event| event.guest);
                 let (role, text) = match start.origin {
                     TurnOrigin::Event => {
                         row.event_streak = row.event_streak.saturating_add(1);
