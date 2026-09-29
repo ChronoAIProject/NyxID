@@ -359,8 +359,10 @@ concurrent channel turns and queues the rest.
 
 ### 12a. Chats, groups and guests
 
-A bot's chats are threads of their own: each private chat is one thread, and
-each group, channel or forum topic is one thread its members share. Messages in
+A bot's chats are threads of their own: each group, channel or forum topic is
+one thread its members share, and each other person's private chat is one
+thread. The owner's own private chats are the exception (§12b): they continue
+the agent's own thread. Messages in
 a shared thread start with their sender's name, and the agent is told that
 everyone in the chat sees its reply. Chats are recorded in `nyxbot_threads`
 (kind, title, platform chat and topic IDs, settings). Private chats keep their
@@ -451,6 +453,41 @@ platform, count, a dot while one is working) that opens for the thread being
 viewed and shows five chats, then more on request. Each thread row shows a
 private, group or channel icon. Thread listings carry `channel.channel_agent_id`,
 `bot_label`, `chat_id`, `chat_kind` and `chat_title`.
+
+### 12b. One context for the owner, and no double work
+
+**The owner's own thread.** The owner's private chats with an agent, on every
+bot attached to it (Telegram, Lark, Discord, ...), continue that agent's own
+thread: its home thread in NyxID (a first chat-app message creates it when the
+agent has none; a deleted home is replaced). The app and every chat app share
+that one transcript and live context. The thread is not a channel thread
+(`channel` stays unset, so the sidebar keeps it with the agent's own threads);
+instead `reply_channel` remembers the chat the owner last wrote from. A channel
+turn's answer goes back to the chat that asked; asynchronous replies (event
+turns such as a specialist's report, or a message queued while the agent was
+busy) go to `reply_channel`, which a message written in the app clears. Each
+user message records the chat app it came from (`via`), shown as a badge in the
+app, and the turn's instructions tell the agent where its reply is read (plain
+text, full URLs, word confirmations) and that this is its own thread with the
+owner. The chat row points at the thread, so word confirmations of the thread's
+cards work from any of the owner's chats. Groups and other people's private
+chats keep their own threads.
+
+**The same question is not worked on twice.** A running turn records its
+question: a digest of its normalized words (case, punctuation, spacing and
+leading @mentions ignored; short messages such as "yes" are never keyed) and a
+short excerpt. When a message arrives while its thread is busy:
+
+- if it is the question being answered, it is not queued: from the chat that
+  asked, the sender is told the answer is coming; from another chat (e.g. the
+  owner asked on Telegram and again on Lark), that chat is added to the running
+  answer's recipients (`also_deliver`, at most four), and at settlement the
+  answer is sent there too (`deliver_also`, taken once by the settlement hook);
+- if the same question is already queued, it is not queued again.
+
+The agent is also told, in each owner turn's instructions, what its other
+threads are answering right now (thread title and question excerpt, the same
+question marked), so it does not start that work again.
 
 ## 13. No-break guarantees
 
