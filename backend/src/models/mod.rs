@@ -127,3 +127,7 @@ pub mod usage_rollup_state;
 pub mod usage_workspace;
 
 pub mod channel_activity;
+
+pub mod credits;
+
+pub mod billing_lago_carry;

@@ -636,7 +636,7 @@ async fn admin_query_execution_stats() {
             .and_then(|stage| stage.get("$cursor"))
             .unwrap_or(&json);
         let stats = &cursor["executionStats"];
-        serde_json::json!({ "docs_examined": stats["totalDocsExamined"], "keys_examined": stats["totalKeysExamined"], "execution_ms": stats["executionTimeMillis"], "winning_plan": cursor["queryPlanner"]["winningPlan"] })
+        serde_json::json!({ "docs_examined": stats["totalDocsExamined"], "keys_examined": stats["totalKeysExamined"], "execution_ms": stats["executionTimeMillis"], "winning_plan": cursor["queryPlanner"]["winningPlan"], "explain": json })
     }
     fn record(evidence: &mut serde_json::Value, phase: &str, name: &str, value: serde_json::Value) {
         println!(
@@ -912,7 +912,10 @@ async fn hourly_cost_partitions_preserve_legacy_rounding_and_unknown_masking() {
     let params = query().validate(end).unwrap();
     let oracle = aggregate(&db, summary_pipeline(&params)).await.unwrap();
     let expected = stats(&documents(&oracle[0], "totals").unwrap()[0]).unwrap();
-    assert_eq!(expected.gross_cost_micros, Some(18));
+    // #1672: retain fractions across display groups; the former 18-micro
+    // expectation discarded two 0.600001-micro groups before aggregation.
+    assert_eq!(expected.gross_cost_micros, Some(19));
+    assert_eq!(expected.gross_cost.unwrap().to_string(), "0.000019400004");
     let before = get_usage(&db, query().validate(end).unwrap())
         .await
         .unwrap();
@@ -962,7 +965,17 @@ async fn hourly_rollup_production_density_benchmark() {
     let end = previous
         .as_ref()
         .map(|s| s.get_datetime("end").unwrap().to_chrono())
-        .unwrap_or_else(|| hour(Utc::now()) + chrono::Duration::minutes(17));
+        .unwrap_or_else(|| {
+            // Pin comparison runs to one UTC phase: midnight otherwise changes
+            // the daily/hourly edge mix independently of the reduction code.
+            std::env::var("NYXID_BENCHMARK_ANCHOR")
+                .map(|value| {
+                    DateTime::parse_from_rfc3339(&value)
+                        .unwrap()
+                        .with_timezone(&Utc)
+                })
+                .unwrap_or_else(|_| hour(Utc::now()) + chrono::Duration::minutes(17))
+        });
     let first = hour(end) - chrono::Duration::hours(72);
     let actors: Vec<String> = previous
         .as_ref()
@@ -1201,6 +1214,17 @@ async fn hourly_rollup_production_density_benchmark() {
     println!(
         "31-day population: {summaries_per_hour} summaries/full hour; production observed 38 actor×service rows across 14 users/17 services in 2h (~3 metrics, 2 classes, a few models)"
     );
+    // The fixture is fully folded into exact mirror fields before timing. Mark
+    // the derived data ready so the production benchmark exercises the same
+    // plain covered paths used after rollup normalization.
+    db.collection::<Document>("billing_migrations")
+        .update_one(
+            doc! { "_id": crate::services::billing::exact_migration::ROLLUP_MARKER },
+            doc! { "$set": { "completed_at": bson::DateTime::now() } },
+        )
+        .upsert(true)
+        .await
+        .unwrap();
     let mut measurements = Vec::new();
     let mut failures = Vec::new();
     for (days, budget_ms) in [(1, 500.0), (7, 1_000.0), (31, 2_000.0)] {
@@ -1271,7 +1295,26 @@ async fn hourly_rollup_production_density_benchmark() {
                 );
             }
             ms.sort_by(f64::total_cmp);
-            let explain = db.run_command(doc! { "explain": { "aggregate": COLLECTION_NAME, "pipeline": fast_pipeline(&params, cached_rates(&db).await.unwrap(), usage_rollup::state(&db).await.unwrap().and_then(|s| s.folded_before), usage_rollup::state(&db).await.unwrap().is_some_and(|s| s.daily_ready)), "cursor": {}, "hint": usage_rollup::PENDING_INDEX }, "verbosity": "executionStats" }).await.unwrap();
+            let state = usage_rollup::state(&db).await.unwrap();
+            let pipeline = fast_pipeline(
+                &params,
+                cached_rates(&db).await.unwrap(),
+                state.as_ref().and_then(|s| s.folded_before),
+                state.as_ref().is_some_and(|s| s.daily_ready),
+                crate::services::billing::exact_migration::rollup_ready(&db)
+                    .await
+                    .unwrap(),
+            );
+            let explain = db
+                .run_command(doc! {
+                    "explain": {
+                        "aggregate": COLLECTION_NAME, "pipeline": pipeline, "cursor": {},
+                        "hint": usage_rollup::PENDING_INDEX,
+                    },
+                    "verbosity": "executionStats",
+                })
+                .await
+                .unwrap();
             let mut docs = 0_i64;
             let mut keys = 0_i64;
             fn examined(value: &Bson, docs: &mut i64, keys: &mut i64) {
@@ -1465,7 +1508,10 @@ async fn hourly_integer_cost_reduction_is_exact_below_saturation_and_clamps_over
             row.insert("wallet_id", "wallet");
             row.insert("released", true);
             row.insert("lago_acked", false);
-            row.insert("funding", doc! { "settled": true, "total_charge_micros": amount, "wallet_funded_micros": amount });
+            row.insert(
+                "funding",
+                doc! { "settled": true, "total_charge_micros": amount, "wallet_funded_micros": amount },
+            );
             insert(&db, row).await;
         }
         let oracle = aggregate(&db, summary_pipeline(&query().validate(now).unwrap()))
@@ -1648,24 +1694,30 @@ async fn hourly_and_daily_reductions_have_covering_indexes() {
         (crate::models::usage_rollup_hourly::COLLECTION_NAME, "hour"),
         (crate::models::usage_rollup_daily::COLLECTION_NAME, "day"),
     ] {
+        // Flat Decimal128 mirrors use covered index slots after normalization.
         for index in [
-            "usage_rollup_reduce_window",
-            "usage_rollup_reduce_actor",
-            "usage_rollup_reduce_owner",
+            "usage_rollup_reduce_window_exact_v4",
+            "usage_rollup_reduce_actor_exact_v4",
+            "usage_rollup_reduce_owner_exact_v4",
         ] {
             let mut group = doc! { "_id": "$single_display_key" };
             for field in usage_rollup::MEASURES
                 .iter()
                 .filter(|f| **f != "rows_folded")
             {
-                group.insert(*field, doc! { "$sum": format!("${field}") });
+                let amount = if COST_FIELDS.contains(field) || *field == "legacy_grant_cost" {
+                    rollup_credit_expr(field, true)
+                } else {
+                    Bson::String(format!("${field}"))
+                };
+                group.insert(*field, doc! { "$sum": amount });
             }
             let mut filter = doc! { bucket: { "$gte": bson::DateTime::from_chrono(end - chrono::Duration::days(1)), "$lt": bson::DateTime::from_chrono(end) }, "single_display_key": { "$ne": null } };
             match index {
-                "usage_rollup_reduce_actor" => {
+                "usage_rollup_reduce_actor_exact_v4" => {
                     filter.insert("actor", "actor");
                 }
-                "usage_rollup_reduce_owner" => {
+                "usage_rollup_reduce_owner_exact_v4" => {
                     filter.insert("owner", "owner");
                 }
                 _ => (),
@@ -1690,6 +1742,12 @@ async fn hourly_and_daily_reductions_have_covering_indexes() {
                 "{collection} / {index}: {explain}"
             );
             assert!(serde_json::to_string(&explain).unwrap().contains("IXSCAN"));
+            assert!(
+                !serde_json::to_string(&explain)
+                    .unwrap()
+                    .contains("traverseP"),
+                "flat cost mirrors must use index slots without object traversal"
+            );
         }
     }
     db.drop().await.unwrap();
@@ -2147,4 +2205,411 @@ async fn analytics_calendar_intervals_and_token_measures_conserve_folded_usage()
         ]
     );
     db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn pico_costs_retain_472_micros_across_raw_rollup_api_and_analytics() {
+    use crate::models::credits::Credits;
+    use crate::services::billing::usage_rollup::{fold_once, hour};
+    let db = connect_test_database("exact_472_micro_rollup")
+        .await
+        .unwrap();
+    let end = hour(Utc::now()) + chrono::Duration::minutes(17);
+    let actor = uuid::Uuid::new_v4().to_string();
+    let mut rows = Vec::new();
+    for index in 0..590 {
+        let quantity = if index == 589 { 202_051 } else { 200_881 };
+        let amount = Credits::from_pico(800_000)
+            .unwrap()
+            .checked_mul(quantity)
+            .unwrap();
+        let mut row = meter(&actor, &actor, "exact-cache", quantity);
+        row.insert(
+            "created_at",
+            bson::DateTime::from_chrono(end - chrono::Duration::hours(2)),
+        );
+        row.insert("wallet_id", "wallet");
+        row.insert("released", true);
+        // Exact credits belong under unit-free keys; the former fixture used
+        // the unreleased Decimal128-credits-under-micros format. Keep the oracle.
+        row.insert(
+            "funding",
+            doc! { "settled": true, "total_charge": amount, "grant_funded": amount,
+            "wallet_funded": Credits::ZERO, "allowance_funded": Credits::ZERO },
+        );
+        rows.push(row);
+    }
+    db.collection::<Document>(COLLECTION_NAME)
+        .insert_many(rows)
+        .await
+        .unwrap();
+    let expected: Credits = "94.816768".parse().unwrap();
+    for folded in [false, true] {
+        if folded {
+            while fold_once(&db, end).await.unwrap() > 0 {}
+            // Exercise the normalized covering reduction as well as raw costs.
+            crate::services::billing::exact_migration::run(&db)
+                .await
+                .unwrap();
+        }
+        let report = get_usage(&db, query().validate(end).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(report.totals.gross_cost, Some(expected));
+        assert_eq!(report.totals.gross_cost_micros, Some(94_816_768));
+        let params = analytics::AnalyticsQuery {
+            measure: Some("cost".into()),
+            ..Default::default()
+        }
+        .validate(end)
+        .unwrap();
+        let report = analytics::get_analytics(&db, params).await.unwrap();
+        assert_eq!(report.exact_total, Some(expected));
+    }
+    let response = crate::handlers::billing::get_usage(
+        axum::extract::State(test_app_state(db.clone())),
+        test_auth_user(&actor),
+        axum::extract::Query(crate::handlers::billing::UsageQuery { period: None }),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(response.totals.estimated_credits, Some(expected));
+    assert_eq!(response.totals.estimated_credits_micros, Some(94_816_768));
+    // Before #1672, truncating each of these 590 rows dropped 472 microcredits.
+    assert_eq!(expected.legacy_micros().unwrap() - 94_816_296, 472);
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn exact_cost_ranking_orders_decimal_values_before_and_after_folding() {
+    use crate::models::credits::Credits;
+    use crate::services::billing::usage_rollup::{fold_once, hour};
+    let db = connect_test_database("exact_cost_ranking").await.unwrap();
+    let end = hour(Utc::now()) + chrono::Duration::minutes(17);
+    let actor = uuid::Uuid::new_v4().to_string();
+    for (service, cost) in [
+        ("a-nine", "9"),
+        ("z-nine-plus-pico", "9.000000000001"),
+        ("ten", "10"),
+        ("one", "1"),
+    ] {
+        let mut row = meter(&actor, &actor, service, 1);
+        let amount: Credits = cost.parse().unwrap();
+        row.insert(
+            "created_at",
+            bson::DateTime::from_chrono(end - chrono::Duration::hours(2)),
+        );
+        row.insert("wallet_id", "wallet");
+        row.insert("released", true);
+        row.insert(
+            "funding",
+            doc! {
+                "settled": true, "total_charge": amount, "wallet_funded": amount,
+                "grant_funded": Credits::ZERO, "allowance_funded": Credits::ZERO,
+            },
+        );
+        insert(&db, row).await;
+    }
+    for folded in [false, true] {
+        if folded {
+            while fold_once(&db, end).await.unwrap() > 0 {}
+        }
+        let params = AdminUsageQuery {
+            sort: Some("cost".into()),
+            ..query()
+        }
+        .validate(end)
+        .unwrap();
+        let report = get_usage(&db, params).await.unwrap();
+        assert_eq!(
+            report
+                .ranking
+                .iter()
+                .map(|row| row.service.service_slug.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            ["ten", "z-nine-plus-pico", "a-nine", "one"]
+        );
+        assert_eq!(
+            report.totals.gross_cost.unwrap().to_string(),
+            "29.000000000001"
+        );
+    }
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn covered_credit_mirrors_preserve_legacy_scale_and_explicit_null() {
+    use crate::models::credits::Credits;
+    use crate::services::billing::usage_rollup;
+    let db = connect_test_database("covered_credit_presence")
+        .await
+        .unwrap();
+    usage_rollup::ensure_indexes(&db).await.unwrap();
+    let collection = db.collection::<Document>(crate::models::usage_rollup_hourly::COLLECTION_NAME);
+    let at = usage_rollup::hour(Utc::now());
+    let old = "99".parse::<bson::Decimal128>().unwrap();
+    for (name, costs) in [
+        ("legacy", doc! { "gross_cost_micros": old }),
+        (
+            "null",
+            doc! { "gross_cost": Bson::Null, "gross_cost_micros": old },
+        ),
+        (
+            "exact",
+            doc! { "gross_cost": Credits::from_pico(1).unwrap(), "gross_cost_micros": old },
+        ),
+    ] {
+        collection
+            .insert_one(doc! {
+                "_id": name, "hour": bson::DateTime::from_chrono(at),
+                "single_display_key": { "name": name }, "query_costs": costs,
+            })
+            .await
+            .unwrap();
+    }
+    for (name, root) in [
+        (
+            "root-exact",
+            doc! { "gross_cost": Credits::from_whole(2), "gross_cost_micros": 99_i64 },
+        ),
+        ("root-legacy", doc! { "gross_cost_micros": 99_i64 }),
+        (
+            "root-null",
+            doc! { "gross_cost": Bson::Null, "gross_cost_micros": 99_i64 },
+        ),
+    ] {
+        let mut row = doc! {
+            "_id": name, "hour": bson::DateTime::from_chrono(at),
+            "single_display_key": { "name": name },
+        };
+        row.extend(root);
+        collection.insert_one(row).await.unwrap();
+    }
+    db.collection::<Document>("billing_migrations")
+        .delete_one(doc! { "_id": "exact-v2" })
+        .await
+        .unwrap();
+    db.collection::<Document>("billing_migrations")
+        .delete_one(doc! { "_id": "exact-v2-rollups" })
+        .await
+        .unwrap();
+    let normalized = crate::services::billing::exact_migration::rollup_ready(&db)
+        .await
+        .unwrap();
+    assert!(!normalized);
+    let pre_marker_pipeline = vec![
+        doc! { "$match": { "hour": bson::DateTime::from_chrono(at), "single_display_key": { "$ne": null } } },
+        doc! { "$group": { "_id": "$single_display_key", "amount": { "$sum": rollup_credit_expr("gross_cost", normalized) } } },
+    ];
+    let pre_marker_rows: Vec<Document> = collection
+        .aggregate(pre_marker_pipeline)
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(pre_marker_rows.len(), 6);
+    for row in &pre_marker_rows {
+        let name = row.get_document("_id").unwrap().get_str("name").unwrap();
+        let actual =
+            Credits::from_bson(row["amount"].clone(), crate::models::credits::SCALE).unwrap();
+        let expected = match name {
+            "legacy" | "root-legacy" => Credits::from_micros(99),
+            "exact" => Credits::from_pico(1).unwrap(),
+            "null" | "root-null" => Credits::ZERO,
+            "root-exact" => Credits::from_whole(2),
+            _ => panic!("unexpected group"),
+        };
+        assert_eq!(actual, expected, "pre-marker {name}");
+    }
+    crate::services::billing::exact_migration::run(&db)
+        .await
+        .unwrap();
+    let normalized = crate::services::billing::exact_migration::rollup_ready(&db)
+        .await
+        .unwrap();
+    assert!(normalized);
+    let pipeline = vec![
+        doc! { "$match": { "hour": bson::DateTime::from_chrono(at), "single_display_key": { "$ne": null } } },
+        doc! { "$group": { "_id": "$single_display_key", "amount": { "$sum": rollup_credit_expr("gross_cost", normalized) } } },
+    ];
+    let rows: Vec<Document> = collection
+        .aggregate(pipeline.clone())
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    for row in rows {
+        let name = row.get_document("_id").unwrap().get_str("name").unwrap();
+        let actual =
+            Credits::from_bson(row["amount"].clone(), crate::models::credits::SCALE).unwrap();
+        let expected = match name {
+            "legacy" | "root-legacy" => Credits::from_micros(99),
+            "exact" => Credits::from_pico(1).unwrap(),
+            "null" | "root-null" => Credits::ZERO,
+            "root-exact" => Credits::from_whole(2),
+            _ => panic!("unexpected group"),
+        };
+        assert_eq!(actual, expected, "{name}");
+    }
+    let explain = db
+        .run_command(doc! {
+            "explain": { "aggregate": collection.name(), "pipeline": pipeline, "cursor": {},
+                "hint": "usage_rollup_reduce_window_exact_v4" },
+            "verbosity": "executionStats",
+        })
+        .await
+        .unwrap();
+    let stats = explain
+        .get_document("executionStats")
+        .ok()
+        .or_else(|| {
+            explain
+                .get_array("stages")
+                .ok()?
+                .first()?
+                .as_document()?
+                .get_document("$cursor")
+                .ok()?
+                .get_document("executionStats")
+                .ok()
+        })
+        .unwrap();
+    assert_eq!(stats.get_i32("totalDocsExamined").unwrap(), 0);
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn covered_money_reduction_matches_decimal_or_fails_closed_on_overflow() {
+    use crate::models::credits::{Credits, SCALE};
+    use crate::services::billing::{exact_migration, usage_rollup};
+    let end = usage_rollup::hour(Utc::now());
+    let costs = [
+        "gross_cost",
+        "wallet_cost",
+        "grant_cost",
+        "allowance_cost",
+        "legacy_grant_cost",
+    ];
+    let lost_picos = Credits::from_pico(800_000).unwrap();
+    let cases = [
+        (
+            "submicro",
+            vec![Credits::from_pico(1).unwrap(), lost_picos, lost_picos],
+            false,
+        ),
+        (
+            "472micros",
+            (0..590)
+                .map(|n| {
+                    lost_picos
+                        .checked_mul(if n == 589 { 202_051 } else { 200_881 })
+                        .unwrap()
+                })
+                .collect(),
+            false,
+        ),
+        (
+            "sum_overflow",
+            vec![
+                Credits::from_micros(i64::MAX),
+                Credits::from_micros(i64::MAX),
+            ],
+            true,
+        ),
+        (
+            "row_overflow",
+            vec![
+                Credits::from_micros(i64::MAX)
+                    .checked_add(Credits::from_whole(1))
+                    .unwrap(),
+            ],
+            true,
+        ),
+    ];
+    for (name, amounts, may_fail_closed) in cases {
+        let db = connect_test_database(&format!("covered_exact_{name}"))
+            .await
+            .unwrap();
+        usage_rollup::ensure_indexes(&db).await.unwrap();
+        let collection =
+            db.collection::<Document>(crate::models::usage_rollup_hourly::COLLECTION_NAME);
+        let rows: Vec<_> = amounts.iter().enumerate().map(|(i, amount)| {
+            let mut row = doc! { "_id": i.to_string(), "hour": bson::DateTime::from_chrono(end - chrono::Duration::hours(2)), "single_display_key": { "service": "same" } };
+            for field in costs { row.insert(field, *amount); }
+            row
+        }).collect();
+        collection.insert_many(rows).await.unwrap();
+        // Exercise the production atomic normalization before its covered path.
+        db.collection::<Document>("billing_migrations")
+            .delete_many(doc! {})
+            .await
+            .unwrap();
+        exact_migration::run(&db).await.unwrap();
+        assert!(exact_migration::rollup_ready(&db).await.unwrap());
+        let pipeline = fast_pipeline(
+            &query().validate(end).unwrap(),
+            Document::new(),
+            Some(end),
+            false,
+            true,
+        );
+        let covered: Vec<Document> = pipeline
+            .iter()
+            .filter_map(|stage| stage.get_document("$unionWith").ok())
+            .find(|union| union.get_str("coll").ok() == Some(collection.name()))
+            .unwrap()
+            .get_array("pipeline")
+            .unwrap()
+            .iter()
+            .map(|v| v.as_document().unwrap().clone())
+            .collect();
+        let mut oracle = doc! { "_id": Bson::Null };
+        for field in costs {
+            oracle.insert(field, doc! { "$sum": format!("${field}") });
+        }
+        let expected: Vec<Document> = collection
+            .aggregate(vec![doc! { "$group": oracle }])
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        if name == "472micros" {
+            assert_eq!(
+                Credits::from_bson(expected[0]["gross_cost"].clone(), SCALE)
+                    .unwrap()
+                    .to_string(),
+                "94.816768"
+            );
+        }
+        let result = match collection.aggregate(covered).await {
+            Ok(cursor) => cursor.try_collect::<Vec<Document>>().await,
+            Err(error) => Err(error),
+        };
+        match result {
+            Ok(actual) => {
+                assert_eq!(actual.len(), 1, "{name}");
+                for field in costs {
+                    assert_eq!(
+                        Credits::from_bson(actual[0][field].clone(), SCALE).unwrap(),
+                        Credits::from_bson(expected[0][field].clone(), SCALE).unwrap(),
+                        "{name}/{field}"
+                    );
+                }
+            }
+            Err(error) => {
+                assert!(
+                    may_fail_closed
+                        && error
+                            .to_string()
+                            .contains("Int64 credit reduction overflow"),
+                    "{name}: {error}"
+                );
+            }
+        }
+        db.drop().await.unwrap();
+    }
 }

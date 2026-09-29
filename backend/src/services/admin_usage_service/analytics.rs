@@ -1,5 +1,6 @@
 //! Bounded chart projections over the same rollup/tail snapshot as usage tables.
 use super::*;
+use crate::models::credits::Credits;
 use chrono::{Datelike, Months};
 
 #[derive(Debug, Default, Deserialize, IntoParams)]
@@ -161,16 +162,23 @@ impl AnalyticsOptions {
     }
     fn field(&self) -> String {
         match self.measure.as_str() {
-            "cost" => "gross_cost_micros".into(),
-            "wallet_cost" => "wallet_cost_micros".into(),
-            "grant_cost" => "grant_cost_micros".into(),
-            "allowance_cost" => "allowance_cost_micros".into(),
+            "cost" => "gross_cost".into(),
+            "wallet_cost" => "wallet_cost".into(),
+            "grant_cost" => "grant_cost".into(),
+            "allowance_cost" => "allowance_cost".into(),
             "quantity" => format!("quantities.{}", self.metric),
             value => value.into(),
         }
     }
     fn is_cost(&self) -> bool {
         self.measure == "cost" || self.measure.ends_with("_cost")
+    }
+    fn final_value(&self) -> Bson {
+        if self.is_cost() {
+            "$value".into()
+        } else {
+            doc! { "$toLong": { "$min": [i64::MAX, "$value"] } }.into()
+        }
     }
     pub(super) fn facets(&self, reduced: &impl Fn(&[&str]) -> Vec<Document>) -> Document {
         let dimensions: &[&str] = match self.breakdown.as_str() {
@@ -180,7 +188,11 @@ impl AnalyticsOptions {
             _ => &["service_id", "service_slug"],
         };
         let mut distribution = reduced(if self.top == 0 { &[] } else { dimensions });
-        let field = self.field();
+        let field = if self.is_cost() {
+            self.field().trim_end_matches("_micros").to_string()
+        } else {
+            self.field()
+        };
         let measure: Bson = if self.is_cost() {
             format!("${field}").into()
         } else {
@@ -199,7 +211,7 @@ impl AnalyticsOptions {
                 "known": { "$sum": { "$cond": [{ "$ne": [{ "$ifNull": ["$value", null] }, null] }, 1, 0] } },
                 "unknown_cost_events": { "$sum": "$unknown_cost_events" }, "groups": { "$sum": 1 },
             } },
-            doc! { "$set": { "value": { "$cond": [{ "$gt": ["$known", 0] }, { "$toLong": { "$min": [i64::MAX, "$value"] } }, null] } } },
+            doc! { "$set": { "value": { "$cond": [{ "$gt": ["$known", 0] }, self.final_value(), null] } } },
         ]);
         let mut series_dimensions = if self.top == 0 {
             Vec::new()
@@ -213,7 +225,7 @@ impl AnalyticsOptions {
         series_dimensions.push("bucket");
         let mut series = reduced(&series_dimensions);
         let mut series_group = doc! {
-            "_id": entity, "value": { "$sum": { "$toDecimal": format!("${field}") } },
+            "_id": entity, "value": { "$sum": format!("${field}") },
             "known": { "$sum": { "$cond": [{ "$ne": [{ "$ifNull": [format!("${field}"), null] }, null] }, 1, 0] } },
             "points": { "$push": { "bucket": "$_id.bucket", "value": { "$ifNull": [format!("${field}"), Bson::Null] }, "requests": "$requests", "unknown_cost_events": "$unknown_cost_events" } },
         };
@@ -228,7 +240,7 @@ impl AnalyticsOptions {
         }
         series.extend([
             doc! { "$group": series_group },
-            doc! { "$set": { "value": { "$cond": [{ "$gt": ["$known", 0] }, { "$toLong": { "$min": [i64::MAX, "$value"] } }, null] } } },
+            doc! { "$set": { "value": { "$cond": [{ "$gt": ["$known", 0] }, self.final_value(), null] } } },
             doc! { "$sort": { "value": -1, "_id": 1 } },
         ]);
         let mut series_other = series.clone();
@@ -241,7 +253,7 @@ impl AnalyticsOptions {
                 "requests": { "$sum": "$points.requests" }, "unknown_cost_events": { "$sum": "$points.unknown_cost_events" },
             } },
             doc! { "$project": { "_id": 0, "bucket": "$_id", "requests": 1, "unknown_cost_events": 1,
-                "value": { "$cond": [{ "$gt": ["$known", 0] }, { "$toLong": { "$min": [i64::MAX, "$value"] } }, null] },
+                "value": { "$cond": [{ "$gt": ["$known", 0] }, self.final_value(), null] },
             } },
         ]);
         let mut trend = reduced(&["bucket"]);
@@ -257,6 +269,8 @@ impl AnalyticsOptions {
 pub struct AnalyticsPoint {
     pub bucket: DateTime<Utc>,
     pub value: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exact_value: Option<Credits>,
     pub requests: i64,
     pub unknown_cost_events: i64,
 }
@@ -265,6 +279,8 @@ pub struct AnalyticsSlice {
     pub id: Option<String>,
     pub label: String,
     pub value: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exact_value: Option<Credits>,
     pub unknown_cost_events: i64,
     pub is_other: bool,
 }
@@ -281,10 +297,52 @@ pub struct AnalyticsResponse {
     pub granularity: String,
     pub unit: String,
     pub total: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exact_total: Option<Credits>,
     pub totals: UsageStats,
     pub points: Vec<AnalyticsPoint>,
     pub slices: Vec<AnalyticsSlice>,
     pub series: Vec<AnalyticsSeries>,
+}
+
+fn exact_value(stats: &UsageStats, options: &AnalyticsOptions) -> Option<Credits> {
+    if stats.unknown_cost_events > 0 {
+        return None;
+    }
+    match options.measure.as_str() {
+        "cost" => stats.gross_cost,
+        "wallet_cost" => stats.wallet_cost,
+        "grant_cost" => stats.grant_cost,
+        "allowance_cost" => stats.allowance_cost,
+        _ => None,
+    }
+}
+
+fn document_value(
+    row: &Document,
+    options: &AnalyticsOptions,
+) -> AppResult<(Option<i64>, Option<Credits>)> {
+    if options.is_cost() {
+        if number(row, "unknown_cost_events") > 0 {
+            return Ok((None, None));
+        }
+        let exact = row
+            .get("value")
+            .filter(|v| !matches!(v, Bson::Null))
+            .map(|v| Credits::from_bson(v.clone(), 1_000_000))
+            .transpose()?;
+        Ok((exact.map(Credits::display_micros), exact))
+    } else {
+        Ok((
+            match row.get("value") {
+                Some(Bson::Int64(n)) => Some(*n),
+                Some(Bson::Int32(n)) => Some(i64::from(*n)),
+                Some(Bson::Decimal128(n)) => n.to_string().parse().ok(),
+                _ => None,
+            },
+            None,
+        ))
+    }
 }
 
 fn value(stats: &UsageStats, options: &AnalyticsOptions) -> Option<i64> {
@@ -368,6 +426,13 @@ async fn get_inner(db: &mongodb::Database, params: UsageParams) -> AppResult<Ana
         let stats = buckets.remove(&bucket);
         points.push(AnalyticsPoint {
             bucket,
+            exact_value: if options.is_cost() {
+                stats
+                    .as_ref()
+                    .map_or(Some(Credits::ZERO), |stats| exact_value(stats, options))
+            } else {
+                None
+            },
             value: stats
                 .as_ref()
                 .map_or(Some(0), |stats| value(stats, options)),
@@ -481,20 +546,18 @@ async fn get_inner(db: &mongodb::Database, params: UsageParams) -> AppResult<Ana
             id: key,
             label,
             value: value(&stats, options),
+            exact_value: exact_value(&stats, options),
             unknown_cost_events: stats.unknown_cost_events,
             is_other: false,
         });
     }
     if let Some(other) = documents(&result, "other")?.first() {
         let unknown = number(other, "unknown_cost_events");
-        let other_value = match other.get("value") {
-            Some(Bson::Int64(n)) => Some(*n),
-            Some(Bson::Int32(n)) => Some(i64::from(*n)),
-            _ => None,
-        };
+        let (other_value, exact) = document_value(other, options)?;
         slices.push(AnalyticsSlice {
             id: None,
             label: "Other".into(),
+            exact_value: exact,
             value: if options.is_cost() && unknown > 0 {
                 None
             } else {
@@ -512,15 +575,12 @@ async fn get_inner(db: &mongodb::Database, params: UsageParams) -> AppResult<Ana
                 .map_err(|_| AppError::Internal("Invalid series bucket".into()))?
                 .to_chrono();
             let unknown = number(&row, "unknown_cost_events");
-            let amount = match row.get("value") {
-                Some(Bson::Int64(n)) => Some(*n),
-                Some(Bson::Int32(n)) => Some(i64::from(*n)),
-                _ => None,
-            };
+            let (amount, exact) = document_value(&row, options)?;
             values.insert(
                 at,
                 AnalyticsPoint {
                     bucket: at,
+                    exact_value: exact,
                     value: if options.is_cost() && unknown > 0 {
                         None
                     } else {
@@ -536,6 +596,7 @@ async fn get_inner(db: &mongodb::Database, params: UsageParams) -> AppResult<Ana
             .map(|point| {
                 values.remove(&point.bucket).unwrap_or(AnalyticsPoint {
                     bucket: point.bucket,
+                    exact_value: options.is_cost().then_some(Credits::ZERO),
                     value: Some(0),
                     requests: 0,
                     unknown_cost_events: 0,
@@ -569,6 +630,11 @@ async fn get_inner(db: &mongodb::Database, params: UsageParams) -> AppResult<Ana
         });
     }
     Ok(AnalyticsResponse {
+        exact_total: if options.is_cost() && totals.events == 0 {
+            Some(Credits::ZERO)
+        } else {
+            exact_value(&totals, options)
+        },
         total: if totals.events == 0 {
             Some(0)
         } else {

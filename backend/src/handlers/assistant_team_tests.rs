@@ -112,6 +112,100 @@ async fn transcript(state: &AppState, id: &str) -> Vec<AssistantMessage> {
         .unwrap()
 }
 
+#[tokio::test]
+async fn server_started_turn_preserves_picocredits_and_obeys_cutover() {
+    use crate::models::{billing_wallet::BillingWallet, credits::Credits};
+    use crate::services::channel_x_tests::billing::{enable_billing_with_entitlement, settled};
+
+    for pending_cutover in [false, true] {
+        let (mut state, calls, server) = setup("team_exact_billing").await;
+        enable_billing_with_entitlement(&mut state, OWNER, engine::SERVICE_SLUG).await;
+        state
+            .db
+            .collection::<bson::Document>(SERVICES)
+            .update_one(
+                doc! { "slug": engine::SERVICE_SLUG },
+                doc! { "$set": { "billing": {
+                    "platform_billable": true,
+                    "platform_charge_nyxid_credentials_only": false,
+                    "platform_metric": "requests",
+                } } },
+            )
+            .await
+            .unwrap();
+        state
+            .db
+            .collection::<bson::Document>("billing_rate_cache")
+            .insert_one(doc! {
+                "_id": "platform_requests:*", "lago_metric_code": "platform_requests",
+                "credits_per_unit_pico": 1_i64, "credits_per_unit_micros": 0_i64,
+                "synced_at": bson::DateTime::now(),
+            })
+            .await
+            .unwrap();
+        if pending_cutover {
+            state
+                .db
+                .collection::<bson::Document>("billing_migrations")
+                .delete_one(doc! { "_id": "exact-v2" })
+                .await
+                .unwrap();
+        }
+        let start = TurnStart::from(&engine::TurnRequest {
+            agent_id: None,
+            conversation_id: None,
+            text: "A server-started billed turn".into(),
+            model: None,
+            access_mode: None,
+        });
+        let Started::Turn { conversation, .. } =
+            start_server_turn(&state, OWNER, start, Pool::Channel { owner: OWNER })
+                .await
+                .unwrap()
+        else {
+            panic!("server turn should start");
+        };
+        idle_row(&state, &conversation.id).await;
+        let messages = transcript(&state, &conversation.id).await;
+        let rows = settled(&state).await;
+        let wallet = state
+            .db
+            .collection::<BillingWallet>("billing_wallet")
+            .find_one(doc! { "owner_id": OWNER })
+            .await
+            .unwrap()
+            .unwrap();
+        if pending_cutover {
+            assert!(
+                calls.lock().await.is_empty(),
+                "cutover must fence provider effects"
+            );
+            assert!(rows.is_empty());
+            assert_eq!(wallet.pending_lago_debits, Credits::ZERO);
+            assert_eq!(messages.last().unwrap().status, "failed");
+        } else {
+            assert_eq!(
+                messages.last().unwrap().status,
+                "completed",
+                "turn error: {:?}",
+                messages.last().unwrap().error_code,
+            );
+            assert_eq!(calls.lock().await.len(), 1);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].billing_owner_id, OWNER);
+            assert_eq!(rows[0].quantity, Some(1));
+            let expected: Credits = "0.000000000001".parse().unwrap();
+            assert_eq!(
+                rows[0].funding.as_ref().unwrap().wallet_funded,
+                Some(expected)
+            );
+            assert_eq!(wallet.pending_lago_debits, expected);
+            assert_eq!(wallet.reserved_credits, Credits::ZERO);
+        }
+        server.abort();
+    }
+}
+
 /// Run one user turn; `conversation_id` None starts a new thread with
 /// `agent_id` (NyxBot by default).
 async fn user_turn(

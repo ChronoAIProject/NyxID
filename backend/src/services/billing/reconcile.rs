@@ -1,3 +1,4 @@
+use crate::models::credits::Credits;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -68,6 +69,9 @@ impl BillingReconciler {
     }
 
     pub async fn run_once(&self) -> AppResult<ReconcileStats> {
+        if !super::exact_migration::ready(&self.db).await? {
+            return Ok(ReconcileStats::default());
+        }
         let mut stats = ReconcileStats::default();
         stats.abandoned += self.abandon_unforwarded_reserved().await?;
         stats.funding_releases_recovered +=
@@ -135,8 +139,8 @@ impl BillingReconciler {
         lago: &dyn LagoApi,
         stats: &mut ReconcileStats,
     ) -> AppResult<()> {
-        let rates = match lago.plan_rates(&self.config.lago_plan_code).await {
-            Ok(rates) => rates,
+        let plan = match lago.plan_rates(&self.config.lago_plan_code).await {
+            Ok(plan) => plan,
             Err(error) => {
                 tracing::warn!(
                     plan_code = %self.config.lago_plan_code,
@@ -146,7 +150,27 @@ impl BillingReconciler {
                 return Ok(());
             }
         };
-        if rates.is_empty() {
+        let rejected = plan.rejected;
+        let diagnostics = self.db.collection::<Document>("billing_rate_diagnostics");
+        diagnostics
+            .update_one(
+                doc! { "_id": &self.config.lago_plan_code },
+                doc! {
+                    "$set": {
+                        "rejected_metrics": &rejected,
+                        "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                    },
+                },
+            )
+            .upsert(true)
+            .await?;
+        if !rejected.is_empty() {
+            self.db
+                .collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
+                .delete_many(doc! { "lago_metric_code": { "$in": &rejected } })
+                .await?;
+        }
+        if plan.rates.is_empty() {
             tracing::warn!(
                 plan_code = %self.config.lago_plan_code,
                 "Billing rate cache refresh found no standard charges; keeping existing rates"
@@ -154,7 +178,8 @@ impl BillingReconciler {
             return Ok(());
         }
 
-        let mut by_code: BTreeMap<String, (i64, Option<i64>)> = rates
+        let mut by_code: BTreeMap<String, (i64, Option<i64>)> = plan
+            .rates
             .into_iter()
             .map(|rate| {
                 (
@@ -168,9 +193,11 @@ impl BillingReconciler {
             super::meter::PLATFORM_BYTES_METRIC_CODE,
             super::meter::PLATFORM_TOKENS_METRIC_CODE,
         ] {
-            by_code
-                .entry(metric_code.to_string())
-                .or_insert((0, Some(0)));
+            if !rejected.iter().any(|code| code == metric_code) {
+                by_code
+                    .entry(metric_code.to_string())
+                    .or_insert((0, Some(0)));
+            }
         }
 
         let now = Utc::now();
@@ -214,30 +241,12 @@ impl BillingReconciler {
             .await?;
 
         for wallet in wallets {
-            match lago.wallet_balance(&wallet.lago_customer_id).await {
+            match webhook::provider_effective_balance(lago, &wallet).await {
                 Ok(balance_credits) => {
-                    // OSS Lago never refreshes credits_ongoing_balance (the
-                    // clock job is premium-gated), so the synced balance
-                    // ignores usage accrued this period until the invoice
-                    // settles. Subtract the period's current_usage ourselves;
-                    // cents convert 1:1 to credits (wallet rate_amount is 1)
-                    // and partial credits round up against availability.
-                    let accrued_credits = match wallet.lago_subscription_id.as_deref() {
-                        Some(subscription_id) => lago
-                            .current_usage(&wallet.lago_customer_id, subscription_id)
-                            .await
-                            .ok()
-                            .and_then(|usage| {
-                                super::lago_client::extract_current_usage_amount_cents(&usage.raw)
-                            })
-                            .map(|cents| (cents.max(0) + 99) / 100)
-                            .unwrap_or(0),
-                        None => 0,
-                    };
                     if webhook::refresh_wallet_balance(
                         &self.db,
                         &wallet.lago_customer_id,
-                        balance_credits.saturating_sub(accrued_credits),
+                        balance_credits,
                     )
                     .await?
                     .is_some()
@@ -353,9 +362,22 @@ impl BillingReconciler {
                 && remote != local_quantity
             {
                 stats.drift_alerts += 1;
+                let latest = self
+                    .db
+                    .collection::<UsageMeterRow>(USAGE_METER)
+                    .find_one(doc! { "billing_owner_id": &owner_id,
+                        "lago_metric_code": &metric_code,
+                        "funding.lago_carry_id": { "$type": "string" },
+                    })
+                    .sort(doc! { "created_at": -1 })
+                    .await?;
+                let latest_carry_id = latest
+                    .and_then(|row| row.funding)
+                    .and_then(|funding| funding.lago_carry_id);
                 tracing::warn!(
                     owner_id = %owner_id,
                     metric_code = %metric_code,
+                    latest_carry_id = ?latest_carry_id,
                     local_quantity_micros = local_quantity,
                     remote_quantity_micros = remote,
                     "Billing Lago usage drift detected"
@@ -565,7 +587,12 @@ fn json_decimal_micros(value: Option<&serde_json::Value>) -> Option<i64> {
         serde_json::Value::String(value) => value.clone(),
         _ => return None,
     };
-    super::lago_client::decimal_credits_to_micros(&text)
+    // Quantity boundary: Lago emits millionths. Reject finer values instead
+    // of hiding drift through truncation.
+    let quantity: Credits = text.parse().ok()?;
+    (quantity >= Credits::ZERO && quantity.pico() % 1_000_000 == 0)
+        .then(|| quantity.legacy_micros().ok())
+        .flatten()
 }
 
 fn doc_i64(doc: &Document, key: &str) -> Option<i64> {
@@ -684,7 +711,7 @@ mod tests {
             credential_class: CredentialClass::UserOwned,
             model: None,
             token_breakdown: None,
-            reserved_credits: 0,
+            reserved_credits: crate::models::credits::Credits::from_whole(0),
             funding: None,
             quantity: Some(1),
             pending_resale_quantity: None,
@@ -764,7 +791,7 @@ mod tests {
         let mut row = finalized_row("tx-benefit-funded");
         row.funding = Some(crate::models::usage_meter::UsageFunding {
             settled: true,
-            wallet_charge_credits: Some(0),
+            wallet_charge_credits: Some(crate::models::credits::Credits::from_whole(0)),
             lago_billable_quantity_micros: Some(0),
             settled_at: Some(Utc::now()),
             ..Default::default()
@@ -940,7 +967,7 @@ mod tests {
         let mut row = finalized_row("tx-settlement-dead-letter");
         row.status = UsageStatus::Failed;
         row.released = false;
-        row.reserved_credits = 1;
+        row.reserved_credits = crate::models::credits::Credits::from_whole(1);
         row.settlement_attempts =
             crate::services::billing::reservation::MAX_SETTLEMENT_ATTEMPTS - 1;
         row.settlement_next_retry_at = Some(Utc::now() - Duration::seconds(1));
@@ -1059,6 +1086,7 @@ mod tests {
     #[derive(Clone)]
     struct RatesLago {
         rates: Vec<super::super::lago_client::PlanRate>,
+        rejected: Vec<String>,
     }
 
     #[async_trait]
@@ -1117,8 +1145,11 @@ mod tests {
         async fn plan_rates(
             &self,
             _plan_code: &str,
-        ) -> crate::errors::AppResult<Vec<super::super::lago_client::PlanRate>> {
-            Ok(self.rates.clone())
+        ) -> crate::errors::AppResult<super::super::lago_client::PlanRates> {
+            Ok(super::super::lago_client::PlanRates {
+                rates: self.rates.clone(),
+                rejected: self.rejected.clone(),
+            })
         }
     }
 
@@ -1130,6 +1161,7 @@ mod tests {
         let reconciler = BillingReconciler::new(
             db.clone(),
             Some(std::sync::Arc::new(RatesLago {
+                rejected: Vec::new(),
                 rates: vec![
                     super::super::lago_client::PlanRate {
                         lago_metric_code: "platform_tokens".to_string(),
@@ -1193,7 +1225,10 @@ mod tests {
             .expect("seed rate");
         let reconciler = BillingReconciler::new(
             db.clone(),
-            Some(std::sync::Arc::new(RatesLago { rates: Vec::new() })),
+            Some(std::sync::Arc::new(RatesLago {
+                rates: Vec::new(),
+                rejected: Vec::new(),
+            })),
             std::sync::Arc::new(billing_enabled_config()),
         );
 
@@ -1206,5 +1241,66 @@ mod tests {
             .expect("rate exists");
         assert_eq!(stats.rate_cache_refreshes, 0);
         assert_eq!(saved.credits_per_unit_micros, 7);
+    }
+
+    #[tokio::test]
+    async fn invalid_metric_loses_cached_rate_without_free_fallback_or_plan_outage() {
+        use super::ReconcileStats;
+        use mongodb::bson::{Bson, Document};
+        use std::sync::Arc;
+
+        let db = connect_test_database("billing_invalid_rate_cache")
+            .await
+            .unwrap();
+        let collection =
+            db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME);
+        collection
+            .insert_one(BillingRateCache {
+                id: BillingRateCache::cache_id("platform_tokens", None),
+                lago_metric_code: "platform_tokens".into(),
+                model: None,
+                credits_per_unit_micros: 7,
+                credits_per_unit_pico: None,
+                synced_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+        let lago = RatesLago {
+            rates: vec![super::super::lago_client::PlanRate {
+                lago_metric_code: "platform_requests".into(),
+                credits_per_unit_micros: 9,
+                credits_per_unit_pico: Some(9_000_000),
+            }],
+            rejected: vec!["platform_tokens".into()],
+        };
+        let config = Arc::new(billing_enabled_config());
+        let reconciler = BillingReconciler::new(db.clone(), None, config.clone());
+        reconciler
+            .refresh_rate_cache(&lago, &mut ReconcileStats::default())
+            .await
+            .unwrap();
+        assert!(
+            collection
+                .find_one(doc! { "_id": "platform_tokens:*" })
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let valid = collection
+            .find_one(doc! { "_id": "platform_requests:*" })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(valid.credits_per_unit_micros, 9);
+        let diagnostic = db
+            .collection::<Document>("billing_rate_diagnostics")
+            .find_one(doc! { "_id": &config.lago_plan_code })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            diagnostic.get_array("rejected_metrics").unwrap(),
+            &[Bson::String("platform_tokens".into())]
+        );
     }
 }

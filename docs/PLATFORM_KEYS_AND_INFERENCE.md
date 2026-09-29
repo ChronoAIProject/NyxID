@@ -215,11 +215,11 @@ and additional components of each lane. Supported units are `tokens` (provider t
 accept only tokens/requests/bytes. Backend `BillingMetric` metadata and frontend
 `schemas/billing-metrics.ts` / CLI `commands/billing_units.rs` centralize unit names and labels.
 
-| Final credential class | Lane |
-| --- | --- |
-| UserOwned, NyxidPlatformOauthApp, AgentOverrideUserOwned, NodeManaged | BYOK |
-| NyxidManagedMaster | Platform key |
-| NoAuth | None (meter only) |
+| Final credential class                                                | Lane              |
+| --------------------------------------------------------------------- | ----------------- |
+| UserOwned, NyxidPlatformOauthApp, AgentOverrideUserOwned, NodeManaged | BYOK              |
+| NyxidManagedMaster                                                    | Platform key      |
+| NoAuth                                                                | None (meter only) |
 
 At least one configured lane selects lane mode. A missing matching lane is free,
 even if legacy platform billing is enabled. While the selected lane's primary is
@@ -286,23 +286,29 @@ dialog consumes it directly. Allowances fund only identical-metric usage rows.
 Omitted allowance metric defaults to BYOK primary, then platform-key primary,
 then legacy; `effective_platform_metric` remains this display default.
 Existing allowances preserve their stored unit on unrelated edits. Periods, recurrence,
-grant expiry, ledger canonical fields/order/hash/dedupe keys and verification are unchanged.
+grant expiry and operation dedupe identities are unchanged. Exact accounting adds versioned ledger postings.
 
 Unit prices support `PRICE_FRACTIONAL_DIGITS = 12` and at most 1,000,000 credits/unit.
 The normalized exact decimal goes to Lago. Optional `credits_per_unit_pico` (10^-12
 credits) is preferred in cache/funding/reservations; legacy `credits_per_unit_micros`
 is still populated by truncation for rolling compatibility. Missing precise fields
-use the old micro rate exactly. All money multiplication uses saturating integer i128
-intermediates. Gross/funding display costs truncate **after** multiplying to micros;
-grant movements remain micros; the exact remaining wallet cost rounds **up** to whole
-credits per component, including sub-microcredit costs. Lago receives the wallet-funded quantity,
-rounded up to its existing micro-unit precision, capped at actual units. No floating
-point is used in rate or cost arithmetic. Ledger amount encoding remains unchanged.
+use the old micro rate exactly. Money uses checked i128 picocredit `Credits`,
+Decimal128 credits in MongoDB, and decimal strings in JSON. Funding calculates
+cost once and subtracts allowance and grants to obtain the exact wallet debit.
+Lago quantities floor cumulatively with durable owner/metric/rate carry; they do
+not round up per row. Balanced v2 ledger postings cover every balance movement;
+v1 canonical bytes remain unchanged. See [exact accounting](BILLING_EXACT_ACCOUNTING.md).
 
 **Rollout:** upgrade ALL replicas before authoring component prices, allowances
 using new metrics, or prices beyond six fractional digits. Old binaries cannot deserialize the new enum variants or charge
-additional components. Defaulted fields require no data migration; existing lanes and
-prices of up to six fractional digits keep their prior accounting.
+additional components. The 0.31 exact-accounting cutover requires draining old billing writers before
+starting the migration with `BILLING_EXACT_CUTOVER_DRAINED=true`; subsequent
+new-version replicas resume the recorded background migration. Pending cutover
+returns 503 for billed admission and pauses money sweeps; the server, nonbilling
+traffic and legacy-tolerant UI reads remain available. Malformed documents are
+isolated and reported through Integrity while other rows continue migrating.
+Old binaries fail to read migrated amounts and must not be restarted. See the
+exact-accounting deployment contract.
 
 ## Inference defaults and transports
 
@@ -310,13 +316,13 @@ Startup fills only absent/null inference blocks whose `inference_admin_modified`
 marker is absent/false, including admin-created Chrono rows. It never replaces an
 admin-authored block or an explicit null clear.
 
-| Catalog slug | Protocol | Model list | Realtime |
-| --- | --- | --- | --- |
-| llm-openai | openai_responses | true | true |
-| llm-anthropic | anthropic_messages | true | false |
-| llm-deepseek, llm-mistral, llm-openrouter | openai_completions | true | false |
-| chrono-llm, chrono-llm-public | openai_completions | true | false |
-| llm-xai | openai_completions | true | true |
+| Catalog slug                              | Protocol           | Model list | Realtime |
+| ----------------------------------------- | ------------------ | ---------- | -------- |
+| llm-openai                                | openai_responses   | true       | true     |
+| llm-anthropic                             | anthropic_messages | true       | false    |
+| llm-deepseek, llm-mistral, llm-openrouter | openai_completions | true       | false    |
+| chrono-llm, chrono-llm-public             | openai_completions | true       | false    |
+| llm-xai                                   | openai_completions | true       | true     |
 
 OpenAI, Anthropic, DeepSeek, Mistral and OpenRouter document `GET /models`.
 Anthropic's list uses the familiar `data` model array with its own pagination fields;

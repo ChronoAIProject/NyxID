@@ -1,5 +1,6 @@
 //! Platform-wide, read-only meter reporting. MongoDB owns every reduction,
 //! including legacy pricing, ranking order, and pagination.
+use crate::services::billing::amounts::{credit_expr, legacy_credit_expr};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
@@ -22,12 +23,7 @@ const TOKEN_FIELDS: &[&str] = &[
     "cached_tokens",
     "cache_creation_tokens",
 ];
-const COST_FIELDS: &[&str] = &[
-    "gross_cost_micros",
-    "wallet_cost_micros",
-    "grant_cost_micros",
-    "allowance_cost_micros",
-];
+const COST_FIELDS: &[&str] = &["gross_cost", "wallet_cost", "grant_cost", "allowance_cost"];
 const COUNT_FIELDS: &[&str] = &[
     "requests",
     "events",
@@ -79,9 +75,17 @@ pub struct UsageStats {
     /// overlap prompt counts and must not be added to this total.
     pub total_tokens: i64,
     pub gross_cost_micros: Option<i64>,
+    #[serde(default)]
+    pub gross_cost: Option<crate::models::credits::Credits>,
     pub wallet_cost_micros: Option<i64>,
+    #[serde(default)]
+    pub wallet_cost: Option<crate::models::credits::Credits>,
     pub grant_cost_micros: Option<i64>,
+    #[serde(default)]
+    pub grant_cost: Option<crate::models::credits::Credits>,
     pub allowance_cost_micros: Option<i64>,
+    #[serde(default)]
+    pub allowance_cost: Option<crate::models::credits::Credits>,
     pub exact_cost_events: i64,
     pub legacy_cost_events: i64,
     /// Billable legacy events whose current cached rate is unavailable.
@@ -299,17 +303,9 @@ fn meter_filter(params: &UsageParams, include_service: bool) -> Document {
     filter
 }
 
-// Decimal128 avoids floating-point money arithmetic. Persisted quantities/rates
-// are int64. Products below the int64 microcredit saturation limit need at most
-// 25 significant digits and fit Decimal128 exactly; larger results clamp like
-// billing::amounts::cost_micros.
+// Exact historical estimates use current cached rates, preserving null semantics.
 fn legacy_cost(quantity: &str) -> Bson {
-    doc! { "$convert": {
-        "input": { "$min": [i64::MAX, { "$trunc": [{ "$divide": [
-            { "$multiply": [ { "$toDecimal": quantity }, "$rate_pico" ] }, 1_000_000,
-        ] }, 0] }] }, "to": "long", "onNull": 0,
-    } }
-    .into()
+    doc! { "$multiply": [ { "$toDecimal": quantity }, "$rate_pico", crate::models::credits::Credits::from_pico(1).expect("one pico")] }.into()
 }
 
 pub(crate) fn meter_group(legacy_dimensions: bool) -> Document {
@@ -329,20 +325,20 @@ pub(crate) fn meter_group(legacy_dimensions: bool) -> Document {
         "legacy_cost_events": { "$sum": { "$cond": ["$exact", 0, 1] } },
         "legacy_quantity": { "$sum": { "$cond": ["$exact", 0, "$quantity"] } },
         "legacy_allowance_quantity": { "$sum": { "$cond": ["$exact", 0, { "$sum": "$funding.allowance_consumptions.quantity" }] } },
-        "legacy_grant": { "$sum": { "$cond": ["$exact", 0, { "$sum": "$funding.grant_consumptions.amount_micros" }] } },
+        "legacy_grant_cost": { "$sum": { "$cond": ["$exact", 0, { "$sum": { "$map": { "input": { "$ifNull": ["$funding.grant_consumptions", []] }, "as": "allocation", "in": credit_expr("$$allocation.amount") } } }] } },
     };
     for field in TOKEN_FIELDS {
         group.insert(*field, doc! { "$sum": { "$cond": ["$primary", { "$ifNull": [format!("$token_breakdown.{field}"), 0] }, 0] } });
     }
     for (field, source) in COST_FIELDS.iter().zip([
-        "total_charge_micros",
-        "wallet_funded_micros",
-        "grant_funded_micros",
-        "allowance_funded_micros",
+        "total_charge",
+        "wallet_funded",
+        "grant_funded",
+        "allowance_funded",
     ]) {
         group.insert(
             *field,
-            doc! { "$sum": { "$toDecimal": { "$ifNull": [format!("$funding.{source}"), 0] } } },
+            doc! { "$sum": credit_expr(format!("$funding.{source}")) },
         );
     }
     if !legacy_dimensions {
@@ -356,7 +352,7 @@ pub(crate) fn meter_group(legacy_dimensions: bool) -> Document {
 pub(crate) fn meter_flags() -> Document {
     doc! { "$set": {
         "primary": { "$and": [{ "$eq": ["$layer", "platform"] }, { "$eq": ["$transaction_id", { "$concat": ["$billing_request_id", ":platform"] }] }] },
-        "exact": { "$ne": [{ "$ifNull": ["$funding.total_charge_micros", null] }, null] },
+        "exact": crate::services::billing::amounts::funding_cost_present(),
     } }
 }
 
@@ -367,11 +363,11 @@ fn base_pipeline(params: &UsageParams) -> Vec<Document> {
     let mut costs = Document::new();
     for (field, legacy) in COST_FIELDS.iter().zip([
         Bson::String("$legacy_gross".into()),
-        doc! { "$max": [0, { "$subtract": [{ "$subtract": ["$legacy_gross", "$legacy_allowance"] }, "$legacy_grant"] }] }.into(),
-        Bson::String("$legacy_grant".into()), Bson::String("$legacy_allowance".into()),
+        doc! { "$max": [0, { "$subtract": [{ "$subtract": ["$legacy_gross", "$legacy_allowance"] }, "$legacy_grant_cost"] }] }.into(),
+        Bson::String("$legacy_grant_cost".into()), Bson::String("$legacy_allowance".into()),
     ]) {
         let sum: Bson = doc! { "$add": [format!("${field}"), legacy] }.into();
-        let billable: Bson = if *field == "grant_cost_micros" { sum } else {
+        let billable: Bson = if *field == "grant_cost" { sum } else {
             doc! { "$cond": ["$unknown", null, sum] }.into()
         };
         costs.insert(*field, doc! { "$cond": ["$_id.billable", billable, 0] });
@@ -384,7 +380,7 @@ fn base_pipeline(params: &UsageParams) -> Vec<Document> {
         doc! { "$match": meter_filter(params, true) },
         doc! { "$set": {
             "primary": { "$and": [{ "$eq": ["$layer", "platform"] }, { "$eq": ["$transaction_id", { "$concat": ["$billing_request_id", ":platform"] }] }] },
-            "exact": { "$ne": [{ "$ifNull": ["$funding.total_charge_micros", null] }, null] },
+            "exact": crate::services::billing::amounts::funding_cost_present(),
         } },
         doc! { "$group": group },
         // _id equality lookups choose model-specific before generic. Only
@@ -413,9 +409,12 @@ fn sum_fields(group: &mut Document, source_prefix: &str) {
         group.insert(*field, doc! { "$sum": format!("{source_prefix}{field}") });
     }
     for field in COST_FIELDS {
-        // Decimal accumulation preserves integer micros even when a platform
-        // total exceeds int64; clamp only at the response boundary.
-        group.insert(*field, doc! { "$sum": { "$toDecimal": { "$ifNull": [format!("{source_prefix}{field}"), 0] } } });
+        // Decimal accumulation preserves exact credits even when a platform
+        // total exceeds int64; clamp only the legacy response projection.
+        group.insert(
+            *field,
+            doc! { "$sum": { "$ifNull": [format!("{source_prefix}{field}"), 0] } },
+        );
         group.insert(format!("{field}_known"), doc! { "$sum": { "$cond": [{ "$ne": [{ "$ifNull": [format!("{source_prefix}{field}"), null] }, null] }, 1, 0] } });
     }
 }
@@ -456,7 +455,10 @@ fn rollup(dimensions: &[&str]) -> Vec<Document> {
         project.insert(*field, 1);
     }
     for field in COST_FIELDS {
-        project.insert(*field, doc! { "$cond": [{ "$gt": [format!("${field}_known"), 0] }, { "$toLong": { "$min": [i64::MAX, format!("${field}")] } }, null] });
+        // Decimal128 remains native through the response document. Converting
+        // every grouped amount to a string here adds a BSON allocation and
+        // reparsing step on the hot admin path.
+        project.insert(*field, doc! { "$cond": [{ "$gt": [format!("${field}_known"), 0] }, format!("${field}"), null] });
     }
     for field in ["users", "services"] {
         project.insert(format!("unique_{field}"), doc! { "$size": { "$reduce": {
@@ -486,19 +488,24 @@ fn summary_pipeline(params: &UsageParams) -> Vec<Document> {
 fn ranking_pipeline(params: &UsageParams) -> Vec<Document> {
     let mut pipeline = base_pipeline(params);
     pipeline.extend(rollup(&["actor", "owner", "service_id", "service_slug"]));
-    let sort = match params.sort.as_str() {
-        "quantity" => format!("quantities.{}", params.metric),
-        "cost" => "gross_cost_micros".into(),
-        value => value.into(),
-    };
     pipeline.push(doc! { "$facet": {
-        "ranking": [
-            { "$sort": { sort: -1, "_id.actor": 1, "_id.owner": 1, "_id.service_slug": 1, "_id.service_id": 1 } },
-            { "$skip": params.offset }, { "$limit": params.per_page as i64 },
-        ],
+        "ranking": ranking_stages(params),
         "total": [{ "$count": "count" }],
     } });
     pipeline
+}
+
+fn ranking_stages(params: &UsageParams) -> Vec<Document> {
+    let sort = match params.sort.as_str() {
+        "quantity" => format!("quantities.{}", params.metric),
+        "cost" => "gross_cost".into(),
+        value => value.into(),
+    };
+    vec![
+        doc! { "$sort": { sort: -1, "_id.actor": 1, "_id.owner": 1, "_id.service_slug": 1, "_id.service_id": 1 } },
+        doc! { "$skip": params.offset },
+        doc! { "$limit": params.per_page as i64 },
+    ]
 }
 
 fn query_error(error: mongodb::error::Error) -> AppError {
@@ -538,7 +545,20 @@ fn documents(document: &Document, key: &str) -> AppResult<Vec<Document>> {
 }
 
 fn stats(document: &Document) -> AppResult<UsageStats> {
-    bson::from_document(document.clone()).map_err(|error| AppError::Internal(error.to_string()))
+    let mut document = document.clone();
+    for field in COST_FIELDS {
+        if let Some(value) = document.get(*field).cloned()
+            && matches!(value, Bson::Decimal128(_) | Bson::Int32(_) | Bson::Int64(_))
+        {
+            let credits = crate::models::credits::Credits::from_bson(value, 1)?;
+            document.insert(*field, credits.to_string());
+            // Legacy display projections are derived once, after the exact
+            // aggregation, instead of multiplying every grouped BSON value in
+            // MongoDB's hot reduction.
+            document.insert(format!("{field}_micros"), credits.display_micros());
+        }
+    }
+    bson::from_document(document).map_err(|error| AppError::Internal(error.to_string()))
 }
 fn id(document: &Document) -> AppResult<&Document> {
     document
@@ -770,11 +790,63 @@ fn source_filter(
     filter
 }
 
+fn exact_or_legacy_credit_expr(exact: Bson, legacy: Bson) -> Bson {
+    doc! {
+        "$cond": [
+            { "$ne": [{ "$type": exact.clone() }, "missing"] },
+            exact,
+            legacy_credit_expr(doc! { "$convert": {
+                "input": legacy, "to": "decimal", "onError": Bson::Null, "onNull": Bson::Null,
+            } }.into()),
+        ]
+    }
+    .into()
+}
+
+/// Before the rollup marker exists, read both released legacy mirrors and the
+/// exact keys. Once the marker is durable, the covering index can use the
+/// plain exact path without per-document type inspection.
+fn rollup_credit_expr(field: &str, normalized: bool) -> Bson {
+    if normalized {
+        return format!("$query_{field}").into();
+    }
+    let legacy = if field == "legacy_grant_cost" {
+        "legacy_grant".to_owned()
+    } else {
+        format!("{field}_micros")
+    };
+    let exact = format!("$query_costs.{field}");
+    let old = format!("$query_costs.{legacy}");
+    doc! { "$cond": [
+        { "$ne": [{ "$type": &exact }, "missing"] }, &exact,
+        { "$cond": [
+            { "$ne": [{ "$type": &old }, "missing"] },
+            exact_or_legacy_credit_expr(Bson::String(exact), Bson::String(old)),
+            exact_or_legacy_credit_expr(format!("${field}").into(), format!("${legacy}").into()),
+        ] },
+    ] }
+    .into()
+}
+
+fn partition_credit_expr(field: &str, normalized: bool) -> Bson {
+    let exact = format!("$part.{field}");
+    if normalized {
+        return exact.into();
+    }
+    let legacy = if field == "legacy_grant_cost" {
+        "legacy_grant".to_owned()
+    } else {
+        format!("{field}_micros")
+    };
+    exact_or_legacy_credit_expr(exact.into(), format!("$part.{legacy}").into())
+}
+
 fn fast_pipeline(
     params: &UsageParams,
     rates: Document,
     folded_before: Option<DateTime<Utc>>,
     daily_ready: bool,
+    rollup_normalized: bool,
 ) -> Vec<Document> {
     use crate::services::billing::usage_rollup::{DIMENSIONS, MEASURES, day, hour};
     let from_hour = hour(params.window.from);
@@ -806,7 +878,7 @@ fn fast_pipeline(
             .insert("bucket", options.bucket("$created_at"));
     }
     // BSON object key order is significant to grouping. Rebuild one canonical
-    // key for both raw groups and unfolded summaries before legacy rounding.
+    // key for both raw groups and unfolded summaries before exact reduction.
     let canonical_key: Document = raw_group
         .get_document("_id")
         .expect("literal group key")
@@ -826,27 +898,13 @@ fn fast_pipeline(
     initial_group.insert("tail_rows", doc! { "$sum": 0_i64 });
     let mut partition_group = regroup.clone();
     partition_group.insert("_id", canonical_key);
-    for field in COST_FIELDS {
-        initial_group.insert(*field, doc! { "$sum": format!("${field}") });
-        partition_group.insert(
+    for field in COST_FIELDS.iter().chain([&"legacy_grant_cost"]) {
+        initial_group.insert(
             *field,
-            doc! { "$sum": { "$toDecimal": format!("${field}") } },
+            doc! { "$sum": rollup_credit_expr(field, rollup_normalized) },
         );
+        partition_group.insert(*field, doc! { "$sum": format!("${field}") });
     }
-    // Persisted funding costs are nonnegative int64 (billing::amounts).
-    // Sum integers exactly until overflow; Mongo promotes an overflowing sum
-    // to double, which is necessarily >= i64::MAX and saturates here. Convert
-    // only the reduced groups to Decimal128 for the shared legacy price path.
-    // This avoids decoding/adding a Decimal128 for every hourly source value.
-    let bounded_costs: Document = COST_FIELDS
-        .iter()
-        .map(|field| {
-            (
-                (*field).to_owned(),
-                Bson::Document(doc! { "$toDecimal": { "$min": [i64::MAX, format!("${field}")] } }),
-            )
-        })
-        .collect();
     let mut unfold = doc! { "_id": { "$mergeObjects": [key, { "$ifNull": ["$part.key", {}] }] }, "tail_rows": 0_i64 };
     if let Some(options) = &params.analytics {
         unfold
@@ -857,7 +915,12 @@ fn fast_pipeline(
             .push(doc! { "bucket": options.bucket(doc! { "$ifNull": ["$hour", "$day"] }) }.into());
     }
     for field in MEASURES {
-        unfold.insert(*field, format!("$part.{field}"));
+        let value = if COST_FIELDS.contains(field) || *field == "legacy_grant_cost" {
+            partition_credit_expr(field, rollup_normalized)
+        } else {
+            format!("$part.{field}").into()
+        };
+        unfold.insert(*field, value);
     }
     let partition_pipeline = vec![
         doc! { "$set": { "part": { "$cond": [
@@ -923,7 +986,7 @@ fn fast_pipeline(
         partitions.extend(partition_pipeline.clone());
         pipeline.extend([
             doc! { "$unionWith": { "coll": collection, "pipeline": [
-                doc! { "$match": single_filter }, doc! { "$group": initial_group.clone() }, doc! { "$set": bounded_costs.clone() },
+                doc! { "$match": single_filter }, doc! { "$group": initial_group.clone() },
             ] } },
             doc! { "$unionWith": { "coll": collection, "pipeline": partitions } },
         ]);
@@ -966,17 +1029,12 @@ fn fast_pipeline(
         stages.extend(rollup(dimensions));
         stages
     };
-    let sort = match params.sort.as_str() {
-        "quantity" => format!("quantities.{}", params.metric),
-        "cost" => "gross_cost_micros".into(),
-        value => value.into(),
-    };
     if let Some(options) = &params.analytics {
         pipeline.push(doc! { "$facet": options.facets(&reduced) });
         return pipeline;
     }
     let mut ranking = reduced(&["actor", "owner", "service_id", "service_slug"]);
-    ranking.extend([doc! { "$sort": { sort: -1, "_id.actor": 1, "_id.owner": 1, "_id.service_slug": 1, "_id.service_id": 1 } }, doc! { "$skip": params.offset }, doc! { "$limit": params.per_page as i64 }]);
+    ranking.extend(ranking_stages(params));
     let mut total = reduced(&["actor", "owner", "service_id", "service_slug"]);
     total.push(doc! { "$count": "count" });
     let mut freshness = selected();
@@ -1038,8 +1096,17 @@ async fn fast_aggregate_with_mode(
         let use_snapshot = snapshot && active;
         let bound = before.as_ref().and_then(|s| s.folded_before);
         let daily_ready = before.as_ref().is_some_and(|state| state.daily_ready);
-        let result =
-            run_fast_pipeline(db, params, rates.clone(), bound, daily_ready, use_snapshot).await;
+        let rollup_normalized = crate::services::billing::exact_migration::rollup_ready(db).await?;
+        let result = run_fast_pipeline(
+            db,
+            params,
+            rates.clone(),
+            bound,
+            daily_ready,
+            rollup_normalized,
+            use_snapshot,
+        )
+        .await;
         let result = match result {
             Err(AppError::DatabaseError(error))
                 if use_snapshot
@@ -1078,7 +1145,9 @@ async fn fast_aggregate_with_mode(
     // read with conservative raw boundary hours guarantees a completed result.
     // Standalone concurrent writes can skew it by an in-flight bounded batch;
     // freshness explicitly reports that validation was not obtained.
-    let result = run_fast_pipeline(db, params, rates, None, false, false).await?;
+    let rollup_normalized = crate::services::billing::exact_migration::rollup_ready(db).await?;
+    let result =
+        run_fast_pipeline(db, params, rates, None, false, rollup_normalized, false).await?;
     with_freshness(result, usage_rollup::state(db).await?, false)
 }
 
@@ -1088,11 +1157,18 @@ async fn run_fast_pipeline(
     rates: Document,
     folded_before: Option<DateTime<Utc>>,
     daily_ready: bool,
+    rollup_normalized: bool,
     snapshot: bool,
 ) -> AppResult<Document> {
     let collection = db.collection::<Document>(COLLECTION_NAME);
     let mut action = collection
-        .aggregate(fast_pipeline(params, rates, folded_before, daily_ready))
+        .aggregate(fast_pipeline(
+            params,
+            rates,
+            folded_before,
+            daily_ready,
+            rollup_normalized,
+        ))
         .hint(mongodb::options::Hint::Name(
             crate::services::billing::usage_rollup::PENDING_INDEX.to_owned(),
         ))

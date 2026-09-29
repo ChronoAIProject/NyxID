@@ -181,7 +181,7 @@ An "all users" one-shot grant snapshots active person and organization owners at
 
 One-shot issuance journals at most 50 recipients inline to bound a platform-wide request. Scheduled walks use the reconcile sweep's recipient budget. Unjournaled grants remain unspendable until recovery confirms their issuance entries. Credit schedules use `BILLING_RECONCILE_INTERVAL_SECS`; they add no environment variable.
 
-Funding order is free allowance units, promotional grant microcredits (soonest expiry first), then wallet credits. The reservation gate holds estimated allowance units and grant value, but settlement applies actual metric quantity and releases any excess hold. Grant reservations admitted before expiry remain valid; otherwise expiry is checked at the instant of reservation. Daily windows start at 00:00 UTC, weekly windows at Monday 00:00 UTC, monthly windows on the first day at 00:00 UTC, and one-time allowances never reset. Only the wallet-funded fraction of a finalized usage row is pushed to Lago. Fully benefit-funded rows are acknowledged locally, and Lago drift comparison sums that same wallet-funded decimal quantity, preventing grants or allowances from becoming a second invoice charge.
+Funding order is free allowance units, exact promotional grant credits (soonest expiry first), then exact wallet credits. The reservation gate holds estimated allowance units and grant value, but settlement applies actual metric quantity and releases any excess hold. Grant reservations admitted before expiry remain valid; otherwise expiry is checked at the instant of reservation. Daily windows start at 00:00 UTC, weekly windows at Monday 00:00 UTC, monthly windows on the first day at 00:00 UTC, and one-time allowances never reset. Only the wallet-funded fraction of a finalized usage row is pushed to Lago. Fully benefit-funded rows are acknowledged locally, and Lago drift comparison sums that same wallet-funded decimal quantity, preventing grants or allowances from becoming a second invoice charge.
 
 Purchased credits expire 365 days after the Lago wallet transaction settles. Lago v1.50 exposes a wallet-level `expiration_at`, but that expires the entire wallet at one instant and cannot represent independently rolling purchases, so NyxID performs FIFO per-purchase expiry from traceable `remaining_credit_amount` values (with a conservative legacy wallet-balance fallback) and debits Lago with `voided_credits`. A durable operation embedded in `billing_wallet` holds expiring credits out of availability, recovers a provider debit by its unique operation name after a crash, reads back the exact Lago balance, updates top-up history, and confirms every `topup_expired` ledger entry before clearing. The existing reconcile interval drives grant expiry and purchased-credit expiry; no new environment variable is required. Keep `BILLING_RECONCILE_INTERVAL_SECS` non-zero in production.
 
@@ -348,7 +348,7 @@ Both chains are re-verified automatically by a background sweep that walks the c
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CHAIN_VERIFY_INTERVAL_SECS` | `3600` | Interval between automatic verification chunks for both chains. `0` disables the sweep (manual verify endpoints still work). |
+| `CHAIN_VERIFY_INTERVAL_SECS` | `3600` | Interval between automatic chain-verification chunks and billing account-reconciliation passes. `0` disables both automatic runners (manual verify endpoints still work). |
 
 
 Unlike the audit chain, the billing ledger detects tail truncation: the reconcile sweep anchors the ledger head `(seq, head_hash)` into the audit chain (event `billing_ledger_head_anchored`) whenever it advances, and the verify endpoint cross-checks the newest anchor against the surviving head. Deleting ledger tail entries past an anchor reports `tail_truncated`; hiding it would additionally require truncating the audit chain back past the anchor, destroying unrelated audit history. Each anchor is also written to the server log (`billing ledger head anchored`), so shipped logs form an external anchor outside MongoDB. Entries newer than the latest anchor (up to one reconcile interval, `BILLING_RECONCILE_INTERVAL_SECS`) remain inside the undetectable window.
@@ -552,3 +552,14 @@ Drive and Workspace editor routing activates automatically at startup for recogn
 ## Service-history database topology
 
 All service-instance writes require transactions. Startup rejects standalone MongoDB before indexes or migrations. Use MongoDB 8 on a replica set or mongos. Bundled Compose creates authenticated `nyxid-rs` with a persistent internal keyfile and a primary-election initializer; backend startup waits for it. Local host connections to Compose use `directConnection=true`; external databases must use their actual replica-set/mongos URI. Existing data volumes require a coordinated backup and maintenance migration; see [SERVICE_HISTORY.md](SERVICE_HISTORY.md#mongodb-deployment-prerequisite). There is no new history environment variable or TTL.
+
+### Exact billing cutover (0.34.0)
+
+`BILLING_EXACT_CUTOVER_DRAINED=true` is a one-time operator acknowledgement
+required before the background task migrates existing wallets/grants. Pending
+cutover returns 503 for billed admission and pauses money sweeps; the server and
+nonbilling traffic continue serving. Drain all old billed requests and stop
+pre-v2 servers/reconcilers first. The acknowledgement and
+migration completion are durable; new replicas/restarts resume without the flag.
+Fresh databases need no acknowledgement. Do not restart old writers after
+cutover. See [Exact accounting](BILLING_EXACT_ACCOUNTING.md#d5-cutover-and-operations).

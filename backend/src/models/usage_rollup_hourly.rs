@@ -23,10 +23,10 @@ pub struct UsageRollupHourly {
     pub exact: bool,
     #[serde(flatten)]
     pub measures: UsageRollupMeasures,
-    /// Preserve historical per-display-group truncation and unknown-rate
+    /// Preserve historical display grouping and unknown-rate
     /// masking without adding API keys/ack state to the hourly primary key.
     pub cost_partitions: std::collections::BTreeMap<String, UsageCostPartition>,
-    /// Derived query accelerators, committed with the integer measures. The
+    /// Derived query accelerators, committed with the exact measures. The
     /// decimal mirror avoids per-document conversions in Mongo's group stage;
     /// the single key permits grouping before any partition expansion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -42,25 +42,39 @@ pub struct UsageRollupHourly {
     pub last_batch: i64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct UsageRollupMeasures {
-    pub quantity: i64,
-    pub events: i64,
-    pub requests: i64,
-    pub exact_cost_events: i64,
-    pub legacy_cost_events: i64,
-    pub legacy_quantity: i64,
-    pub legacy_allowance_quantity: i64,
-    pub legacy_grant: i64,
-    pub gross_cost_micros: i64,
-    pub wallet_cost_micros: i64,
-    pub grant_cost_micros: i64,
-    pub allowance_cost_micros: i64,
-    pub prompt_tokens: i64,
-    pub completion_tokens: i64,
-    pub cached_tokens: i64,
-    pub cache_creation_tokens: i64,
-    pub rows_folded: i64,
+crate::exact_credit_model! {
+    [
+        ("legacy_grant_cost", "legacy_grant"),
+        ("gross_cost", "gross_cost_micros"),
+        ("wallet_cost", "wallet_cost_micros"),
+        ("grant_cost", "grant_cost_micros"),
+        ("allowance_cost", "allowance_cost_micros"),
+    ]
+    #[derive(Clone, Debug, Serialize)]
+    pub struct UsageRollupMeasures {
+        pub quantity: i64,
+        pub events: i64,
+        pub requests: i64,
+        pub exact_cost_events: i64,
+        pub legacy_cost_events: i64,
+        pub legacy_quantity: i64,
+        pub legacy_allowance_quantity: i64,
+        #[serde(with = "crate::models::credits::whole")]
+        pub legacy_grant_cost: crate::models::credits::Credits,
+        #[serde(with = "crate::models::credits::whole")]
+        pub gross_cost: crate::models::credits::Credits,
+        #[serde(with = "crate::models::credits::whole")]
+        pub wallet_cost: crate::models::credits::Credits,
+        #[serde(with = "crate::models::credits::whole")]
+        pub grant_cost: crate::models::credits::Credits,
+        #[serde(with = "crate::models::credits::whole")]
+        pub allowance_cost: crate::models::credits::Credits,
+        pub prompt_tokens: i64,
+        pub completion_tokens: i64,
+        pub cached_tokens: i64,
+        pub cache_creation_tokens: i64,
+        pub rows_folded: i64,
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

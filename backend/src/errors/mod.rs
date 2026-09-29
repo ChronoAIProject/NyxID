@@ -1288,6 +1288,12 @@ impl IntoResponse for AppError {
 /// Convenience type alias for handler return types.
 pub type AppResult<T> = Result<T, AppError>;
 
+impl From<crate::models::credits::CreditsError> for AppError {
+    fn from(error: crate::models::credits::CreditsError) -> Self {
+        Self::Internal(error.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
