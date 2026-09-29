@@ -29,6 +29,7 @@ function request(overrides: Record<string, unknown> = {}) {
     resource: [],
     incremental_consent: {
       client_name: "Aevatar",
+      current_scopes: "openid proxy offline_access",
       scopes: "openid proxy offline_access",
       current_service_ids: ["old-a", "old-b"],
       allow_all_services: false,
@@ -72,7 +73,7 @@ describe("incremental consent", () => {
   it("counts only additions and keeps existing access immutable", () => {
     open();
     expect(
-      screen.getByRole("heading", { name: "Update service access" }),
+      screen.getByRole("heading", { name: "Choose what Aevatar can access" }),
     ).toBeInTheDocument();
     expect(screen.getByText("Allow 2 additional services")).toBeInTheDocument();
     expect(screen.getByText("Already authorized")).toBeInTheDocument();
@@ -91,9 +92,9 @@ describe("incremental consent", () => {
       .getByRole("button", { name: "Allow 2 services" })
       .closest("form")!;
     expect(new FormData(form).getAll("allowed_service_ids")).toEqual([
-      "new-c",
-      "new-d",
+      "old-a", "old-b", "new-c", "new-d",
     ]);
+    expect(form).toHaveAttribute("action", "/oauth/authorize/incremental/decision");
   });
 
   it("updates the count and submitted additions for optional selections", async () => {
@@ -151,9 +152,9 @@ describe("incremental consent", () => {
         serviceState.data = serviceState.data.filter(
           (service) => service.id !== "new-c",
         );
-      if (kind === "disabled") serviceState.data[2].is_active = false;
+      if (kind === "disabled") serviceState.data[2]!.is_active = false;
       if (kind === "forbidden")
-        serviceState.data[2].credential_source = {
+        serviceState.data[2]!.credential_source = {
           type: "org",
           org_name: "Former team",
           allowed: false,
@@ -219,6 +220,37 @@ describe("incremental consent", () => {
     expect(
       screen.getByRole("button", { name: "Allow 2 services" }),
     ).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Return to application" })).toBeEnabled();
+  });
+
+  it("shows newly requested OAuth scopes even when no services are added", () => {
+    const payload = request();
+    payload.incremental_consent.required_service_ids = ["old-a"];
+    payload.incremental_consent.scopes = "openid proxy offline_access account:write";
+    open(payload);
+    expect(screen.getByText("Allow 1 additional permission")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Allow 1 permission" })).toBeEnabled();
+  });
+
+  it.each(["loading", "failed"])("shows scope-only permissions while service inventory is %s", (kind) => {
+    serviceState.isLoading = kind === "loading";
+    serviceState.isError = kind === "failed";
+    serviceState.data = [];
+    const payload = request();
+    payload.incremental_consent.required_service_ids = [];
+    payload.incremental_consent.scopes = "openid proxy offline_access account:write";
+    open(payload);
+    expect(screen.getByText("Allow 1 additional permission")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Allow 1 permission" })).toBeEnabled();
+    expect(screen.queryByText(/Services could not be loaded/)).not.toBeInTheDocument();
+    expect(screen.getAllByText(/Previously authorized service details unavailable/)).toHaveLength(2);
+  });
+
+  it("keeps an unavailable existing service without blocking new approvals", () => {
+    serviceState.data = serviceState.data.filter((service) => service.id !== "old-b");
+    open();
+    expect(screen.getByText(/Previously authorized service unavailable/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Allow 2 services" })).toBeEnabled();
   });
 
   it("rejects incomplete incremental payloads without falling back to replacement mode", () => {

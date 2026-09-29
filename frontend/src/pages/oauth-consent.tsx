@@ -1,4 +1,5 @@
 import { useMemo, useState, type ReactNode } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { Badge } from "@/components/ui/badge";
 import { Button, ButtonIcon } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -17,6 +18,7 @@ import { DetailSection } from "@/components/shared/detail-section";
 import { DetailRow } from "@/components/shared/detail-row";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { useUserServices } from "@/hooks/use-user-services";
+import { api } from "@/lib/api-client";
 import {
   oauthConsentServiceAccessSchema,
   readIncrementalConsentRequest,
@@ -101,11 +103,34 @@ function serviceOrgName(service: ConsentServiceDisplay): string | null {
 }
 
 export function OAuthConsentPage() {
+  const [requestHandle] = useState(() =>
+    new URLSearchParams(window.location.search).get("consent_request_id"),
+  );
   const [incremental] = useState(() =>
     readIncrementalConsentRequest(new URLSearchParams(window.location.search)),
   );
+  if (requestHandle) return <StoredIncrementalConsent handle={requestHandle} />;
   if (incremental) return <OAuthIncrementalConsentPage {...incremental} />;
   return <StandardConsentPage />;
+}
+
+function StoredIncrementalConsent({ handle }: { readonly handle: string }) {
+  const { data, isPending, isError } = useQuery({
+    queryKey: ["oauth-consent-request", handle],
+    queryFn: () => api.get<{ token: string }>(`/users/me/oauth-consent-requests/${encodeURIComponent(handle)}`),
+    retry: false,
+  });
+  if (isPending || isError) {
+    return (
+      <main className="mx-auto flex min-h-dvh max-w-xl items-center px-4">
+        {isPending ? <p role="status">Loading authorization request...</p> :
+          <ErrorBanner message="This authorization request is unavailable. Return to the application and try again." />}
+      </main>
+    );
+  }
+  const parsed = readIncrementalConsentRequest(new URLSearchParams({ consent_request: data.token }));
+  return parsed ? <OAuthIncrementalConsentPage {...parsed} /> :
+    <OAuthIncrementalConsentPage error="Invalid consent request. Please restart authorization." />;
 }
 
 function StandardConsentPage() {

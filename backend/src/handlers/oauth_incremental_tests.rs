@@ -84,12 +84,11 @@ impl IncrementalFixture {
         .await?;
         let location = response.headers()[header::LOCATION].to_str().unwrap();
         let url = url::Url::parse(location).unwrap();
-        Ok(url
-            .query_pairs()
-            .find(|(key, _)| key == "consent_request")
-            .unwrap()
-            .1
-            .into_owned())
+        assert!(location.len() < 256, "consent URL stays bounded");
+        let handle = url.query_pairs()
+            .find(|(key, _)| key == "consent_request_id")
+            .unwrap().1.into_owned();
+        oauth_consent_request_service::get(&self.state.db, &self.user_id, &handle).await
     }
 
     async fn decide(
@@ -104,10 +103,10 @@ impl IncrementalFixture {
             "response_type": "code", "client_id": "tampered-client",
             "redirect_uri": "https://evil.example", "decision": decision,
             "consent_request": token, "allowed_service_ids": selected,
-            "allow_all_services": all,
+            "allow_all_services": all, "service_access_mode": "incremental",
         }))
         .unwrap();
-        authorize_decision(
+        authorize_incremental_decision(
             State(self.state.clone()),
             OptionalAuthUser(Some(crate::test_utils::test_auth_user(&self.user_id))),
             TelemetryContext::default(),
@@ -144,6 +143,14 @@ impl IncrementalFixture {
     }
 }
 
+fn incremental_callback_error(response: &Response) -> Option<String> {
+    url::Url::parse(response.headers()[header::LOCATION].to_str().unwrap())
+        .unwrap()
+        .query_pairs()
+        .find(|(key, _)| key == "error")
+        .map(|(_, value)| value.into_owned())
+}
+
 #[tokio::test]
 async fn incremental_ordinary_and_binding_flows_preserve_full_refresh_grant() {
     for with_binding in [false, true] {
@@ -156,7 +163,7 @@ async fn incremental_ordinary_and_binding_flows_preserve_full_refresh_grant() {
                 .collection::<OauthBrokerBinding>(OAUTH_BROKER_BINDINGS)
                 .update_one(
                     doc! { "_id": hash_binding_id(fixture.binding_id.as_ref().unwrap()) },
-                    doc! { "$unset": { "rotation_version": "" } },
+                    doc! { "$unset": { "grant_version": "" } },
                 )
                 .await
                 .unwrap();
@@ -293,10 +300,13 @@ async fn incremental_concurrent_decisions_conflict_without_losing_grants() {
         fixture.decide(&first, &extra, false, "allow"),
         fixture.decide(&second, &extra, false, "allow")
     );
-    assert!(matches!(
-        (&left, &right),
-        (Ok(_), Err(AppError::Conflict(_))) | (Err(AppError::Conflict(_)), Ok(_))
-    ));
+    assert_eq!(
+        [left.unwrap(), right.unwrap()]
+            .iter()
+            .filter(|response| incremental_callback_error(response).is_some())
+            .count(),
+        1
+    );
     let consent =
         consent_service::check_consent(&fixture.state.db, &fixture.user_id, &fixture.client_id, "")
             .await
@@ -321,10 +331,10 @@ async fn incremental_revoke_before_decision_or_exchange_never_revives_consent() 
         if let Some(code) = code {
             assert!(fixture.exchange(&code).await.is_err());
         } else {
-            assert!(matches!(
-                fixture.decide(&signed, &[], false, "allow").await,
-                Err(AppError::Conflict(_))
-            ));
+            assert_eq!(
+                incremental_callback_error(&fixture.decide(&signed, &[], false, "allow").await.unwrap()),
+                Some("interaction_required".to_string())
+            );
         }
         assert!(
             consent_service::check_consent(
@@ -351,38 +361,240 @@ async fn incremental_revoke_before_decision_or_exchange_never_revives_consent() 
 }
 
 #[tokio::test]
-async fn incremental_binding_rotation_or_refresh_revocation_invalidates_pending_code() {
-    for revoke_refresh in [false, true] {
-        let fixture = IncrementalFixture::new(true, false).await;
-        let code = fixture.code(&fixture.request().await.unwrap()).await;
-        let binding = load_binding(&fixture.state.db, fixture.binding_id.as_ref().unwrap()).await;
-        if revoke_refresh {
-            oauth_service::revoke_issued_refresh(&fixture.state.db, &binding.refresh_token_jti)
-                .await
-                .unwrap();
-        } else {
-            fixture
-                .state
-                .db
-                .collection::<OauthBrokerBinding>(OAUTH_BROKER_BINDINGS)
-                .update_one(
-                    doc! { "_id": &binding.id },
-                    doc! { "$inc": { "rotation_version": 1 } },
-                )
-                .await
-                .unwrap();
-        }
-        assert!(fixture.exchange(&code).await.is_err());
-        let current = load_binding(&fixture.state.db, fixture.binding_id.as_ref().unwrap()).await;
-        assert_eq!(current.refresh_token_jti, binding.refresh_token_jti);
-    }
+async fn incremental_broker_rotation_during_review_preserves_scopes_and_binding() {
+    let fixture = IncrementalFixture::new(true, false).await;
+    let signed = fixture.request().await.unwrap();
+    let raw_binding = fixture.binding_id.as_ref().unwrap();
+    let prior = load_binding(&fixture.state.db, raw_binding).await;
+    oauth_broker_service::exchange_via_binding(
+        &fixture.state.db,
+        fixture.state.encryption_keys.clone(),
+        &fixture.state.http_client,
+        &fixture.state.jwt_keys,
+        &fixture.state.config,
+        false,
+        &fixture.client_id,
+        raw_binding,
+        Some("openid"),
+        None,
+        None,
+    ).await.unwrap();
+    let rotated = load_binding(&fixture.state.db, raw_binding).await;
+    assert_ne!(rotated.refresh_token_jti, prior.refresh_token_jti);
+    assert_eq!(rotated.grant_version, prior.grant_version);
+    let code = fixture.code(&signed).await;
+    let Json(tokens) = fixture.exchange(&code).await.unwrap();
+    assert_eq!(tokens.binding_updated, Some(true));
+    let grant = oauth_broker_service::resolve_binding_grant_for_subject(
+        &fixture.state.db, &fixture.client_id, &fixture.user_id, None,
+        &hash_binding_id(raw_binding),
+    ).await.unwrap();
+    assert!(grant.scopes.contains("offline_access"));
+    assert!(grant.scopes.contains("proxy"));
+}
+
+#[tokio::test]
+async fn stale_incremental_binding_update_keeps_original_refresh_usable() {
+    let fixture = IncrementalFixture::new(true, false).await;
+    let signed = fixture.request().await.unwrap();
+    let snapshot = verify_consent_request(&fixture.state, &signed, &fixture.user_id)
+        .unwrap()
+        .incremental_consent
+        .unwrap();
+    let raw_binding = fixture.binding_id.as_ref().unwrap();
+    let original = load_binding(&fixture.state.db, raw_binding).await;
+    let scope = fixture.params.scope.as_deref().unwrap();
+    let replacement = oauth_service::issue_oauth_refresh_token(
+        &fixture.state.db,
+        &fixture.state.config,
+        &fixture.state.jwt_keys,
+        &fixture.client_id,
+        &fixture.user_id,
+        scope,
+        &[],
+        &fixture.services[..4]
+            .iter()
+            .map(|service| service.id.clone())
+            .collect::<Vec<_>>(),
+        false,
+    )
+    .await
+    .unwrap();
+
+    consent_service::grant_consent_with_services(
+        &fixture.state.db,
+        &fixture.user_id,
+        &fixture.client_id,
+        scope,
+        Some(vec![
+            fixture.services[0].id.clone(),
+            fixture.services[1].id.clone(),
+        ]),
+    )
+    .await
+    .unwrap();
+    let scopes = scope.split_whitespace().map(str::to_string).collect::<Vec<_>>();
+    assert!(oauth_broker_service::update_binding_grant_with_version(
+        &fixture.state.db,
+        &fixture.state.encryption_keys,
+        &fixture.client_id,
+        &fixture.user_id,
+        &hash_binding_id(raw_binding),
+        &replacement.refresh_token,
+        &replacement.refresh_token_jti,
+        &scopes,
+        None,
+        Some(&snapshot),
+    )
+    .await
+    .is_err());
+
+    let current = load_binding(&fixture.state.db, raw_binding).await;
+    assert_eq!(current.refresh_token_jti, original.refresh_token_jti);
+    assert_eq!(current.grant_version, original.grant_version);
+    let old_refresh = fixture
+        .state
+        .db
+        .collection::<RefreshToken>(REFRESH_TOKENS)
+        .find_one(doc! { "jti": &original.refresh_token_jti })
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!old_refresh.revoked);
+    oauth_broker_service::exchange_via_binding(
+        &fixture.state.db,
+        fixture.state.encryption_keys.clone(),
+        &fixture.state.http_client,
+        &fixture.state.jwt_keys,
+        &fixture.state.config,
+        false,
+        &fixture.client_id,
+        raw_binding,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn google_style_incremental_scope_request_adds_only_requested_permission() {
+    let mut fixture = IncrementalFixture::new(false, false).await;
+    fixture.state.db.collection::<crate::models::oauth_client::OauthClient>(
+        crate::models::oauth_client::COLLECTION_NAME,
+    ).update_one(
+        doc! { "_id": &fixture.client_id },
+        doc! { "$set": { "allowed_scopes": format!("{} account:write", fixture.params.scope.as_deref().unwrap()) } },
+    ).await.unwrap();
+    fixture.params.service_access_mode = None;
+    fixture.params.include_granted_scopes = true;
+    fixture.params.scope = Some("account:write".to_string());
+    fixture.params.requested_service_ids.clear();
+    fixture.params.resource.clear();
+    let signed = fixture.request().await.unwrap();
+    let snapshot = verify_consent_request(&fixture.state, &signed, &fixture.user_id)
+        .unwrap().incremental_consent.unwrap();
+    assert!(snapshot.current_scopes.contains("offline_access"));
+    assert!(snapshot.scopes.contains("account:write"));
+    let code = fixture.code(&signed).await;
+    let Json(tokens) = fixture.exchange(&code).await.unwrap();
+    let scope = tokens.scope.unwrap();
+    assert!(scope.contains("openid"));
+    assert!(scope.contains("account:write"));
+}
+
+#[tokio::test]
+async fn omitted_scope_does_not_grant_new_client_allowed_scopes() {
+    let mut fixture = IncrementalFixture::new(false, false).await;
+    fixture.state.db.collection::<crate::models::oauth_client::OauthClient>(
+        crate::models::oauth_client::COLLECTION_NAME,
+    ).update_one(
+        doc! { "_id": &fixture.client_id },
+        doc! { "$set": { "allowed_scopes": format!("{} account:write", fixture.params.scope.as_deref().unwrap()) } },
+    ).await.unwrap();
+    fixture.params.scope = None;
+    let signed = fixture.request().await.unwrap();
+    let snapshot = verify_consent_request(&fixture.state, &signed, &fixture.user_id)
+        .unwrap().incremental_consent.unwrap();
+    assert_eq!(snapshot.scopes, snapshot.current_scopes);
+    assert!(!snapshot.scopes.contains("account:write"));
+}
+
+#[tokio::test]
+async fn unavailable_existing_service_does_not_block_additions() {
+    let fixture = IncrementalFixture::new(true, false).await;
+    fixture.state.db.collection::<UserService>(USER_SERVICES)
+        .update_one(doc! { "_id": &fixture.services[1].id }, doc! { "$set": { "is_active": false } })
+        .await.unwrap();
+    let signed = fixture.request().await.unwrap();
+    let code = fixture.code(&signed).await;
+    let Json(tokens) = fixture.exchange(&code).await.unwrap();
+    assert_eq!(tokens.binding_updated, Some(true));
+}
+
+#[tokio::test]
+async fn narrowed_consent_cannot_be_widened_from_an_older_binding() {
+    let fixture = IncrementalFixture::new(true, false).await;
+    consent_service::grant_consent_with_services(
+        &fixture.state.db,
+        &fixture.user_id,
+        &fixture.client_id,
+        "openid proxy",
+        Some(vec![fixture.services[0].id.clone()]),
+    ).await.unwrap();
+    assert!(matches!(fixture.request().await, Err(AppError::Conflict(_))));
+}
+
+#[tokio::test]
+async fn review_handle_is_bound_to_the_user() {
+    let fixture = IncrementalFixture::new(false, false).await;
+    let signed = fixture.request().await.unwrap();
+    let handle = oauth_consent_request_service::create(
+        &fixture.state.db, &fixture.user_id, &signed,
+    ).await.unwrap();
+    assert_eq!(
+        oauth_consent_request_service::get(&fixture.state.db, &fixture.user_id, &handle)
+            .await.unwrap(),
+        signed,
+    );
+    assert!(oauth_consent_request_service::get(
+        &fixture.state.db, &Uuid::new_v4().to_string(), &handle,
+    ).await.is_err());
+}
+
+#[tokio::test]
+async fn expired_review_can_return_to_client_with_state() {
+    let fixture = IncrementalFixture::new(false, false).await;
+    let signed = fixture.request().await.unwrap();
+    let mut claims = decode::<ConsentRequestClaims>(&signed, &fixture.state.jwt_keys.decoding, &{
+        let mut validation = Validation::new(Algorithm::RS256);
+        validation.set_audience(&[CONSENT_REQUEST_AUDIENCE]);
+        validation
+    }).unwrap().claims;
+    claims.exp = Utc::now().timestamp() - 120;
+    let expired = encode(&Header::new(Algorithm::RS256), &claims, &fixture.state.jwt_keys.encoding).unwrap();
+    let response = fixture.decide(&expired, &[], false, "deny").await.unwrap();
+    assert_eq!(incremental_callback_error(&response), Some("access_denied".to_string()));
+}
+
+#[tokio::test]
+async fn incremental_revoked_binding_refresh_invalidates_pending_code() {
+    let fixture = IncrementalFixture::new(true, false).await;
+    let code = fixture.code(&fixture.request().await.unwrap()).await;
+    let binding = load_binding(&fixture.state.db, fixture.binding_id.as_ref().unwrap()).await;
+    oauth_service::revoke_issued_refresh(&fixture.state.db, &binding.refresh_token_jti)
+        .await.unwrap();
+    assert!(fixture.exchange(&code).await.is_err());
+    let current = load_binding(&fixture.state.db, fixture.binding_id.as_ref().unwrap()).await;
+    assert_eq!(current.refresh_token_jti, binding.refresh_token_jti);
 }
 
 #[tokio::test]
 async fn incremental_rejects_tampering_wildcard_wrong_user_and_expiry() {
     let fixture = IncrementalFixture::new(false, false).await;
     let signed = fixture.request().await.unwrap();
-    assert!(fixture.decide(&signed, &[], true, "allow").await.is_err());
+    assert!(incremental_callback_error(&fixture.decide(&signed, &[], true, "allow").await.unwrap()).is_some());
     assert!(verify_consent_request(&fixture.state, &signed, &Uuid::new_v4().to_string()).is_err());
     let mut claims = decode::<ConsentRequestClaims>(&signed, &fixture.state.jwt_keys.decoding, &{
         let mut v = Validation::new(Algorithm::RS256);
@@ -398,7 +610,10 @@ async fn incremental_rejects_tampering_wildcard_wrong_user_and_expiry() {
         &fixture.state.jwt_keys.encoding,
     )
     .unwrap();
-    assert!(fixture.decide(&expired, &[], false, "allow").await.is_err());
+    assert_eq!(
+        incremental_callback_error(&fixture.decide(&expired, &[], false, "allow").await.unwrap()),
+        Some("interaction_required".to_string())
+    );
     let mut parts = signed.split('.').map(String::from).collect::<Vec<_>>();
     claims.exp = Utc::now().timestamp() + 600;
     claims
@@ -587,7 +802,7 @@ async fn incremental_org_ids_use_live_membership_without_same_slug_substitution(
         .delete_one(doc! { "_id": &membership.id })
         .await
         .unwrap();
-    assert!(fixture.decide(&signed, &[], false, "allow").await.is_err());
+    assert_eq!(incremental_callback_error(&fixture.decide(&signed, &[], false, "allow").await.unwrap()), Some("interaction_required".to_string()));
 }
 
 #[tokio::test]
@@ -609,10 +824,7 @@ async fn incremental_legacy_replica_change_invalidates_unversioned_snapshot() {
         )
         .await
         .unwrap();
-    assert!(matches!(
-        fixture.decide(&signed, &[], false, "allow").await,
-        Err(AppError::Conflict(_))
-    ));
+    assert_eq!(incremental_callback_error(&fixture.decide(&signed, &[], false, "allow").await.unwrap()), Some("interaction_required".to_string()));
 }
 
 #[test]

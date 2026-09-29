@@ -39,6 +39,7 @@ const incrementalConsentRequestSchema = z.object({
   resource: z.array(z.string()),
   incremental_consent: z.object({
     client_name: z.string().min(1),
+    current_scopes: z.string(),
     scopes: z.string().min(1),
     current_service_ids: z.array(z.string().min(1)),
     allow_all_services: z.boolean(),
@@ -55,7 +56,7 @@ export function readIncrementalConsentRequest(
 ): { request: IncrementalConsentRequest } | { error: string } | null {
   const token = search.get("consent_request") ?? "";
   try {
-    const part = token.split(".")[1];
+    const part = token.split(".")[1] ?? "";
     const base64 = part.replace(/-/g, "+").replace(/_/g, "/");
     const bytes = Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
     const payload: unknown = JSON.parse(new TextDecoder().decode(bytes));

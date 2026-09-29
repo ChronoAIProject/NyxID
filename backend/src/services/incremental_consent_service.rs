@@ -42,7 +42,7 @@ pub async fn prepare(
     user_id: &str,
     client_id: &str,
     client_name: &str,
-    scopes: &str,
+    requested_scopes: Option<&str>,
     required_service_ids: &[String],
     access_resources: &[String],
     binding: Option<&oauth_broker_service::BindingGrantSnapshot>,
@@ -50,6 +50,31 @@ pub async fn prepare(
     let consent = consent_service::check_consent(db, user_id, client_id, "")
         .await?
         .ok_or_else(consent_service::grant_changed)?;
+    if !consent.allow_all_services && consent.allowed_service_ids.is_none() {
+        return Err(consent_service::grant_changed());
+    }
+    if let Some(binding) = binding {
+        let consent_scopes = consent
+            .scopes
+            .split_whitespace()
+            .collect::<std::collections::HashSet<_>>();
+        let services_covered = consent.allow_all_services
+            || (!binding.allow_all_services
+                && binding.allowed_service_ids.iter().all(|id| {
+                    consent
+                        .allowed_service_ids
+                        .as_ref()
+                        .is_some_and(|ids| ids.contains(id))
+                }));
+        if !services_covered
+            || !binding
+                .scopes
+                .split_whitespace()
+                .all(|scope| consent_scopes.contains(scope))
+        {
+            return Err(consent_service::grant_changed());
+        }
+    }
     let (current_service_ids, allow_all_services, current_scopes) = match binding {
         Some(binding) => (
             binding.allowed_service_ids.clone(),
@@ -67,20 +92,21 @@ pub async fn prepare(
     } else {
         current_service_ids
     };
-    validate_services(
-        db,
-        user_id,
-        &union(&current_service_ids, required_service_ids),
-    )
-    .await?;
+    let additions = required_service_ids
+        .iter()
+        .filter(|id| !current_service_ids.contains(id))
+        .cloned()
+        .collect::<Vec<_>>();
+    validate_services(db, user_id, &additions).await?;
     let consent_fingerprint = consent_service::fingerprint(&consent)?;
     Ok(IncrementalConsent {
         consent_fingerprint,
         consent_id: consent.id,
         consent_revision: consent.revision,
-        binding_rotation_version: binding.map(|b| b.rotation_version),
+        binding_grant_version: binding.map(|b| b.grant_version),
         client_name: client_name.to_string(),
-        scopes: union_scopes(current_scopes, scopes),
+        current_scopes: current_scopes.to_string(),
+        scopes: union_scopes(current_scopes, requested_scopes.unwrap_or(current_scopes)),
         current_service_ids,
         allow_all_services,
         required_service_ids: union(&[], required_service_ids),
@@ -116,21 +142,19 @@ pub async fn validate_current(
             hash,
         )
         .await?;
-        if Some(binding.rotation_version) != snapshot.binding_rotation_version {
+        if Some(binding.grant_version) != snapshot.binding_grant_version {
             return Err(consent_service::grant_changed());
         }
-    } else if snapshot.binding_rotation_version.is_some() {
+    } else if snapshot.binding_grant_version.is_some() {
         return Err(consent_service::grant_changed());
     }
-    validate_services(
-        db,
-        user_id,
-        &union(
-            &snapshot.current_service_ids,
-            &snapshot.required_service_ids,
-        ),
-    )
-    .await?;
+    let additions = snapshot
+        .required_service_ids
+        .iter()
+        .filter(|id| !snapshot.current_service_ids.contains(id))
+        .cloned()
+        .collect::<Vec<_>>();
+    validate_services(db, user_id, &additions).await?;
     Ok(consent)
 }
 
@@ -194,7 +218,10 @@ pub async fn approve(
         external_subject,
     )
     .await?;
-    let additions = union(selected_ids, &snapshot.required_service_ids);
+    let additions = union(selected_ids, &snapshot.required_service_ids)
+        .into_iter()
+        .filter(|id| !snapshot.current_service_ids.contains(id))
+        .collect::<Vec<_>>();
     validate_services(db, user_id, &additions).await?;
     let grant_ids = if snapshot.allow_all_services {
         Vec::new()

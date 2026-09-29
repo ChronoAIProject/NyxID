@@ -533,6 +533,7 @@ fn delegated_read_denied_path(path: &str) -> bool {
     if matches!(
         segments.as_slice(),
         ["channel-relay", "messages", _, "attachments", _]
+            | ["users", "me", "oauth-consent-requests", _]
     ) {
         return true;
     }
@@ -2260,6 +2261,9 @@ mod tests {
         assert!(!delegated_read_denied_path("/api/v1/channel-platforms"));
         assert!(delegated_read_denied_path(
             "/api/v1/channel-relay/messages/id/attachments/0"
+        ));
+        assert!(delegated_read_denied_path(
+            "/api/v1/users/me/oauth-consent-requests/id"
         ));
         db.drop().await.unwrap();
     }

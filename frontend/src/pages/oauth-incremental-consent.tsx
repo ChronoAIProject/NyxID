@@ -71,8 +71,12 @@ export function OAuthIncrementalConsentPage({
     ? []
     : requiredIds.filter((id) => !currentIds.includes(id));
   const additions = [...new Set([...requiredAdditions, ...optionalIds])];
+  const currentScopes = snapshot?.current_scopes.split(/\s+/).filter(Boolean) ?? [];
+  const addedScopes = snapshot?.scopes
+    .split(/\s+/)
+    .filter((scope) => scope && !currentScopes.includes(scope)) ?? [];
   const unavailable = [
-    ...new Set([...currentIds, ...requiredIds, ...optionalIds]),
+    ...new Set([...requiredAdditions, ...optionalIds]),
   ].filter((id) => !available.some((service) => service.id === id));
   const optional = snapshot?.allow_all_services
     ? []
@@ -80,22 +84,33 @@ export function OAuthIncrementalConsentPage({
         (service) =>
           !currentIds.includes(service.id) && !requiredIds.includes(service.id),
       );
+  const needsServiceInventory = requiredAdditions.length > 0 || optionalIds.length > 0;
   const blocked = Boolean(
-    error || expired || isLoading || isError || unavailable.length,
+    error || expired || (needsServiceInventory && (isLoading || isError || unavailable.length)),
   );
   const errorMessage =
     error ||
     (expired
       ? "This authorization request has expired. Return to the application and try again."
-      : isError
+      : isError && needsServiceInventory
         ? "Services could not be loaded. Reload this page to try again."
         : !isLoading && unavailable.length
-          ? "A requested or previously authorized service is unavailable, disconnected, or no longer shared with you. Review application access and restart authorization."
+          ? "A requested service is unavailable, disconnected, or no longer shared with you. Review application access and restart authorization."
           : undefined);
 
   function serviceRow(id: string, retained: boolean) {
     const service = available.find((item) => item.id === id);
-    if (!service) return null;
+    if (!service && !retained) return null;
+    if (!service) {
+      return (
+        <div key={id} className="px-4 py-3 text-[12px] text-muted-foreground">
+          {isLoading || isError
+            ? "Previously authorized service details unavailable: "
+            : "Previously authorized service unavailable: "}
+          <span className="break-all font-mono">{id}</span>
+        </div>
+      );
+    }
     return (
       <div key={id} className="flex items-start gap-3 px-4 py-3">
         <Check
@@ -120,10 +135,10 @@ export function OAuthIncrementalConsentPage({
         </div>
         <header className="space-y-2 text-center">
           <h1 className="text-[22px] font-bold leading-tight tracking-tight sm:text-[28px]">
-            Update service access
+            Choose what {snapshot?.client_name ?? "this application"} can access
           </h1>
           <p className="text-[12px] text-muted-foreground">
-            Review the additional services this application needs.
+            Review the new services and permissions requested.
           </p>
         </header>
         {errorMessage && <ErrorBanner message={errorMessage} />}
@@ -135,10 +150,10 @@ export function OAuthIncrementalConsentPage({
                   {snapshot.client_name}
                 </p>
                 <p className="mt-1 break-all text-[12px] text-muted-foreground">
-                  Return to {new URL(request.redirect_uri).host}
+                  Return to {new URL(request.redirect_uri).host || new URL(request.redirect_uri).protocol.slice(0, -1)}
                 </p>
               </div>
-              {isLoading ? (
+              {isLoading && needsServiceInventory ? (
                 <p role="status" className="text-[12px] text-muted-foreground">
                   Loading services...
                 </p>
@@ -204,6 +219,16 @@ export function OAuthIncrementalConsentPage({
                       </details>
                     )}
                   </DetailSection>
+                  {addedScopes.length > 0 && (
+                    <DetailSection title={`Allow ${addedScopes.length} additional ${addedScopes.length === 1 ? "permission" : "permissions"}`} className="bg-overlay">
+                      {addedScopes.map((scope) => (
+                        <div key={scope} className="px-4 py-3 text-[12px]">
+                          <p className="font-semibold text-foreground">{OAUTH_SCOPE_META[scope]?.title ?? scope}</p>
+                          {OAUTH_SCOPE_META[scope]?.description && <p className="mt-1 text-muted-foreground">{OAUTH_SCOPE_META[scope].description}</p>}
+                        </div>
+                      ))}
+                    </DetailSection>
+                  )}
                   <DetailSection
                     title="Already authorized"
                     className="bg-overlay"
@@ -229,7 +254,7 @@ export function OAuthIncrementalConsentPage({
                   Application permissions and details
                 </summary>
                 <ul className="mt-3 space-y-2 text-[12px] text-muted-foreground">
-                  {snapshot.scopes.split(/\s+/).map((scope) => (
+                  {currentScopes.map((scope) => (
                     <li key={scope}>
                       <span className="text-foreground">
                         {OAUTH_SCOPE_META[scope]?.title ?? scope}
@@ -252,7 +277,7 @@ export function OAuthIncrementalConsentPage({
               </p>
               <form
                 method="POST"
-                action="/oauth/authorize/decision"
+                action="/oauth/authorize/incremental/decision"
                 className="flex flex-col gap-2 sm:flex-row sm:justify-end"
               >
                 <input
@@ -323,7 +348,7 @@ export function OAuthIncrementalConsentPage({
                   name="allow_all_services"
                   value={snapshot.allow_all_services ? "true" : "false"}
                 />
-                {additions.map((id) => (
+                {[...new Set([...currentIds, ...additions])].map((id) => (
                   <input
                     key={id}
                     type="hidden"
@@ -344,9 +369,8 @@ export function OAuthIncrementalConsentPage({
                   name="decision"
                   value="deny"
                   variant="outline"
-                  disabled={expired}
                 >
-                  Cancel
+                  {expired ? "Return to application" : "Cancel"}
                 </Button>
                 <Button
                   type="submit"
@@ -358,8 +382,11 @@ export function OAuthIncrementalConsentPage({
                   <ButtonIcon variant="primary">
                     <ShieldCheck />
                   </ButtonIcon>
-                  {additions.length
-                    ? `Allow ${additions.length} ${additions.length === 1 ? "service" : "services"}`
+                  {additions.length || addedScopes.length
+                    ? `Allow ${[
+                        additions.length ? `${additions.length} ${additions.length === 1 ? "service" : "services"}` : "",
+                        addedScopes.length ? `${addedScopes.length} ${addedScopes.length === 1 ? "permission" : "permissions"}` : "",
+                      ].filter(Boolean).join(" and ")}`
                     : "Continue"}
                 </Button>
               </form>

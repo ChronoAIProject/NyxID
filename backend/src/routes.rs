@@ -539,6 +539,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .route("/me/consents", get(handlers::consent::list_my_consents))
         .route(
+            "/me/oauth-consent-requests/{handle}",
+            get(handlers::oauth::get_consent_request),
+        )
+        .route(
             "/me/consents/{client_id}/authorization",
             get(handlers::consent::get_my_consent_authorization),
         )
@@ -1064,6 +1068,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/authorize/decision",
             post(handlers::oauth::authorize_decision),
+        )
+        .route(
+            "/authorize/incremental/decision",
+            post(handlers::oauth::authorize_incremental_decision),
         )
         .route("/par", post(handlers::oauth::pushed_authorization_request))
         .route("/token", post(handlers::oauth::token))

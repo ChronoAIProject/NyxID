@@ -31,6 +31,7 @@ use crate::models::node_service_binding::{
 use crate::models::oauth_broker_binding::{
     COLLECTION_NAME as OAUTH_BROKER_BINDINGS, OauthBrokerBinding,
 };
+use crate::models::oauth_consent_request::COLLECTION_NAME as OAUTH_CONSENT_REQUESTS;
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
 use crate::models::pushed_authorization_request::COLLECTION_NAME as PAR_COLLECTION;
 use crate::models::ssh_auth_mode::SshAuthMode;
@@ -732,6 +733,20 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     )
     .await?;
     par.create_index(IndexModel::builder().keys(doc! { "client_id": 1 }).build())
+        .await?;
+
+    let consent_requests = db.collection::<mongodb::bson::Document>(OAUTH_CONSENT_REQUESTS);
+    consent_requests
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "expires_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(Duration::from_secs(0))
+                        .build(),
+                )
+                .build(),
+        )
         .await?;
 
     // ── service_endpoints ──

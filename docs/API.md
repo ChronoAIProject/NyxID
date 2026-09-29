@@ -4135,14 +4135,15 @@ Authorization endpoint. Validates the OAuth client and parameters, then issues a
 | `code_challenge`        | string | Yes      | PKCE code challenge (base64url-encoded SHA-256) |
 | `code_challenge_method` | string | No       | Must be `S256` if provided               |
 | `nonce`                 | string | No       | Value included in ID token for replay protection |
-| `service_access_mode`   | string | No       | `incremental` opts into add-only service consent; omission keeps ordinary authorization/review behavior |
-| `requested_service_ids` | repeated string | No | Exact UserService UUIDs required by an incremental request (maximum 100 entries, deduplicated); requires `service_access_mode=incremental` |
+| `include_granted_scopes` | boolean | No | `true` requests additive OAuth scopes and service access, like Google's incremental authorization option |
+| `service_access_mode`   | string | No       | `incremental` is the NyxID-specific alias for add-only consent; omission keeps ordinary authorization/review behavior unless `include_granted_scopes=true` |
+| `requested_service_ids` | repeated string | No | Exact UserService UUIDs required by an incremental request (maximum 100 entries, deduplicated); requires `include_granted_scopes=true` or `service_access_mode=incremental` |
 | `resource`              | repeated string | No | RFC 8707 resources; in incremental mode their services are also required, and they narrow the initial access token rather than the accumulated refresh/binding grant |
 | `binding_grant_id`      | string | No       | SHA-256 of an existing binding handle, to update that exact binding; external subject must match, including an absent subject in incremental mode |
 
-Incremental authorization requires a live consent for the current user and client. NyxID signs the existing grant and requested IDs, then asks the user to confirm additions. Existing A/B plus newly approved C/D produces A/B/C/D in the authorization code, refresh token, and broker binding. Existing unrestricted access stays unrestricted; a restricted grant cannot become unrestricted in this mode. Unknown, disabled, or inaccessible service IDs are rejected. Concurrent consent changes, binding rotation, or revocation invalidate stale decisions/codes and require restarting authorization.
+Incremental authorization requires a live consent for the current user and client. NyxID signs the existing grant and requested IDs, then asks the user to confirm additions. Existing A/B plus newly approved C/D produces A/B/C/D in the authorization code, refresh token, and broker binding. Existing unrestricted access stays unrestricted; a restricted grant cannot become unrestricted in this mode. Unknown, disabled, or inaccessible new service IDs are rejected. Concurrent grant changes or revocation invalidate stale decisions/codes and require restarting authorization; routine broker refresh-token rotation does not change the grant.
 
-`POST /oauth/par` accepts the same `service_access_mode` and repeated `requested_service_ids` form fields. Callers must start at the authorization/PAR endpoint, not construct a consent page URL or provide a grant snapshot themselves. See [incremental service access and the Aevatar integration contract](site/shared/concepts/oauth-oidc.md#adding-service-access-incrementally).
+`POST /oauth/par` accepts the same `include_granted_scopes`, `service_access_mode`, and repeated `requested_service_ids` form fields. Callers must start at the authorization/PAR endpoint, not construct a consent page URL or provide a grant snapshot themselves. See [incremental service access and the Aevatar integration contract](site/shared/concepts/oauth-oidc.md#adding-service-access-incrementally).
 
 **Response (200):**
 

@@ -1021,7 +1021,7 @@ OAuth consent records tracking which scopes a user has granted to each client ap
 
 **Indexes:** `(user_id, client_id)` (unique)
 
-Incremental consent snapshots bind the current revision and a fingerprint of the legacy grant fields, plus the selected binding's rotation version when applicable. Consent updates compare those fields before replacing the row. Token issuance performs live checks and a consent write after refresh insertion, so a concurrent transaction deleting consent and revoking refresh tokens cannot miss a newly inserted usable token. A failed final check revokes the newly issued refresh. Binding replacement atomically revokes its previous refresh and changes its pointer. See the [OAuth contract](site/shared/concepts/oauth-oidc.md#adding-service-access-incrementally) for persistent-grant versus access-token resource semantics and deployment requirements.
+Incremental consent snapshots bind the current revision and a fingerprint of the legacy grant fields, plus the selected binding's grant version when applicable. Routine broker token rotation changes only the rotation version. Consent updates compare the grant fields before replacing the row. Token issuance performs live checks and a consent write after refresh insertion. For an existing binding, the final consent write, previous refresh revocation, and binding pointer update share one transaction; a failed check cannot leave the handle pointing to a revoked replacement. See the [OAuth contract](site/shared/concepts/oauth-oidc.md#adding-service-access-incrementally) for persistent-grant versus access-token resource semantics and deployment requirements.
 
 #### service_accounts
 

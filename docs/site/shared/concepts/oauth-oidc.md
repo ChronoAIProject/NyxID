@@ -129,11 +129,13 @@ See [MCP proxy](/docs/shared/concepts/mcp-proxy) for how delegation tokens flow 
 
 ## Adding service access incrementally
 
-Use `service_access_mode=incremental` on `/oauth/authorize` (or `/oauth/par`) when an already signed-in application needs additional services. Unlike a normal review, this mode preserves existing service access and cannot introduce a new all-services grant. A live consent for this user and client is required; if it has expired or been revoked, restart the ordinary authorization flow first.
+Use `include_granted_scopes=true` on `/oauth/authorize` (or `/oauth/par`) when an application needs more OAuth permissions. Put the new permissions in `scope`, as in Google's incremental authorization flow. NyxID preserves previously granted scopes and service access. A live consent for this user and client is required; if it has expired or been revoked, restart ordinary authorization. NyxID also accepts `service_access_mode=incremental` for existing callers; it has the same add-only semantics.
 
 | Parameter | Meaning |
 |-----------|---------|
-| `service_access_mode=incremental` | Opt in to the add-only confirmation page and grant semantics. Omission keeps ordinary authorization/review behavior. |
+| `include_granted_scopes=true` | Request additive OAuth scopes and show a confirmation page. Omission keeps ordinary authorization/review behavior. |
+| `scope` | Only the newly needed OAuth scopes are required. Omission preserves the current scope grant without adding the client's other configured scopes. |
+| `service_access_mode=incremental` | NyxID-specific alias for the same add-only review, retained for callers using the original service-access contract. |
 | Repeated `requested_service_ids` | Exact **UserService UUIDs** the application needs. At most 100 entries; duplicates are deduplicated. These services are required for this request. Catalog IDs, display names, and slugs are not substitutes. |
 | Repeated `resource` | Optional RFC 8707 resources. Resolved services are also required, but these resources narrow the initial **access token**, not the accumulated refresh/binding grant. `/oauth/token` can request a different subset within the accumulated grant. |
 | `binding_grant_id` | Optional SHA-256 of the existing binding handle, when updating that specific binding. Its exact external subject must match, including an absent external subject for ordinary account bindings. Never put the raw `binding_id` in the URL. |
@@ -148,25 +150,25 @@ For example, an app with A and B already granted can request C and D:
   &code_challenge=PKCE_CHALLENGE
   &code_challenge_method=S256
   &state=CSRF_AND_RETURN_CONTEXT
-  &service_access_mode=incremental
+  &include_granted_scopes=true
   &requested_service_ids=USER_SERVICE_C_UUID
   &requested_service_ids=USER_SERVICE_D_UUID
 ```
 
-The consent page shows C and D under **Allow 2 additional services**, with A and B in a read-only **Already authorized** section. Users may explicitly select other optional services. An existing unrestricted grant remains unrestricted; zero new services produces a **Continue** action. The page displays exact personal/organization identity and blocks approval when a service is unavailable or the request has expired. App-supplied free-text permission descriptions are not accepted.
+The consent page shows C and D under **Allow 2 additional services**, with A and B in a read-only **Already authorized** section. Newly requested OAuth scopes appear as **additional permissions** in the main review and Allow button. Users may explicitly select other optional services. An existing unrestricted grant remains unrestricted; zero new services and permissions produces a **Continue** action. A previously authorized service that is now unavailable remains in the stored grant but is identified as unavailable and cannot be used through the proxy; only unavailable new services block approval. App-supplied free-text permission descriptions are not accepted.
 
 The approved authorization code stores the complete accumulated service boundary. Refresh tokens and broker bindings inherit that boundary; an optional `resource=C` only narrows the access token. Binding updates keep the existing handle and return `binding_updated: true`, without a replacement handle. Without `binding_grant_id`, the flow uses the user's client-wide consent and may issue a new binding through the ordinary broker flow. It does not update other existing bindings automatically.
 
-NyxID signs the grant snapshot, mode, IDs, app identity, and request context. The browser decodes this signed payload for display; the server verifies its signature, expiry, authenticated user, client, and live ownership on submission. URL display hints are not authority. All-services escalation, unknown or inaccessible IDs, disabled services, and mismatched external subjects fail closed. A consent revision/fingerprint and binding rotation version fence stale decisions and codes. Concurrent modifications, including broker rotation, require restarting authorization; updates are not silently rebased. A later revocation cannot recreate the deleted consent. Binding rotation and old-refresh revocation commit atomically, and incremental token issuance serializes with consent revocation. Previously issued stateless access tokens retain their normal expiry semantics.
+NyxID signs the grant snapshot, mode, IDs, scopes, app identity, and request context. The browser receives a short, user-bound review handle and loads the signed request from NyxID; the server verifies its signature, expiry, authenticated user, client, and live ownership on submission. URL display hints are not authority. All-services escalation, unknown or inaccessible new IDs, disabled new services, and mismatched external subjects fail closed. A consent revision/fingerprint and binding grant version fence stale decisions and codes. Routine broker token rotation does not change the grant version and can continue during review. Conflicts return an OAuth error callback with `state`, allowing the caller to restore its draft and retry. A later revocation cannot recreate the deleted consent. Binding replacement and the final consent fence commit atomically. Previously issued stateless access tokens retain their normal expiry semantics.
 
-Deploy the backend and consent UI together before enabling this mode in callers. Old authorization servers that do not implement the mode must not be used as a fallback for an incremental request.
+Deploy the backend and consent UI together before enabling this mode in callers. The dedicated incremental decision endpoint rejects requests on old backend replicas instead of silently replacing the grant. Old authorization servers that do not implement the mode must not be used as a fallback.
 
 ### Aevatar Channel integration boundary
 
 Aevatar's Channel editor can use repeated `required_service_ids` on its own edit URL to carry the exact NyxID UserService IDs and focus `#services`. **That editor parameter is an Aevatar contract**, not a NyxID authorization request parameter. The caller must:
 
 1. Resolve and validate the IDs, and compare them with its effective grant and current channel selection. Already authorized services only need local selection.
-2. Save the unsaved editor draft and return location behind an opaque `state`, then start Authorization Code + PKCE with `service_access_mode=incremental` and the missing IDs as `requested_service_ids`. Include the binding hash when the existing handle should be updated.
+2. Save the unsaved editor draft and return location behind an opaque `state`, then start Authorization Code + PKCE with `include_granted_scopes=true`, the newly needed OAuth scopes in `scope`, and the missing IDs as `requested_service_ids`. Include the binding hash when the existing handle should be updated.
 3. Validate state, exchange the code, and re-read actual access before marking the missing services available. A redirect alone is not proof that access was granted. Refresh or replace locally cached credentials as appropriate.
 4. Restore the draft and preselect newly authorized required services. Persist Channel changes only when the user presses **Save changes**. Cancel, expiry, and conflict must preserve the draft and offer a fresh authorization attempt.
 
