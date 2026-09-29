@@ -3464,23 +3464,70 @@ async fn direct_reply_channels_are_reset_once() {
     server.abort();
 }
 
-#[test]
-fn gateway_platforms_are_read_from_the_environment() {
-    assert_eq!(crate::config::gateway_platforms(None), vec!["telegram"]);
-    assert_eq!(
-        crate::config::gateway_platforms(Some(" ")),
-        vec!["telegram"]
+/// Turn a platform's gateway flag on for one person, as a platform admin
+/// piloting it does.
+async fn enable_gateway_for(state: &AppState, platform: &str, user_id: &str) {
+    let flag = gateway_flag(platform).unwrap();
+    crate::services::feature_flag_service::set_platform_override(
+        &state.db,
+        flag,
+        &crate::services::feature_flag_service::FlagTarget::User(user_id.into()),
+        true,
+        OWNER,
+    )
+    .await
+    .unwrap();
+}
+
+/// Which bots use the gateway is decided per owner by the platform's flag:
+/// Telegram always, every other NyxID channel platform once its flag is on
+/// for them, anything else never. Changes apply without a restart.
+#[tokio::test]
+async fn gateway_platforms_follow_their_feature_flags() {
+    let (state, _, server) = setup("nyxbot_gateway_flags").await;
+    let other = Uuid::new_v4().to_string();
+    state
+        .db
+        .collection(USERS)
+        .insert_one(test_user(&other, UserType::Person))
+        .await
+        .unwrap();
+    for platform in [
+        "lark", "feishu", "discord", "slack", "whatsapp", "x", "aurinko",
+    ] {
+        let flag = gateway_flag(platform).unwrap();
+        assert!(crate::services::feature_flag_service::find_flag(flag).is_some());
+    }
+    assert!(gateway_flag("openclaw").is_none());
+    assert!(gateway_enabled(&state, OWNER, "telegram").await.unwrap());
+    assert!(
+        gateway_enabled(&state, OWNER, "telegram-new")
+            .await
+            .unwrap()
     );
-    assert_eq!(
-        crate::config::gateway_platforms(Some("Telegram, lark,feishu")),
-        vec!["telegram", "lark", "feishu"]
+    assert!(!gateway_enabled(&state, OWNER, "lark").await.unwrap());
+    assert!(
+        !crate::services::feature_flag_service::flag_may_be_enabled(
+            &state.db,
+            gateway_flag("lark").unwrap()
+        )
+        .await
+        .unwrap()
     );
-    // Telegram always stays; repeats and platforms the gateway cannot verify
-    // are dropped.
-    assert_eq!(
-        crate::config::gateway_platforms(Some("lark,Lark,discord,feishu,lark,whatsapp")),
-        vec!["telegram", "lark", "feishu"]
+    enable_gateway_for(&state, "lark", OWNER).await;
+    assert!(gateway_enabled(&state, OWNER, "lark").await.unwrap());
+    assert!(!gateway_enabled(&state, &other, "lark").await.unwrap());
+    assert!(!gateway_enabled(&state, OWNER, "feishu").await.unwrap());
+    assert!(!gateway_enabled(&state, OWNER, "openclaw").await.unwrap());
+    assert!(
+        crate::services::feature_flag_service::flag_may_be_enabled(
+            &state.db,
+            gateway_flag("lark").unwrap()
+        )
+        .await
+        .unwrap()
     );
+    server.abort();
 }
 
 type GatewayCalls = Arc<Mutex<Vec<(String, String, Value)>>>;
@@ -3630,8 +3677,44 @@ async fn personal_bots_move_to_the_gateway_once_it_takes_their_platform() {
     assert_eq!(before.transport, "direct");
     let route_id = before.route_id.clone().unwrap();
     switch_to_gateway(&state).await.unwrap();
-    // Listed, but nobody has used the bot yet: left alone too.
-    state.config.nyxbot_gateway_platforms = vec!["telegram".into(), "lark".into()];
+    // Flag on for another person only: left alone.
+    let other = Uuid::new_v4().to_string();
+    state
+        .db
+        .collection(USERS)
+        .insert_one(test_user(&other, UserType::Person))
+        .await
+        .unwrap();
+    enable_gateway_for(&state, "lark", &other).await;
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .update_one(
+            doc! {"_id": &before.id},
+            doc! {"$set": {"owner_sender_ids": ["ou_alice"]}},
+        )
+        .await
+        .unwrap();
+    switch_to_gateway(&state).await.unwrap();
+    let not_theirs = load_channel(&state, OWNER, &before.id).await.unwrap();
+    assert_eq!(not_theirs.transport, "direct");
+    assert!(
+        not_theirs
+            .gateway_attempted_at
+            .is_some_and(|at| at < Utc::now() - ChronoDuration::hours(GATEWAY_RETRY_HOURS - 1))
+    );
+    // On for the owner, but nobody has used the bot yet: left alone too.
+    enable_gateway_for(&state, "lark", OWNER).await;
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .update_one(
+            doc! {"_id": &before.id},
+            doc! {"$set": {"owner_sender_ids": []},
+            "$unset": {"gateway_attempted_at": ""}},
+        )
+        .await
+        .unwrap();
     switch_to_gateway(&state).await.unwrap();
     let unchanged = load_channel(&state, OWNER, &before.id).await.unwrap();
     assert_eq!(unchanged.transport, "direct");
@@ -3887,8 +3970,8 @@ async fn personal_bots_move_to_the_gateway_once_it_takes_their_platform() {
         .unwrap()
         .unwrap();
     assert_eq!(fresh_route.agent_api_key_id, fresh.route_api_key_id);
-    // A bot whose own user ID cannot be looked up stays on NyxID's relay
-    // without asking the gateway (its groups could not hear it addressed).
+    // A bot whose own user ID cannot be looked up still uses the gateway,
+    // without pinning it (the gateway then counts any mention).
     calls.lock().await.clear();
     refuse.store(false, Ordering::SeqCst);
     let third = bot_doc("lark", "Lobby bot");
@@ -3902,8 +3985,10 @@ async fn personal_bots_move_to_the_gateway_once_it_takes_their_platform() {
     let (lobby, _) = connect(&state, OWNER, None, &third_id, &nyxbot)
         .await
         .unwrap();
-    assert_eq!(lobby.transport, "direct");
-    assert!(calls.lock().await.is_empty());
+    assert_eq!(lobby.transport, "gateway");
+    let made = calls.lock().await.clone();
+    assert_eq!(made[0].0, "POST");
+    assert!(made[0].2["sources"][0].get("bot_id").is_none());
     // A move whose replica stopped midway: its new keys are reaped.
     let (stuck_agent, stuck_route) = (
         key(&state, "stuck agent").await,
@@ -3913,7 +3998,7 @@ async fn personal_bots_move_to_the_gateway_once_it_takes_their_platform() {
         .db
         .collection::<NyxbotChannel>(CHANNELS)
         .update_one(
-            doc! {"_id": &lobby.id},
+            doc! {"_id": &fresh.id},
             doc! {"$set": {"pending_agent_api_key_id": &stuck_agent.id,
             "pending_route_api_key_id": &stuck_route.id,
             "gateway_attempted_at": bson::DateTime::from_chrono(
@@ -3922,7 +4007,7 @@ async fn personal_bots_move_to_the_gateway_once_it_takes_their_platform() {
         .await
         .unwrap();
     switch_to_gateway(&state).await.unwrap();
-    let reaped = load_channel(&state, OWNER, &lobby.id).await.unwrap();
+    let reaped = load_channel(&state, OWNER, &fresh.id).await.unwrap();
     assert!(reaped.pending_agent_api_key_id.is_none() && reaped.pending_route_api_key_id.is_none());
     for stuck in [&stuck_agent.id, &stuck_route.id] {
         assert!(

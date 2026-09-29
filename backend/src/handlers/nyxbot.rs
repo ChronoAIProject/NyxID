@@ -43,7 +43,7 @@ use crate::{
     },
     services::{
         assistant_nyxagent::{self as engine, TurnStart, excerpt, identifier},
-        channel_bot_service, channel_routing_service, key_service,
+        channel_bot_service, channel_routing_service, feature_flag_service, key_service,
     },
 };
 
@@ -63,23 +63,34 @@ fn canonical_platform(platform: &str) -> &str {
     }
 }
 
-/// Who owns the channel bot (and its route and route key): the org for an
-/// org bot, else the channel's owner.
-/// NyxBot reaches bots on these platforms through the Agent Event Gateway
-/// (`NYXBOT_GATEWAY_PLATFORMS`); every other bot uses NyxID's relay.
-fn gateway_supports(state: &AppState, platform: &str) -> bool {
+/// The feature flag that puts a platform's personal bots on the Agent Event
+/// Gateway (`nyxbot:gateway-{platform}`). Telegram always uses the gateway.
+fn gateway_flag(platform: &str) -> Option<&'static str> {
     let platform = canonical_platform(platform);
-    state
-        .config
-        .nyxbot_gateway_platforms
+    feature_flag_service::NYXBOT_GATEWAY_FLAGS
         .iter()
-        .any(|listed| canonical_platform(listed) == platform)
+        .find(|(listed, _)| *listed == platform)
+        .map(|(_, flag)| *flag)
 }
 
-/// A gateway refusal of a newly listed platform is not retried sooner than
+/// Whether NyxBot reaches `owner`'s personal bots on `platform` through the
+/// gateway (the platform's flag, resolved for them); else NyxID's relay.
+async fn gateway_enabled(state: &AppState, owner: &str, platform: &str) -> AppResult<bool> {
+    if canonical_platform(platform) == "telegram" {
+        return Ok(true);
+    }
+    match gateway_flag(platform) {
+        Some(flag) => feature_flag_service::personal_flag_enabled(&state.db, owner, flag).await,
+        None => Ok(false),
+    }
+}
+
+/// A gateway refusal of a newly enabled platform is not retried sooner than
 /// this (the sweep tries daily).
 const GATEWAY_RETRY_HOURS: i64 = 23;
 
+/// Who owns the channel bot (and its route and route key): the org for an
+/// org bot, else the channel's owner.
 pub(crate) fn bot_owner(row: &NyxbotChannel) -> &str {
     row.bot_owner_id.as_deref().unwrap_or(&row.user_id)
 }
@@ -572,9 +583,9 @@ pub async fn connect(
     }
     let platform = canonical_platform(&bot.platform).to_owned();
     // The gateway binds a channel to one person; org bots use NyxID's relay.
-    // Platforms newly listed for the gateway fall back to NyxID's relay when
+    // Platforms newly enabled for the gateway fall back to NyxID's relay when
     // the gateway cannot take them (Telegram keeps failing loudly).
-    let wants_gateway = gateway_supports(state, &platform) && bot_owner_id == owner;
+    let wants_gateway = bot_owner_id == owner && gateway_enabled(state, owner, &platform).await?;
     let may_fall_back = wants_gateway && platform != "telegram";
     let now = Utc::now();
     let id = Uuid::new_v4().to_string();
@@ -872,9 +883,9 @@ async fn connect_gateway(
     let record_id = Uuid::new_v4().to_string();
     // Other platforms pin the bot's own user ID so mentions of it are known.
     let mut row = row.clone();
-    if row.platform != "telegram" {
-        // Without it a group would never hear the bot addressed.
-        let bot_id = bot_user_id(state, bot).await.ok_or("bot_id_unavailable")?;
+    if row.platform != "telegram"
+        && let Some(bot_id) = bot_user_id(state, bot).await
+    {
         let _ = state
             .db
             .collection::<NyxbotChannel>(CHANNELS)
@@ -1068,26 +1079,21 @@ async fn bot_user_id(state: &AppState, bot: &ChannelBot) -> Option<String> {
     }
 }
 
-/// A bot in the middle of answering is looked at again this much later
-/// (not counted as a refusal).
-const MOVE_BUSY_RETRY_MINUTES: i64 = 10;
+/// A bot in the middle of answering, or whose owner does not have the
+/// platform's gateway flag on, is looked at again this much later (not
+/// counted as a refusal).
+const MOVE_RECHECK_MINUTES: i64 = 10;
 /// A move takes seconds; one still pending after this never finished.
 const MOVE_STALE_MINUTES: i64 = 30;
 
 /// Move one personal bot still on NyxID's relay onto the gateway once its
-/// platform is listed in `NYXBOT_GATEWAY_PLATFORMS`: at most one per sweep on
-/// each replica, each bot at most daily, only bots whose owner has verified
-/// (they are in use) and none in the middle of answering. Building happens
-/// beside the working bot and the swap is last, so a refusal leaves the bot
-/// exactly as it was.
+/// platform's gateway flag (`nyxbot:gateway-lark` / `nyxbot:gateway-feishu`)
+/// is on for its owner: at most one per sweep on each replica, each bot at
+/// most daily after a refusal, only bots whose owner has verified (they are
+/// in use) and none in the middle of answering. Flag changes take effect on
+/// the next sweeps, without a restart. Building happens beside the working
+/// bot and the swap is last, so a refusal leaves the bot exactly as it was.
 pub(crate) async fn switch_to_gateway(state: &AppState) -> AppResult<()> {
-    let listed: Vec<&str> = state
-        .config
-        .nyxbot_gateway_platforms
-        .iter()
-        .map(|platform| canonical_platform(platform))
-        .filter(|platform| *platform != "telegram")
-        .collect();
     let now = Utc::now();
     let channels = state.db.collection::<NyxbotChannel>(CHANNELS);
     // A move that never finished (its replica stopped) leaves its new keys
@@ -1112,12 +1118,19 @@ pub(crate) async fn switch_to_gateway(state: &AppState) -> AppResult<()> {
             let _ = key_service::delete_api_key(&state.db, &stuck.user_id, &key).await;
         }
     }
-    if listed.is_empty() {
+    // Only platforms whose flag somebody has turned on.
+    let mut enabled: Vec<&str> = Vec::new();
+    for (platform, flag) in feature_flag_service::NYXBOT_GATEWAY_FLAGS {
+        if feature_flag_service::flag_may_be_enabled(&state.db, flag).await? {
+            enabled.push(platform);
+        }
+    }
+    if enabled.is_empty() {
         return Ok(());
     }
     let due = bson::DateTime::from_chrono(now - ChronoDuration::hours(GATEWAY_RETRY_HOURS));
     let filter = doc! {"status": "active", "transport": "direct",
-    "bot_owner_id": bson::Bson::Null, "platform": {"$in": &listed},
+    "bot_owner_id": bson::Bson::Null, "platform": {"$in": &enabled},
     "owner_sender_ids.0": {"$exists": true},
     "$or": [{"gateway_attempted_at": bson::Bson::Null},
         {"gateway_attempted_at": {"$lt": due}}]};
@@ -1133,13 +1146,15 @@ pub(crate) async fn switch_to_gateway(state: &AppState) -> AppResult<()> {
     else {
         return Ok(());
     };
-    if channel_answering(state, &row).await? {
+    if !gateway_enabled(state, &row.user_id, &row.platform).await?
+        || channel_answering(state, &row).await?
+    {
         channels
             .update_one(
                 doc! {"_id": &row.id},
                 doc! {"$set": {"gateway_attempted_at": bson::DateTime::from_chrono(
                 now - ChronoDuration::hours(GATEWAY_RETRY_HOURS)
-                    + ChronoDuration::minutes(MOVE_BUSY_RETRY_MINUTES))}},
+                    + ChronoDuration::minutes(MOVE_RECHECK_MINUTES))}},
             )
             .await?;
         return Ok(());
@@ -1306,12 +1321,12 @@ async fn move_to_gateway(state: &AppState, row: &NyxbotChannel) -> Result<(), &'
     {
         return Err("issuer_unsupported");
     }
-    // Mentions of the bot are recognised by its own user ID; without it a
-    // group would never hear the bot addressed.
+    // Mentions of the bot are recognised exactly by its own user ID when
+    // NyxID can look it up (without it the gateway counts any mention).
     let bot_id = if row.platform == "telegram" {
         None
     } else {
-        Some(bot_user_id(state, &bot).await.ok_or("bot_id_unavailable")?)
+        bot_user_id(state, &bot).await
     };
     let base = gateway_base(state)
         .await

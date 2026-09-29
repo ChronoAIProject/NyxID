@@ -7,10 +7,11 @@ pub const EVENTS_COLLECTION_NAME: &str = "nyxbot_events";
 pub const WATCHES_COLLECTION_NAME: &str = "nyxbot_watches";
 
 /// A channel bot linked to one of the owner's agents (NyxBot or a
-/// specialist). Personal bots on platforms listed in
-/// `NYXBOT_GATEWAY_PLATFORMS` (Telegram always) are reached through the Agent
-/// Event Gateway (`transport = "gateway"`, NyxID is the gateway's `nyxbot`
-/// provider); other bots use NyxID's relay directly (`"direct"`).
+/// specialist). Personal Telegram bots, and personal bots on platforms whose
+/// `nyxbot:gateway-{platform}` feature flag is on for their owner, are reached
+/// through the Agent Event Gateway (`transport = "gateway"`, NyxID is the
+/// gateway's `nyxbot` provider); other bots use NyxID's relay directly
+/// (`"direct"`).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct NyxbotChannel {
     #[serde(rename = "_id")]
@@ -65,7 +66,7 @@ pub struct NyxbotChannel {
     #[serde(default)]
     pub gateway_bot_id: Option<String>,
     /// When NyxID last tried to move this personal bot onto the gateway
-    /// (its platform is listed in `NYXBOT_GATEWAY_PLATFORMS`); tried daily.
+    /// (its platform's gateway flag is on for the owner); tried daily.
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub gateway_attempted_at: Option<DateTime<Utc>>,
     /// While a working bot on NyxID's relay is being moved onto the gateway:

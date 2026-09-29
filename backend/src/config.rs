@@ -188,34 +188,6 @@ impl std::str::FromStr for TrustedProxyRange {
     }
 }
 
-/// Platforms whose raw events the Agent Event Gateway verifies itself. The
-/// gateway accepts channels for others but refuses their messages unless told
-/// to trust NyxID's normalized payload, which loses mention and reply evidence,
-/// so NyxBot keeps those on NyxID's relay.
-pub const GATEWAY_VERIFIED_PLATFORMS: [&str; 3] = ["telegram", "lark", "feishu"];
-
-/// Parse `NYXBOT_GATEWAY_PLATFORMS`: lowercase platform names, always
-/// including `telegram`; platforms the gateway cannot verify are ignored.
-pub fn gateway_platforms(value: Option<&str>) -> Vec<String> {
-    // Telegram is always relayed by the gateway: listing more adds to it.
-    let mut platforms = vec!["telegram".to_owned()];
-    for platform in value.unwrap_or_default().split(',') {
-        let platform = platform.trim().to_ascii_lowercase();
-        if platform.is_empty() || platforms.contains(&platform) {
-            continue;
-        }
-        if GATEWAY_VERIFIED_PLATFORMS.contains(&platform.as_str()) {
-            platforms.push(platform);
-        } else {
-            tracing::warn!(
-                platform = %platform,
-                "NYXBOT_GATEWAY_PLATFORMS: the gateway cannot verify this platform; its bots stay on NyxID's relay"
-            );
-        }
-    }
-    platforms
-}
-
 /// Application configuration loaded from environment variables.
 #[derive(Clone)]
 pub struct AppConfig {
@@ -539,11 +511,6 @@ pub struct AppConfig {
     pub channel_relay_callback_timeout_secs: u32,
     /// Maximum number of channel bots a single user can register (default: 5)
     pub channel_poll_interval_secs: u64,
-    /// Chat platforms NyxBot reaches through the Agent Event Gateway; the rest
-    /// use NyxID's relay. `NYXBOT_GATEWAY_PLATFORMS` (comma-separated, default
-    /// `telegram`): list a platform once the gateway supports it, and personal
-    /// bots on it move to the gateway by themselves.
-    pub nyxbot_gateway_platforms: Vec<String>,
     pub channel_relay_max_bots_per_user: u32,
     /// TTL in days for channel messages before automatic expiry (default: 30)
     pub channel_relay_message_ttl_days: u32,
@@ -1452,9 +1419,6 @@ impl AppConfig {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(30),
             channel_poll_interval_secs: env::var("CHANNEL_POLL_INTERVAL_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(30),
-            nyxbot_gateway_platforms: gateway_platforms(
-                env::var("NYXBOT_GATEWAY_PLATFORMS").ok().as_deref(),
-            ),
             channel_relay_max_bots_per_user: env::var("CHANNEL_RELAY_MAX_BOTS_PER_USER")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -2061,7 +2025,6 @@ mod tests {
                 crate::services::anonymous_endpoint_service::DEFAULT_PUBLIC_MCP_RATE_LIMIT_PER_MINUTE,
             channel_relay_callback_timeout_secs: 30,
             channel_poll_interval_secs: 30,
-            nyxbot_gateway_platforms: vec!["telegram".into()],
             channel_relay_max_bots_per_user: 5,
             channel_relay_message_ttl_days: 30,
             channel_media_max_bytes: DEFAULT_CHANNEL_MEDIA_MAX_BYTES,

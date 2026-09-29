@@ -123,6 +123,63 @@ const NYXAGENT_ENGINE_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: true,
 };
 
+/// NyxBot reaches the owner's personal chat-app bots on a platform through
+/// the Agent Event Gateway (Telegram always does). One flag per NyxID channel
+/// platform, resolved for each bot's owner, so a platform can be piloted on one
+/// account or org before everyone. Turning one on moves working bots over by
+/// themselves once the gateway takes the platform (it refuses platforms it
+/// cannot verify, and those bots stay on NyxID's relay, retried daily);
+/// turning it off stops further moves (moved bots stay until reconnected).
+/// Keyed by canonical platform.
+pub const NYXBOT_GATEWAY_FLAGS: &[(&str, &str)] = &[
+    ("lark", "nyxbot:gateway-lark"),
+    ("feishu", "nyxbot:gateway-feishu"),
+    ("discord", "nyxbot:gateway-discord"),
+    ("slack", "nyxbot:gateway-slack"),
+    ("whatsapp", "nyxbot:gateway-whatsapp"),
+    ("x", "nyxbot:gateway-x"),
+    ("aurinko", "nyxbot:gateway-aurinko"),
+];
+
+const fn nyxbot_gateway_flag(key: &'static str, description: &'static str) -> FeatureFlagDef {
+    FeatureFlagDef {
+        key,
+        description,
+        default_enabled: false,
+    }
+}
+
+const NYXBOT_GATEWAY_FLAG_DEFS: [FeatureFlagDef; 7] = [
+    nyxbot_gateway_flag(
+        "nyxbot:gateway-lark",
+        "NyxBot reaches owners' Lark bots through the Agent Event Gateway once the gateway takes Lark (text only there); until then NyxID's relay.",
+    ),
+    nyxbot_gateway_flag(
+        "nyxbot:gateway-feishu",
+        "NyxBot reaches owners' Feishu bots through the Agent Event Gateway once the gateway takes Feishu (text only there); until then NyxID's relay.",
+    ),
+    nyxbot_gateway_flag(
+        "nyxbot:gateway-discord",
+        "NyxBot reaches owners' Discord bots through the Agent Event Gateway once the gateway verifies Discord; until then NyxID's relay.",
+    ),
+    nyxbot_gateway_flag(
+        "nyxbot:gateway-slack",
+        "NyxBot reaches owners' Slack bots through the Agent Event Gateway once the gateway verifies Slack; until then NyxID's relay.",
+    ),
+    nyxbot_gateway_flag(
+        "nyxbot:gateway-whatsapp",
+        "NyxBot reaches owners' WhatsApp bots through the Agent Event Gateway once the gateway verifies WhatsApp; until then NyxID's relay.",
+    ),
+    nyxbot_gateway_flag(
+        "nyxbot:gateway-x",
+        "NyxBot reaches owners' X bots through the Agent Event Gateway once the gateway supports X; until then NyxID's relay.",
+    ),
+    nyxbot_gateway_flag(
+        "nyxbot:gateway-aurinko",
+        "NyxBot reaches owners' email (Aurinko) bots through the Agent Event Gateway once the gateway supports them; until then NyxID's relay.",
+    ),
+];
+
 #[cfg(not(test))]
 pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     NYXAGENT_ENGINE_FLAG,
@@ -130,6 +187,13 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     BILLING_FLAG,
     AEVATAR_CHAT_WIRE_LOG_FLAG,
     DIRECT_CHAT_ENGINE_FLAG,
+    NYXBOT_GATEWAY_FLAG_DEFS[0],
+    NYXBOT_GATEWAY_FLAG_DEFS[1],
+    NYXBOT_GATEWAY_FLAG_DEFS[2],
+    NYXBOT_GATEWAY_FLAG_DEFS[3],
+    NYXBOT_GATEWAY_FLAG_DEFS[4],
+    NYXBOT_GATEWAY_FLAG_DEFS[5],
+    NYXBOT_GATEWAY_FLAG_DEFS[6],
 ];
 
 /// Test builds carry a placeholder flag so the resolution / override pipeline
@@ -141,6 +205,13 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     BILLING_FLAG_TEST,
     AEVATAR_CHAT_WIRE_LOG_FLAG,
     DIRECT_CHAT_ENGINE_FLAG,
+    NYXBOT_GATEWAY_FLAG_DEFS[0],
+    NYXBOT_GATEWAY_FLAG_DEFS[1],
+    NYXBOT_GATEWAY_FLAG_DEFS[2],
+    NYXBOT_GATEWAY_FLAG_DEFS[3],
+    NYXBOT_GATEWAY_FLAG_DEFS[4],
+    NYXBOT_GATEWAY_FLAG_DEFS[5],
+    NYXBOT_GATEWAY_FLAG_DEFS[6],
     FeatureFlagDef {
         key: "example_ui",
         description: "Test-only placeholder flag.",
@@ -496,6 +567,33 @@ pub async fn aevatar_chat_wire_log_enabled(
         .await?
         .iter()
         .any(|key| key == AEVATAR_CHAT_WIRE_LOG_FLAG_KEY))
+}
+
+/// Whether a personal-surface flag is on for a person: default, global,
+/// matching org scopes, then their own override (as on `/users/me`).
+pub async fn personal_flag_enabled(
+    db: &mongodb::Database,
+    user_id: &str,
+    flag_key: &str,
+) -> AppResult<bool> {
+    Ok(resolve_personal_features(db, user_id)
+        .await?
+        .iter()
+        .any(|key| key == flag_key))
+}
+
+/// Whether a flag can be on for anyone: its default, or any enabling
+/// override. Lets background work skip a flag nobody has turned on.
+pub async fn flag_may_be_enabled(db: &mongodb::Database, flag_key: &str) -> AppResult<bool> {
+    if find_flag(flag_key).is_some_and(|flag| flag.default_enabled) {
+        return Ok(true);
+    }
+    Ok(db
+        .collection::<FeatureFlagOverride>(COLLECTION_NAME)
+        .count_documents(doc! { "flag_key": flag_key, "enabled": true })
+        .limit(1)
+        .await?
+        > 0)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1540,6 +1638,13 @@ mod tests {
                 "experimental:billing",
                 "experimental:aevatar-chat-wire-log",
                 "experimental:direct-chat-engine",
+                "nyxbot:gateway-lark",
+                "nyxbot:gateway-feishu",
+                "nyxbot:gateway-discord",
+                "nyxbot:gateway-slack",
+                "nyxbot:gateway-whatsapp",
+                "nyxbot:gateway-x",
+                "nyxbot:gateway-aurinko",
             ]
         );
         assert_eq!(
