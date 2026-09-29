@@ -223,6 +223,7 @@ pub(crate) fn inbound_metadata(
         callback_http_status: None,
         reply_to_message_id: None,
         platform_reply_message_id: None,
+        reply_to_platform_message_id: inbound.reply_to_platform_message_id.clone(),
         created_at: Utc::now(),
         updated_at: None,
     }
@@ -269,6 +270,7 @@ pub async fn store_outbound_message(
         callback_http_status: None,
         reply_to_message_id: reply_to_message_id.map(String::from),
         platform_reply_message_id: None,
+        reply_to_platform_message_id: None,
         created_at: now,
         updated_at: Some(now),
     };
@@ -337,6 +339,7 @@ pub async fn store_device_event_message(
         callback_http_status: None,
         reply_to_message_id: None,
         platform_reply_message_id: None,
+        reply_to_platform_message_id: None,
         created_at: Utc::now(),
         updated_at: None,
     };
@@ -1238,6 +1241,7 @@ mod tests {
             callback_http_status: None,
             reply_to_message_id: None,
             platform_reply_message_id: None,
+            reply_to_platform_message_id: None,
             created_at: now,
             updated_at: None,
         };

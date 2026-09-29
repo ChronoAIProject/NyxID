@@ -476,6 +476,17 @@ pub trait PlatformAdapter: Send + Sync {
         Err(crate::errors::AppError::ChannelMediaUnsupported)
     }
 
+    /// The display name of a group or channel the bot is in, when the
+    /// platform can tell it (best effort; `None` when unknown).
+    async fn chat_title(
+        &self,
+        _http: &reqwest::Client,
+        _credentials: &BotCredentials<'_>,
+        _conversation_id: &str,
+    ) -> AppResult<Option<String>> {
+        Ok(None)
+    }
+
     fn ingestion(&self) -> Ingestion {
         Ingestion::Webhook
     }

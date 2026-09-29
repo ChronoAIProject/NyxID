@@ -264,7 +264,7 @@ pub fn virtual_service(chat: &acks::ChatAuthority) -> McpToolService {
     }
     service
         .endpoints
-        .extend(super::assistant_team_tools::memory_endpoints());
+        .extend(super::assistant_team_tools::agent_endpoints());
     service
 }
 

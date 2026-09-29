@@ -30,10 +30,14 @@ pub const TOOL_NAMES: &[&str] = &[
     "link_channel_bot",
     "list_channel_agents",
     "disconnect_channel_bot",
+    "list_channel_chats",
+    "update_channel_chat",
+    "update_channel_access",
 ];
 
-/// Every agent (NyxBot and specialists) manages its own memory.
-pub const MEMORY_TOOL_NAMES: &[&str] = &["remember", "forget"];
+/// Every agent (NyxBot and specialists) manages its own memory and posts to
+/// the chats it answers that allow it.
+pub const AGENT_TOOL_NAMES: &[&str] = &["remember", "forget", "post_to_chat"];
 
 /// NyxID pages `nyxid__settings_link` can open, and their paths.
 pub const SETTINGS_AREAS: &[&str] = &[
@@ -101,11 +105,11 @@ pub fn settings_path(area: &str, service: Option<&str>, org_id: Option<&str>) ->
 pub fn is_team_tool(tool_name: &str) -> bool {
     tool_name
         .strip_prefix("nyxid__")
-        .is_some_and(|name| TOOL_NAMES.contains(&name) || MEMORY_TOOL_NAMES.contains(&name))
+        .is_some_and(|name| TOOL_NAMES.contains(&name) || AGENT_TOOL_NAMES.contains(&name))
 }
 
-pub fn is_memory_tool(name: &str) -> bool {
-    MEMORY_TOOL_NAMES.contains(&name)
+pub fn is_agent_tool(name: &str) -> bool {
+    AGENT_TOOL_NAMES.contains(&name)
 }
 
 fn string(max: usize) -> Value {
@@ -197,6 +201,43 @@ pub fn schema(name: &str) -> Value {
             vec!["text"],
         ),
         "forget" => (json!({"note_id": string(64)}), vec!["note_id"]),
+        "post_to_chat" => (
+            json!({"chat_id": {"type": "string", "minLength": 1, "maxLength": 64,
+                    "description": "A chat id from nyxid__list_channel_chats (or the chat \
+                    id NyxID named in your instructions)"},
+                "text": {"type": "string", "minLength": 1, "maxLength": 4000,
+                    "description": "The message to post, as plain text"}}),
+            vec!["chat_id", "text"],
+        ),
+        "list_channel_chats" => (
+            json!({"channel_agent_id": {"type": "string", "minLength": 1, "maxLength": 64,
+                "description": "Only this channel bot's chats (from nyxid__list_channel_agents)"}}),
+            vec![],
+        ),
+        "update_channel_chat" => (
+            json!({"chat_id": string(64),
+                "reply_mode": {"type": "string", "enum": ["mention", "all"],
+                    "description": "Groups and channels: answer only when mentioned or \
+                    replied to (mention), or every message (all)"},
+                "members": {"type": "string", "enum": ["everyone", "owner", "default"],
+                    "description": "Groups and channels: whether members other than the \
+                    user may talk to the agent, as guests; default lets them once the user \
+                    has talked to the bot there"},
+                "allow_posts": {"type": "boolean",
+                    "description": "Let the chat's agent post there without being asked"},
+                "agent": {"type": "string", "minLength": 1, "maxLength": 64,
+                    "description": "\"nyxbot\", a specialist name or id, or \"default\" for \
+                    the channel bot's agent"}}),
+            vec!["chat_id"],
+        ),
+        "update_channel_access" => (
+            json!({"channel_agent_id": string(64),
+                "private_chats": {"type": "string", "enum": ["owner", "everyone"],
+                    "description": "Who may talk to the agent in private chats with the bot: \
+                    only the user (owner), or anyone (everyone, each as a guest in their own \
+                    thread)"}}),
+            vec!["channel_agent_id", "private_chats"],
+        ),
         "create_group" => (
             json!({"name": string(60), "members": json!({"type": "array", "minItems": 1, "maxItems": 8,
                 "items": {"type": "string", "minLength": 1, "maxLength": 64},
@@ -344,6 +385,29 @@ fn description(name: &str) -> &'static str {
             secrets. Pass replace_id to update a note."
         }
         "forget" => "Delete one of your memory notes by id.",
+        "post_to_chat" => {
+            "Post a message into a chat your channel bot is in, without being asked there \
+            (e.g. a scheduled update). Works only in chats you answer (NyxBot: any of the \
+            user's chats) whose posting is allowed; only when the user asked for it."
+        }
+        "list_channel_chats" => {
+            "List the chats the user's channel bots are in: each private chat, group, channel \
+            and topic, with its title, kind, agent and settings (reply mode, who may talk, \
+            posting). Use the chat id with nyxid__update_channel_chat and nyxid__post_to_chat."
+        }
+        "update_channel_chat" => {
+            "Change one chat's settings when the user asks: answer every message or only \
+            mentions and replies (groups default to mentions); let members other than the user \
+            talk to the agent (default once the user has talked to the bot there); allow \
+            posting there; or give the chat its own agent. Guests never act for the user: you \
+            answer them without tools, and a specialist given the chat reads only with its \
+            own services, so give a chat a specialist when its members need a service."
+        }
+        "update_channel_access" => {
+            "Set who may talk to the agent in private chats with a channel bot: only the user \
+            (default) or anyone, each in their own thread as a guest (no account actions and \
+            nothing private to the user; NyxBot uses no tools for them)."
+        }
         _ => "Unknown NyxBot tool.",
     }
 }
@@ -354,8 +418,8 @@ pub fn endpoints() -> Vec<McpToolEndpoint> {
 }
 
 /// Memory tools every agent gets.
-pub fn memory_endpoints() -> Vec<McpToolEndpoint> {
-    endpoints_for(MEMORY_TOOL_NAMES)
+pub fn agent_endpoints() -> Vec<McpToolEndpoint> {
+    endpoints_for(AGENT_TOOL_NAMES)
 }
 
 fn endpoints_for(names: &[&str]) -> Vec<McpToolEndpoint> {
@@ -476,7 +540,7 @@ mod tests {
         assert!(is_team_tool("nyxid__remember"));
         assert!(!is_team_tool("nyxid__list_agent_keys"));
         assert_eq!(endpoints().len(), TOOL_NAMES.len());
-        assert_eq!(memory_endpoints().len(), MEMORY_TOOL_NAMES.len());
+        assert_eq!(agent_endpoints().len(), AGENT_TOOL_NAMES.len());
         assert!(validate("remember", &json!({"text": "Prefers mornings"})).is_ok());
         assert!(validate("remember", &json!({"text": "x".repeat(501)})).is_err());
     }

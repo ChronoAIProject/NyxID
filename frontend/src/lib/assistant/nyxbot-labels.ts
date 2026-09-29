@@ -1,5 +1,6 @@
 import { getProviderBrand } from "@/lib/provider-branding";
 import type { AssistantAgentKind } from "@/schemas/assistant-nyxagent";
+import type { Conversation } from "@/types/assistant";
 
 const PLATFORM_NAMES: Readonly<Record<string, string>> = {
   "telegram-new": "Telegram",
@@ -13,6 +14,61 @@ export function channelPlatformName(platform: string): string {
   const known = PLATFORM_NAMES[platform] ?? getProviderBrand(platform).label;
   if (known) return known;
   return platform ? platform.charAt(0).toUpperCase() + platform.slice(1) : "Channel";
+}
+
+/** A channel chat's name, or what kind of chat it is when unnamed. */
+export function channelChatTitle(
+  kind: string | null | undefined,
+  title: string | null | undefined,
+  platform: string,
+): string {
+  if (title) return title;
+  const name = channelPlatformName(platform);
+  if (kind === "private") return `Private ${name} chat`;
+  if (kind === "channel") return `${name} channel`;
+  return kind === "group" ? `${name} group` : `${name} chat`;
+}
+
+/** An agent's threads through one channel bot, newest first. */
+export interface ChannelThreadGroup {
+  /** The channel bot connection, or `platform:<id>` for older threads. */
+  readonly key: string;
+  readonly platform: string;
+  readonly label: string;
+  readonly threads: readonly Conversation[];
+}
+
+/**
+ * Split an agent's threads (newest first) into its own threads and one group
+ * per channel bot, ordered by each bot's newest thread.
+ */
+export function splitChannelThreads(threads: readonly Conversation[]): {
+  readonly own: readonly Conversation[];
+  readonly bots: readonly ChannelThreadGroup[];
+} {
+  const own: Conversation[] = [];
+  const bots = new Map<string, { platform: string; label?: string; threads: Conversation[] }>();
+  for (const thread of threads) {
+    const channel = thread.channel;
+    if (!channel) {
+      own.push(thread);
+      continue;
+    }
+    const key = channel.channel_agent_id ?? `platform:${channel.platform}`;
+    const group = bots.get(key) ?? { platform: channel.platform, threads: [] };
+    group.label ??= channel.bot_label ?? undefined;
+    group.threads.push(thread);
+    bots.set(key, group);
+  }
+  return {
+    own,
+    bots: [...bots].map(([key, group]) => ({
+      key,
+      platform: group.platform,
+      label: group.label ?? `${channelPlatformName(group.platform)} bot`,
+      threads: group.threads,
+    })),
+  };
 }
 
 export const AGENT_STATUS_LABEL = {

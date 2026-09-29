@@ -36,6 +36,9 @@ pub struct ChatAuthority {
     /// The agent this thread belongs to (NyxBot or a specialist).
     pub agent_id: String,
     pub agent_name: String,
+    /// The thread's newest turn acts for a channel chat guest (not the
+    /// owner): read-only service calls only; see `guest_refusal`.
+    pub guest: bool,
 }
 impl ChatAuthority {
     /// NyxBot threads run with Full access; specialists only with their grants.
@@ -47,6 +50,24 @@ impl std::fmt::Debug for ChatAuthority {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("ChatAuthority { [REDACTED] }")
     }
+}
+
+/// What NyxBot is told when a guest turn calls a tool: NyxBot holds all of
+/// the owner's services, so it uses none for other people.
+pub fn orchestrator_guest_refusal() -> Value {
+    json!({"error": "owner_only", "instructions": "You are answering someone other than the \
+        owner, so you use no tools here: answer from the conversation. If people in this chat \
+        should use certain services, the owner can give the chat a specialist with just those \
+        services (ask NyxBot in NyxID)."})
+}
+
+/// What a guest turn (someone other than the owner) is told when it asks
+/// for something only the owner can ask for.
+pub fn guest_refusal() -> Value {
+    json!({"error": "owner_only", "instructions": "You are answering someone other than the \
+        owner. Only the owner can ask for account actions, new connections, more access or \
+        changes made with their services. Answer in words or with read-only lookups, and say \
+        that only the bot's owner can ask for that."})
 }
 
 pub async fn for_key(
@@ -80,6 +101,7 @@ pub async fn for_key(
         },
         agent_id: agent.id,
         agent_name: agent.name,
+        guest: conversation.guest_turn,
     }))
 }
 
@@ -545,6 +567,10 @@ pub async fn service_gate(
     platform: bool,
 ) -> AppResult<Option<(Value, Option<AssistantAcknowledgement>)>> {
     if chat.is_orchestrator() {
+        // NyxBot holds every service; other people get none of them.
+        if chat.guest {
+            return Ok(Some((orchestrator_guest_refusal(), None)));
+        }
         return Ok(None);
     }
     let key = key_service::get_api_key(db, &chat.user_id, &chat.api_key_id).await?;
@@ -560,6 +586,10 @@ pub async fn service_gate(
     };
     if granted {
         return Ok(None);
+    }
+    // A guest never widens what the agent may use: no permission request.
+    if chat.guest {
+        return Ok(Some((guest_refusal(), None)));
     }
     let summary = if platform {
         format!("Use {name} (NyxID platform credential)")
@@ -692,6 +722,7 @@ pub async fn decide_as(
                     role: target.role,
                     agent_id: target.agent_id.clone().unwrap_or_default(),
                     agent_name: String::new(),
+                    guest: target.guest_turn,
                 };
                 let (_, key) = fence(&db, &chat, session).await?;
                 let subagent = target.role == AgentRole::Subagent;

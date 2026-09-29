@@ -3475,7 +3475,10 @@ pub fn build_mcp_operation_descriptor(
     Ok(prepare_proxy_tool_call(service, endpoint, args)?.operation_descriptor())
 }
 
-fn is_generic_proxy_dispatch(service: &McpToolService, endpoint: &McpToolEndpoint) -> bool {
+pub(crate) fn is_generic_proxy_dispatch(
+    service: &McpToolService,
+    endpoint: &McpToolEndpoint,
+) -> bool {
     service.is_generic_proxy && endpoint.endpoint_id == GENERIC_PROXY_ENDPOINT_ID
 }
 

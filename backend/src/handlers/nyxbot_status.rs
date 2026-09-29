@@ -414,6 +414,12 @@ pub(crate) async fn check_deliveries(state: &AppState) -> AppResult<()> {
         if let Err(error) = check_delivery(state, &row).await {
             tracing::debug!(%error, "NyxBot delivery check deferred");
         }
+        // A gateway update that failed or raced is retried here.
+        match super::chats::sync_gateway_groups(state, &row, false).await {
+            Ok(Some(code)) => tracing::debug!(code, "NyxBot gateway group admission pending"),
+            Ok(None) => {}
+            Err(error) => tracing::debug!(%error, "NyxBot gateway group admission deferred"),
+        }
     }
     Ok(())
 }

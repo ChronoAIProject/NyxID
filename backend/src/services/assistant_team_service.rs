@@ -271,6 +271,7 @@ async fn create_thread(
         channel: None,
         group_id: None,
         group_seen_seq: 0,
+        guest_turn: false,
     };
     let collection = db.collection::<AssistantConversation>(CONVERSATIONS);
     collection.insert_one(&row).session(&mut *session).await?;

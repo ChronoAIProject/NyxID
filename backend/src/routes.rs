@@ -1971,6 +1971,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             delete(handlers::nyxbot::disconnect_channel).patch(handlers::nyxbot::link_channel),
         )
         .route(
+            "/nyxagent/channels/{id}/chats",
+            get(handlers::nyxbot::list_channel_chats),
+        )
+        .route(
+            "/nyxagent/channels/{id}/chats/{chat_id}",
+            patch(handlers::nyxbot::update_channel_chat),
+        )
+        .route(
             "/nyxagent/conversations/{id}/acknowledgements/{ack_id}",
             post(handlers::assistant_nyxagent::decide_acknowledgement),
         )

@@ -165,6 +165,12 @@ pub struct AssistantConversation {
     /// The newest group message this member has already been given.
     #[serde(default)]
     pub group_seen_seq: i64,
+    /// The newest turn was started by someone other than the owner, e.g. a
+    /// member of a group chat. Its tool calls are restricted (NyxBot: none;
+    /// specialists: curated reads within their grants). Kept after the turn
+    /// settles so late tool calls stay restricted.
+    #[serde(default)]
+    pub guest_turn: bool,
 }
 
 impl AssistantConversation {

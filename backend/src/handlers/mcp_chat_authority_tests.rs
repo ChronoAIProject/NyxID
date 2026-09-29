@@ -1082,3 +1082,193 @@ async fn chat_tool_images_become_mcp_image_content_and_owner_only_turn_attachmen
     );
     server.abort();
 }
+
+async fn mark_guest(f: &Fixture, guest: bool) {
+    f.state
+        .db
+        .collection::<mongodb::bson::Document>(
+            crate::models::assistant_conversation::COLLECTION_NAME,
+        )
+        .update_one(
+            doc! {"_id": &f.row.id},
+            doc! {"$set": {"guest_turn": guest}},
+        )
+        .await
+        .unwrap();
+}
+
+/// NyxBot holds every service of the owner, so a turn for someone else
+/// calls no tools at all.
+#[tokio::test]
+async fn nyxbot_guest_turns_call_no_tools() {
+    let f = orchestrator_fixture("chat_mcp_guest_nyxbot").await;
+    mark_guest(&f, true).await;
+    let auth = authenticate(&f).await;
+    assert!(auth.chat.as_ref().unwrap().guest);
+    for (name, args) in [
+        ("nyx__search_tools", json!({"query": "mail"})),
+        ("nyx__list_connected_services", json!({})),
+        (
+            "nyx__call_tool",
+            json!({"tool_name": "github__list_repos", "arguments_json": "{}"}),
+        ),
+        ("nyxid__list_agent_keys", json!({})),
+        ("github__list_repos", json!({})),
+    ] {
+        let refused = result(direct_call(&f, &auth, name, args).await, true).await;
+        assert_eq!(refused["error"], "owner_only", "{name}: {refused}");
+        assert!(
+            refused["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("no tools"),
+            "{name}: {refused}"
+        );
+    }
+    // The owner's next turn has everything back.
+    mark_guest(&f, false).await;
+    let auth = authenticate(&f).await;
+    let listed = direct_call(&f, &auth, "nyxid__list_channel_chats", json!({})).await;
+    let bytes = axum::body::to_bytes(listed.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    assert!(!String::from_utf8_lossy(&bytes).contains("owner_only"));
+}
+
+/// A specialist's turn for someone other than the owner only discovers and
+/// reads: account, team, memory, connection and Oracle tools and every
+/// service change are refused, whichever way they are called.
+#[tokio::test]
+async fn specialist_guest_turns_only_discover_and_read() {
+    let f = fixture("chat_mcp_guest").await;
+    mark_guest(&f, true).await;
+    let auth = authenticate(&f).await;
+    assert!(auth.chat.as_ref().unwrap().guest);
+    for (name, args) in [
+        ("nyxid__list_agent_keys", json!({})),
+        (
+            "nyxid__remember",
+            json!({"text": "the owner's secret plan"}),
+        ),
+        ("nyxid__post_to_chat", json!({"chat_id": "c", "text": "hi"})),
+        ("nyx__connect_service", json!({"service": "github"})),
+        ("nyx__oracle_pools", json!({})),
+    ] {
+        let refused = result(direct_call(&f, &auth, name, args).await, true).await;
+        assert_eq!(refused["error"], "owner_only", "{name}: {refused}");
+    }
+    // Through the universal proxy tool too.
+    let refused = result(
+        call(&f, &auth, "nyxid__list_agent_keys", json!({})).await,
+        true,
+    )
+    .await;
+    assert_eq!(refused["error"], "owner_only");
+    // Discovery still works.
+    let search = handle_meta_search(
+        &f.state,
+        &auth,
+        None,
+        &json!({"query": "list"}),
+        None,
+        false,
+    )
+    .await;
+    let bytes = axum::body::to_bytes(search.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    assert!(!String::from_utf8_lossy(&bytes).contains("owner_only"));
+    // Service operations: reads pass on to the usual checks, changes stop.
+    let target = crate::services::mcp_approval::McpApprovalTarget {
+        service_id: uuid::Uuid::new_v4().to_string(),
+        service_name: "Example".into(),
+        service_slug: "example".into(),
+        service_owner_user_id: f.owner.clone(),
+        is_auto_connected: false,
+    };
+    for method in ["POST", "PUT", "PATCH", "DELETE"] {
+        let operation = operation_descriptor::build_mcp_descriptor(method, "/items", None);
+        let refused =
+            authorize_mcp_operation(&f.state, &auth, target.clone(), &operation, Some(json!(1)))
+                .await
+                .unwrap_err();
+        assert_eq!(result(refused, true).await["error"], "owner_only");
+    }
+    let read = operation_descriptor::build_mcp_descriptor("GET", "/items", None);
+    if let Err(response) =
+        authorize_mcp_operation(&f.state, &auth, target.clone(), &read, Some(json!(1))).await
+    {
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("owner_only"));
+    }
+    // The generic proxy tool picks any method and path: never for guests.
+    let generic = mcp_service::McpToolService {
+        workspace_destinations_pending: false,
+        service_id: "service-1".into(),
+        service_name: "Example".into(),
+        service_slug: "example".into(),
+        description: None,
+        service_category: "custom".into(),
+        endpoints: vec![],
+        durable_endpoint_metadata: Default::default(),
+        source: mcp_service::McpToolSource::Internal,
+        executable: true,
+        is_generic_proxy: true,
+        invalid_openapi_contract: false,
+        recommended_skills: vec![],
+        recommended_skill_refs: None,
+        skills_revision: None,
+        proxy_operation_policy: None,
+    };
+    let endpoint = mcp_service::McpToolEndpoint {
+        endpoint_id: mcp_service::GENERIC_PROXY_ENDPOINT_ID.into(),
+        ..Default::default()
+    };
+    assert!(guest_endpoint_refusal(&auth, &generic, &endpoint, None).is_some());
+    assert!(
+        guest_endpoint_refusal(
+            &auth,
+            &generic,
+            &mcp_service::McpToolEndpoint::default(),
+            None
+        )
+        .is_none()
+    );
+}
+
+/// A guest never widens what a specialist may use: an ungranted service is
+/// refused without a permission request for NyxBot to grant.
+#[tokio::test]
+async fn guests_never_ask_for_more_access() {
+    let f = fixture("chat_guest_gate").await;
+    let mut chat = f.chat.clone();
+    chat.guest = true;
+    let (value, request) =
+        acks::service_gate(&f.state.db, &chat, "service-1", "example", "Example", false)
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(value["error"], "owner_only");
+    assert!(request.is_none());
+    assert_eq!(
+        f.state
+            .db
+            .collection::<mongodb::bson::Document>(
+                crate::models::assistant_acknowledgement::COLLECTION_NAME,
+            )
+            .count_documents(doc! {"conversation_id": &f.row.id})
+            .await
+            .unwrap(),
+        0
+    );
+    // The owner's own turn still asks.
+    chat.guest = false;
+    let (_, request) =
+        acks::service_gate(&f.state.db, &chat, "service-1", "example", "Example", false)
+            .await
+            .unwrap()
+            .unwrap();
+    assert!(request.is_some());
+}

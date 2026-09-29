@@ -94,6 +94,14 @@ pub struct AgentRefResponse {
 #[derive(Serialize)]
 pub struct ChannelOriginResponse {
     platform: String,
+    /// The channel bot connection (`/nyxagent/channels/{id}`).
+    channel_agent_id: String,
+    bot_label: Option<String>,
+    /// The chat this thread answers (`/nyxagent/channels/{id}/chats`), its
+    /// kind (`private`, `group`, `channel`) and name, when known.
+    chat_id: Option<String>,
+    chat_kind: Option<String>,
+    chat_title: Option<String>,
 }
 #[derive(Serialize)]
 pub struct ConversationResponse {
@@ -136,6 +144,19 @@ impl ConversationResponse {
         });
         self
     }
+    /// Fill in a channel thread's bot and chat.
+    pub(crate) fn with_chat(
+        mut self,
+        details: &std::collections::HashMap<String, super::nyxbot::chats::ChatDetails>,
+    ) -> Self {
+        if let (Some(channel), Some(detail)) = (self.channel.as_mut(), details.get(&self.id)) {
+            channel.bot_label = Some(detail.bot_label.clone());
+            channel.chat_id = detail.chat_id.clone();
+            channel.chat_kind = detail.kind.clone();
+            channel.chat_title = detail.title.clone();
+        }
+        self
+    }
 }
 impl From<AssistantConversation> for ConversationResponse {
     fn from(row: AssistantConversation) -> Self {
@@ -171,6 +192,11 @@ impl From<AssistantConversation> for ConversationResponse {
             pending_events: row.pending_events.len(),
             channel: row.channel.map(|channel| ChannelOriginResponse {
                 platform: channel.platform,
+                channel_agent_id: channel.nyxbot_channel_id,
+                bot_label: None,
+                chat_id: None,
+                chat_kind: None,
+                chat_title: None,
             }),
         }
     }
@@ -272,14 +298,18 @@ pub async fn list(
     let next_cursor = more.then(|| engine::index_cursor(rows.last().expect("nonempty page")));
     let ids: Vec<String> = rows.iter().map(|row| row.id.clone()).collect();
     let counts = acknowledgements::pending_counts(&state.db, &user_id, &ids).await?;
+    let chats =
+        super::nyxbot::chats::thread_details(&state, &user_id, &rows.iter().collect::<Vec<_>>())
+            .await?;
     Ok(Json(IndexResponse {
         conversations: rows
             .into_iter()
             .map(|row| {
                 let count = counts.get(&row.id).copied().unwrap_or(0);
                 let agent_id = row.agent_id.clone();
-                let mut dto =
-                    ConversationResponse::from(row).with_agent(agent_id.as_deref(), &agents);
+                let mut dto = ConversationResponse::from(row)
+                    .with_agent(agent_id.as_deref(), &agents)
+                    .with_chat(&chats);
                 dto.pending_acknowledgements = count;
                 dto
             })
@@ -358,8 +388,10 @@ pub async fn history(
         });
     let agents = crate::services::assistant_team_service::agents(&state.db, &user_id, true).await?;
     let agent_id = conversation.agent_id.clone();
-    let mut conversation =
-        ConversationResponse::from(conversation).with_agent(agent_id.as_deref(), &agents);
+    let chats = super::nyxbot::chats::thread_details(&state, &user_id, &[&conversation]).await?;
+    let mut conversation = ConversationResponse::from(conversation)
+        .with_agent(agent_id.as_deref(), &agents)
+        .with_chat(&chats);
     conversation.pending_acknowledgements = acknowledgements
         .iter()
         .filter(|ack| ack.status == "pending")
@@ -529,7 +561,10 @@ pub async fn rename(
             .await?;
     let count = counts.get(&row.id).copied().unwrap_or(0);
     let agent_id = row.agent_id.clone();
-    let mut dto = ConversationResponse::from(row).with_agent(agent_id.as_deref(), &agents);
+    let chats = super::nyxbot::chats::thread_details(&state, &user_id, &[&row]).await?;
+    let mut dto = ConversationResponse::from(row)
+        .with_agent(agent_id.as_deref(), &agents)
+        .with_chat(&chats);
     dto.pending_acknowledgements = count;
     Ok(Json(dto))
 }
@@ -1158,7 +1193,7 @@ async fn execute_turn(
     partial: &mut String,
 ) -> Result<TurnResult, TurnError> {
     let turn_id = &row.active_turn.as_ref().expect("claimed turn").turn_id;
-    let history = engine::messages(
+    let mut history = engine::messages(
         &state.db,
         &row.user_id,
         &row.id,
@@ -1167,6 +1202,17 @@ async fn execute_turn(
     )
     .await
     .map_err(|_| TurnError::new("assistant_unavailable"))?;
+    // A guest's recap holds only what the chat itself saw.
+    if row.guest_turn {
+        use crate::models::assistant_conversation::TurnOrigin;
+        // Only the chat's own messages and the replies to them; never NyxID's
+        // notices, event-turn replies (not always delivered) or anything
+        // said in the app.
+        history.retain(|message| {
+            message.origin == Some(TurnOrigin::Channel)
+                && matches!(message.role.as_str(), "user" | "assistant")
+        });
+    }
     // Cards decided while an earlier turn was still running never reached the
     // model: NyxAgent ends a turn on a card and answers repeats locally. Report
     // decisions made since the previous user message; a lookup failure only
@@ -1176,7 +1222,7 @@ async fn execute_turn(
         .rev()
         .find(|message| message.role == "user")
         .map(|message| message.created_at);
-    let mut decisions = match previous {
+    let mut decisions = match previous.filter(|_| !row.guest_turn) {
         Some(previous) => {
             acknowledgements::decided_since(&state.db, &row.user_id, &row.id, previous)
                 .await

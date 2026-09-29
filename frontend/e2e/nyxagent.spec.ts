@@ -331,12 +331,19 @@ test("a destroyed member stays visible, cannot be mentioned, and leaves on the n
   ).toBeVisible();
 });
 
-test("a thread that came from a chat app shows its platform on the row, header and messages", async ({
+test("a thread that came from a chat app sits in its bot's section and shows its platform", async ({
   page,
 }) => {
   await openAssistant(page, { faults: { nyxagentEnabled: true } });
+  // Chat-app threads are grouped per bot, collapsed until opened.
+  const section = page
+    .getByRole("navigation")
+    .getByRole("button", { name: "Telegram bot on Telegram, 1 chat" });
+  await expect(section).toHaveAttribute("aria-expanded", "false");
+  await expect(conversationRow(page, "Morning briefing")).toHaveCount(0);
+  await section.click();
+  await expect(section).toHaveAttribute("aria-expanded", "true");
   const row = conversationRow(page, "Morning briefing");
-  await expect(row).toContainText("Telegram");
   await row.click();
   await expect(page).toHaveURL(/c=nyxa-[a-f0-9]{32}/);
   const main = page.getByRole("main");
