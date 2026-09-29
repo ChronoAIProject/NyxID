@@ -1618,6 +1618,7 @@ mod tests {
         assert_eq!(
             shipped,
             vec![
+                "auth:invitation-code",
                 "assistant:nyxagent-engine",
                 "experimental:ai-assistant",
                 "experimental:billing",
