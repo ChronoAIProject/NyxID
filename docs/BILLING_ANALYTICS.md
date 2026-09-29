@@ -375,7 +375,17 @@ legacy integer response fields. Sorting uses exact values; chart labels retain
 decimals and tiny nonzero costs remain visible. See BILLING_EXACT_ACCOUNTING.md.
 
 Exact monetary BSON keys have no `_micros` suffix and store Decimal128 credits.
-For mixed historical data, use the shared `credit_expr` helper before summing.
+For mixed historical data, normalize each amount before summing (the backend's
+`credit_expr` helper generates the same expression). For example:
+
+```js
+{ $ifNull: ["$funding.total_charge", { $cond: [
+  { $eq: [{ $type: "$funding.total_charge" }, "missing"] },
+  { $divide: [{ $toDecimal: { $ifNull: ["$funding.total_charge_micros", 0] } }, 1000000] },
+  null,
+] }] }
+```
+
 Exact keys take precedence, including explicit null. Numeric legacy `*_micros`
 values always use microcredits, including Decimal128 query mirrors.
 Rollup `legacy_grant_cost` replaces legacy integer `legacy_grant`.
