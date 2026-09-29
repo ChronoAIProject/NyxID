@@ -78,12 +78,10 @@ pub(super) async fn note_owner_presence(
     Ok(chat)
 }
 
-/// A guest's text with every "(owner)" (any case) unbracketed.
+/// A guest's text with every "(owner)" (any ASCII case) unbracketed. ASCII
+/// lowercasing keeps every byte offset, so positions carry over.
 fn without_owner_mark(text: &str) -> String {
-    let lower = text.to_lowercase();
-    if lower.len() != text.len() || !lower.contains("(owner)") {
-        return text.replace("(owner)", "owner");
-    }
+    let lower = text.to_ascii_lowercase();
     let mut out = String::with_capacity(text.len());
     let mut rest = 0;
     for (at, _) in lower.match_indices("(owner)") {

@@ -424,9 +424,9 @@ turn so late tool calls stay restricted):
 - the owner's memory, roster, direct chats, pending requests and card
   decisions stay out of the turn's instructions; the first guest turn after an
   owner turn starts from the transcript rather than the owner's live context,
-  and a guest's recap holds only chat messages and the replies delivered to the
-  chat (messages record the turn origin), never what the owner said in the app
-  or NyxID's notices to the agent;
+  and a guest's recap holds only the chat's own messages and the replies to
+  them (messages record the turn origin), never what the owner said in the
+  app, NyxID's notices, or event-turn replies (not always delivered);
 - only the owner's words confirm action cards.
 
 Guests' turns are billed to the owner, like every channel turn, and share the
