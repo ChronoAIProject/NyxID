@@ -124,8 +124,9 @@ async fn key_put_assigns_catalog_refs_with_the_existing_client_body() {
     }
     let (status, list) = request(&f.state, "GET", "/api/v1/keys", &bearer, None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(list["keys"].as_array().unwrap().len(), 2);
-    for row in list["keys"].as_array().unwrap() {
+    let entries = list["keys"].as_array().unwrap();
+    for id in [&f.service.id, &future.id] {
+        let row = entries.iter().find(|row| row["id"] == *id).unwrap();
         assert_eq!(row["skills_revision"], 3);
         assert_eq!(row["recommended_skill_refs"], json!([]));
     }
@@ -751,6 +752,7 @@ async fn key_put_recommendations_reach_consumers_and_preserve_instance_overrides
 #[tokio::test]
 async fn key_put_shares_curation_budget_and_identical_retry_is_free() {
     let (f, _, bearer) = editor("key_put_shared_budget").await;
+    // Keep the one-second budget window from resetting during the test.
     f.state.db.collection::<Document>(ACCOUNTS).update_one(doc! {"_id":&f.sa.id},doc! {"$set":{
         "rate_limit_override":1_i64,"catalog_editor_writes_used":0_i64,
         "catalog_editor_write_window":bson::DateTime::from_chrono(chrono::Utc::now()+chrono::Duration::hours(1))

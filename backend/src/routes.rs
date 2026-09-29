@@ -1269,7 +1269,8 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         );
 
     // These inventory reads retain the service-account restriction. Key GETs
-    // below separately check SA scope and grants. Writes stay human-only.
+    // below separately check SA scope and grants. Writes stay human-only except
+    // for the CatalogEditor recommendation PUT in key_update_routes.
     let service_inventory_read_routes = Router::new()
         .route(
             "/keys/{key_id}/authorization",

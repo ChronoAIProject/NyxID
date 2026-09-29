@@ -1,6 +1,6 @@
 # Service-account skill assignment through PUT /keys
 
-Status: agreed design following independent Fable 5.1 review of current main and this plan. Fable's four required changes are incorporated: refs-only body, unchanged non-SA dispatch, authorization before body parsing, and an explicit write-response disclosure contract. No implementation or deployment is included in this planning turn.
+Status: implementation and review record for PR #1694, based on main `cf02492b`. Fable's four required changes are incorporated: refs-only body, unchanged non-SA dispatch, authorization before body parsing, and an explicit write-response disclosure contract. Implementation commit `e1892db6` passed 310 focused local tests and independent production-code and test review; final documentation corrections and CI are tracked in the PR. Production deployment and live acceptance remain outstanding.
 
 ## Outcome and evidence
 

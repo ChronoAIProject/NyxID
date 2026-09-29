@@ -507,7 +507,7 @@ General accounts support free-form scope strings; an explicit platform-admin sav
 
 ### Routes Accessible to Service Accounts
 
-The general route table below does not widen CatalogEditor or Curation access. CatalogEditor permits catalog metadata GETs, catalog-curation routes, and the Ornn HTTP target described below. Legacy Curation remains confined to its grants.
+The general route table below does not widen CatalogEditor or Curation access. CatalogEditor permits catalog metadata GETs, recommendation PUTs to exact catalog UUIDs under `/keys`, catalog-curation routes, and the Ornn HTTP target described below. Legacy Curation remains confined to its grants.
 
 | Endpoint | Existing scope check |
 |----------|----------------------|
@@ -518,6 +518,7 @@ The general route table below does not widen CatalogEditor or Curation access. C
 | `ANY /api/v1/proxy/s/{slug}/*` | CatalogEditor: token and live `proxy`, resolving only its authorized Ornn catalog slug; legacy Curation cannot use this alias |
 | `GET /api/v1/keys` | CatalogEditor: catalog read scope (legacy role-based editors also need `user-services:read` and a catalog read role); General/Curation: live connection grant and owner access |
 | `GET /api/v1/keys/{uuid}` | Same authority as list; catalog UUID for CatalogEditor, connection UUID for General/Curation |
+| `PUT /api/v1/keys/{catalog_uuid}` | CatalogEditor only: token and live `catalog:skills:write` (legacy editors also need the global catalog write role); body accepts only `recommended_skill_refs` |
 | `GET /api/v1/mcp/config` | `proxy` or `proxy:*`; General SAs only, using their own discovery identity |
 | Connection/provider management | Existing route authentication and ownership checks; no separate connections/providers scope enforcement |
 
@@ -531,7 +532,7 @@ Service accounts cannot access human-only endpoints:
 - `/api/v1/api-keys/*` (API key management)
 - `/api/v1/admin/*` (admin panel)
 - `/api/v1/services/*` (service definition management)
-- `/api/v1/keys` without catalog editor authority or a live connection grant; slug reads, writes, and `/keys/{id}/authorization` are unavailable to SAs
+- `/api/v1/keys` without catalog editor authority or a live connection grant; slug reads and `/keys/{id}/authorization` are unavailable to SAs. Writes are unavailable except for the CatalogEditor exact-catalog-UUID PUT above.
 
 ---
 
@@ -1047,6 +1048,6 @@ The SA detail response contains only `id`, `slug`, `name`, `label`, `service_typ
 
 Recommendation inheritance matches existing key reads: an endpoint name override (including an explicitly stored empty list) suppresses catalog refs and revision. Otherwise the catalog's names, refs and revision are returned. Custom connections without recommendations return null names/refs/revision and the digest of the empty state. This endpoint does not persist per-instance refs or permit any writes.
 
-Only the list and exact UUID detail GETs are allowed for SAs. Slugs, HEAD, upgrades, authorization evidence, history, and POST/PUT/DELETE remain unavailable. Disabled connections remain in the list and readable by UUID; deleted connections and missing/cross-owner backing endpoints disappear from the list and return 404 by UUID. Ungranted targets return 404 by UUID. Grant revocation/expiry, current scope removal, and owner changes deny both reads; inactive owners and lost org membership/access remove affected entries from the list and deny their detail reads. Existing token revocation, expiry and credential-generation checks still apply. Existing human, API-key and delegated key reads retain their response and authorization behavior.
+Only the list and exact UUID detail GETs are allowed for General and Curation SAs. Slugs, HEAD, upgrades, authorization evidence, history, and POST/PUT/DELETE remain unavailable to those accounts. Disabled connections remain in the list and readable by UUID; deleted connections and missing/cross-owner backing endpoints disappear from the list and return 404 by UUID. Ungranted targets return 404 by UUID. Grant revocation/expiry, current scope removal, and owner changes deny both reads; inactive owners and lost org membership/access remove affected entries from the list and deny their detail reads. Existing token revocation, expiry and credential-generation checks still apply. Existing human, API-key and delegated key reads retain their response and authorization behavior.
 
 Deploy all serving replicas before enabling clients; old replicas still reject the list endpoint for SAs. Existing accounts gain no access until both the scope and exact grant are configured.
