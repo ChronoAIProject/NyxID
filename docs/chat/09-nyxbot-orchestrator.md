@@ -359,8 +359,10 @@ concurrent channel turns and queues the rest.
 
 ### 12a. Chats, groups and guests
 
-A bot's chats are threads of their own: each private chat is one thread, and
-each group, channel or forum topic is one thread its members share. Messages in
+A bot's chats are threads of their own: each group, channel or forum topic is
+one thread its members share, and each other person's private chat is one
+thread. The owner's own private chats are the exception (§12b): they continue
+the agent's own thread. Messages in
 a shared thread start with their sender's name, and the agent is told that
 everyone in the chat sees its reply. Chats are recorded in `nyxbot_threads`
 (kind, title, platform chat and topic IDs, settings). Private chats keep their
@@ -451,6 +453,54 @@ platform, count, a dot while one is working) that opens for the thread being
 viewed and shows five chats, then more on request. Each thread row shows a
 private, group or channel icon. Thread listings carry `channel.channel_agent_id`,
 `bot_label`, `chat_id`, `chat_kind` and `chat_title`.
+
+### 12b. One context for the owner, and no double work
+
+**The owner's own thread.** The owner's private chats with an agent, on every
+bot attached to it (Telegram, Lark, Discord, ...), continue that agent's own
+thread: its home thread in NyxID (a first chat-app message creates it when the
+agent has none; a deleted home is replaced). A home is never a chat app channel
+thread (a group's or someone else's private chat): such a pointer is replaced
+(lazily, and for existing agents once at startup), and channel threads never
+become home. Organization bots are excluded:
+the owner's private chats with an org's bot keep their own thread, so personal
+context never flows through an organization's bot. The app and every chat app share
+that one transcript and live context. The thread is not a channel thread
+(`channel` stays unset, so the sidebar keeps it with the agent's own threads);
+instead `reply_channel` remembers the chat the owner last wrote from. A channel
+turn's answer goes back to the chat that asked; asynchronous replies (event
+turns such as a specialist's report, or a message queued while the agent was
+busy) go to `reply_channel`, which a message written in the app clears. Each
+user message records the chat app it came from (`via`), shown as a badge in the
+app, and the turn's instructions tell the agent where its reply is read (plain
+text, full URLs, word confirmations) and that this is its own thread with the
+owner. The chat row points at the thread, so word confirmations of the thread's
+cards work from any of the owner's chats. Groups and other people's private
+chats keep their own threads.
+
+**The same question is not worked on twice.** A running turn records its
+question: a digest of its normalized words (case, punctuation, spacing and
+leading @mentions ignored; short messages such as "yes" are never keyed) and a
+short excerpt. When a message arrives while its thread is busy:
+
+- if it is the question being answered, it is not queued: from the chat that
+  asked, the sender is told the answer is coming; from another chat (e.g. the
+  owner asked on Telegram and again on Lark), that chat is added to the running
+  answer's recipients (`also_deliver`, at most four), and at settlement the
+  answer is sent there too (`deliver_also`, taken once by the settlement hook);
+- if the same question is already queued, it is not queued again, and a repeat
+  from another chat is added to the queued message's recipients.
+
+Queued messages remember the chats that asked them (`reply_to`); on the
+owner's own thread the turn that drains them also answers there, even when the
+owner's next message comes from the app. On a chat app thread (a group's), a
+message the owner writes in the app never takes the chat's queued messages: its
+reply stays in the app, and the queued messages wait for a turn that answers in
+the chat. When a turn fails, chats that were promised its answer are told to ask
+again. The agent's own threads are also told, in the owner's turn instructions,
+what its other threads are answering right now (thread title and question
+excerpt, the same question marked), so it does not start that work again;
+channel threads never get this note, so no chat hears about another.
 
 ## 13. No-break guarantees
 

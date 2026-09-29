@@ -272,6 +272,7 @@ fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
             activities: Vec::new(),
             attachments: Vec::new(),
             origin: None,
+            via: None,
         })
         .collect();
     let prompt = instructions(&stale_test_row(Utc::now()), None, &messages);
@@ -496,6 +497,10 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
             stop_requested: false,
             events: Vec::new(),
             note: None,
+            question_key: None,
+            question: None,
+            asked_from: None,
+            also_deliver: Vec::new(),
         }),
         context_reset_at: None,
         context_reset_reason: None,
@@ -510,6 +515,8 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         group_id: None,
         group_seen_seq: 0,
         guest_turn: false,
+        reply_channel: None,
+        deliver_also: Vec::new(),
     }
 }
 

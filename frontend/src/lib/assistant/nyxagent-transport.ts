@@ -379,6 +379,7 @@ export class NyxAgentTransport {
         error: failed ? storedError(message.error_code) : undefined,
         ...toolCalls(message.activities),
         ...images(id, message.attachments),
+        via: message.via,
       };
     });
     // The live turn's tool activity arrives through the polled history metadata,

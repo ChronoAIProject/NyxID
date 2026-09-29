@@ -170,6 +170,9 @@ fn event_turn(conversation_id: &str) -> TurnStart {
         report_to: None,
         group_id: None,
         guest: false,
+        question_key: None,
+        question: None,
+        reply_channel: None,
     }
 }
 
@@ -309,10 +312,31 @@ pub(crate) async fn after_turn(
             wake(state, owner, &other.id).await;
         }
     }
+    // Chats that asked the same question while it was being answered get the
+    // answer too (taken once, whatever the outcome).
+    let also = engine::take_deliveries(&state.db, owner, &row.id)
+        .await
+        .unwrap_or_default();
+    if error.is_some() {
+        // They were told an answer would come: say it did not.
+        for origin in &also {
+            super::nyxbot::deliver_to(
+                state,
+                row,
+                origin,
+                "I couldn't finish answering that question. Please ask again.",
+            )
+            .await;
+        }
+        return;
+    }
     // Only asynchronous event turns reach the chat: a channel turn answers its
     // own event, and a turn the owner starts in the web app stays in the web app.
-    if row.channel.is_some() && turn.origin == TurnOrigin::Event && error.is_none() {
+    if (row.channel.is_some() || row.reply_channel.is_some()) && turn.origin == TurnOrigin::Event {
         super::nyxbot::deliver_update(state, row, text).await;
+    }
+    for origin in &also {
+        super::nyxbot::deliver_to(state, row, origin, text).await;
     }
 }
 
@@ -435,6 +459,42 @@ fn guest_note(specialist: bool) -> &'static str {
     }
 }
 
+/// What the agent's other threads are working on right now, so it neither
+/// redoes that work nor starts it twice. Lookup failures only omit it.
+async fn in_progress_note(
+    state: &AppState,
+    row: &AssistantConversation,
+    agent: &AssistantAgent,
+) -> String {
+    let Ok(others) = team::in_progress(&state.db, &row.user_id, &agent.id, &row.id).await else {
+        return String::new();
+    };
+    if others.is_empty() {
+        return String::new();
+    }
+    let this = row
+        .active_turn
+        .as_ref()
+        .and_then(|turn| turn.question_key.as_deref());
+    let mut note = String::from(
+        "\n\nYour other threads are working on these right now; do not start the same work \
+        again (if you are asked the same thing, say it is in progress there):",
+    );
+    for (title, question, key) in others {
+        note.push_str(&format!(
+            "\n- \"{}\": \"{}\"{}",
+            excerpt(&title, 60).replace('"', "'"),
+            excerpt(question.as_deref().unwrap_or("(working)"), 200).replace('"', "'"),
+            if this.is_some() && key.as_deref() == this {
+                " (the same question as this one)"
+            } else {
+                ""
+            }
+        ));
+    }
+    note
+}
+
 /// Turn-scoped notes appended to the instructions: drained events, a channel
 /// sender's context, the agent's memory, and for NyxBot its roster, direct
 /// user chats with specialists and pending permission requests. NyxID-authored
@@ -470,6 +530,10 @@ pub(crate) async fn turn_notes(
     }
     if let Some(agent) = agent {
         notes.push_str(&team::memory_note(agent));
+        // Only the agent's own threads hear about its other chats.
+        if row.channel.is_none() {
+            notes.push_str(&in_progress_note(state, row, agent).await);
+        }
         if let Some(note) = super::assistant_group::group_note(state, row, agent).await {
             notes.push_str("\n\n");
             notes.push_str(&note);
@@ -569,6 +633,9 @@ pub(crate) async fn assign(
             report_to: report_to.map(str::to_owned),
             group_id: None,
             guest: false,
+            question_key: None,
+            question: None,
+            reply_channel: None,
         },
         Pool::Team { owner, limit },
     )

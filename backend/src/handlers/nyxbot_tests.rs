@@ -343,16 +343,20 @@ async fn gateway_turns_admit_once_answer_only_the_verified_owner_and_keep_contex
         assert_eq!(calls[0]["input"], "What changed today?");
         let instructions = calls[0]["instructions"].as_str().unwrap();
         assert!(instructions.contains("verified this sender as the owner"));
-        assert!(instructions.contains("channel bot. Replies are delivered"));
+        assert!(instructions.contains("chat app. Replies are delivered"));
     }
+    // The owner's private chat continues NyxBot's own thread.
     let conversation: AssistantConversation = state
         .db
         .collection::<AssistantConversation>(CONVERSATIONS)
-        .find_one(doc! {"user_id": OWNER, "channel.nyxbot_channel_id": &row.id})
+        .find_one(doc! {"user_id": OWNER, "reply_channel.nyxbot_channel_id": &row.id})
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(conversation.channel.as_ref().unwrap().partition, PARTITION);
+    assert_eq!(
+        conversation.reply_channel.as_ref().unwrap().partition,
+        PARTITION
+    );
     let key = key_service::get_api_key(&state.db, OWNER, &conversation.credential_api_key_id)
         .await
         .unwrap();
@@ -530,7 +534,7 @@ async fn owners_confirm_actions_by_replying_yes_in_the_chat_app() {
     let conversation: AssistantConversation = state
         .db
         .collection::<AssistantConversation>(CONVERSATIONS)
-        .find_one(doc! {"user_id": OWNER, "channel.nyxbot_channel_id": &row.id})
+        .find_one(doc! {"user_id": OWNER, "reply_channel.nyxbot_channel_id": &row.id})
         .await
         .unwrap()
         .unwrap();
@@ -658,7 +662,7 @@ async fn relinking_a_bot_to_a_specialist_starts_that_agents_own_thread() {
     let first =
         body_text(respond(&state, &agent_key, &event("Hi", "7", "evt-1"), "evt_1").await).await;
     assert!(first.contains("Here is your answer"), "{first}");
-    let (specialist, _) = crate::services::assistant_team_service::create_specialist(
+    let (specialist, specialist_home) = crate::services::assistant_team_service::create_specialist(
         &state.db,
         &state.encryption_keys,
         OWNER,
@@ -682,21 +686,27 @@ async fn relinking_a_bot_to_a_specialist_starts_that_agents_own_thread() {
         body_text(respond(&state, &agent_key, &event("Hi", "7", "evt-2"), "evt_2").await).await;
     assert!(second.contains("Here is your answer"), "{second}");
     assert_eq!(calls.lock().await.len(), 2);
-    let threads: Vec<AssistantConversation> = state
-        .db
-        .collection::<AssistantConversation>(CONVERSATIONS)
-        .find(doc! {"user_id": OWNER, "channel.nyxbot_channel_id": &row.id})
+    // The owner's chat continued NyxBot's own thread, then the specialist's.
+    let nyxbot_home = crate::services::assistant_team_service::ensure_nyxbot(&state.db, OWNER)
         .await
         .unwrap()
-        .try_collect()
-        .await
+        .home_conversation_id
         .unwrap();
-    assert_eq!(threads.len(), 2);
-    let (nyxbot_thread, specialist_thread): (Vec<_>, Vec<_>) =
-        threads.iter().partition(|thread| !thread.is_subagent());
+    let specialist_thread =
+        crate::services::assistant_nyxagent::get(&state.db, OWNER, &specialist_home.id)
+            .await
+            .unwrap();
     assert_eq!(
-        specialist_thread[0].agent_id.as_deref(),
+        specialist_thread.agent_id.as_deref(),
         Some(specialist.id.as_str())
+    );
+    assert_eq!(
+        specialist_thread
+            .reply_channel
+            .as_ref()
+            .unwrap()
+            .nyxbot_channel_id,
+        row.id
     );
     // The chat now maps to the specialist's thread; the NyxBot thread's late
     // updates stay in the app.
@@ -709,9 +719,9 @@ async fn relinking_a_bot_to_a_specialist_starts_that_agents_own_thread() {
         .unwrap();
     assert_eq!(
         mapping.conversation_id.as_deref(),
-        Some(specialist_thread[0].id.as_str())
+        Some(specialist_thread.id.as_str())
     );
-    assert_ne!(nyxbot_thread[0].id, specialist_thread[0].id);
+    assert_ne!(nyxbot_home, specialist_thread.id);
     // Linking to the same agent again changes nothing.
     let unchanged = link(&state, OWNER, &row.id, &specialist).await.unwrap();
     assert_eq!(unchanged["changed"], false);
@@ -2137,6 +2147,62 @@ async fn group_chats_share_one_thread_and_members_talk_as_guests() {
         .await
         .unwrap();
     assert!(queued.pending_events.is_empty());
+    // The owner's own message while busy is queued for the group...
+    let owner_queued = body_text(
+        respond(
+            &state,
+            &agent_key,
+            &group_event(
+                "@helper_bot and the budget?",
+                "7",
+                "Alice",
+                "evt-g2c",
+                owner_partition,
+                true,
+            ),
+            "evt_g2c",
+        )
+        .await,
+    )
+    .await;
+    assert!(owner_queued.contains("right after"), "{owner_queued}");
+    settle(&state, &thread.id).await;
+    // ...and a message the owner writes in the app on the group's thread does
+    // not take it (its reply stays in the app; the group's answer comes from
+    // a turn that answers in the group).
+    let app = crate::handlers::assistant_team::start_server_turn(
+        &state,
+        OWNER,
+        TurnStart {
+            conversation_id: Some(thread.id.clone()),
+            text: "Private note to myself".into(),
+            model: None,
+            origin: TurnOrigin::User,
+            channel: None,
+            title: None,
+            note: None,
+            new_id: None,
+            agent_id: None,
+            report_to: None,
+            group_id: None,
+            guest: false,
+            question_key: None,
+            question: None,
+            reply_channel: None,
+        },
+        super::super::assistant_team::Pool::Channel { owner: OWNER },
+    )
+    .await
+    .unwrap();
+    let crate::handlers::assistant_team::Started::Turn { conversation, .. } = app else {
+        panic!("the app turn starts");
+    };
+    let turn = conversation.active_turn.as_ref().unwrap();
+    assert!(turn.events.is_empty());
+    assert!(turn.also_deliver.is_empty());
+    assert_eq!(conversation.pending_events.len(), 1);
+    // Let the app turn and the woken group turn finish.
+    wait_for_calls(&calls, 4).await;
     settle(&state, &thread.id).await;
     // The chat is listed with its settings; only the owner may talk there
     // once they say so.
@@ -2187,7 +2253,7 @@ async fn group_chats_share_one_thread_and_members_talk_as_guests() {
     )
     .await;
     assert!(!ignored.contains("output_text"), "{ignored}");
-    assert_eq!(calls.lock().await.len(), 2);
+    assert_eq!(calls.lock().await.len(), 4);
     // Back to the default: members may talk, since the owner has.
     let reset = chats::update_chat(
         &state,
@@ -2253,7 +2319,7 @@ async fn group_chats_share_one_thread_and_members_talk_as_guests() {
     )
     .await;
     assert!(!chatter.contains("output_text"), "{chatter}");
-    assert_eq!(calls.lock().await.len(), 2);
+    assert_eq!(calls.lock().await.len(), 4);
     // Chatter no turn answered keeps no content.
     let dropped = state
         .db
@@ -2290,7 +2356,7 @@ async fn group_chats_share_one_thread_and_members_talk_as_guests() {
     )
     .await;
     assert!(reply.contains("Here is your answer"), "{reply}");
-    assert_eq!(calls.lock().await.len(), 3);
+    assert_eq!(calls.lock().await.len(), 5);
     settle(&state, &thread.id).await;
     // Strangers in private chats are refused until private chats are open;
     // then each gets their own thread, as a guest.
@@ -2715,5 +2781,480 @@ async fn chat_posting_is_opt_in_and_chat_agents_survive_relinks() {
         .await
         .is_err()
     );
+    server.abort();
+}
+
+/// Post one signed direct relay message from `sender` in a private chat.
+async fn direct_private(
+    state: &AppState,
+    row: &NyxbotChannel,
+    message_id: &str,
+    sender: &str,
+    text: &str,
+) -> StatusCode {
+    let body = json!({
+        "message_id": message_id, "correlation_id": format!("jti-{message_id}"),
+        "platform": "lark",
+        "agent": {"api_key_id": row.route_api_key_id, "name": "route"},
+        "conversation": {"id": "route", "platform_id": format!("oc_{sender}"), "type": "private"},
+        "sender": {"platform_id": sender, "display_name": "Alice"},
+        "content": {"type": "text", "text": text},
+        "timestamp": "2026-09-28T00:00:00Z",
+    });
+    let bytes = serde_json::to_vec(&body).unwrap();
+    let token = crate::crypto::jwt::generate_relay_callback_token(
+        &state.jwt_keys,
+        &state.config,
+        &format!("jti-{message_id}"),
+        &row.route_api_key_id,
+        message_id,
+        "lark",
+        &sha256_hex(&bytes),
+    )
+    .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert("x-nyxid-callback-token", token.parse().unwrap());
+    relay_callback(
+        State(state.clone()),
+        Path(row.id.clone()),
+        headers,
+        Bytes::from(bytes),
+    )
+    .await
+    .status()
+}
+
+async fn wait_for_calls(calls: &Calls, count: usize) {
+    for _ in 0..200 {
+        if calls.lock().await.len() >= count {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+}
+
+/// The owner's private chats with an agent, on every attached bot, continue
+/// the agent's own thread in NyxID: one context. Replies to the chat that
+/// asked; asynchronous replies to the chat they last wrote from.
+#[tokio::test]
+async fn the_owners_private_chats_share_the_agents_own_thread() {
+    let (state, calls, server) = setup("nyxbot_shared_thread").await;
+    let (telegram, agent_key) = channel(&state, "gateway").await;
+    let (lark, _) = channel(&state, "direct").await;
+    for (row, sender) in [(&telegram, "7"), (&lark, "ou_alice")] {
+        state
+            .db
+            .collection::<NyxbotChannel>(CHANNELS)
+            .update_one(
+                doc! {"_id": &row.id},
+                doc! {"$set": {"owner_sender_ids": [sender]}},
+            )
+            .await
+            .unwrap();
+    }
+    let bound = put_binding(
+        State(state.clone()),
+        Path("bnd_shared".into()),
+        bearer(&agent_key),
+        Json(binding_body(&agent_key, OWNER)),
+    )
+    .await;
+    assert_eq!(bound.status(), StatusCode::OK);
+    let ensured = put_conversation(
+        State(state.clone()),
+        Path(("bnd_shared".into(), PARTITION.into())),
+        bearer(&agent_key),
+    )
+    .await;
+    assert_eq!(ensured.status(), StatusCode::OK);
+    // Telegram first: the thread becomes NyxBot's own (home) thread.
+    let first = body_text(
+        respond(
+            &state,
+            &agent_key,
+            &event("Remind me what we planned for Friday", "7", "evt-s1"),
+            "evt_s1",
+        )
+        .await,
+    )
+    .await;
+    assert!(first.contains("Here is your answer"), "{first}");
+    let nyxbot = crate::services::assistant_team_service::ensure_nyxbot(&state.db, OWNER)
+        .await
+        .unwrap();
+    let home = nyxbot.home_conversation_id.clone().unwrap();
+    let thread = crate::services::assistant_nyxagent::get(&state.db, OWNER, &home)
+        .await
+        .unwrap();
+    assert!(thread.channel.is_none(), "not a channel thread");
+    assert_eq!(
+        thread.reply_channel.as_ref().unwrap().nyxbot_channel_id,
+        telegram.id
+    );
+    {
+        let calls = calls.lock().await;
+        let instructions = calls[0]["instructions"].as_str().unwrap();
+        assert!(instructions.contains("your own thread with the owner"));
+    }
+    // Lark next: the same thread, and the same live context.
+    assert_eq!(
+        direct_private(
+            &state,
+            &lark,
+            "msg-s2",
+            "ou_alice",
+            "And what about Saturday?"
+        )
+        .await,
+        StatusCode::ACCEPTED
+    );
+    wait_for_calls(&calls, 2).await;
+    {
+        let calls = calls.lock().await;
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1]["input"], "And what about Saturday?");
+        assert!(
+            !calls[1]["conversation"].is_null(),
+            "continues the live context"
+        );
+    }
+    let thread = crate::services::assistant_nyxagent::get(&state.db, OWNER, &home)
+        .await
+        .unwrap();
+    assert_eq!(
+        thread.reply_channel.as_ref().unwrap().nyxbot_channel_id,
+        lark.id
+    );
+    assert_eq!(
+        channel_conversations(&state, &telegram.id).await.len()
+            + channel_conversations(&state, &lark.id).await.len(),
+        0,
+        "no separate chat threads"
+    );
+    // A home that is somebody's chat thread (e.g. one that claimed it after
+    // the owner deleted theirs) is never used for the owner's chats.
+    let foreign = format!("nyxa-{}", Uuid::new_v4().simple());
+    let mut group_thread = state
+        .db
+        .collection::<bson::Document>(CONVERSATIONS)
+        .find_one(doc! {"_id": &home})
+        .await
+        .unwrap()
+        .unwrap();
+    group_thread.insert("_id", &foreign);
+    group_thread.insert(
+        "channel",
+        doc! {"nyxbot_channel_id": &telegram.id, "partition": "chat_group", "platform": "telegram"},
+    );
+    group_thread.insert("active_turn", bson::Bson::Null);
+    state
+        .db
+        .collection::<bson::Document>(CONVERSATIONS)
+        .insert_one(group_thread)
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &nyxbot.id},
+            doc! {"$set": {"home_conversation_id": &foreign}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        direct_private(
+            &state,
+            &lark,
+            "msg-s3",
+            "ou_alice",
+            "One more thing about Sunday"
+        )
+        .await,
+        StatusCode::ACCEPTED
+    );
+    wait_for_calls(&calls, 3).await;
+    let rehomed = crate::services::assistant_team_service::ensure_nyxbot(&state.db, OWNER)
+        .await
+        .unwrap()
+        .home_conversation_id
+        .unwrap();
+    assert_ne!(rehomed, foreign);
+    let rehomed_thread = crate::services::assistant_nyxagent::get(&state.db, OWNER, &rehomed)
+        .await
+        .unwrap();
+    assert!(rehomed_thread.channel.is_none());
+    // Back to the original home for the rest of the test.
+    state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &nyxbot.id},
+            doc! {"$set": {"home_conversation_id": &home}},
+        )
+        .await
+        .unwrap();
+    // Writing in the app stops asynchronous replies going to a chat app.
+    let started = crate::handlers::assistant_team::start_server_turn(
+        &state,
+        OWNER,
+        TurnStart {
+            conversation_id: Some(home.clone()),
+            text: "Thanks, noted".into(),
+            model: None,
+            origin: TurnOrigin::User,
+            channel: None,
+            title: None,
+            note: None,
+            new_id: None,
+            agent_id: None,
+            report_to: None,
+            group_id: None,
+            guest: false,
+            question_key: None,
+            question: None,
+            reply_channel: None,
+        },
+        super::super::assistant_team::Pool::Channel { owner: OWNER },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        started,
+        crate::handlers::assistant_team::Started::Turn { .. }
+    ));
+    wait_for_calls(&calls, 4).await;
+    let thread = crate::services::assistant_nyxagent::get(&state.db, OWNER, &home)
+        .await
+        .unwrap();
+    assert!(thread.reply_channel.is_none());
+    // Each message says where the user wrote it.
+    let via: Vec<Option<String>> = engine::messages(&state.db, OWNER, &home, 100, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|message| message.role == "user")
+        .map(|message| message.via)
+        .collect();
+    assert_eq!(
+        via,
+        vec![Some("telegram".into()), Some("lark".into()), None]
+    );
+    server.abort();
+}
+
+/// A question already being answered, or already queued, is not worked on
+/// again: a repeat from the same chat is told so, and one from another chat
+/// also gets the answer when it is ready.
+#[tokio::test]
+async fn the_same_question_is_not_worked_on_twice() {
+    let (state, calls, server) = setup("nyxbot_same_question").await;
+    let (telegram, agent_key) = channel(&state, "gateway").await;
+    let (lark, _) = channel(&state, "direct").await;
+    for (row, sender) in [(&telegram, "7"), (&lark, "ou_alice")] {
+        state
+            .db
+            .collection::<NyxbotChannel>(CHANNELS)
+            .update_one(
+                doc! {"_id": &row.id},
+                doc! {"$set": {"owner_sender_ids": [sender]}},
+            )
+            .await
+            .unwrap();
+    }
+    let bound = put_binding(
+        State(state.clone()),
+        Path("bnd_same".into()),
+        bearer(&agent_key),
+        Json(binding_body(&agent_key, OWNER)),
+    )
+    .await;
+    assert_eq!(bound.status(), StatusCode::OK);
+    let ensured = put_conversation(
+        State(state.clone()),
+        Path(("bnd_same".into(), PARTITION.into())),
+        bearer(&agent_key),
+    )
+    .await;
+    assert_eq!(ensured.status(), StatusCode::OK);
+    let question = "What changed in my calendar today?";
+    let first = body_text(
+        respond(
+            &state,
+            &agent_key,
+            &event(question, "7", "evt-q1"),
+            "evt_q1",
+        )
+        .await,
+    )
+    .await;
+    assert!(first.contains("Here is your answer"), "{first}");
+    let home = crate::services::assistant_team_service::ensure_nyxbot(&state.db, OWNER)
+        .await
+        .unwrap()
+        .home_conversation_id
+        .unwrap();
+    // The thread is still answering it (as asked from Telegram).
+    let chat_row = state
+        .db
+        .collection::<NyxbotThread>(THREADS)
+        .find_one(doc! {"channel_id": &telegram.id, "partition": PARTITION})
+        .await
+        .unwrap()
+        .unwrap();
+    let asked_from = ChannelOrigin {
+        nyxbot_channel_id: telegram.id.clone(),
+        partition: chat_row.partition.clone(),
+        platform: "telegram".into(),
+    };
+    state
+        .db
+        .collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &home},
+            doc! {"$set": {"active_turn": {
+                "turn_id": "busy", "origin": "channel",
+                "started_at": bson::DateTime::now(), "stop_requested": false,
+                "question_key": engine::question_key(question),
+                "question": question,
+                "asked_from": bson::to_bson(&asked_from).unwrap(),
+            }}},
+        )
+        .await
+        .unwrap();
+    // The same question again from Telegram, differently typed.
+    let again = body_text(
+        respond(
+            &state,
+            &agent_key,
+            &event("what CHANGED in my calendar today", "7", "evt-q2"),
+            "evt_q2",
+        )
+        .await,
+    )
+    .await;
+    assert!(again.contains("still working on that question"), "{again}");
+    // From Lark: it waits for the same answer.
+    assert_eq!(
+        direct_private(&state, &lark, "msg-q3", "ou_alice", question).await,
+        StatusCode::ACCEPTED
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let thread = crate::services::assistant_nyxagent::get(&state.db, OWNER, &home)
+        .await
+        .unwrap();
+    let turn = thread.active_turn.as_ref().unwrap();
+    assert_eq!(turn.also_deliver.len(), 1);
+    assert_eq!(turn.also_deliver[0].nyxbot_channel_id, lark.id);
+    assert!(thread.pending_events.is_empty(), "nothing queued twice");
+    // A different question is queued once; asking it again is not.
+    let other = "Please book a table for Friday evening";
+    let queued =
+        body_text(respond(&state, &agent_key, &event(other, "7", "evt-q4"), "evt_q4").await).await;
+    assert!(queued.contains("right after"), "{queued}");
+    let repeat =
+        body_text(respond(&state, &agent_key, &event(other, "7", "evt-q5"), "evt_q5").await).await;
+    assert!(repeat.contains("already queued"), "{repeat}");
+    // The same queued question from Lark: Lark gets that answer too.
+    assert_eq!(
+        direct_private(&state, &lark, "msg-q6", "ou_alice", other).await,
+        StatusCode::ACCEPTED
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let thread = crate::services::assistant_nyxagent::get(&state.db, OWNER, &home)
+        .await
+        .unwrap();
+    assert_eq!(thread.pending_events.len(), 1);
+    let waiting: Vec<&str> = thread.pending_events[0]
+        .reply_to
+        .iter()
+        .map(|origin| origin.nyxbot_channel_id.as_str())
+        .collect();
+    assert_eq!(waiting, vec![telegram.id.as_str(), lark.id.as_str()]);
+    assert_eq!(calls.lock().await.len(), 1, "no second turn for either");
+    // Settlement hands the waiting chats over once.
+    state
+        .db
+        .collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &home},
+            doc! {"$set": {"deliver_also": [bson::to_bson(&asked_from).unwrap()]}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        engine::take_deliveries(&state.db, OWNER, &home)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        engine::take_deliveries(&state.db, OWNER, &home)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    server.abort();
+}
+
+#[test]
+fn questions_are_recognized_whatever_their_spelling() {
+    let key = engine::question_key("What changed in my calendar today?").unwrap();
+    assert_eq!(
+        engine::question_key("@helper_bot  what CHANGED in my calendar, today").as_deref(),
+        Some(key.as_str())
+    );
+    assert_ne!(
+        engine::question_key("What changed in my inbox today?").as_deref(),
+        Some(key.as_str())
+    );
+    // Short messages are normal to repeat.
+    assert_eq!(engine::question_key("yes"), None);
+    assert_eq!(engine::question_key("ok thanks!"), None);
+}
+
+/// Agents whose home pointer names a chat app channel thread lose it at
+/// startup; others keep theirs.
+#[tokio::test]
+async fn startup_repairs_homes_that_are_channel_threads() {
+    let (state, _, server) = setup("nyxbot_home_repair").await;
+    let agents = state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME);
+    let conversations = state.db.collection::<bson::Document>(CONVERSATIONS);
+    conversations
+        .insert_many([
+            doc! {"_id": "nyxa-channel", "user_id": OWNER,
+            "channel": {"nyxbot_channel_id": "c", "partition": "chat_x", "platform": "telegram"}},
+            doc! {"_id": "nyxa-own", "user_id": OWNER},
+        ])
+        .await
+        .unwrap();
+    agents
+        .insert_many([
+            doc! {"_id": "agent-bad", "user_id": OWNER, "home_conversation_id": "nyxa-channel"},
+            doc! {"_id": "agent-good", "user_id": OWNER, "home_conversation_id": "nyxa-own"},
+        ])
+        .await
+        .unwrap();
+    assert_eq!(engine::repair_channel_homes(&state.db).await.unwrap(), 1);
+    let home = |id: &'static str| {
+        let agents = agents.clone();
+        async move {
+            agents
+                .find_one(doc! {"_id": id})
+                .await
+                .unwrap()
+                .unwrap()
+                .get_str("home_conversation_id")
+                .ok()
+                .map(str::to_owned)
+        }
+    };
+    assert_eq!(home("agent-bad").await, None);
+    assert_eq!(home("agent-good").await.as_deref(), Some("nyxa-own"));
+    assert_eq!(engine::repair_channel_homes(&state.db).await.unwrap(), 0);
     server.abort();
 }

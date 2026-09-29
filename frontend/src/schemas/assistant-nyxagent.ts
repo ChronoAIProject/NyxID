@@ -97,6 +97,8 @@ export const nyxAgentMessageSchema = z.object({
   created_at: z.string(),
   activities: z.array(nyxAgentTurnActivitySchema).default([]),
   attachments: z.array(nyxAgentAttachmentSchema).default([]),
+  /** A user message written in a chat app: its platform. */
+  via: z.string().nullish(),
 });
 export const nyxAgentAcknowledgementSchema = z.object({
   id: z.string().uuid(),

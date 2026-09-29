@@ -176,16 +176,42 @@ pub fn base_prompt(
             ));
         }
     }
-    if let Some(channel) = &row.channel {
+    // Where this turn's reply is read: the channel thread's chat, or for the
+    // owner's own thread the chat app that asked (or, for an asynchronous
+    // reply, the one they last wrote from).
+    let chat_app = row
+        .channel
+        .as_ref()
+        .map(|channel| (channel, true))
+        .or_else(|| {
+            let turn = row.active_turn.as_ref()?;
+            match turn.origin {
+                TurnOrigin::Channel => turn.asked_from.as_ref(),
+                TurnOrigin::Event => row.reply_channel.as_ref(),
+                _ => None,
+            }
+            .map(|channel| (channel, false))
+        });
+    if let Some((channel, thread)) = chat_app {
+        let place = if thread {
+            format!(
+                "This thread answers the user's {} channel bot.",
+                identifier(&channel.platform)
+            )
+        } else {
+            format!(
+                "The user is reading this reply in their {} chat app.",
+                identifier(&channel.platform)
+            )
+        };
         prompt.push_str(&format!(
-            "\n\nThis thread answers the user's {} channel bot. Replies are delivered as \
+            "\n\n{place} Replies are delivered as \
             plain text messages: keep them short, avoid tables and wide code blocks, and \
             never paste secrets. The user cannot see NyxID's cards or buttons here: give every \
             link (connect links, setup links) as a full URL in your text, and when an action \
             needs confirmation (acknowledgement_required) ask them to reply with its \
             confirm_phrase (for example \"yes 4821\") or \"no\" with the same code; NyxID \
-            applies their answer.",
-            identifier(&channel.platform)
+            applies their answer."
         ));
     }
     prompt
@@ -232,6 +258,124 @@ pub struct TurnStart {
     pub group_id: Option<String>,
     /// Started by someone other than the owner (a channel chat guest).
     pub guest: bool,
+    /// The question's key and text (without a sender prefix); derived from
+    /// `text` for app messages when unset.
+    pub question_key: Option<String>,
+    pub question: Option<String>,
+    /// The owner's chat that wrote to their agent's own thread (not a channel
+    /// thread): asynchronous replies go there.
+    pub reply_channel: Option<ChannelOrigin>,
+}
+
+/// Question excerpts kept on a running turn for the agent's other threads.
+pub const QUESTION_EXCERPT_CHARS: usize = 200;
+/// Chats that may wait for one running answer besides the one that asked.
+pub const MAX_ALSO_DELIVER: usize = 4;
+
+/// Take the chats still owed the newest turn's answer (once).
+pub async fn take_deliveries(
+    db: &Database,
+    user_id: &str,
+    id: &str,
+) -> AppResult<Vec<ChannelOrigin>> {
+    Ok(db
+        .collection::<AssistantConversation>(CONVERSATIONS)
+        .find_one_and_update(
+            doc! {"_id": id, "user_id": user_id,
+            "deliver_also.0": {"$exists": true}},
+            doc! {"$set": {"deliver_also": []}},
+        )
+        .return_document(mongodb::options::ReturnDocument::Before)
+        .await?
+        .map(|row| row.deliver_also)
+        .unwrap_or_default())
+}
+
+/// The owner's chat that asynchronous replies of their own thread go to.
+pub async fn set_reply_channel(
+    db: &Database,
+    user_id: &str,
+    id: &str,
+    origin: &ChannelOrigin,
+) -> AppResult<()> {
+    let origin =
+        bson::to_bson(origin).map_err(|_| AppError::Internal("Failed to encode chat".into()))?;
+    db.collection::<AssistantConversation>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": id, "user_id": user_id},
+            doc! {"$set": {"reply_channel": origin}},
+        )
+        .await?;
+    Ok(())
+}
+
+/// A repeat of a queued question from another chat: that chat gets the
+/// answer too. Returns false when no queued message has that question any
+/// more (a turn just took it).
+pub async fn also_reply_to_queued(
+    db: &Database,
+    user_id: &str,
+    id: &str,
+    key: &str,
+    origin: &ChannelOrigin,
+) -> AppResult<bool> {
+    let origin =
+        bson::to_bson(origin).map_err(|_| AppError::Internal("Failed to encode chat".into()))?;
+    let updated = db
+        .collection::<AssistantConversation>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": id, "user_id": user_id, "pending_events.question_key": key},
+            doc! {"$addToSet": {"pending_events.$[e].reply_to": origin}},
+        )
+        .array_filters(vec![doc! {"e.question_key": key}])
+        .await?;
+    Ok(updated.matched_count == 1)
+}
+
+/// Have the running turn `turn_id` also deliver its answer to `origin`.
+/// Returns false when the turn has ended or enough chats already wait.
+pub async fn also_deliver(
+    db: &Database,
+    user_id: &str,
+    id: &str,
+    turn_id: &str,
+    origin: &ChannelOrigin,
+) -> AppResult<bool> {
+    let origin =
+        bson::to_bson(origin).map_err(|_| AppError::Internal("Failed to encode chat".into()))?;
+    let limit = format!("active_turn.also_deliver.{}", MAX_ALSO_DELIVER - 1);
+    let updated = db
+        .collection::<AssistantConversation>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": id, "user_id": user_id, "active_turn.turn_id": turn_id,
+            &limit: {"$exists": false}},
+            doc! {"$addToSet": {"active_turn.also_deliver": origin}},
+        )
+        .await?;
+    Ok(updated.matched_count == 1)
+}
+
+/// A digest of a question's words, ignoring case, punctuation, spacing and
+/// leading @mentions, so the same question asked twice is recognized. Short
+/// messages ("yes", "ok", "thanks") are never keyed: repeating them is normal.
+pub fn question_key(text: &str) -> Option<String> {
+    let words: Vec<String> = text
+        .split_whitespace()
+        .skip_while(|word| word.starts_with('@'))
+        .map(|word| {
+            word.chars()
+                .filter(|c| c.is_alphanumeric())
+                .flat_map(char::to_lowercase)
+                .collect::<String>()
+        })
+        .filter(|word| !word.is_empty())
+        .collect();
+    let normalized = words.join(" ");
+    if normalized.chars().filter(|c| c.is_alphanumeric()).count() < 12 {
+        return None;
+    }
+    use sha2::{Digest, Sha256};
+    Some(hex::encode(Sha256::digest(normalized.as_bytes())))
 }
 impl std::fmt::Debug for TurnStart {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -261,6 +405,9 @@ impl From<&TurnRequest> for TurnStart {
             report_to: None,
             group_id: None,
             guest: false,
+            question_key: None,
+            question: None,
+            reply_channel: None,
         }
     }
 }
@@ -422,6 +569,38 @@ pub async fn warn_at_startup(db: &Database) {
             )
         );
     }
+}
+
+/// Agents whose home pointer names a chat app channel thread (possible
+/// before homes were restricted to agents' own threads) lose it; the next own
+/// thread becomes home. Best effort, idempotent.
+pub async fn repair_channel_homes(db: &Database) -> mongodb::error::Result<u64> {
+    let agents = db.collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME);
+    let rows: Vec<bson::Document> = agents
+        .aggregate(vec![
+            doc! {"$match": {"home_conversation_id": {"$ne": bson::Bson::Null}}},
+            doc! {"$lookup": {"from": CONVERSATIONS, "localField": "home_conversation_id",
+            "foreignField": "_id", "as": "home"}},
+            doc! {"$match": {"home.channel": {"$ne": bson::Bson::Null}}},
+            doc! {"$project": {"_id": 1}},
+        ])
+        .await?
+        .try_collect()
+        .await?;
+    let ids: Vec<&str> = rows
+        .iter()
+        .filter_map(|row| row.get_str("_id").ok())
+        .collect();
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    Ok(agents
+        .update_many(
+            doc! {"_id": {"$in": ids}},
+            doc! {"$set": {"home_conversation_id": bson::Bson::Null}},
+        )
+        .await?
+        .modified_count)
 }
 
 pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
@@ -855,6 +1034,8 @@ pub async fn begin_turn(
                         pending_events: Vec::new(),
                         event_streak: 0,
                         channel: start.channel.clone(),
+                        reply_channel: None,
+                        deliver_also: Vec::new(),
                         group_id: start.group_id.clone(),
                         group_seen_seq: 0,
                         guest_turn: false,
@@ -897,11 +1078,14 @@ pub async fn begin_turn(
                 }
                 // Queued events are the owner's (guests' messages are never
                 // queued): a guest turn leaves them for the owner's next turn.
-                let events = if start.guest {
-                    Vec::new()
-                } else {
-                    std::mem::take(&mut row.pending_events)
-                };
+                // A chat app thread's queued messages wait for a turn that
+                // answers in that chat, never one the owner starts in the app.
+                let events =
+                    if start.guest || (start.origin == TurnOrigin::User && row.channel.is_some()) {
+                        Vec::new()
+                    } else {
+                        std::mem::take(&mut row.pending_events)
+                    };
                 // A guest turn never inherits the owner's live context (their
                 // tool results may hold more than the chat saw): it starts from
                 // the transcript alone.
@@ -973,6 +1157,7 @@ pub async fn begin_turn(
                         activities: Vec::new(),
                         attachments: Vec::new(),
                         origin: Some(lost.origin),
+                        via: None,
                     };
                     db.collection::<AssistantMessage>(MESSAGES)
                         .insert_one(message)
@@ -998,7 +1183,56 @@ pub async fn begin_turn(
                     attachments: Vec::new(),
                     events,
                     note: start.note.as_deref().map(|note| excerpt(note, 1200)),
+                    question_key: start.question_key.clone().or_else(|| {
+                        (start.origin == TurnOrigin::User)
+                            .then(|| question_key(&start.text))
+                            .flatten()
+                    }),
+                    question: start
+                        .question
+                        .as_deref()
+                        .or((start.origin == TurnOrigin::User).then_some(start.text.as_str()))
+                        .map(|question| excerpt(question, QUESTION_EXCERPT_CHARS)),
+                    asked_from: (start.origin == TurnOrigin::Channel)
+                        .then(|| {
+                            start
+                                .reply_channel
+                                .clone()
+                                .or_else(|| start.channel.clone())
+                        })
+                        .flatten(),
+                    also_deliver: Vec::new(),
                 });
+                // Chats whose queued messages this turn answers get its reply
+                // too, unless it already goes there.
+                let answered_here = match start.origin {
+                    TurnOrigin::Channel => start.reply_channel.clone().or(start.channel.clone()),
+                    TurnOrigin::Event => row.channel.clone().or(row.reply_channel.clone()),
+                    _ => None,
+                };
+                // Only on the owner's own thread (not a chat app thread), whose
+                // queued messages come from the owner's own private chats.
+                if row.channel.is_none()
+                    && let Some(turn) = row.active_turn.as_mut()
+                {
+                    for origin in turn.events.iter().flat_map(|event| event.reply_to.iter()) {
+                        if Some(origin) != answered_here.as_ref()
+                            && !turn.also_deliver.contains(origin)
+                            && turn.also_deliver.len() < MAX_ALSO_DELIVER
+                        {
+                            turn.also_deliver.push(origin.clone());
+                        }
+                    }
+                }
+                // The owner's own thread follows them between the app and their
+                // chat apps: asynchronous replies go where they last wrote.
+                match start.origin {
+                    TurnOrigin::User => row.reply_channel = None,
+                    TurnOrigin::Channel if start.reply_channel.is_some() => {
+                        row.reply_channel = start.reply_channel.clone();
+                    }
+                    _ => {}
+                }
                 row.updated_at = now;
                 row.message_count += 1;
                 if start.conversation_id.is_some() {
@@ -1010,8 +1244,8 @@ pub async fn begin_turn(
                     collection.insert_one(&row).session(&mut *session).await?;
                 }
                 // An agent's first own thread becomes its home; a hidden group
-                // member thread never does.
-                if row.group_id.is_none() {
+                // member thread or a chat app channel thread never does.
+                if row.group_id.is_none() && row.channel.is_none() {
                     db.collection::<bson::Document>(
                         crate::models::assistant_agent::COLLECTION_NAME,
                     )
@@ -1037,6 +1271,15 @@ pub async fn begin_turn(
                     activities: Vec::new(),
                     attachments: Vec::new(),
                     origin: Some(start.origin),
+                    via: (start.origin == TurnOrigin::Channel)
+                        .then(|| {
+                            start
+                                .reply_channel
+                                .as_ref()
+                                .or(start.channel.as_ref())
+                                .map(|channel| channel.platform.clone())
+                        })
+                        .flatten(),
                 };
                 db.collection::<AssistantMessage>(MESSAGES)
                     .insert_one(message)
@@ -1261,6 +1504,11 @@ pub async fn finish_turn(
                     == 1;
                 current.message_count += 1;
                 current.updated_at = now;
+                current.deliver_also = current
+                    .active_turn
+                    .as_ref()
+                    .map(|turn| turn.also_deliver.clone())
+                    .unwrap_or_default();
                 current.active_turn = None;
                 if error.is_some() || !credential_alive {
                     current.nyxagent_session_id = None;
@@ -1298,6 +1546,7 @@ pub async fn finish_turn(
                     activities,
                     attachments,
                     origin,
+                    via: None,
                 };
                 db.collection::<AssistantMessage>(MESSAGES)
                     .insert_one(message)

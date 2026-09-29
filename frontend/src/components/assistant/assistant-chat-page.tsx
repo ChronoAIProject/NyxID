@@ -705,11 +705,12 @@ function NyxAgentThreadPage() {
               if (message.role === "orchestrator") {
                 return <NyxBotOrchestratorMessage message={message} />;
               }
-              if (message.role === "user" && channelPlatform) {
-                // The user wrote this in the chat app, not here.
+              const via = message.role === "user" ? (message.via ?? channelPlatform) : null;
+              if (via) {
+                // The user wrote this in a chat app, not here.
                 return (
                   <div className="flex flex-col items-end gap-1">
-                    <ChannelBadge platform={channelPlatform} />
+                    <ChannelBadge platform={via} />
                     <ChatMessageBubble message={message} />
                   </div>
                 );

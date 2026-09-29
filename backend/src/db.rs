@@ -120,6 +120,10 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     crate::services::service_history::relay::ensure_indexes(db).await?;
     crate::services::catalog_skill_service::ensure_indexes(db).await?;
     crate::services::assistant_nyxagent::ensure_indexes(db).await?;
+    // Best effort: a failure only leaves bad home pointers for lazy repair.
+    if let Err(error) = crate::services::assistant_nyxagent::repair_channel_homes(db).await {
+        tracing::warn!(%error, "NyxBot home repair deferred");
+    }
     crate::services::coordination_service::ensure_indexes(db).await?;
 
     // ── assistant_wire_logs ──
