@@ -1127,7 +1127,7 @@ mod tests {
             HeaderMap::new(),
             Json(RegisterRequest {
                 email: "new@example.com".into(),
-                password: "Password123".into(),
+                password: uuid::Uuid::new_v4().to_string(),
                 display_name: None,
             }),
         )

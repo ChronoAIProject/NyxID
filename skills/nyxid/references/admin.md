@@ -90,6 +90,8 @@ Role-change semantics:
 
 `nyxid admin` (without a subcommand) lists every available admin operation. Listing operations require operator OR admin; mutating operations require admin. Non-admin / non-operator callers get `1002 forbidden`.
 
+Admins no longer need to issue invitation codes for new accounts: signup is open through configured social providers and, when enabled, email/password. The former admin invitation-code API, page, and CLI commands have been removed. Organization membership invitations are separate and remain available.
+
 ## MCP Configuration
 
 ```bash

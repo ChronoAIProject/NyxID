@@ -391,6 +391,10 @@ pub async fn promote_user_to_admin(db: &mongodb::Database, email: &str) -> AppRe
 mod tests {
     use super::*;
 
+    fn test_password() -> String {
+        Uuid::new_v4().to_string()
+    }
+
     fn make_person() -> User {
         let now = Utc::now();
         User {
@@ -503,7 +507,7 @@ mod tests {
             .await
             .unwrap();
 
-        let result = register_user(&db, "new@example.com", "password123", Some("New"), false)
+        let result = register_user(&db, "new@example.com", &test_password(), Some("New"), false)
             .await
             .expect("register");
 
@@ -530,7 +534,8 @@ mod tests {
             return;
         };
 
-        match register_user(&db, "short@example.com", "1234567", None, false).await {
+        let short_password = test_password()[..7].to_string();
+        match register_user(&db, "short@example.com", &short_password, None, false).await {
             Err(AppError::ValidationError(_)) => {}
             Err(other) => panic!("expected ValidationError, got: {other:?}"),
             Ok(_) => panic!("expected error for short password"),
@@ -562,11 +567,11 @@ mod tests {
             .await
             .unwrap();
 
-        register_user(&db, "dup@example.com", "password123", None, false)
+        register_user(&db, "dup@example.com", &test_password(), None, false)
             .await
             .expect("first register");
 
-        let result = register_user(&db, "dup@example.com", "password456", None, false)
+        let result = register_user(&db, "dup@example.com", &test_password(), None, false)
             .await
             .expect("duplicate should return fake success");
 
@@ -583,7 +588,7 @@ mod tests {
             .await
             .unwrap();
 
-        let result = register_user(&db, "auto@example.com", "password123", None, true)
+        let result = register_user(&db, "auto@example.com", &test_password(), None, true)
             .await
             .expect("register with auto-verify");
 
@@ -607,7 +612,7 @@ mod tests {
             .await
             .unwrap();
 
-        register_user(&db, "user@example.com", "correct-pw-1", None, true)
+        register_user(&db, "user@example.com", &test_password(), None, true)
             .await
             .expect("register");
 
@@ -627,7 +632,8 @@ mod tests {
             .await
             .unwrap();
 
-        let result = register_user(&db, "inactive@example.com", "password123", None, true)
+        let password = test_password();
+        let result = register_user(&db, "inactive@example.com", &password, None, true)
             .await
             .expect("register");
 
@@ -639,7 +645,7 @@ mod tests {
             .await
             .unwrap();
 
-        let err = authenticate_user(&db, "inactive@example.com", "password123")
+        let err = authenticate_user(&db, "inactive@example.com", &password)
             .await
             .expect_err("inactive user");
         assert!(matches!(err, AppError::Forbidden(_)));
@@ -677,11 +683,12 @@ mod tests {
             .await
             .unwrap();
 
-        register_user(&db, "good@example.com", "password123", None, true)
+        let password = test_password();
+        register_user(&db, "good@example.com", &password, None, true)
             .await
             .expect("register");
 
-        let user = authenticate_user(&db, "good@example.com", "password123")
+        let user = authenticate_user(&db, "good@example.com", &password)
             .await
             .expect("login");
         assert_eq!(user.email, "good@example.com");
@@ -737,7 +744,7 @@ mod tests {
             .await
             .unwrap();
 
-        let reg = register_user(&db, "verify@example.com", "password123", None, false)
+        let reg = register_user(&db, "verify@example.com", &test_password(), None, false)
             .await
             .expect("register");
 
@@ -761,7 +768,7 @@ mod tests {
             .await
             .unwrap();
 
-        let reg = register_user(&db, "hvp@example.com", "password123", None, false)
+        let reg = register_user(&db, "hvp@example.com", &test_password(), None, false)
             .await
             .expect("register");
         assert!(reg.actually_created);
@@ -804,7 +811,7 @@ mod tests {
             .await
             .unwrap();
 
-        register_user(&db, "reset@example.com", "password123", None, true)
+        register_user(&db, "reset@example.com", &test_password(), None, true)
             .await
             .expect("register");
 
@@ -865,7 +872,7 @@ mod tests {
             .await
             .unwrap();
 
-        let reg = register_user(&db, "expired@example.com", "password123", None, true)
+        let reg = register_user(&db, "expired@example.com", &test_password(), None, true)
             .await
             .expect("register");
 
@@ -901,7 +908,9 @@ mod tests {
             .await
             .unwrap();
 
-        register_user(&db, "rp-ok@example.com", "oldpassword1", None, true)
+        let old_password = test_password();
+        let new_password = test_password();
+        register_user(&db, "rp-ok@example.com", &old_password, None, true)
             .await
             .expect("register");
 
@@ -910,16 +919,16 @@ mod tests {
             .expect("initiate")
             .expect("token");
 
-        reset_password(&db, &token, "newpassword1")
+        reset_password(&db, &token, &new_password)
             .await
             .expect("reset");
 
-        let err = authenticate_user(&db, "rp-ok@example.com", "oldpassword1")
+        let err = authenticate_user(&db, "rp-ok@example.com", &old_password)
             .await
             .expect_err("old password should fail");
         assert!(matches!(err, AppError::AuthenticationFailed(_)));
 
-        let user = authenticate_user(&db, "rp-ok@example.com", "newpassword1")
+        let user = authenticate_user(&db, "rp-ok@example.com", &new_password)
             .await
             .expect("new password should work");
         assert_eq!(user.email, "rp-ok@example.com");
