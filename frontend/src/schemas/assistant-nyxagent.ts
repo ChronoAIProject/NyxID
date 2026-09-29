@@ -478,8 +478,12 @@ export const nyxAgentChannelChatSchema = z.object({
   agent_id: z.string().nullable().default(null),
   /** `all` answers every message; `mention` only mentions and replies. */
   reply_mode: z.enum(["mention", "all"]).catch("mention"),
-  /** Groups: whether members other than the user may talk to the agent. */
-  members: z.enum(["everyone", "owner"]).catch("everyone"),
+  /**
+   * Who may talk to the agent: members too, or only the user (private
+   * chats: the bot's setting). Groups open once the user has talked there.
+   */
+  members: z.enum(["everyone", "owner"]).catch("owner"),
+  owner_seen: z.boolean().default(false),
   allow_posts: z.boolean().default(false),
   conversation_id: z.string().nullable().default(null),
   last_message_at: z.string().nullable().default(null),

@@ -227,9 +227,11 @@ export function ChannelChats({
             />
           </div>
           <p className="text-[11px] text-text-tertiary">
-            People other than you talk to the agent as guests: it only reads with its services
-            for them and never acts on your account. In groups it answers when mentioned or
-            replied to unless set to every message.
+            People other than you talk to the agent as guests: it never acts on your account for
+            them, NyxBot uses none of your services for them, and a chat&apos;s own specialist
+            only reads with its services. Members of a group can talk to it once you have talked
+            to the bot there. In groups it answers when mentioned or replied to unless set to
+            every message.
           </p>
           {error ? (
             <p role="alert" className="text-[11px] text-destructive">

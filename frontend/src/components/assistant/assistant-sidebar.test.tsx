@@ -577,14 +577,40 @@ describe("NyxBot agents in the sidebar", () => {
     await user.click(within(threads).getByRole("button", { name: "Show 2 more" }));
     expect(within(threads).getByRole("button", { name: "Chat 6" })).toBeInTheDocument();
     unmount();
-    // The open chat's section starts open and shows it even past the first page.
-    renderWith(chats[6]!.id);
+    // The open chat's section starts open and shows it even past the first
+    // page; closed, it opens again for another of its chats.
+    const view = renderWith(chats[6]!.id);
     const reopened = screen.getByRole("group", { name: "Threads with NyxBot" });
     expect(
       within(reopened).getByRole("button", { name: "Support bot on Telegram, 7 chats" }),
     ).toHaveAttribute("aria-expanded", "true");
     expect(within(reopened).getByRole("button", { name: "Chat 6" })).toBeInTheDocument();
     expect(within(reopened).queryByRole("button", { name: "Chat 5" })).not.toBeInTheDocument();
+    const header = within(reopened).getByRole("button", {
+      name: "Support bot on Telegram, 7 chats",
+    });
+    await user.click(header);
+    expect(header).toHaveAttribute("aria-expanded", "false");
+    view.rerender(
+      <TooltipProvider>
+        <AssistantSidebar
+          conversations={[]}
+          activeConversationId={chats[1]!.id}
+          onNewChat={vi.fn()}
+          onSelect={vi.fn()}
+          onDelete={vi.fn()}
+          agents={{
+            agents,
+            selectedAgentId: "agent-nyxbot",
+            threads: [own, ...chats],
+            onSelectAgent: vi.fn(),
+            onNewThread: vi.fn(),
+            onNewAgent: vi.fn(),
+          }}
+        />
+      </TooltipProvider>,
+    );
+    expect(header).toHaveAttribute("aria-expanded", "true");
   });
 
   it("shows specialist status and pending requests, and selects an agent", async () => {

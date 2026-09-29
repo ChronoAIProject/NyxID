@@ -895,12 +895,17 @@ pub async fn begin_turn(
                 if start.origin == TurnOrigin::Event && row.pending_events.is_empty() {
                     return Err(AppError::Conflict("No pending events".into()));
                 }
-                let events = std::mem::take(&mut row.pending_events);
-                // A turn that carries a guest's message acts for the guest. It
-                // never inherits the owner's live context (their tool results
-                // may hold more than the chat saw): it starts from the
-                // transcript alone.
-                let guest = start.guest || events.iter().any(|event| event.guest);
+                // Queued events are the owner's (guests' messages are never
+                // queued): a guest turn leaves them for the owner's next turn.
+                let events = if start.guest {
+                    Vec::new()
+                } else {
+                    std::mem::take(&mut row.pending_events)
+                };
+                // A guest turn never inherits the owner's live context (their
+                // tool results may hold more than the chat saw): it starts from
+                // the transcript alone.
+                let guest = start.guest;
                 if guest && !row.guest_turn && row.nyxagent_session_id.is_some() {
                     row.nyxagent_session_id = None;
                     row.nyxagent_last_response_id = None;
@@ -964,6 +969,7 @@ pub async fn begin_turn(
                         created_at: now,
                         activities: Vec::new(),
                         attachments: Vec::new(),
+                        origin: Some(lost.origin),
                     };
                     db.collection::<AssistantMessage>(MESSAGES)
                         .insert_one(message)
@@ -1027,6 +1033,7 @@ pub async fn begin_turn(
                     created_at: now,
                     activities: Vec::new(),
                     attachments: Vec::new(),
+                    origin: Some(start.origin),
                 };
                 db.collection::<AssistantMessage>(MESSAGES)
                     .insert_one(message)
@@ -1232,6 +1239,7 @@ pub async fn finish_turn(
                     .as_ref()
                     .map(|turn| turn.attachments.clone())
                     .unwrap_or_default();
+                let origin = current.active_turn.as_ref().map(|turn| turn.origin);
                 let now = current.context_reset_at.map_or_else(Utc::now, |reset_at| {
                     Utc::now().max(reset_at + chrono::Duration::milliseconds(1))
                 });
@@ -1286,6 +1294,7 @@ pub async fn finish_turn(
                     created_at: now,
                     activities,
                     attachments,
+                    origin,
                 };
                 db.collection::<AssistantMessage>(MESSAGES)
                     .insert_one(message)

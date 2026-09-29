@@ -378,7 +378,7 @@ payload or, once, from the platform's chat lookup (Telegram `getChat`, Lark
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `reply_mode` | `mention` (groups, channels) | Answer only when the bot is mentioned or a message replies to one of its messages; `all` answers every message. Private chats always answer. |
-| `members` | `everyone` (groups, channels) | Members other than the owner may talk to the agent as guests; `owner` answers only the owner. |
+| `members` | `everyone` once the owner has talked to the bot there, else `owner` (groups, channels) | Members other than the owner may talk to the agent as guests; `owner` answers only the owner. A stranger who adds the bot to their own group gets nothing. |
 | `allow_posts` | off | The chat's agent may post there without being asked (`nyxid__post_to_chat`). |
 | agent | the bot's agent | The chat reaches another agent; it starts a new thread with it, and relinking the bot leaves such chats alone. |
 
@@ -394,30 +394,48 @@ or a reply to one of the bot's sent messages (NyxID records the platform
 message an inbound message replies to). Directly relayed Telegram messages are
 judged from the update (an @username or text mention, a reply to the bot); Lark
 and Feishu count any @mention (they deliver unmentioned group messages only to
-apps granted every group message); other platforms treat every message as
-addressed. Telegram bots see every group message only with privacy mode off or
+apps granted every group message); Slack counts `app_mention` events and
+Discord its `mentions` and replied-to author; a reply to one of the bot's sent
+messages counts everywhere. When a platform cannot tell, only the owner's
+messages count as addressed. Telegram bots see every group message only with privacy mode off or
 as group admins, and NyxBot says so when a chat is set to `all`.
 
-**Guests.** A turn started by someone other than the verified owner, or one that
-drains such a queued message, is a guest turn (`guest_turn` on the thread,
-`guest` on its chat authority; kept after the turn so late tool calls stay
-restricted):
+**Guests.** A turn started by someone other than the verified owner is a guest
+turn (`guest_turn` on the thread, `guest` on its chat authority; kept after the
+turn so late tool calls stay restricted):
 
-- no `nyxid__` account, team, memory or posting tools, and no connection, SSH
-  or Oracle tools; discovery and `nyx__call_tool` remain;
-- service operations must be reads (the MCP operation's verb); writes are
-  refused with `owner_only`;
+- NyxBot holds every service of the owner, so its guest turns call no tools at
+  all and answer from the conversation; to let a chat's members use a service,
+  the owner gives the chat a specialist with just that service;
+- a specialist's guest turns may discover tools and read within its grants:
+  no `nyxid__` account, team, memory or posting tools, no connection, SSH or
+  Oracle tools, only curated operations (never the generic proxy tool, whose
+  GET can still change things) and only read verbs; everything else is refused
+  with `owner_only`;
 - an ungranted service is refused without a permission request, so a guest
   never widens what a specialist may use;
-- the owner's memory, roster, direct chats and pending requests stay out of the
-  turn's instructions, and the first guest turn after an owner turn starts from
-  the transcript rather than the owner's live context (whose tool results may
-  hold more than the chat saw);
+- guests' messages are never queued as the owner's work: a busy agent asks them
+  to try again, and a guest turn leaves the owner's queued events alone;
+- in a shared thread the owner's messages are marked `(owner)`; guests' names
+  cannot carry the mark and their text is kept on one line, so no one passes
+  for the owner;
+- the owner's memory, roster, direct chats, pending requests and card
+  decisions stay out of the turn's instructions; the first guest turn after an
+  owner turn starts from the transcript rather than the owner's live context,
+  and a guest's recap holds only channel and event turns (messages record the
+  turn origin), never what the owner said in the app;
 - only the owner's words confirm action cards.
 
-Guest turns still run within the chat agent's own authority: a specialist
-linked to a group reads only with its grants. Guests' turns are billed to the
-owner, like every channel turn, and share the owner's channel pool.
+Guests' turns are billed to the owner, like every channel turn, and share the
+owner's channel pool. Messages no turn answered (e.g. group chatter while the
+gateway admits every group message) keep no content: a refused event's stored
+context is dropped at once.
+
+**Lifecycle.** Chats given to an agent that is destroyed go back to the bot's
+agent. A rebuilt connection carries its groups and direct chats over with their
+settings (chats without their own agent start new threads if the connection now
+reaches another agent) and keeps `private_chats`. The 15-second sweep retries a
+gateway admission update that failed or raced.
 
 **Posting.** `nyxid__post_to_chat` sends through the bot's own route (NyxID's
 initiated-send path: rate limit, outbound record and audit) into a chat that

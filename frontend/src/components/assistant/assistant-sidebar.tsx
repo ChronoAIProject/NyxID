@@ -288,10 +288,12 @@ function ChannelThreadsGroup({
   readonly renderThread: (conversation: Conversation) => ReactNode;
 }) {
   const holdsActive = group.threads.some((thread) => thread.id === activeThreadId);
-  // `null` follows the open thread; a click pins it open or closed.
-  const [pinned, setPinned] = useState<boolean | null>(null);
+  // A click opens or closes the section for the thread open at that moment;
+  // opening another of its chats opens it again.
+  const [pinned, setPinned] = useState<{ open: boolean; active: string | undefined }>();
   const [shown, setShown] = useState(CHANNEL_THREADS_SHOWN);
-  const open = pinned ?? holdsActive;
+  const open =
+    pinned && (pinned.active === activeThreadId || !holdsActive) ? pinned.open : holdsActive;
   const running = group.threads.some((thread) => thread.active_turn);
   const visible = group.threads.filter(
     (thread, index) => index < shown || thread.id === activeThreadId,
@@ -305,7 +307,7 @@ function ChannelThreadsGroup({
         type="button"
         aria-expanded={open}
         aria-label={`${group.label} on ${platform}, ${String(count)} ${count === 1 ? "chat" : "chats"}${running ? ", working" : ""}`}
-        onClick={() => setPinned(!open)}
+        onClick={() => setPinned({ open: !open, active: activeThreadId })}
         data-keep-drawer-open=""
         className="flex w-full items-center gap-1.5 rounded-lg px-3 py-1.5 text-left text-[12px] text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
       >

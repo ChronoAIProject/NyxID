@@ -83,7 +83,7 @@ beforeEach(() => {
   const chat = (id: string, kind: string, title: string) => ({
     id, channel_agent_id: "channel-1", platform: "telegram", bot_label: "Home bot", kind, title,
     agent_id: null, reply_mode: kind === "private" ? "all" : "mention", members: "everyone",
-    allow_posts: false, conversation_id: null, last_message_at: at,
+    owner_seen: true, allow_posts: false, conversation_id: null, last_message_at: at,
   });
   chats = [chat("chat-g", "group", "Team chat"), chat("chat-p", "private", "Alice")];
   globalThis.__nyxidAssistantHttpMock = ({ endpoint, init }) => {

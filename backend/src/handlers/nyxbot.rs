@@ -340,10 +340,7 @@ impl From<&NyxbotChannel> for ChannelAgentResponse {
             owner_linked: !row.owner_sender_ids.is_empty(),
             agent_id: row.agent_id.clone(),
             org_id: row.bot_owner_id.clone(),
-            private_chats: row
-                .private_chats
-                .clone()
-                .unwrap_or_else(|| "owner".into()),
+            private_chats: row.private_chats.clone().unwrap_or_else(|| "owner".into()),
             delivery_status: row.delivery_status.clone(),
             delivery_error: row.delivery_error.clone(),
             delivery_reason: row
@@ -539,7 +536,7 @@ pub async fn connect(
         // A half-created or broken connection (e.g. a key was deleted) is
         // released first, then rebuilt from scratch.
         verified_owners = existing.owner_sender_ids.clone();
-        rebuilt_from = Some(existing.id.clone());
+        rebuilt_from = Some(existing.clone());
         disconnect(state, owner, &existing.id).await?;
     }
     // Never silently replace another agent's default route.
@@ -687,8 +684,18 @@ pub async fn connect(
             )
             .await;
             // A rebuilt connection keeps its chats, their settings and threads.
-            if let Some(previous) = rebuilt_from.as_deref() {
-                chats::carry_over(state, owner, previous, &id).await?;
+            if let Some(previous) = rebuilt_from.as_ref() {
+                let reaches = |row: &NyxbotChannel| row.agent_id.clone();
+                let agent_changed = reaches(previous).unwrap_or_default() != agent.id
+                    && !(previous.agent_id.is_none() && agent.is_nyxbot());
+                chats::carry_over(state, owner, previous, &id, agent_changed).await?;
+                if let Some(access) = previous.private_chats.as_deref() {
+                    state
+                        .db
+                        .collection::<NyxbotChannel>(CHANNELS)
+                        .update_one(doc! {"_id": &id}, doc! {"$set": {"private_chats": access}})
+                        .await?;
+                }
             }
             let row = load_channel(state, owner, &id).await?;
             if let Some(code) = chats::sync_gateway_groups(state, &row).await? {
@@ -1759,17 +1766,20 @@ const PRIVATE_REFUSAL: &str = "This bot answers only its owner. If this is your 
 
 /// Decide what an inbound chat message leads to: the owner verifying their
 /// account, a turn (as the owner or a guest), a short reply, or nothing.
+/// `addressed`: whether the message mentions or replies to the bot, `None`
+/// when the platform cannot tell (then only the owner is answered).
 async fn inbound_message(
     state: &AppState,
     row: &NyxbotChannel,
     chat: &NyxbotThread,
     sender: &Sender<'_>,
     text: &str,
-    addressed: bool,
+    addressed: Option<bool>,
 ) -> AppResult<Inbound> {
     if let Some(linked) = link_owner(state, row, sender, text).await? {
         return Ok(linked);
     }
+    let chat = &chats::note_owner_presence(state, row, chat, sender.id).await?;
     let guest = match chats::admission(row, chat, sender.id, addressed) {
         chats::Admission::Owner => false,
         chats::Admission::Guest => true,
@@ -2022,9 +2032,8 @@ async fn start_chat_turn(
     let message = if private {
         excerpt(text, engine::MAX_MESSAGE_CHARS - 16)
     } else {
-        let from = name.as_deref().unwrap_or("Someone");
         excerpt(
-            &format!("{from}: {text}"),
+            &chats::attributed(sender.display_name, text, guest),
             engine::MAX_MESSAGE_CHARS - 16,
         )
     };
@@ -2032,9 +2041,14 @@ async fn start_chat_turn(
         name.clone()
             .unwrap_or_else(|| format!("{} chat", platform_name(&row.platform)))
     } else {
-        chat.title
-            .clone()
-            .unwrap_or_else(|| format!("{} group", platform_name(&row.platform)))
+        // A new group thread is named after the group when the platform can
+        // say (bounded; best effort).
+        let looked_up = match chat.title.clone() {
+            Some(title) => Some(title),
+            None if !exists => chats::look_up_title(state, row, chat).await,
+            None => None,
+        };
+        looked_up.unwrap_or_else(|| format!("{} group", platform_name(&row.platform)))
     };
     let agent_id = match chat.agent_id.clone().or_else(|| row.agent_id.clone()) {
         Some(agent_id) => agent_id,
@@ -2083,19 +2097,21 @@ async fn start_chat_turn(
         // The chat is busy (or the owner's channel pool is full): queue the
         // message for the agent's next turn instead of bouncing it. Its reply
         // is an asynchronous update delivered back to this chat.
+        // Someone other than the owner is asked to try again: their messages
+        // never queue up as the owner's work or use the owner's wake-ups.
+        Ok(Started::Busy | Started::PoolFull) if guest => Ok(Inbound::Reply(
+            "I'm answering another message right now. Please try again in a moment.".into(),
+        )),
         Ok(Started::Busy | Started::PoolFull) if exists => {
             let note = format!(
-                "{who} sent another {} message in {place} while you were working{}. Answer it \
+                "{who} sent another {} message in {place} while you were working. Answer it \
                 next; your reply is delivered to the chat: \"{}\"",
                 identifier(&row.platform),
-                if guest { " (not the owner)" } else { "" },
                 excerpt(text, 3000).replace('"', "'")
             );
-            let mut event = crate::services::assistant_team_service::event("message", note, None);
-            event.guest = guest;
+            let event = crate::services::assistant_team_service::event("message", note, None);
             let queued =
-                engine::push_events(&state.db, &row.user_id, &conversation_id, vec![event])
-                    .await?;
+                engine::push_events(&state.db, &row.user_id, &conversation_id, vec![event]).await?;
             if queued.is_none() {
                 return Ok(Inbound::Busy);
             }
@@ -2524,7 +2540,7 @@ pub async fn responses(State(state): State<AppState>, headers: HeaderMap, body: 
         &state,
         &row,
         &partition,
-        &activity,
+        activity,
         context["event_ref"].as_str(),
         &Sender {
             id: &sender_id,
@@ -2538,12 +2554,14 @@ pub async fn responses(State(state): State<AppState>, headers: HeaderMap, body: 
         let state = state.clone();
         let event_key = event_key.clone();
         async move {
+            // Messages no turn answered (e.g. group chatter) keep no content.
             let _ = state
                 .db
                 .collection::<NyxbotEvent>(EVENTS)
                 .update_one(
                     doc! {"_id": &event_key},
-                    doc! {"$set": {"status": status, "conversation_id": conversation}},
+                    doc! {"$set": {"status": status, "conversation_id": conversation},
+                    "$unset": {"event_context_ciphertext": ""}},
                 )
                 .await;
         }
@@ -2668,17 +2686,19 @@ async fn gateway_inbound(
     }
     // While the gateway admits only mentions and replies in groups, every
     // group message it passes on is addressed to the bot.
-    let addressed = kind == "private"
-        || activity["kind"]["mentions_bot"] == true
-        || row.gateway_groups.as_deref() != Some("all")
-        || match activity["event_id"].as_str() {
-            Some(message_id) => {
-                let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await?;
-                let reply_to = chats::inbound_reply_to(state, row, message_id).await?;
-                chats::replies_to_bot(state, &bot, chat_id, reply_to.as_deref()).await?
-            }
-            None => false,
-        };
+    let addressed = Some(
+        kind == "private"
+            || activity["kind"]["mentions_bot"] == true
+            || row.gateway_groups.as_deref() != Some("all")
+            || match activity["event_id"].as_str() {
+                Some(message_id) => {
+                    let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await?;
+                    let reply_to = chats::inbound_reply_to(state, row, message_id).await?;
+                    chats::replies_to_bot(state, &bot, chat_id, reply_to.as_deref()).await?
+                }
+                None => false,
+            },
+    );
     inbound_message(state, row, &chat, sender, text, addressed).await
 }
 
@@ -2902,7 +2922,11 @@ pub async fn relay_callback(
     // Dedup redeliveries of the same inbound message.
     let event_key = sha256_hex(format!("{}\0{}", row.id, claims.message_id));
     let now = Utc::now();
-    let kind = chats::chat_kind(payload["conversation"]["type"].as_str().unwrap_or("private"));
+    let kind = chats::chat_kind(
+        payload["conversation"]["type"]
+            .as_str()
+            .unwrap_or("private"),
+    );
     let chat_id = payload["conversation"]["platform_id"]
         .as_str()
         .unwrap_or_default()
@@ -3000,10 +3024,15 @@ pub async fn relay_callback(
             if text.trim().is_empty() || sender_id.is_empty() {
                 return Ok(());
             }
-            let addressed = kind == "private" || {
+            let addressed = if kind == "private" {
+                Some(true)
+            } else {
                 let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await?;
-                chats::raw_addressed(&bot, &raw).unwrap_or(true)
-                    || chats::replies_to_bot(&state, &bot, &chat_id, reply_to.as_deref()).await?
+                if chats::replies_to_bot(&state, &bot, &chat_id, reply_to.as_deref()).await? {
+                    Some(true)
+                } else {
+                    chats::raw_addressed(&bot, &raw)
+                }
             };
             let sender = Sender {
                 id: &sender_id,
@@ -3014,8 +3043,7 @@ pub async fn relay_callback(
                     Inbound::Reply(text) => Some(text),
                     Inbound::Silent => None,
                     Inbound::Busy => Some(
-                        "I'm still working on the previous message. I'll pick this up next."
-                            .into(),
+                        "I'm still working on the previous message. I'll pick this up next.".into(),
                     ),
                     Inbound::Turn(receiver) => match final_reply(receiver).await {
                         Ok(text) => Some(bounded_reply(&text)),

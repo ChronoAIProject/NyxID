@@ -51,10 +51,6 @@ pub struct AgentEvent {
     /// Specialist agent the event concerns, when any.
     #[serde(default)]
     pub agent_id: Option<String>,
-    /// Carries a message from someone other than the owner (a channel chat
-    /// guest): the turn that drains it runs as a guest turn.
-    #[serde(default)]
-    pub guest: bool,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
 }
@@ -169,10 +165,10 @@ pub struct AssistantConversation {
     /// The newest group message this member has already been given.
     #[serde(default)]
     pub group_seen_seq: i64,
-    /// The newest turn was started by (or carried a message from) someone
-    /// other than the owner, e.g. a member of a group chat. Its tool calls run
-    /// read-only: no account, team or memory tools and no service changes.
-    /// Kept after the turn settles so late tool calls stay restricted.
+    /// The newest turn was started by someone other than the owner, e.g. a
+    /// member of a group chat. Its tool calls are restricted (NyxBot: none;
+    /// specialists: curated reads within their grants). Kept after the turn
+    /// settles so late tool calls stay restricted.
     #[serde(default)]
     pub guest_turn: bool,
 }

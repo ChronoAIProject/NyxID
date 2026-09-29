@@ -862,7 +862,10 @@ async fn resolve_edit_request_context(
 // Handlers
 // ---------------------------------------------------------------------------
 
-pub(crate) async fn check_initiate_rate_limit(state: &AppState, conversation_id: &str) -> AppResult<()> {
+pub(crate) async fn check_initiate_rate_limit(
+    state: &AppState,
+    conversation_id: &str,
+) -> AppResult<()> {
     if !state
         .per_conversation_initiate_limiter
         .check_shared(conversation_id)

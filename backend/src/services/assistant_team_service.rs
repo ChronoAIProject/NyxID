@@ -77,7 +77,6 @@ pub fn event(kind: &str, text: String, agent_id: Option<&str>) -> AgentEvent {
         kind: kind.into(),
         text,
         agent_id: agent_id.map(str::to_owned),
-        guest: false,
         created_at: Utc::now(),
     }
 }

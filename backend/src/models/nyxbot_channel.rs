@@ -148,10 +148,14 @@ pub struct NyxbotThread {
     /// or replied to) or `all` (answer every message).
     #[serde(default)]
     pub reply_mode: Option<String>,
-    /// Groups and channels: `everyone` (default: any member may talk to the
-    /// agent, as a guest) or `owner`.
+    /// Groups and channels: `everyone` (any member may talk to the agent, as
+    /// a guest) or `owner`. Unset: `everyone` once the owner has talked to the
+    /// bot there (`owner_seen`), else `owner`, so a stranger who adds the bot
+    /// to their own group gets nothing.
     #[serde(default)]
     pub members: Option<String>,
+    #[serde(default)]
+    pub owner_seen: bool,
     /// The chat's agent may post here without being asked.
     #[serde(default)]
     pub allow_posts: bool,

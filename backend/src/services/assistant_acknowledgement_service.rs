@@ -52,6 +52,15 @@ impl std::fmt::Debug for ChatAuthority {
     }
 }
 
+/// What NyxBot is told when a guest turn calls a tool: NyxBot holds all of
+/// the owner's services, so it uses none for other people.
+pub fn orchestrator_guest_refusal() -> Value {
+    json!({"error": "owner_only", "instructions": "You are answering someone other than the \
+        owner, so you use no tools here: answer from the conversation. If people in this chat \
+        should use certain services, the owner can give the chat a specialist with just those \
+        services (ask NyxBot in NyxID)."})
+}
+
 /// What a guest turn (someone other than the owner) is told when it asks
 /// for something only the owner can ask for.
 pub fn guest_refusal() -> Value {
@@ -558,6 +567,10 @@ pub async fn service_gate(
     platform: bool,
 ) -> AppResult<Option<(Value, Option<AssistantAcknowledgement>)>> {
     if chat.is_orchestrator() {
+        // NyxBot holds every service; other people get none of them.
+        if chat.guest {
+            return Ok(Some((orchestrator_guest_refusal(), None)));
+        }
         return Ok(None);
     }
     let key = key_service::get_api_key(db, &chat.user_id, &chat.api_key_id).await?;

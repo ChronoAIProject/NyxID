@@ -298,12 +298,9 @@ pub async fn list(
     let next_cursor = more.then(|| engine::index_cursor(rows.last().expect("nonempty page")));
     let ids: Vec<String> = rows.iter().map(|row| row.id.clone()).collect();
     let counts = acknowledgements::pending_counts(&state.db, &user_id, &ids).await?;
-    let chats = super::nyxbot::chats::thread_details(
-        &state,
-        &user_id,
-        &rows.iter().collect::<Vec<_>>(),
-    )
-    .await?;
+    let chats =
+        super::nyxbot::chats::thread_details(&state, &user_id, &rows.iter().collect::<Vec<_>>())
+            .await?;
     Ok(Json(IndexResponse {
         conversations: rows
             .into_iter()
@@ -391,8 +388,7 @@ pub async fn history(
         });
     let agents = crate::services::assistant_team_service::agents(&state.db, &user_id, true).await?;
     let agent_id = conversation.agent_id.clone();
-    let chats =
-        super::nyxbot::chats::thread_details(&state, &user_id, &[&conversation]).await?;
+    let chats = super::nyxbot::chats::thread_details(&state, &user_id, &[&conversation]).await?;
     let mut conversation = ConversationResponse::from(conversation)
         .with_agent(agent_id.as_deref(), &agents)
         .with_chat(&chats);
@@ -1197,7 +1193,7 @@ async fn execute_turn(
     partial: &mut String,
 ) -> Result<TurnResult, TurnError> {
     let turn_id = &row.active_turn.as_ref().expect("claimed turn").turn_id;
-    let history = engine::messages(
+    let mut history = engine::messages(
         &state.db,
         &row.user_id,
         &row.id,
@@ -1206,6 +1202,16 @@ async fn execute_turn(
     )
     .await
     .map_err(|_| TurnError::new("assistant_unavailable"))?;
+    // A guest's recap holds only what the chat itself saw.
+    if row.guest_turn {
+        use crate::models::assistant_conversation::TurnOrigin;
+        history.retain(|message| {
+            matches!(
+                message.origin,
+                Some(TurnOrigin::Channel) | Some(TurnOrigin::Event)
+            )
+        });
+    }
     // Cards decided while an earlier turn was still running never reached the
     // model: NyxAgent ends a turn on a card and answers repeats locally. Report
     // decisions made since the previous user message; a lookup failure only
@@ -1215,7 +1221,7 @@ async fn execute_turn(
         .rev()
         .find(|message| message.role == "user")
         .map(|message| message.created_at);
-    let mut decisions = match previous {
+    let mut decisions = match previous.filter(|_| !row.guest_turn) {
         Some(previous) => {
             acknowledgements::decided_since(&state.db, &row.user_id, &row.id, previous)
                 .await

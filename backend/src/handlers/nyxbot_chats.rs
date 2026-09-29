@@ -43,8 +43,68 @@ pub(super) fn answers_everything(chat: &NyxbotThread) -> bool {
     chat.kind.as_deref() == Some("private") || chat.reply_mode.as_deref() == Some("all")
 }
 
+/// Members other than the owner may talk to the agent: when the owner said
+/// so, or by default once the owner has talked to the bot there.
 fn members_may_talk(chat: &NyxbotThread) -> bool {
-    chat.members.as_deref() != Some("owner")
+    match chat.members.as_deref() {
+        Some("everyone") => true,
+        Some(_) => false,
+        None => chat.owner_seen,
+    }
+}
+
+fn is_group(chat: &NyxbotThread) -> bool {
+    matches!(chat.kind.as_deref(), Some("group" | "channel"))
+}
+
+/// Record that the owner talks to the bot in this group: from then on its
+/// members may talk to the agent too, unless the owner said otherwise.
+pub(super) async fn note_owner_presence(
+    state: &AppState,
+    row: &NyxbotChannel,
+    chat: &NyxbotThread,
+    sender_id: &str,
+) -> AppResult<NyxbotThread> {
+    let mut chat = chat.clone();
+    if is_group(&chat) && !chat.owner_seen && row.owner_sender_ids.iter().any(|id| id == sender_id)
+    {
+        state
+            .db
+            .collection::<NyxbotThread>(THREADS)
+            .update_one(doc! {"_id": &chat.id}, doc! {"$set": {"owner_seen": true}})
+            .await?;
+        chat.owner_seen = true;
+    }
+    Ok(chat)
+}
+
+/// A group message as its thread stores it: the sender's name first, marked
+/// `(owner)` for the owner. Names cannot carry the mark and a guest's text is
+/// kept on one line, so no one can pass for the owner.
+pub(super) fn attributed(name: Option<&str>, text: &str, guest: bool) -> String {
+    let name = name
+        .map(|name| {
+            name.chars()
+                .map(|c| {
+                    if c.is_control() || matches!(c, '(' | ')' | '[' | ']' | ':') {
+                        ' '
+                    } else {
+                        c
+                    }
+                })
+                .collect::<String>()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .filter(|name| !name.is_empty())
+        .map(|name| name.chars().take(60).collect::<String>());
+    if guest {
+        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        format!("{}: {text}", name.as_deref().unwrap_or("Someone"))
+    } else {
+        format!("{} (owner): {text}", name.as_deref().unwrap_or("Owner"))
+    }
 }
 
 pub(super) fn clean_title(title: &str) -> Option<String> {
@@ -79,7 +139,7 @@ pub(super) async fn record_chat(
 ) -> AppResult<NyxbotThread> {
     let now = bson::DateTime::now();
     let mut set = doc! {"updated_at": now, "last_message_at": now, "kind": facts.kind,
-        "platform_chat_id": &facts.chat_id};
+    "platform_chat_id": &facts.chat_id};
     if let Some(thread_id) = facts.thread_id.as_deref() {
         set.insert("platform_thread_id", thread_id);
     }
@@ -103,10 +163,69 @@ pub(super) async fn record_chat(
         .ok_or_else(|| AppError::Internal("Channel chat unavailable".into()))
 }
 
+async fn fetch_title(state: &AppState, bot_id: &str, chat_id: &str) -> AppResult<Option<String>> {
+    let bot = channel_bot_service::get_bot(&state.db, bot_id).await?;
+    let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
+    let token = crate::services::channel_credentials::resolve_bot_token(
+        &state.db,
+        &state.encryption_keys,
+        adapter.as_ref(),
+        &bot,
+    )
+    .await?;
+    Ok(adapter
+        .chat_title(
+            &state.http_client,
+            &crate::services::channel_platform::BotCredentials {
+                billing: None,
+                token: &token,
+                platform_bot_id: Some(&bot.platform_bot_id),
+                platform_secrets: None,
+            },
+            chat_id,
+        )
+        .await?
+        .as_deref()
+        .and_then(clean_title))
+}
+
+async fn store_title(state: &AppState, chat_id: &str, title: &str) -> AppResult<()> {
+    state
+        .db
+        .collection::<NyxbotThread>(THREADS)
+        .update_one(
+            doc! {"_id": chat_id, "title": bson::Bson::Null},
+            doc! {"$set": {"title": title}},
+        )
+        .await?;
+    Ok(())
+}
+
+/// Look a group's name up now (bounded), for a thread about to be created.
+pub(super) async fn look_up_title(
+    state: &AppState,
+    row: &NyxbotChannel,
+    chat: &NyxbotThread,
+) -> Option<String> {
+    let chat_id = chat.platform_chat_id.as_deref()?;
+    let lookup = fetch_title(state, &row.channel_bot_id, chat_id);
+    match tokio::time::timeout(Duration::from_secs(3), lookup).await {
+        Ok(Ok(Some(title))) => {
+            let _ = store_title(state, &chat.id, &title).await;
+            Some(title)
+        }
+        Ok(Err(error)) => {
+            tracing::debug!(%error, "Channel chat title not looked up");
+            None
+        }
+        _ => None,
+    }
+}
+
 /// Look a group's name up once, when the message did not carry it. Best
 /// effort: failures only leave the chat untitled.
 pub(super) fn spawn_title_lookup(state: &AppState, row: &NyxbotChannel, chat: &NyxbotThread) {
-    if chat.title.is_some() || chat.kind.as_deref() == Some("private") {
+    if chat.title.is_some() || !is_group(chat) {
         return;
     }
     let Some(chat_id) = chat.platform_chat_id.clone() else {
@@ -117,36 +236,8 @@ pub(super) fn spawn_title_lookup(state: &AppState, row: &NyxbotChannel, chat: &N
     let id = chat.id.clone();
     tokio::spawn(async move {
         let result: AppResult<()> = async {
-            let bot = channel_bot_service::get_bot(&state.db, &bot_id).await?;
-            let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
-            let token = crate::services::channel_credentials::resolve_bot_token(
-                &state.db,
-                &state.encryption_keys,
-                adapter.as_ref(),
-                &bot,
-            )
-            .await?;
-            let title = adapter
-                .chat_title(
-                    &state.http_client,
-                    &crate::services::channel_platform::BotCredentials {
-                        billing: None,
-                        token: &token,
-                        platform_bot_id: Some(&bot.platform_bot_id),
-                        platform_secrets: None,
-                    },
-                    &chat_id,
-                )
-                .await?;
-            if let Some(title) = title.as_deref().and_then(clean_title) {
-                state
-                    .db
-                    .collection::<NyxbotThread>(THREADS)
-                    .update_one(
-                        doc! {"_id": &id, "title": bson::Bson::Null},
-                        doc! {"$set": {"title": title}},
-                    )
-                    .await?;
+            if let Some(title) = fetch_title(&state, &bot_id, &chat_id).await? {
+                store_title(&state, &id, &title).await?;
             }
             Ok(())
         }
@@ -172,8 +263,8 @@ fn mentions_username(text: &str, username: &str) -> bool {
 }
 
 /// Whether a direct message in a group mentions the bot or replies to it,
-/// read from the platform's payload. `None` when the platform's payload does
-/// not say (every message then counts as addressed).
+/// read from the platform's payload. `None` when the payload does not say:
+/// then only the owner is answered (as before chats had settings).
 pub(super) fn raw_addressed(bot: &ChannelBot, raw: &Value) -> Option<bool> {
     match canonical_platform(&bot.platform) {
         "telegram" => {
@@ -195,9 +286,9 @@ pub(super) fn raw_addressed(bot: &ChannelBot, raw: &Value) -> Option<bool> {
                 is_bot(&message["reply_to_message"]["from"])
                     || mentions_username(text, bot.platform_bot_username.trim_start_matches('@'))
                     || entities.is_some_and(|entities| {
-                        entities
-                            .iter()
-                            .any(|entity| entity["type"] == "text_mention" && is_bot(&entity["user"]))
+                        entities.iter().any(|entity| {
+                            entity["type"] == "text_mention" && is_bot(&entity["user"])
+                        })
                     }),
             )
         }
@@ -208,6 +299,17 @@ pub(super) fn raw_addressed(bot: &ChannelBot, raw: &Value) -> Option<bool> {
                 .as_array()
                 .is_some_and(|mentions| !mentions.is_empty()),
         ),
+        // Slack says so with its own event type; other channel messages
+        // cannot be told apart here.
+        "slack" => (raw["event"]["type"] == "app_mention").then_some(true),
+        "discord" if raw.get("author").is_some() => {
+            let bot_id = bot.platform_bot_id.as_str();
+            Some(
+                raw["mentions"].as_array().is_some_and(|users| {
+                    users.iter().any(|user| user["id"].as_str() == Some(bot_id))
+                }) || raw["referenced_message"]["author"]["id"].as_str() == Some(bot_id),
+            )
+        }
         _ => None,
     }
 }
@@ -225,9 +327,11 @@ pub(super) async fn replies_to_bot(
     Ok(state
         .db
         .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
-        .find_one(doc! {"platform": &bot.platform, "platform_message_id": reply_to,
-        "direction": "outbound", "channel_bot_id": &bot.id,
-        "platform_conversation_id": chat_id})
+        .find_one(
+            doc! {"platform": &bot.platform, "platform_message_id": reply_to,
+            "direction": "outbound", "channel_bot_id": &bot.id,
+            "platform_conversation_id": chat_id},
+        )
         .projection(doc! {"_id": 1})
         .await?
         .is_some())
@@ -243,8 +347,10 @@ pub(super) async fn inbound_reply_to(
     Ok(state
         .db
         .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
-        .find_one(doc! {"_id": message_id, "channel_bot_id": &row.channel_bot_id,
-        "direction": "inbound"})
+        .find_one(
+            doc! {"_id": message_id, "channel_bot_id": &row.channel_bot_id,
+            "direction": "inbound"},
+        )
         .projection(doc! {"reply_to_platform_message_id": 1})
         .await?
         .and_then(|message| {
@@ -271,9 +377,12 @@ pub(super) fn admission(
     row: &NyxbotChannel,
     chat: &NyxbotThread,
     sender_id: &str,
-    addressed: bool,
+    addressed: Option<bool>,
 ) -> Admission {
     let owner = row.owner_sender_ids.iter().any(|id| id == sender_id);
+    // When the platform cannot tell, the owner's messages count as addressed
+    // and nobody else's do.
+    let addressed = addressed.unwrap_or(owner);
     if chat.kind.as_deref() == Some("private") {
         return if owner {
             Admission::Owner
@@ -308,19 +417,30 @@ pub(super) fn describe(chat: &NyxbotThread) -> String {
     }
 }
 
-/// Move a rebuilt connection's chats (and their threads' channel) to the
-/// new connection. A new gateway channel names its private conversations
-/// anew (`conv_...`), so those start fresh threads, as they always did.
+/// Move a rebuilt connection's chats (and their threads' channel) and its
+/// private-chat access to the new connection. A new gateway channel names its
+/// private conversations anew (`conv_...`), so those start fresh threads, as
+/// they always did. When the connection now reaches another agent, chats
+/// without their own agent start new threads with it (as relinking does).
 pub(super) async fn carry_over(
     state: &AppState,
     owner: &str,
-    from: &str,
+    from: &NyxbotChannel,
     to: &str,
+    agent_changed: bool,
 ) -> AppResult<()> {
+    let from = from.id.as_str();
     let stable = doc! {"$not": {"$regex": "^conv_"}};
-    state
-        .db
-        .collection::<NyxbotThread>(THREADS)
+    let threads = state.db.collection::<NyxbotThread>(THREADS);
+    if agent_changed {
+        threads
+            .update_many(
+                doc! {"channel_id": from, "user_id": owner, "agent_id": bson::Bson::Null},
+                doc! {"$set": {"conversation_id": bson::Bson::Null}},
+            )
+            .await?;
+    }
+    threads
         .update_many(
             doc! {"channel_id": from, "user_id": owner, "partition": stable.clone()},
             doc! {"$set": {"channel_id": to}},
@@ -361,11 +481,21 @@ pub(super) async fn sync_gateway_groups(
     state: &AppState,
     row: &NyxbotChannel,
 ) -> AppResult<Option<&'static str>> {
-    if row.transport != "gateway" || row.status != "active" {
+    if row.transport != "gateway" {
+        return Ok(None);
+    }
+    // Compare with the stored admission as of now, not the caller's copy.
+    let row = &load_channel(state, &row.user_id, &row.id).await?;
+    if row.status != "active" {
         return Ok(None);
     }
     let wanted = wanted_groups(state, row).await?;
-    if row.gateway_groups.as_deref().unwrap_or(GATEWAY_GROUPS_DEFAULT) == wanted {
+    if row
+        .gateway_groups
+        .as_deref()
+        .unwrap_or(GATEWAY_GROUPS_DEFAULT)
+        == wanted
+    {
         return Ok(None);
     }
     let (Some(channel_id), Some(version), Some(route_id)) = (
@@ -425,8 +555,11 @@ pub struct ChannelChatResponse {
     agent_id: Option<String>,
     /// `mention` or `all` for groups and channels; `all` for private chats.
     reply_mode: &'static str,
-    /// Groups and channels: `everyone` or `owner`.
-    members: &'static str,
+    /// Who may talk to the agent: `everyone` or `owner` (for private chats,
+    /// the bot's `private_chats`).
+    members: String,
+    /// Groups: the owner has talked to the bot there.
+    owner_seen: bool,
     allow_posts: bool,
     conversation_id: Option<String>,
     last_message_at: Option<chrono::DateTime<Utc>>,
@@ -446,11 +579,14 @@ fn chat_response(row: &NyxbotChannel, chat: &NyxbotThread) -> ChannelChatRespons
         } else {
             "mention"
         },
-        members: if members_may_talk(chat) {
-            "everyone"
+        members: if chat.kind.as_deref() == Some("private") {
+            row.private_chats.clone().unwrap_or_else(|| "owner".into())
+        } else if members_may_talk(chat) {
+            "everyone".into()
         } else {
-            "owner"
+            "owner".into()
         },
+        owner_seen: chat.owner_seen,
         allow_posts: chat.allow_posts,
         conversation_id: chat.conversation_id.clone(),
         last_message_at: chat.last_message_at,
@@ -533,7 +669,14 @@ pub(crate) async fn update_chat(
     settings: &ChatSettings,
 ) -> AppResult<Value> {
     let (row, chat) = load_chat(state, owner, chat_id).await?;
-    let group = chat.kind.as_deref().is_some_and(|kind| kind != "private");
+    let group = is_group(&chat);
+    if chat.kind.is_none() && (settings.reply_mode.is_some() || settings.members.is_some()) {
+        return Err(AppError::Conflict(
+            "NyxID has not seen a message in this chat since chats got their own settings; \
+            send one there first"
+                .into(),
+        ));
+    }
     let mut set = doc! {"updated_at": bson::DateTime::now()};
     let mut unset = doc! {};
     if let Some(mode) = settings.reply_mode.as_deref() {
@@ -783,6 +926,24 @@ pub(crate) async fn post(
     )
     .await;
     Ok(json!({"status": "posted", "chat_id": chat.id, "message_id": sent.message_id}))
+}
+
+/// Chats given to a destroyed agent go back to their bot's agent (in new
+/// threads).
+pub(crate) async fn release_agent_chats(
+    state: &AppState,
+    owner: &str,
+    agent_id: &str,
+) -> AppResult<()> {
+    state
+        .db
+        .collection::<NyxbotThread>(THREADS)
+        .update_many(
+            doc! {"user_id": owner, "agent_id": agent_id},
+            doc! {"$unset": {"agent_id": ""}, "$set": {"conversation_id": bson::Bson::Null}},
+        )
+        .await?;
+    Ok(())
 }
 
 /// A channel thread's bot and chat, for thread listings.

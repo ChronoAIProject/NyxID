@@ -416,12 +416,24 @@ pub(crate) async fn permission_decided(
     .await;
 }
 
-const GUEST_NOTE: &str = "\n\nThis turn answers someone other than the owner (a member of a \
-    chat your channel bot is in). Help them, reading with your services when useful, but only \
-    the owner can ask for account actions, new connections or changes made with the owner's \
-    services: NyxID refuses those, so say that only the bot's owner can ask for that. Never \
-    reveal the owner's private information (their account, other chats, memory or \
-    credentials).";
+/// The instructions of a turn for someone other than the owner. NyxBot holds
+/// every service of the owner, so it uses none for other people.
+fn guest_note(specialist: bool) -> &'static str {
+    if specialist {
+        "\n\nThis turn answers someone other than the owner (a member of a chat your channel \
+        bot is in). Help them, reading with your services when useful, but only the owner can \
+        ask for account actions, new connections or changes made with the owner's services: \
+        NyxID refuses those, so say that only the bot's owner can ask for that. Never reveal \
+        the owner's private information (their account, other chats, memory or credentials)."
+    } else {
+        "\n\nThis turn answers someone other than the owner (a member of a chat the owner's \
+        channel bot is in). Answer from the conversation only: you use no tools or services \
+        for them, and only the owner can ask you to act. If they need a service, say the \
+        owner can give this chat its own agent with just that service. Never reveal the \
+        owner's private information (their account, services, other chats, memory or \
+        credentials)."
+    }
+}
 
 /// Turn-scoped notes appended to the instructions: drained events, a channel
 /// sender's context, the agent's memory, and for NyxBot its roster, direct
@@ -453,7 +465,7 @@ pub(crate) async fn turn_notes(
     // Someone other than the owner is talking: nothing private to the owner
     // (memory, other chats, the team, pending requests) goes into this turn.
     if row.guest_turn {
-        notes.push_str(GUEST_NOTE);
+        notes.push_str(guest_note(row.is_subagent()));
         return notes;
     }
     if let Some(agent) = agent {
@@ -1061,6 +1073,7 @@ pub(crate) async fn destroy_agent(
     agent_id: &str,
 ) -> AppResult<AssistantAgent> {
     let agent = team::destroy(&state.db, owner, agent_id).await?;
+    super::nyxbot::chats::release_agent_chats(state, owner, &agent.id).await?;
     for channel in super::nyxbot::list(state, owner).await? {
         if channel.agent_id.as_deref() == Some(agent.id.as_str())
             && let Err(error) = super::nyxbot::disconnect(state, owner, &channel.id).await

@@ -1556,8 +1556,8 @@ async fn dispatch_tools_call(
         .await;
     }
 
-    if guest_turn(auth) && !guest_tool_allowed(tool_name) {
-        return guest_refused(request.id.clone());
+    if let Some(refused) = guest_tool_refusal(auth, tool_name, request.id.clone()) {
+        return refused;
     }
     if tool_name.starts_with("nyxid__") {
         return handle_account_tool(state, auth, tool_name, &arguments, request.id.clone()).await;
@@ -1734,6 +1734,9 @@ async fn dispatch_tools_call(
         );
     }
 
+    if let Some(refused) = guest_endpoint_refusal(auth, service, endpoint, request.id.clone()) {
+        return refused;
+    }
     let prepared = match mcp_service::prepare_proxy_tool_call(service, endpoint, &arguments) {
         Ok(prepared) => prepared,
         Err(e) => {
@@ -2057,6 +2060,38 @@ fn guest_refused(request_id: Option<serde_json::Value>) -> Response {
     )
 }
 
+/// Refuse a tool a guest turn may not call. NyxBot holds every service of
+/// the owner, so its guest turns call no tools at all; a specialist's guest
+/// turns may discover and read within its grants.
+fn guest_tool_refusal(
+    auth: &McpAuthContext,
+    tool_name: &str,
+    request_id: Option<serde_json::Value>,
+) -> Option<Response> {
+    let chat = auth.chat.as_ref().filter(|chat| chat.guest)?;
+    if chat.is_orchestrator() {
+        return Some(tool_result(
+            request_id,
+            &crate::services::assistant_acknowledgement_service::orchestrator_guest_refusal()
+                .to_string(),
+            true,
+        ));
+    }
+    (!guest_tool_allowed(tool_name)).then(|| guest_refused(request_id))
+}
+
+/// The generic proxy tool lets the caller choose any method and path, and a
+/// GET is not always harmless; guest turns use curated operations only.
+fn guest_endpoint_refusal(
+    auth: &McpAuthContext,
+    service: &mcp_service::McpToolService,
+    endpoint: &mcp_service::McpToolEndpoint,
+    request_id: Option<serde_json::Value>,
+) -> Option<Response> {
+    (guest_turn(auth) && mcp_service::is_generic_proxy_dispatch(service, endpoint))
+        .then(|| guest_refused(request_id))
+}
+
 /// A channel chat member who is not the owner asked for this turn.
 fn guest_turn(auth: &McpAuthContext) -> bool {
     auth.chat.as_ref().is_some_and(|chat| chat.guest)
@@ -2078,8 +2113,6 @@ fn guest_tool_allowed(tool_name: &str) -> bool {
                 | "nyx__call_tool"
         )
 }
-
-
 
 async fn handle_account_tool(
     state: &AppState,
@@ -2255,6 +2288,9 @@ async fn handle_meta_call_tool(
         return response;
     }
 
+    if let Some(refused) = guest_endpoint_refusal(auth, service, endpoint, request_id.clone()) {
+        return refused;
+    }
     let prepared = match mcp_service::prepare_proxy_tool_call(service, endpoint, &inner_args) {
         Ok(prepared) => prepared,
         Err(e) => {

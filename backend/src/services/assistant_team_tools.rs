@@ -221,7 +221,8 @@ pub fn schema(name: &str) -> Value {
                     replied to (mention), or every message (all)"},
                 "members": {"type": "string", "enum": ["everyone", "owner"],
                     "description": "Groups and channels: whether members other than the \
-                    user may talk to the agent (as guests: read-only, no account actions)"},
+                    user may talk to the agent, as guests (default: once the user has talked \
+                    to the bot there)"},
                 "allow_posts": {"type": "boolean",
                     "description": "Let the chat's agent post there without being asked"},
                 "agent": {"type": "string", "minLength": 1, "maxLength": 64,
@@ -396,14 +397,16 @@ fn description(name: &str) -> &'static str {
         }
         "update_channel_chat" => {
             "Change one chat's settings when the user asks: answer every message or only \
-            mentions and replies (groups default to mentions), let members other than the user \
-            talk to the agent (they are guests: read-only services, no account actions; \
-            default on in groups), allow posting there, or give the chat its own agent."
+            mentions and replies (groups default to mentions); let members other than the user \
+            talk to the agent (default once the user has talked to the bot there); allow \
+            posting there; or give the chat its own agent. Guests never act for the user: you \
+            answer them without tools, and a specialist given the chat reads only with its \
+            own services, so give a chat a specialist when its members need a service."
         }
         "update_channel_access" => {
             "Set who may talk to the agent in private chats with a channel bot: only the user \
-            (default) or anyone, each in their own thread as a guest (read-only services, no \
-            account actions, nothing private to the user)."
+            (default) or anyone, each in their own thread as a guest (no account actions and \
+            nothing private to the user; NyxBot uses no tools for them)."
         }
         _ => "Unknown NyxBot tool.",
     }
