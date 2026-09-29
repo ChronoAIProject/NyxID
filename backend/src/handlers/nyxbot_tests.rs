@@ -1764,7 +1764,7 @@ async fn org_admins_link_org_bots_by_label_and_lose_them_with_their_role() {
     assert!(
         !matches!(&reply, Err(AppError::NotFound(message)) if message == "API key not found")
             && !matches!(&reply, Err(AppError::Forbidden(_))),
-        "{reply:?}"
+        "org replies must use the org's route key"
     );
     // A member who does not administer the org cannot link it.
     let member = Uuid::new_v4().to_string();
