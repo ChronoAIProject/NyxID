@@ -83,7 +83,8 @@ beforeEach(() => {
   const chat = (id: string, kind: string, title: string) => ({
     id, channel_agent_id: "channel-1", platform: "telegram", bot_label: "Home bot", kind, title,
     agent_id: null, reply_mode: kind === "private" ? "all" : "mention", members: "everyone",
-    owner_seen: true, allow_posts: false, conversation_id: null, last_message_at: at,
+    members_setting: null, owner_seen: false, allow_posts: false, conversation_id: null,
+    last_message_at: at,
   });
   chats = [chat("chat-g", "group", "Team chat"), chat("chat-p", "private", "Alice")];
   globalThis.__nyxidAssistantHttpMock = ({ endpoint, init }) => {
@@ -108,7 +109,12 @@ beforeEach(() => {
     );
     if (chatPatch && method === "PATCH") {
       const index = chats.findIndex((row) => row.id === chatPatch[1]);
-      chats[index] = { ...chats[index]!, ...(body as object) };
+      const update = body as Record<string, unknown>;
+      chats[index] = {
+        ...chats[index]!,
+        ...update,
+        ...(update.members ? { members_setting: update.members } : {}),
+      };
       return json({ chat: chats[index] });
     }
     if (endpoint === "/assistant/nyxagent/channels/channel-1" && method === "PATCH") {
@@ -305,6 +311,18 @@ it("opens a bot's chats and saves who can talk and how it answers", async () => 
       method: "PATCH",
       endpoint: "/assistant/nyxagent/channels/channel-1/chats/chat-g",
       body: { reply_mode: "all" },
+    }),
+  );
+  // Before the user has talked there, only they can; they can pin that.
+  const members = within(list).getByRole("combobox", { name: "Who can talk in Team chat" });
+  expect(members).toHaveTextContent("You, until you talk here");
+  await user.click(members);
+  await user.click(screen.getByRole("option", { name: "Only you" }));
+  await waitFor(() =>
+    expect(writes).toContainEqual({
+      method: "PATCH",
+      endpoint: "/assistant/nyxagent/channels/channel-1/chats/chat-g",
+      body: { members: "owner" },
     }),
   );
   await user.click(

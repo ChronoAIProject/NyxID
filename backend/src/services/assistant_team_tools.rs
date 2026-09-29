@@ -219,10 +219,10 @@ pub fn schema(name: &str) -> Value {
                 "reply_mode": {"type": "string", "enum": ["mention", "all"],
                     "description": "Groups and channels: answer only when mentioned or \
                     replied to (mention), or every message (all)"},
-                "members": {"type": "string", "enum": ["everyone", "owner"],
+                "members": {"type": "string", "enum": ["everyone", "owner", "default"],
                     "description": "Groups and channels: whether members other than the \
-                    user may talk to the agent, as guests (default: once the user has talked \
-                    to the bot there)"},
+                    user may talk to the agent, as guests; default lets them once the user \
+                    has talked to the bot there"},
                 "allow_posts": {"type": "boolean",
                     "description": "Let the chat's agent post there without being asked"},
                 "agent": {"type": "string", "minLength": 1, "maxLength": 64,

@@ -1205,11 +1205,12 @@ async fn execute_turn(
     // A guest's recap holds only what the chat itself saw.
     if row.guest_turn {
         use crate::models::assistant_conversation::TurnOrigin;
-        history.retain(|message| {
-            matches!(
-                message.origin,
-                Some(TurnOrigin::Channel) | Some(TurnOrigin::Event)
-            )
+        // Chat messages and the replies delivered to the chat; never NyxID's
+        // own notices of event turns or anything said in the app.
+        history.retain(|message| match message.origin {
+            Some(TurnOrigin::Channel) => matches!(message.role.as_str(), "user" | "assistant"),
+            Some(TurnOrigin::Event) => message.role == "assistant",
+            _ => false,
         });
     }
     // Cards decided while an earlier turn was still running never reached the

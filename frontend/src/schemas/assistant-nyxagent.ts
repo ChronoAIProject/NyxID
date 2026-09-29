@@ -483,6 +483,8 @@ export const nyxAgentChannelChatSchema = z.object({
    * chats: the bot's setting). Groups open once the user has talked there.
    */
   members: z.enum(["everyone", "owner"]).catch("owner"),
+  /** The user's explicit choice; null follows the default. */
+  members_setting: z.enum(["everyone", "owner"]).nullable().catch(null).default(null),
   owner_seen: z.boolean().default(false),
   allow_posts: z.boolean().default(false),
   conversation_id: z.string().nullable().default(null),
@@ -500,7 +502,8 @@ export const nyxAgentChannelChatUpdatedSchema = z.object({
 export type NyxAgentChannelChatUpdated = z.infer<typeof nyxAgentChannelChatUpdatedSchema>;
 export type NyxAgentChannelChatSettings = Partial<{
   reply_mode: "mention" | "all";
-  members: "everyone" | "owner";
+  /** `default` lets members talk once the user has talked there. */
+  members: "everyone" | "owner" | "default";
   allow_posts: boolean;
   /** An agent ID, or `default` for the bot's agent. */
   agent_id: string;

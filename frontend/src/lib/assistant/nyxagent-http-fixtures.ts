@@ -863,7 +863,9 @@ export class NyxAgentHttpFixtures {
     }
     if (update.members !== undefined) {
       if (!group) return failure(400, "Who may talk in private chats is set on the channel bot");
-      chat.members = update.members === "owner" ? "owner" : "everyone";
+      chat.members_setting =
+        update.members === "owner" ? "owner" : update.members === "everyone" ? "everyone" : null;
+      chat.members = chat.members_setting ?? (chat.owner_seen ? "everyone" : "owner");
     }
     if (typeof update.allow_posts === "boolean") chat.allow_posts = update.allow_posts;
     let agentName: string | undefined;
@@ -937,6 +939,7 @@ export class NyxAgentHttpFixtures {
           agent_id: null,
           reply_mode: kind === "private" ? "all" : "mention",
           members: kind === "private" ? "owner" : "everyone",
+          members_setting: null,
           owner_seen: kind !== "private",
           allow_posts: false,
           conversation_id: null,

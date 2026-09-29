@@ -57,6 +57,10 @@ pub struct NyxbotChannel {
     /// `mention_or_reply_to_bot`.
     #[serde(default)]
     pub gateway_groups: Option<String>,
+    /// Gateway only: after the gateway refused an admission update, the
+    /// sweep retries it no sooner than this.
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub gateway_groups_retry_at: Option<DateTime<Utc>>,
     /// Platform sender IDs verified as the owner. Only these senders reach the
     /// owner's Full-access NyxBot; everyone else gets a short refusal.
     #[serde(default)]

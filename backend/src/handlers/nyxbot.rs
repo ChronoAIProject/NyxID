@@ -619,6 +619,7 @@ pub async fn connect(
         gateway_version: None,
         binding_id: None,
         gateway_groups: None,
+        gateway_groups_retry_at: None,
         owner_sender_ids: {
             let mut ids = known_owner_senders(state, owner, &platform).await;
             for id in verified_owners {
@@ -698,7 +699,7 @@ pub async fn connect(
                 }
             }
             let row = load_channel(state, owner, &id).await?;
-            if let Some(code) = chats::sync_gateway_groups(state, &row).await? {
+            if let Some(code) = chats::sync_gateway_groups(state, &row, true).await? {
                 tracing::warn!(code, "NyxBot gateway group admission not restored");
             }
             let row = load_channel(state, owner, &id).await?;
@@ -1786,7 +1787,8 @@ async fn inbound_message(
         chats::Admission::Refuse => return Ok(Inbound::Reply(PRIVATE_REFUSAL.into())),
         chats::Admission::Silent => return Ok(Inbound::Silent),
     };
-    start_chat_turn(state, row, chat, sender, text, guest).await
+    let addressed = chat.kind.as_deref() == Some("private") || addressed == Some(true);
+    start_chat_turn(state, row, chat, sender, text, guest, addressed).await
 }
 
 /// Link a sender presenting the owner's one-time code.
@@ -1976,6 +1978,7 @@ async fn start_chat_turn(
     sender: &Sender<'_>,
     text: &str,
     guest: bool,
+    addressed: bool,
 ) -> AppResult<Inbound> {
     let (_, conversation_id) = thread_conversation(state, row, &chat.partition).await?;
     let exists = engine::get(&state.db, &row.user_id, &conversation_id)
@@ -2097,8 +2100,10 @@ async fn start_chat_turn(
         // The chat is busy (or the owner's channel pool is full): queue the
         // message for the agent's next turn instead of bouncing it. Its reply
         // is an asynchronous update delivered back to this chat.
-        // Someone other than the owner is asked to try again: their messages
-        // never queue up as the owner's work or use the owner's wake-ups.
+        // Someone other than the owner is asked to try again (only when they
+        // spoke to the bot): their messages never queue up as the owner's
+        // work or use the owner's wake-ups.
+        Ok(Started::Busy | Started::PoolFull) if guest && !addressed => Ok(Inbound::Silent),
         Ok(Started::Busy | Started::PoolFull) if guest => Ok(Inbound::Reply(
             "I'm answering another message right now. Please try again in a moment.".into(),
         )),

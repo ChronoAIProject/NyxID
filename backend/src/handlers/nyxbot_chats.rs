@@ -78,6 +78,23 @@ pub(super) async fn note_owner_presence(
     Ok(chat)
 }
 
+/// A guest's text with every "(owner)" (any case) unbracketed.
+fn without_owner_mark(text: &str) -> String {
+    let lower = text.to_lowercase();
+    if lower.len() != text.len() || !lower.contains("(owner)") {
+        return text.replace("(owner)", "owner");
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = 0;
+    for (at, _) in lower.match_indices("(owner)") {
+        out.push_str(&text[rest..at]);
+        out.push_str(&text[at + 1..at + 6]);
+        rest = at + "(owner)".len();
+    }
+    out.push_str(&text[rest..]);
+    out
+}
+
 /// A group message as its thread stores it: the sender's name first, marked
 /// `(owner)` for the owner. Names cannot carry the mark and a guest's text is
 /// kept on one line, so no one can pass for the owner.
@@ -101,7 +118,11 @@ pub(super) fn attributed(name: Option<&str>, text: &str, guest: bool) -> String 
         .map(|name| name.chars().take(60).collect::<String>());
     if guest {
         let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-        format!("{}: {text}", name.as_deref().unwrap_or("Someone"))
+        format!(
+            "{}: {}",
+            name.as_deref().unwrap_or("Someone"),
+            without_owner_mark(&text)
+        )
     } else {
         format!("{} (owner): {text}", name.as_deref().unwrap_or("Owner"))
     }
@@ -302,6 +323,10 @@ pub(super) fn raw_addressed(bot: &ChannelBot, raw: &Value) -> Option<bool> {
         // Slack says so with its own event type; other channel messages
         // cannot be told apart here.
         "slack" => (raw["event"]["type"] == "app_mention").then_some(true),
+        // Slash commands and component clicks are always for the bot.
+        "discord" if matches!(raw["type"].as_u64(), Some(2 | 3)) && raw.get("author").is_none() => {
+            Some(true)
+        }
         "discord" if raw.get("author").is_some() => {
             let bot_id = bot.platform_bot_id.as_str();
             Some(
@@ -475,11 +500,16 @@ async fn wanted_groups(state: &AppState, row: &NyxbotChannel) -> AppResult<&'sta
     Ok(if all { "all" } else { GATEWAY_GROUPS_DEFAULT })
 }
 
+/// How long the sweep waits before retrying an update the gateway refused.
+const GATEWAY_RETRY_MINUTES: i64 = 10;
+
 /// Bring the gateway's group admission in line with the chats' settings.
-/// Returns a stable error code when the gateway refused the update.
+/// Returns a stable error code when the gateway refused the update. The
+/// sweep (`force = false`) backs off after a refusal; a user's change does not.
 pub(super) async fn sync_gateway_groups(
     state: &AppState,
     row: &NyxbotChannel,
+    force: bool,
 ) -> AppResult<Option<&'static str>> {
     if row.transport != "gateway" {
         return Ok(None);
@@ -498,6 +528,32 @@ pub(super) async fn sync_gateway_groups(
     {
         return Ok(None);
     }
+    if !force
+        && row
+            .gateway_groups_retry_at
+            .is_some_and(|at| at > Utc::now())
+    {
+        return Ok(Some("gateway_retry_pending"));
+    }
+    let code = push_gateway_groups(state, row, wanted).await?;
+    let update = match code {
+        None => doc! {"$unset": {"gateway_groups_retry_at": ""}},
+        Some(_) => doc! {"$set": {"gateway_groups_retry_at": bson::DateTime::from_chrono(
+        Utc::now() + ChronoDuration::minutes(GATEWAY_RETRY_MINUTES))}},
+    };
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .update_one(doc! {"_id": &row.id}, update)
+        .await?;
+    Ok(code)
+}
+
+async fn push_gateway_groups(
+    state: &AppState,
+    row: &NyxbotChannel,
+    wanted: &'static str,
+) -> AppResult<Option<&'static str>> {
     let (Some(channel_id), Some(version), Some(route_id)) = (
         row.gateway_channel_id.as_deref(),
         row.gateway_version,
@@ -558,6 +614,9 @@ pub struct ChannelChatResponse {
     /// Who may talk to the agent: `everyone` or `owner` (for private chats,
     /// the bot's `private_chats`).
     members: String,
+    /// Groups: the owner's explicit choice (`everyone` or `owner`); `None`
+    /// follows the default (members once the owner has talked there).
+    members_setting: Option<String>,
     /// Groups: the owner has talked to the bot there.
     owner_seen: bool,
     allow_posts: bool,
@@ -586,6 +645,7 @@ fn chat_response(row: &NyxbotChannel, chat: &NyxbotThread) -> ChannelChatRespons
         } else {
             "owner".into()
         },
+        members_setting: chat.members.clone(),
         owner_seen: chat.owner_seen,
         allow_posts: chat.allow_posts,
         conversation_id: chat.conversation_id.clone(),
@@ -693,9 +753,9 @@ pub(crate) async fn update_chat(
         set.insert("reply_mode", mode);
     }
     if let Some(members) = settings.members.as_deref() {
-        if !matches!(members, "everyone" | "owner") {
+        if !matches!(members, "everyone" | "owner" | "default") {
             return Err(AppError::ValidationError(
-                "members must be everyone or owner".into(),
+                "members must be everyone, owner or default".into(),
             ));
         }
         if !group {
@@ -703,7 +763,11 @@ pub(crate) async fn update_chat(
                 "Who may talk in private chats is set on the channel bot (private_chats)".into(),
             ));
         }
-        set.insert("members", members);
+        if members == "default" {
+            unset.insert("members", "");
+        } else {
+            set.insert("members", members);
+        }
     }
     if let Some(allow) = settings.allow_posts {
         if allow && chat.platform_chat_id.is_none() {
@@ -749,7 +813,7 @@ pub(crate) async fn update_chat(
         .await?
         .ok_or_else(|| AppError::NotFound("Chat not found".into()))?;
     let gateway_error = if settings.reply_mode.is_some() {
-        sync_gateway_groups(state, &row).await?
+        sync_gateway_groups(state, &row, true).await?
     } else {
         None
     };

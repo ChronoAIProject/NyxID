@@ -928,7 +928,10 @@ pub async fn begin_turn(
                     // is posted to the group.
                     TurnOrigin::Group => ("group", start.text.clone()),
                     TurnOrigin::User | TurnOrigin::Channel => {
-                        row.event_streak = 0;
+                        // Only the owner's messages reset the event-turn guard.
+                        if !start.guest {
+                            row.event_streak = 0;
+                        }
                         // The user's own turns never report to NyxBot (only
                         // assigned and event turns do), but they keep the
                         // assigning thread so resumed assigned work still

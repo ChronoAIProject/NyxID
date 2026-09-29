@@ -378,7 +378,7 @@ payload or, once, from the platform's chat lookup (Telegram `getChat`, Lark
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `reply_mode` | `mention` (groups, channels) | Answer only when the bot is mentioned or a message replies to one of its messages; `all` answers every message. Private chats always answer. |
-| `members` | `everyone` once the owner has talked to the bot there, else `owner` (groups, channels) | Members other than the owner may talk to the agent as guests; `owner` answers only the owner. A stranger who adds the bot to their own group gets nothing. |
+| `members` | default: `everyone` once the owner has talked to the bot there, else `owner` (groups, channels) | Members other than the owner may talk to the agent as guests; `owner` answers only the owner; `default` returns to the default. A stranger who adds the bot to their own group gets nothing. |
 | `allow_posts` | off | The chat's agent may post there without being asked (`nyxid__post_to_chat`). |
 | agent | the bot's agent | The chat reaches another agent; it starts a new thread with it, and relinking the bot leaves such chats alone. |
 
@@ -396,8 +396,8 @@ judged from the update (an @username or text mention, a reply to the bot); Lark
 and Feishu count any @mention (they deliver unmentioned group messages only to
 apps granted every group message); Slack counts `app_mention` events and
 Discord its `mentions` and replied-to author; a reply to one of the bot's sent
-messages counts everywhere. When a platform cannot tell, only the owner's
-messages count as addressed. Telegram bots see every group message only with privacy mode off or
+messages counts everywhere, and Discord slash commands always do. When a
+platform cannot tell, only the owner's messages count as addressed. Telegram bots see every group message only with privacy mode off or
 as group admins, and NyxBot says so when a chat is set to `all`.
 
 **Guests.** A turn started by someone other than the verified owner is a guest
@@ -415,15 +415,18 @@ turn so late tool calls stay restricted):
 - an ungranted service is refused without a permission request, so a guest
   never widens what a specialist may use;
 - guests' messages are never queued as the owner's work: a busy agent asks them
-  to try again, and a guest turn leaves the owner's queued events alone;
+  to try again (only if they spoke to the bot), a guest turn leaves the owner's
+  queued events alone, and guest turns never reset the owner's event-turn loop
+  guard;
 - in a shared thread the owner's messages are marked `(owner)`; guests' names
-  cannot carry the mark and their text is kept on one line, so no one passes
-  for the owner;
+  cannot carry the mark, their text is kept on one line and any `(owner)` in
+  it is unbracketed, so no one passes for the owner;
 - the owner's memory, roster, direct chats, pending requests and card
   decisions stay out of the turn's instructions; the first guest turn after an
   owner turn starts from the transcript rather than the owner's live context,
-  and a guest's recap holds only channel and event turns (messages record the
-  turn origin), never what the owner said in the app;
+  and a guest's recap holds only chat messages and the replies delivered to the
+  chat (messages record the turn origin), never what the owner said in the app
+  or NyxID's notices to the agent;
 - only the owner's words confirm action cards.
 
 Guests' turns are billed to the owner, like every channel turn, and share the
@@ -435,7 +438,8 @@ context is dropped at once.
 agent. A rebuilt connection carries its groups and direct chats over with their
 settings (chats without their own agent start new threads if the connection now
 reaches another agent) and keeps `private_chats`. The 15-second sweep retries a
-gateway admission update that failed or raced.
+gateway admission update that failed or raced, at most every ten minutes after
+the gateway refused one (`gateway_groups_retry_at`).
 
 **Posting.** `nyxid__post_to_chat` sends through the bot's own route (NyxID's
 initiated-send path: rate limit, outbound record and audit) into a chat that

@@ -133,9 +133,13 @@ function ChatRow({
             />
             <SettingSelect
               label={`Who can talk in ${title}`}
-              value={chat.members}
+              value={chat.members_setting ?? "default"}
               disabled={update.isPending}
               options={[
+                {
+                  value: "default",
+                  label: chat.owner_seen ? "Everyone (you talk here)" : "You, until you talk here",
+                },
                 { value: "everyone", label: "Everyone there" },
                 { value: "owner", label: "Only you" },
               ]}
