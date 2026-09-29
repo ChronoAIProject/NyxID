@@ -662,10 +662,11 @@ For Aevatar, save `catalog:skills:read catalog:skills:write proxy` in **Allowed 
 | --- | --- |
 | `GET /api/v1/keys` | `catalog:skills:read` |
 | `GET /api/v1/keys/{catalog_uuid}` | `catalog:skills:read` |
+| `PUT /api/v1/keys/{catalog_uuid}` with only `recommended_skill_refs` | `catalog:skills:write` |
 | Catalog discovery, skills, history, OpenAPI contract | `catalog:skills:read` |
 | Catalog recommendation PUT or restore | `catalog:skills:write` |
 
-Read and write are independent. Read alone authorizes both key GETs; `user-services:read` is unnecessary for this catalog metadata path. Write alone does not grant reads. The scopes authorize catalog metadata and recommendations, not execution against the services or access to private connections.
+Read and write are independent. Read alone authorizes both key GETs; `user-services:read` is unnecessary for this catalog metadata path. Write alone does not grant GET access. A successful key PUT returns the written entry's safe catalog metadata, including names, type, active status, references, revision, and digest, without requiring read scope. The scopes authorize catalog metadata and recommendations, not execution against the services or access to private connections.
 
 The same grant can be saved with the CLI using a platform administrator's identity:
 
@@ -681,9 +682,42 @@ The ordinary edit form also supports saving catalog scopes already present on an
 
 Existing CatalogEditor accounts keep their previous role-based authority until an administrator explicitly saves catalog scopes. In that legacy mode, live global `nyxid:catalog:skills:read/write` permissions remain required, and key GETs additionally require `user-services:read`. Removing a legacy authorizing role still revokes access. A scope save deliberately converts the account to scope authority; subsequent catalog revocation uses the allowed scopes. Existing General or Curation accounts are not upgraded merely because their stored scopes contain these strings. Role-only and metadata-only API updates do not convert them.
 
-For CatalogEditor, `/keys` returns `{"keys":[...]}` with `resource_type: "catalog_service"` on every row. Both `id` and `catalog_service_id` are **catalog UUIDs**. Use an `id` from this list for detail and `/catalog-curation/services/{id}/skills`; personal/org connection UUIDs are a separate namespace. Existing and disabled catalog entries are included; inspect `is_active`. Responses contain names, identifiers, type, active status, recommendations, references, revision, and manifest digest. Queries project these metadata fields without loading credentials or private connection settings. GET responses use `Cache-Control: private, no-store`.
+For CatalogEditor, `/keys` returns `{"keys":[...]}` with `resource_type: "catalog_service"` on every row. Both `id` and `catalog_service_id` are **catalog UUIDs**. Use an `id` from this list for key detail/PUT and `/catalog-curation/services/{id}/skills`; personal/org connection UUIDs are a separate namespace. Existing and disabled catalog entries are included; inspect `is_active`. Responses contain names, identifiers, type, active status, recommendations, references, revision, and manifest digest. Queries project these metadata fields without loading credentials or private connection settings. GET and PUT responses use `Cache-Control: private, no-store`.
 
-Writes use the [machine recommendation API](#machine-recommendation-api) and retain revision conflicts, request replay protection, history, token revocation, and credential-generation checks. Scope, account, and token changes conflict with in-flight mutation transactions and force revalidation; legacy role authority is also fenced. A persisted per-account write window applies across replicas: 60 changed writes per second by default, or `rate_limit_override`. Unchanged writes and committed retries do not consume additional budget. Removing a scope blocks subsequent requests with existing tokens; a newly added scope must also be present on the token.
+Both the key PUT and the [machine recommendation API](#machine-recommendation-api) use the same transactional writer, history, token revocation, and credential-generation checks. Scope, account, and token changes conflict with in-flight mutation transactions and force revalidation; legacy role authority is also fenced. A persisted per-account write window applies across both routes and replicas: 60 changed writes per second by default, or `rate_limit_override`. Unchanged writes and committed retries do not consume additional budget. Removing a scope blocks subsequent requests with existing tokens; a newly added scope must also be present on the token.
+
+### Assigning references through key PUT
+
+CatalogEditors may replace a catalog service's complete recommendation list with the existing key URL:
+
+```http
+PUT /api/v1/keys/{catalog_uuid}
+Authorization: Bearer <service-account-token>
+Content-Type: application/json
+
+{
+  "recommended_skill_refs": [{
+    "source": "ornn",
+    "skill_id": "immutable-skill-id",
+    "name": "operations/manual",
+    "version": "1.5",
+    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "dependencies": []
+  }]
+}
+```
+
+The example hash is illustrative; supply the actual package hash. Reference validation and size bounds are identical to the machine recommendation API. NyxID validates the reference structure without fetching package bytes or proving the hash. This write changes NyxID catalog recommendations; Ornn package content, versions, visibility, and bindings are managed through Ornn's API separately.
+
+The SA body accepts exactly `recommended_skill_refs`. Missing/null values and additional fields (including `base_revision`, `request_id`, or connection settings) return 422. Invalid pins return 400. `[]` stores empty references and derived advisory names; it does not remove the refs field. A later names-only admin edit therefore still needs replacement refs or `clear_refs`. The body limit is 70,000 bytes. Authorization runs before body extraction; a caller lacking write authority receives 403 even with a malformed body. A valid catalog UUID that does not exist, including a private connection UUID, returns 404.
+
+The response is 200 with the same safe catalog metadata shape as the SA detail GET. The server captures the current revision once and commits against that revision. A concurrent change after the snapshot returns 409; the server does not silently rebase. An identical retry is a no-op when the recommendations are unchanged. The simple request cannot detect a list based on an earlier client read: retrying after an intervening edit can replace that edit. For explicit stale-write protection and durable replay, use `PUT /api/v1/catalog-curation/services/{catalog_uuid}/skills` with `base_revision` and `request_id` as documented below.
+
+Legacy CatalogEditors need the existing global write role permission plus matching token/live write scopes, but no extra read scope for this PUT. General and Curation SAs cannot use this alias. Human key updates keep their connection request contract; they ignore the unknown `recommended_skill_refs` field while processing supported fields normally. API-key, delegated, and relay writes remain denied. Invalid or expired SA credentials return 401; valid unauthorized accounts return 403. POST, DELETE, history, slug writes, and upgrades remain outside the SA key exception.
+
+Deploy this alias on every backend replica before using it. Older replicas still reject the SA PUT with 403; rollback restores that restriction without changing stored recommendation data. This alias adds no account migration or configuration requirement.
+
+### Ornn proxy access
 
 Ornn HTTP requests require `proxy` on both the token and the live account. Keep the assigned Ornn role permissions `ornn:skill:read`, `ornn:skill:create`, and `ornn:skill:update` for package content operations. A converted legacy Curation account retains its administrator-selected Ornn target; a fresh editor uses the active HTTP catalog service with slug `ornn-api`. Both `/api/v1/proxy/{catalog_uuid}/...` and `/api/v1/proxy/s/{target_slug}/...` resolve directly to that catalog target. In particular, `POST /api/v1/proxy/s/ornn-api/api/v1/skill-format/validate` remains available after saving catalog scopes, including with an existing token that already contains `proxy`.
 

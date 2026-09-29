@@ -1308,10 +1308,13 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::service_history::get_history),
         )
         .route("/", post(handlers::keys::create_key))
-        .route(
-            "/{key_id}",
-            put(handlers::keys::update_key).delete(handlers::keys::delete_key),
-        );
+        .route("/{key_id}", delete(handlers::keys::delete_key));
+
+    let key_update_routes = Router::new()
+        .route("/keys/{key_id}", put(handlers::key_updates::update_key))
+        .layer(middleware::from_fn(reject_delegated_tokens))
+        .layer(middleware::from_fn(reject_api_key_tokens))
+        .layer(middleware::from_fn(reject_relay_tokens));
 
     let connect_link_routes = Router::new()
         .route("/", post(handlers::connect_links::create_connect_link))
@@ -2211,6 +2214,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .merge(api_v1_delegated)
         .merge(api_v1_shared)
         .merge(api_v1_human_only)
+        .merge(key_update_routes)
         .merge(ownership_routes);
 
     let well_known_routes = Router::new()

@@ -368,6 +368,38 @@ fn duplicate_key(error: &AppError) -> bool {
     }
 }
 
+/// Replace references against one server-observed revision. Transaction retries
+/// retain that revision so a competing writer produces a conflict, not a rebase.
+pub async fn replace_refs_at_current_revision(
+    db: &Database,
+    service_id: &str,
+    actor: &SkillActor,
+    refs: Vec<SkillReference>,
+) -> AppResult<(SkillCommit, String)> {
+    let revision = super::catalog_editor_catalog_service::read(db, service_id)
+        .await?
+        .skills_revision;
+    let request_id = Uuid::new_v4().to_string();
+    let input = SkillUpdate {
+        recommended_skill_refs: Some(refs),
+        ..Default::default()
+    };
+    let committed = commit(
+        db,
+        service_id,
+        actor,
+        &input,
+        revision,
+        &request_id,
+        &Document::new(),
+        &Document::new(),
+        None,
+        None,
+    )
+    .await?;
+    Ok((committed, request_id))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn commit(
     db: &Database,
