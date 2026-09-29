@@ -865,9 +865,26 @@ async fn dispatch(
                 Some(&author),
             )
             .await?;
+            // This thread is woken with the members' replies once the group
+            // is quiet.
+            if !addressed.is_empty() {
+                crate::services::assistant_group_service::follow(
+                    db,
+                    owner,
+                    &group.id,
+                    caller,
+                    message.seq,
+                )
+                .await?;
+            }
             (
                 json!({"posted": message.seq, "addressed_agent_ids": addressed,
-                    "note": "Members reply in the group; you are not woken for their replies."}),
+                "note": if addressed.is_empty() {
+                    "Nobody was addressed: @mention members to have them answer."
+                } else {
+                    "Members answer in the group. End your turn: NyxID wakes you with \
+                    their replies when the group is quiet."
+                }}),
                 false,
             )
         }
@@ -1342,6 +1359,10 @@ pub struct SettingsResponse {
     max_concurrent_subagent_turns: i32,
     max_live_subagents_limit: i32,
     max_concurrent_subagent_turns_limit: i32,
+    max_group_handoffs: i32,
+    max_group_handoffs_per_hour: i32,
+    max_group_handoffs_limit: i32,
+    max_group_handoffs_per_hour_limit: i32,
 }
 impl From<crate::models::assistant_settings::AssistantSettings> for SettingsResponse {
     fn from(row: crate::models::assistant_settings::AssistantSettings) -> Self {
@@ -1352,6 +1373,11 @@ impl From<crate::models::assistant_settings::AssistantSettings> for SettingsResp
             max_live_subagents_limit: crate::models::assistant_settings::MAX_LIVE_SUBAGENTS_LIMIT,
             max_concurrent_subagent_turns_limit:
                 crate::models::assistant_settings::MAX_CONCURRENT_SUBAGENT_TURNS_LIMIT,
+            max_group_handoffs: row.max_group_handoffs,
+            max_group_handoffs_per_hour: row.max_group_handoffs_per_hour,
+            max_group_handoffs_limit: crate::models::assistant_settings::MAX_GROUP_HANDOFFS_LIMIT,
+            max_group_handoffs_per_hour_limit:
+                crate::models::assistant_settings::MAX_GROUP_HANDOFFS_PER_HOUR_LIMIT,
         }
     }
 }
@@ -1371,6 +1397,10 @@ pub struct SettingsRequest {
     skip_destructive_confirmation: Option<bool>,
     max_live_subagents: Option<i32>,
     max_concurrent_subagent_turns: Option<i32>,
+    #[serde(default)]
+    max_group_handoffs: Option<i32>,
+    #[serde(default)]
+    max_group_handoffs_per_hour: Option<i32>,
 }
 
 pub async fn update_settings(
@@ -1388,6 +1418,8 @@ pub async fn update_settings(
             skip_destructive_confirmation: body.skip_destructive_confirmation,
             max_live_subagents: body.max_live_subagents,
             max_concurrent_subagent_turns: body.max_concurrent_subagent_turns,
+            max_group_handoffs: body.max_group_handoffs,
+            max_group_handoffs_per_hour: body.max_group_handoffs_per_hour,
         },
     )
     .await?;

@@ -43,7 +43,12 @@ const GROUP_HOPS = 6;
 export const NYXAGENT_FIXTURE_CHANNEL_THREAD = "Morning briefing";
 /** A user message that NyxBot hands to the researcher in a group. */
 export const NYXAGENT_FIXTURE_GROUP_HANDOFF = "Find the urgent issues";
-const LIMITS = { max_live_subagents_limit: 32, max_concurrent_subagent_turns_limit: 8 };
+const LIMITS = {
+  max_live_subagents_limit: 32,
+  max_concurrent_subagent_turns_limit: 8,
+  max_group_handoffs_limit: 24,
+  max_group_handoffs_per_hour_limit: 600,
+};
 /** Channel bots the dev mock API lists (src/lib/mock-data.ts). */
 const FIXTURE_BOTS: Readonly<Record<string, { platform: string; label: string; username: string }>> =
   {
@@ -100,6 +105,8 @@ interface Settings {
   skip_destructive_confirmation: boolean;
   max_live_subagents: number;
   max_concurrent_subagent_turns: number;
+  max_group_handoffs: number;
+  max_group_handoffs_per_hour: number;
 }
 
 interface State {
@@ -114,6 +121,8 @@ const DEFAULT_SETTINGS: Settings = {
   skip_destructive_confirmation: false,
   max_live_subagents: 8,
   max_concurrent_subagent_turns: 3,
+  max_group_handoffs: 6,
+  max_group_handoffs_per_hour: 60,
 };
 
 const json = (data: unknown, status = 200) =>
@@ -1103,10 +1112,15 @@ export class NyxAgentHttpFixtures {
         const update = body() as Partial<Settings>;
         const live = update.max_live_subagents;
         const turns = update.max_concurrent_subagent_turns;
+        const handoffs = update.max_group_handoffs;
+        const hourly = update.max_group_handoffs_per_hour;
         if (
           (live !== undefined && (live < 0 || live > LIMITS.max_live_subagents_limit)) ||
           (turns !== undefined &&
-            (turns < 1 || turns > LIMITS.max_concurrent_subagent_turns_limit))
+            (turns < 1 || turns > LIMITS.max_concurrent_subagent_turns_limit)) ||
+          (handoffs !== undefined &&
+            (handoffs < 0 || handoffs > LIMITS.max_group_handoffs_limit)) ||
+          (hourly !== undefined && (hourly < 0 || hourly > LIMITS.max_group_handoffs_per_hour_limit))
         ) {
           return failure(400, "Setting out of range");
         }

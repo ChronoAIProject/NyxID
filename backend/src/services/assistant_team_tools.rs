@@ -302,7 +302,8 @@ fn description(name: &str) -> &'static str {
         }
         "list_groups" => "List the user's group chats with their members.",
         "post_to_group" => {
-            "Post a message to a group as yourself; @mention members to have them answer there."
+            "Post a message to a group as yourself; @mention members to have them answer there. \
+            You are woken with their replies once the group is quiet."
         }
         "update_group" => "Rename a group or add/remove members.",
         "delete_group" => "Delete a group chat and its transcript.",

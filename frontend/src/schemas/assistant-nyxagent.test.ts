@@ -142,6 +142,10 @@ describe("NyxBot team, settings and channel schemas", () => {
     max_concurrent_subagent_turns: 3,
     max_live_subagents_limit: 32,
     max_concurrent_subagent_turns_limit: 8,
+    max_group_handoffs: 6,
+    max_group_handoffs_per_hour: 60,
+    max_group_handoffs_limit: 24,
+    max_group_handoffs_per_hour_limit: 600,
   };
 
   const agent = {
@@ -244,8 +248,17 @@ describe("NyxBot team, settings and channel schemas", () => {
 
   it("validates settings form values against the server limits", () => {
     const schema = nyxAgentSettingsFormSchema(limits);
-    const valid = { confirm_destructive: true, max_live_subagents: 0, max_concurrent_subagent_turns: 1 };
+    const valid = {
+      confirm_destructive: true,
+      max_live_subagents: 0,
+      max_concurrent_subagent_turns: 1,
+      max_group_handoffs: 0,
+      max_group_handoffs_per_hour: 0,
+    };
     expect(schema.safeParse(valid).success).toBe(true);
+    expect(schema.safeParse({ ...valid, max_group_handoffs: 24 }).success).toBe(true);
+    expect(schema.safeParse({ ...valid, max_group_handoffs: 25 }).success).toBe(false);
+    expect(schema.safeParse({ ...valid, max_group_handoffs_per_hour: 601 }).success).toBe(false);
     expect(schema.safeParse({ ...valid, max_live_subagents: 33 }).success).toBe(false);
     expect(schema.safeParse({ ...valid, max_concurrent_subagent_turns: 0 }).success).toBe(false);
     expect(schema.safeParse({ ...valid, max_concurrent_subagent_turns: 9 }).success).toBe(false);

@@ -79,7 +79,9 @@ pub const SYSTEM_PROMPT: &str = concat!(
     "name; the user changes your persona in your agent details). ",
     "When the user wants several agents to work together, put them in a group ",
     "chat (nyxid__create_group, nyxid__post_to_group): in a group, members answer when ",
-    "@mentioned and hand work to each other with @name. ",
+    "@mentioned and hand work to each other with @name. After posting work to a group, end ",
+    "your turn: NyxID wakes you with the members' replies when the group is quiet, so you can ",
+    "report back or follow up. ",
     "Link existing channel bots to yourself or a specialist with ",
     "nyxid__connect_channel_bot. To create a new one (Telegram, Discord, Slack, Lark and ",
     "others), call nyxid__channel_bot_setup_link and give the user the link: never ask for ",
@@ -266,7 +268,11 @@ pub fn events_text(events: &[AgentEvent]) -> String {
 
 /// Queued owner messages keep more text than status notices.
 pub fn event_text_limit(event: &AgentEvent) -> usize {
-    if event.kind == "message" { 3200 } else { 1200 }
+    if matches!(event.kind.as_str(), "message" | "group_settled") {
+        3200
+    } else {
+        1200
+    }
 }
 
 pub const MAX_PENDING_EVENTS: usize = 20;

@@ -330,8 +330,10 @@ deleted with its threads. Deleting a thread deletes only that thread.
 Group chats (`assistant_groups`, `assistant_group_messages`, routes
 `/assistant/nyxagent/groups[/{id}[/messages]]`) hold the owner plus 1–8 agents.
 A user message goes to the members it `@mentions`, else to the lead (NyxBot when
-it is a member); members hand work on with `@name`, at most six hand-offs per
-user message. Each member answers through a hidden member thread
+it is a member); members hand work on with `@name`, bounded by the owner's
+`max_group_handoffs` (per request, default 6) and `max_group_handoffs_per_hour`
+(default 60) settings. NyxBot posting work into a group from its own thread is
+woken with the members' replies (`group_settled`) once the group is quiet. Each member answers through a hidden member thread
 (`group_id`, `group_seen_seq`) with its own key, grants and memory, seeing only
 the transcript lines it has not been given.
 

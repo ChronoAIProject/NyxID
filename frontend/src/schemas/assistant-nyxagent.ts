@@ -174,12 +174,22 @@ export const nyxAgentSettingsSchema = z.object({
   max_concurrent_subagent_turns: z.number().int().nonnegative(),
   max_live_subagents_limit: z.number().int().nonnegative(),
   max_concurrent_subagent_turns_limit: z.number().int().positive(),
+  /** Agent-to-agent hand-offs in a group per message you send (0 turns them off). */
+  max_group_handoffs: z.number().int().nonnegative().default(6),
+  /** Hand-offs per hour across all your groups. */
+  max_group_handoffs_per_hour: z.number().int().nonnegative().default(60),
+  max_group_handoffs_limit: z.number().int().nonnegative().default(24),
+  max_group_handoffs_per_hour_limit: z.number().int().nonnegative().default(600),
 });
 export type NyxAgentSettings = z.infer<typeof nyxAgentSettingsSchema>;
 export type NyxAgentSettingsUpdate = Partial<
   Pick<
     NyxAgentSettings,
-    "skip_destructive_confirmation" | "max_live_subagents" | "max_concurrent_subagent_turns"
+    | "skip_destructive_confirmation"
+    | "max_live_subagents"
+    | "max_concurrent_subagent_turns"
+    | "max_group_handoffs"
+    | "max_group_handoffs_per_hour"
   >
 >;
 
@@ -187,6 +197,8 @@ export type NyxAgentSettingsUpdate = Partial<
 export function nyxAgentSettingsFormSchema(limits: {
   readonly max_live_subagents_limit: number;
   readonly max_concurrent_subagent_turns_limit: number;
+  readonly max_group_handoffs_limit: number;
+  readonly max_group_handoffs_per_hour_limit: number;
 }) {
   const whole = (min: number, max: number) =>
     z
@@ -198,6 +210,8 @@ export function nyxAgentSettingsFormSchema(limits: {
     confirm_destructive: z.boolean(),
     max_live_subagents: whole(0, limits.max_live_subagents_limit),
     max_concurrent_subagent_turns: whole(1, limits.max_concurrent_subagent_turns_limit),
+    max_group_handoffs: whole(0, limits.max_group_handoffs_limit),
+    max_group_handoffs_per_hour: whole(0, limits.max_group_handoffs_per_hour_limit),
   });
 }
 export type NyxAgentSettingsForm = z.infer<ReturnType<typeof nyxAgentSettingsFormSchema>>;

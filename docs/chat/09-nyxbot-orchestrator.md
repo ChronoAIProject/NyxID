@@ -188,16 +188,21 @@ Like Grok Bot's group chats: `assistant_groups` holds the owner plus 1–8 agent
 `assistant_group_messages` holds the shared transcript (`user`, `agent`,
 `notice`). A user message goes to the members it `@mentions`, else to the lead
 (NyxBot when it is a member, else the first member). A member's reply that
-`@mentions` others hands the work to them, at most six hand-offs per user
-message. Each member speaks through its own hidden member thread
+`@mentions` others hands the work to them, bounded by the owner's settings:
+`max_group_handoffs` per new request (default 6, 0–24; 0 turns hand-offs off)
+and `max_group_handoffs_per_hour` across all their groups (default 60, 0–600). Each member speaks through its own hidden member thread
 (`group_id`, `group_seen_seq`): it keeps its own key, grants and memory, and is
 given only the transcript lines it has not seen (bounded). Member threads never
 appear in thread lists. Members addressed while busy or while the pool is full
 wait on the group and start when they are free (or from the sweep; the unique
-index allows one member thread per agent and group). Only the owner's message
-refills the hand-off budget: an agent's post spends it, NyxBot cannot post into a
-group from its own member thread, and an owner's groups make at most 60
-hand-offs per hour. Transcript lines are rendered with indented continuations so
+index allows one member thread per agent and group). A new request (the owner's
+message, or NyxBot's `post_to_group` from one of its own threads) refills the
+hand-off budget; NyxBot cannot post into a group from its own member thread.
+When NyxBot posts work into a group from its own thread, that thread follows the
+group: once nobody is working or waiting to answer, it is woken with a
+`group_settled` summary of the members' replies (information only) so it can
+report back or follow up; such wake-ups are ordinary event turns under the
+event-turn guards. Transcript lines are rendered with indented continuations so
 only real user messages start a line with `[user]:`, and specialists cannot be
 named `user`, `nyxbot`, `nyxid`, `owner` or `system`. Every reply of a member
 thread (including event turns) is posted to the group. A member's action card is
