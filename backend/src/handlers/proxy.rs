@@ -557,6 +557,7 @@ struct PreResolved {
     user_service_id: Option<String>,
     has_server_credential: bool,
     master_credential: bool,
+    require_identity_assertion: bool,
     credential_source: Option<String>,
     /// The user_id that owns the resolved UserService. For personal
     /// resolutions this is the actor; for org-routed resolutions this is
@@ -988,7 +989,8 @@ async fn proxy_request_inner(
                         &sa,
                         &auth_user.scope,
                     )
-                    .await?,
+                    .await?
+                    .id,
                 )
             } else {
                 let grant = crate::services::curation_grant_service::live_grant(&sa)?;
@@ -1005,11 +1007,12 @@ async fn proxy_request_inner(
                         .into(),
                 ));
             }
-            let target = proxy_service::resolve_curation_proxy_target(
+            let (target, master_credential) = proxy_service::resolve_curation_proxy_target(
                 &state.db,
                 &state.encryption_keys,
-                &sa.id,
+                &sa,
                 service_id,
+                state.platform_user_rate_limit,
             )
             .await?;
             let slug = target.service.slug.clone();
@@ -1025,8 +1028,9 @@ async fn proxy_request_inner(
                     node_id: None,
                     user_service_id: None,
                     has_server_credential: true,
-                    master_credential: false,
-                    credential_source: Some("user".into()),
+                    master_credential,
+                    require_identity_assertion: master_credential,
+                    credential_source: (!master_credential).then(|| "user".into()),
                     effective_owner_id: sa.id,
                     billing_owner_id: Some(auth_user.proxy_resolution_user_id()),
                     is_auto_connected: true,
@@ -1102,6 +1106,7 @@ async fn proxy_request_inner(
                     user_service_id: Some(resolved.user_service_id),
                     has_server_credential: resolved.has_server_credential,
                     master_credential: resolved.master_credential,
+                    require_identity_assertion: false,
                     credential_source: resolved.credential_source,
                     effective_owner_id: resolved
                         .org_routing
@@ -1169,6 +1174,7 @@ async fn proxy_request_inner(
                 user_service_id: Some(resolved.user_service_id),
                 has_server_credential: resolved.has_server_credential,
                 master_credential: resolved.master_credential,
+                require_identity_assertion: false,
                 credential_source: resolved.credential_source,
                 effective_owner_id: resolved
                     .org_routing
@@ -1282,6 +1288,41 @@ async fn proxy_request_by_slug_inner(
     validate_original_proxy_request_path(&request)?;
     auth_user.ensure_rest_proxy_access()?;
 
+    if auth_user.auth_method == AuthMethod::ServiceAccount {
+        let sa = crate::services::service_account_service::get_service_account(
+            &state.db,
+            &auth_user.user_id.to_string(),
+        )
+        .await?;
+        if sa.purpose == crate::models::service_account::ServiceAccountPurpose::CatalogEditor {
+            let target = crate::services::catalog_editor_proxy_service::authorized_target(
+                &state.db,
+                &sa,
+                &auth_user.scope,
+            )
+            .await?;
+            if slug != target.slug {
+                return Err(AppError::Forbidden(
+                    "Catalog editor requires its Ornn target".into(),
+                ));
+            }
+            return Box::pin(proxy_request_inner(
+                state,
+                auth_user,
+                &target.id,
+                path,
+                request,
+                resolved_slug,
+            ))
+            .await;
+        }
+        if sa.purpose != crate::models::service_account::ServiceAccountPurpose::General {
+            return Err(AppError::Forbidden(
+                "Curation proxy requires its exact catalog UUID".into(),
+            ));
+        }
+    }
+
     let user_id_str = auth_user.proxy_resolution_user_id();
     let via_service = extract_via_service(&request);
     preflight_proxy_deny_before_resolution(
@@ -1345,6 +1386,7 @@ async fn proxy_request_by_slug_inner(
                     user_service_id: Some(resolved.user_service_id),
                     has_server_credential: resolved.has_server_credential,
                     master_credential: resolved.master_credential,
+                    require_identity_assertion: false,
                     credential_source: resolved.credential_source,
                     effective_owner_id: resolved
                         .org_routing
@@ -1412,6 +1454,7 @@ async fn proxy_request_by_slug_inner(
                 user_service_id: Some(resolved.user_service_id),
                 has_server_credential: resolved.has_server_credential,
                 master_credential: resolved.master_credential,
+                require_identity_assertion: false,
                 credential_source: resolved.credential_source,
                 effective_owner_id: resolved
                     .org_routing
@@ -1889,6 +1932,9 @@ async fn execute_proxy_inner(
         .unwrap_or_else(std::time::Instant::now);
     let downstream_cancellation = request_cancellation(&request);
     let billing_egress_permit = enforce_proxy_billing_classification(&request)?;
+    let require_identity_assertion = pre_resolved
+        .as_ref()
+        .is_some_and(|target| target.require_identity_assertion);
 
     let user_id_str = auth_user.user_id.to_string();
 
@@ -2609,6 +2655,7 @@ async fn execute_proxy_inner(
                     Ok(assertion) => {
                         identity_headers.push(("X-NyxID-Identity-Token".to_string(), assertion));
                     }
+                    Err(e) if require_identity_assertion => return Err(e),
                     Err(e) => {
                         tracing::warn!(
                             service_id = %service_id,
@@ -2653,6 +2700,16 @@ async fn execute_proxy_inner(
                 );
             }
         }
+    }
+
+    if require_identity_assertion
+        && !identity_headers
+            .iter()
+            .any(|(name, _)| name == "X-NyxID-Identity-Token")
+    {
+        return Err(AppError::Forbidden(
+            "Catalog editor proxy requires a signed service-account identity".into(),
+        ));
     }
 
     if target.service.inject_delegation_token {
@@ -9160,6 +9217,21 @@ mod proxy_resolution_integration_tests {
         server.abort();
     }
 
+    async fn insert_general_service_account(db: &mongodb::Database, owner_user_id: &str) -> String {
+        let (account, _) = crate::services::service_account_service::create_service_account(
+            db,
+            "General service account",
+            None,
+            "proxy",
+            &[],
+            None,
+            owner_user_id,
+        )
+        .await
+        .expect("create general service account for live purpose check");
+        account.id
+    }
+
     fn service_account_auth(service_account_id: &str, owner_user_id: &str) -> AuthUser {
         AuthUser {
             user_id: Uuid::parse_str(service_account_id).expect("valid service account id"),
@@ -9668,7 +9740,7 @@ mod proxy_resolution_integration_tests {
 
         let (base_url, server) = start_downstream().await;
         let org_id = Uuid::new_v4().to_string();
-        let sa_id = Uuid::new_v4().to_string();
+        let sa_id = insert_general_service_account(&db, &org_id).await;
         db.collection::<crate::models::user::User>(USERS)
             .insert_one(test_user(&org_id, UserType::Org))
             .await
@@ -10087,7 +10159,7 @@ mod proxy_resolution_integration_tests {
         let (base_url, server) = start_downstream().await;
         let org_id = Uuid::new_v4().to_string();
         let admin_id = Uuid::new_v4().to_string();
-        let sa_id = Uuid::new_v4().to_string();
+        let sa_id = insert_general_service_account(&db, &org_id).await;
         seed_org_actor(&db, &org_id, &admin_id, OrgRole::Admin).await;
         db.collection::<NotificationChannel>(NOTIFICATION_CHANNELS)
             .insert_one(notification_channel(&admin_id, 0))
@@ -10134,18 +10206,7 @@ mod proxy_resolution_integration_tests {
 
         let (base_url, server) = start_downstream().await;
         let owner_id = Uuid::new_v4().to_string();
-        let (sa, _) = crate::services::service_account_service::create_service_account(
-            &db,
-            "General service account",
-            None,
-            "proxy",
-            &[],
-            None,
-            &owner_id,
-        )
-        .await
-        .expect("create general service account for live purpose check");
-        let sa_id = sa.id;
+        let sa_id = insert_general_service_account(&db, &owner_id).await;
         let catalog_service_id = Uuid::new_v4().to_string();
         db.collection::<crate::models::user::User>(USERS)
             .insert_one(test_user(&owner_id, UserType::Person))
@@ -10187,7 +10248,7 @@ mod proxy_resolution_integration_tests {
 
         let (base_url, server) = start_downstream().await;
         let org_id = Uuid::new_v4().to_string();
-        let sa_id = Uuid::new_v4().to_string();
+        let sa_id = insert_general_service_account(&db, &org_id).await;
         db.collection::<crate::models::user::User>(USERS)
             .insert_one(test_user(&org_id, UserType::Org))
             .await

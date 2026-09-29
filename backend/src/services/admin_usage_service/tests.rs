@@ -1998,6 +1998,18 @@ async fn analytics_daily_and_hourly_series_match_across_rollup_sources() {
 #[test]
 fn analytics_rejects_unbounded_and_malformed_queries() {
     use super::analytics::AnalyticsQuery;
+    assert_eq!(
+        AnalyticsQuery {
+            top: Some(20),
+            ..Default::default()
+        }
+        .validate(Utc::now())
+        .unwrap()
+        .analytics
+        .unwrap()
+        .top,
+        20
+    );
     for query in [
         AnalyticsQuery {
             interval: Some("minute".into()),

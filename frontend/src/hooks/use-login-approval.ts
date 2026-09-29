@@ -15,6 +15,7 @@ import {
 import { userCodeSchema } from "@/schemas/auth-device";
 import { useAuthStore } from "@/stores/auth-store";
 import type { LoginFlow } from "./use-agent-key-login";
+import type { WebAuthDeviceTransport } from "./use-auth-device";
 
 const storageKey = (flow: LoginFlow, code: string) =>
   `nyxid-approval:${flow}:${code}`;
@@ -46,6 +47,7 @@ export function useLoginApproval(flow: LoginFlow, code: string, query: string) {
   const [identity, setIdentity] = useState<ApprovalIdentity | null>(null);
   const [restoring, setRestoring] = useState(false);
   const current = useRef(identity);
+  const generation = useRef(0);
   current.current = identity;
   const key = storageKey(flow, code);
   const call = (
@@ -107,9 +109,14 @@ export function useLoginApproval(flow: LoginFlow, code: string, query: string) {
   }, [key, parse]);
   async function begin(keep: boolean) {
     if (current.current) return current.current;
+    const started = generation.current;
     const next = parse(
       await call("", { flow, user_code: code, keep_signed_in: keep }),
     );
+    if (generation.current !== started) {
+      await call(`/${next.id}`, undefined, "DELETE");
+      throw Error("This verification ended.");
+    }
     current.current = next;
     setIdentity(next);
     try {
@@ -155,6 +162,29 @@ export function useLoginApproval(flow: LoginFlow, code: string, query: string) {
       await useAuthStore.getState().checkAuth({ ephemeral: true });
     return result;
   }
+  function appTransport(keep: boolean): WebAuthDeviceTransport {
+    return {
+      request: async (body) => {
+        const next = await begin(keep);
+        return call(`/${next.id}/app`, body);
+      },
+      poll: async (deviceCode, isCurrent) => {
+        const next = current.current;
+        if (!next) throw Error("Verify your identity again.");
+        const result = parse(
+          await call(`/${next.id}/app/poll`, { device_code: deviceCode }),
+        );
+        if (!isCurrent() || current.current?.id !== next.id)
+          throw Error("This verification ended.");
+        if (!result.verified)
+          throw Error("Identity verification was not completed.");
+        current.current = result;
+        setIdentity(result);
+        if (result.verified && result.keep_signed_in)
+          await useAuthStore.getState().checkAuth({ ephemeral: true });
+      },
+    };
+  }
   async function inventory(): Promise<LoginInventory> {
     if (!current.current?.verified) throw Error("Verify your identity again.");
     const result = (await call(`/${current.current.id}/inventory`)) as {
@@ -188,6 +218,7 @@ export function useLoginApproval(flow: LoginFlow, code: string, query: string) {
     }
   }, [key]);
   async function reset() {
+    generation.current += 1;
     if (current.current) {
       try {
         await call(`/${current.current.id}`, undefined, "DELETE");
@@ -206,6 +237,7 @@ export function useLoginApproval(flow: LoginFlow, code: string, query: string) {
     beginSocial,
     authenticate,
     mfa,
+    appTransport,
     inventory,
     decide,
     reset,

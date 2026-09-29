@@ -524,6 +524,7 @@ impl PlatformAdapter for AurinkoAdapter {
             .await?;
         Ok(BotIdentity {
             platform_bot_id: identity(&account["id"]).ok_or_else(upstream)?,
+            display_name: None,
             platform_bot_username: account["mailboxAddress"]
                 .as_str()
                 .or(account["email"].as_str())

@@ -17,16 +17,16 @@
 
 ## 0. Guiding constraints (from the ADR + reviews)
 
-- **Build the meter before billing.** The unified meter ships and is verified *before* any service can
+- **Build the meter before billing.** The unified meter ships and is verified _before_ any service can
   charge (Hard req. 1, 12).
 - **Money correctness over convenience.** Durable-before-forward, stable per-request/per-layer
   `transaction_id`, reserve-then-true-up funding with an immediate local debit, bidirectional Lago
   reconciliation, idempotent settle (no DB transactions exist in this repo).
 - **Thin Lago client, NyxID-owned gate/ledger.** No rating/invoicing/dunning in NyxID. NyxID may cache
-  Lago's rate card *read-only* (approximate) only to size reservations and bound the cap.
+  Lago's rate card _read-only_ (approximate) only to size reservations and bound the cap.
 - **Cross-instance, no per-process state.** All billing state in MongoDB (Oracle-queue precedent,
   CLAUDE.md §11). Atomic ops via `find_one_and_update`.
-- **Two layers.** *Resale* (catalog-level, only when NyxID supplies the credential) vs *platform*
+- **Two layers.** _Resale_ (catalog-level, only when NyxID supplies the credential) vs _platform_
   (plan-level, any proxied request). Independent line items, independent `transaction_id`s.
 - **Metadata before secrets.** Entitlement and owner resolution run on a metadata-only route context
   that does **not** decrypt credentials; credential decryption + reservation happen just before the
@@ -36,12 +36,12 @@
 
 Each phase is independently shippable and leaves the system correct. Nothing charges until P3.
 
-| Phase | Deliverable | Hard reqs | Self-contained? |
-|---|---|---|---|
-| **P1 — Unified meter** | Metadata route context (§4.0) + one meter per path writing a durable `usage_meter` ledger (capture only, **no wallet, no gate, no Lago**). `billing_owner_id`, `billing_request_id`, per-layer/per-flush `transaction_id`, request/byte counters, `CredentialClass` resale signal. `ServiceBilling` catalog field + write surfaces + anonymous-incompatibility validation. | 1,2,3,5,6,7,8,9,12 | Yes — `wallet_id`/`reserved_credits` are `Option`, unused in P1 |
-| **P2 — Lago sink + display** | `LagoClient` + idempotent (GET-or-create) provisioning + event push + bidirectional reconcile + dead-letter. A Lago-compatibility spike (§11) precedes freezing the client signatures. Read-only `billing` block in API/UI. | 11 | Yes — builds on the P1 ledger |
-| **P3 — The gate** | `billing_wallet` + entitlement (fail-closed, on route context) + reserve-then-true-up funding (local debit, idempotent settle) + cached rate card + overdraft cap + conditional fail-open. `BILLING_ENABLED` flips charging on. | 4 + D4 | Needs P2 |
-| **P4 — Surfaces + backfill** | Billing UI (credits, invoices, per-service cost), CLI, top-up, one-time Lago backfill of existing owners. | — | Needs P3 |
+| Phase                        | Deliverable                                                                                                                                                                                                                                                                                                                                                                | Hard reqs          | Self-contained?                                                 |
+| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------ | --------------------------------------------------------------- |
+| **P1 — Unified meter**       | Metadata route context (§4.0) + one meter per path writing a durable `usage_meter` ledger (capture only, **no wallet, no gate, no Lago**). `billing_owner_id`, `billing_request_id`, per-layer/per-flush `transaction_id`, request/byte counters, `CredentialClass` resale signal. `ServiceBilling` catalog field + write surfaces + anonymous-incompatibility validation. | 1,2,3,5,6,7,8,9,12 | Yes — `wallet_id`/`reserved_credits` are `Option`, unused in P1 |
+| **P2 — Lago sink + display** | `LagoClient` + idempotent (GET-or-create) provisioning + event push + bidirectional reconcile + dead-letter. A Lago-compatibility spike (§11) precedes freezing the client signatures. Read-only `billing` block in API/UI.                                                                                                                                                | 11                 | Yes — builds on the P1 ledger                                   |
+| **P3 — The gate**            | `billing_wallet` + entitlement (fail-closed, on route context) + reserve-then-true-up funding (local debit, idempotent settle) + cached rate card + overdraft cap + conditional fail-open. `BILLING_ENABLED` flips charging on.                                                                                                                                            | 4 + D4             | Needs P2                                                        |
+| **P4 — Surfaces + backfill** | Billing UI (credits, invoices, per-service cost), CLI, top-up, one-time Lago backfill of existing owners.                                                                                                                                                                                                                                                                  | —                  | Needs P3                                                        |
 
 ## 2. Module map
 
@@ -123,11 +123,11 @@ and additional components of each lane. Supported units are `tokens` (provider t
 accept only tokens/requests/bytes. Backend `BillingMetric` metadata and frontend
 `schemas/billing-metrics.ts` / CLI `commands/billing_units.rs` centralize unit names and labels.
 
-| Final credential class | Lane |
-| --- | --- |
-| UserOwned, NyxidPlatformOauthApp, AgentOverrideUserOwned, NodeManaged | BYOK |
-| NyxidManagedMaster | Platform key |
-| NoAuth | None (meter only) |
+| Final credential class                                                | Lane              |
+| --------------------------------------------------------------------- | ----------------- |
+| UserOwned, NyxidPlatformOauthApp, AgentOverrideUserOwned, NodeManaged | BYOK              |
+| NyxidManagedMaster                                                    | Platform key      |
+| NoAuth                                                                | None (meter only) |
 
 At least one configured lane selects lane mode. A missing matching lane is free,
 even if legacy platform billing is enabled. While the selected lane's primary is
@@ -218,7 +218,7 @@ isolated and reported through Integrity while other rows continue migrating.
 Old binaries fail to read migrated amounts and must not be restarted. See the
 exact-accounting deployment contract.
 
-**"Billing-active" rollup (R7).** A request is *billing-active* iff `ServiceBilling.resale_billable`
+**"Billing-active" rollup (R7).** A request is _billing-active_ iff `ServiceBilling.resale_billable`
 (and the resolved credential is `NyxidManagedMaster`) **OR** the resolved billing owner is on a
 platform-metered Lago plan. The `BILLING_ENABLED` startup invariant (§9) refuses to serve a
 billing-active request unless the meter+ledger (P1) and, for charging, the gate (P3) are wired —
@@ -233,8 +233,7 @@ manually, so P1 must also add `billing` to `CreateServiceRequest` (`services.rs:
 **Anonymous incompatibility (Hard req 9) is bidirectional (R10).** Reject `resale_billable=true` when
 the service has enabled anonymous endpoints (in `services.rs`), AND reject enabling an anonymous
 endpoint when `resale_billable` (in `admin_anonymous_endpoints.rs`) — extend
-`validate_*_anonymous_compatibility` (`anonymous_endpoint_service.rs:104/113`). Returns 11304 (HTTP
-400) at write time. Public/anonymous proxy (`public_proxy.rs`, no `AuthUser`) can therefore never be
+`validate_*_anonymous_compatibility` (`anonymous_endpoint_service.rs:104/113`). Returns 11304 (HTTP 400) at write time. Public/anonymous proxy (`public_proxy.rs`, no `AuthUser`) can therefore never be
 billing-active.
 
 For shared OAuth apps (including X), admins can opt into
@@ -300,6 +299,7 @@ downstream cost may already be incurred, so those are charged at the reservation
 reconciliation / dead-lettered — never silently freed.
 
 **Indexes** (`db.rs`, mirroring oracle patterns at `db.rs:1715-1743`):
+
 - unique `{ transaction_id: 1 }` — idempotency / no double-row.
 - `{ status: 1, lago_acked: 1, updated_at: 1 }` — reconcile/dead-letter sweeps.
 - sparse `{ pending_resale_quantity: 1 }` — incomplete multi-layer intent materialization.
@@ -331,7 +331,7 @@ pub struct BillingWallet {
 
 **Availability (R3.1):** `available = balance_credits − reserved_credits − pending_lago_debits`.
 `balance_credits` is authoritative-from-Lago (synced by sweep); `reserved_credits` are open holds;
-`pending_lago_debits` is the sum of finalized-but-unsynced burns so availability drops *immediately* at
+`pending_lago_debits` is the sum of finalized-but-unsynced burns so availability drops _immediately_ at
 settle (not only at the next sync — without this, the next request reserves the same money). The
 periodic sync sets `balance_credits` from Lago and zeroes the `pending_lago_debits` it has accounted
 for. **Indexes:** unique `{ owner_id: 1 }`, unique `{ lago_customer_id: 1 }`.
@@ -407,14 +407,14 @@ which is deliberately regenerated per failover attempt (opposite lifecycle, R8).
 There is **no single shared seam.** Each entry path owns its sequence; all call the same
 `meter::{open, settle, fail}` (§4.3) and, in P3, the same `gate` (§5).
 
-| Entry path | Resolve + gate/reserve site | Dispatch / send | Settle (meter) | Shape |
-|---|---|---|---|---|
-| `/proxy` (`execute_proxy_inner:1132`) | single fan-in ~`proxy.rs:1352` (after owner+credential-class+target resolved, **before** the WS/node/direct arms at `1662/1720/2236`) | `forward_request:2236` / node `send_proxy_request:1849` / WS bridges | buffered `2455`; SSE task `2308`; node Complete `1869`, Streaming `1893` | request (HTTP), connection (WS) |
-| Codex/ChatGPT direct branch | same fan-in | `send_to_chatgpt` (`proxy.rs:2150/2187`) — bypasses `forward_request` | in the ChatGPT translator finalize | request |
-| `/llm` gateway (`llm_gateway.rs:64/330`) | in `llm_proxy_request` ~`:265` (after resolution `:125`, before send) | `forward_request:273/644` AND Codex branch `:224/634` | its existing extraction `:827-933` → meter | request |
-| MCP (`mcp_service::execute_tool`) | **inside** `execute_tool` after target resolution, before node/direct dispatch (`mcp_service.rs:2372+`) | execute_tool's own node/direct forwarding | post-dispatch within execute_tool | request (per tool call) |
-| SSH exec (`ssh_exec.rs:91`) | before the exec call | `ssh_service` exec | on response (`metric=requests` or raw stdout/stderr bytes pre-truncation) | request |
-| WS direct (`proxy.rs:3250`) / node (`3365`); SSH tunnel (`ssh_tunnel.rs:173`) / web terminal | at upgrade (reserve per-connection cap, R6) | bridge loop | periodic flush + settle on disconnect | connection-session |
+| Entry path                                                                                   | Resolve + gate/reserve site                                                                                                           | Dispatch / send                                                       | Settle (meter)                                                            | Shape                           |
+| -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------------------- | ------------------------------- |
+| `/proxy` (`execute_proxy_inner:1132`)                                                        | single fan-in ~`proxy.rs:1352` (after owner+credential-class+target resolved, **before** the WS/node/direct arms at `1662/1720/2236`) | `forward_request:2236` / node `send_proxy_request:1849` / WS bridges  | buffered `2455`; SSE task `2308`; node Complete `1869`, Streaming `1893`  | request (HTTP), connection (WS) |
+| Codex/ChatGPT direct branch                                                                  | same fan-in                                                                                                                           | `send_to_chatgpt` (`proxy.rs:2150/2187`) — bypasses `forward_request` | in the ChatGPT translator finalize                                        | request                         |
+| `/llm` gateway (`llm_gateway.rs:64/330`)                                                     | in `llm_proxy_request` ~`:265` (after resolution `:125`, before send)                                                                 | `forward_request:273/644` AND Codex branch `:224/634`                 | its existing extraction `:827-933` → meter                                | request                         |
+| MCP (`mcp_service::execute_tool`)                                                            | **inside** `execute_tool` after target resolution, before node/direct dispatch (`mcp_service.rs:2372+`)                               | execute_tool's own node/direct forwarding                             | post-dispatch within execute_tool                                         | request (per tool call)         |
+| SSH exec (`ssh_exec.rs:91`)                                                                  | before the exec call                                                                                                                  | `ssh_service` exec                                                    | on response (`metric=requests` or raw stdout/stderr bytes pre-truncation) | request                         |
+| WS direct (`proxy.rs:3250`) / node (`3365`); SSH tunnel (`ssh_tunnel.rs:173`) / web terminal | at upgrade (reserve per-connection cap, R6)                                                                                           | bridge loop                                                           | periodic flush + settle on disconnect                                     | connection-session              |
 
 **Metric capture.** Tokens reuse `llm_usage_service` (buffered + SSE accumulator). Requests = 1/call;
 bytes = request/response length (HTTP) or `ConnectionUsageStats { frames_in/out, bytes_in/out,
@@ -474,6 +474,7 @@ The repo has **no** `start_session`/`with_transaction` (only a TODO at `services
 multi-doc atomicity is achieved with idempotent guards, mirroring `oracle_task_service.rs:959`.
 
 **Reserve (prepaid):**
+
 ```rust
 db.collection::<BillingWallet>("billing_wallet").find_one_and_update(
     doc!{ "owner_id": &owner, "suspended": false,
@@ -490,6 +491,7 @@ db.collection::<BillingWallet>("billing_wallet").find_one_and_update(
 AND `has_payment_instrument: true` — atomic so concurrent card-backed requests cannot exceed the cap.
 
 **Settle (idempotent, two steps):**
+
 ```rust
 // 1. atomically claim the row's terminal transition (idempotent: a re-run finds status already Finalized)
 let claimed = usage_meter.find_one_and_update(
@@ -504,6 +506,7 @@ if claimed.is_some() {
     usage_meter.update_one(doc!{ "_id": &row_id }, doc!{ "$set": { "released": true } }).await?;
 }
 ```
+
 A recovery sweep handles `status=Finalized && released=false` (crash between step 1 and step 2) by
 re-applying the wallet move. The `pending_lago_debits` is cleared by the balance sync once Lago
 confirms the burn (so the cap bounds total exposure across one full `BILLING_RECONCILE_INTERVAL_SECS`
@@ -563,12 +566,14 @@ Lago via the §11 spike before freezing these signatures.
 **Never** `path`, raw `api_key_id`, bodies, or downstream URLs.
 
 **Ingestion failure policy — branch on the Lago error `code`, not the HTTP status (R5):**
+
 - `transaction_id_taken` (422) → **SUCCESS** (`lago_acked=true`; the event was already applied — do
   NOT dead-letter).
 - `billable_metric_not_found` / subscription / closed-period (422) → `DeadLetter` + alert.
 - `429` → backoff + retry. `5xx`/timeout → retry; row stays `lago_acked=false`.
 
 **Reconcile sweep** (`reconcile.rs`, spawned like the OAuth sweep `main.rs:732`):
+
 1. Re-push `lago_acked=false AND updated_at < now-grace` rows.
 2. `Reserved && forwarded=false && updated_at < now-abandon_grace` → `Abandoned` (release holds).
    **`Forwarded` rows are charged/held/dead-lettered, never auto-freed** (R3.3).
@@ -585,14 +590,14 @@ Lago via the §11 spike before freezing these signatures.
 Add to `AppError` (`errors/mod.rs`), map status in `status_code()`, assign in `error_code()`, add keys
 in `error_key()` (oracle 11000-block is the template).
 
-| Code | Variant | Key | HTTP | Notes |
-|---|---|---|---|---|
-| 11300 | `InsufficientCredits` | `insufficient_credits` | 402 | prepaid below next reservation |
-| 11301 | `BillingNotConfigured` | `billing_not_configured` | 402 | billing-active, no wallet/plan |
-| 11302 | `BillingProviderUnavailable` | `billing_provider_unavailable` | 402 | explicit fail-closed override only |
-| 11303 | `PlanEntitlementRequired` | `plan_entitlement_required` | 402 | plan excludes service (incl. fail-closed unknown) |
-| 11304 | `AnonymousIncompatibleBilling` | `anonymous_incompatible_billing` | **400** | `resale_billable` + anon endpoint (write time) |
-| 11307 | `WalletSuspended` | `wallet_suspended` | 402 | cap breached / collection suspended |
+| Code  | Variant                        | Key                              | HTTP    | Notes                                             |
+| ----- | ------------------------------ | -------------------------------- | ------- | ------------------------------------------------- |
+| 11300 | `InsufficientCredits`          | `insufficient_credits`           | 402     | prepaid below next reservation                    |
+| 11301 | `BillingNotConfigured`         | `billing_not_configured`         | 402     | billing-active, no wallet/plan                    |
+| 11302 | `BillingProviderUnavailable`   | `billing_provider_unavailable`   | 402     | explicit fail-closed override only                |
+| 11303 | `PlanEntitlementRequired`      | `plan_entitlement_required`      | 402     | plan excludes service (incl. fail-closed unknown) |
+| 11304 | `AnonymousIncompatibleBilling` | `anonymous_incompatible_billing` | **400** | `resale_billable` + anon endpoint (write time)    |
+| 11307 | `WalletSuspended`              | `wallet_suspended`               | 402     | cap breached / collection suspended               |
 
 ## 9. Config / env (`config.rs` + `docs/ENV.md`)
 
@@ -646,6 +651,7 @@ rate-cache reservation sizing; entitlement decision table (incl. Unknown → fai
 `CredentialClass` derivation (BYO/override/master/no-auth/node).
 
 **Integration (money-correctness):**
+
 - **Concurrency drain:** N parallel reserves against balance B → total ≤ B; prepaid never over-commits.
 - **Post-settle double-spend:** finalize a request, immediately fire another → second sees reduced
   `available` (pending_lago_debits applied), cannot reserve the freed amount before sync.
@@ -682,14 +688,14 @@ rate-cache reservation sizing; entitlement decision table (incl. Unknown → fai
 3. Durable cross-instance state → crash-after-forward + concurrency + idempotent-settle tests.
 4. Money-denominated overdraft cap + auto-suspend (cached rate card) → fail-modes test.
 5. Bill the billing owner, not the actor → owner-attribution test.
-6/8. Right number / final credential class → resale-classification test (BYO + override → platform).
-7. Integer counts to Lago (the `LagoEvent.properties.quantity` is i64, sourced only from integer
+   6/8. Right number / final credential class → resale-classification test (BYO + override → platform).
+6. Integer counts to Lago (the `LagoEvent.properties.quantity` is i64, sourced only from integer
    counts; `reported_cost` is never an input) → schema test.
-9. Anonymous incompatible (bidirectional, 11304) → write-time test on both `services.rs` and
+7. Anonymous incompatible (bidirectional, 11304) → write-time test on both `services.rs` and
    `admin_anonymous_endpoints.rs`.
-10. `BillingOwnerResolver` separate from ACL, with legacy + org defaults → unit + owner-attribution.
-11. Bidirectional reconcile + dead-letter + 422 sub-code branch → reconcile/dead-letter tests.
-12. Refuse to serve billing-active until wired → `BILLING_ENABLED` startup-invariant test.
+8. `BillingOwnerResolver` separate from ACL, with legacy + org defaults → unit + owner-attribution.
+9. Bidirectional reconcile + dead-letter + 422 sub-code branch → reconcile/dead-letter tests.
+10. Refuse to serve billing-active until wired → `BILLING_ENABLED` startup-invariant test.
 
 ## 14. Deferred / open (tracked in ADR §Open questions)
 

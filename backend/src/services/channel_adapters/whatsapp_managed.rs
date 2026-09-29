@@ -290,6 +290,7 @@ pub async fn complete(
         token,
         identity: BotIdentity {
             platform_bot_id: phone.clone(),
+            display_name: None,
             platform_bot_username: display,
         },
         fields: BTreeMap::from([("phone_number_id", phone), ("waba_id", waba.to_string())]),

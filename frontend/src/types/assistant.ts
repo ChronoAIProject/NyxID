@@ -118,4 +118,6 @@ export interface Conversation {
   readonly message_count?: number;
   readonly llm_route?: string | null;
   readonly llm_model?: string | null;
+  /** NyxBot threads that answer one of the user's channel bots. */
+  readonly channel?: { readonly platform: string } | null;
 }

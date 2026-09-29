@@ -12,9 +12,10 @@ acceptance or close the original mobile validation requirement.
 
 Eight-character public device codes, displayed as `XXXX-XXXX`, are the
 compatibility target for installed mobile clients. Legacy account requests
-continue to issue that format. Grant-capable v2 requests issue the prior
-`2-XXXX-XXXX` format by default. Set `AUTH_DEVICE_EIGHT_CHAR_CODES=true` only
-after the staged rollout below to issue eight-character v2 codes. Readers
+continue to issue that format. Grant-capable v2 requests also issue eight-character
+codes by default (`AUTH_DEVICE_EIGHT_CHAR_CODES=true`). Setting the flag to `false`
+restores prior `2-XXXX-XXXX` issuance for rollout rollback. The staged rollout below
+remains required when upgrading replicas that predate reservations. Readers
 accept both existing formats; the public code never authorizes a grant.
 
 The server stores grant-capable requests in `auth_device_codes_v2` and legacy

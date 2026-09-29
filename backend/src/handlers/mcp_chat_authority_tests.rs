@@ -1,7 +1,9 @@
 use super::*;
 use crate::services::{
     assistant_acknowledgement_service as acks, assistant_agent_credential_service as credentials,
-    assistant_authority_tests::{Fixture, connected, fixture, ordinary_key},
+    assistant_authority_tests::{
+        Fixture, connected, fixture, orchestrator_fixture, ordinary_key, service_gate,
+    },
 };
 use axum::{Json, Router, routing::any};
 use futures::TryStreamExt;
@@ -13,15 +15,17 @@ use std::sync::{
 };
 
 async fn authenticate(f: &Fixture) -> McpAuthContext {
-    let key = credentials::load_for_conversation(
-        &f.state.db,
-        &f.state.encryption_keys,
-        &f.owner,
-        &f.row.id,
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    authenticate_id(f, &f.row.id).await
+}
+
+/// Authenticate as another conversation of the same owner (e.g. the team's
+/// orchestrator when the fixture is a subagent).
+async fn authenticate_id(f: &Fixture, id: &str) -> McpAuthContext {
+    let key =
+        credentials::load_for_conversation(&f.state.db, &f.state.encryption_keys, &f.owner, id)
+            .await
+            .unwrap()
+            .unwrap();
     let mut headers = HeaderMap::new();
     headers.insert("x-api-key", key.raw_key.parse().unwrap());
     authenticate_mcp(&f.state, &headers, false).await.unwrap()
@@ -70,7 +74,7 @@ async fn mounted_chat_service_edits_record_verified_actor_and_separate_request_g
     use futures::TryStreamExt;
     use tower::ServiceExt;
 
-    let f = fixture("chat_service_history").await;
+    let f = orchestrator_fixture("chat_service_history").await;
     let service = connected(
         &f.state.db,
         &f.owner,
@@ -89,14 +93,6 @@ async fn mounted_chat_service_edits_record_verified_actor_and_separate_request_g
         )
         .await
         .unwrap();
-    crate::services::assistant_access_mode_service::change(
-        &f.state.db,
-        &f.owner,
-        &f.row.id,
-        crate::models::assistant_conversation::AccessMode::Full,
-    )
-    .await
-    .unwrap();
     let credential = credentials::load_for_conversation(
         &f.state.db,
         &f.state.encryption_keys,
@@ -199,9 +195,10 @@ async fn chat_mcp_lists_ungranted_tools_and_allow_retries_execute_without_bypass
         rows.iter().find(|r| r["service_id"] == id).unwrap()["chat_access"],
         "acknowledgement_required"
     );
+    // Subagents hold explicit grants only: auto-connected services too.
     assert_eq!(
         rows.iter().find(|r| r["service_id"] == auto).unwrap()["chat_access"],
-        "granted"
+        "acknowledgement_required"
     );
     let search = result(
         handle_meta_search(
@@ -220,17 +217,28 @@ async fn chat_mcp_lists_ungranted_tools_and_allow_retries_execute_without_bypass
     assert_eq!(tool["chat_access"], "acknowledgement_required");
     for body in [&listing, &search] {
         let hint = body["chat_access_hint"].as_str().unwrap();
-        assert!(
-            hint.contains("acknowledgement_required = call the tool now"),
-            "{hint}"
-        );
+        assert!(hint.contains("call the tool now"), "{hint}");
     }
     let name = tool["name"].as_str().unwrap();
     let args = json!({"method": "GET", "path": "/ok"});
     let refusal = result(call(&f, &auth, name, args.clone()).await, true).await;
     assert_eq!(refusal["error"], "acknowledgement_required");
     assert_eq!(refusal["kind"], "service");
+    assert_eq!(refusal["decider"], "orchestrator");
     assert_eq!(hits.load(Ordering::SeqCst), 0);
+    // The request reached the orchestrator as a wake-up event (it is busy
+    // with its own turn, so the event waits in its queue).
+    let team_id = f.nyxbot_thread.clone();
+    let orchestrator = crate::services::assistant_nyxagent::get(&f.state.db, &f.owner, &team_id)
+        .await
+        .unwrap();
+    assert!(orchestrator.pending_events.iter().any(|event| {
+        event.kind == "permission_requested"
+            && event.agent_id.as_deref() == Some(f.chat.agent_id.as_str())
+            && event
+                .text
+                .contains(refusal["acknowledgement_id"].as_str().unwrap())
+    }));
     acks::decide(
         &f.state.db,
         &f.owner,
@@ -245,7 +253,7 @@ async fn chat_mcp_lists_ungranted_tools_and_allow_retries_execute_without_bypass
     assert_eq!(success["ok"], true);
     assert_eq!(hits.load(Ordering::SeqCst), 1);
     let second = connected(&f.state.db, &f.owner, "denied", &address).await;
-    let refused = acks::service_gate(&f.state.db, &f.chat, &second, "denied", "Denied", false)
+    let refused = service_gate(&f.state.db, &f.chat, &second, "denied", "Denied", false)
         .await
         .unwrap()
         .unwrap();
@@ -270,26 +278,8 @@ async fn chat_mcp_lists_ungranted_tools_and_allow_retries_execute_without_bypass
     )
     .await;
     assert_eq!(denied["error"], "acknowledgement_denied");
-    f.state
-        .db
-        .collection::<mongodb::bson::Document>(
-            crate::models::assistant_conversation::COLLECTION_NAME,
-        )
-        .update_one(
-            doc! {"_id": &f.row.id},
-            doc! {"$set": {"active_turn": mongodb::bson::Bson::Null}},
-        )
-        .await
-        .unwrap();
-    crate::services::assistant_access_mode_service::change(
-        &f.state.db,
-        &f.owner,
-        &f.row.id,
-        crate::models::assistant_conversation::AccessMode::Full,
-    )
-    .await
-    .unwrap();
-    let full = authenticate(&f).await;
+    // The orchestrator runs with Full access: no gates, every service granted.
+    let full = authenticate_id(&f, &team_id).await;
     assert_eq!(chat_access(&full, service), "granted");
     assert!(
         chat_service_gate(&f.state, &full, service, None)
@@ -328,8 +318,8 @@ async fn chat_mcp_lists_ungranted_tools_and_allow_retries_execute_without_bypass
         .collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME)
         .find_one(doc! {
             "event_type": "assistant_mcp_tool_call",
-            "event_data.conversation_id": &f.row.id,
-            "event_data.access_mode": "full",
+            "event_data.conversation_id": &team_id,
+            "event_data.agent_role": "orchestrator",
             "event_data.tool_name": "nyx__call_tool",
         })
         .await
@@ -345,7 +335,8 @@ async fn chat_mcp_lists_ungranted_tools_and_allow_retries_execute_without_bypass
                 .state
                 .db
                 .collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME)
-                .find_one(doc! {"event_type": "mcp_tool_call", "event_data.access_mode": "full"})
+                .find_one(doc! {"event_type": "mcp_tool_call",
+                "event_data.agent_role": "orchestrator"})
                 .await
                 .unwrap()
                 .is_some();
@@ -406,8 +397,23 @@ async fn chat_mcp_native_account_and_action_refusals_are_tool_results() {
         false,
     )
     .await;
-    assert_eq!(list["total"], 1);
+    assert!(list["total"].as_u64().unwrap() >= 1);
     let target = ordinary_key(&f).await;
+    // Subagents cannot change or delete account resources at all.
+    let refused = result(
+        call(
+            &f,
+            &auth,
+            "nyxid__delete_agent_key",
+            json!({"api_key_id": target}),
+        )
+        .await,
+        true,
+    )
+    .await;
+    assert_eq!(refused["error"], "orchestrator_only");
+    // The orchestrator confirms destructive actions with the user by default.
+    let auth = authenticate_id(&f, &f.nyxbot_thread).await;
     let action = result(
         call(
             &f,
@@ -507,7 +513,7 @@ async fn chat_discovery_does_not_write_request_audits_but_execution_refusals_do(
             .unwrap()
             .unwrap();
         let data = row.get_document("event_data").unwrap();
-        assert_eq!(data.get_str("access_mode").unwrap(), "ask");
+        assert_eq!(data.get_str("agent_role").unwrap(), "subagent");
         assert_eq!(data.get_str("conversation_id").unwrap(), f.row.id);
         assert!(!data.contains_key("arguments"));
     }
@@ -515,10 +521,10 @@ async fn chat_discovery_does_not_write_request_audits_but_execution_refusals_do(
 }
 
 #[tokio::test]
-async fn platform_services_get_a_consent_card_in_ask_mode_and_execute_after_allow() {
+async fn subagents_request_platform_services_and_execute_after_allow() {
     use crate::models::{
         assistant_acknowledgement::COLLECTION_NAME as ACKS,
-        assistant_conversation::{AccessMode, COLLECTION_NAME as CONVERSATIONS},
+        assistant_conversation::COLLECTION_NAME as CONVERSATIONS,
         service_endpoint::ServiceEndpoint,
     };
     let f = fixture("chat_platform_full_required").await;
@@ -591,31 +597,20 @@ async fn platform_services_get_a_consent_card_in_ask_mode_and_execute_after_allo
             .unwrap(),
         0
     );
-    for mode in [AccessMode::Ask, AccessMode::Full] {
-        if mode == AccessMode::Full {
-            f.state
-                .db
-                .collection::<mongodb::bson::Document>(CONVERSATIONS)
-                .update_one(
-                    doc! {"_id": &f.row.id},
-                    doc! {"$set": {"active_turn": mongodb::bson::Bson::Null}},
-                )
-                .await
-                .unwrap();
-            crate::services::assistant_access_mode_service::change(
-                &f.state.db,
-                &f.owner,
-                &f.row.id,
-                mode,
-            )
-            .await
-            .unwrap();
-        }
-        let auth = authenticate(&f).await;
-        let expected = if mode == AccessMode::Ask {
-            "acknowledgement_required"
+    let _ = CONVERSATIONS;
+    let team_id = f.nyxbot_thread.clone();
+    // A subagent asks its orchestrator for the platform service; the
+    // orchestrator itself runs with Full access and uses it directly.
+    for orchestrator in [false, true] {
+        let auth = if orchestrator {
+            authenticate_id(&f, &team_id).await
         } else {
+            authenticate(&f).await
+        };
+        let expected = if orchestrator {
             "granted"
+        } else {
+            "acknowledgement_required"
         };
         let listing = result(
             direct_call(&f, &auth, "nyx__list_connected_services", json!({})).await,
@@ -644,7 +639,7 @@ async fn platform_services_get_a_consent_card_in_ask_mode_and_execute_after_allo
         let tool = &search["matches"][0];
         assert_eq!(tool["chat_access"], expected);
         let name = tool["name"].as_str().unwrap();
-        if mode == AccessMode::Ask {
+        if !orchestrator {
             // Both call shapes ask for the same card; nothing executes yet.
             let mut ids = Vec::new();
             for direct in [true, false] {
@@ -743,7 +738,7 @@ async fn platform_services_get_a_consent_card_in_ask_mode_and_execute_after_allo
                     .await
                     .unwrap(),
                 1,
-                "Full mode creates no cards"
+                "the orchestrator creates no cards"
             );
         }
     }

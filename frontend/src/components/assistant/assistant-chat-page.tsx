@@ -1,6 +1,27 @@
-import { Badge } from "@/components/ui/badge";
-import { NyxAgentModeSelector } from "./nyxagent-mode-selector";
 import { NyxAgentAcknowledgementCard } from "./nyxagent-acknowledgement-card";
+import { NyxBotEventNotice, NyxBotOrchestratorMessage } from "./nyxbot-messages";
+import { NyxBotSettingsButton } from "./nyxbot-settings-dialog";
+import {
+  ChannelBadge,
+  PendingEventsNote,
+  TeamStrip,
+  ThreadHeader,
+} from "./nyxbot-agent-panels";
+import { AgentDetailsSheet } from "./nyxbot-agent-details";
+import { NewAgentDialog } from "./nyxbot-agent-forms";
+import { NewGroupDialog } from "./nyxbot-group-forms";
+import { NyxAgentGroupPage } from "./nyxbot-group-view";
+import { NyxBotHome } from "./nyxbot-home";
+import { nyxBotOf, selectedAgentOf, useNyxBotAgents } from "@/hooks/use-nyxbot-agents";
+import { useNyxBotGroups } from "@/hooks/use-nyxbot-groups";
+import {
+  agentHandle,
+  agentTitle,
+  groupWithDisplayNames,
+  withDisplayName,
+} from "@/lib/assistant/nyxbot-labels";
+import { nyxAgentTransport } from "@/lib/assistant/nyxagent-transport";
+import type { NyxAgentConversationAgent } from "@/schemas/assistant-nyxagent";
 import { ApprovalCard } from "@/components/assistant/blocks/approval-card";
 import {
   lazy,
@@ -18,17 +39,10 @@ import { AssistantShell } from "@/components/assistant/assistant-shell";
 import { AssistantEngineSidebar } from "@/components/assistant/assistant-engine-sidebar";
 import { useNyxAgentAssistantChat } from "@/hooks/use-assistant-nyxagent";
 import { Button } from "@/components/ui/button";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { AssistantWireLogAction } from "@/components/assistant/assistant-wire-log-panel";
 import { ChatActorControls } from "@/components/assistant/chat-actor-controls";
 import { ChatComposer } from "@/components/assistant/chat-composer";
-import { ChatMessageList } from "@/components/assistant/chat-message";
+import { ChatMessageBubble, ChatMessageList } from "@/components/assistant/chat-message";
 import {
   DirectChatControls,
   DirectModeBanner,
@@ -446,13 +460,34 @@ export function DirectAssistantChatPage() {
   );
 }
 
+/**
+ * The NyxAgent engine: a group chat (`?g=`), a thread (`?c=`, `?draft`,
+ * `?agent=`), or the NyxBot home when none of those are set.
+ */
 export function NyxAgentAssistantChatPage() {
+  const search = useRouterState({
+    select: (state) => parseAssistantSearch(state.location.search as Record<string, unknown>),
+  });
+  if (search.g) {
+    return <NyxAgentGroupPage key={search.g} groupId={search.g} mock={Boolean(search.mock)} />;
+  }
+  return <NyxAgentThreadPage />;
+}
+
+function NyxAgentThreadPage() {
   const navigate = useNavigate();
   const user = useAuthStore((state) => state.user);
   const search = useRouterState({
     select: (state) => parseAssistantSearch(state.location.search as Record<string, unknown>),
   });
   const selectedId = search.draft ? undefined : search.c;
+  // No thread, draft or agent in the URL: the NyxBot home.
+  const home = !search.c && !search.draft && !search.agent;
+  // Router state is global: while the sidebar navigates to another page this
+  // component is still mounted and sees that page's (thread-less) URL.
+  const onChatRoute = useRouterState({
+    select: (state) => state.location.pathname.replace(/\/+$/, "") === "/assistant",
+  });
   const composerRef = useRef<HTMLDivElement>(null);
   const [composerHeight, setComposerHeight] = useState(0);
   const [focusRequest, setFocusRequest] = useState(0);
@@ -469,9 +504,28 @@ export function NyxAgentAssistantChatPage() {
       replace: true,
     });
   }, [navigate, search.mock, selectedId]);
+  const agents = useNyxBotAgents();
+  const groups = useNyxBotGroups();
+  // The agent whose details sheet is open (the thread's agent, or NyxBot from home).
+  const [detailsAgentId, setDetailsAgentId] = useState<string>();
+  const [creating, setCreating] = useState<"agent" | "group">();
+  // The open thread's agent, else the agent in the URL, else NyxBot.
+  const threadAgent = nyxAgentTransport.getConversation(selectedId)?.agent ?? undefined;
+  const selectedAgent = selectedAgentOf(agents.data?.agents, threadAgent?.id, search.agent);
+  const draftAgent: NyxAgentConversationAgent | undefined = selectedAgent
+    ? {
+        id: selectedAgent.id,
+        kind: selectedAgent.kind,
+        name: selectedAgent.name,
+        destroyed: selectedAgent.status === "destroyed",
+      }
+    : undefined;
+  const headerAgent = selectedId ? threadAgent : draftAgent;
   const chat = useNyxAgentAssistantChat({
     selectedConversationId: selectedId,
     onConversationAdopted: adopt,
+    threadsAgentId: selectedAgent?.id,
+    draftAgent,
   });
   useLayoutEffect(() => {
     const element = composerRef.current;
@@ -483,25 +537,93 @@ export function NyxAgentAssistantChatPage() {
     return () => observer.disconnect();
   }, []);
 
-  function go(id?: string) {
-    setFocusRequest((value) => value + 1);
+  // `?agent=` alone (the sidebar's agent rows): open that agent's latest
+  // thread. The home never redirects.
+  const latestThreadId = chat.conversations[0]?.id;
+  useEffect(() => {
+    if (
+      !onChatRoute ||
+      !search.agent ||
+      search.c ||
+      search.draft ||
+      !chat.threadsLoaded ||
+      !latestThreadId
+    ) {
+      return;
+    }
     void navigate({
       to: "/assistant" as never,
-      search: {
-        ...(id ? { c: id } : { draft: true }),
-        ...(search.mock ? { mock: 1 } : {}),
-      } as never,
+      search: { c: latestThreadId, ...(search.mock ? { mock: 1 } : {}) } as never,
+      replace: true,
+    });
+  }, [
+    chat.threadsLoaded,
+    latestThreadId,
+    navigate,
+    onChatRoute,
+    search.agent,
+    search.c,
+    search.draft,
+    search.mock,
+  ]);
+
+  function navigateTo(next: { c?: string; draft?: true; agent?: string; g?: string }) {
+    void navigate({
+      to: "/assistant" as never,
+      search: { ...next, ...(search.mock ? { mock: 1 } : {}) } as never,
     });
   }
 
+  /**
+   * Open a thread. Without one, a specialist starts a new thread and NyxBot
+   * returns to its home (where the composer starts a new NyxBot thread).
+   */
+  function go(id?: string) {
+    setFocusRequest((value) => value + 1);
+    if (id) navigateTo({ c: id });
+    else if (selectedAgent?.kind === "specialist") {
+      navigateTo({ draft: true, agent: selectedAgent.id });
+    } else navigateTo({});
+  }
+
+  const conversation = chat.conversation;
+  // Threads carry the agent's handle; its display name lives on the agent list.
+  const headerNamed = headerAgent ? withDisplayName(headerAgent, agents.data?.agents) : undefined;
+  const agentName = headerNamed ? agentTitle(headerNamed) : "NyxBot";
+  const destroyed = Boolean(headerAgent?.destroyed);
+  const channelPlatform = selectedId ? (conversation?.channel?.platform ?? null) : null;
+  // The home stays until the first message of its new NyxBot thread shows.
+  const showHome = home && !chat.isStreaming && !chat.session.messages.length;
+  const threadPanels = headerAgent && !showHome ? (
+    <div className="shrink-0 px-4 pt-3 sm:px-6">
+      <div className="mx-auto w-full max-w-[758px] space-y-2">
+        <ThreadHeader
+          name={agentName}
+          handle={headerNamed ? agentHandle(headerNamed) : undefined}
+          kind={headerAgent.kind}
+          agentId={headerAgent.id}
+          destroyed={destroyed}
+          channelPlatform={channelPlatform}
+          onOpenDetails={() => setDetailsAgentId(headerAgent.id)}
+        />
+        {headerAgent.kind === "nyxbot" ? (
+          <TeamStrip agents={agents.data?.agents ?? []} onOpenConversation={go} />
+        ) : null}
+        {conversation && !chat.isStreaming ? (
+          <PendingEventsNote count={conversation.pending_events} agentName={agentName} />
+        ) : null}
+      </div>
+    </div>
+  ) : null;
+
   return (
     <AssistantShell
-      title={chat.session.title}
-      headerActions={chat.accessMode === "full" ? <Badge variant="warning">Full access</Badge> : null}
+      title={showHome ? "Home" : chat.session.title}
+      headerActions={<NyxBotSettingsButton />}
       sidebar={
         <AssistantEngineSidebar
           engine="nyxagent"
-          conversations={chat.conversations}
+          conversations={[]}
           activeConversationId={selectedId}
           onNewChat={() => go()}
           onSelect={go}
@@ -511,12 +633,63 @@ export function NyxAgentAssistantChatPage() {
       }
     >
       <div className="relative flex h-full min-h-0 flex-col bg-background">
-        {chat.beforeSeq ? (
+        {threadPanels}
+        <AgentDetailsSheet
+          agentId={detailsAgentId}
+          agents={agents.data?.agents ?? []}
+          open={detailsAgentId !== undefined}
+          onOpenChange={(open) => {
+            if (!open) setDetailsAgentId(undefined);
+          }}
+          onDeleted={() => {
+            setDetailsAgentId(undefined);
+            navigateTo({});
+          }}
+        />
+        {creating === "agent" ? (
+          <NewAgentDialog
+            onClose={() => setCreating(undefined)}
+            onCreated={(created) => {
+              setCreating(undefined);
+              navigateTo({ c: created.home_conversation_id });
+            }}
+          />
+        ) : null}
+        {creating === "group" ? (
+          <NewGroupDialog
+            agents={agents.data?.agents ?? []}
+            onClose={() => setCreating(undefined)}
+            onCreated={(group) => {
+              setCreating(undefined);
+              navigateTo({ g: group.id });
+            }}
+          />
+        ) : null}
+        {chat.beforeSeq && !showHome ? (
           <Button variant="ghost" onClick={() => void chat.loadOlder()}>
             Load earlier messages
           </Button>
         ) : null}
-        {chat.isLoading && !chat.session.messages.length ? (
+        {showHome ? (
+          <NyxBotHome
+            userName={user?.display_name ?? undefined}
+            agents={agents.data?.agents ?? []}
+            agentsLoading={agents.isPending}
+            groups={(groups.data ?? []).map((group) =>
+              groupWithDisplayNames(group, agents.data?.agents),
+            )}
+            bottomInset={composerHeight}
+            onChat={(agent) => navigateTo({ agent: agent.id })}
+            onOpenConversation={(id) => go(id)}
+            onOpenGroup={(id) => navigateTo({ g: id })}
+            onNewGroup={() => setCreating("group")}
+            onNewAgent={() => setCreating("agent")}
+            onManageMemory={() => {
+              const nyxbot = nyxBotOf(agents.data?.agents);
+              if (nyxbot) setDetailsAgentId(nyxbot.id);
+            }}
+          />
+        ) : chat.isLoading && !chat.session.messages.length ? (
           <div className="flex flex-1 items-center justify-center text-[12px] text-text-tertiary">
             Loading conversation...
           </div>
@@ -524,6 +697,19 @@ export function NyxAgentAssistantChatPage() {
           <ChatMessageList
             session={chat.session}
             renderMessage={(message) => {
+              if (message.role === "event") return <NyxBotEventNotice message={message} />;
+              if (message.role === "orchestrator") {
+                return <NyxBotOrchestratorMessage message={message} />;
+              }
+              if (message.role === "user" && channelPlatform) {
+                // The user wrote this in the chat app, not here.
+                return (
+                  <div className="flex flex-col items-end gap-1">
+                    <ChannelBadge platform={channelPlatform} />
+                    <ChatMessageBubble message={message} />
+                  </div>
+                );
+              }
               const approval = chat.approvals.find(
                 (row) => message.id === `nyxagent-approval:${row.id}`,
               );
@@ -569,8 +755,10 @@ export function NyxAgentAssistantChatPage() {
             bottomInset={composerHeight}
             notice={chat.error}
             emptyDescription={
-              "See your connected services, connect a new one, " +
-              "set up a channel bot, or check approvals."
+              headerAgent?.kind === "specialist"
+                ? `Talk to ${agentName} directly. It remembers across its threads and asks NyxBot for anything outside its grants.`
+                : "See your connected services, connect a new one, " +
+                  "set up a channel bot, or check approvals."
             }
           />
         )}
@@ -578,10 +766,18 @@ export function NyxAgentAssistantChatPage() {
           <ChatComposer
             active={chat.isStreaming}
             sending={chat.isStreaming}
-            disabled={Boolean(selectedId && chat.error)}
+            disabled={Boolean(selectedId && chat.error) || destroyed}
             ownerUserId={user?.id ?? null}
-            draftKey={selectedId ? `conv:${selectedId}` : "screen:nyxagent:assistant"}
+            draftKey={
+              selectedId
+                ? `conv:${selectedId}`
+                : headerAgent?.kind === "specialist"
+                  ? `screen:nyxagent:agent:${headerAgent.id}`
+                  : "screen:nyxagent:assistant"
+            }
             focusRequest={focusRequest}
+            // Model routing is server-side: there is no profile selector here.
+            placeholder={`Message ${agentName}`}
             onSend={async (text) => {
               try {
                 await chat.send(text);
@@ -599,38 +795,6 @@ export function NyxAgentAssistantChatPage() {
                 toast.error("Could not stop the assistant. Try again.");
               }
             }}
-            controls={
-              <div className="ml-[30px] flex max-w-[390px] gap-3 pb-1.5">
-                <div className="min-w-0 flex-1">
-                <label
-                  htmlFor="nyxagent-profile"
-                  className="mb-1 block text-[10px] font-medium text-text-tertiary"
-                >
-                  Profile
-                </label>
-                <Select
-                  value={chat.model}
-                  onValueChange={chat.setModel}
-                  disabled={Boolean(selectedId) || chat.isStreaming}
-                >
-                  <SelectTrigger id="nyxagent-profile" className="h-7 rounded-md px-2">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {chat.models.map((model) => (
-                      <SelectItem key={model.id} value={model.id}>{model.label}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                </div>
-                <NyxAgentModeSelector
-                  key={selectedId ?? "draft"}
-                  mode={chat.accessMode}
-                  disabled={chat.isStreaming || chat.changingAccessMode || chat.isLoading}
-                  onChange={chat.setAccessMode}
-                />
-              </div>
-            }
           />
         </div>
       </div>

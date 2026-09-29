@@ -376,6 +376,37 @@ impl DirectChatRateLimiter {
         }
     }
 
+    /// A capacity slot outside the per-person human window: NyxBot subagent and
+    /// event turns draw from a per-team pool whose size the owner configures.
+    /// `Ok(None)` means the pool is full; callers report `busy` instead of queueing.
+    pub async fn try_acquire_pool(
+        self: &Arc<Self>,
+        namespace: &str,
+        scope: &str,
+        limit: u32,
+    ) -> Result<Option<DirectChatPermit>, AppError> {
+        if let Some(slot_manager) = &self.slot_manager {
+            return Ok(slot_manager
+                .acquire(namespace, scope, limit.max(1))
+                .await?
+                .map(|slot| DirectChatPermit {
+                    slot: Some(slot),
+                    #[cfg(test)]
+                    local_limiter: None,
+                    #[cfg(test)]
+                    user_id: String::new(),
+                }));
+        }
+        #[cfg(not(test))]
+        unreachable!("production direct-chat limiters always have a MongoDB backend");
+        #[cfg(test)]
+        Ok(Some(DirectChatPermit {
+            slot: None,
+            local_limiter: None,
+            user_id: String::new(),
+        }))
+    }
+
     #[cfg(test)]
     pub fn cleanup(&self) {
         let now = Instant::now();
@@ -744,7 +775,8 @@ pub struct ResolvedClientIp {
     pub attribution: ClientIpAttribution,
 }
 
-/// Per-message edit limiter keyed by upstream platform message ID.
+/// Per-message edit limiter keyed by NyxID outbound message ID (platform
+/// message IDs repeat across chats, so they cannot key a shared bucket).
 /// Used by the channel relay edit endpoint so progressive updates on one
 /// message cannot starve the rest of the relay.
 #[derive(Clone)]
@@ -786,12 +818,12 @@ impl PerMessageEditRateLimiter {
         }
     }
 
-    pub async fn check_shared(&self, platform_message_id: &str) -> Result<bool, AppError> {
+    pub async fn check_shared(&self, message_key: &str) -> Result<bool, AppError> {
         if let Some(db) = self.db.as_ref() {
             return Ok(TokenBucketStore::admit(
                 db,
                 &self.namespace,
-                platform_message_id,
+                message_key,
                 self.rate_per_second,
                 self.burst,
             )
@@ -799,22 +831,20 @@ impl PerMessageEditRateLimiter {
             .allowed);
         }
         #[cfg(test)]
-        return Ok(self.check(platform_message_id));
+        return Ok(self.check(message_key));
         #[cfg(not(test))]
         unreachable!("production rate limiters always have a MongoDB backend")
     }
 
-    /// Check if an edit for the given upstream message should be allowed.
+    /// Check if an edit for the given outbound message should be allowed.
     #[cfg(test)]
-    pub fn check(&self, platform_message_id: &str) -> bool {
+    pub fn check(&self, message_key: &str) -> bool {
         let now = Instant::now();
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let entry = state
-            .entry(platform_message_id.to_string())
-            .or_insert(AgentBucket {
-                tokens: self.burst as f64,
-                last_refill: now,
-            });
+        let entry = state.entry(message_key.to_string()).or_insert(AgentBucket {
+            tokens: self.burst as f64,
+            last_refill: now,
+        });
 
         let elapsed_secs = now.duration_since(entry.last_refill).as_secs_f64();
         entry.tokens =

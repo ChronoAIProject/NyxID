@@ -392,6 +392,7 @@ mod tests {
             auth_method: "bearer".to_string(),
             auth_key_name: "Authorization".to_string(),
             catalog_service_id: Some("github-catalog".to_string()),
+            icon_url: None,
             node_id: None,
             node_priority: 0,
             service_type: "http".to_string(),

@@ -39,6 +39,9 @@ export async function openAssistant(
   const search = new URLSearchParams({ mock: "1" });
   if (options.conversation) search.set("c", options.conversation);
   await page.goto(`/assistant?${search.toString()}`);
+  // The earlier engines' sidebar leads with "New chat"; the NyxAgent sidebar
+  // has none (chats start from the NyxBot home or an agent) and leads with
+  // its agents instead.
   await expect
     .poll(
       async () =>
@@ -46,6 +49,7 @@ export async function openAssistant(
           .getByRole("button", { name: "New chat", exact: true })
           .first()
           .isVisible()) ||
+        (await page.getByRole("button", { name: "New agent", exact: true }).first().isVisible()) ||
         (await page.getByRole("button", { name: "Open chats" }).isVisible()),
       { timeout: 20_000 },
     )

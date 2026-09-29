@@ -8,13 +8,12 @@
 use chrono::Utc;
 use futures::TryStreamExt;
 use hmac::{Hmac, Mac};
-use mongodb::bson::{Bson, doc};
+use mongodb::bson::doc;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::config::AppConfig;
 use crate::errors::{AppError, AppResult};
-use crate::models::channel_conversation::COLLECTION_NAME as CONVERSATIONS;
 use crate::models::channel_message::{COLLECTION_NAME, ChannelMessage};
 use crate::services::channel_platform::InboundMessage;
 
@@ -518,67 +517,64 @@ pub async fn get_message(db: &mongodb::Database, message_id: &str) -> AppResult<
         .ok_or_else(|| AppError::NotFound(format!("Message not found: {message_id}")))
 }
 
-/// Get a single outbound message by its upstream platform message ID.
-pub async fn get_outbound_message_by_platform_id(
-    db: &mongodb::Database,
-    platform: &str,
-    platform_message_id: &str,
-) -> AppResult<ChannelMessage> {
-    db.collection::<ChannelMessage>(COLLECTION_NAME)
-        .find_one(doc! {
-            "platform": platform,
-            "platform_message_id": platform_message_id,
-            "direction": "outbound",
-        })
-        .await?
-        .ok_or_else(|| {
-            AppError::NotFound(format!("Outbound message not found: {platform_message_id}"))
-        })
-}
-
-/// Resolve a single outbound message editable by an assigned agent API key.
+/// Resolve the outbound row an agent API key may edit: rows the key sent.
+///
+/// Platform message IDs are not globally unique (Telegram numbers messages
+/// per chat), so `outbound_message_id` pins the exact row and an unpinned ID
+/// shared by several of the key's rows is a conflict, never a guess.
 pub async fn get_outbound_message_for_api_key(
     db: &mongodb::Database,
     api_key_id: &str,
     platform_message_id: &str,
+    outbound_message_id: Option<&str>,
 ) -> AppResult<ChannelMessage> {
-    let platforms = db
-        .collection::<mongodb::bson::Document>(CONVERSATIONS)
-        .distinct("platform", doc! { "agent_api_key_id": api_key_id })
-        .await?;
+    find_unique_outbound_message(
+        db,
+        doc! { "agent_api_key_id": api_key_id },
+        platform_message_id,
+        outbound_message_id,
+    )
+    .await
+}
 
-    let mut found: Option<ChannelMessage> = None;
+/// Resolve the outbound row a reply token may edit: the reply its key sent
+/// to its bound inbound message in its bound conversation.
+pub async fn get_outbound_reply_for_inbound(
+    db: &mongodb::Database,
+    api_key_id: &str,
+    conversation_id: &str,
+    inbound_message_id: &str,
+    platform_message_id: &str,
+    outbound_message_id: Option<&str>,
+) -> AppResult<ChannelMessage> {
+    find_unique_outbound_message(
+        db,
+        doc! {
+            "agent_api_key_id": api_key_id,
+            "conversation_id": conversation_id,
+            "reply_to_message_id": inbound_message_id,
+        },
+        platform_message_id,
+        outbound_message_id,
+    )
+    .await
+}
 
-    for platform in platforms {
-        let Bson::String(platform) = platform else {
-            continue;
-        };
-
-        match get_outbound_message_by_platform_id(db, &platform, platform_message_id).await {
-            Ok(message) => {
-                if found.is_some() {
-                    return Err(AppError::Conflict(format!(
-                        "Multiple outbound messages found for platform message ID: {platform_message_id}"
-                    )));
-                }
-                found = Some(message);
-            }
-            Err(AppError::NotFound(_)) => {}
-            Err(err) => return Err(err),
-        }
+async fn find_unique_outbound_message(
+    db: &mongodb::Database,
+    mut filter: mongodb::bson::Document,
+    platform_message_id: &str,
+    outbound_message_id: Option<&str>,
+) -> AppResult<ChannelMessage> {
+    filter.insert("direction", "outbound");
+    filter.insert("platform_message_id", platform_message_id);
+    if let Some(outbound_message_id) = outbound_message_id {
+        filter.insert("_id", outbound_message_id);
     }
-
-    if let Some(message) = found {
-        return Ok(message);
-    }
-
     let matches: Vec<ChannelMessage> = db
         .collection::<ChannelMessage>(COLLECTION_NAME)
-        .find(doc! {
-            "direction": "outbound",
-            "agent_api_key_id": api_key_id,
-            "platform_message_id": platform_message_id,
-        })
+        .find(filter)
+        .limit(2)
         .await?
         .try_collect()
         .await?;
@@ -589,7 +585,8 @@ pub async fn get_outbound_message_for_api_key(
             "Outbound message not found: {platform_message_id}"
         ))),
         _ => Err(AppError::Conflict(format!(
-            "Multiple outbound messages found for platform message ID: {platform_message_id}"
+            "Multiple outbound messages found for platform message ID: {platform_message_id}; \
+             pass outbound_message_id (the message_id returned by /reply or /send)"
         ))),
     }
 }
@@ -729,6 +726,7 @@ pub fn build_callback_payload(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::channel_conversation::COLLECTION_NAME as CONVERSATIONS;
 
     #[tokio::test]
     async fn inbound_retry_lookup_is_scoped_to_bot_platform_and_direction() {
@@ -802,7 +800,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn outbound_message_for_api_key_fallback_returns_single_matching_outbound_message() {
+    async fn outbound_message_for_api_key_returns_single_matching_outbound_message() {
         let Some(db) =
             crate::test_utils::connect_test_database("channel_relay_outbound_api_key_single").await
         else {
@@ -855,9 +853,9 @@ mod tests {
         .expect("insert outbound message");
 
         let resolved =
-            get_outbound_message_for_api_key(&db, &agent_api_key_id, platform_message_id)
+            get_outbound_message_for_api_key(&db, &agent_api_key_id, platform_message_id, None)
                 .await
-                .expect("single fallback match should resolve");
+                .expect("single match should resolve");
         assert_eq!(resolved.id, inserted.id);
         assert_eq!(resolved.platform, "lark");
         assert_eq!(
@@ -873,7 +871,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn outbound_message_for_api_key_fallback_conflicts_on_duplicate_matches() {
+    async fn outbound_message_for_api_key_conflicts_on_duplicate_matches() {
         let Some(db) =
             crate::test_utils::connect_test_database("channel_relay_outbound_api_key").await
         else {
@@ -944,18 +942,148 @@ mod tests {
         .await
         .expect("insert duplicate outbound message");
 
-        let err = get_outbound_message_for_api_key(&db, &agent_api_key_id, platform_message_id)
-            .await
-            .expect_err("duplicate fallback matches should conflict");
+        let err =
+            get_outbound_message_for_api_key(&db, &agent_api_key_id, platform_message_id, None)
+                .await
+                .expect_err("duplicate matches should conflict");
         assert!(
             matches!(err, AppError::Conflict(msg) if msg.contains("Multiple outbound messages found"))
         );
 
-        let err =
-            get_outbound_message_for_api_key(&db, &other_agent_api_key_id, platform_message_id)
-                .await
-                .expect_err("fallback lookup should stay scoped to the requesting agent");
+        let err = get_outbound_message_for_api_key(
+            &db,
+            &other_agent_api_key_id,
+            platform_message_id,
+            None,
+        )
+        .await
+        .expect_err("lookup should stay scoped to the requesting agent");
         assert!(matches!(err, AppError::NotFound(_)));
+
+        db.drop().await.expect("drop test database");
+    }
+
+    async fn insert_telegram_conversation(
+        db: &mongodb::Database,
+        agent_api_key_id: &str,
+        platform_conversation_id: &str,
+        is_active: bool,
+    ) -> crate::models::channel_conversation::ChannelConversation {
+        let now = Utc::now();
+        let conversation = crate::models::channel_conversation::ChannelConversation {
+            activity_callback: None,
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: uuid::Uuid::new_v4().to_string(),
+            channel_bot_id: Some(uuid::Uuid::new_v4().to_string()),
+            platform: "telegram".to_string(),
+            platform_conversation_id: platform_conversation_id.to_string(),
+            platform_conversation_type: "private".to_string(),
+            platform_sender_id: None,
+            agent_api_key_id: agent_api_key_id.to_string(),
+            default_agent: false,
+            allow_agent_initiated: false,
+            is_active,
+            last_message_at: None,
+            created_at: now,
+            updated_at: now,
+        };
+        db.collection::<crate::models::channel_conversation::ChannelConversation>(CONVERSATIONS)
+            .insert_one(&conversation)
+            .await
+            .expect("insert conversation");
+        conversation
+    }
+
+    async fn store_telegram_reply(
+        db: &mongodb::Database,
+        conversation: &crate::models::channel_conversation::ChannelConversation,
+        platform_conversation_id: &str,
+        platform_message_id: &str,
+    ) -> ChannelMessage {
+        store_outbound_message(
+            db,
+            conversation
+                .channel_bot_id
+                .as_deref()
+                .expect("test conversation bot id"),
+            &conversation.id,
+            &conversation.user_id,
+            "telegram",
+            &conversation.agent_api_key_id,
+            None,
+            Some(platform_message_id),
+            Some(platform_conversation_id),
+            "text",
+            None,
+        )
+        .await
+        .expect("insert outbound message")
+    }
+
+    #[tokio::test]
+    async fn outbound_message_for_api_key_ignores_other_keys_colliding_rows() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("channel_relay_outbound_cross_key").await
+        else {
+            eprintln!("skipping channel_relay service test: no local MongoDB available");
+            return;
+        };
+        let own_key = uuid::Uuid::new_v4().to_string();
+        let other_key = uuid::Uuid::new_v4().to_string();
+        // Telegram numbers messages per chat, so another tenant's older reply
+        // in a now-inactive conversation carries the same message ID.
+        let other = insert_telegram_conversation(&db, &other_key, "chat-other", false).await;
+        store_telegram_reply(&db, &other, "chat-other", "57").await;
+        let own = insert_telegram_conversation(&db, &own_key, "chat-own", true).await;
+        let own_reply = store_telegram_reply(&db, &own, "chat-own", "57").await;
+
+        let resolved = get_outbound_message_for_api_key(&db, &own_key, "57", None)
+            .await
+            .expect("the caller's own reply should resolve");
+        assert_eq!(resolved.id, own_reply.id);
+
+        db.drop().await.expect("drop test database");
+    }
+
+    #[tokio::test]
+    async fn outbound_message_for_api_key_requires_pin_for_same_key_collisions() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("channel_relay_outbound_same_key").await
+        else {
+            eprintln!("skipping channel_relay service test: no local MongoDB available");
+            return;
+        };
+        let key = uuid::Uuid::new_v4().to_string();
+        // One wildcard route serves customers A and B, whose chats both
+        // number the bot's reply 57.
+        let route = insert_telegram_conversation(&db, &key, "*", true).await;
+        let customer_a = store_telegram_reply(&db, &route, "chat-a", "57").await;
+        let customer_b = store_telegram_reply(&db, &route, "chat-b", "57").await;
+
+        let err = get_outbound_message_for_api_key(&db, &key, "57", None)
+            .await
+            .expect_err("an ambiguous platform message ID must not pick a row");
+        assert!(matches!(err, AppError::Conflict(_)));
+
+        let resolved = get_outbound_message_for_api_key(&db, &key, "57", Some(&customer_b.id))
+            .await
+            .expect("a pinned outbound row should resolve");
+        assert_eq!(resolved.id, customer_b.id);
+        assert_eq!(resolved.platform_conversation_id.as_deref(), Some("chat-b"));
+
+        // A pin never widens the caller scope or detaches from the edited ID.
+        let other_key = uuid::Uuid::new_v4().to_string();
+        for (caller, platform_message_id) in [(other_key.as_str(), "57"), (key.as_str(), "58")] {
+            let err = get_outbound_message_for_api_key(
+                &db,
+                caller,
+                platform_message_id,
+                Some(&customer_a.id),
+            )
+            .await
+            .expect_err("an out-of-scope pin must not resolve");
+            assert!(matches!(err, AppError::NotFound(_)));
+        }
 
         db.drop().await.expect("drop test database");
     }

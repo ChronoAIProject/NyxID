@@ -385,7 +385,9 @@ async fn ensure_catalog_editor_route(
     }
     if path_matches_prefix(path, "/api/v1/proxy") {
         let target = catalog_editor_proxy_service::authorized_target(db, sa, scope).await?;
-        if path_matches_prefix(path, &format!("/api/v1/proxy/{target}")) {
+        if path_matches_prefix(path, &format!("/api/v1/proxy/{}", target.id))
+            || path_matches_prefix(path, &format!("/api/v1/proxy/s/{}", target.slug))
+        {
             return Ok(());
         }
     }

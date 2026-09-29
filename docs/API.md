@@ -577,7 +577,10 @@ Fetch the non-mutating anti-phishing context shown by first-party review surface
 `supports_grant_choice` is an explicit capability advertisement. It is `true`
 only for grant-capable `/auth/device/v2/request` rows and is `false` for
 legacy rows. Clients must use this field instead of inspecting the public code
-format. Legacy requests use eight normalized characters. V2 keeps the old nine-character marker by default; `AUTH_DEVICE_EIGHT_CHAR_CODES=true` enables eight-character issuance only after old readers and non-reserving writers have drained (see ADR-015).
+format. Legacy and v2 requests default to eight normalized characters for installed
+app compatibility. `AUTH_DEVICE_EIGHT_CHAR_CODES=false` restores the old
+nine-character v2 marker during rollout rollback. Old readers and non-reserving
+writers must be drained before eight-character v2 issuance (see ADR-015).
 
 #### POST /api/v1/auth/device/approve
 

@@ -1809,6 +1809,119 @@ function LabelEditor({
   );
 }
 
+function IconEditor({
+  keyId,
+  slug,
+  iconUrl,
+  readOnly,
+}: {
+  readonly keyId: string;
+  readonly slug: string;
+  readonly iconUrl?: string | null;
+  readonly readOnly: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState(iconUrl ?? "");
+  const updateKey = useUpdateKey();
+  const trimmed = draft.trim();
+  let valid = trimmed.length === 0;
+  if (trimmed.length > 0 && trimmed.length <= 2048 && isValidHttpUrl(trimmed)) {
+    const parsed = new URL(trimmed);
+    valid = !parsed.username && !parsed.password && !trimmed.includes("#");
+  }
+
+  function handleOpenChange(nextOpen: boolean) {
+    if (nextOpen) setDraft(iconUrl ?? "");
+    setOpen(nextOpen);
+  }
+
+  function handleSave() {
+    if (!valid) return;
+    updateKey.mutate(
+      { keyId, icon_url: trimmed },
+      {
+        onSuccess: () => {
+          toast.success(
+            trimmed ? "Service icon updated" : "Default icon restored",
+          );
+          setOpen(false);
+        },
+        onError: (error) => {
+          toast.error(
+            error instanceof ApiError ? error.message : "Failed to update icon",
+          );
+        },
+      },
+    );
+  }
+
+  return (
+    <>
+      <div className="flex shrink-0 items-center gap-1">
+        <ServiceIcon slug={slug} iconUrl={iconUrl} size="md" />
+        {!readOnly && (
+          <Button
+            size="icon"
+            variant="ghost"
+            className="h-6 w-6"
+            title="Change service icon"
+            aria-label="Change service icon"
+            onClick={() => handleOpenChange(true)}
+          >
+            <Pencil className="h-3 w-3" />
+          </Button>
+        )}
+      </div>
+      <Dialog open={open} onOpenChange={handleOpenChange}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Service icon</DialogTitle>
+            <DialogDescription>Use an image URL for this service.</DialogDescription>
+          </DialogHeader>
+          <div className="flex items-center gap-3 py-2">
+            <ServiceIcon
+              slug={slug}
+              iconUrl={valid ? trimmed : iconUrl}
+              size="lg"
+            />
+            <div className="min-w-0 flex-1 space-y-2">
+              <Label htmlFor="service-icon-url">Image URL</Label>
+              <Input
+                id="service-icon-url"
+                type="url"
+                value={draft}
+                maxLength={2048}
+                placeholder="https://example.com/icon.svg"
+                onChange={(event) => setDraft(event.target.value)}
+                aria-invalid={!valid}
+              />
+              {!valid && (
+                <p className="text-xs text-destructive">
+                  Enter an HTTP(S) image URL without credentials or a fragment.
+                </p>
+              )}
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDraft("")} disabled={!draft}>
+              Use default
+            </Button>
+            <Button
+              variant="primary"
+              onClick={handleSave}
+              disabled={
+                !valid || trimmed === (iconUrl ?? "") || updateKey.isPending
+              }
+            >
+              Save
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
+
 function AccessPolicySection({
   serviceId,
   adminOnly,
@@ -2340,7 +2453,12 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
       <div className="flex flex-col gap-2">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-3">
-            <ServiceIcon slug={keyInfo.catalog_service_slug} size="md" />
+            <IconEditor
+              keyId={keyInfo.id}
+              slug={keyInfo.catalog_service_slug ?? keyInfo.slug}
+              iconUrl={keyInfo.icon_url}
+              readOnly={readOnly}
+            />
             <div className="flex flex-col gap-2">
               {keyInfo.auto_connected ? (
                 <h2

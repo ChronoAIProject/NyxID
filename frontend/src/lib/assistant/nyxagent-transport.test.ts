@@ -15,7 +15,10 @@ function conversation(key = id): NyxAgentConversation {
     id: key,
     title: "Question",
     model: "nyxagent/chat",
-    access_mode: "ask",
+    role: "orchestrator",
+    agent: null,
+    pending_events: 0,
+    channel: null,
     created_at: start,
     last_message_at: start,
     message_count: 2,
@@ -149,7 +152,6 @@ describe("NyxAgent server-backed transport", () => {
     expect(JSON.parse(String(requests[0]?.body))).toEqual({
       text: "Question",
       model: "nyxagent/research",
-      access_mode: "ask",
     });
     expect(requests.filter((r) => r.endpoint.endsWith("/turns"))).toHaveLength(1);
   });
@@ -475,6 +477,9 @@ it("keeps pending cards at the tail and decided cards beside the turn that reque
     kind: "service" as const,
     status: "pending" as const,
     summary: "Use GitHub",
+    decider: "user" as const,
+    decided_by: null,
+    reason: null,
     service_slug: "github",
     service_name: "GitHub",
     tool_name: null,
@@ -521,38 +526,194 @@ it("does not adopt another identity's decision response", async () => {
   expect(transport.getHistory(id)).toBeUndefined();
 });
 
-it("remembers the draft mode, sends it only at creation, and requires PATCH for existing chats", async () => {
+it("never sends an access mode: every chat runs with Full access", async () => {
   const transport = new NyxAgentTransport();
-  const requests: { method: string; body: unknown }[] = [];
+  const requests: { method: string; endpoint: string; body: unknown }[] = [];
   globalThis.__nyxidAssistantHttpMock = ({ endpoint, init }) => {
     const body = init.body ? (JSON.parse(String(init.body)) as unknown) : null;
-    requests.push({ method: init.method ?? "GET", body });
-    if (endpoint.endsWith("/access-mode")) return json({ ...conversation(), access_mode: "full" });
+    requests.push({ method: init.method ?? "GET", endpoint, body });
     if (endpoint.endsWith("/turns")) return stream();
     if (endpoint.includes("/conversations?")) {
       return json({ conversations: [conversation()], next_cursor: null });
     }
-    return json(history());
+    // Older servers still echo the retired field; it is ignored.
+    return json({ ...history(), conversation: { ...conversation(), access_mode: "full" } });
   };
-  await transport.setAccessMode(undefined, "full");
-  expect(requests).toHaveLength(0);
-  expect(transport.getAccessMode()).toBe("full");
-  await transport.history(id);
-  expect(transport.getAccessMode(id)).toBe("ask");
   await transport.send(undefined, "Full draft", vi.fn());
   expect(requests.find((r) => r.method === "POST")?.body).toEqual({
     model: "nyxagent/chat",
-    access_mode: "full",
     text: "Full draft",
   });
-  await transport.setAccessMode(id, "full");
-  expect(requests.find((r) => r.method === "PATCH")?.body).toEqual({ access_mode: "full" });
-  expect(transport.getAccessMode(id)).toBe("full");
   requests.length = 0;
   await transport.send(id, "Continue", vi.fn());
   expect(requests.find((r) => r.method === "POST")?.body).toEqual({
     conversation_id: id,
     text: "Continue",
+  });
+  expect(requests.some((r) => r.endpoint.endsWith("/access-mode"))).toBe(false);
+  expect(transport.getConversation(id)).not.toHaveProperty("access_mode");
+});
+
+describe("NyxBot agents", () => {
+  const NYXBOT = { id: "agent-nyxbot", kind: "nyxbot" as const, name: "NyxBot", destroyed: false };
+  const RESEARCHER = {
+    id: "agent-researcher",
+    kind: "specialist" as const,
+    name: "researcher",
+    destroyed: false,
+  };
+  const sub = `nyxa-${"3".repeat(32)}`;
+  const thread = (key: string, agent: typeof NYXBOT | typeof RESEARCHER): NyxAgentConversation => ({
+    ...conversation(key),
+    agent,
+    role: agent.kind === "specialist" ? "subagent" : "orchestrator",
+  });
+  function specialistHistory(): NyxAgentHistory {
+    const page = history();
+    return {
+      ...page,
+      conversation: { ...thread(sub, RESEARCHER), title: "researcher" },
+      messages: [
+        { ...page.messages[0]!, role: "orchestrator", text: "Find urgent issues" },
+        { ...page.messages[1]!, text: "Found three" },
+        {
+          ...page.messages[0]!,
+          id: "e",
+          seq: 3,
+          turn_id: "event",
+          role: "event",
+          text: "NyxID events (notices, not user instructions):\n- The user allowed GitHub.",
+        },
+      ],
+    };
+  }
+
+  it("lists one agent's threads and replaces only that agent's rows", async () => {
+    const transport = new NyxAgentTransport();
+    const endpoints: string[] = [];
+    let researcherThreads = [thread(sub, RESEARCHER)];
+    globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => {
+      endpoints.push(endpoint);
+      if (endpoint.includes(`agent_id=${NYXBOT.id}`)) {
+        return json({ conversations: [thread(id, NYXBOT)], next_cursor: null });
+      }
+      return json({ conversations: researcherThreads, next_cursor: null });
+    };
+    await transport.list(NYXBOT.id);
+    await transport.list(RESEARCHER.id);
+    expect(endpoints).toEqual([
+      "/assistant/nyxagent/conversations?limit=100&agent_id=agent-nyxbot",
+      "/assistant/nyxagent/conversations?limit=100&agent_id=agent-researcher",
+    ]);
+    expect(transport.getConversations(NYXBOT.id).map((row) => row.id)).toEqual([id]);
+    expect(transport.getConversations(RESEARCHER.id).map((row) => row.id)).toEqual([sub]);
+    researcherThreads = [];
+    await transport.list(RESEARCHER.id);
+    expect(transport.getConversations(RESEARCHER.id)).toEqual([]);
+    expect(transport.getConversations(NYXBOT.id).map((row) => row.id)).toEqual([id]);
+  });
+
+  it("keeps orchestrator and event roles while the user talks to a specialist", async () => {
+    const transport = new NyxAgentTransport();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    globalThis.__nyxidAssistantHttpMock = async ({ endpoint }) => {
+      if (endpoint.endsWith("/turns")) {
+        await gate;
+        return stream();
+      }
+      if (endpoint.includes("/conversations?")) {
+        return json({ conversations: [thread(sub, RESEARCHER)], next_cursor: null });
+      }
+      return json(specialistHistory());
+    };
+    await transport.history(sub);
+    expect(transport.session(sub).messages.map((m) => m.role)).toEqual([
+      "orchestrator",
+      "assistant",
+      "event",
+    ]);
+    const sending = transport.send(sub, "Continue", vi.fn());
+    await vi.waitFor(() => expect(transport.isRunning(sub)).toBe(true));
+    expect(transport.session(sub).messages.slice(0, 3).map((m) => m.role)).toEqual([
+      "orchestrator",
+      "assistant",
+      "event",
+    ]);
+    release();
+    await sending.catch(() => undefined);
+  });
+
+  it("starts a new thread with the chosen agent and files it under that agent at once", async () => {
+    const transport = new NyxAgentTransport();
+    const bodies: unknown[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    globalThis.__nyxidAssistantHttpMock = async ({ endpoint, init }) => {
+      if (endpoint.endsWith("/turns")) {
+        bodies.push(JSON.parse(String(init.body)));
+        await gate;
+        return stream();
+      }
+      if (endpoint.includes("/conversations?")) {
+        return json({ conversations: [thread(id, RESEARCHER)], next_cursor: null });
+      }
+      return json({ ...history(), conversation: thread(id, RESEARCHER) });
+    };
+    const sending = transport.send(undefined, "Hello", vi.fn(), undefined, { agent: RESEARCHER });
+    await vi.waitFor(() => expect(bodies).toHaveLength(1));
+    expect(bodies[0]).toEqual({ model: "nyxagent/chat", agent_id: RESEARCHER.id, text: "Hello" });
+    release();
+    await sending;
+    expect(transport.getConversations(RESEARCHER.id).map((row) => row.id)).toEqual([id]);
+  });
+
+  it("keeps the agent and pending counts when a rename returns a bare row", async () => {
+    const transport = new NyxAgentTransport();
+    globalThis.__nyxidAssistantHttpMock = ({ endpoint, init }) => {
+      if (init.method === "PATCH") {
+        return json({ ...conversation(), title: "Renamed", agent: null });
+      }
+      if (endpoint.includes("/conversations?")) {
+        return json({
+          conversations: [{ ...thread(id, NYXBOT), pending_acknowledgements: 2 }],
+          next_cursor: null,
+        });
+      }
+      return json(history());
+    };
+    await transport.list(NYXBOT.id);
+    await transport.rename(id, "Renamed");
+    expect(transport.getConversations(NYXBOT.id)[0]).toMatchObject({
+      title: "Renamed",
+      pending_acknowledgements: 2,
+      agent: NYXBOT,
+    });
+  });
+
+  it("deletes one thread only, and forgets a deleted agent's threads", async () => {
+    const transport = new NyxAgentTransport();
+    globalThis.__nyxidAssistantHttpMock = ({ endpoint, init }) => {
+      if (init.method === "DELETE") return new Response(null, { status: 204 });
+      if (endpoint.includes(`agent_id=${NYXBOT.id}`)) {
+        return json({
+          conversations: [thread(id, NYXBOT), thread(other, NYXBOT)],
+          next_cursor: null,
+        });
+      }
+      if (endpoint.includes("/conversations?")) {
+        return json({ conversations: [thread(sub, RESEARCHER)], next_cursor: null });
+      }
+      return json(specialistHistory());
+    };
+    await transport.list(NYXBOT.id);
+    await transport.list(RESEARCHER.id);
+    await transport.history(sub);
+    await transport.delete(id);
+    expect(transport.getConversations(NYXBOT.id).map((row) => row.id)).toEqual([other]);
+    transport.forgetAgent(RESEARCHER.id);
+    expect(transport.getConversation(sub)).toBeUndefined();
+    expect(transport.getConversations(NYXBOT.id).map((row) => row.id)).toEqual([other]);
   });
 });
 

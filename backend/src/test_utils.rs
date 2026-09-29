@@ -2500,6 +2500,7 @@ pub(crate) fn test_user_service(
         auth_method: "none".to_string(),
         auth_key_name: String::new(),
         catalog_service_id: catalog_service_id.map(str::to_string),
+        icon_url: None,
         node_id: node_id.map(str::to_string),
         node_priority: 0,
         service_type: "http".to_string(),

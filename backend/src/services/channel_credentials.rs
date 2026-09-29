@@ -178,8 +178,18 @@ pub async fn resolve_bot_token(
 }
 
 pub async fn fail_bot(db: &mongodb::Database, bot: &ChannelBot, cause: &str) -> AppResult<()> {
+    let mut filter = doc! { "_id": &bot.id, "is_active": true, "status": { "$ne": "failed" }, "connection_id": &bot.connection_id, "updated_at": bson::DateTime::from_chrono(bot.updated_at) };
+    if bot.platform == "x" {
+        // Incomplete setup pauses delivery before failure is known. The first
+        // actual failure claims that marker, preserving its cause and one audit.
+        filter.remove("status");
+        filter.insert("$or", vec![
+            doc! {"status": {"$ne": "failed"}},
+            doc! {"status": "failed", "error": super::channel_connection_webhook_service::SETUP_PENDING_ERROR},
+        ]);
+    }
     let result = db.collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
-        .update_one(doc! { "_id": &bot.id, "is_active": true, "status": { "$ne": "failed" }, "connection_id": &bot.connection_id, "updated_at": bson::DateTime::from_chrono(bot.updated_at) },
+        .update_one(filter,
             doc! { "$set": { "status": "failed", "error": cause, "updated_at": bson::DateTime::now() } }).await?;
     if result.modified_count > 0 {
         audit_failure(db, bot, cause).await?;

@@ -1002,6 +1002,9 @@ async fn main() {
         1,                       // 1-second window
     );
 
+    // NyxBot: destroy idle subagents and retry deferred team wake-ups.
+    handlers::assistant_team::spawn_sweeps(state.clone());
+
     // Revoke abandoned Agent Key exchanges even when the CLI stops polling.
     if config.agent_key_login_sweep_interval_secs > 0 {
         let sweep_db = state.db.clone();

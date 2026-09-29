@@ -182,11 +182,15 @@ pub mod service_account_scope_service;
 
 pub mod channel_platform_catalog_service;
 
-pub mod assistant_access_mode_service;
 pub mod assistant_account_tools;
 pub mod assistant_acknowledgement_service;
 pub mod assistant_agent_credential_service;
+pub mod assistant_group_service;
 pub mod assistant_nyxagent;
+pub mod assistant_profile_routing;
+pub mod assistant_settings_service;
+pub mod assistant_team_service;
+pub mod assistant_team_tools;
 pub mod channel_retry_ingress;
 pub mod provider_link_service;
 pub mod retired_service_service;

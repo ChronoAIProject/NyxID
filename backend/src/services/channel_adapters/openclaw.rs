@@ -149,6 +149,7 @@ impl PlatformAdapter for OpenClawAdapter {
         let _bot_token = credentials.token;
         Ok(BotIdentity {
             platform_bot_id: "openclaw".to_string(),
+            display_name: None,
             platform_bot_username: "openclaw".to_string(),
         })
     }

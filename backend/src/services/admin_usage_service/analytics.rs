@@ -106,9 +106,9 @@ impl AnalyticsQuery {
             ));
         }
         let top = self.top.unwrap_or(5);
-        if ![0, 5, 10].contains(&top) {
+        if ![0, 5, 10, 20].contains(&top) {
             return Err(AppError::ValidationError(
-                "top must be 0 (aggregate), 5, or 10".into(),
+                "top must be 0 (aggregate), 5, 10, or 20".into(),
             ));
         }
         let granularity = match self.interval.as_deref().unwrap_or("auto") {

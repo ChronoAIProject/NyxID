@@ -184,14 +184,31 @@ async fn complete(
     headers: &HeaderMap,
     addr: SocketAddr,
 ) -> AppResult<Private<ApprovalStatus>> {
+    let method = if mfa { "password_mfa" } else { "password" };
+    complete_identity(state, row, mfa, method, headers, addr, None).await
+}
+
+async fn complete_identity(
+    state: &AppState,
+    row: &LoginApproval,
+    trusted_authentication: bool,
+    method: &str,
+    headers: &HeaderMap,
+    addr: SocketAddr,
+    app_request: Option<&crate::models::auth_device_code::AuthDeviceCode>,
+) -> AppResult<Private<ApprovalStatus>> {
     service::live(&state.db, state.auth_device_hmac_key.as_slice(), row).await?;
     let actor = service::user(&state.db, row).await?;
-    if actor.mfa_enabled && !mfa {
+    if actor.mfa_enabled && !trusted_authentication {
         return Ok(private(response(state, row).await?));
     }
     let ip = resolve_client_ip(headers, addr, state)?.to_string();
     let ua = extract_user_agent(headers);
-    let (row, session) = service::verify(&state.db, row, mfa, &ip, ua.as_deref()).await?;
+    let (row, session) = if let Some(request) = app_request {
+        service::verify_app(&state.db, row, request, &ip, ua.as_deref()).await?
+    } else {
+        service::verify(&state.db, row, trusted_authentication, &ip, ua.as_deref()).await?
+    };
     let (mut result_headers, body) = private(response(state, &row).await?);
     if let Some(session) = session {
         apply_browser_session_cookies(
@@ -206,7 +223,8 @@ async fn complete(
         Some(actor.id),
         "login_request_identity_verified".into(),
         Some(
-            serde_json::json!({"request_id": row.request_id, "keep_signed_in": row.keep_signed_in, "mfa_verified": mfa}),
+            serde_json::json!({"request_id": row.request_id, "keep_signed_in": row.keep_signed_in,
+                "method": method, "mfa_verified": method == "password_mfa"}),
         ),
         Some(ip),
         ua,
@@ -214,6 +232,64 @@ async fn complete(
         None,
     );
     Ok((result_headers, body))
+}
+
+pub async fn app_request(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(body): Json<super::auth_device::AuthDeviceRequestBody>,
+) -> AppResult<Private<super::auth_device::AuthDeviceRequestResponse>> {
+    origin(&state, &headers)?;
+    let row = load(&state, &headers, &id).await?;
+    limit(&state, &headers, addr, None).await?;
+    let context =
+        super::login_client_context::capture_client_context(&headers, addr, &state, body)?;
+    let request = service::begin_app(
+        &state.db,
+        state.auth_device_hmac_key.as_slice(),
+        &row,
+        context,
+    )
+    .await?;
+    let mut url = url::Url::parse(&state.config.frontend_url).map_err(|_| service::invalid())?;
+    url.set_path("/login/device");
+    url.set_query(None);
+    let verification_uri = url.to_string();
+    url.query_pairs_mut()
+        .append_pair("user_code", &request.user_code);
+    Ok(private(super::auth_device::AuthDeviceRequestResponse {
+        device_code: request.device_code,
+        user_code: request.user_code,
+        verification_uri,
+        verification_uri_complete: url.to_string(),
+        expires_in: request.expires_in,
+        interval: request.interval,
+    }))
+}
+
+pub async fn app_poll(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(body): Json<super::auth_device::AuthDevicePollBody>,
+) -> AppResult<Private<ApprovalStatus>> {
+    origin(&state, &headers)?;
+    let row = load(&state, &headers, &id).await?;
+    let ip = resolve_client_ip(&headers, addr, &state)?;
+    if !state.auth_device_poll_limiter.check_shared(ip).await? {
+        return Err(AppError::AuthDeviceCodeRateLimited);
+    }
+    let (row, request) = service::app_identity(
+        &state.db,
+        state.auth_device_hmac_key.as_slice(),
+        &row,
+        &body.device_code,
+    )
+    .await?;
+    complete_identity(&state, &row, true, "app", &headers, addr, Some(&request)).await
 }
 pub async fn password(
     State(state): State<AppState>,
@@ -468,7 +544,9 @@ pub(super) async fn social_complete(
     let row =
         service::consume_social(&state.db, state.auth_device_hmac_key.as_slice(), id, raw).await?;
     let row = service::identify(&state.db, &row, actor).await?;
-    let (mut headers, _) = complete(state, &row, false, headers, addr).await?;
+    // Match ordinary social login: the provider owns its authentication challenges.
+    let (mut headers, _) =
+        complete_identity(state, &row, true, "social", headers, addr, None).await?;
     // Identity and scope hints remain in tab-local state. The callback carries no credential.
     let mut url = url::Url::parse(&state.config.frontend_url).map_err(|_| service::invalid())?;
     url.set_path(&format!(

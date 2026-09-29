@@ -37,6 +37,7 @@ vi.mock("@/stores/auth-store", () => {
   return { useAuthStore: Object.assign(state, { getState: state }) };
 });
 vi.mock("@tanstack/react-router", () => ({
+  useNavigate: () => vi.fn(),
   useLocation: ({
     select,
   }: {
@@ -49,9 +50,9 @@ vi.mock("@tanstack/react-router", () => ({
   }: {
     children: React.ReactNode;
     to: string;
-    search: { return_to: string };
+    search?: { return_to?: string };
   }) => (
-    <a href={`${to}?return_to=${encodeURIComponent(search.return_to)}`}>
+    <a href={`${to}?return_to=${encodeURIComponent(search?.return_to ?? "")}`}>
       {children}
     </a>
   ),
@@ -134,6 +135,33 @@ async function scope(flow: "device" | "agent-key" = "device") {
 const approvals = () =>
   mocks.post.mock.calls.filter(([path]) => String(path).includes("/approve"));
 describe("three-step device approval", () => {
+  it.each([
+    ["ABCD-EFGH", "ABCDEFGH", 8],
+    ["2ABC-DEFG", "2ABCDEFG", 9],
+    ["2-ABCD-EFGH", "2ABCDEFGH", 9],
+  ])(
+    "accepts a pasted %s code in segmented fields",
+    async (pasted, normalized, count) => {
+      mocks.query = "";
+      mount();
+      const group = screen.getByRole("group", { name: "User code" });
+      expect(within(group).getAllByRole("textbox")).toHaveLength(8);
+      await act(async () => {
+        fireEvent.paste(within(group).getAllByRole("textbox")[0]!, {
+          clipboardData: { getData: () => pasted },
+        });
+      });
+      expect(within(group).getAllByRole("textbox")).toHaveLength(count);
+      await click("Continue");
+      expect(mocks.preview).toHaveBeenCalledWith("/auth/device/preview", {
+        method: "POST",
+        body: { user_code: normalized },
+        credentials: "omit",
+        preserveSessionOn401: true,
+      });
+    },
+  );
+
   it("preserves collapsed details through step navigation and expands them on Review request", async () => {
     mocks.query += "&show_details=true";
     mount();
@@ -254,7 +282,7 @@ describe("three-step device approval", () => {
       } else expect(reset).not.toBeInTheDocument();
     },
   );
-  it("offers only enabled identity methods and reveals email fields after selection", async () => {
+  it("offers the same configured providers, app option, and email fields as normal login", async () => {
     mocks.auth = false;
     mocks.config = { email_auth_enabled: true, social_providers: ["google"] };
     mount();
@@ -265,16 +293,9 @@ describe("three-step device approval", () => {
     expect(
       screen.queryByRole("button", { name: "Continue with GitHub" }),
     ).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("Password")).not.toBeInTheDocument();
-    await click("Continue with email");
     expect(screen.getByLabelText("Password")).toBeVisible();
     expect(
-      screen.queryByRole("button", { name: "Continue with Google" }),
-    ).not.toBeInTheDocument();
-    await click("Other sign-in methods");
-    expect(screen.queryByLabelText("Password")).not.toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "Continue with Google" }),
+      screen.getByRole("button", { name: "Continue with the NyxID app" }),
     ).toBeVisible();
     expect(mocks.post).not.toHaveBeenCalled();
   });

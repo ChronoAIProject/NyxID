@@ -45,6 +45,9 @@ import {
 } from "@/components/ui/table";
 import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { ErrorBanner } from "@/components/shared/error-banner";
+import { PlatformIcon, PLATFORM_ICON_OPTIONS } from "@/components/platform-icon";
+import { ServiceIcon, type ServiceIconSize } from "@/components/service-icon";
+import { CUSTOM_SERVICE_SLUGS, SPEC_CATALOG_SLUGS } from "@/components/service-icons";
 import { toast } from "sonner";
 import {
   Plus,
@@ -141,8 +144,38 @@ const DS_NAV = [
   { id: "ux-rules", label: "UX Rules" },
 ];
 
+const ICON_SIZE_OPTIONS: readonly {
+  value: ServiceIconSize;
+  label: string;
+}[] = [
+  { value: "2xs", label: "2xs" },
+  { value: "xs", label: "xs" },
+  { value: "sm", label: "sm" },
+  { value: "md", label: "md" },
+  { value: "lg", label: "lg" },
+  { value: "xl", label: "xl" },
+];
+
+const ICON_AUDIT_SLUGS = [...SPEC_CATALOG_SLUGS, ...CUSTOM_SERVICE_SLUGS];
+
+function iconAuditLabel(slug: string) {
+  return slug
+    .replace(/^(api|llm)-/, "")
+    .split("-")
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ");
+}
+
 export function DesignSystemPage() {
   const [switchVal, setSwitchVal] = useState(true);
+  const [iconSearch, setIconSearch] = useState("");
+  const normalizedIconSearch = iconSearch.trim().toLowerCase();
+  const filteredIconAuditSlugs = ICON_AUDIT_SLUGS.filter(
+    (slug) =>
+      !normalizedIconSearch ||
+      slug.toLowerCase().includes(normalizedIconSearch) ||
+      iconAuditLabel(slug).toLowerCase().includes(normalizedIconSearch),
+  );
 
   return (
     <div className="min-h-dvh bg-background text-foreground">
@@ -811,6 +844,86 @@ export function DesignSystemPage() {
                 <p className="text-[11px] text-text-tertiary">
                   Nav sidebar: <code className="text-nyx-secondary-400">16px</code>. Top bar chrome: <code className="text-nyx-secondary-400">18px</code>. Inline buttons: <code className="text-nyx-secondary-400">14px</code>. Stat cards: <code className="text-nyx-secondary-400">14px</code>. Tiny indicators: <code className="text-nyx-secondary-400">12px</code>.
                 </p>
+              </div>
+            </ComponentShowcase>
+
+            <ComponentShowcase title="Platform icon scale">
+              <div className="space-y-4 overflow-x-auto">
+                <div className="min-w-[680px]">
+                  <div className="grid grid-cols-[minmax(180px,1fr)_repeat(6,56px)] items-center gap-2 border-b border-border/40 pb-2 text-[10px] font-mono uppercase tracking-[0.08em] text-text-tertiary">
+                    <span>Agent platform</span>
+                    {ICON_SIZE_OPTIONS.map(({ label }) => (
+                      <span key={label} className="text-center">{label}</span>
+                    ))}
+                  </div>
+                  {PLATFORM_ICON_OPTIONS.map(({ platform, label }) => (
+                    <div
+                      key={platform}
+                      className="grid grid-cols-[minmax(180px,1fr)_repeat(6,56px)] items-center gap-2 border-b border-border/20 py-3 last:border-0"
+                    >
+                      <div className="min-w-0">
+                        <p className="truncate text-[13px] font-medium text-foreground">{label}</p>
+                        <code className="text-[10px] text-text-tertiary">{platform}</code>
+                      </div>
+                      {ICON_SIZE_OPTIONS.map(({ value, label: sizeLabel }) => (
+                        <div key={sizeLabel} className="flex h-10 items-center justify-center">
+                          <PlatformIcon platform={platform} size={value} />
+                        </div>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </ComponentShowcase>
+
+            <ComponentShowcase title="Catalog service icon audit">
+              <div className="space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <p className="text-[12px] text-muted-foreground">
+                    {ICON_AUDIT_SLUGS.length} registered service marks, including seeded Pro services and internal platform aliases.
+                  </p>
+                  <div className="relative w-full sm:w-64">
+                    <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-text-tertiary" />
+                    <Input
+                      value={iconSearch}
+                      onChange={(event) => setIconSearch(event.target.value)}
+                      placeholder="Filter services"
+                      aria-label="Filter service icons"
+                      className="h-8 pl-8 text-[12px]"
+                    />
+                  </div>
+                </div>
+                <div className="overflow-x-auto rounded-lg border border-border/50">
+                  <div className="min-w-[680px]">
+                    <div className="grid grid-cols-[minmax(180px,1fr)_repeat(6,56px)] items-center gap-2 border-b border-border/50 bg-muted/40 px-3 py-2 text-[10px] font-mono uppercase tracking-[0.08em] text-text-tertiary">
+                      <span>Service</span>
+                      {ICON_SIZE_OPTIONS.map(({ label }) => (
+                        <span key={label} className="text-center">{label}</span>
+                      ))}
+                    </div>
+                    {filteredIconAuditSlugs.map((slug) => (
+                      <div
+                        key={slug}
+                        className="grid grid-cols-[minmax(180px,1fr)_repeat(6,56px)] items-center gap-2 border-b border-border/20 px-3 last:border-0"
+                      >
+                        <div className="min-w-0 py-2">
+                          <p className="truncate text-[12px] font-medium text-foreground">{iconAuditLabel(slug)}</p>
+                          <code className="truncate text-[10px] text-text-tertiary">{slug}</code>
+                        </div>
+                        {ICON_SIZE_OPTIONS.map(({ value, label }) => (
+                          <div key={label} className="flex h-12 items-center justify-center">
+                            <ServiceIcon slug={slug} size={value} />
+                          </div>
+                        ))}
+                      </div>
+                    ))}
+                    {filteredIconAuditSlugs.length === 0 && (
+                      <p className="px-3 py-8 text-center text-[12px] text-muted-foreground">
+                        No matching service icons.
+                      </p>
+                    )}
+                  </div>
+                </div>
               </div>
             </ComponentShowcase>
           </div>

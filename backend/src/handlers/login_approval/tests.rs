@@ -4,7 +4,7 @@ use crate::test_utils::{connect_test_database, test_app_state, test_user};
 use mongodb::bson::doc;
 use serde_json::{Value, json};
 
-async fn exercise(keep: bool, mfa: bool) {
+async fn exercise(keep: bool, mfa: bool, app: bool) {
     let Some(db) = connect_test_database("request_only_identity").await else {
         return;
     };
@@ -107,16 +107,146 @@ async fn exercise(keep: bool, mfa: bool) {
         .await
         .unwrap();
     assert_eq!(cross_site.status(), StatusCode::FORBIDDEN);
-    let mut signed = client
-        .post(format!("{approval}/password"))
-        .header("Origin", &origin)
-        .header("Cookie", &cookie)
-        .json(&json!({"email":email, "password":password, "client":"token"}))
-        .send()
+    let mut signed = if app {
+        crate::test_utils::ensure_rate_window_headroom(
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(20),
+        )
+        .await;
+        let app_request = client
+            .post(format!("{approval}/app"))
+            .header("Origin", &origin)
+            .header("Cookie", &cookie)
+            .json(&json!({"client_label": "NyxID app identity verification"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(app_request.status(), StatusCode::OK);
+        let app_request: Value = app_request.json().await.unwrap();
+        assert_eq!(
+            device::normalize_user_code(app_request["user_code"].as_str().unwrap())
+                .unwrap()
+                .len(),
+            8
+        );
+        let app_poll = format!("{approval}/app/poll");
+        let wrong_request = client
+            .post(&app_poll)
+            .header("Origin", &origin)
+            .header("Cookie", &cookie)
+            .json(&json!({"device_code": request.device_code}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(wrong_request.status(), StatusCode::NOT_FOUND);
+        for _ in 0..12 {
+            let pending = client
+                .post(&app_poll)
+                .header("Origin", &origin)
+                .header("Cookie", &cookie)
+                .json(&json!({"device_code": app_request["device_code"]}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(pending.status(), StatusCode::BAD_REQUEST);
+            let pending: Value = pending.json().await.unwrap();
+            assert_eq!(pending["error_code"], 11202);
+        }
+        let proof = client
+            .post(&app_poll)
+            .header("Origin", &origin)
+            .json(&json!({"device_code": app_request["device_code"]}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(proof.status(), StatusCode::UNAUTHORIZED);
+        let state = test_app_state(db.clone());
+        device::approve(
+            &db,
+            &state.config,
+            &state.jwt_keys,
+            &state.encryption_keys,
+            state.auth_device_hmac_key.as_slice(),
+            device::ApproveInput {
+                user_id: actor_id.clone(),
+                user_code: app_request["user_code"].as_str().unwrap().into(),
+                approver_ip: None,
+                approver_user_agent: None,
+            },
+        )
         .await
         .unwrap();
+        let app_filter = doc! {"device_code_hmac": device::hmac_hex(
+        state.auth_device_hmac_key.as_slice(),
+        app_request["device_code"].as_str().unwrap().as_bytes())};
+        let app_codes = db.collection::<crate::models::auth_device_code::AuthDeviceCode>(
+            crate::models::auth_device_code::COLLECTION_NAME,
+        );
+        app_codes
+            .update_one(
+                app_filter.clone(),
+                doc! {"$set": {"approved_session_id": "legacy-session"}},
+            )
+            .await
+            .unwrap();
+        let old_delivery = client
+            .post(&app_poll)
+            .header("Origin", &origin)
+            .header("Cookie", &cookie)
+            .json(&json!({"device_code": app_request["device_code"]}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(old_delivery.status(), StatusCode::UNAUTHORIZED);
+        let unchanged = app_codes
+            .find_one(app_filter.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            unchanged.status,
+            crate::models::auth_device_code::AuthDeviceCodeStatus::Approved
+        );
+        app_codes
+            .update_one(app_filter, doc! {"$unset": {"approved_session_id": ""}})
+            .await
+            .unwrap();
+        assert_eq!(
+            db.collection::<Session>("sessions")
+                .count_documents(doc! {"user_id": &actor_id})
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(matches!(
+            device::poll_and_claim(
+                &db,
+                state.auth_device_hmac_key.as_slice(),
+                app_request["device_code"].as_str().unwrap()
+            )
+            .await,
+            Err(AppError::AuthDeviceCodeNotFound)
+        ));
+        client
+            .post(&app_poll)
+            .header("Origin", &origin)
+            .header("Cookie", &cookie)
+            .json(&json!({"device_code": app_request["device_code"]}))
+            .send()
+            .await
+            .unwrap()
+    } else {
+        client
+            .post(format!("{approval}/password"))
+            .header("Origin", &origin)
+            .header("Cookie", &cookie)
+            .json(&json!({"email":email, "password":password, "client":"token"}))
+            .send()
+            .await
+            .unwrap()
+    };
     assert_eq!(signed.status(), StatusCode::OK);
-    if let Some(totp) = totp {
+    if !app && let Some(totp) = totp {
         assert!(signed.headers().get(header::SET_COOKIE).is_none());
         let pending: Value = signed.json().await.unwrap();
         assert_eq!(pending["verified"], false);
@@ -167,6 +297,7 @@ async fn exercise(keep: bool, mfa: bool) {
     assert_eq!(session_cookie.is_some(), keep);
     let signed: Value = signed.json().await.unwrap();
     assert_eq!(signed["verified"], true);
+    assert_eq!(signed["mfa_required"], false);
     assert!(signed.get("access_token").is_none());
     assert_eq!(
         db.collection::<Session>("sessions")
@@ -236,22 +367,32 @@ async fn exercise(keep: bool, mfa: bool) {
 
 #[tokio::test]
 async fn request_only_proof_never_becomes_an_account_session() {
-    exercise(false, false).await;
+    exercise(false, false, false).await;
 }
 
 #[tokio::test]
 async fn persistent_choice_keeps_browser_signed_in_after_decision() {
-    exercise(true, false).await;
+    exercise(true, false, false).await;
 }
 
 #[tokio::test]
 async fn request_only_mfa_is_required_before_authorization() {
-    exercise(false, true).await;
+    exercise(false, true, false).await;
 }
 
 #[tokio::test]
 async fn persistent_mfa_creates_session_only_after_second_factor() {
-    exercise(true, true).await;
+    exercise(true, true, false).await;
+}
+
+#[tokio::test]
+async fn app_identity_creates_no_session_or_extra_mfa_challenge_for_request_only_verification() {
+    exercise(false, true, true).await;
+}
+
+#[tokio::test]
+async fn app_identity_creates_a_browser_session_only_for_the_persistent_choice() {
+    exercise(true, true, true).await;
 }
 
 #[tokio::test]
@@ -260,7 +401,8 @@ async fn social_completion_is_request_bound_and_cannot_replay_or_revive_cancelle
         return;
     };
     let state = test_app_state(db.clone());
-    let actor = test_user(&uuid::Uuid::new_v4().to_string(), UserType::Person);
+    let mut actor = test_user(&uuid::Uuid::new_v4().to_string(), UserType::Person);
+    actor.mfa_enabled = true;
     db.collection::<User>(crate::models::user::COLLECTION_NAME)
         .insert_one(&actor)
         .await
@@ -309,6 +451,8 @@ async fn social_completion_is_request_bound_and_cannot_replay_or_revive_cancelle
         .await
         .unwrap();
     assert!(verified.verified);
+    assert!(verified.mfa_verified);
+    assert!(!response(&state, &verified).await.unwrap().mfa_required);
     assert!(
         social_complete(
             &state,

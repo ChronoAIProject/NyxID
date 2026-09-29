@@ -108,13 +108,18 @@ pub mod user_service_connection;
 pub mod ws_frame_injection;
 
 pub mod assistant_acknowledgement;
+pub mod assistant_agent;
 pub mod assistant_agent_credential;
 pub mod assistant_attachment;
 pub mod assistant_conversation;
+pub mod assistant_group;
 pub mod assistant_message;
+pub mod assistant_profile_route;
+pub mod assistant_settings;
 pub mod catalog_skill_revision;
 pub mod channel_delivery;
 pub mod channel_email;
+pub mod nyxbot_channel;
 pub mod service_change_event;
 pub mod usage_rollup_daily;
 pub mod usage_rollup_hourly;

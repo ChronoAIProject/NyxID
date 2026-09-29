@@ -8,6 +8,9 @@ const acknowledgement: NyxAgentAcknowledgement = {
   kind: "service",
   status: "pending",
   summary: "Delete agent key ci-bot",
+  decider: "user",
+  decided_by: null,
+  reason: null,
   service_slug: "github",
   service_name: "GitHub",
   tool_name: null,
@@ -66,5 +69,51 @@ it.each(["allowed", "denied", "expired", "used"] as const)(
     );
     expect(screen.getByRole("status")).toHaveTextContent(new RegExp(status, "i"));
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
+  },
+);
+
+it.each([
+  ["service", "Allow this agent to use GitHub?"],
+  ["account", "Allow this agent to read your NyxID account?"],
+] as const)("labels a specialist's %s request as routed to NyxBot", async (kind, text) => {
+  const decide = vi.fn().mockResolvedValue(undefined);
+  render(
+    <NyxAgentAcknowledgementCard
+      acknowledgement={{ ...acknowledgement, kind, decider: "orchestrator" }}
+      deciding={false}
+      onDecision={decide}
+    />,
+  );
+  const card = screen.getByRole("region", { name: text });
+  expect(card).toHaveTextContent("Requested from NyxBot");
+  // The user can still decide it from the specialist's thread.
+  fireEvent.click(screen.getByRole("button", { name: "Allow" }));
+  await waitFor(() => expect(decide).toHaveBeenCalledWith("allow"));
+});
+
+it.each([
+  ["orchestrator", "allowed", "Scope matches the user's request", "Allowed by NyxBot: Scope matches the user's request"],
+  ["orchestrator", "denied", null, "Denied by NyxBot"],
+  ["user", "denied", null, "Denied by you"],
+  ["user", "allowed", null, "Allowed by you"],
+] as const)(
+  "shows who decided a routed request (%s, %s)",
+  (decidedBy, status, reason, text) => {
+    render(
+      <NyxAgentAcknowledgementCard
+        acknowledgement={{
+          ...acknowledgement,
+          decider: "orchestrator",
+          decided_by: decidedBy,
+          status,
+          reason,
+        }}
+        deciding={false}
+        onDecision={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("status")).toHaveTextContent(
+      `${text} · Allow this agent to use GitHub?`,
+    );
   },
 );

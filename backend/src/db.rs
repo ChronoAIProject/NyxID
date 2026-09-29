@@ -2235,6 +2235,21 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .build(),
         )
         .await?;
+    // Reply edits resolve outbound rows by the caller's key, never by the
+    // platform message ID alone: Telegram IDs repeat across chats and tenants.
+    channel_msgs
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "agent_api_key_id": 1, "platform_message_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("channel_messages_outbound_edit_idx".to_string())
+                        .partial_filter_expression(doc! { "direction": "outbound" })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
 
     // ── reply_token_uses ──
     let reply_token_uses = db.collection::<mongodb::bson::Document>("reply_token_uses");
@@ -4165,6 +4180,7 @@ async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error
             auth_method,
             auth_key_name,
             catalog_service_id,
+            icon_url: None,
             node_id: None,
             node_priority: 0,
             service_type,
@@ -4403,6 +4419,7 @@ async fn migrate_service_connections(db: &Database) -> Result<(), Box<dyn std::e
             auth_method: service.auth_method.clone(),
             auth_key_name: service.auth_key_name.clone(),
             catalog_service_id: Some(service.id.clone()),
+            icon_url: None,
             node_id: None,
             node_priority: 0,
             service_type: service.service_type.clone(),
@@ -4666,6 +4683,7 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
             auth_method: service.auth_method.clone(),
             auth_key_name: service.auth_key_name.clone(),
             catalog_service_id: Some(service.id.clone()),
+            icon_url: None,
             node_id: Some(binding.node_id.clone()),
             node_priority: binding.priority,
             service_type: service.service_type.clone(),

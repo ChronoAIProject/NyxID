@@ -34,16 +34,26 @@ import { cn } from "@/lib/utils";
 import "./visualization.css";
 
 const COLORS = [
-  "var(--analytics-violet)",
-  "var(--analytics-blue)",
-  "var(--analytics-lavender)",
-  "var(--analytics-indigo)",
-  "var(--analytics-sky)",
-  "var(--analytics-periwinkle)",
-  "var(--analytics-steel)",
-  "var(--analytics-iris)",
-  "var(--analytics-mist)",
-  "var(--analytics-slate)",
+  "var(--analytics-series-1)",
+  "var(--analytics-series-2)",
+  "var(--analytics-series-3)",
+  "var(--analytics-series-4)",
+  "var(--analytics-series-5)",
+  "var(--analytics-series-6)",
+  "var(--analytics-series-7)",
+  "var(--analytics-series-8)",
+  "var(--analytics-series-9)",
+  "var(--analytics-series-10)",
+  "var(--analytics-series-11)",
+  "var(--analytics-series-12)",
+  "var(--analytics-series-13)",
+  "var(--analytics-series-14)",
+  "var(--analytics-series-15)",
+  "var(--analytics-series-16)",
+  "var(--analytics-series-17)",
+  "var(--analytics-series-18)",
+  "var(--analytics-series-19)",
+  "var(--analytics-series-20)",
 ] as const;
 const seriesColor = (index: number, other: boolean) =>
   other
@@ -135,14 +145,14 @@ export function ChartView({
     ),
   }));
   const temporal = panel.chart === "line" || panel.chart === "combo";
-  const color = (index: number, other: boolean) =>
-    seriesColor(panel.chart === "bar" ? 0 : index, other);
+  const color = seriesColor;
   const format = (value: string | number | null, compact = false) =>
     formatAnalyticsValue(value, data.unit, compact);
   const unit = unitLabel(data.unit);
   const unknown = data.totals.unknown_cost_events;
   const plotSlices = data.slices.map((slice, index) => ({
     ...slice,
+    amount: analyticsAmount(slice),
     value: plotAmount(slice),
     index,
   }));
@@ -224,8 +234,8 @@ export function ChartView({
             itemStyle={tooltipTextStyle}
             labelStyle={tooltipTextStyle}
             filterNull={false}
-            formatter={(v, name, item) => [
-              `${format(item.payload?.[`exact${String(item.dataKey)}`] ?? item.payload?.exact_value ?? (v == null ? null : Number(v)))} ${unit}`,
+            formatter={(_value, name, item) => [
+              `${format(item.payload?.amount ?? null)} ${unit}`,
               name,
             ]}
           />
@@ -290,8 +300,8 @@ export function ChartView({
           labelStyle={tooltipTextStyle}
           filterNull={false}
           cursor={{ fill: "var(--color-muted)", opacity: 0.4 }}
-          formatter={(v, _name, item) => [
-            `${format(item.payload?.[`exact${String(item.dataKey)}`] ?? item.payload?.exact_value ?? (v == null ? null : Number(v)))} ${unit}`,
+          formatter={(_value, _name, item) => [
+            `${format(item.payload?.amount ?? null)} ${unit}`,
           ]}
         />
         <Bar
@@ -372,7 +382,7 @@ export function ChartView({
               item.dataKey === "requests"
                 ? [formatAnalyticsValue(Number(v), "requests"), "Requests"]
                 : [
-                    `${format(item.payload?.[`exact${String(item.dataKey)}`] ?? item.payload?.exact_value ?? (v == null ? null : Number(v)))} ${unit}`,
+                    `${format(item.payload?.[`exact${String(item.dataKey)}`] ?? null)} ${unit}`,
                     name,
                   ]
             }
@@ -447,8 +457,8 @@ export function ChartView({
             labelStyle={tooltipTextStyle}
             filterNull={false}
             labelFormatter={(label) => timeLabel(String(label))}
-            formatter={(v, name, item) => [
-              `${format(item.payload?.[`exact${String(item.dataKey)}`] ?? item.payload?.exact_value ?? (v == null ? null : Number(v)))} ${unit}`,
+            formatter={(_value, name, item) => [
+              `${format(item.payload?.[`exact${String(item.dataKey)}`] ?? null)} ${unit}`,
               name,
             ]}
           />

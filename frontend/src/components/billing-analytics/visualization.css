@@ -1,16 +1,27 @@
 /* Chart colors are scoped so the shared NyxID surfaces keep their own tokens. */
 .analytics-visuals {
   --analytics-label: var(--color-foreground);
-  --analytics-violet: #9775fa;
-  --analytics-blue: #638be7;
+  --analytics-series-1: #aa82f7;
+  --analytics-series-2: #59c6da;
+  --analytics-series-3: #f0b357;
+  --analytics-series-4: #6cca91;
+  --analytics-series-5: #f28d79;
+  --analytics-series-6: #77a5f2;
+  --analytics-series-7: #dc83c8;
+  --analytics-series-8: #65c2af;
+  --analytics-series-9: #d8cc73;
+  --analytics-series-10: #e990a4;
+  --analytics-series-11: #998cf0;
+  --analytics-series-12: #ea9e65;
+  --analytics-series-13: #96c971;
+  --analytics-series-14: #73b8e8;
+  --analytics-series-15: #cf77a5;
+  --analytics-series-16: #bfd16b;
+  --analytics-series-17: #e37a80;
+  --analytics-series-18: #81c9c1;
+  --analytics-series-19: #b6a4e7;
+  --analytics-series-20: #98aabe;
   --analytics-lavender: #c0b2ec;
-  --analytics-indigo: #7b83cb;
-  --analytics-sky: #93b7e5;
-  --analytics-periwinkle: #aaa7da;
-  --analytics-steel: #7898b7;
-  --analytics-iris: #8d79bc;
-  --analytics-mist: #bbc7dd;
-  --analytics-slate: #919bac;
   --analytics-other: #687184;
   --analytics-grid: var(--color-border);
   --analytics-area-top: 0.34;
@@ -20,16 +31,27 @@
 }
 
 .theme-light .analytics-visuals {
-  --analytics-violet: #8059d4;
-  --analytics-blue: #496fc0;
+  --analytics-series-1: #7044c6;
+  --analytics-series-2: #167f98;
+  --analytics-series-3: #a7650d;
+  --analytics-series-4: #258254;
+  --analytics-series-5: #ba5744;
+  --analytics-series-6: #366cbb;
+  --analytics-series-7: #a34590;
+  --analytics-series-8: #1d8575;
+  --analytics-series-9: #817613;
+  --analytics-series-10: #af4868;
+  --analytics-series-11: #6057bb;
+  --analytics-series-12: #ad5a24;
+  --analytics-series-13: #557e28;
+  --analytics-series-14: #327fae;
+  --analytics-series-15: #a13e70;
+  --analytics-series-16: #6c831d;
+  --analytics-series-17: #b93c49;
+  --analytics-series-18: #2a837f;
+  --analytics-series-19: #7663ad;
+  --analytics-series-20: #536c85;
   --analytics-lavender: #9385c0;
-  --analytics-indigo: #646eae;
-  --analytics-sky: #6c91bb;
-  --analytics-periwinkle: #8e8abb;
-  --analytics-steel: #5e809e;
-  --analytics-iris: #8165a3;
-  --analytics-mist: #858fa6;
-  --analytics-slate: #78859a;
   --analytics-other: #878d9d;
   --analytics-area-top: 0.24;
   --analytics-area-middle: 0.08;

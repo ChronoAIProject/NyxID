@@ -67,6 +67,8 @@ pub struct AuthDeviceCode {
     pub id: String,
     #[serde(default)]
     pub supports_grant_choice: bool,
+    #[serde(default)]
+    pub login_approval_id: Option<String>,
     pub device_code_hmac: String,
     pub user_code_hmac: String,
     #[serde(default)]
@@ -251,6 +253,7 @@ mod tests {
     fn make_auth_device_code() -> AuthDeviceCode {
         let now = Utc::now();
         AuthDeviceCode {
+            login_approval_id: None,
             supports_grant_choice: false,
             id: uuid::Uuid::new_v4().to_string(),
             device_code_hmac: "abc123ff".repeat(8),
@@ -424,11 +427,13 @@ mod tests {
     fn legacy_bson_without_new_optional_fields_deserializes() {
         let row = make_auth_device_code();
         let mut doc = bson::to_document(&row).expect("serialize");
+        doc.remove("login_approval_id");
         doc.remove("client_ip");
         doc.remove("denied_by_user_id");
 
         let restored: AuthDeviceCode = bson::from_document(doc).expect("deserialize legacy row");
 
+        assert!(restored.login_approval_id.is_none());
         assert!(restored.client_ip.is_none());
         assert!(restored.denied_by_user_id.is_none());
     }

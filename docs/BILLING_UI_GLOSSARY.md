@@ -18,16 +18,16 @@ Where the ADR's intent and the shipped code disagree, this doc describes **the c
 
 ## 0. The three words everything else is built on
 
-| Term | Meaning |
-|---|---|
-| **Credit** | The billing unit. **1 credit = 1 USD.** NyxID creates every Lago wallet in USD with `rate_amount: "1"`, so credits are 1:1 with the wallet currency. Wallet amounts retain up to twelve decimal places. Top-up inputs remain whole credits. |
+| Term                              | Meaning                                                                                                                                                                                                                                                                                                               |
+| --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Credit**                        | The billing unit. **1 credit = 1 USD.** NyxID creates every Lago wallet in USD with `rate_amount: "1"`, so credits are 1:1 with the wallet currency. Wallet amounts retain up to twelve decimal places. Top-up inputs remain whole credits.                                                                           |
 | **Exact credits / credit micros** | Money uses decimal-credit strings and BigInt picocredits. Legacy integer micros remain display compatibility fields (one millionth of a credit), truncated after aggregation. Wallet debit equals its exact funded share. Normal display uses six decimals; a smaller nonzero value displays `<0.000001`, never zero. |
-| **Layer** | Which of two independent charges produced a usage row. One request can produce several platform component rows and one resale row. |
+| **Layer**                         | Which of two independent charges produced a usage row. One request can produce several platform component rows and one resale row.                                                                                                                                                                                    |
 
-| Layer | What is being charged |
-|---|---|
-| **Platform** | NyxID's fee for the request. In lane mode, the final credential selects either Your own key or NyxID platform key pricing. A missing lane is free. With no lanes, the legacy `platform_billable` / `platform_pricing` settings apply. |
-| **Resale** | The downstream vendor's value, resold. Charged **only** when NyxID supplied the master credential (`CredentialClass::NyxidManagedMaster`), the catalog service sets `resale_billable` with a Lago metric code, and the operator switch `BILLING_RESALE_ENABLED` is on. Bring your own key — or have an agent binding swap yours in, or keep the credential on a node — and there is no resale line (`services/billing/route_context.rs:52-58`). |
+| Layer        | What is being charged                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Platform** | NyxID's fee for the request. In lane mode, the final credential selects either Your own key or NyxID platform key pricing. A missing lane is free. With no lanes, the legacy `platform_billable` / `platform_pricing` settings apply.                                                                                                                                                                                                           |
+| **Resale**   | The downstream vendor's value, resold. Charged **only** when NyxID supplied the master credential (`CredentialClass::NyxidManagedMaster`), the catalog service sets `resale_billable` with a Lago metric code, and the operator switch `BILLING_RESALE_ENABLED` is on. Bring your own key — or have an agent binding swap yours in, or keep the credential on a node — and there is no resale line (`services/billing/route_context.rs:52-58`). |
 
 A **lane** selects the platform-layer price; it is not an extra billing layer.
 **Your own key** includes BYOK, agent credential overrides and node-managed keys.
@@ -84,19 +84,20 @@ free usage, and Top-up history. **Usage** contains the filters, Spend / Activity
 summary, and expandable service records. The page uses live billing APIs and inherits
 the application's fonts and theme.
 
-| UI element | Meaning | Source |
-|---|---|---|
-| **Billing / Usage** | Defaults to Billing. Tab, usage period and service selection persist in the URL and browser history. | `schemas/billing.ts`, `pages/billing.tsx` |
-| **Service filter** | Defaults to All active services: services with recorded usage in the selected period. Options use catalog display names. Unused catalog services are excluded. A selection absent from a newly loaded period resets to all. | `lib/billing-usage.ts`, `pages/billing.tsx` |
-| **Time filter** (24 hours / 7 days / 30 days / 90 days / All time) | Rolling windows measured back from the server's current UTC time. Filters usage summaries and all usage details. Defaults to 30 days. | `pages/billing.tsx`, `handlers/billing.rs` |
-| **Top-up history period** | Independent from Usage, defaults to 30 days. Changing it resets history to page 1. | `components/billing/billing-topup-history.tsx` |
-| **All time** | Usage means the last 3,650 days; Top-up history drops the date filter. | `handlers/billing.rs` |
+| UI element                                                         | Meaning                                                                                                                                                                                                                     | Source                                         |
+| ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| **Billing / Usage**                                                | Defaults to Billing. Tab, usage period and service selection persist in the URL and browser history.                                                                                                                        | `schemas/billing.ts`, `pages/billing.tsx`      |
+| **Service filter**                                                 | Defaults to All active services: services with recorded usage in the selected period. Options use catalog display names. Unused catalog services are excluded. A selection absent from a newly loaded period resets to all. | `lib/billing-usage.ts`, `pages/billing.tsx`    |
+| **Time filter** (24 hours / 7 days / 30 days / 90 days / All time) | Rolling windows measured back from the server's current UTC time. Filters usage summaries and all usage details. Defaults to 30 days.                                                                                       | `pages/billing.tsx`, `handlers/billing.rs`     |
+| **Top-up history period**                                          | Independent from Usage, defaults to 30 days. Changing it resets history to page 1.                                                                                                                                          | `components/billing/billing-topup-history.tsx` |
+| **All time**                                                       | Usage means the last 3,650 days; Top-up history drops the date filter.                                                                                                                                                      | `handlers/billing.rs`                          |
 
 Wallet and benefits always show current balances, independently of either history filter.
 Dates use the viewer's local timezone. The personal usage API has no time buckets or arbitrary
 date ranges; the time filter does not imply daily or hourly charts.
 
 **Page access and rollout:**
+
 - Capability: `user.capabilities.billing_available` requires billing enabled + Lago configured + the user's billing feature flag.
 - Flag precedence is `Default → Global → Org → User`: each explicit value replaces the less-specific value. An active org's disable overrides a global enable, and an explicit user enable overrides that org disable. Conflicting org overrides at the same scope resolve to disabled. Clearing an override restores inheritance; revoked memberships do not contribute org overrides.
 - Frontend: `BillingRouteGuard` redirects to `/dashboard` if that capability is false.
@@ -118,11 +119,11 @@ API support for authorized org reads.
 Shown when the usage response's capability block says charging is off (`billing.tsx:66-68`,
 `:135-139`). Backed by `BillingReadOnlyBlock` (`handlers/billing.rs:74-80`, `:294-299`):
 
-| Field | Meaning |
-|---|---|
-| `charging_enabled` | Already `BILLING_ENABLED && lago_configured` — despite the name, not just the master switch. False means nothing is charged, only metered. |
-| `lago_configured` | A Lago API URL **and** key are present and the client constructed. **Not** a live health check (`services/billing/mod.rs:33`, `:82`). |
-| `source: "usage_meter"` | Numbers come from NyxID's own durable ledger, not Lago's rating engine. Never rendered. |
+| Field                         | Meaning                                                                                                                                                       |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `charging_enabled`            | Already `BILLING_ENABLED && lago_configured` — despite the name, not just the master switch. False means nothing is charged, only metered.                    |
+| `lago_configured`             | A Lago API URL **and** key are present and the client constructed. **Not** a live health check (`services/billing/mod.rs:33`, `:82`).                         |
+| `source: "usage_meter"`       | Numbers come from NyxID's own durable ledger, not Lago's rating engine. Never rendered.                                                                       |
 | `rates_are_approximate: true` | Compatibility flag, always true. New settled rows use persisted exact gross costs; older rows use current cached rates. The UI labels the cost **Est. cost**. |
 
 While it shows, the Top Up input, Checkout button, and Provision Wallet button are all disabled
@@ -142,12 +143,12 @@ For mixed billing lanes, the allowance unit selector follows [the metering and a
 
 The admin grant, credit schedule, and allowance dialogs share four choices:
 
-| Recipients | Wallet receiving the benefit |
-|---|---|
-| **All billing owners** (`all_users`) | Every active person's and organization's wallet. |
-| **Selected owners** (`selected_users`, `target_user_ids`) | Each selected person's or organization's wallet. Selecting an organization funds its shared wallet. |
+| Recipients                                                 | Wallet receiving the benefit                                                                                                                                            |
+| ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **All billing owners** (`all_users`)                       | Every active person's and organization's wallet.                                                                                                                        |
+| **Selected owners** (`selected_users`, `target_user_ids`)  | Each selected person's or organization's wallet. Selecting an organization funds its shared wallet.                                                                     |
 | **Organization members** (`org_members`, `target_org_ids`) | Each active person's personal wallet when they have a non-revoked membership in any selected organization, including viewers. The organization wallet receives nothing. |
-| **Group members** (`groups`, `target_group_ids`) | Each active person's personal wallet through direct group membership. Parent/child groups are not expanded; organization accounts are excluded. |
+| **Group members** (`groups`, `target_group_ids`)           | Each active person's personal wallet through direct group membership. Parent/child groups are not expanded; organization accounts are excluded.                         |
 
 Selected lists contain 1–500 unique ids, with only the list matching the recipient kind populated. Organizations must be active; groups must exist. Overlapping memberships pay a person once. One-shot org/group grants reject more than 100,000 resolved recipients; larger populations use schedules.
 
@@ -182,16 +183,16 @@ View breakdown interaction. A help icon beside Wallet explains funding order and
 why the available balance can differ from the provider balance. A Suspended badge
 appears when applicable. Owner IDs and normal collection-state badges are not displayed.
 
-| Label | Meaning | API field |
-|---|---|---|
-| **Available** | Credits spendable now, excluding reservations, unsettled charges and expiry holds. Does not include overdraft. | `available` (legacy: `available_credits`) |
-| **Updated** | Relative age of the provider-synced balance. Does not describe usage freshness. | `balance_synced_at` |
-| **Balance** | Last provider-synced exact decimal balance. | `balance` (legacy: `balance_credits`) |
-| **Reserved** | Exact credit holds for in-flight requests. | `reserved` (legacy projection: `reserved_credits`) |
-| **Pending** | Charged locally, awaiting provider sync. | `pending_debits` (legacy: `pending_lago_debits`) |
-| **Expiring** | Credits held while expired purchases are removed; shown when nonzero. | `pending_expiry` (legacy: `pending_topup_expiry_credits`) |
-| **Overdraft** | Configured extra capacity, shown when nonzero. Actual eligibility also depends on plan and payment instrument. | `overdraft_cap` (legacy: `overdraft_cap_credits`) |
-| **Plan** | Configured plan kind. | `plan_kind` |
+| Label         | Meaning                                                                                                        | API field                                                 |
+| ------------- | -------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
+| **Available** | Credits spendable now, excluding reservations, unsettled charges and expiry holds. Does not include overdraft. | `available` (legacy: `available_credits`)                 |
+| **Updated**   | Relative age of the provider-synced balance. Does not describe usage freshness.                                | `balance_synced_at`                                       |
+| **Balance**   | Last provider-synced exact decimal balance.                                                                    | `balance` (legacy: `balance_credits`)                     |
+| **Reserved**  | Exact credit holds for in-flight requests.                                                                     | `reserved` (legacy projection: `reserved_credits`)        |
+| **Pending**   | Charged locally, awaiting provider sync.                                                                       | `pending_debits` (legacy: `pending_lago_debits`)          |
+| **Expiring**  | Credits held while expired purchases are removed; shown when nonzero.                                          | `pending_expiry` (legacy: `pending_topup_expiry_credits`) |
+| **Overdraft** | Configured extra capacity, shown when nonzero. Actual eligibility also depends on plan and payment instrument. | `overdraft_cap` (legacy: `overdraft_cap_credits`)         |
+| **Plan**      | Configured plan kind.                                                                                          | `plan_kind`                                               |
 
 All rows after Updated are in the expandable breakdown. Its formula reads
 `Available = Balance - Reserved - Pending - Expiring`. The API's
@@ -220,13 +221,13 @@ then wallet credits. Empty benefits are omitted; loading, retry and rollout stat
 
 ### Empty / error states
 
-| State | Trigger |
-|---|---|
+| State                                           | Trigger                                                                                                                                                                                                                                                                                                                          |
+| ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **"No wallet provisioned." + Provision Wallet** | Only when the wallet request fails with error code **11301 `BillingNotConfigured`** (HTTP 402). The button calls `POST /billing/wallet`, which idempotently ensures the Lago customer, subscription, wallet, and local row. Toast on success: "Billing wallet provisioned" — shown whether or not anything was actually created. |
-| **Error banner + Retry** | Any other wallet failure. Message is the server's, falling back to "Failed to load billing wallet." |
+| **Error banner + Retry**                        | Any other wallet failure. Message is the server's, falling back to "Failed to load billing wallet."                                                                                                                                                                                                                              |
 
-**About 11301.** Across the subsystem it means *Lago client absent* (`services/billing/mod.rs:98-106`),
-*rate-cache entry missing or stale* (`reservation.rs:1073`), or *no Lago client for a receipt*
+**About 11301.** Across the subsystem it means _Lago client absent_ (`services/billing/mod.rs:98-106`),
+_rate-cache entry missing or stale_ (`reservation.rs:1073`), or _no Lago client for a receipt_
 (`handlers/billing.rs:583`). On the wallet request specifically it means **Lago is unconfigured** —
 not "you have no wallet", since `GET /billing/wallet` auto-provisions when Lago works
 (`handlers/billing.rs:334-342`). See gap 3.
@@ -235,25 +236,25 @@ not "you have no wallet", since `GET /billing/wallet` auto-provisions when Lago 
 
 ## 4. Add credits dialog
 
-| UI element | Meaning |
-|---|---|
-| **"Add credits through hosted checkout."** | Payment runs through Stripe *underneath Lago*; NyxID never touches card data. |
-| **Credits input** | Whole credits to buy = whole USD. Range **1 to 10,000,000**, step 1, default 100 — enforced on both sides (`billing.tsx:69-75`; `services/billing/provisioning.rs:119-128`). Not an invoice total: no fees or tax shown. |
-| **Continue to payment** | `POST /billing/topup` with a fresh browser-generated UUID as `idempotency_key`, then **navigates the current tab** to the hosted `checkout_url` (`openExternal` = `window.location.assign`, `lib/navigation.ts:4-6`). Clicking it does not mean payment succeeded. |
+| UI element                                 | Meaning                                                                                                                                                                                                                                                            |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **"Add credits through hosted checkout."** | Payment runs through Stripe _underneath Lago_; NyxID never touches card data.                                                                                                                                                                                      |
+| **Credits input**                          | Whole credits to buy = whole USD. Range **1 to 10,000,000**, step 1, default 100 — enforced on both sides (`billing.tsx:69-75`; `services/billing/provisioning.rs:119-128`). Not an invoice total: no fees or tax shown.                                           |
+| **Continue to payment**                    | `POST /billing/topup` with a fresh browser-generated UUID as `idempotency_key`, then **navigates the current tab** to the hosted `checkout_url` (`openExternal` = `window.location.assign`, `lib/navigation.ts:4-6`). Clicking it does not mean payment succeeded. |
 
-| Concept | Meaning |
-|---|---|
-| **Idempotency key** | Stops a double-click from creating two payments. Reusing a key with a *different* amount is a 409 Conflict; reusing it with the same amount returns the existing checkout (`reused: true`). |
-| **Paid vs granted credits** | A top-up sends `paid_credits` only; `granted_credits` (Lago's free/promotional bucket, which is *additive*) is forced to `"0"` so a purchase never mints double (`lago_client.rs:302-317`, bug #1050). |
+| Concept                     | Meaning                                                                                                                                                                                                |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Idempotency key**         | Stops a double-click from creating two payments. Reusing a key with a _different_ amount is a 409 Conflict; reusing it with the same amount returns the existing checkout (`reused: true`).            |
+| **Paid vs granted credits** | A top-up sends `paid_credits` only; `granted_credits` (Lago's free/promotional bucket, which is _additive_) is forced to `"0"` so a purchase never mints double (`lago_client.rs:302-317`, bug #1050). |
 
 **The creation-status enum you never see.** `POST /billing/topup` returns its own lifecycle state,
 distinct from the history table's (`models/billing_topup_session.rs:7-13`):
 
-| Value | Meaning |
-|---|---|
-| `pending` | Local idempotent session stored; the provider call has not completed. |
+| Value              | Meaning                                                                                        |
+| ------------------ | ---------------------------------------------------------------------------------------------- |
+| `pending`          | Local idempotent session stored; the provider call has not completed.                          |
 | `checkout_created` | Lago produced the wallet transaction, finalized invoice, and hosted URL. Payment still unpaid. |
-| `failed` | Creating the Lago transaction or checkout failed — surfaces as an error toast. |
+| `failed`           | Creating the Lago transaction or checkout failed — surfaces as an error toast.                 |
 
 ---
 
@@ -271,15 +272,15 @@ never sent to Lago, and render **Free** with **—** cost.
 
 ### Summary and expandable details
 
-| Group | Meaning |
-|---|---|
-| **Spend** | Estimated credits, covered by benefits (grants + allowances), and wallet-funded cost. Any unknown component makes that total Unavailable; known records remain readable. Empty usage totals are zero. |
-| **Activity** | Metered request quantity, services used, images and bytes. These are metric quantities, not unique HTTP request counts. |
-| **Tokens** | Total-token metric plus separate input/output and cache-read/write metrics. Missing classes show a dash, not a fabricated count. Token totals and classes may overlap and are never added together. |
-| **All metrics & funding** | Exact quantities grouped into Tokens, Cache, and Requests & other units. Funding shows all three sources; allowance-covered units stay separate by metric. All-service API request/byte/event totals remain available here. |
-| **Service rows** | Catalog display name, quantities, estimated cost and settlement status. Services are grouped under AI models, Connected apps, or Other services using catalog inference metadata. |
-| **Service expansion** | Metered quantities and funding, then Models, agents & billing layers, with every returned aggregate record accessible. |
-| **Full metering & funding details** | Per-record costs, funding, allowance-covered units, requests, bytes, events, original provider token breakdown, meter code and agent-key identity. |
+| Group                               | Meaning                                                                                                                                                                                                                     |
+| ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Spend**                           | Estimated credits, covered by benefits (grants + allowances), and wallet-funded cost. Any unknown component makes that total Unavailable; known records remain readable. Empty usage totals are zero.                       |
+| **Activity**                        | Metered request quantity, services used, images and bytes. These are metric quantities, not unique HTTP request counts.                                                                                                     |
+| **Tokens**                          | Total-token metric plus separate input/output and cache-read/write metrics. Missing classes show a dash, not a fabricated count. Token totals and classes may overlap and are never added together.                         |
+| **All metrics & funding**           | Exact quantities grouped into Tokens, Cache, and Requests & other units. Funding shows all three sources; allowance-covered units stay separate by metric. All-service API request/byte/event totals remain available here. |
+| **Service rows**                    | Catalog display name, quantities, estimated cost and settlement status. Services are grouped under AI models, Connected apps, or Other services using catalog inference metadata.                                           |
+| **Service expansion**               | Metered quantities and funding, then Models, agents & billing layers, with every returned aggregate record accessible.                                                                                                      |
+| **Full metering & funding details** | Per-record costs, funding, allowance-covered units, requests, bytes, events, original provider token breakdown, meter code and agent-key identity.                                                                          |
 
 Estimated cost is the gross cost of the full finalized quantity, including benefit-covered
 units. New settlements use persisted exact gross costs; historical rows use current cached
@@ -424,24 +425,24 @@ failures show a retry action rather than an empty history. On phones, the same f
 stack into purchase rows. NyxID stores only that a checkout was created; the payment outcome is read
 live from Lago's credit invoices on each request.
 
-| Column | Meaning |
-|---|---|
-| **Date** | When the **checkout was created** (`created_at`) — not when payment completed, and not Lago's invoice issuing date, even on a Paid row. |
-| **Credits** | Credits requested (= USD). |
-| **Credit expiry** | Purchased-credit expiry date, or expired date and exact expired amount. Paid purchases awaiting expiry synchronization show Pending sync. |
-| **Invoice** | Lago's human-facing invoice number. `—` while unresolved — invoice attachment is asynchronous, and the handler backfills the link through Lago's wallet transactions when it can. |
-| **Status** | See below. |
-| **Actions** | **Resume payment** (pending only; **navigates the current tab** to the stored checkout URL). **Download receipt** (paid only; resolves a signed Lago URL and opens it in a **new tab** — `window.open(_blank)`, `use-billing.ts:103`). `—` otherwise. |
+| Column            | Meaning                                                                                                                                                                                                                                               |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Date**          | When the **checkout was created** (`created_at`) — not when payment completed, and not Lago's invoice issuing date, even on a Paid row.                                                                                                               |
+| **Credits**       | Credits requested (= USD).                                                                                                                                                                                                                            |
+| **Credit expiry** | Purchased-credit expiry date, or expired date and exact expired amount. Paid purchases awaiting expiry synchronization show Pending sync.                                                                                                             |
+| **Invoice**       | Lago's human-facing invoice number. `—` while unresolved — invoice attachment is asynchronous, and the handler backfills the link through Lago's wallet transactions when it can.                                                                     |
+| **Status**        | See below.                                                                                                                                                                                                                                            |
+| **Actions**       | **Resume payment** (pending only; **navigates the current tab** to the stored checkout URL). **Download receipt** (paid only; resolves a signed Lago URL and opens it in a **new tab** — `window.open(_blank)`, `use-billing.ts:103`). `—` otherwise. |
 
 ### Status values (computed at read time, `handlers/billing.rs:519-535`)
 
-| Status | Meaning |
-|---|---|
-| **Paid** | The Lago credit invoice reports `payment_status = succeeded`. The only status that enables a receipt. |
-| **Pending** | No decisive Lago outcome, the local session is not failed, and it is under 24h old. Covers both local `pending` and `checkout_created`. Resumable when a URL was stored. |
+| Status      | Meaning                                                                                                                                                                                                                                              |
+| ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Paid**    | The Lago credit invoice reports `payment_status = succeeded`. The only status that enables a receipt.                                                                                                                                                |
+| **Pending** | No decisive Lago outcome, the local session is not failed, and it is under 24h old. Covers both local `pending` and `checkout_created`. Resumable when a URL was stored.                                                                             |
 | **Expired** | No decisive Lago outcome and over 24h old. Stripe checkout sessions expire after 24 hours and Lago returns the same cached session per transaction, so it can no longer be completed — start a new top-up. Computed by NyxID; **not** a Lago status. |
-| **Failed** | Lago reports `payment_status = failed`, or the local session itself failed before checkout existed. |
-| **Voided** | The Lago invoice lifecycle status is `voided`. Checked before payment status. |
+| **Failed**  | Lago reports `payment_status = failed`, or the local session itself failed before checkout existed.                                                                                                                                                  |
+| **Voided**  | The Lago invoice lifecycle status is `voided`. Checked before payment status.                                                                                                                                                                        |
 
 **`receipt_available` means eligible, not generated.** It is set `true` for every Paid row
 (`handlers/billing.rs:546`). Clicking asks Lago to produce the PDF and briefly retries; if generation
@@ -451,8 +452,8 @@ is incomplete the backend returns "The receipt is still being generated; try aga
 state (`handlers/billing.rs:470-476`). Everything then reads Pending/Expired/Failed with no invoice
 numbers and no receipts.
 
-> **Two status enums share the same words.** The *history* status above is derived per-request from
-> Lago. The *session* status in MongoDB (§4) is `pending` / `checkout_created` / `failed` and describes
+> **Two status enums share the same words.** The _history_ status above is derived per-request from
+> Lago. The _session_ status in MongoDB (§4) is `pending` / `checkout_created` / `failed` and describes
 > only checkout creation. Usage `Pending` (§5) is a third, unrelated meaning: no Lago ack.
 
 ---

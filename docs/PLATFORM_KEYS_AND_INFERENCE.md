@@ -215,11 +215,11 @@ and additional components of each lane. Supported units are `tokens` (provider t
 accept only tokens/requests/bytes. Backend `BillingMetric` metadata and frontend
 `schemas/billing-metrics.ts` / CLI `commands/billing_units.rs` centralize unit names and labels.
 
-| Final credential class | Lane |
-| --- | --- |
-| UserOwned, NyxidPlatformOauthApp, AgentOverrideUserOwned, NodeManaged | BYOK |
-| NyxidManagedMaster | Platform key |
-| NoAuth | None (meter only) |
+| Final credential class                                                | Lane              |
+| --------------------------------------------------------------------- | ----------------- |
+| UserOwned, NyxidPlatformOauthApp, AgentOverrideUserOwned, NodeManaged | BYOK              |
+| NyxidManagedMaster                                                    | Platform key      |
+| NoAuth                                                                | None (meter only) |
 
 At least one configured lane selects lane mode. A missing matching lane is free,
 even if legacy platform billing is enabled. While the selected lane's primary is
@@ -316,13 +316,13 @@ Startup fills only absent/null inference blocks whose `inference_admin_modified`
 marker is absent/false, including admin-created Chrono rows. It never replaces an
 admin-authored block or an explicit null clear.
 
-| Catalog slug | Protocol | Model list | Realtime |
-| --- | --- | --- | --- |
-| llm-openai | openai_responses | true | true |
-| llm-anthropic | anthropic_messages | true | false |
-| llm-deepseek, llm-mistral, llm-openrouter | openai_completions | true | false |
-| chrono-llm, chrono-llm-public | openai_completions | true | false |
-| llm-xai | openai_completions | true | true |
+| Catalog slug                              | Protocol           | Model list | Realtime |
+| ----------------------------------------- | ------------------ | ---------- | -------- |
+| llm-openai                                | openai_responses   | true       | true     |
+| llm-anthropic                             | anthropic_messages | true       | false    |
+| llm-deepseek, llm-mistral, llm-openrouter | openai_completions | true       | false    |
+| chrono-llm, chrono-llm-public             | openai_completions | true       | false    |
+| llm-xai                                   | openai_completions | true       | true     |
 
 OpenAI, Anthropic, DeepSeek, Mistral and OpenRouter document `GET /models`.
 Anthropic's list uses the familiar `data` model array with its own pagination fields;
