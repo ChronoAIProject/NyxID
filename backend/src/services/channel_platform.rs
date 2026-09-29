@@ -476,6 +476,17 @@ pub trait PlatformAdapter: Send + Sync {
         Err(crate::errors::AppError::ChannelMediaUnsupported)
     }
 
+    /// The bot's own user ID on the platform when it differs from
+    /// `platform_bot_id` and the platform can tell it (Lark: the bot's
+    /// `open_id`, which mentions of it carry). Best effort.
+    async fn bot_user_id(
+        &self,
+        _http: &reqwest::Client,
+        _credentials: &BotCredentials<'_>,
+    ) -> AppResult<Option<String>> {
+        Ok(None)
+    }
+
     /// The display name of a group or channel the bot is in, when the
     /// platform can tell it (best effort; `None` when unknown).
     async fn chat_title(

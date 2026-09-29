@@ -1558,6 +1558,7 @@ mod tests {
                 crate::services::anonymous_endpoint_service::DEFAULT_PUBLIC_MCP_RATE_LIMIT_PER_MINUTE,
             channel_relay_callback_timeout_secs: 5,
             channel_poll_interval_secs: 30,
+            nyxbot_gateway_platforms: vec!["telegram".into()],
             channel_relay_max_bots_per_user: 5,
             channel_relay_message_ttl_days: 30,
             channel_media_max_bytes: 20 * 1024 * 1024,

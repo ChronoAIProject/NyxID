@@ -57,6 +57,19 @@ pub struct NyxbotChannel {
     /// `mention_or_reply_to_bot`.
     #[serde(default)]
     pub gateway_groups: Option<String>,
+    /// Gateway only, for platforms other than Telegram: the bot's own user ID
+    /// there (Lark: its `open_id`), pinned on the gateway source so mentions
+    /// of the bot are recognised.
+    #[serde(default)]
+    pub gateway_bot_id: Option<String>,
+    /// When NyxID last tried to move this personal bot onto the gateway
+    /// (its platform is listed in `NYXBOT_GATEWAY_PLATFORMS`); tried daily.
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub gateway_attempted_at: Option<DateTime<Utc>>,
+    /// When the gateway last refused this bot's platform, so it fell back to
+    /// NyxID's relay.
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub gateway_fallback_at: Option<DateTime<Utc>>,
     /// Gateway only: after the gateway refused an admission update, the
     /// sweep retries it no sooner than this.
     #[serde(default, with = "crate::models::bson_datetime::optional")]

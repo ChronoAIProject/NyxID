@@ -529,6 +529,7 @@ Channel relay is a first-class metadata-only gateway under ADR-013. See [CHANNEL
 | `CHANNEL_RELAY_MAX_BOTS_PER_USER` | `5` | Maximum bots per user across all platforms |
 | `CHANNEL_RELAY_MESSAGE_TTL_DAYS` | `30` | TTL for `channel_messages` auto-cleanup |
 | `CHANNEL_POLL_INTERVAL_SECS` | `30` | Interval for the generic channel poll sweep; `0` disables it. Only polling adapters participate. X has a 60-second minimum per bot; provider backoff and MongoDB leases can defer the next poll. Webhook channels are unaffected. |
+| `NYXBOT_GATEWAY_PLATFORMS` | `telegram` | Comma-separated chat platforms NyxBot reaches through the Agent Event Gateway (`cmaeg`); every other bot uses NyxID's relay. List a platform (e.g. `telegram,lark,feishu`) once every gateway replica relays it: personal bots on it then move to the gateway by themselves (one per 15-second sweep, each at most daily), keeping their verified owners, chats and settings. If the gateway refuses a newly listed platform, the bot stays on NyxID's relay and is retried the next day. Organization bots always use NyxID's relay. |
 
 ## Oracle Relay
 

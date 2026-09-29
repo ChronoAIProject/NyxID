@@ -128,6 +128,9 @@ async fn channel(state: &AppState, transport: &str) -> (NyxbotChannel, String) {
         binding_id: None,
         gateway_groups: None,
         gateway_groups_retry_at: None,
+        gateway_bot_id: None,
+        gateway_attempted_at: None,
+        gateway_fallback_at: None,
         owner_sender_ids: Vec::new(),
         link_code_hash: None,
         link_code_expires_at: None,
@@ -2641,6 +2644,9 @@ fn telegram_mentions_and_replies_to_the_bot_are_recognised() {
             binding_id: None,
             gateway_groups: None,
             gateway_groups_retry_at: None,
+            gateway_bot_id: None,
+            gateway_attempted_at: None,
+            gateway_fallback_at: None,
             owner_sender_ids: vec!["ou_alice".into()],
             link_code_hash: None,
             link_code_expires_at: None,
@@ -3451,5 +3457,129 @@ async fn direct_reply_channels_are_reset_once() {
         0
     );
     assert!(kept("nyxa-direct").await);
+    server.abort();
+}
+
+#[test]
+fn gateway_platforms_are_read_from_the_environment() {
+    assert_eq!(crate::config::gateway_platforms(None), vec!["telegram"]);
+    assert_eq!(
+        crate::config::gateway_platforms(Some(" ")),
+        vec!["telegram"]
+    );
+    assert_eq!(
+        crate::config::gateway_platforms(Some("Telegram, lark,feishu")),
+        vec!["telegram", "lark", "feishu"]
+    );
+}
+
+/// Once a platform is listed for the gateway, personal bots on NyxID's relay
+/// move there by themselves; when the gateway cannot take them they stay on
+/// NyxID's relay (with their owners, chats and settings) and are retried no
+/// sooner than a day later.
+#[tokio::test]
+async fn personal_bots_move_to_the_gateway_once_it_takes_their_platform() {
+    let (mut state, _, server) = setup("nyxbot_gateway_switch").await;
+    let bot = bot_doc("lark", "Office bot");
+    let bot_id = bot.get_str("_id").unwrap().to_owned();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .insert_one(bot)
+        .await
+        .unwrap();
+    let nyxbot = crate::services::assistant_team_service::ensure_nyxbot(&state.db, OWNER)
+        .await
+        .unwrap();
+    // Not listed: NyxID's relay, and the sweep leaves it alone.
+    let (before, _) = connect(&state, OWNER, None, &bot_id, &nyxbot)
+        .await
+        .unwrap();
+    assert_eq!(before.transport, "direct");
+    switch_to_gateway(&state).await.unwrap();
+    assert_eq!(
+        load_channel(&state, OWNER, &before.id)
+            .await
+            .unwrap()
+            .status,
+        "active"
+    );
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .update_one(
+            doc! {"_id": &before.id},
+            doc! {"$set": {"owner_sender_ids": ["ou_alice"], "private_chats": "everyone"}},
+        )
+        .await
+        .unwrap();
+    let group = chats::record_chat(
+        &state,
+        &before,
+        &chats::group_partition("oc_team", None),
+        &chats::ChatFacts {
+            kind: "group",
+            owner: false,
+            chat_id: "oc_team".into(),
+            thread_id: None,
+            title: Some("Team".into()),
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    chats::update_chat(
+        &state,
+        OWNER,
+        &group.id,
+        &chats::ChatSettings {
+            reply_mode: Some("all".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    // Listed: the sweep rebuilds it; with no gateway to take it, it stays on
+    // NyxID's relay, as a fresh connection that keeps everything.
+    state.config.nyxbot_gateway_platforms = vec!["telegram".into(), "lark".into()];
+    switch_to_gateway(&state).await.unwrap();
+    assert_eq!(
+        load_channel(&state, OWNER, &before.id)
+            .await
+            .unwrap()
+            .status,
+        "disconnected"
+    );
+    let after = list(&state, OWNER)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|row| row.status == "active")
+        .unwrap();
+    assert_ne!(after.id, before.id);
+    assert_eq!(after.transport, "direct");
+    assert!(after.gateway_fallback_at.is_some());
+    assert!(after.gateway_attempted_at.is_some());
+    assert_eq!(after.owner_sender_ids, vec!["ou_alice".to_owned()]);
+    assert_eq!(after.private_chats.as_deref(), Some("everyone"));
+    let carried = state
+        .db
+        .collection::<NyxbotThread>(THREADS)
+        .find_one(doc! {"_id": &group.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(carried.channel_id, after.id);
+    assert_eq!(carried.reply_mode.as_deref(), Some("all"));
+    // Not retried the same day, and a manual connect keeps it as it is.
+    switch_to_gateway(&state).await.unwrap();
+    assert_eq!(
+        load_channel(&state, OWNER, &after.id).await.unwrap().status,
+        "active"
+    );
+    let (again, _) = connect(&state, OWNER, None, &bot_id, &nyxbot)
+        .await
+        .unwrap();
+    assert_eq!(again.id, after.id);
     server.abort();
 }

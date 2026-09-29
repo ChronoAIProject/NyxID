@@ -65,6 +65,21 @@ fn canonical_platform(platform: &str) -> &str {
 
 /// Who owns the channel bot (and its route and route key): the org for an
 /// org bot, else the channel's owner.
+/// NyxBot reaches bots on these platforms through the Agent Event Gateway
+/// (`NYXBOT_GATEWAY_PLATFORMS`); every other bot uses NyxID's relay.
+fn gateway_supports(state: &AppState, platform: &str) -> bool {
+    let platform = canonical_platform(platform);
+    state
+        .config
+        .nyxbot_gateway_platforms
+        .iter()
+        .any(|listed| canonical_platform(listed) == platform)
+}
+
+/// A gateway refusal of a newly listed platform is not retried sooner than
+/// this (the sweep tries daily).
+const GATEWAY_RETRY_HOURS: i64 = 23;
+
 pub(crate) fn bot_owner(row: &NyxbotChannel) -> &str {
     row.bot_owner_id.as_deref().unwrap_or(&row.user_id)
 }
@@ -524,9 +539,22 @@ pub async fn connect(
             }
             None => false,
         };
+        // A bot whose platform the gateway now relays moves there, unless the
+        // gateway refused it recently.
+        let wanted = if gateway_supports(state, &bot.platform) && bot_owner_id == owner {
+            "gateway"
+        } else {
+            "direct"
+        };
+        let transport_ok = existing.transport == wanted
+            || (wanted == "gateway"
+                && existing.gateway_fallback_at.is_some_and(|at| {
+                    at > Utc::now() - ChronoDuration::hours(GATEWAY_RETRY_HOURS)
+                }));
         let healthy = existing.delivery_status.as_deref() != Some("failing")
             && bot_owner(&existing) == bot_owner_id
-            && route_alive;
+            && route_alive
+            && transport_ok;
         if existing.status == "active" && keys_alive && healthy {
             link(state, owner, &existing.id, agent).await?;
             let existing = load_channel(state, owner, &existing.id).await?;
@@ -555,17 +583,30 @@ pub async fn connect(
     }
     let platform = canonical_platform(&bot.platform).to_owned();
     // The gateway binds a channel to one person; org bots use NyxID's relay.
-    let gateway = platform == "telegram" && bot_owner_id == owner;
+    // Platforms newly listed for the gateway fall back to NyxID's relay when
+    // the gateway cannot take them (Telegram keeps failing loudly).
+    let wants_gateway = gateway_supports(state, &platform) && bot_owner_id == owner;
+    let may_fall_back = wants_gateway && platform != "telegram";
     let now = Utc::now();
     let id = Uuid::new_v4().to_string();
     let label = excerpt(&bot.label, 60);
-    let callback = if gateway {
-        format!("{}/callbacks/pending", gateway_base(state).await?)
+    let direct_callback = format!(
+        "{}/api/v1/nyxbot/relay/{id}",
+        state.config.base_url.trim_end_matches('/')
+    );
+    let gateway_url = if wants_gateway {
+        match gateway_base(state).await {
+            Ok(url) => Some(url),
+            Err(_) if may_fall_back => None,
+            Err(error) => return Err(error),
+        }
     } else {
-        format!(
-            "{}/api/v1/nyxbot/relay/{id}",
-            state.config.base_url.trim_end_matches('/')
-        )
+        None
+    };
+    let gateway = gateway_url.is_some();
+    let callback = match gateway_url.as_deref() {
+        Some(url) => format!("{url}/callbacks/pending"),
+        None => direct_callback.clone(),
     };
     let route_key = key_service::create_api_key(
         &state.db,
@@ -620,6 +661,9 @@ pub async fn connect(
         binding_id: None,
         gateway_groups: None,
         gateway_groups_retry_at: None,
+        gateway_bot_id: None,
+        gateway_attempted_at: may_fall_back.then_some(now),
+        gateway_fallback_at: (may_fall_back && !gateway).then_some(now),
         owner_sender_ids: {
             let mut ids = known_owner_senders(state, owner, &platform).await;
             for id in verified_owners {
@@ -648,7 +692,7 @@ pub async fn connect(
         .collection::<NyxbotChannel>(CHANNELS)
         .insert_one(&row)
         .await?;
-    let outcome = if gateway {
+    let mut outcome = if gateway {
         connect_gateway(
             state,
             &row,
@@ -663,6 +707,22 @@ pub async fn connect(
     } else {
         connect_direct(state, &row, &bot).await
     };
+    // The gateway does not take this platform yet: NyxID's relay does.
+    if may_fall_back
+        && gateway
+        && let Err(code) = outcome
+    {
+        tracing::info!(code, platform = %platform, "NyxBot channel stays on NyxID's relay");
+        outcome = fall_back_to_direct(
+            state,
+            owner,
+            &row,
+            &bot,
+            &direct_callback,
+            agent_key_id.as_deref(),
+        )
+        .await;
+    }
     match outcome {
         Ok(route_id) => {
             state
@@ -755,21 +815,28 @@ fn gateway_policy(
     groups: &str,
 ) -> Value {
     let username = bot.platform_bot_username.trim_start_matches('@');
+    let platform = canonical_platform(&row.platform);
     let mut source = json!({
         "type": "nyxid_relay",
         "issuer": state.config.jwt_issuer,
         "key_id": row.route_api_key_id,
         "route_ids": route_ids,
-        "platform": "telegram",
+        "platform": platform,
         "admission": {"type": "scoped", "senders": {"type": "open"},
             "chats": {"type": "open"}, "groups": groups},
     });
-    let valid_username = (5..=32).contains(&username.len())
-        && username
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_');
-    if valid_username {
-        source["bot_username"] = json!(username);
+    // Telegram recognises mentions by username; other platforms by the bot's
+    // own user ID, when NyxID could look it up.
+    if platform == "telegram" {
+        let valid_username = (5..=32).contains(&username.len())
+            && username
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_');
+        if valid_username {
+            source["bot_username"] = json!(username);
+        }
+    } else if let Some(bot_id) = row.gateway_bot_id.as_deref() {
+        source["bot_id"] = json!(bot_id);
     }
     let name: String = format!("NyxBot {}", row.bot_label)
         .chars()
@@ -812,6 +879,22 @@ async fn connect_gateway(
     let creator = creator_bearer(state, &row.user_id).map_err(|_| "creator_unavailable")?;
     let creator = creator.as_str();
     let record_id = Uuid::new_v4().to_string();
+    // Other platforms pin the bot's own user ID so mentions of it are known.
+    let mut row = row.clone();
+    if row.platform != "telegram"
+        && let Some(bot_id) = bot_user_id(state, bot).await
+    {
+        let _ = state
+            .db
+            .collection::<NyxbotChannel>(CHANNELS)
+            .update_one(
+                doc! {"_id": &row.id},
+                doc! {"$set": {"gateway_bot_id": &bot_id}},
+            )
+            .await;
+        row.gateway_bot_id = Some(bot_id);
+    }
+    let row = &row;
     let mut body = gateway_policy(state, row, bot, &[], GATEWAY_GROUPS_DEFAULT);
     body["record_id"] = json!(record_id);
     body["credentials"] = json!({"agent_key": agent_key, "channel_key": route_key});
@@ -946,6 +1029,150 @@ async fn connect_gateway(
             Err(failed("gateway_unavailable").await)
         }
     }
+}
+
+/// The bot's own user ID on its platform (best effort).
+async fn bot_user_id(state: &AppState, bot: &ChannelBot) -> Option<String> {
+    let lookup = async {
+        let adapter = crate::services::channel_adapters::resolve_adapter(
+            &bot.platform,
+            &state.token_exchange_cache,
+        )?;
+        let token = crate::services::channel_credentials::resolve_bot_token(
+            &state.db,
+            &state.encryption_keys,
+            adapter.as_ref(),
+            bot,
+        )
+        .await?;
+        adapter
+            .bot_user_id(
+                &state.http_client,
+                &crate::services::channel_platform::BotCredentials {
+                    billing: None,
+                    token: &token,
+                    platform_bot_id: Some(&bot.platform_bot_id),
+                    platform_secrets: None,
+                },
+            )
+            .await
+    };
+    match tokio::time::timeout(Duration::from_secs(5), lookup).await {
+        Ok(Ok(id)) => id,
+        _ => None,
+    }
+}
+
+/// Move one personal bot still on NyxID's relay onto the gateway once its
+/// platform is listed in `NYXBOT_GATEWAY_PLATFORMS`: at most one per sweep,
+/// and each bot at most daily (a refusal leaves it on NyxID's relay). The
+/// rebuild keeps its verified owners, chats, settings and private-chat access.
+pub(crate) async fn switch_to_gateway(state: &AppState) -> AppResult<()> {
+    let listed: Vec<&str> = state
+        .config
+        .nyxbot_gateway_platforms
+        .iter()
+        .map(|platform| canonical_platform(platform))
+        .filter(|platform| *platform != "telegram")
+        .collect();
+    if listed.is_empty() {
+        return Ok(());
+    }
+    let due = bson::DateTime::from_chrono(Utc::now() - ChronoDuration::hours(GATEWAY_RETRY_HOURS));
+    let filter = doc! {"status": "active", "transport": "direct",
+    "bot_owner_id": bson::Bson::Null, "platform": {"$in": &listed},
+    "$or": [{"gateway_attempted_at": bson::Bson::Null},
+        {"gateway_attempted_at": {"$lt": due}}]};
+    let channels = state.db.collection::<NyxbotChannel>(CHANNELS);
+    // Claim it, so replicas do not rebuild the same bot at once.
+    let Some(row) = channels
+        .find_one_and_update(
+            filter,
+            doc! {"$set": {"gateway_attempted_at": bson::DateTime::now()}},
+        )
+        .await?
+    else {
+        return Ok(());
+    };
+    let agent = match row.agent_id.as_deref() {
+        Some(agent_id) => {
+            crate::services::assistant_team_service::agent(&state.db, &row.user_id, agent_id)
+                .await?
+        }
+        None => {
+            crate::services::assistant_team_service::ensure_nyxbot(&state.db, &row.user_id).await?
+        }
+    };
+    let (moved, _) = connect(
+        state,
+        &row.user_id,
+        row.source_conversation_id.as_deref(),
+        &row.channel_bot_id,
+        &agent,
+    )
+    .await?;
+    audit(
+        state,
+        &row.user_id,
+        "nyxbot_channel_transport_checked",
+        json!({"channel_agent_id": &moved.id, "platform": &moved.platform,
+            "transport": &moved.transport}),
+    )
+    .await;
+    Ok(())
+}
+
+/// Turn a channel whose gateway setup failed into a NyxID relay channel: its
+/// route key calls NyxID, the gateway agent key goes.
+async fn fall_back_to_direct(
+    state: &AppState,
+    owner: &str,
+    row: &NyxbotChannel,
+    bot: &ChannelBot,
+    callback: &str,
+    agent_key: Option<&str>,
+) -> Result<String, &'static str> {
+    if let Some(agent_key) = agent_key {
+        let _ = key_service::delete_api_key(&state.db, owner, agent_key).await;
+    }
+    key_service::update_api_key_scope_with_scope_authorization(
+        &state.db,
+        bot_owner(row),
+        None,
+        &row.route_api_key_id,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(Some(callback)),
+        None,
+    )
+    .await
+    .map_err(|_| "route_key_update_failed")?;
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .update_one(
+            doc! {"_id": &row.id},
+            doc! {"$set": {"transport": "direct",
+                "gateway_fallback_at": bson::DateTime::now()},
+            "$unset": {"agent_api_key_id": "", "agent_key_ciphertext": "",
+                "gateway_channel_id": "", "gateway_record_id": "", "gateway_version": "",
+                "binding_id": "", "gateway_bot_id": ""}},
+        )
+        .await
+        .map_err(|_| "storage_unavailable")?;
+    let mut direct = row.clone();
+    direct.transport = "direct".into();
+    direct.agent_api_key_id = None;
+    connect_direct(state, &direct, bot).await
 }
 
 async fn connect_direct(
