@@ -1,6 +1,6 @@
 //! Platform-wide, read-only meter reporting. MongoDB owns every reduction,
 //! including legacy pricing, ranking order, and pagination.
-use crate::services::billing::amounts::credit_expr;
+use crate::services::billing::amounts::{credit_expr, legacy_credit_expr};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
@@ -790,15 +790,14 @@ fn source_filter(
     filter
 }
 
-fn legacy_credit_expr(exact: Bson, legacy: Bson) -> Bson {
+fn exact_or_legacy_credit_expr(exact: Bson, legacy: Bson) -> Bson {
     doc! {
         "$cond": [
             { "$ne": [{ "$type": exact.clone() }, "missing"] },
             exact,
-            { "$divide": [
-                { "$convert": { "input": legacy, "to": "decimal", "onError": Bson::Null, "onNull": Bson::Null } },
-                1_000_000_i64,
-            ] },
+            legacy_credit_expr(doc! { "$convert": {
+                "input": legacy, "to": "decimal", "onError": Bson::Null, "onNull": Bson::Null,
+            } }.into()),
         ]
     }
     .into()
@@ -822,8 +821,8 @@ fn rollup_credit_expr(field: &str, normalized: bool) -> Bson {
         { "$ne": [{ "$type": &exact }, "missing"] }, &exact,
         { "$cond": [
             { "$ne": [{ "$type": &old }, "missing"] },
-            legacy_credit_expr(Bson::String(exact), Bson::String(old)),
-            legacy_credit_expr(format!("${field}").into(), format!("${legacy}").into()),
+            exact_or_legacy_credit_expr(Bson::String(exact), Bson::String(old)),
+            exact_or_legacy_credit_expr(format!("${field}").into(), format!("${legacy}").into()),
         ] },
     ] }
     .into()
@@ -839,7 +838,7 @@ fn partition_credit_expr(field: &str, normalized: bool) -> Bson {
     } else {
         format!("{field}_micros")
     };
-    legacy_credit_expr(exact.into(), format!("$part.{legacy}").into())
+    exact_or_legacy_credit_expr(exact.into(), format!("$part.{legacy}").into())
 }
 
 fn fast_pipeline(

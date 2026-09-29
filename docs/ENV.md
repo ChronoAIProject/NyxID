@@ -556,8 +556,10 @@ All service-instance writes require transactions. Startup rejects standalone Mon
 ### Exact billing cutover (0.33.0)
 
 `BILLING_EXACT_CUTOVER_DRAINED=true` is a one-time operator acknowledgement
-required before the background task migrates existing wallets/grants. Pending cutover returns 503 for billed admission and pauses money sweeps; the server and nonbilling traffic continue serving. Drain all old billed
-requests and stop pre-v2 servers/reconcilers first. The acknowledgement and
+required before the background task migrates existing wallets/grants. Pending
+cutover returns 503 for billed admission and pauses money sweeps; the server and
+nonbilling traffic continue serving. Drain all old billed requests and stop
+pre-v2 servers/reconcilers first. The acknowledgement and
 migration completion are durable; new replicas/restarts resume without the flag.
 Fresh databases need no acknowledgement. Do not restart old writers after
 cutover. See [Exact accounting](BILLING_EXACT_ACCOUNTING.md#d5-cutover-and-operations).

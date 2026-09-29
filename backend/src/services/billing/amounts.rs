@@ -53,8 +53,8 @@ pub fn cost(
     crate::models::credits::Credits::from_pico(rate)?.checked_mul(quantity.max(0))
 }
 
-/// A persisted Decimal128 already denotes credits; legacy integer values denote
-/// microcredits. Normalize before summing so mixed buckets retain every pico.
+/// Exact keys denote credits; legacy keys denote microcredits regardless of
+/// BSON numeric type. Normalize before summing so mixed buckets retain every pico.
 pub fn credit_expr(value: impl Into<mongodb::bson::Bson>) -> mongodb::bson::Bson {
     let value = value.into();
     if let mongodb::bson::Bson::String(path) = &value {
@@ -79,20 +79,19 @@ pub fn credit_expr(value: impl Into<mongodb::bson::Bson>) -> mongodb::bson::Bson
             // takes precedence over an older value under the legacy key.
             return mongodb::bson::doc! { "$ifNull": [path, { "$cond": [
                 { "$eq": [{ "$type": path }, "missing"] },
-                legacy_credit_expr(old_path.into()),
+                legacy_credit_expr(mongodb::bson::doc! { "$ifNull": [old_path, 0_i64] }.into()),
                 null,
             ] }] }
             .into();
         }
     }
-    legacy_credit_expr(value)
+    legacy_credit_expr(mongodb::bson::doc! { "$ifNull": [value, 0_i64] }.into())
 }
 
-fn legacy_credit_expr(value: mongodb::bson::Bson) -> mongodb::bson::Bson {
-    mongodb::bson::doc! { "$let": { "vars": { "money": { "$ifNull": [value, 0_i64] } }, "in": {
-        "$cond": [{ "$eq": [{ "$type": "$$money" }, "decimal"] }, "$$money",
-            { "$multiply": [{ "$toDecimal": "$$money" }, crate::models::credits::Credits::from_micros(1)] }]
-    } } }.into()
+/// Every numeric value under a legacy money key is in microcredits, including
+/// released Decimal128 query mirrors. Callers choose their missing/error policy.
+pub fn legacy_credit_expr(value: mongodb::bson::Bson) -> mongodb::bson::Bson {
+    mongodb::bson::doc! { "$divide": [{ "$toDecimal": value }, 1_000_000_i64] }.into()
 }
 
 /// A present exact field, including null, supersedes the legacy funding field.
@@ -126,5 +125,100 @@ mod tests {
         assert!(decimal_to_pico("0.0000000000001").is_none());
         // Saturation silently hid accounting overflow; exact arithmetic must fail.
         assert!(cost(rate_pico(None, i64::MAX), i64::MAX).is_err());
+    }
+
+    #[tokio::test]
+    async fn legacy_decimal_micros_use_micro_scale_and_preserve_exact_precedence() {
+        use crate::models::credits::{Credits, SCALE};
+        use futures::TryStreamExt;
+        use mongodb::bson::{Bson, Decimal128, Document, doc};
+
+        let db = crate::test_utils::connect_test_database("legacy_credit_scale")
+            .await
+            .unwrap();
+        let collection = db.collection::<Document>("amounts");
+        let pico = Credits::from_pico(1).unwrap();
+        let mut documents = Vec::new();
+        for (kind, legacy) in [
+            (
+                "decimal",
+                Bson::Decimal128("1234567".parse::<Decimal128>().unwrap()),
+            ),
+            ("int64", Bson::Int64(1_234_567)),
+            ("int32", Bson::Int32(1_234_567)),
+            ("double", Bson::Double(1_234_567.0)),
+        ] {
+            for (presence, exact) in [
+                ("legacy", None),
+                ("exact", Some(Bson::from(pico))),
+                ("null", Some(Bson::Null)),
+            ] {
+                let mut money = doc! {
+                    "total_charge_micros": legacy.clone(),
+                    "amount_micros": legacy.clone(),
+                    "gross_cost_micros": legacy.clone(),
+                };
+                if let Some(exact) = exact {
+                    for field in ["total_charge", "amount", "gross_cost"] {
+                        money.insert(field, exact.clone());
+                    }
+                }
+                documents.push(doc! {
+                    "_id": format!("{kind}-{presence}"),
+                    "funding": money.clone(),
+                    "allocations": [money.clone()],
+                    "query_costs": money,
+                });
+            }
+        }
+        collection.insert_many(documents).await.unwrap();
+        let rows: Vec<Document> = collection
+            .aggregate(vec![doc! { "$project": {
+                "funding": credit_expr("$funding.total_charge"),
+                "allocations": { "$map": {
+                    "input": "$allocations", "as": "allocation",
+                    "in": credit_expr("$$allocation.amount"),
+                } },
+                "cost": credit_expr("$query_costs.gross_cost"),
+                // Fold increments pass a legacy $getField expression directly.
+                "fold_legacy": credit_expr(doc! { "$getField": {
+                    "field": "gross_cost_micros", "input": "$query_costs",
+                } }),
+            } }])
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 12);
+        for row in rows {
+            let id = row.get_str("_id").unwrap();
+            for actual in [
+                &row["funding"],
+                &row.get_array("allocations").unwrap()[0],
+                &row["cost"],
+            ] {
+                if id.ends_with("-null") {
+                    assert_eq!(actual, &Bson::Null, "{id}");
+                } else {
+                    let expected = if id.ends_with("-exact") {
+                        pico
+                    } else {
+                        Credits::from_micros(1_234_567)
+                    };
+                    assert_eq!(
+                        Credits::from_bson(actual.clone(), SCALE).unwrap(),
+                        expected,
+                        "{id}"
+                    );
+                }
+            }
+            assert_eq!(
+                Credits::from_bson(row["fold_legacy"].clone(), SCALE).unwrap(),
+                Credits::from_micros(1_234_567),
+                "{id}",
+            );
+        }
+        db.drop().await.unwrap();
     }
 }

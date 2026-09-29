@@ -2230,10 +2230,12 @@ async fn pico_costs_retain_472_micros_across_raw_rollup_api_and_analytics() {
         );
         row.insert("wallet_id", "wallet");
         row.insert("released", true);
+        // Exact credits belong under unit-free keys; the former fixture used
+        // the unreleased Decimal128-credits-under-micros format. Keep the oracle.
         row.insert(
             "funding",
-            doc! { "settled": true, "total_charge_micros": amount, "grant_funded_micros": amount,
-            "wallet_funded_micros": Credits::ZERO, "allowance_funded_micros": Credits::ZERO },
+            doc! { "settled": true, "total_charge": amount, "grant_funded": amount,
+            "wallet_funded": Credits::ZERO, "allowance_funded": Credits::ZERO },
         );
         rows.push(row);
     }
