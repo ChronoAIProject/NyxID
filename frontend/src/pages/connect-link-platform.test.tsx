@@ -1,8 +1,15 @@
-import { StrictMode } from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { StrictMode, useCallback, useState } from "react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, afterEach, expect, it, vi } from "vitest";
 import { ConnectLinkPage } from "./connect-link";
+import type { CompleteConnectLinkResponse } from "@/schemas/connect-links";
 
 const mocks = vi.hoisted(() => ({
   complete: vi.fn(),
@@ -52,10 +59,17 @@ vi.mock("@/hooks/use-connect-links", () => ({
       use_platform_key: mocks.choice,
     },
   }),
-  useCompleteConnectLink: () => ({
-    mutateAsync: mocks.complete,
-    isPending: false,
-  }),
+  useCompleteConnectLink: () => {
+    const [data, setData] = useState<CompleteConnectLinkResponse>();
+    const mutateAsync = useCallback(async (input: unknown) => {
+      const result = (await mocks.complete(
+        input,
+      )) as CompleteConnectLinkResponse;
+      setData(result);
+      return result;
+    }, []);
+    return { mutateAsync, isPending: false, data };
+  },
   useCancelHostedConnectLink: () => ({ isPending: false }),
   useConnectLinkStatus: () => ({}),
   connectLinkStorageKey: (id: string) => id,
@@ -73,13 +87,18 @@ beforeEach(() => {
   let now = 100_000;
   vi.spyOn(Date, "now").mockImplementation(() => (now += 1000));
 });
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
 it("defaults to platform and completes without any secret", async () => {
   render(<ConnectLinkPage />);
   expect(
     screen.getByRole("heading", { name: "NyxID wants to connect to your xAI" }),
   ).toBeInTheDocument();
-  await waitFor(() => expect(mocks.preview).toHaveBeenCalledWith("hosted-token"));
+  await waitFor(() =>
+    expect(mocks.preview).toHaveBeenCalledWith("hosted-token"),
+  );
   expect(screen.getByRole("radio", { name: /Use NyxID's key/ })).toBeChecked();
   await userEvent.click(
     screen.getByRole("button", { name: "Approve connection" }),
@@ -99,7 +118,9 @@ it("previews once under React StrictMode", async () => {
   await screen.findByRole("heading", {
     name: "NyxID wants to connect to your xAI",
   });
-  await waitFor(() => expect(mocks.preview).toHaveBeenCalledExactlyOnceWith("hosted-token"));
+  await waitFor(() =>
+    expect(mocks.preview).toHaveBeenCalledExactlyOnceWith("hosted-token"),
+  );
 });
 it.each([false, true])(
   "submits an explicit own-key choice when the creator choice is %s and access is revoked",
@@ -108,6 +129,10 @@ it.each([false, true])(
     mocks.available = false;
     render(<ConnectLinkPage />);
     expect(screen.queryByRole("radio")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Authorization")).toHaveAttribute(
+      "placeholder",
+      "Paste API key or token for xAI",
+    );
     await userEvent.type(
       screen.getByLabelText("Authorization"),
       "personal-secret",
@@ -140,7 +165,10 @@ it("prefills an editable gateway URL and submits it with the credential", async 
   render(<ConnectLinkPage />);
   const url = screen.getByRole("textbox", { name: "Service URL" });
   expect(url).toHaveValue("https://gateway.example.test");
-  expect(screen.getByLabelText("Gateway bearer token")).toBeInTheDocument();
+  expect(screen.getByLabelText("Gateway bearer token")).toHaveAttribute(
+    "placeholder",
+    "Paste bearer token for xAI",
+  );
   await userEvent.clear(url);
   await userEvent.type(url, "https://another.example.test");
   await userEvent.type(
@@ -156,4 +184,85 @@ it("prefills an editable gateway URL and submits it with the credential", async 
       endpoint_url: "https://another.example.test",
     }),
   });
+});
+
+it("polls a provider device code at its server interval and displays completion", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-09-28T00:00:00Z"));
+  mocks.complete
+    .mockResolvedValueOnce({
+      status: "device_code_required",
+      device_user_code: "ABCD-EFGH",
+      device_verification_uri: "https://provider.example/device",
+      device_state: "device-state",
+      device_interval: 5,
+      device_status: "pending",
+    })
+    .mockResolvedValueOnce({
+      status: "device_code_required",
+      device_state: "device-state",
+      device_interval: 10,
+      device_status: "slow_down",
+    })
+    .mockResolvedValueOnce({ status: "completed", callback_url: null });
+
+  render(<ConnectLinkPage />);
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "Approve connection" }));
+  });
+  expect(screen.getByText("ABCD-EFGH")).toBeInTheDocument();
+  expect(screen.getByRole("radio", { name: /Use NyxID's key/ })).toBeDisabled();
+  expect(
+    screen.getByText("Checking automatically every 5 seconds."),
+  ).toBeInTheDocument();
+  expect(mocks.complete).toHaveBeenCalledTimes(1);
+
+  await act(async () => vi.advanceTimersByTimeAsync(5_000));
+  expect(mocks.complete).toHaveBeenCalledTimes(2);
+  expect(
+    screen.getByText(
+      "Provider requested a slower check. Checking again in 10 seconds.",
+    ),
+  ).toBeInTheDocument();
+  await act(async () => vi.advanceTimersByTimeAsync(9_000));
+  expect(mocks.complete).toHaveBeenCalledTimes(2);
+  await act(async () => vi.advanceTimersByTimeAsync(1_000));
+  expect(mocks.complete).toHaveBeenCalledTimes(3);
+  expect(
+    screen.getByRole("heading", { name: "xAI connected" }),
+  ).toBeInTheDocument();
+  expect(screen.getByText("Connection completed")).toBeInTheDocument();
+  await act(async () => vi.advanceTimersByTimeAsync(20_000));
+  expect(mocks.complete).toHaveBeenCalledTimes(3);
+});
+
+it("keeps retrying after a transient device poll failure without offering a new code", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-09-28T00:00:00Z"));
+  mocks.complete
+    .mockResolvedValueOnce({
+      status: "device_code_required",
+      device_user_code: "ABCD-EFGH",
+      device_verification_uri: "https://provider.example/device",
+      device_state: "device-state",
+      device_interval: 5,
+      device_status: "pending",
+    })
+    .mockRejectedValueOnce(new Error("Temporary network failure"))
+    .mockResolvedValueOnce({ status: "completed", callback_url: null });
+
+  render(<ConnectLinkPage />);
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "Approve connection" }));
+  });
+  await act(async () => vi.advanceTimersByTimeAsync(5_000));
+  expect(mocks.complete).toHaveBeenCalledTimes(2);
+  expect(
+    screen.queryByRole("button", { name: "Get a new code" }),
+  ).not.toBeInTheDocument();
+  await act(async () => vi.advanceTimersByTimeAsync(5_000));
+  expect(mocks.complete).toHaveBeenCalledTimes(3);
+  expect(
+    screen.getByRole("heading", { name: "xAI connected" }),
+  ).toBeInTheDocument();
 });

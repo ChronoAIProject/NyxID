@@ -790,3 +790,90 @@ describe("ChatComposer measured layout", () => {
     expect(fades[1]).toHaveClass("opacity-100");
   });
 });
+
+describe("ChatComposer @mentions (group chats)", () => {
+  const mentions = [
+    { id: "a1", name: "NyxBot", kind: "nyxbot" as const },
+    { id: "a2", name: "researcher", kind: "specialist" as const },
+    { id: "a3", name: "release-notes", kind: "specialist" as const },
+  ];
+
+  beforeEach(() => {
+    localStorage.clear();
+    useAssistantDraftStore.setState({ ownerUserId: null, drafts: {} });
+    baseProps.onSend.mockClear();
+  });
+
+  function type(input: HTMLTextAreaElement, value: string) {
+    fireEvent.change(input, { target: { value, selectionStart: value.length } });
+    input.setSelectionRange(value.length, value.length);
+    fireEvent.select(input);
+  }
+
+  function renderMentions() {
+    render(
+      <ChatComposer
+        {...baseProps}
+        draftKey="group:one"
+        placeholder="Message the group — @mention an agent"
+        mentions={mentions}
+      />,
+    );
+    return screen.getByRole("combobox", { name: "Message the group — @mention an agent" }) as HTMLTextAreaElement;
+  }
+
+  it("uses the given placeholder", () => {
+    render(<ChatComposer {...baseProps} draftKey="conv:one" placeholder="Message NyxBot" />);
+    expect(screen.getByRole("textbox")).toHaveAttribute("placeholder", "Message NyxBot");
+  });
+
+  it("lists matching members after @ and inserts the chosen one with Enter", async () => {
+    const input = renderMentions();
+    expect(input).toHaveAttribute("aria-expanded", "false");
+    type(input, "hey @re");
+    const list = screen.getByRole("listbox", { name: "Mention an agent" });
+    expect(input).toHaveAttribute("aria-expanded", "true");
+    const options = screen.getAllByRole("option");
+    expect(options.map((option) => option.textContent)).toEqual([
+      expect.stringContaining("researcher"),
+      expect.stringContaining("release-notes"),
+    ]);
+    expect(options[0]).toHaveAttribute("aria-selected", "true");
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    expect(screen.getAllByRole("option")[1]).toHaveAttribute("aria-selected", "true");
+    expect(input).toHaveAttribute("aria-activedescendant", screen.getAllByRole("option")[1]!.id);
+    await act(async () => {
+      fireEvent.keyDown(input, { key: "Enter" });
+    });
+    // Enter chose a member instead of sending.
+    expect(baseProps.onSend).not.toHaveBeenCalled();
+    expect(input).toHaveValue("hey @release-notes ");
+    expect(list).not.toBeInTheDocument();
+  });
+
+  it("inserts with Tab or a click, and Escape dismisses the list", async () => {
+    const input = renderMentions();
+    type(input, "@nyx");
+    await act(async () => {
+      fireEvent.keyDown(input, { key: "Tab" });
+    });
+    expect(input).toHaveValue("@NyxBot ");
+    type(input, "@NyxBot and @res");
+    fireEvent.click(screen.getByRole("option", { name: /researcher/ }));
+    expect(input).toHaveValue("@NyxBot and @researcher ");
+    type(input, "@NyxBot and @researcher @");
+    expect(screen.getByRole("listbox")).toBeInTheDocument();
+    fireEvent.keyDown(input, { key: "Escape" });
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+  });
+
+  it("sends with Enter when no member matches", async () => {
+    const input = renderMentions();
+    type(input, "@stranger hello");
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+    await act(async () => {
+      fireEvent.keyDown(input, { key: "Enter" });
+    });
+    expect(baseProps.onSend).toHaveBeenCalledWith("@stranger hello");
+  });
+});

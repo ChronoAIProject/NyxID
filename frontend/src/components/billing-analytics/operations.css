@@ -8,6 +8,50 @@
   border-radius: 12px;
 }
 
+.analytics-grid-item {
+  position: relative;
+}
+
+.analytics-grid-item > .analytics-panel {
+  padding-bottom: 2.25rem;
+}
+
+.analytics-grid-item[data-resizing="true"] {
+  user-select: none;
+  outline: 2px solid var(--color-primary);
+  outline-offset: 3px;
+  border-radius: 8px;
+}
+
+.analytics-grid-item[data-resizing="true"] .analytics-plot {
+  height: var(--analytics-resize-height) !important;
+}
+
+.analytics-drag-handle,
+.analytics-resize-handle {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 150ms ease;
+}
+
+.analytics-resize-handle {
+  cursor: nwse-resize;
+}
+
+.analytics-grid-item:is(:hover, :focus-within, [data-resizing="true"])
+  :is(.analytics-drag-handle, .analytics-resize-handle) {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+@media (hover: none) {
+  .analytics-drag-handle,
+  .analytics-resize-handle {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
 .analytics-operations-grid,
 .analytics-overview-grid {
   grid-template-columns: minmax(0, 1fr);

@@ -2,12 +2,13 @@ import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { nyxAgentTransport } from "@/lib/assistant/nyxagent-transport";
 import type {
-  NyxAgentAccessMode,
   NyxAgentAcknowledgement,
+  NyxAgentConversationAgent,
   NyxAgentHistory,
 } from "@/schemas/assistant-nyxagent";
 import { useAuthStore } from "@/stores/auth-store";
 import { useDecideApproval } from "@/hooks/use-approvals";
+import { nyxBotQueryKeys, useNyxBotAgents } from "@/hooks/use-nyxbot-agents";
 import {
   currentCreditsActor,
   isInsufficientCreditsCode,
@@ -28,16 +29,22 @@ function notifyTurnCredits(
   );
 }
 
-/** A foreground send whose live failure may open the out-of-credits dialog. */
+/**
+ * A foreground send whose live failure may open the out-of-credits dialog.
+ * `agent` is only used when the send starts a new thread.
+ */
 function liveSend(
   conversationId: string | undefined,
   text: string,
   onAdopt: (id: string) => void,
+  agent?: NyxAgentConversationAgent,
 ) {
   const actorId = currentCreditsActor();
-  return nyxAgentTransport.send(conversationId, text, onAdopt, (id, turnId, code) =>
-    notifyTurnCredits(id, turnId, code, actorId),
-  );
+  const onFailed = (id: string, turnId: string, code: string) =>
+    notifyTurnCredits(id, turnId, code, actorId);
+  return conversationId || !agent
+    ? nyxAgentTransport.send(conversationId, text, onAdopt, onFailed)
+    : nyxAgentTransport.send(undefined, text, onAdopt, onFailed, { agent });
 }
 
 /** The user-visible turn that resumes the assistant after an allowed card. */
@@ -63,10 +70,16 @@ export function useNyxAgentAssistantChat({
   selectedConversationId,
   onConversationAdopted,
   enabled = true,
+  threadsAgentId,
+  draftAgent,
 }: {
   readonly selectedConversationId?: string;
   readonly onConversationAdopted: (id: string) => void;
   readonly enabled?: boolean;
+  /** List this agent's threads (for the sidebar and landing). */
+  readonly threadsAgentId?: string;
+  /** The agent a new thread starts with; the server defaults to NyxBot. */
+  readonly draftAgent?: NyxAgentConversationAgent;
 }) {
   const userId = useAuthStore((state) => state.user?.id);
   const queryClient = useQueryClient();
@@ -76,13 +89,20 @@ export function useNyxAgentAssistantChat({
     nyxAgentTransport.getRevision,
   );
   const streaming = nyxAgentTransport.isRunning(selectedConversationId);
-  const indexKey = ["assistant", "nyxagent", userId, "index"];
+  const threadsKey = nyxBotQueryKeys.threads(userId);
+  const agentsKey = nyxBotQueryKeys.agents(userId);
   const historyKey = ["assistant", "nyxagent", userId, "history", selectedConversationId];
-  const index = useQuery({
-    queryKey: indexKey,
-    queryFn: () => nyxAgentTransport.list(),
-    enabled: enabled && Boolean(userId),
+  const threads = useQuery({
+    queryKey: nyxBotQueryKeys.threads(userId, threadsAgentId),
+    queryFn: () => nyxAgentTransport.list(threadsAgentId),
+    enabled: enabled && Boolean(userId && threadsAgentId),
   });
+  const agents = useNyxBotAgents(enabled);
+  const selected = nyxAgentTransport.getConversation(selectedConversationId);
+  // A thread whose agent NyxID (not this page) set to work: poll its transcript.
+  const selectedAgentRunning = agents.data?.agents.some(
+    (agent) => agent.id === selected?.agent?.id && agent.status === "running",
+  );
   const history = useQuery({
     queryKey: historyKey,
     queryFn: async () => {
@@ -93,7 +113,10 @@ export function useNyxAgentAssistantChat({
         previous?.conversation.pending_acknowledgements !==
           page.conversation.pending_acknowledgements
       ) {
-        await queryClient.invalidateQueries({ queryKey: indexKey });
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: threadsKey }),
+          queryClient.invalidateQueries({ queryKey: agentsKey }),
+        ]);
       }
       return page;
     },
@@ -102,45 +125,52 @@ export function useNyxAgentAssistantChat({
     // Polling during a live turn also carries the turn's tool activity.
     refetchInterval: (query) =>
       streaming ||
+      selectedAgentRunning ||
       query.state.data?.conversation.active_turn ||
       query.state.data?.acknowledgements.some((row) => row.status === "pending") ||
       (query.state.data?.approvals.length ?? 0) > 0
         ? 2000
         : false,
   });
-  const models = useQuery({
-    queryKey: ["assistant", "nyxagent", userId, "models"],
-    queryFn: () => nyxAgentTransport.models(),
-    enabled: enabled && Boolean(userId),
-    staleTime: 60_000,
-  });
   const send = useCallback(
     async (text: string) => {
       try {
-        await liveSend(selectedConversationId, text, onConversationAdopted);
+        await liveSend(selectedConversationId, text, onConversationAdopted, draftAgent);
       } finally {
-        // A first turn may have provisioned the credential needed for profile discovery.
-        await queryClient.invalidateQueries({
-          queryKey: ["assistant", "nyxagent", userId, "models"],
-        });
+        // A new thread changes its agent's summary. (Model routing is
+        // server-side, so there is no profile list to refresh.)
+        await queryClient.invalidateQueries({ queryKey: agentsKey });
       }
     },
-    [selectedConversationId, onConversationAdopted, queryClient, userId],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [selectedConversationId, onConversationAdopted, queryClient, userId, draftAgent?.id],
   );
   const stop = useCallback(async () => {
     if (selectedConversationId) await nyxAgentTransport.stop(selectedConversationId);
   }, [selectedConversationId]);
 
-  const mode = useMutation({
-    mutationFn: (value: NyxAgentAccessMode) =>
-      nyxAgentTransport.setAccessMode(selectedConversationId, value),
-    onSuccess: async () => {
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: historyKey }),
-        queryClient.invalidateQueries({ queryKey: indexKey }),
-      ]);
-    },
-  });
+  // When any agent starts, settles or raises a request, NyxID may have woken
+  // the open thread (NyxBot hears back from its specialists), so re-read it
+  // and the agent's thread list.
+  const agentsSignature = agents.data?.agents
+    .map(
+      (agent) =>
+        `${agent.id}:${agent.status}:${String(agent.pending_requests.length)}:${String(
+          agent.last_reply?.seq ?? 0,
+        )}`,
+    )
+    .join(",");
+  const seenAgentsSignature = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (agentsSignature === undefined) return;
+    const previous = seenAgentsSignature.current;
+    seenAgentsSignature.current = agentsSignature;
+    if (previous === undefined || previous === agentsSignature) return;
+    void queryClient.invalidateQueries({ queryKey: threadsKey });
+    if (selectedConversationId) void queryClient.invalidateQueries({ queryKey: historyKey });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentsSignature]);
+
   const lastDecision = useRef(Number.NEGATIVE_INFINITY);
   // Cards allowed while their conversation's turn was still running. The
   // running turn cannot observe the decision (NyxAgent ends a turn on a card and
@@ -160,7 +190,9 @@ export function useNyxAgentAssistantChat({
     },
     onSuccess: (acknowledgement, { choice }) => {
       // An allowed card resumes the assistant: the refusal told it to retry after
-      // approval, and it cannot wait for the decision inside its own turn.
+      // approval, and it cannot wait for the decision inside its own turn. A
+      // specialist's request routed to NyxBot is resumed by the server itself.
+      if (acknowledgement.decider === "orchestrator") return;
       if (choice !== "allow" || !selectedConversationId) return;
       if (nyxAgentTransport.isRunning(selectedConversationId)) {
         const queued = pendingContinuations.current.get(selectedConversationId);
@@ -175,7 +207,8 @@ export function useNyxAgentAssistantChat({
     onSettled: async () => {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: historyKey }),
-        queryClient.invalidateQueries({ queryKey: indexKey }),
+        queryClient.invalidateQueries({ queryKey: threadsKey }),
+        queryClient.invalidateQueries({ queryKey: agentsKey }),
       ]);
     },
   });
@@ -238,11 +271,16 @@ export function useNyxAgentAssistantChat({
   return {
     approvals: nyxAgentTransport.getHistory(selectedConversationId)?.approvals ?? [],
     decideApproval,
-    conversations: enabled ? nyxAgentTransport.getConversations() : [],
+    /** `threadsAgentId`'s threads, newest first. */
+    conversations:
+      enabled && threadsAgentId ? nyxAgentTransport.getConversations(threadsAgentId) : [],
+    threadsLoaded: threads.isSuccess,
+    /** The selected thread's row, once loaded. */
+    conversation: selected,
     session: nyxAgentTransport.session(selectedConversationId),
     isStreaming: nyxAgentTransport.isRunning(selectedConversationId),
     isLoading: history.isLoading,
-    error: history.error?.message ?? index.error?.message,
+    error: history.error?.message ?? threads.error?.message ?? agents.error?.message,
     send,
     stop,
     acknowledgements: nyxAgentTransport.getHistory(selectedConversationId)?.acknowledgements ?? [],
@@ -250,12 +288,6 @@ export function useNyxAgentAssistantChat({
     decidingAcknowledgement: decision.isPending ? decision.variables?.id : undefined,
     deleteConversation: (id: string) => nyxAgentTransport.delete(id),
     renameConversation: (id: string, title: string) => nyxAgentTransport.rename(id, title),
-    accessMode: nyxAgentTransport.getAccessMode(selectedConversationId),
-    setAccessMode: mode.mutateAsync,
-    changingAccessMode: mode.isPending,
-    model: nyxAgentTransport.getModel(selectedConversationId),
-    setModel: (model: string) => nyxAgentTransport.setModel(model),
-    models: models.data ?? [{ id: "nyxagent/chat", label: "chat" }],
     beforeSeq: nyxAgentTransport.getHistory(selectedConversationId)?.before_seq,
     loadOlder: async () => {
       const before = nyxAgentTransport.getHistory(selectedConversationId)?.before_seq;

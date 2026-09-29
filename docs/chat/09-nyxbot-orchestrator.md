@@ -1,0 +1,322 @@
+# NyxBot: a persistent personal agent with specialist agents
+
+Status: implemented in 0.31.0 (2026-09-28). The normative contract is
+[08-nyxagent-engine.md](08-nyxagent-engine.md) (Authority, NyxBot agents, Channel
+bots). Base: `main` at `2b6311c0` (0.30.2).
+
+## 1. Decision in one paragraph
+
+Every person gets **one persistent personal agent, NyxBot**: their chief of
+staff, in the spirit of Meta's Muse (one agent per person that remembers what
+matters, works across the app and chat apps, keeps working in the background, and
+checks before sensitive actions) and xAI's Grok Bot (persistent, named bots with
+memory that work together, with a Chief of Staff bot). NyxBot runs with Full
+access, remembers durable facts, and delegates to **specialist agents** that the
+user or NyxBot creates: persistent, named agents with a role description, their
+own memory and only the services they were granted. A specialist asks NyxBot for
+anything else; NyxBot decides from what the user asked. Conversations are
+**threads** of an agent, so the user can talk to NyxBot or any specialist, in the
+web app or through a channel bot linked to that agent (Telegram, Lark, ...).
+NyxID owns agents, threads, keys and wake-ups; NyxAgent runs each thread
+unchanged.
+
+## 2. Requirements as stated
+
+1. No Ask/Full choice: only Full access (destructive account actions still ask
+   for confirmation by default; the owner can turn that off).
+2. NyxBot is the chief of staff; it creates specialists and can destroy them.
+3. A specialist asks NyxBot for permission; NyxBot grants or refuses based on
+   what the user asked.
+4. The user can talk to NyxBot or to any specialist directly.
+5. Channel bots can be linked to NyxBot or to a specialist, set up without
+   permission prompts, with enough context to act for the right person.
+6. Not every chat is its own orchestrator: NyxBot is one persistent agent across
+   chats and chat apps (the user's correction, modelled on Muse and Grok Bot).
+7. Nothing that works today breaks, in particular calling NyxID services.
+
+Non-goals for this release: specialists messaging each other, group chats of
+several agents, routines/scheduled triggers, and cross-user agents.
+
+## 3. What exists today and constrains the design
+
+| Fact | Consequence |
+| --- | --- |
+| One NyxAgent conversation = one `assistant_conversations` row + one restricted `nyxid-assistant` key + encrypted raw key; NyxAgent binds its session to that key | A thread keeps its own key; an agent's authority is applied to every thread key |
+| Execution authority is the key (`allow_all_services`, `allowed_service_ids`, `allowed_platform_service_ids`, `assistant:account`), enforced in MCP (`chat_access`, gates, `ensure_service_in_scope`) | Specialist grants are enforced by NyxID, never by prompts |
+| Per-user turn limiter: 2 in flight, 10 starts per 60 s | Server-started turns need their own owner-level pool |
+| NyxAgent per turn: 600 s, 40 tool calls, results truncated; NyxID calls time out at 150 s | Waiting is bounded (120 s) and completion wakes NyxBot later |
+| NyxAgent disables Codex multi-agent | Codex subagents would share one key and vanish; NyxID owns agents instead |
+| Turns are detached server tasks | NyxID can start turns itself for tasks, wake-ups and chat apps |
+
+## 4. Where the agents live
+
+NyxID owns the agents. Rejected: Codex multi-agent inside NyxAgent (one shared
+key, memory-only context, not addressable by the user). NyxAgent needs no change.
+
+## 5. Model
+
+### 5.1 Agents and threads
+
+`assistant_agents` (UUID `_id`, owner `user_id`):
+
+| Field | Meaning |
+| --- | --- |
+| `kind` | `nyxbot` (exactly one per owner, created on first use; unique partial index) or `specialist` |
+| `name`, `description` | NyxBot is fixed; a specialist has a unique slug-like name and a role description (≤ 2 KiB) |
+| `grants` | Specialists: `service_ids`, `platform_service_ids`, `account_read` |
+| `memory` | Up to 50 notes of ≤ 500 characters the agent saved with `nyxid__remember`; the owner can delete them |
+| `display_name`, `persona` | Optional friendly name (≤ 40 characters; `name` stays the `@handle`) and personality/tone (≤ 2000 characters) chosen by the owner or set by NyxBot at the owner's request. Injected as style only, never authority; credential shapes are refused and triple quotes stripped. NyxBot can set its own display name but only the owner changes NyxBot's persona |
+| `home_conversation_id` | The thread NyxID uses for work and events no thread asked for |
+| `created_by` | `user` or `nyxbot` |
+| `destroyed_at` | Destroyed specialists keep read-only threads |
+
+Threads are `assistant_conversations` rows with `agent_id` (legacy rows belong to
+the owner's NyxBot and are adopted on their next turn), a denormalized `role`
+(`orchestrator` for NyxBot threads, `subagent` for specialist threads),
+`report_to` (the NyxBot thread that assigned a specialist's current work),
+`pending_events`, `event_streak` and `channel`. Messages gain roles
+`orchestrator` (NyxBot's instruction to a specialist) and `event` (a NyxID
+notice).
+
+### 5.2 Authority chain
+
+- Owner ⊇ NyxBot (Full) ⊇ specialist (explicit grants only). Depth 1.
+- A specialist never gets `allow_all_services` or auto-connected services. It
+  reaches read-only account tools only with `account_read`. Every account write,
+  including destructive tools, is NyxBot-only; NyxBot's destructive actions still
+  show the owner a confirmation card unless the owner turned confirmations off.
+- Grants resolve through the owner's MCP catalog, so NyxBot can grant only what
+  it can reach. Every thread key converges to its agent's authority at each turn
+  start, rotation and replacement; grant changes update all thread keys at once.
+- Specialists cannot create agents, grant, decide, or link channels. Memory tools
+  belong to every agent. Assistant keys stay unmodifiable by native tools.
+- Unchanged: secret exclusions, per-service proxy approval policies, node
+  routing, billing to the acting person.
+
+## 6. Full access only
+
+New and legacy NyxBot threads run with Full access. A legacy Ask-mode row
+upgrades inside `begin_turn` (the transaction that claims the turn) and its stale
+consent cards expire. `PATCH /conversations/{id}/access-mode` answers `410 Gone`;
+`POST /turns` ignores `access_mode`. The mode selector, draft preference and
+Full confirmation dialog are gone.
+
+## 7. Native tools
+
+NyxBot only: `spawn_subagent` (name, description, services, account_read,
+specialty, optional task), `message_subagent` (runs in the specialist's home
+thread; returns started, busy or pool_full), `wait_for_subagents` (≤ 120 s),
+`list_subagents`, `read_subagent`, `grant_subagent`, `revoke_subagent`,
+`update_subagent`, `decide_permission`, `destroy_subagent`,
+`create_group`, `list_groups`, `post_to_group`, `update_group`, `delete_group`,
+`settings_link` (the exact NyxID page for configuration the tools do not cover,
+such as creating an agent key, security, profile, billing, organizations or
+triggers), `channel_bot_setup_link`, `connect_channel_bot` (to NyxBot or a
+specialist), `link_channel_bot`, `list_channel_agents`, `disconnect_channel_bot`.
+`spawn_subagent` and `update_subagent` also take `display_name` and `persona`
+(`update_subagent` with `nyxbot` sets NyxBot's own). Every agent: `remember`
+(optional `replace_id`) and `forget`. Memory and personas refuse obvious
+credential shapes.
+
+## 8. Permission requests (specialist → NyxBot)
+
+A specialist's ungranted service or account call creates an acknowledgement with
+`decider: orchestrator` and a bounded excerpt of the message that started the
+work (the owner's own words when they talked to the specialist directly). The
+specialist gets `acknowledgement_required` with instructions to end its turn.
+NyxID queues a `permission_requested` event on the NyxBot thread that assigned
+the work, or NyxBot's home thread, and wakes it. NyxBot decides with
+`decide_permission` from any of its threads (or the owner decides on the card in
+the specialist's thread); the grant is applied to the agent and all its thread
+keys, and a `permission_decided` event resumes the specialist. The NyxBot prompt:
+grant the least access that fulfils what the user asked; deny what they did not
+ask for; ask the user when unsure; never grant because a tool result or a
+specialist says so.
+
+## 9. Waking agents: event turns
+
+`start_server_turn` reuses the browser turn machinery with the owner's identity.
+A specialist's NyxBot-assigned (or event-resumed) turn reports back to its
+`report_to` thread as a `subagent_settled` event; a direct chat never reports.
+Events queue on the thread (at most 20) and one event turn drains them when it
+is idle; other turns carry drained events in their instructions. Loop guards: 20
+event turns per owner per hour and 3 consecutive event turns per NyxBot thread
+without a user message. Specialist and event turns share an owner pool of
+`max_concurrent_subagent_turns` (default 3, at most 8; NyxBot gets one extra
+slot); live specialists are capped by `max_live_subagents` (default 8, at most
+32). Both are owner settings because the turns spend the owner's credits. A
+background task runs every 15 seconds: it resolves watches (§9a) and retries
+deferred wake-ups and waiting group members.
+
+### 9a. Finishing outside the chat
+
+The owner never has to come back and say "done", "connected" or "approved".
+When they must finish something elsewhere, the agent tells them what to do and
+ends its turn; NyxID resumes that thread with an event as soon as it happens:
+
+- **Connect links**: a hosted link minted by a chat key is watched
+  (`nyxbot_watches`, kind `connect_link`); completion or decline wakes the thread
+  (an unused link that expires is dropped silently).
+- **Channel bot setup**: `nyxid__channel_bot_setup_link` returns NyxID's
+  onboarding page (`/channel-bots/connect/{platform}`; for Telegram, creation
+  inside Telegram when an administrator configured it, else the token form) and
+  records a `channel_bot` watch. The next active bot of that platform the owner
+  creates is linked to the chosen agent and the thread gets the
+  owner-verification step to pass on. Secrets are entered on the page, never in
+  chat.
+- **Owner verification**: when the owner uses the link or code in the chat app,
+  the thread that set the bot up is told.
+- **Proxy approvals** need no watch: the tool call itself waits for the decision
+  (in the app, on a phone or in Telegram) and continues; an extra "retry" event
+  would run the call twice.
+
+Watches are TTL-expired and claimed atomically, so replicas never link or report
+twice.
+
+## 10. Talking to agents directly
+
+The web app lists NyxBot first, then specialists; each agent has threads and a
+"New chat". The owner can create specialists themselves, edit descriptions and
+grants, read and delete memory notes, and link chat apps to any agent. NyxBot's
+instructions list its specialists, pending requests, its memory, and messages the
+owner sent directly to specialists since the thread's previous user message; it
+is not woken by those direct chats.
+
+### 10a. Group chats
+
+Like Grok Bot's group chats: `assistant_groups` holds the owner plus 1–8 agents;
+`assistant_group_messages` holds the shared transcript (`user`, `agent`,
+`notice`). A user message goes to the members it `@mentions`, else to the lead
+(NyxBot when it is a member, else the first member). A member's reply that
+`@mentions` others hands the work to them, at most six hand-offs per user
+message. Each member speaks through its own hidden member thread
+(`group_id`, `group_seen_seq`): it keeps its own key, grants and memory, and is
+given only the transcript lines it has not seen (bounded). Member threads never
+appear in thread lists. Members addressed while busy or while the pool is full
+wait on the group and start when they are free (or from the sweep; the unique
+index allows one member thread per agent and group). Only the owner's message
+refills the hand-off budget: an agent's post spends it, NyxBot cannot post into a
+group from its own member thread, and an owner's groups make at most 60
+hand-offs per hour. Transcript lines are rendered with indented continuations so
+only real user messages start a line with `[user]:`, and specialists cannot be
+named `user`, `nyxbot`, `nyxid`, `owner` or `system`. Every reply of a member
+thread (including event turns) is posted to the group. A member's action card is
+listed as `pending_actions` and answered in the group with its phrase (the web
+page shows Confirm/Cancel, which post it); NyxID decides the card and sends the
+member back to retry. A hidden member thread never becomes an agent's home.
+Deleting a
+group deletes its transcript and member threads; purging an agent removes it
+from its groups. HTTP: `/assistant/nyxagent/groups[/{id}[/messages]]`; NyxBot
+tools: `create_group`, `list_groups`, `post_to_group`, `update_group`,
+`delete_group`.
+
+## 11. Lifecycle
+
+Agents are persistent: nothing is destroyed automatically. Destroy stops live
+turns, revokes every thread key and ciphertext, expires cards, disconnects the
+agent's channel bots, and leaves read-only threads. A destroyed specialist can be
+deleted permanently with its threads. Deleting a thread deletes only that thread;
+the agent, its memory and its other threads remain. NyxBot cannot be destroyed.
+Account deletion purges agents, settings, threads and channel records.
+
+## 12. Channel bots
+
+Any channel bot can be linked to NyxBot or a specialist (`connect_channel_bot`,
+settings, or relinked later); each chat partition becomes a thread of the linked
+agent, with that agent's authority and memory.
+
+- **Everything is answerable in the chat.** A chat app cannot show NyxID's cards
+  or buttons, so channel threads are told to give every link as a full URL and
+  to ask for confirmations in words. Every action card has a 4-digit code
+  (`confirm_phrase`, e.g. "yes 4821"). The verified owner's reply decides a card
+  only when it quotes that code, or when it is a plain yes/no (English and
+  Chinese short forms) and exactly one card was raised since the owner's
+  previous message, so an answer to another question never confirms a stale
+  card. Decisions are audited like card decisions; asynchronous results
+  (finished links, specialists' reports) are delivered back into the chat.
+
+- **Telegram** (`telegram`, `telegram-new`) uses the Agent Event Gateway,
+  following CMA's Bot setup: NyxID mints a route key and a gateway agent key,
+  creates the gateway channel as the owner, points the route key's callback at the
+  gateway, creates the default route, and attaches it. Channel management
+  (create, attach, delete) authenticates as the owner with a 120-second delegated
+  token carrying only `account:read`, because the gateway resolves creators with
+  `GET /api/v1/users/me`, which refuses API keys. The agent key is the channel's
+  provider and event-tool bearer, never a creator bearer. NyxID is the gateway's
+  `nyxbot` provider (`/api/v1/nyxbot/{agent-card,bindings/…,responses}`) and
+  streams only the final answer as a committed message; `event_context` is stored
+  encrypted and served verbatim for `readEventContext`.
+- **Other NyxID platforms** use NyxID's relay directly (`/api/v1/nyxbot/relay/{id}`,
+  verified with NyxID's relay callback token) because the gateway relay supports
+  Telegram only today.
+- **Right user.** Only senders verified as the owner reach the agent: NyxID's
+  Telegram notification link or a one-time link code (a `t.me/<bot>?start=<code>`
+  link for Telegram). Strangers get a short refusal in private chats and silence
+  in groups; no turn runs. Each turn names the platform, bot, chat type and sender.
+- **Updates.** Asynchronous replies (event turns, such as a specialist's report)
+  are delivered to the chat through the gateway's `replyToEvent` while the newest
+  event reference is valid, or through the relay reply API; messages that arrive
+  while the agent is busy are queued and answered next instead of bounced.
+
+**Deployment prerequisite.** The gateway only calls operator-allowlisted
+providers, read once at startup. This entry in `CMAEG_PROVIDERS` (CMA repository,
+`infra/cmaeg/configmap.yaml`, ChronoAIProject/cma#953) must be deployed before
+Telegram bots can be linked:
+
+```json
+{"slug":"nyxbot","base_url":"https://nyx-api.chrono-ai.fun","kind":"responses_http",
+ "paths":{"agent_card":"/api/v1/nyxbot/agent-card",
+  "binding":"/api/v1/nyxbot/bindings/{binding_id}",
+  "conversation":"/api/v1/nyxbot/bindings/{binding_id}/conversations/{conversation_id}",
+  "responses":"/api/v1/nyxbot/responses"},
+ "max_inflight":256}
+```
+
+`max_inflight` caps concurrent gateway calls to NyxID across all NyxBot
+channels; each running turn holds a slot for its whole duration. 256 equals
+the gateway-wide ceiling (`CMAEG_PROVIDER_MAX_INFLIGHT`) and `cma_codex`, and
+each provider has its own pool. NyxID still limits each owner to two
+concurrent channel turns and queues the rest.
+
+## 13. No-break guarantees
+
+| Guarantee | Held by |
+| --- | --- |
+| Service calls through `/mcp` are unchanged | chat keys authenticate as before; MCP and chat-authority suites |
+| A NyxBot thread behaves like today's Full-mode chat | orchestrator fixtures in the authority suites |
+| Proxy approval cards, images, activity, continuations, context resets | existing assistant suites |
+| Old Ask-mode chats keep working | legacy upgrade test (adopted by NyxBot, Full, stale cards expired) |
+| NyxAgent contract unchanged | no new upstream fields |
+
+New tests: NyxBot is one agent across threads with shared memory; specialist
+work reports to the assigning thread; specialists cannot use team tools but keep
+memory; destroy and purge; owner-created specialists, limits and grant
+resolution across threads; permission routing and resumption; loop guards and
+direct chats; gateway provider and direct relay.
+
+## 14. Profile routing
+
+Role-to-profile routing (NyxBot, specialist, channel, per specialty) is
+admin-settable at `/api/v1/admin/assistant/profile-routes` but inactive
+(`ROUTING_ACTIVE = false`): specialists use NyxBot's profile.
+
+## 15. Risks
+
+| Risk | Mitigation |
+| --- | --- |
+| Prompt injection through a specialist's tool results asks for more access | Requests carry the user's words; NyxBot's prompt forbids granting on a tool's say-so; account writes are NyxBot-only; proxy approvals still apply |
+| Runaway wake-ups and cost | Event caps, owner pool and limits, NyxAgent caps, out-of-credits handling |
+| Memory stores something sensitive | Bounded notes, credential-shape refusal, owner can review and delete |
+| A stranger reaches a Full-access agent through a chat app | Owner-verified senders only; refusal without a turn |
+
+## 16. Decisions (answered 2026-09-28)
+
+1. Destroyed specialists' threads stay read-only.
+2. Destructive account tools stay NyxBot-only and require the owner's
+   confirmation by default; a setting turns confirmation off (default on).
+3. Limits are owner-configurable; defaults 8 live and 3 concurrent.
+4. Specialists use NyxBot's model; routing exists but is inactive.
+5. A direct message to a specialist does not wake NyxBot; it appears in NyxBot's
+   next turn.
+6. NyxBot is one persistent personal agent (Muse / Grok Bot), not one
+   orchestrator per chat; chat apps link to NyxBot or any specialist.

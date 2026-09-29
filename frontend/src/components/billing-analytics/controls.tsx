@@ -331,6 +331,7 @@ export function PanelControls({
         options={[
           { value: "5", label: "Top 5 + Other" },
           { value: "10", label: "Top 10 + Other" },
+          { value: "20", label: "Top 20 + Other" },
           { value: "0", label: "Aggregated total" },
         ]}
       />

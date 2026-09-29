@@ -1,9 +1,11 @@
 import {
+  Fragment,
   useCallback,
   useEffect,
   useEffectEvent,
   useRef,
   useState,
+  type ClipboardEvent,
 } from "react";
 import { useLocation } from "@tanstack/react-router";
 import {
@@ -635,17 +637,10 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                         void verify();
                     }}
                   >
-                    <label htmlFor="approval-user-code" className="sr-only">
-                      User code
-                    </label>
-                    <Input
-                      id="approval-user-code"
+                    <ApprovalCodeInput
                       value={code}
                       disabled={busy}
-                      autoComplete="one-time-code"
-                      placeholder="XXXX-XXXX"
-                      className="h-16 bg-background text-center font-mono text-[22px] uppercase tracking-widest sm:text-[28px]"
-                      onChange={(e) => setCode(e.target.value)}
+                      onChange={setCode}
                     />
                     <Button
                       type="submit"
@@ -1105,5 +1100,133 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
         Device login by NyxID
       </p>
     </LoginDeviceShell>
+  );
+}
+
+const APPROVAL_CODE_LENGTH = 9;
+
+function compactApprovalCode(value: string): string {
+  return value
+    .replace(/[\s-]/g, "")
+    .toUpperCase()
+    .replace(/[^0-9A-Z]/g, "")
+    .slice(0, APPROVAL_CODE_LENGTH);
+}
+
+function ApprovalCodeInput({
+  value,
+  disabled,
+  onChange,
+}: {
+  readonly value: string;
+  readonly disabled: boolean;
+  readonly onChange: (value: string) => void;
+}) {
+  const inputRefs = useRef<Array<HTMLInputElement | null>>([]);
+  const compact = compactApprovalCode(value);
+  const length = compact.startsWith("2") ? 9 : 8;
+  const chars = Array.from({ length }, (_, index) => compact[index] ?? "");
+
+  function commit(next: string[], focusIndex?: number) {
+    onChange(formatAuthDeviceUserCodeInput(next.join("")));
+    if (focusIndex === undefined) return;
+    queueMicrotask(() => inputRefs.current[focusIndex]?.focus());
+  }
+
+  function handlePaste(event: ClipboardEvent<HTMLInputElement>, index: number) {
+    event.preventDefault();
+    const pasted = compactApprovalCode(event.clipboardData.getData("text"));
+    if (!pasted) return;
+    const next = [...chars];
+    for (const [offset, character] of Array.from(pasted).entries()) {
+      if (
+        index + offset >=
+        (pasted.startsWith("2") && index === 0 ? 9 : length)
+      )
+        break;
+      next[index + offset] = character;
+    }
+    commit(
+      next,
+      Math.min(
+        index + pasted.length,
+        (pasted.startsWith("2") && index === 0 ? 9 : length) - 1,
+      ),
+    );
+  }
+
+  function handleChange(raw: string, index: number) {
+    const entered = compactApprovalCode(raw);
+    const next = [...chars];
+    if (!entered) {
+      next[index] = "";
+      commit(next);
+      return;
+    }
+    for (const [offset, character] of Array.from(entered).entries()) {
+      if (
+        index + offset >=
+        (index === 0 && entered.startsWith("2") ? 9 : length)
+      )
+        break;
+      next[index + offset] = character;
+    }
+    commit(
+      next,
+      Math.min(
+        index + entered.length,
+        (index === 0 && entered.startsWith("2") ? 9 : length) - 1,
+      ),
+    );
+  }
+
+  return (
+    <div
+      role="group"
+      aria-label="User code"
+      className="mx-auto flex w-full max-w-md items-center justify-center gap-1 sm:gap-2"
+    >
+      {chars.map((character, index) => (
+        <Fragment key={index}>
+          {index === (length === 9 ? 1 : 4) || (length === 9 && index === 5) ? (
+            <span
+              aria-hidden="true"
+              className="px-0.5 text-lg text-muted-foreground"
+            >
+              -
+            </span>
+          ) : null}
+          <input
+            ref={(element) => {
+              inputRefs.current[index] = element;
+            }}
+            aria-label={`User code character ${index + 1}`}
+            value={character}
+            disabled={disabled}
+            autoComplete={index === 0 ? "one-time-code" : "off"}
+            inputMode="text"
+            maxLength={1}
+            spellCheck={false}
+            onChange={(event) => handleChange(event.target.value, index)}
+            onPaste={(event) => handlePaste(event, index)}
+            onKeyDown={(event) => {
+              if (event.key === "Backspace" && !character && index > 0) {
+                const next = [...chars];
+                next[index - 1] = "";
+                commit(next, index - 1);
+              } else if (event.key === "ArrowLeft" && index > 0) {
+                event.preventDefault();
+                inputRefs.current[index - 1]?.focus();
+              } else if (event.key === "ArrowRight" && index < length - 1) {
+                event.preventDefault();
+                inputRefs.current[index + 1]?.focus();
+              }
+            }}
+            onFocus={(event) => event.currentTarget.select()}
+            className="h-14 min-w-0 flex-1 rounded-md border border-border bg-background text-center font-mono text-lg uppercase outline-none transition-colors focus:border-primary focus:ring-2 focus:ring-primary/30 sm:h-16 sm:max-w-10 sm:text-xl"
+          />
+        </Fragment>
+      ))}
+    </div>
   );
 }

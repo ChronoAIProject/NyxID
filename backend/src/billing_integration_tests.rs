@@ -1505,7 +1505,7 @@ async fn exercise_nyxagent_routes(
     )
     .await;
     assert!(String::from_utf8_lossy(&response).contains("\"status\":\"completed\""));
-    let row = crate::services::assistant_nyxagent::list(db, owner, 1, None)
+    let row = crate::services::assistant_nyxagent::list(db, owner, 1, None, None)
         .await
         .unwrap()
         .remove(0);
