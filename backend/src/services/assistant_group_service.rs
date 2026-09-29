@@ -19,8 +19,8 @@ use crate::{
         assistant_agent::AssistantAgent,
         assistant_conversation::{AssistantConversation, COLLECTION_NAME as CONVERSATIONS},
         assistant_group::{
-            AssistantGroup, COLLECTION_NAME as GROUPS, GroupMessage, HOPS_PER_MESSAGE, MAX_MEMBERS,
-            MAX_NAME_CHARS, MESSAGES_COLLECTION_NAME as MESSAGES,
+            AssistantGroup, COLLECTION_NAME as GROUPS, GroupFollower, GroupMessage, MAX_FOLLOWERS,
+            MAX_MEMBERS, MAX_NAME_CHARS, MESSAGES_COLLECTION_NAME as MESSAGES,
         },
     },
     services::{
@@ -126,7 +126,8 @@ pub async fn create(
         created_by: created_by.into(),
         message_count: 0,
         pending_agent_ids: Vec::new(),
-        hops_remaining: HOPS_PER_MESSAGE,
+        hops_remaining: handoff_budget(db, owner).await?,
+        followers: Vec::new(),
         pending_checked_at: None,
         last_message_at: None,
         created_at: now,
@@ -393,15 +394,123 @@ pub async fn take_pending(
         == 1)
 }
 
+/// The owner's hand-offs per message (their NyxBot setting).
+async fn handoff_budget(db: &Database, owner: &str) -> AppResult<i32> {
+    Ok(super::assistant_settings_service::get(db, owner)
+        .await?
+        .max_group_handoffs)
+}
+
 /// A user message restores the hand-off budget.
 pub async fn reset_hops(db: &Database, owner: &str, group_id: &str) -> AppResult<()> {
+    let budget = handoff_budget(db, owner).await?;
     db.collection::<AssistantGroup>(GROUPS)
         .update_one(
             owner_filter(owner, group_id)?,
-            doc! {"$set": {"hops_remaining": HOPS_PER_MESSAGE}},
+            doc! {"$set": {"hops_remaining": budget}},
         )
         .await?;
     Ok(())
+}
+
+/// A NyxBot thread posted work into the group: it is woken with a summary of
+/// what follows once the group goes quiet. Its newest post replaces an older
+/// one; bounded.
+pub async fn follow(
+    db: &Database,
+    owner: &str,
+    group_id: &str,
+    conversation_id: &str,
+    since_seq: i64,
+) -> AppResult<()> {
+    let filter = owner_filter(owner, group_id)?;
+    let groups = db.collection::<AssistantGroup>(GROUPS);
+    groups
+        .update_one(
+            filter.clone(),
+            doc! {"$pull": {"followers": {"conversation_id": conversation_id}}},
+        )
+        .await?;
+    let follower = bson::to_bson(&GroupFollower {
+        conversation_id: conversation_id.into(),
+        since_seq,
+        created_at: Utc::now(),
+    })
+    .map_err(|_| AppError::Internal("Follower encoding failed".into()))?;
+    groups
+        .update_one(
+            filter,
+            doc! {"$push": {"followers": {"$each": [follower],
+            "$slice": -(MAX_FOLLOWERS as i64)}}},
+        )
+        .await?;
+    Ok(())
+}
+
+/// Take the group's followers once it is quiet (nobody working or waiting to
+/// answer). Atomic: only the caller that clears them notifies.
+pub async fn take_followers_if_quiet(
+    db: &Database,
+    owner: &str,
+    group_id: &str,
+) -> AppResult<Vec<GroupFollower>> {
+    let group = get(db, owner, group_id).await?;
+    if group.followers.is_empty()
+        || !group.pending_agent_ids.is_empty()
+        || !working(db, owner, group_id).await?.is_empty()
+    {
+        return Ok(Vec::new());
+    }
+    let mut filter = owner_filter(owner, group_id)?;
+    filter.insert(
+        "followers",
+        bson::to_bson(&group.followers)
+            .map_err(|_| AppError::Internal("Follower encoding failed".into()))?,
+    );
+    filter.insert("pending_agent_ids", doc! {"$size": 0});
+    let taken = db
+        .collection::<AssistantGroup>(GROUPS)
+        .update_one(filter, doc! {"$set": {"followers": []}})
+        .await?
+        .modified_count
+        == 1;
+    Ok(if taken { group.followers } else { Vec::new() })
+}
+
+/// What the members said after `since_seq`, for a follower's summary.
+pub async fn replies_since(
+    db: &Database,
+    owner: &str,
+    group_id: &str,
+    since_seq: i64,
+) -> AppResult<String> {
+    let rows: Vec<GroupMessage> = db
+        .collection::<GroupMessage>(MESSAGES)
+        .find(
+            doc! {"group_id": group_id, "user_id": owner, "seq": {"$gt": since_seq},
+            "role": {"$ne": "user"}},
+        )
+        .sort(doc! {"seq": -1})
+        .limit(12)
+        .await?
+        .try_collect()
+        .await?;
+    let mut lines: Vec<String> = rows
+        .iter()
+        .map(|row| {
+            let speaker = row
+                .agent_name
+                .as_deref()
+                .map(identifier)
+                .unwrap_or_else(|| "NyxID".into());
+            format!(
+                "[{speaker}]: {}",
+                excerpt(&row.text, 600).replace('\n', "\n    ")
+            )
+        })
+        .collect();
+    lines.reverse();
+    Ok(lines.join("\n"))
 }
 
 /// Spend one agent hand-off; `false` once the budget is used up.

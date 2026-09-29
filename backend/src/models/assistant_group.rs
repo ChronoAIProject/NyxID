@@ -5,8 +5,8 @@ pub const COLLECTION_NAME: &str = "assistant_groups";
 pub const MESSAGES_COLLECTION_NAME: &str = "assistant_group_messages";
 pub const MAX_MEMBERS: usize = 8;
 pub const MAX_NAME_CHARS: usize = 60;
-/// Agent-to-agent hand-offs (@mentions in replies) allowed per user message.
-pub const HOPS_PER_MESSAGE: i32 = 6;
+/// NyxBot threads that posted into a group and wait for its outcome.
+pub const MAX_FOLLOWERS: usize = 8;
 
 /// A group chat: the owner plus several of their agents (Grok-Bot style).
 /// Each member speaks through its own hidden member thread, so it keeps its
@@ -29,6 +29,10 @@ pub struct AssistantGroup {
     /// Remaining agent hand-offs since the last user message.
     #[serde(default)]
     pub hops_remaining: i32,
+    /// NyxBot threads that posted work here from outside: woken with a
+    /// summary once the group goes quiet.
+    #[serde(default)]
+    pub followers: Vec<GroupFollower>,
     /// When the retry sweep last looked at its waiting members (rotation).
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub pending_checked_at: Option<DateTime<Utc>>,
@@ -55,6 +59,16 @@ pub struct GroupMessage {
     #[serde(default)]
     pub agent_name: Option<String>,
     pub text: String,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub created_at: DateTime<Utc>,
+}
+
+/// A NyxBot thread waiting for a group's answer to what it posted.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GroupFollower {
+    pub conversation_id: String,
+    /// Its post; the summary covers the messages after it.
+    pub since_seq: i64,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
 }
