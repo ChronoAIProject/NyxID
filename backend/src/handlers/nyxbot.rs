@@ -2269,19 +2269,31 @@ async fn repeated_question(
         if !engine::also_reply_to_queued(&state.db, &row.user_id, conversation_id, key, origin)
             .await?
         {
-            // A turn has just taken it: wait for that turn's answer instead.
+            // A turn has just taken it: wait for that turn's answer instead,
+            // unless the turn already answers this chat.
             let current = engine::get(&state.db, &row.user_id, conversation_id).await?;
-            let waiting = match current.active_turn.as_ref() {
-                Some(turn) if turn.asked_from.as_ref() == Some(origin) => true,
+            let waiting = match current.active_turn.as_ref().filter(|turn| {
+                turn.events
+                    .iter()
+                    .any(|event| event.question_key.as_deref() == Some(key))
+            }) {
                 Some(turn) => {
-                    engine::also_deliver(
-                        &state.db,
-                        &row.user_id,
-                        conversation_id,
-                        &turn.turn_id,
-                        origin,
-                    )
-                    .await?
+                    let answered_here = match turn.origin {
+                        TurnOrigin::Channel => turn.asked_from.as_ref(),
+                        TurnOrigin::Event => {
+                            current.channel.as_ref().or(current.reply_channel.as_ref())
+                        }
+                        _ => None,
+                    };
+                    answered_here == Some(origin)
+                        || engine::also_deliver(
+                            &state.db,
+                            &row.user_id,
+                            conversation_id,
+                            &turn.turn_id,
+                            origin,
+                        )
+                        .await?
                 }
                 None => false,
             };
