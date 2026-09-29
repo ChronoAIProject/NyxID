@@ -603,6 +603,36 @@ pub async fn repair_channel_homes(db: &Database) -> mongodb::error::Result<u64> 
         .modified_count)
 }
 
+const REPLY_CHANNEL_RESET_MIGRATION: &str = "nyxbot_direct_reply_channel_reset_v1";
+
+/// Once: forget where the owner's own threads send asynchronous replies when
+/// that was a directly relayed chat. Before 0.36.1 a group reached through a
+/// default route looked private, so the owner's group messages could have
+/// set it to a group. The owner's next private message sets it again.
+pub async fn reset_direct_reply_channels(db: &Database) -> mongodb::error::Result<u64> {
+    let migrations = db.collection::<bson::Document>("schema_migrations");
+    if migrations
+        .find_one(doc! {"_id": REPLY_CHANNEL_RESET_MIGRATION})
+        .await?
+        .is_some()
+    {
+        return Ok(0);
+    }
+    let reset = db
+        .collection::<bson::Document>(CONVERSATIONS)
+        .update_many(
+            doc! {"reply_channel.partition": {"$regex": "^direct_"}},
+            doc! {"$unset": {"reply_channel": ""}},
+        )
+        .await?
+        .modified_count;
+    migrations
+        .insert_one(doc! {"_id": REPLY_CHANNEL_RESET_MIGRATION,
+        "applied_at": bson::DateTime::now(), "modified_count": reset as i64})
+        .await?;
+    Ok(reset)
+}
+
 pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     let credentials =
         db.collection::<bson::Document>(crate::models::assistant_agent_credential::COLLECTION_NAME);

@@ -1786,6 +1786,12 @@ async fn inbound_message(
         chats::Admission::Guest => true,
         chats::Admission::Refuse => return Ok(Inbound::Reply(PRIVATE_REFUSAL.into())),
         chats::Admission::Silent => return Ok(Inbound::Silent),
+        chats::Admission::Waiting => {
+            return Ok(match chats::waiting_hint(state, chat).await? {
+                Some(hint) => Inbound::Reply(hint),
+                None => Inbound::Silent,
+            });
+        }
     };
     let addressed = chat.kind.as_deref() == Some("private") || addressed == Some(true);
     start_chat_turn(state, row, chat, sender, text, guest, addressed).await
@@ -2115,10 +2121,7 @@ async fn start_chat_turn(
     let title = if shared {
         None
     } else if private {
-        Some(
-            name.clone()
-                .unwrap_or_else(|| format!("{} chat", platform_name(&row.platform))),
-        )
+        Some(chats::private_title(row, sender.id, sender.display_name))
     } else {
         // A new group thread is named after the group when the platform can
         // say (bounded; best effort).
@@ -2838,9 +2841,9 @@ async fn gateway_inbound(
             kind,
             chat_id: chat_id.to_owned(),
             thread_id: thread_id.map(str::to_owned),
+            owner: row.owner_sender_ids.iter().any(|id| id == sender.id),
             title: (kind == "private")
-                .then(|| sender.display_name.map(str::to_owned))
-                .flatten(),
+                .then(|| chats::private_title(row, sender.id, sender.display_name)),
         },
         None,
     )
@@ -2936,6 +2939,37 @@ pub async fn deliver_update(
     deliver_to(state, row, origin, text).await;
 }
 
+/// The chat a conversation may deliver to: its own channel thread's chat,
+/// or (for the owner's own thread) one of the owner's verified private chats
+/// that now answers into it. Anything else (a relinked chat, a group) gets
+/// nothing, whatever an older replica may have recorded.
+pub(crate) async fn delivery_target(
+    state: &AppState,
+    row: &crate::models::assistant_conversation::AssistantConversation,
+    origin: &ChannelOrigin,
+) -> AppResult<Option<(NyxbotChannel, NyxbotThread)>> {
+    let channel = load_channel(state, &row.user_id, &origin.nyxbot_channel_id).await?;
+    if channel.status != "active" {
+        return Ok(None);
+    }
+    let Some(thread) = state
+        .db
+        .collection::<NyxbotThread>(THREADS)
+        .find_one(doc! {"channel_id": &channel.id, "partition": &origin.partition})
+        .await?
+    else {
+        return Ok(None);
+    };
+    // A relinked chat belongs to another agent now; this thread's late
+    // replies stay in the app.
+    if thread.conversation_id.as_deref() != Some(row.id.as_str()) {
+        return Ok(None);
+    }
+    let own_chat = row.channel.as_ref() == Some(origin);
+    let owners_private_chat = thread.kind.as_deref() == Some("private") && thread.owner_chat;
+    Ok((own_chat || owners_private_chat).then_some((channel, thread)))
+}
+
 /// Deliver `text` from the conversation `row` to one chat. Best effort.
 pub async fn deliver_to(
     state: &AppState,
@@ -2944,21 +2978,9 @@ pub async fn deliver_to(
     text: &str,
 ) {
     let result: AppResult<()> = async {
-        let channel = load_channel(state, &row.user_id, &origin.nyxbot_channel_id).await?;
-        if channel.status != "active" {
+        let Some((channel, thread)) = delivery_target(state, row, origin).await? else {
             return Ok(());
-        }
-        let thread = state
-            .db
-            .collection::<NyxbotThread>(THREADS)
-            .find_one(doc! {"channel_id": &channel.id, "partition": &origin.partition})
-            .await?
-            .ok_or_else(|| AppError::NotFound("Channel thread not found".into()))?;
-        // A relinked chat belongs to another agent now; this thread's late
-        // replies stay in the app.
-        if thread.conversation_id.as_deref() != Some(row.id.as_str()) {
-            return Ok(());
-        }
+        };
         let reply = bounded_reply(text);
         if channel.transport == "gateway" {
             let (Some(ciphertext), Some(expires_at)) = (
@@ -3204,8 +3226,9 @@ pub async fn relay_callback(
                     kind,
                     chat_id: chat_id.clone(),
                     thread_id,
+                    owner: row.owner_sender_ids.iter().any(|id| id == &sender_id),
                     title: if kind == "private" {
-                        display.clone()
+                        Some(chats::private_title(&row, &sender_id, display.as_deref()))
                     } else {
                         raw_title
                     },

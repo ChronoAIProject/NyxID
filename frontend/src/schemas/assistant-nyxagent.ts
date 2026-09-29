@@ -488,6 +488,8 @@ export const nyxAgentChannelChatSchema = z.object({
   /** The user's explicit choice; null follows the default. */
   members_setting: z.enum(["everyone", "owner"]).nullable().catch(null).default(null),
   owner_seen: z.boolean().default(false),
+  /** Private chats: the user's own chat with the bot. */
+  owner: z.boolean().default(false),
   allow_posts: z.boolean().default(false),
   conversation_id: z.string().nullable().default(null),
   last_message_at: z.string().nullable().default(null),

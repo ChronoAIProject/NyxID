@@ -1995,7 +1995,11 @@ async fn group_chats_share_one_thread_and_members_talk_as_guests() {
         .await,
     )
     .await;
-    assert!(!stranger.contains("output_text"), "{stranger}");
+    // No turn: the group only hears why (at most daily).
+    assert!(
+        stranger.contains("once my owner has talked to me"),
+        "{stranger}"
+    );
     assert!(calls.lock().await.is_empty());
     // The owner mentions the bot there: an owner turn in the group's thread,
     // marked as the owner's.
@@ -2463,7 +2467,26 @@ async fn direct_group_messages_need_a_mention_or_a_reply_to_the_bot() {
             calls.lock().await.len()
         }
     };
-    // A member's mention before the owner has talked there reaches no one.
+    // Before NyxID passed on each message's own chat type, this group looked
+    // like private chats (one per member): such records go once the group is
+    // seen as a group.
+    chats::record_chat(
+        &state,
+        &row,
+        "direct_old_misfiled",
+        &chats::ChatFacts {
+            kind: "private",
+            owner: false,
+            chat_id: "oc_group".into(),
+            thread_id: None,
+            title: None,
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    // A member's mention before the owner has talked there reaches no one;
+    // the group is told why, once a day.
     assert_eq!(
         post("msg-1", ("ou_bob", "Bob"), "@_user_1 hi", mention())
             .await
@@ -2471,6 +2494,28 @@ async fn direct_group_messages_need_a_mention_or_a_reply_to_the_bot() {
         StatusCode::ACCEPTED
     );
     assert_eq!(turns(0).await, 0);
+    let group_chat = || async {
+        state
+            .db
+            .collection::<NyxbotThread>(THREADS)
+            .find_one(doc! {"channel_id": &row.id, "kind": "group"})
+            .await
+            .unwrap()
+            .unwrap()
+    };
+    let hinted = group_chat().await.guest_hint_at.unwrap();
+    assert!(
+        state
+            .db
+            .collection::<NyxbotThread>(THREADS)
+            .find_one(doc! {"partition": "direct_old_misfiled"})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    post("msg-1b", ("ou_bob", "Bob"), "@_user_1 hello?", mention()).await;
+    assert_eq!(turns(0).await, 0);
+    assert_eq!(group_chat().await.guest_hint_at.unwrap(), hinted);
     // The owner's chatter without a mention is not for the agent either.
     post("msg-2", ("ou_alice", "Alice"), "lunch?", json!([])).await;
     assert_eq!(turns(0).await, 0);
@@ -2571,6 +2616,62 @@ fn telegram_mentions_and_replies_to_the_bot_are_recognised() {
         chats::raw_addressed(&discord, &json!({"type": 2, "data": {"name": "ask"}})),
         Some(true)
     );
+    // Private chats are named for the owner ("You") or the person, or by
+    // platform and the end of their ID when the platform sends no name.
+    let mut row: NyxbotChannel = {
+        let now = Utc::now();
+        NyxbotChannel {
+            id: "c".into(),
+            user_id: OWNER.into(),
+            channel_bot_id: "b".into(),
+            bot_owner_id: None,
+            platform: "lark".into(),
+            bot_label: "bot".into(),
+            bot_username: None,
+            transport: "direct".into(),
+            status: "active".into(),
+            last_error: None,
+            route_api_key_id: "k".into(),
+            route_id: None,
+            agent_api_key_id: None,
+            agent_key_ciphertext: None,
+            gateway_channel_id: None,
+            gateway_record_id: None,
+            gateway_version: None,
+            binding_id: None,
+            gateway_groups: None,
+            gateway_groups_retry_at: None,
+            owner_sender_ids: vec!["ou_alice".into()],
+            link_code_hash: None,
+            link_code_expires_at: None,
+            source_conversation_id: None,
+            agent_id: None,
+            private_chats: None,
+            delivery_status: None,
+            delivery_error: None,
+            delivery_failed_at: None,
+            delivery_seen_at: None,
+            delivery_checked_at: None,
+            delivery_notified_at: None,
+            created_at: now,
+            updated_at: now,
+        }
+    };
+    assert_eq!(chats::private_title(&row, "ou_alice", Some("Alice")), "You");
+    assert_eq!(
+        chats::private_title(&row, "ou_mallory", Some("you")),
+        "you (guest)"
+    );
+    assert_eq!(chats::private_title(&row, "ou_bob", Some("Bob")), "Bob");
+    assert_eq!(
+        chats::private_title(&row, "ou_bob1234", None),
+        "Lark user …1234"
+    );
+    row.owner_sender_ids.clear();
+    assert_eq!(
+        chats::private_title(&row, "ou_alice", None),
+        "Lark user …lice"
+    );
     // Unknown means only the owner is answered; members stay out until the
     // owner has talked there, and names cannot pass for the owner.
     assert_eq!(
@@ -2609,6 +2710,7 @@ async fn chat_posting_is_opt_in_and_chat_agents_survive_relinks() {
         &chats::group_partition("oc_group", None),
         &chats::ChatFacts {
             kind: "group",
+            owner: false,
             chat_id: "oc_group".into(),
             thread_id: None,
             title: Some("  Team\nchat ".into()),
@@ -2760,6 +2862,7 @@ async fn chat_posting_is_opt_in_and_chat_agents_survive_relinks() {
         "direct_private",
         &chats::ChatFacts {
             kind: "private",
+            owner: false,
             chat_id: "ou_bob".into(),
             thread_id: None,
             title: Some("Bob".into()),
@@ -2926,6 +3029,39 @@ async fn the_owners_private_chats_share_the_agents_own_thread() {
         thread.reply_channel.as_ref().unwrap().nyxbot_channel_id,
         lark.id
     );
+    // Asynchronous replies may go to the owner's own private chat...
+    let target = thread.reply_channel.clone().unwrap();
+    assert!(
+        delivery_target(&state, &thread, &target)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    // ...but never to a group, even one an older replica pointed here.
+    state
+        .db
+        .collection::<NyxbotThread>(THREADS)
+        .update_one(
+            doc! {"channel_id": &lark.id, "partition": &target.partition},
+            doc! {"$set": {"kind": "group"}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        delivery_target(&state, &thread, &target)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    state
+        .db
+        .collection::<NyxbotThread>(THREADS)
+        .update_one(
+            doc! {"channel_id": &lark.id, "partition": &target.partition},
+            doc! {"$set": {"kind": "private"}},
+        )
+        .await
+        .unwrap();
     assert_eq!(
         channel_conversations(&state, &telegram.id).await.len()
             + channel_conversations(&state, &lark.id).await.len(),
@@ -3256,5 +3392,64 @@ async fn startup_repairs_homes_that_are_channel_threads() {
     assert_eq!(home("agent-bad").await, None);
     assert_eq!(home("agent-good").await.as_deref(), Some("nyxa-own"));
     assert_eq!(engine::repair_channel_homes(&state.db).await.unwrap(), 0);
+    server.abort();
+}
+
+/// Once: owner threads forget a directly relayed reply chat (it may have been
+/// a group misfiled as private before 0.36.1); gateway ones are kept.
+#[tokio::test]
+async fn direct_reply_channels_are_reset_once() {
+    let (state, _, server) = setup("nyxbot_reply_channel_reset").await;
+    let conversations = state.db.collection::<bson::Document>(CONVERSATIONS);
+    conversations
+        .insert_many([
+            doc! {"_id": "nyxa-direct", "user_id": OWNER, "reply_channel":
+            {"nyxbot_channel_id": "c", "partition": "direct_abc", "platform": "lark"}},
+            doc! {"_id": "nyxa-gateway", "user_id": OWNER, "reply_channel":
+            {"nyxbot_channel_id": "c", "partition": PARTITION, "platform": "telegram"}},
+        ])
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<bson::Document>("schema_migrations")
+        .delete_many(doc! {})
+        .await
+        .unwrap();
+    assert_eq!(
+        engine::reset_direct_reply_channels(&state.db)
+            .await
+            .unwrap(),
+        1
+    );
+    let kept = |id: &'static str| {
+        let conversations = conversations.clone();
+        async move {
+            conversations
+                .find_one(doc! {"_id": id})
+                .await
+                .unwrap()
+                .unwrap()
+                .contains_key("reply_channel")
+        }
+    };
+    assert!(!kept("nyxa-direct").await);
+    assert!(kept("nyxa-gateway").await);
+    // Never again: a direct reply chat set afterwards stays.
+    conversations
+        .update_one(
+            doc! {"_id": "nyxa-direct"},
+            doc! {"$set": {"reply_channel":
+            {"nyxbot_channel_id": "c", "partition": "direct_def", "platform": "lark"}}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        engine::reset_direct_reply_channels(&state.db)
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(kept("nyxa-direct").await);
     server.abort();
 }

@@ -941,6 +941,7 @@ export class NyxAgentHttpFixtures {
           members: kind === "private" ? "owner" : "everyone",
           members_setting: null,
           owner_seen: kind !== "private",
+          owner: kind === "private",
           allow_posts: false,
           conversation_id: null,
           last_message_at: now,

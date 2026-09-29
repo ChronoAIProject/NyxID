@@ -359,7 +359,14 @@ concurrent channel turns and queues the rest.
 
 ### 12a. Chats, groups and guests
 
-A bot's chats are threads of their own: each group, channel or forum topic is
+Chats and their kind are recorded automatically as messages arrive: NyxID's
+relay passes each message's own chat type (`private`, `group`, `channel`) to
+the agent, never the type configured on the route that caught it (a default
+route answers every kind of chat). Before 0.36.1 a group reached through a
+default route looked like private chats, one per member; those records are
+removed once the group's next message arrives, and a startup migration (once)
+forgets directly relayed reply chats of the owner's own threads, which such a
+misfiled group could have set. A bot's chats are threads of their own: each group, channel or forum topic is
 one thread its members share, and each other person's private chat is one
 thread. The owner's own private chats are the exception (§12b): they continue
 the agent's own thread. Messages in
@@ -380,7 +387,7 @@ payload or, once, from the platform's chat lookup (Telegram `getChat`, Lark
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `reply_mode` | `mention` (groups, channels) | Answer only when the bot is mentioned or a message replies to one of its messages; `all` answers every message. Private chats always answer. |
-| `members` | default: `everyone` once the owner has talked to the bot there, else `owner` (groups, channels) | Members other than the owner may talk to the agent as guests; `owner` answers only the owner; `default` returns to the default. A stranger who adds the bot to their own group gets nothing. |
+| `members` | default: `everyone` once the owner has talked to the bot there, else `owner` (groups, channels) | Members other than the owner may talk to the agent as guests; `owner` answers only the owner; `default` returns to the default. A stranger who adds the bot to their own group gets nothing; a member who addresses it before the owner has talked there is told why, at most daily. |
 | `allow_posts` | off | The chat's agent may post there without being asked (`nyxid__post_to_chat`). |
 | agent | the bot's agent | The chat reaches another agent; it starts a new thread with it, and relinking the bot leaves such chats alone. |
 
