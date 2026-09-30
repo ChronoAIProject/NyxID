@@ -629,7 +629,7 @@ pub struct FindOrCreateUserResult {
 ///
 /// When `allow_new_users` is `false`, first-time social sign-ups are rejected
 /// with `SocialAuthRegistrationClosed`. This mirrors the invite-code gate on
-/// email/password registration — callers should pass `!config.invite_code_required`.
+/// email/password registration — callers should use the global invitation-code flag.
 pub async fn find_or_create_user(
     db: &mongodb::Database,
     profile: &SocialProfile,
@@ -910,7 +910,6 @@ mod tests {
             billing_default_overdraft_cap_credits: 0,
             billing_fail_closed: false,
             billing_resale_enabled: false,
-            invite_code_required: true,
             email_auth_enabled: false,
             auto_verify_email: false,
         }

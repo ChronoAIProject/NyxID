@@ -14,29 +14,28 @@ const {
   loginFn,
   registerFn,
   toastFns,
-} =
-  vi.hoisted(() => ({
-    config: {
-      value: {
-        invite_code_required: true,
-        email_auth_enabled: true,
-        social_providers: ["google", "github"] as string[],
-      } as Record<string, unknown> | undefined,
-    },
-    deviceState: {
-      phase: "idle" as string,
-      request: null,
-      remainingSeconds: null,
-      error: null,
-    },
-    mockDeviceClose: vi.fn(),
-    mockDeviceStart: vi.fn(),
-    mockNavigate: vi.fn(),
-    mockOpenExternal: vi.fn(),
-    loginFn: vi.fn(),
-    registerFn: vi.fn(),
-    toastFns: { info: vi.fn(), error: vi.fn(), success: vi.fn() },
-  }));
+} = vi.hoisted(() => ({
+  config: {
+    value: {
+      invite_code_required: true,
+      email_auth_enabled: true,
+      social_providers: ["google", "github"] as string[],
+    } as Record<string, unknown> | undefined,
+  },
+  deviceState: {
+    phase: "idle" as string,
+    request: null,
+    remainingSeconds: null,
+    error: null,
+  },
+  mockDeviceClose: vi.fn(),
+  mockDeviceStart: vi.fn(),
+  mockNavigate: vi.fn(),
+  mockOpenExternal: vi.fn(),
+  loginFn: vi.fn(),
+  registerFn: vi.fn(),
+  toastFns: { info: vi.fn(), error: vi.fn(), success: vi.fn() },
+}));
 
 vi.mock("@/hooks/use-public-config", () => ({
   usePublicConfig: () => ({ data: config.value }),
@@ -277,10 +276,7 @@ describe("AuthFlow — login", () => {
 
   it("maps invite_code_already_redeemed to the already-redeemed message", () => {
     render(
-      <AuthFlow
-        initialPanel={0}
-        socialError="invite_code_already_redeemed"
-      />,
+      <AuthFlow initialPanel={0} socialError="invite_code_already_redeemed" />,
     );
     expect(screen.getByTestId("social-error")).toHaveTextContent(
       "This invite code has already been redeemed with this account.",
@@ -306,11 +302,54 @@ describe("AuthFlow — login", () => {
 });
 
 describe("AuthFlow — register", () => {
+  it("allows email registration without a code when the flag is disabled", async () => {
+    config.value = {
+      invite_code_required: false,
+      email_auth_enabled: true,
+      social_providers: ["google"],
+    };
+    const user = userEvent.setup();
+    render(<AuthFlow initialPanel={1} />);
+    await user.click(
+      screen.getByRole("button", { name: /Continue with Email/i }),
+    );
+    expect(
+      screen.queryByPlaceholderText("NYX-XXXXXXXX"),
+    ).not.toBeInTheDocument();
+
+    registerFn.mockResolvedValue({ message: "Check your email." });
+    await user.type(screen.getByPlaceholderText("John Doe"), "Ada Lovelace");
+    await user.type(
+      screen.getByPlaceholderText("you@example.com"),
+      "ada@example.com",
+    );
+    await user.type(
+      screen.getByPlaceholderText("Min 8 characters"),
+      "Hunter22",
+    );
+    await user.type(
+      screen.getByPlaceholderText("Re-enter your password"),
+      "Hunter22",
+    );
+    await user.click(screen.getByRole("button", { name: "Create Account" }));
+
+    await waitFor(() => {
+      expect(registerFn).toHaveBeenCalledWith({
+        display_name: "Ada Lovelace",
+        email: "ada@example.com",
+        password: "Hunter22",
+        invite_code: "",
+      });
+    });
+  });
+
   it("blocks the email step and shows the invite gate when no code is entered", async () => {
     const user = userEvent.setup();
     render(<AuthFlow initialPanel={1} />);
 
-    await user.click(screen.getByRole("button", { name: /Continue with Email/i }));
+    await user.click(
+      screen.getByRole("button", { name: /Continue with Email/i }),
+    );
 
     expect(
       screen.getByText("An invite code is required to use NyxID at this time."),
@@ -328,7 +367,10 @@ describe("AuthFlow — register", () => {
       screen.getByPlaceholderText("you@example.com"),
       "ada@example.com",
     );
-    await user.type(screen.getByPlaceholderText("Min 8 characters"), "Hunter22");
+    await user.type(
+      screen.getByPlaceholderText("Min 8 characters"),
+      "Hunter22",
+    );
     await user.type(
       screen.getByPlaceholderText("Re-enter your password"),
       "Hunter22",
@@ -367,7 +409,10 @@ describe("AuthFlow — register", () => {
       screen.getByPlaceholderText("you@example.com"),
       "ada@example.com",
     );
-    await user.type(screen.getByPlaceholderText("Min 8 characters"), "Hunter22");
+    await user.type(
+      screen.getByPlaceholderText("Min 8 characters"),
+      "Hunter22",
+    );
     await user.type(
       screen.getByPlaceholderText("Re-enter your password"),
       "Hunter22",
