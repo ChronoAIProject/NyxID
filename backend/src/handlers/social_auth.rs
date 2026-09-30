@@ -14,7 +14,9 @@ use crate::handlers::auth::{
     clear_cookie_with_same_site, extract_email_domain, extract_ip, extract_referrer_domain,
     extract_user_agent,
 };
-use crate::services::{audit_service, invite_code_service, social_auth_service, token_service};
+use crate::services::{
+    audit_service, feature_flag_service, invite_code_service, social_auth_service, token_service,
+};
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event, hash_short_id};
 use social_auth_service::SocialProfile;
 
@@ -400,9 +402,9 @@ pub async fn callback(
                 redirect_with_error(&redirect_target, "social_auth_profile", secure, domain)
             })?;
 
-    // Read invite code from the cookie set at SSO initiation. When
-    // INVITE_CODE_REQUIRED is true and a valid code is present, reserve it
-    // so the new user slot cannot be taken by a concurrent request.
+    // Read the invite code from the cookie set at SSO initiation. When the
+    // flag is enabled, reserve a valid code so concurrent requests cannot
+    // take the new-user slot.
     let invite_code_raw = extract_cookie_value(&headers, SOCIAL_INVITE_COOKIE);
     let invite_code = invite_code_raw
         .as_deref()
@@ -410,26 +412,31 @@ pub async fn callback(
         .map(|c| c.into_owned())
         .filter(|c| !c.is_empty());
 
-    let (allow_new_users, reserved_invite_id, already_redeemed) =
-        if state.config.invite_code_required {
-            match invite_code.as_deref() {
-                Some(code) => {
-                    match invite_code_service::reserve_invite_code(&state.db, code, &profile.email)
-                        .await
-                    {
-                        Ok(invite_id) => (true, Some(invite_id), false),
-                        // The email already consumed a slot. Set allow_new_users=false
-                        // so find_or_create_user rejects new signups, but existing
-                        // users still log in (find_or_create_user returns Ok for them).
-                        Err(AppError::InviteCodeAlreadyRedeemed) => (false, None, true),
-                        Err(_) => (false, None, false),
-                    }
+    let invite_required = feature_flag_service::invitation_code_required(&state.db)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "Invitation-code flag resolution failed");
+            redirect_with_error(&redirect_target, "social_auth_exchange", secure, domain)
+        })?;
+    let (allow_new_users, reserved_invite_id, already_redeemed) = if invite_required {
+        match invite_code.as_deref() {
+            Some(code) => {
+                match invite_code_service::reserve_invite_code(&state.db, code, &profile.email)
+                    .await
+                {
+                    Ok(invite_id) => (true, Some(invite_id), false),
+                    // The email already consumed a slot. Set allow_new_users=false
+                    // so find_or_create_user rejects new signups, but existing
+                    // users still log in (find_or_create_user returns Ok for them).
+                    Err(AppError::InviteCodeAlreadyRedeemed) => (false, None, true),
+                    Err(_) => (false, None, false),
                 }
-                None => (false, None, false),
             }
-        } else {
-            (true, None, false)
-        };
+            None => (false, None, false),
+        }
+    } else {
+        (true, None, false)
+    };
 
     let create_outcome =
         social_auth_service::find_or_create_user(&state.db, &profile, allow_new_users)
@@ -847,23 +854,28 @@ pub async fn apple_callback(
         .map(|c| c.into_owned())
         .filter(|c| !c.is_empty());
 
-    let (allow_new_users, reserved_invite_id, already_redeemed) =
-        if state.config.invite_code_required {
-            match invite_code.as_deref() {
-                Some(code) => {
-                    match invite_code_service::reserve_invite_code(&state.db, code, &profile.email)
-                        .await
-                    {
-                        Ok(invite_id) => (true, Some(invite_id), false),
-                        Err(AppError::InviteCodeAlreadyRedeemed) => (false, None, true),
-                        Err(_) => (false, None, false),
-                    }
+    let invite_required = feature_flag_service::invitation_code_required(&state.db)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "Invitation-code flag resolution failed");
+            redirect_with_error(&redirect_target, "social_auth_exchange", secure, domain)
+        })?;
+    let (allow_new_users, reserved_invite_id, already_redeemed) = if invite_required {
+        match invite_code.as_deref() {
+            Some(code) => {
+                match invite_code_service::reserve_invite_code(&state.db, code, &profile.email)
+                    .await
+                {
+                    Ok(invite_id) => (true, Some(invite_id), false),
+                    Err(AppError::InviteCodeAlreadyRedeemed) => (false, None, true),
+                    Err(_) => (false, None, false),
                 }
-                None => (false, None, false),
             }
-        } else {
-            (true, None, false)
-        };
+            None => (false, None, false),
+        }
+    } else {
+        (true, None, false)
+    };
 
     let create_outcome =
         social_auth_service::find_or_create_user(&state.db, &profile, allow_new_users)

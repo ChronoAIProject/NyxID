@@ -16,6 +16,7 @@
  * every call site becomes compile-time checked.
  */
 export const FEATURE_FLAG = {
+  INVITATION_CODE: "auth:invitation-code",
   AI_ASSISTANT: "experimental:ai-assistant",
   BILLING: "experimental:billing",
   AEVATAR_CHAT_WIRE_LOG: "experimental:aevatar-chat-wire-log",

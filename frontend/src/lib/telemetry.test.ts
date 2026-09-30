@@ -266,6 +266,12 @@ describe("before_send privacy hook", () => {
     return config.before_send;
   }
 
+  it("suppresses captures from a tracked bot link containing a one-time token", () => {
+    const beforeSend = getBeforeSend();
+    window.history.replaceState(null, '', '/connect/bot/nyx_bcl_private');
+    expect(beforeSend({ properties: { $current_url: window.location.href } })).toBeNull();
+  });
+
   it("suppresses SPA login-grant capture after init and resumes on return", () => {
     window.history.replaceState(null, '', '/settings');
     const beforeSend = getBeforeSend();

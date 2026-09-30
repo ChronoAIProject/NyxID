@@ -11,7 +11,7 @@ import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 import { AssistantLink } from "@/components/assistant/blocks/assistant-link";
-import { isHostedConnectLink } from "@/lib/assistant/hosted-connect-link";
+import { assistantModalLinkTarget } from "@/lib/assistant/assistant-link-target";
 import { useSmoothReveal } from "@/hooks/use-smooth-reveal";
 import { splitStableMarkdown } from "@/lib/assistant/markdown-stream";
 
@@ -69,10 +69,7 @@ const SANITIZE_SCHEMA = {
   ...defaultSchema,
   attributes: {
     ...defaultSchema.attributes,
-    input: [
-      ...(defaultSchema.attributes?.input ?? []),
-      "checked",
-    ],
+    input: [...(defaultSchema.attributes?.input ?? []), "checked"],
     th: [...(defaultSchema.attributes?.th ?? []), "align"],
     td: [...(defaultSchema.attributes?.td ?? []), "align"],
   },
@@ -94,7 +91,10 @@ const BLOCK = "mt-2 first:mt-0";
 function allowedHref(href: string | undefined): string | null {
   if (!href) return null;
   const normalized = href.trim().toLowerCase();
-  if (typeof window !== "undefined" && isHostedConnectLink(href, window.location.origin)) return href;
+  if (typeof window !== "undefined") {
+    const modalTarget = assistantModalLinkTarget(href, window.location.origin);
+    if (modalTarget) return modalTarget.href;
+  }
   return normalized.startsWith("https:") ||
     normalized.startsWith("mailto:") ||
     normalized.startsWith("#")
@@ -324,9 +324,7 @@ const COMPONENTS: Components = {
     if (!safeHref) {
       return <span className="text-muted-foreground">{children}</span>;
     }
-    return (
-      <AssistantLink href={safeHref}>{children}</AssistantLink>
-    );
+    return <AssistantLink href={safeHref}>{children}</AssistantLink>;
   },
   // Remote model-provided images stay links to prevent tracking/exfiltration.
   img: ({ src, alt }) => {

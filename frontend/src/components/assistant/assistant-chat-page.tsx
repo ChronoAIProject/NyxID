@@ -24,6 +24,7 @@ import {
 import { nyxAgentTransport } from "@/lib/assistant/nyxagent-transport";
 import type { NyxAgentConversationAgent } from "@/schemas/assistant-nyxagent";
 import { ApprovalCard } from "@/components/assistant/blocks/approval-card";
+import { AssistantLinkModalHost } from "@/components/assistant/assistant-link-modals";
 import {
   lazy,
   Suspense,
@@ -280,13 +281,15 @@ export function AssistantChatPage() {
             Loading conversation...
           </div>
         ) : (
-          <ChatMessageList
-            session={chat.session}
-            bottomInset={composerHeight}
-            footer={actorControls}
-            notice={threadNotice}
-            projectionVersion={`${String(chat.projection?.stateVersion ?? 0)}:${String(chat.projection?.progressSequence ?? 0)}`}
-          />
+          <AssistantLinkModalHost>
+            <ChatMessageList
+              session={chat.session}
+              bottomInset={composerHeight}
+              footer={actorControls}
+              notice={threadNotice}
+              projectionVersion={`${String(chat.projection?.stateVersion ?? 0)}:${String(chat.projection?.progressSequence ?? 0)}`}
+            />
+          </AssistantLinkModalHost>
         )}
         <div ref={composerRef} className="absolute inset-x-0 bottom-0 z-10">
           <ChatComposer
@@ -698,74 +701,76 @@ function NyxAgentThreadPage() {
             Loading conversation...
           </div>
         ) : (
-          <ChatMessageList
-            session={chat.session}
-            renderMessage={(message) => {
-              if (message.role === "event") return <NyxBotEventNotice message={message} />;
-              if (message.role === "orchestrator") {
-                return <NyxBotOrchestratorMessage message={message} />;
-              }
-              const via = message.role === "user" ? (message.via ?? channelPlatform) : null;
-              if (via) {
-                // The user wrote this in a chat app, not here.
-                return (
-                  <div className="flex flex-col items-end gap-1">
-                    <ChannelBadge platform={via} />
-                    <ChatMessageBubble message={message} />
-                  </div>
+          <AssistantLinkModalHost>
+            <ChatMessageList
+              session={chat.session}
+              renderMessage={(message) => {
+                if (message.role === "event") return <NyxBotEventNotice message={message} />;
+                if (message.role === "orchestrator") {
+                  return <NyxBotOrchestratorMessage message={message} />;
+                }
+                const via = message.role === "user" ? (message.via ?? channelPlatform) : null;
+                if (via) {
+                  // The user wrote this in a chat app, not here.
+                  return (
+                    <div className="flex flex-col items-end gap-1">
+                      <ChannelBadge platform={via} />
+                      <ChatMessageBubble message={message} />
+                    </div>
+                  );
+                }
+                const approval = chat.approvals.find(
+                  (row) => message.id === `nyxagent-approval:${row.id}`,
                 );
-              }
-              const approval = chat.approvals.find(
-                (row) => message.id === `nyxagent-approval:${row.id}`,
-              );
-              if (approval) {
+                if (approval) {
+                  return (
+                    <ApprovalCard
+                      block={{
+                        type: "approval_card",
+                        block_id: message.id,
+                        approval_request_id: approval.id,
+                        body: `${approval.service_name}: ${approval.summary}`,
+                        service_slug: approval.service_slug,
+                        agent_key_prefix: approval.agent_key_prefix,
+                        approval_mode: approval.approval_mode,
+                        grant_duration_sec: null,
+                        expires_at: approval.expires_at,
+                        decision: null,
+                        decision_channel: null,
+                      }}
+                      onDecide={(approved) => chat.decideApproval(approval.id, approved)}
+                    />
+                  );
+                }
+                const acknowledgement = chat.acknowledgements.find((row) =>
+                  message.id === `nyxagent-acknowledgement:${row.id}`,
+                );
+                if (!acknowledgement) return undefined;
                 return (
-                  <ApprovalCard
-                    block={{
-                      type: "approval_card",
-                      block_id: message.id,
-                      approval_request_id: approval.id,
-                      body: `${approval.service_name}: ${approval.summary}`,
-                      service_slug: approval.service_slug,
-                      agent_key_prefix: approval.agent_key_prefix,
-                      approval_mode: approval.approval_mode,
-                      grant_duration_sec: null,
-                      expires_at: approval.expires_at,
-                      decision: null,
-                      decision_channel: null,
+                  <NyxAgentAcknowledgementCard
+                    acknowledgement={acknowledgement}
+                    deciding={Boolean(chat.decidingAcknowledgement)}
+                    onDecision={async (choice) => {
+                      await chat.decideAcknowledgement({ id: acknowledgement.id, choice });
+                      setFocusRequest((value) => value + 1);
                     }}
-                    onDecide={(approved) => chat.decideApproval(approval.id, approved)}
                   />
                 );
+              }}
+              projectionVersion={[
+                ...chat.acknowledgements.map((row) => `${row.id}:${row.status}`),
+                ...chat.approvals.map((row) => `approval:${row.id}`),
+              ].join(",")}
+              bottomInset={composerHeight}
+              notice={chat.error}
+              emptyDescription={
+                headerAgent?.kind === "specialist"
+                  ? `Talk to ${agentName} directly. It remembers across its threads and asks NyxBot for anything outside its grants.`
+                  : "See your connected services, connect a new one, " +
+                    "set up a channel bot, or check approvals."
               }
-              const acknowledgement = chat.acknowledgements.find((row) =>
-                message.id === `nyxagent-acknowledgement:${row.id}`,
-              );
-              if (!acknowledgement) return undefined;
-              return (
-                <NyxAgentAcknowledgementCard
-                  acknowledgement={acknowledgement}
-                  deciding={Boolean(chat.decidingAcknowledgement)}
-                  onDecision={async (choice) => {
-                    await chat.decideAcknowledgement({ id: acknowledgement.id, choice });
-                    setFocusRequest((value) => value + 1);
-                  }}
-                />
-              );
-            }}
-            projectionVersion={[
-              ...chat.acknowledgements.map((row) => `${row.id}:${row.status}`),
-              ...chat.approvals.map((row) => `approval:${row.id}`),
-            ].join(",")}
-            bottomInset={composerHeight}
-            notice={chat.error}
-            emptyDescription={
-              headerAgent?.kind === "specialist"
-                ? `Talk to ${agentName} directly. It remembers across its threads and asks NyxBot for anything outside its grants.`
-                : "See your connected services, connect a new one, " +
-                  "set up a channel bot, or check approvals."
-            }
-          />
+            />
+          </AssistantLinkModalHost>
         )}
         <div ref={composerRef} className="absolute inset-x-0 bottom-0 z-10">
           <ChatComposer

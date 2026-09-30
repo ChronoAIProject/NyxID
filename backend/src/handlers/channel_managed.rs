@@ -49,7 +49,7 @@ impl std::fmt::Debug for CompleteRequest {
     }
 }
 
-async fn limit(state: &AppState, auth: &AuthUser) -> AppResult<()> {
+pub(crate) async fn limit(state: &AppState, auth: &AuthUser) -> AppResult<()> {
     let limiter = crate::mw::rate_limit::PerKeyRateLimiter::with_db(
         state.db.clone(),
         "channel_managed_onboarding",
@@ -258,6 +258,17 @@ pub(crate) async fn complete_inner(
     body: CompleteRequest,
     progress: &channel_managed::ManagedProgress,
 ) -> AppResult<(StatusCode, Json<CreateChannelBotResponse>)> {
+    complete_with_link(state, auth, platform, body, progress, None).await
+}
+
+pub(crate) async fn complete_with_link(
+    state: &AppState,
+    auth: &AuthUser,
+    platform: &str,
+    body: CompleteRequest,
+    progress: &channel_managed::ManagedProgress,
+    link_claim: Option<&crate::services::channel_connect_link_service::Claim>,
+) -> AppResult<(StatusCode, Json<CreateChannelBotResponse>)> {
     let adapter = resolve_adapter(platform, &state.token_exchange_cache)?;
     let descriptor = adapter
         .managed_onboarding()
@@ -277,19 +288,37 @@ pub(crate) async fn complete_inner(
         body.target_org_id.as_deref(),
     )
     .await?;
-    let created = channel_bot_service::create_managed_bot(
-        &state.db,
-        &state.billing,
-        &state.config,
-        &state.encryption_keys,
-        &state.http_client,
-        adapter.as_ref(),
-        &owner,
-        body.label.trim(),
-        &channel_managed::ManagedOnboardingInput(body.input),
-        progress,
-    )
-    .await?;
+    let input = channel_managed::ManagedOnboardingInput(body.input);
+    let created = if let Some(claim) = link_claim {
+        channel_bot_service::create_managed_bot_linked(
+            &state.db,
+            &state.billing,
+            &state.config,
+            &state.encryption_keys,
+            &state.http_client,
+            adapter.as_ref(),
+            &owner,
+            body.label.trim(),
+            &input,
+            progress,
+            Some(claim),
+        )
+        .await?
+    } else {
+        channel_bot_service::create_managed_bot(
+            &state.db,
+            &state.billing,
+            &state.config,
+            &state.encryption_keys,
+            &state.http_client,
+            adapter.as_ref(),
+            &owner,
+            body.label.trim(),
+            &input,
+            progress,
+        )
+        .await?
+    };
     let webhook_url = format!(
         "{}/api/v1/webhooks/channel/{platform}/{}",
         state.config.base_url, created.bot.id

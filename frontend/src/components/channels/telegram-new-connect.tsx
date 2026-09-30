@@ -1,3 +1,4 @@
+import { useChannelConnectLinkContext } from "@/hooks/use-channel-connect-link";
 import { useCallback, useEffect } from "react";
 import { useIsMutating } from "@tanstack/react-query";
 import { useNavigate, useSearch } from "@tanstack/react-router";
@@ -15,9 +16,10 @@ export function TelegramNewConnect({
   renderFields,
 }: ChannelBotConnectProps) {
   const navigate = useNavigate();
+  const link = useChannelConnectLinkContext();
   const search = useSearch({ strict: false });
   const actor = useAuthStore((state) => state.user?.id);
-  const configuration = useTelegramNewConfiguration(search.request_id, false);
+  const configuration = useTelegramNewConfiguration(link ? link.telegramRequestId : search.request_id, false);
   const pending = useIsMutating({ mutationKey: ["telegram-new", actor] }) > 0;
   const saved = configuration.data?.request;
   const request =
@@ -31,7 +33,7 @@ export function TelegramNewConnect({
   const { setValue } = form;
   const updateSearch = useCallback(
     (next: { label: string; target_org_id?: string; request_id?: string }) =>
-      fullPage
+      link ? link.refresh() : fullPage
         ? navigate({
             to: "/channel-bots/connect/$platform",
             params: { platform: "telegram-new" },
@@ -43,7 +45,7 @@ export function TelegramNewConnect({
             search: { connect: "telegram-new", ...next },
             replace: true,
           }),
-    [fullPage, navigate],
+    [fullPage, navigate, link],
   );
 
   useEffect(() => {
@@ -54,7 +56,7 @@ export function TelegramNewConnect({
   }, [request, savedOrgId, setValue]);
 
   useEffect(() => {
-    if (request?.status === "connected") return;
+    if (link || request?.status === "connected") return;
     const nextLabel = request?.label ?? label;
     const nextOrgId = request ? savedOrgId : (orgId ?? undefined);
     const requestId = request?.id ?? search.request_id;
@@ -72,6 +74,7 @@ export function TelegramNewConnect({
     });
   }, [
     request,
+    link,
     savedOrgId,
     label,
     orgId,
@@ -106,7 +109,7 @@ export function TelegramNewConnect({
         fullPage={fullPage}
         label={label}
         orgId={orgId}
-        requestId={search.request_id}
+        requestId={link ? link.telegramRequestId : search.request_id}
         onStarted={saveRequest}
         onCancelled={() => saveRequest()}
         onConnected={(id) => onConnected(id, true)}
