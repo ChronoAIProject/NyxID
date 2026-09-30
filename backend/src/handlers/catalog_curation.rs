@@ -264,7 +264,13 @@ async fn update_skills(
     )))
 }
 
-fn audit_change(state: &AppState, auth: &AuthUser, id: &str, revision: i64, request_id: &str) {
+pub(crate) fn audit_change(
+    state: &AppState,
+    auth: &AuthUser,
+    id: &str,
+    revision: i64,
+    request_id: &str,
+) {
     audit_service::log_for_user(
         state.db.clone(),
         auth,

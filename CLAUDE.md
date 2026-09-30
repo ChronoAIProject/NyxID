@@ -134,6 +134,8 @@ Platform-admin service account create/update with explicit `catalog:skills:read/
 
 Key files: `services/unified_key_service.rs`, `services/catalog_service.rs` (`list_catalog_all`), `handlers/keys.rs`, `handlers/catalog.rs`, `models/user_{endpoint,api_key,service}.rs`.
 
+CatalogEditor `PUT /keys/{catalog_uuid}` accepts only `recommended_skill_refs` with live/token catalog write authority (plus the existing role for legacy editors). It uses the shared skill transaction against one server-observed revision, returns safe metadata without requiring read scope, and never rebases conflicts. Explicit revision/replay clients use `/catalog-curation/services/{id}/skills`. Human key writes keep their original handler; other SA purposes, API-key, delegated, and relay writes remain denied.
+
 ### 9. Agent Isolation
 
 Per-agent credential binding, rate limiting, and audit attribution: each agent (Claude Code, Codex, OpenClaw, ...) uses its own scoped API key (`nyxid_ag_` prefix). Details: `docs/AGENT_ISOLATION.md`.

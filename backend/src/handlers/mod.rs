@@ -58,6 +58,7 @@ pub mod endpoints;
 pub mod exact_service_approvals;
 pub mod health;
 pub mod invite_codes;
+pub mod key_updates;
 pub mod keys;
 pub mod llm_gateway;
 pub mod llms_txt;
