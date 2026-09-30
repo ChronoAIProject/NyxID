@@ -1560,6 +1560,8 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    crate::services::channel_connect_link_service::ensure_indexes(db).await?;
+
     // ── connect_links ──
     let connect_links = db.collection::<ConnectLink>(CONNECT_LINKS);
     connect_links

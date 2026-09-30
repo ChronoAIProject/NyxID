@@ -1070,6 +1070,28 @@ async fn main() {
         });
     }
 
+    // Bot links use their own sweep so slow receivers cannot delay connector links.
+    if config.connect_link_expiry_sweep_interval_secs > 0 {
+        let bot_link_state = state.clone();
+        let interval_secs = config.connect_link_expiry_sweep_interval_secs;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                if let Err(error) = services::channel_connect_link_service::sweep(
+                    &bot_link_state.db,
+                    &bot_link_state.encryption_keys,
+                    &bot_link_state.developer_webhook_dispatcher,
+                )
+                .await
+                {
+                    tracing::warn!(%error, "Channel connect-link sweep failed");
+                }
+            }
+        });
+    }
+
     // Spawn background cleanup task for MCP session reaper.
     // Sessions live up to 30 days (extended on every request via touch()).
     // Reaper runs every 5 minutes to clean up sessions idle longer than 30 days.

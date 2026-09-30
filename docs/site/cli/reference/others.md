@@ -29,6 +29,8 @@ nyxid connect github --scope public_repo --no-wait --output json
 
 To add scopes to an **existing connection**, use the console: **External Services → connection → Manage permissions**.
 
+For bot setup with signed completion notifications, use [channel-bot connect-link](#channel-bot-connect-link).
+
 ## update
 
 Keep the CLI and your installed AI skills current. With no flags, `nyxid update` upgrades the `nyxid` binary to the latest GitHub release, verifies the release attestation, then hands off to the freshly-installed binary to refresh installed skills.
@@ -231,6 +233,32 @@ nyxid channel-bot show <id>
 nyxid channel-bot delete <id> [--yes]
 nyxid channel-bot verify <id>                # re-check token + re-register webhook
 ```
+
+### channel-bot connect-link
+
+Create a tracked bot setup request and return immediately without polling:
+
+```bash
+nyxid channel-bot connect-link discord --label "Support bot" \
+  --webhook-url https://app.example.com/events/nyxid \
+  --webhook-signing-secret-file ./nyxid-webhook.key \
+  --callback-url https://app.example.com/setup/return \
+  --expires-in 900 --output json
+nyxid channel-bot connect-link-status <request-id> --output json
+nyxid channel-bot cancel-connect-link <request-id> --output json
+```
+
+`--org <id|slug|name>` selects an organization you administer. `--requested-by`
+sets an app display name; authenticated agent-key and OAuth app names take
+precedence. Direct webhooks require `--webhook-signing-secret-file` to save the
+one-time signing secret for your receiver.
+The webhook receives signed `channel_connect.completed`, `.cancelled`, or
+`.expired` events. The optional browser callback runs after explicit user
+continuation. `connect-link-status` is available for diagnostics and recovery;
+it returns no tokens or secrets. Existing `nyxid connect` service commands and
+`channel-bot register --managed` retain their current behavior.
+
+The CLI creates the secret file with mode `0600` on Unix and refuses existing files or symlinks before creating the request. JSON and terminal output contain the file path and signing key ID, never the signing secret. JSON uses `webhook_signing_secret_file` for the path. Configure your receiver with the file's contents. The HTTP API still returns the signing secret once to the creating platform. This command does not use the browser secret-delivery wizard or require `--no-wait`. See [Receive a completion callback](/docs/web/guides/channel-bots#receive-a-completion-callback) for signature verification and [connect](#connect) for service connection links.
 
 ### channel-bot route
 
