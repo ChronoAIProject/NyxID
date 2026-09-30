@@ -27,7 +27,11 @@ The fixture serves the real browser endpoints:
 - `RUN_FINISHED`, `RUN_ERROR`, `RUN_STOPPED`, malformed frames, `[DONE]`, and
   mixed line endings.
 
-The app-wide `frontend/src/lib/mock-data.ts` remains separate and unchanged.
+The app-wide `frontend/src/lib/mock-data.ts` also delegates connector and channel
+setup requests to `mock-setup-journeys.ts`, so chat links use the real forms with
+local, stateful responses. Opening a form never completes the setup. Connector
+requests get fresh tokens; only explicit form submission connects the service
+or creates the bot. NyxBot resumes a waiting bot request after that submission.
 The developer mock-scenarios action now selects HTTP fixture responses and
 fixture-world state; it no longer intercepts a transport or emits synthetic
 turn events.
@@ -93,10 +97,30 @@ The browser specifications are:
 | `defects.spec.ts` | start/silent-turn escape, missing deep links, projection gaps, approval persistence and continuity |
 | `nav.spec.ts` | shared shell and sidebar navigation |
 | `wave2-service-actions.spec.ts` | full v4 service-action UI flows |
+| `assistant-link-modals.spec.ts` | both engines: pending connector and channel dialogs, idle/dismiss/reopen, explicit submit, decline, fresh requests, and no chat navigation or extra tab |
 
 The helpers use accessible names plus `[data-assistant-halo]`,
 `[data-streaming-dots]`, and `[data-empty-turn-error]`. Mutation-observer
 continuity probes catch one-render gaps that final-state assertions would miss.
+
+### Interactive local setup demo
+
+Start the frontend with `npm run dev -- --host 127.0.0.1 --port 43891 --strictPort`
+and open `http://127.0.0.1:43891/assistant?mock=1&nyxbot=1`. The optional `nyxbot=1`
+selects the NyxBot fixture for that browser tab, including reloads; `nyxbot=0`
+selects the older actor fixture. The plain `?mock=1` entry enables scenario
+matching automatically on the first fixture load.
+
+- Send `connect to my github`, then click **Connect GitHub**. The modal remains
+  pending until you enter `demo-github-token` and click **Approve & connect**.
+  **Decline** cancels this request; asking again creates a fresh request.
+- Send `set up a telegram bot`, then click **Telegram bot setup**. Enter
+  `demo-bot-token` and click **Add Bot**, then **Done**. Waiting or cancelling
+  the modal does not create the bot or resume the waiting chat.
+
+These are local API fixtures. They make no GitHub or Telegram calls, and do not
+test live OAuth or provider credentials. Both standalone setup routes continue
+to use the same reusable components.
 
 ## Producer contract
 

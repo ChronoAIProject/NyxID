@@ -72,6 +72,7 @@ import {
   TriggersPage,
   IntegrationGuidePage,
   OAuthConsentPage,
+  OAuthConsentPreviewPage,
   OAuthErrorPage,
   PrivacyPage,
   TermsPage,
@@ -212,6 +213,14 @@ const oauthConsentRoute = createRoute({
   },
   component: OAuthConsentPage,
 });
+
+const oauthConsentPreviewRoute = import.meta.env.DEV
+  ? createRoute({
+      path: "/oauth-consent-preview",
+      getParentRoute: () => rootRoute,
+      component: OAuthConsentPreviewPage,
+    })
+  : null;
 
 const oauthLaunchingRoute = createRoute({
   path: "/oauth-launching",
@@ -1020,6 +1029,7 @@ const routeTree = rootRoute.addChildren([
   nyxbotOnboardingRoute,
   authLayout.addChildren([loginRoute, registerRoute]),
   oauthConsentRoute,
+  ...(oauthConsentPreviewRoute ? [oauthConsentPreviewRoute] : []),
   oauthLaunchingRoute,
   oauthCompleteRoute,
   oauthErrorRoute,

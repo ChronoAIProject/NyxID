@@ -254,6 +254,13 @@ jobs:
     needs: changes
     if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
+    # Full DWARF for the nyxid test binary exhausts the hosted runner's memory
+    # while it is codegen'd and linked: the runner dies with exit 143 ("The
+    # runner has received a shutdown signal") four to five minutes into the
+    # crate compile, before any test runs. Line tables keep panic locations
+    # and backtraces while cutting debuginfo volume several-fold.
+    env:
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v6
       - name: Start transaction-capable MongoDB
@@ -294,6 +301,9 @@ jobs:
     needs: changes
     if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
+    # Same test-binary compile as backend-test; see the note there.
+    env:
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v6
       - name: Start transaction-capable MongoDB

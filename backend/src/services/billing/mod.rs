@@ -1283,8 +1283,14 @@ mod tests {
             1
         );
         assert_eq!(lago.price_removals.load(Ordering::SeqCst), 4);
-        assert_eq!(db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
-            .count_documents(doc! { "lago_metric_code": { "$in": ["platform_svc_service-one_byok", "platform_svc_service-one_pk"] } }).await.unwrap(), 0);
+        // Removed lanes keep their rates for historical usage, but retired.
+        let rates =
+            db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME);
+        let lane_codes = doc! { "lago_metric_code": { "$in": ["platform_svc_service-one_byok", "platform_svc_service-one_pk"] } };
+        assert_eq!(rates.count_documents(lane_codes.clone()).await.unwrap(), 2);
+        let mut live = lane_codes;
+        live.insert("retired_at", mongodb::bson::Bson::Null);
+        assert_eq!(rates.count_documents(live).await.unwrap(), 0);
         db.drop().await.unwrap();
     }
 
@@ -1797,13 +1803,116 @@ mod tests {
         pricing::retry_pending_service_prices(&db, lago.as_ref(), "standard")
             .await
             .unwrap();
+        // The primary and three component rates stay priceable, but retired.
+        let rates =
+            db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME);
+        assert_eq!(rates.count_documents(doc! {}).await.unwrap(), 4);
         assert_eq!(
-            db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
-                .count_documents(doc! {})
+            rates
+                .count_documents(doc! { "retired_at": mongodb::bson::Bson::Null })
                 .await
                 .unwrap(),
             0
         );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn removed_prices_retire_rates_until_the_same_code_syncs_again() {
+        use crate::models::downstream_service::{
+            COLLECTION_NAME as CATALOG, DownstreamService, test_helpers::dummy_service,
+        };
+        use crate::models::service_billing::{
+            LanePricing, PricingSyncStatus, ServicePlatformPricing,
+        };
+        use crate::services::billing::pricing;
+        use futures::TryStreamExt;
+
+        /// Save a legacy and a lane price (or clear both), reconcile, and
+        /// return every cached rate.
+        async fn reprice(
+            db: &mongodb::Database,
+            lago: &FakeLago,
+            catalog: &mut DownstreamService,
+            credits: Option<&str>,
+        ) -> Vec<BillingRateCache> {
+            let mut billing = ServiceBilling {
+                platform_pricing: credits.map(|credits| ServicePlatformPricing {
+                    credits_per_unit: credits.into(),
+                    lago_metric_code: String::new(),
+                    sync_status: PricingSyncStatus::Pending,
+                    sync_error: None,
+                }),
+                byok_pricing: credits.map(|credits| LanePricing {
+                    components: Vec::new(),
+                    metric: BillingMetric::Requests,
+                    credits_per_unit: credits.into(),
+                    lago_metric_code: String::new(),
+                    sync_status: PricingSyncStatus::Pending,
+                    sync_error: None,
+                }),
+                ..Default::default()
+            };
+            let current = catalog.billing.as_ref();
+            pricing::normalize_platform_pricing(&catalog.slug, current, &mut billing).unwrap();
+            pricing::normalize_lane_pricing(&catalog.slug, current, &mut billing).unwrap();
+            catalog.billing = Some(billing);
+            db.collection::<DownstreamService>(CATALOG)
+                .replace_one(doc! { "_id": &catalog.id }, &*catalog)
+                .upsert(true)
+                .await
+                .unwrap();
+            assert_eq!(
+                pricing::retry_pending_service_prices(db, lago, "standard")
+                    .await
+                    .unwrap(),
+                1
+            );
+            db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
+                .find(doc! {})
+                .sort(doc! { "_id": 1 })
+                .await
+                .unwrap()
+                .try_collect()
+                .await
+                .unwrap()
+        }
+
+        let Some(db) = connect_test_database("billing_price_retire_resync").await else {
+            return;
+        };
+        let lago = FakeLago::default();
+        let mut catalog = dummy_service();
+        catalog.id = Uuid::new_v4().to_string();
+        catalog.slug = "service-one".into();
+        let codes = ["platform_svc_service-one", "platform_svc_service-one_byok"];
+        let summary = |rates: &[BillingRateCache]| {
+            rates
+                .iter()
+                .map(|rate| {
+                    (
+                        rate.lago_metric_code.clone(),
+                        rate.credits_per_unit_micros,
+                        rate.retired_at.is_some(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let expect = |micros: i64, retired: bool| {
+            codes
+                .iter()
+                .map(|code| (code.to_string(), micros, retired))
+                .collect::<Vec<_>>()
+        };
+
+        let live = reprice(&db, &lago, &mut catalog, Some("0.5")).await;
+        assert_eq!(summary(&live), expect(500_000, false));
+        let retired = reprice(&db, &lago, &mut catalog, None).await;
+        assert_eq!(summary(&retired), expect(500_000, true));
+        assert_eq!(lago.price_removals.load(Ordering::SeqCst), 2);
+        // Re-authoring reuses the stable codes; the full-row sync un-retires.
+        let resynced = reprice(&db, &lago, &mut catalog, Some("0.75")).await;
+        assert_eq!(summary(&resynced), expect(750_000, false));
         db.drop().await.unwrap();
     }
 
@@ -1816,6 +1925,7 @@ mod tests {
                 credits_per_unit_micros: credits * 1_000_000,
                 credits_per_unit_pico: None,
                 synced_at: Utc::now(),
+                retired_at: None,
             })
             .await
             .expect("insert platform rate");

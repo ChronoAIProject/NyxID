@@ -69,6 +69,7 @@ export function ChannelBotSetup({
   defaultPlatform,
   defaultLabel = "",
   fullPage = false,
+  stayInPlace = false,
   prefill,
   onComplete,
   onContinue,
@@ -81,6 +82,8 @@ export function ChannelBotSetup({
   readonly defaultPlatform?: ChannelPlatform;
   readonly defaultLabel?: string;
   readonly fullPage?: boolean;
+  /** Keep the reusable dialog in place after connect/setup flows. */
+  readonly stayInPlace?: boolean;
   readonly prefill?: Readonly<Record<string, string>>;
   readonly onComplete?: () => void;
   readonly onContinue?: () => void | Promise<void>;
@@ -206,15 +209,17 @@ export function ChannelBotSetup({
       },
       { keepDefaultValues: true },
     );
-    void navigate({
-      to: "/channel-bots",
-      search: {
-        connect: managedConnectPlatform(next),
-        label,
-        target_org_id: targetOrgId ?? undefined,
-      },
-      replace: true,
-    });
+    if (!stayInPlace) {
+      void navigate({
+        to: "/channel-bots",
+        search: {
+          connect: managedConnectPlatform(next),
+          label,
+          target_org_id: targetOrgId ?? undefined,
+        },
+        replace: true,
+      });
+    }
   }
 
   function onSubmit(data: CreateChannelBotFormData) {
@@ -226,7 +231,7 @@ export function ChannelBotSetup({
     const payload = channelBotRegistrationPayload(data, descriptor);
     createBot.mutate(payload, {
       onSuccess: (result) => {
-        if (result.webhook_secret || fullPage) {
+        if (result.webhook_secret || fullPage || stayInPlace) {
           setCreatedBot(result);
           if (fullPage) onComplete?.();
           if (!fullPage) reset();
@@ -261,7 +266,7 @@ export function ChannelBotSetup({
       setCreatedBot(null);
       createBot.reset();
       reset();
-      if (id)
+      if (id && !stayInPlace)
         void navigate({ to: "/channel-bots/$botId", params: { botId: id } });
     }
   }
@@ -271,13 +276,15 @@ export function ChannelBotSetup({
       {!fullPage && (
         <DialogHeader>
           <DialogTitle>
-            {createdBot
-              ? `${getPlatform(createdBot.platform).label} Bot Created`
+            {completedId
+              ? `${getPlatform(createdBot?.platform ?? platform).label} Bot ${createdBot ? "Created" : "Connected"}`
               : "Add Channel Bot"}
           </DialogTitle>
           <DialogDescription>
-            {createdBot
-              ? "Store this verification secret now. It will not be shown again."
+            {completedId
+              ? createdBot?.webhook_secret
+                ? "Store this verification secret now. It will not be shown again."
+                : "Your bot has been added to NyxID."
               : "Connect a messaging platform bot to your AI agents."}
           </DialogDescription>
         </DialogHeader>
@@ -298,7 +305,7 @@ export function ChannelBotSetup({
       )}
       {completedId ? (
         <div className="space-y-4">
-          {fullPage && (
+          {(fullPage || stayInPlace) && (
             <div
               role="status"
               className="flex items-start gap-3 rounded-lg border border-success/20 bg-success/5 p-4"
@@ -346,10 +353,12 @@ export function ChannelBotSetup({
               onClick={() => {
                 if (onContinue) { void onContinue(); return; }
                 if (!fullPage) onOpenChange(false);
-                void navigate({
-                  to: "/channel-bots/$botId",
-                  params: { botId: completedId },
-                });
+                if (!stayInPlace) {
+                  void navigate({
+                    to: "/channel-bots/$botId",
+                    params: { botId: completedId },
+                  });
+                }
               }}
             >
               {onContinue ? "Continue" : fullPage ? "Open channel bot" : "Done"}
@@ -367,10 +376,10 @@ export function ChannelBotSetup({
             fullPage={fullPage}
             preferManual={Boolean(prefill && Object.keys(prefill).length)}
             onConnected={(id, replace, result) => {
-              if (fullPage) {
+              if (fullPage || stayInPlace) {
                 if (link && result) setCreatedBot(result);
                 setConnectedBotId(id);
-                onComplete?.();
+                if (fullPage) onComplete?.();
                 return;
               }
               if (!fullPage) onOpenChange(false);
@@ -436,7 +445,7 @@ export function ChannelBotSetup({
                         {errors.platform.message}
                       </p>
                     )}
-                    {getPlatform(platform).enabled && (
+                    {getPlatform(platform).enabled && !stayInPlace && (
                       <Link
                         to="/channel-bots/connect/$platform"
                         params={{ platform }}
