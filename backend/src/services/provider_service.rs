@@ -10517,7 +10517,7 @@ mod tests {
                         crate::services::destination_routing::workspace_targets()
                     );
                     assert!(updated.description.unwrap().contains("Slides"));
-                    assert!(updated.auth_notes.unwrap().contains("gmail.send"));
+                    assert!(updated.auth_notes.unwrap().contains("narrower permissions"));
                     assert!(
                         updated
                             .known_limitations
