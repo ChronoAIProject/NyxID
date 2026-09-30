@@ -22,6 +22,7 @@ const mocks = vi.hoisted(() => ({
   endpointUrl: null as string | null,
   requiresGatewayUrl: false,
   authKeyName: "Authorization",
+  connectMethod: "api_key",
 }));
 vi.mock("@tanstack/react-router", () => ({
   useParams: () => ({ token: "hosted-token" }),
@@ -53,7 +54,7 @@ vi.mock("@/hooks/use-connect-links", () => ({
       scopes: mocks.scopes,
       requested_by: "cli",
       expires_at: "2099-01-01T00:00:00Z",
-      connect_method: "api_key",
+      connect_method: mocks.connectMethod,
       auth_key_name: mocks.authKeyName,
       endpoint_url: mocks.endpointUrl,
       requires_gateway_url: mocks.requiresGatewayUrl,
@@ -83,6 +84,8 @@ beforeEach(() => {
   mocks.endpointUrl = null;
   mocks.requiresGatewayUrl = false;
   mocks.authKeyName = "Authorization";
+  mocks.connectMethod = "api_key";
+  sessionStorage.clear();
   mocks.preview.mockResolvedValue({});
   mocks.complete.mockResolvedValue({ status: "completed" });
   let now = 100_000;
@@ -111,8 +114,14 @@ it("defaults to platform and completes without any secret", async () => {
 });
 
 it("keeps embedded OAuth authorization in a provider popup", async () => {
+  mocks.connectMethod = "oauth";
+  const setItem = vi.fn();
+  const assign = vi.fn(() => {
+    expect(setItem).toHaveBeenCalledWith("connect-link-1", "hosted-token");
+  });
   const popup = {
-    location: { href: "", assign: vi.fn() },
+    sessionStorage: { setItem },
+    location: { href: "", assign },
     close: vi.fn(),
   } as unknown as Window;
   const open = vi.spyOn(window, "open").mockReturnValue(popup);
@@ -136,7 +145,7 @@ it("keeps embedded OAuth authorization in a provider popup", async () => {
   await waitFor(() =>
     expect(open).toHaveBeenCalledWith(
       "about:blank",
-      "nyxid-connect-authorization",
+      "_blank",
       expect.stringContaining("popup"),
     ),
   );
@@ -146,6 +155,62 @@ it("keeps embedded OAuth authorization in a provider popup", async () => {
   expect(
     screen.getByText(/Finish authorization in the provider window/),
   ).toBeInTheDocument();
+  expect(sessionStorage.getItem("connect-link-1")).toBeNull();
+});
+
+it("does not reopen an authorization popup if setup closes during the request", async () => {
+  mocks.connectMethod = "oauth";
+  let finish!: (result: CompleteConnectLinkResponse) => void;
+  mocks.complete.mockImplementationOnce(
+    () =>
+      new Promise<CompleteConnectLinkResponse>((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const popup = {
+    sessionStorage: { setItem: vi.fn() },
+    location: { assign: vi.fn() },
+    close: vi.fn(),
+  } as unknown as Window;
+  const open = vi.spyOn(window, "open").mockReturnValue(popup);
+  const view = render(
+    <ConnectLinkContent
+      token="hosted-token"
+      embedded
+      redirectOnTerminal={false}
+    />,
+  );
+  await userEvent.click(
+    screen.getByRole("button", { name: "Approve connection" }),
+  );
+  expect(open).toHaveBeenCalledTimes(1);
+  view.unmount();
+  expect(popup.close).toHaveBeenCalledTimes(1);
+  await act(async () =>
+    finish({
+      status: "oauth_required",
+      id: "connect-link-1",
+      service_slug: "llm-xai",
+      authorization_url: "https://provider.example/authorize",
+    }),
+  );
+  expect(open).toHaveBeenCalledTimes(1);
+  expect(popup.location.assign).not.toHaveBeenCalled();
+  expect(popup.sessionStorage.setItem).not.toHaveBeenCalled();
+});
+
+it("preserves the host theme when embedded content closes", () => {
+  document.documentElement.classList.add("theme-light");
+  const view = render(
+    <ConnectLinkContent
+      token="hosted-token"
+      embedded
+      redirectOnTerminal={false}
+    />,
+  );
+  view.unmount();
+  expect(document.documentElement).toHaveClass("theme-light");
+  document.documentElement.classList.remove("theme-light");
 });
 
 it("previews once under React StrictMode", async () => {

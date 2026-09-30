@@ -3,10 +3,6 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { AssistantLinkModalHost } from "./assistant-link-modals";
 
-vi.mock("@/hooks/use-channel-platforms", () => ({
-  useChannelPlatformViews: () => ({ data: { platforms: [] } }),
-}));
-
 vi.mock("@/components/connect-link/connect-link-content", () => ({
   ConnectLinkContent: ({
     token,

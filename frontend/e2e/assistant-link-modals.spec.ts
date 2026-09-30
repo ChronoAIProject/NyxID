@@ -74,6 +74,7 @@ for (const nyxagentEnabled of [false, true]) {
           .getByRole("button", { name: "Close", exact: true })
           .click();
         await expect(dialog).toHaveCount(0);
+        await expect(link).toBeFocused();
         await link.click();
         await expect(token).toHaveValue("");
         await token.fill("demo-github-token");
@@ -167,6 +168,7 @@ for (const nyxagentEnabled of [false, true]) {
           .getByRole("button", { name: "Cancel", exact: true })
           .click();
         await expect(dialog).toHaveCount(0);
+        await expect(link).toBeFocused();
         await link.click();
         await expect(token).toHaveValue("");
         await token.fill("demo-bot-token");

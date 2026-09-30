@@ -519,9 +519,7 @@ for (const width of [390, 1440]) {
     await expect(page.getByRole("button")).toHaveCount(1);
     await expect(page.getByRole("list")).toHaveCount(0);
     await expect(
-      page
-        .getByRole("banner")
-        .getByRole("link", { name: "Channel setup guide" }),
+      page.getByRole("link", { name: "Channel setup guide" }),
     ).toBeVisible();
     await page.screenshot({
       path: `/tmp/nyxid-channel-one-click-${width}.png`,

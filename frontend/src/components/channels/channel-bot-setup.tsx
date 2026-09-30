@@ -241,7 +241,6 @@ export function ChannelBotSetup({
         reset();
         createBot.reset();
         if (!fullPage) onOpenChange(false);
-        if (stayInPlace) return;
         void navigate({
           to: "/channel-bots/$botId",
           params: { botId: result.id },

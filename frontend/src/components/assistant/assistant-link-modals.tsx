@@ -1,4 +1,10 @@
-import { useMemo, useState, type MouseEvent, type ReactNode } from "react";
+import {
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent,
+  type ReactNode,
+} from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { X } from "lucide-react";
 import { ChannelBotSetup } from "@/components/channels/channel-bot-setup";
@@ -11,12 +17,8 @@ import {
   DialogPortal,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { useChannelPlatformViews } from "@/hooks/use-channel-platforms";
 import { assistantModalLinkTarget } from "@/lib/assistant/assistant-link-target";
-import {
-  channelBotSetupPrefill,
-  channelBotSetupUrlValues,
-} from "@/schemas/channel-bot-setup";
+import { channelBotSetupUrlValues } from "@/schemas/channel-bot-setup";
 import type { ChannelPlatform } from "@/types/channels";
 
 function ChannelBotSetupModal({
@@ -29,17 +31,10 @@ function ChannelBotSetupModal({
   >;
   readonly onClose: () => void;
 }) {
-  const catalog = useChannelPlatformViews();
   const values = useMemo(
     () => channelBotSetupUrlValues(target.search),
     [target.search],
   );
-  const descriptor = catalog.data?.platforms.find(
-    (entry) => entry.platform === target.platform,
-  );
-  const prefill = descriptor
-    ? channelBotSetupPrefill(target.search, descriptor)
-    : undefined;
   const defaultLabel = values.label?.trim().slice(0, 128) ?? "";
 
   // ChannelBotSetup already owns the Radix dialog for its reusable dialog
@@ -54,7 +49,6 @@ function ChannelBotSetupModal({
       defaultPlatform={target.platform as ChannelPlatform}
       defaultLabel={defaultLabel}
       defaultOrgId={values.target_org_id ?? null}
-      prefill={prefill}
       stayInPlace
     />
   );
@@ -127,6 +121,15 @@ export function AssistantLinkModalHost({
   readonly children: ReactNode;
 }) {
   const [href, setHref] = useState<string | null>(null);
+  const triggerRef = useRef<HTMLAnchorElement | null>(null);
+
+  function closeModal() {
+    setHref(null);
+    const trigger = triggerRef.current;
+    requestAnimationFrame(() => {
+      if (trigger?.isConnected) trigger.focus();
+    });
+  }
   function handleClickCapture(event: MouseEvent<HTMLDivElement>) {
     if (
       event.defaultPrevented ||
@@ -148,13 +151,14 @@ export function AssistantLinkModalHost({
     );
     if (!targetLink) return;
     event.preventDefault();
+    triggerRef.current = link;
     setHref(targetLink.href);
   }
 
   return (
     <div className="contents" onClickCapture={handleClickCapture}>
       {children}
-      <AssistantLinkModal href={href} onClose={() => setHref(null)} />
+      <AssistantLinkModal href={href} onClose={closeModal} />
     </div>
   );
 }

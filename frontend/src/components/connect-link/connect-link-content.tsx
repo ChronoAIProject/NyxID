@@ -81,6 +81,7 @@ export function ConnectLinkContent({
   const previewedTokenRef = useRef<string | null>(null);
   const oauthTokenRef = useRef<{ id: string; token: string } | null>(null);
   const oauthWindowRef = useRef<Window | null>(null);
+  const mountedRef = useRef(true);
   const preview = usePreviewConnectLink();
   const previewConnect = preview.mutateAsync;
   const [oauthLinkId, setOauthLinkId] = useState<string | null>(null);
@@ -132,6 +133,7 @@ export function ConnectLinkContent({
       if (event.origin !== window.location.origin) return;
       const current = oauthTokenRef.current;
       if (!current || event.source !== oauthWindowRef.current) return;
+      if (!event.data || typeof event.data !== "object") return;
       const data = event.data as {
         type?: unknown;
         connect_link_id?: unknown;
@@ -195,13 +197,14 @@ export function ConnectLinkContent({
   }, [embedded, oauthLinkId, oauthStatus.data, previewConnect, token]);
 
   useEffect(() => {
-    if (!embedded) return;
+    mountedRef.current = true;
     return () => {
+      mountedRef.current = false;
       oauthWindowRef.current?.close();
       oauthWindowRef.current = null;
       oauthTokenRef.current = null;
     };
-  }, [embedded]);
+  }, []);
 
   useEffect(() => {
     if (!oauthPopupOpen) return;
@@ -258,7 +261,7 @@ export function ConnectLinkContent({
     ) {
       oauthWindowRef.current = window.open(
         "about:blank",
-        "nyxid-connect-authorization",
+        "_blank",
         "popup,width=560,height=720,resizable=yes,scrollbars=yes",
       );
     }
@@ -268,9 +271,9 @@ export function ConnectLinkContent({
         token,
         values: usePlatformKey ? selected : { ...values, ...selected },
       });
+      if (!mountedRef.current) return;
       if (result.status === "oauth_required" && result.authorization_url) {
         if (embedded) {
-          sessionStorage.setItem(connectLinkStorageKey(result.id), token);
           if (oauthWindowRef.current?.closed) {
             oauthWindowRef.current = null;
           }
@@ -278,16 +281,18 @@ export function ConnectLinkContent({
             oauthWindowRef.current ??
             window.open(
               "about:blank",
-              "nyxid-connect-authorization",
+              "_blank",
               "popup,width=560,height=720,resizable=yes,scrollbars=yes",
             );
           if (!popup) {
-            sessionStorage.removeItem(connectLinkStorageKey(result.id));
             setSubmitError(
               "Your browser blocked the authorization popup. Allow popups for NyxID and try again.",
             );
             return;
           }
+          // The popup copied session storage when it opened, before the link
+          // id existed. Store its recovery token there before leaving our origin.
+          popup.sessionStorage.setItem(connectLinkStorageKey(result.id), token);
           oauthTokenRef.current = { id: result.id, token };
           oauthWindowRef.current = popup;
           setOauthLinkId(result.id);
@@ -318,6 +323,7 @@ export function ConnectLinkContent({
       }
       setDeviceChallenge(null);
     } catch (error) {
+      if (!mountedRef.current) return;
       if (embedded) {
         oauthWindowRef.current?.close();
         oauthWindowRef.current = null;
@@ -661,6 +667,7 @@ export function ConnectLinkReturnPage() {
         event.source !== window.opener
       )
         return;
+      if (!event.data || typeof event.data !== "object") return;
       const data = event.data as {
         type?: unknown;
         connect_link_id?: unknown;
