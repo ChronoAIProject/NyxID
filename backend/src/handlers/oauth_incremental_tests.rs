@@ -577,7 +577,10 @@ async fn omitted_scope_does_not_grant_new_client_allowed_scopes() {
     let signed = fixture.request().await.unwrap();
     let snapshot = verify_consent_request(&fixture.state, &signed, &fixture.user_id)
         .unwrap().incremental_consent.unwrap();
-    assert_eq!(snapshot.scopes, snapshot.current_scopes);
+    assert_eq!(
+        snapshot.scopes.split_whitespace().collect::<std::collections::HashSet<_>>(),
+        snapshot.current_scopes.split_whitespace().collect::<std::collections::HashSet<_>>()
+    );
     assert!(!snapshot.scopes.contains("account:write"));
 }
 
