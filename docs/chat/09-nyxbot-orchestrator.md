@@ -171,8 +171,11 @@ ends its turn; NyxID resumes that thread with an event as soon as it happens:
   inside Telegram when an administrator configured it, else the token form) and
   records a `channel_bot` watch. The next active bot of that platform the owner
   creates is linked to the chosen agent and the thread gets the
-  owner-verification step to pass on. Secrets are entered on the page, never in
-  chat.
+  owner-verification step to pass on. A bot created inside Telegram through
+  NyxID needs no step: the Telegram account that created it (confirmed by
+  Telegram, for the owner who started the creation) is its verified owner, so
+  the thread just tells them to open the bot and press Start. Secrets are
+  entered on the page, never in chat.
 - **Owner verification**: when the owner uses the link or code in the chat app,
   the thread that set the bot up is told.
 - **Proxy approvals** need no watch: the tool call itself waits for the decision
@@ -348,7 +351,11 @@ settings, or relinked later); each chat becomes a thread of the linked agent
   org's other admins can link the bot, and nothing reaches or leaves their
   agent. Disconnecting removes the org's route and key too.
 - **Right user.** The owner is verified through NyxID's Telegram notification
-  link or a one-time link code (a `t.me/<bot>?start=<code>` link for Telegram);
+  link, a one-time link code (a `t.me/<bot>?start=<code>` link for Telegram), or,
+  for a Telegram bot created inside Telegram through NyxID, as the account that
+  created it (`telegram_bot_requests`: connected, started by this owner; linked on
+  its first message and greeted, and a verified owner's bare `/start` is
+  greeted without a turn);
   only they act with the agent's full authority. Everyone else is a guest
   (§12a): in private chats they get a short refusal unless the owner opened the
   bot's private chats to everyone; in groups they may talk to the agent unless

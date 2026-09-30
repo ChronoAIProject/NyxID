@@ -452,11 +452,16 @@ async fn active_for_bot(
 }
 
 /// Owner-verified senders from NyxID's own Telegram notification link.
-async fn known_owner_senders(state: &AppState, owner: &str, platform: &str) -> Vec<String> {
+async fn known_owner_senders(
+    state: &AppState,
+    owner: &str,
+    platform: &str,
+    bot_id: &str,
+) -> Vec<String> {
     if platform != "telegram" {
         return Vec::new();
     }
-    state
+    let mut ids: Vec<String> = state
         .db
         .collection::<crate::models::notification_channel::NotificationChannel>(
             crate::models::notification_channel::COLLECTION_NAME,
@@ -467,7 +472,32 @@ async fn known_owner_senders(state: &AppState, owner: &str, platform: &str) -> V
         .flatten()
         .and_then(|row| row.telegram_chat_id)
         .map(|id| vec![id.to_string()])
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if let Some(creator) = bot_creator(state, owner, bot_id).await
+        && !ids.contains(&creator)
+    {
+        ids.push(creator);
+    }
+    ids
+}
+
+/// The Telegram account that created this bot through NyxID's in-Telegram
+/// bot creation, when `owner` started that creation: Telegram confirmed the
+/// account created the bot, and it confirmed it was setting it up for this
+/// NyxID account. It is the owner's own account, as surely as one that opened
+/// the owner-verification link.
+async fn bot_creator(state: &AppState, owner: &str, bot_id: &str) -> Option<String> {
+    use crate::models::telegram_bot_request::COLLECTION_NAME as REQUESTS;
+    state
+        .db
+        .collection::<bson::Document>(REQUESTS)
+        .find_one(doc! {"_id": bot_id, "actor_user_id": owner, "status": "connected"})
+        .projection(doc! {"telegram_user_id": 1})
+        .await
+        .ok()
+        .flatten()
+        .and_then(|request| request.get_i64("telegram_user_id").ok())
+        .map(|id| id.to_string())
 }
 
 /// The channel's gateway agent key. It is the creator bearer on channel
@@ -667,7 +697,7 @@ pub async fn connect(
         pending_agent_api_key_id: None,
         pending_route_api_key_id: None,
         owner_sender_ids: {
-            let mut ids = known_owner_senders(state, owner, &platform).await;
+            let mut ids = known_owner_senders(state, owner, &platform, &bot.id).await;
             for id in verified_owners {
                 if !ids.contains(&id) {
                     ids.push(id);
@@ -2100,6 +2130,16 @@ async fn channel_bot_watch(state: &AppState, watch: &NyxbotWatch) -> AppResult<(
             Err(error) => Err(error),
         };
     let text = match &outcome {
+        // Created in Telegram through NyxID: the account that created it is
+        // already the owner's, so nothing is left to verify.
+        Ok((agent, value)) if value["channel_agent"]["owner_linked"] == true => format!(
+            "The {} channel bot {} the user just created is now linked to {}, and the account \
+            that created it is already verified as theirs. Tell them to open the bot and press \
+            Start (or send a message): it answers there. No verification step is needed.",
+            identifier(&bot.platform),
+            identifier(&bot.label),
+            identifier(&agent.name),
+        ),
         Ok((agent, value)) => format!(
             "The {} channel bot {} the user just created is now linked to {}. Give the user \
             its owner-verification step: {}",
@@ -2399,13 +2439,17 @@ async fn inbound_message(
     start_chat_turn(state, row, chat, sender, text, guest, addressed).await
 }
 
-/// Link a sender presenting the owner's one-time code.
+/// Link the owner's chat-app account: a sender presenting the owner's
+/// one-time code, or the Telegram account that created the bot through NyxID
+/// for the owner (no code needed). A verified owner's bare `/start` is
+/// greeted instead of starting a turn.
 async fn link_owner(
     state: &AppState,
     row: &NyxbotChannel,
     sender: &Sender<'_>,
     text: &str,
 ) -> AppResult<Option<Inbound>> {
+    let known = row.owner_sender_ids.iter().any(|id| id == sender.id);
     if let (Some(hash), Some(expires_at)) =
         (row.link_code_hash.as_deref(), row.link_code_expires_at)
         && expires_at > Utc::now()
@@ -2426,56 +2470,91 @@ async fn link_owner(
                 "$set": {"updated_at": bson::DateTime::now()}},
             )
             .await?;
-        audit(
-            state,
-            &row.user_id,
-            "nyxbot_channel_owner_linked",
-            json!({
-                "channel_agent_id": &row.id, "platform": &row.platform,
-            }),
-        )
-        .await;
-        let agent_name = match row.agent_id.as_deref() {
-            Some(agent_id) => {
-                crate::services::assistant_team_service::agent(&state.db, &row.user_id, agent_id)
-                    .await
-                    .map(|agent| agent.name)
-                    .unwrap_or_else(|_| "NyxBot".into())
-            }
-            None => "NyxBot".into(),
-        };
-        // The chat that set the bot up hears about it without the user
-        // coming back to say so.
-        if let Some(source) = row.source_conversation_id.clone() {
-            let state = state.clone();
-            let owner = row.user_id.clone();
-            let text = format!(
-                "The user verified their {} account on channel bot {}; it now reaches {} \
-                there. No confirmation is needed.",
-                identifier(&row.platform),
-                identifier(&row.bot_label),
-                identifier(&agent_name)
-            );
-            tokio::spawn(async move {
-                super::assistant_team::notify(
-                    &state,
-                    &owner,
-                    &source,
-                    vec![crate::services::assistant_team_service::event(
-                        "channel_owner_verified",
-                        text,
-                        None,
-                    )],
-                )
-                .await;
-            });
-        }
+        return Ok(Some(owner_linked(state, row, "link_code").await));
+    }
+    if !known
+        && !sender.id.is_empty()
+        && canonical_platform(&row.platform) == "telegram"
+        && bot_creator(state, &row.user_id, &row.channel_bot_id)
+            .await
+            .as_deref()
+            == Some(sender.id)
+    {
+        state
+            .db
+            .collection::<NyxbotChannel>(CHANNELS)
+            .update_one(
+                doc! {"_id": &row.id},
+                doc! {"$addToSet": {"owner_sender_ids": sender.id},
+                "$set": {"updated_at": bson::DateTime::now()}},
+            )
+            .await?;
+        return Ok(Some(owner_linked(state, row, "bot_creator").await));
+    }
+    if known && text.trim() == "/start" {
         return Ok(Some(Inbound::Reply(format!(
-            "Linked. I'm {agent_name}, your NyxID agent: I can use your NyxID services and \
-            account here. Send me anything to get started."
+            "Hi, I'm {}, your NyxID agent. Send me anything to get started.",
+            channel_agent_name(state, row).await
         ))));
     }
     Ok(None)
+}
+
+async fn channel_agent_name(state: &AppState, row: &NyxbotChannel) -> String {
+    match row.agent_id.as_deref() {
+        Some(agent_id) => {
+            crate::services::assistant_team_service::agent(&state.db, &row.user_id, agent_id)
+                .await
+                .map(|agent| agent.name)
+                .unwrap_or_else(|_| "NyxBot".into())
+        }
+        None => "NyxBot".into(),
+    }
+}
+
+/// The owner's account was just linked: audit it, tell the chat that set the
+/// bot up, and greet them.
+async fn owner_linked(state: &AppState, row: &NyxbotChannel, method: &str) -> Inbound {
+    audit(
+        state,
+        &row.user_id,
+        "nyxbot_channel_owner_linked",
+        json!({
+            "channel_agent_id": &row.id, "platform": &row.platform, "method": method,
+        }),
+    )
+    .await;
+    let agent_name = channel_agent_name(state, row).await;
+    // The chat that set the bot up hears about it without the user coming
+    // back to say so.
+    if let Some(source) = row.source_conversation_id.clone() {
+        let state = state.clone();
+        let owner = row.user_id.clone();
+        let text = format!(
+            "The user verified their {} account on channel bot {}; it now reaches {} there. \
+            No confirmation is needed.",
+            identifier(&row.platform),
+            identifier(&row.bot_label),
+            identifier(&agent_name)
+        );
+        tokio::spawn(async move {
+            super::assistant_team::notify(
+                &state,
+                &owner,
+                &source,
+                vec![crate::services::assistant_team_service::event(
+                    "channel_owner_verified",
+                    text,
+                    None,
+                )],
+            )
+            .await;
+        });
+    }
+    Inbound::Reply(format!(
+        "Linked. I'm {agent_name}, your NyxID agent: I can use your NyxID services and \
+        account here. Send me anything to get started."
+    ))
 }
 
 async fn thread_conversation(
