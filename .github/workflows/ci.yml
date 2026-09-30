@@ -253,7 +253,7 @@ jobs:
     needs: changes
     if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     # Reduce debug-information volume while retaining locations and backtraces.
     # Resource samples distinguish future compilation shutdowns from test failures.
     env:

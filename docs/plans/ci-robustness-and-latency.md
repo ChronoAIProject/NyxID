@@ -40,9 +40,9 @@ at the user's request for the broader CI reliability fix.
   settings. Samples appear every 30 seconds in the live log and in
   `resources-*` artifacts retained for 14 days. Unsupported optional telemetry
   or artifact failure does not change the required command's result.
-- Bound backend tests and billing smoke to 45 minutes and both backend coverage
-  jobs to 90 minutes. The initial 45-minute coverage bound interrupted a live
-  suite on a slow hosted runner; the larger outer limit accommodates observed
+- Bound the full backend suite and both backend coverage jobs to 90 minutes,
+  with 45 minutes for billing smoke. The initial 45-minute coverage bound
+  interrupted a live suite on a slow hosted runner; the larger outer limit accommodates observed
   variability without retrying tests or weakening their assertions.
 - Key cached backend base reports by exact source SHA plus workflow/setup
   script contents, architecture and the **measurement job's** runner image.
@@ -134,6 +134,17 @@ clipped by the new limit, not evidence of an OOM or a test deadlock. The cause
 of the timing variation remains unproven. Coverage now has a conservative
 90-minute outer bound, and optional CPU/load/pressure samples help diagnose
 future variance. The bound is a failure limit, not an expected run time.
+
+The subsequent run at `264f39dd`
+([CI 36741290868](https://github.com/ChronoAIProject/NyxID/actions/runs/36741290868))
+passed the full backend suite: 6,873 passed, two skipped. Compilation took
+6m03s and tests took 29m06s, versus approximately 12 minutes in earlier passing
+runs. The complete job took 37m14s, leaving less than eight minutes under the
+initial 45-minute limit. During tests, resource samples showed sustained I/O
+pressure with low CPU pressure and negligible memory pressure. These are host
+observations, not proof of a specific disk or database cause. The full suite
+therefore also gets the conservative 90-minute outer bound; test concurrency,
+assertions and retries remain unchanged. Billing smoke retains 45 minutes.
 
 The timing figures below are elapsed job-minutes, including cancelled work.
 They are neither CPU utilization measurements nor a billing estimate. This is
