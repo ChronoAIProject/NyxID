@@ -101,6 +101,7 @@ export const DOCS_TABS: readonly DocTab[] = [
         group: "Guides",
         pages: [
           { slug: "cli/guides/connect-a-service", title: "Connect an AI service" },
+          { slug: "cli/guides/network", title: "Network, proxies and TLS" },
           { slug: "cli/guides/openrouter", title: "Use OpenRouter through NyxID" },
           { slug: "cli/guides/credential-node", title: "Set up a credential node" },
           { slug: "cli/guides/ssh-node", title: "Set up an SSH node" },

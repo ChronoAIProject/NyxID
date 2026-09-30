@@ -263,9 +263,16 @@ pub async fn register_node(
     ws_url: &str,
     registration_token: &str,
 ) -> Result<(String, String, Option<String>)> {
-    let (ws_stream, _) = tokio_tungstenite::connect_async(ws_url)
-        .await
-        .map_err(|e| Error::WebSocket(format!("Failed to connect: {e}")))?;
+    let (ws_stream, _) = tokio_tungstenite::connect_async_tls_with_config(
+        ws_url,
+        None,
+        false,
+        Some(tokio_tungstenite::Connector::Rustls(
+            crate::tls::shared_config()?,
+        )),
+    )
+    .await
+    .map_err(|e| Error::WebSocket(format!("Failed to connect: {e}")))?;
 
     let (mut ws_sink, mut ws_stream) = ws_stream.split();
 
@@ -438,9 +445,14 @@ async fn pending_credential_poll_loop(
     mut shutdown: watch::Receiver<bool>,
 ) {
     let api_base_url = node_agent_api_base_url_from_ws_url(&server_ws_url);
-    let Ok(client) = reqwest::Client::builder()
-        .timeout(Duration::from_secs(PENDING_CREDENTIAL_POLL_TIMEOUT_SECS))
-        .build()
+    let Ok(client) = crate::tls::client_builder()
+        .map_err(|e| e.to_string())
+        .and_then(|builder| {
+            builder
+                .timeout(Duration::from_secs(PENDING_CREDENTIAL_POLL_TIMEOUT_SECS))
+                .build()
+                .map_err(|e| e.to_string())
+        })
     else {
         tracing::debug!("Failed to create pending credential poll HTTP client");
         return;
@@ -534,9 +546,14 @@ async fn handle_pending_credentials_available(
     storage_backend: &str,
 ) {
     let api_base_url = node_agent_api_base_url_from_ws_url(server_ws_url);
-    let Ok(client) = reqwest::Client::builder()
-        .timeout(Duration::from_secs(PENDING_CREDENTIAL_POLL_TIMEOUT_SECS))
-        .build()
+    let Ok(client) = crate::tls::client_builder()
+        .map_err(|e| e.to_string())
+        .and_then(|builder| {
+            builder
+                .timeout(Duration::from_secs(PENDING_CREDENTIAL_POLL_TIMEOUT_SECS))
+                .build()
+                .map_err(|e| e.to_string())
+        })
     else {
         tracing::debug!("Failed to create pending credential nudge HTTP client");
         return;
@@ -852,8 +869,14 @@ async fn connect_and_serve(
 ) -> Result<Option<Duration>> {
     // 1. Connect
     let ws_config = node_control_ws_config(config.server.proxy_max_body_size);
-    let connect =
-        tokio_tungstenite::connect_async_with_config(&config.server.url, Some(ws_config), false);
+    let connect = tokio_tungstenite::connect_async_tls_with_config(
+        &config.server.url,
+        Some(ws_config),
+        false,
+        Some(tokio_tungstenite::Connector::Rustls(
+            crate::tls::shared_config()?,
+        )),
+    );
     tokio::pin!(connect);
     let (ws_stream, _) = tokio::select! {
         result = &mut connect => {
@@ -3818,9 +3841,26 @@ async fn handle_ws_proxy_open(
     let mut ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();
     ws_config.max_message_size = Some(WS_PROXY_MAX_MESSAGE_SIZE);
     ws_config.max_frame_size = Some(WS_PROXY_MAX_MESSAGE_SIZE);
+    let tls_config = match crate::tls::shared_config() {
+        Ok(config) => config,
+        Err(error) => {
+            let _ = send_ws_proxy_error(
+                &tx,
+                &session_id,
+                &format!("TLS configuration failed: {error}"),
+            )
+            .await;
+            return;
+        }
+    };
     let connect_result = tokio::time::timeout(
         Duration::from_secs(WS_PROXY_CONNECT_TIMEOUT_SECS),
-        tokio_tungstenite::connect_async_with_config(ws_request, Some(ws_config), false),
+        tokio_tungstenite::connect_async_tls_with_config(
+            ws_request,
+            Some(ws_config),
+            false,
+            Some(tokio_tungstenite::Connector::Rustls(tls_config)),
+        ),
     )
     .await;
 

@@ -10,6 +10,7 @@ use tokio::time::Instant;
 use zeroize::{Zeroize, Zeroizing};
 
 use super::agent_key;
+use crate::net_diagnostics::{Diagnostic, Stage};
 use crate::{
     api::{build_credential_http_client, device_login_user_agent},
     cli::{LoginArgs, LoginCommands, OutputFormat},
@@ -88,6 +89,108 @@ impl std::fmt::Display for LoginError {
 }
 impl std::error::Error for LoginError {}
 
+/// Carries additive diagnostics without changing the stable login error contract.
+#[derive(Debug)]
+pub struct LoginFailure {
+    pub kind: LoginError,
+    pub diagnostic: Option<Diagnostic>,
+}
+impl From<LoginError> for LoginFailure {
+    fn from(kind: LoginError) -> Self {
+        Self {
+            kind,
+            diagnostic: None,
+        }
+    }
+}
+impl std::fmt::Display for LoginFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.kind.fmt(f)
+    }
+}
+impl std::error::Error for LoginFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.kind)
+    }
+}
+impl LoginFailure {
+    pub fn json(&self) -> serde_json::Value {
+        let mut value = self.kind.json();
+        if let Some(diagnostic) = &self.diagnostic {
+            value["error"]["diagnostic"] =
+                serde_json::to_value(diagnostic).expect("diagnostic serializes");
+        }
+        value
+    }
+    pub fn text(&self) -> String {
+        match &self.diagnostic {
+            Some(diagnostic) => format!("{}\n{}", self.kind, diagnostic.text()),
+            None => self.kind.to_string(),
+        }
+    }
+}
+fn unavailable(diagnostic: Diagnostic) -> LoginFailure {
+    LoginFailure {
+        kind: LoginError::Unavailable,
+        diagnostic: Some(diagnostic.for_login()),
+    }
+}
+fn transport(error: reqwest::Error) -> LoginFailure {
+    let endpoint = error.url().map(|u| u.to_string());
+    unavailable(Diagnostic::reqwest(
+        &error.without_url(),
+        endpoint.as_deref(),
+        None,
+    ))
+}
+fn storage(cause: &str) -> LoginFailure {
+    LoginFailure {
+        kind: LoginError::Storage,
+        diagnostic: Some(Diagnostic::new(Stage::Storage, None, None, cause).for_login()),
+    }
+}
+fn storage_error(cause: &str, error: impl Into<anyhow::Error>) -> LoginFailure {
+    let mut failure = storage(cause);
+    let error = error.into();
+    if let Some(diagnostic) = &mut failure.diagnostic {
+        diagnostic.causes.extend(
+            error
+                .chain()
+                .take(32)
+                .map(crate::net_diagnostics::cause_text),
+        );
+        diagnostic.causes.dedup();
+        diagnostic.causes.truncate(8);
+    }
+    failure
+}
+fn credential_client(profile: Option<&str>) -> Result<reqwest::Client> {
+    build_credential_http_client(profile).map_err(|error| {
+        unavailable(Diagnostic::from_anyhow(&error).unwrap_or_else(|| {
+            Diagnostic::new(
+                Stage::Config,
+                None,
+                None,
+                "could not construct login HTTP client",
+            )
+        }))
+        .into()
+    })
+}
+async fn response_json<T: serde::de::DeserializeOwned>(
+    response: reqwest::Response,
+) -> Result<T, LoginFailure> {
+    let endpoint = response.url().to_string();
+    let status = response.status().as_u16();
+    response.json().await.map_err(|error| {
+        unavailable(Diagnostic::reqwest(
+            &error.without_url(),
+            Some(&endpoint),
+            Some(status),
+        ))
+    })
+}
+
 #[derive(Serialize, Deserialize)]
 struct PendingLogin {
     version: u8,
@@ -144,21 +247,24 @@ pub(crate) fn normalized_destination(raw: &str) -> Result<String> {
 fn pending_path(id: &str) -> Result<PathBuf> {
     let id = uuid::Uuid::parse_str(id).map_err(|_| LoginError::Missing)?;
     let dir = super::token_dir_for_profile(None)
-        .map_err(|_| LoginError::Storage)?
+        .map_err(|error| storage_error("could not access the local profile directory", error))?
         .join("pending-logins");
-    fs::create_dir_all(&dir).map_err(|_| LoginError::Storage)?;
+    fs::create_dir_all(&dir)
+        .map_err(|error| storage_error("could not access the local profile directory", error))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))
-            .map_err(|_| LoginError::Storage)?;
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).map_err(|error| {
+            storage_error("could not access the local profile directory", error)
+        })?;
     }
     Ok(dir.join(format!("{id}.json")))
 }
 
 fn save_pending(path: &Path, pending: &PendingLogin) -> Result<()> {
     let encoded = Zeroizing::new(serde_json::to_string(pending)?);
-    super::write_token_file(path, &encoded).map_err(|_| LoginError::Storage.into())
+    super::write_token_file(path, &encoded)
+        .map_err(|error| storage_error("could not save the local login record", error).into())
 }
 
 fn load_pending(path: &Path) -> Result<PendingLogin> {
@@ -170,7 +276,10 @@ fn load_pending(path: &Path) -> Result<PendingLogin> {
     {
         use std::os::unix::fs::PermissionsExt;
         if metadata.permissions().mode() & 0o077 != 0 {
-            return Err(LoginError::Storage.into());
+            return Err(storage(
+                "local login record permissions are not private (expected mode 0600)",
+            )
+            .into());
         }
     }
     let encoded = Zeroizing::new(fs::read(path).map_err(|_| LoginError::Missing)?);
@@ -187,10 +296,13 @@ fn lock_request(path: &Path) -> Result<fs::File> {
     }
     let file = options
         .open(path.with_extension("lock"))
-        .map_err(|_| LoginError::Storage)?;
+        .map_err(|error| storage_error("could not access the local profile directory", error))?;
     file.try_lock().map_err(|error| match error {
-        fs::TryLockError::WouldBlock => LoginError::Busy,
-        fs::TryLockError::Error(_) => LoginError::Storage,
+        fs::TryLockError::WouldBlock => anyhow::Error::from(LoginError::Busy),
+        fs::TryLockError::Error(error) => anyhow::Error::from(storage_error(
+            "could not lock the local login record",
+            error,
+        )),
     })?;
     Ok(file)
 }
@@ -272,11 +384,11 @@ pub async fn run(args: LoginArgs) -> Result<()> {
     } else {
         "device/v2"
     };
-    let client = build_credential_http_client(args.profile.as_deref())?;
+    let client = credential_client(args.profile.as_deref())?;
     let response = client.post(format!("{base_url}/api/v1/auth/{flow}/request"))
         .timeout(std::time::Duration::from_secs(30))
         .json(&serde_json::json!({"client_label": super::client_label(), "client_user_agent": device_login_user_agent(), "requested_profile": args.profile.as_deref().unwrap_or("default")}))
-        .send().await.map_err(|_| LoginError::Unavailable)?;
+        .send().await.map_err(transport)?;
     if response.status() == reqwest::StatusCode::NOT_FOUND {
         if flow == "device/v2"
             && hints.is_empty()
@@ -292,14 +404,25 @@ pub async fn run(args: LoginArgs) -> Result<()> {
     if !response.status().is_success() {
         return Err(response_error(response).await.into());
     }
-    let challenge: Challenge = response.json().await.map_err(|_| LoginError::Unavailable)?;
+    let endpoint = response.url().to_string();
+    let status = response.status().as_u16();
+    let challenge: Challenge = response_json(response).await?;
+    let invalid_verification = || {
+        unavailable(Diagnostic::new(
+            Stage::Validation,
+            Some(&endpoint),
+            Some(status),
+            "invalid verification URL in login response",
+        ))
+    };
     let mut verification =
-        url::Url::parse(&challenge.verification_uri).map_err(|_| LoginError::Unavailable)?;
-    if !matches!(verification.scheme(), "http" | "https")
+        url::Url::parse(&challenge.verification_uri).map_err(|_| invalid_verification())?;
+    if verification.host_str().is_none()
+        || !matches!(verification.scheme(), "http" | "https")
         || !verification.username().is_empty()
         || verification.password().is_some()
     {
-        return Err(LoginError::Unavailable.into());
+        return Err(invalid_verification().into());
     }
     verification.set_query(None);
     verification.set_fragment(None);
@@ -396,7 +519,7 @@ async fn resume(
     if pending.state != "pending" {
         return Err(state_error(&pending.state).into());
     }
-    let client = build_credential_http_client(pending.profile.as_deref())?;
+    let client = credential_client(pending.profile.as_deref())?;
     // Wall time survives process restarts; active waits use a fixed monotonic mapping.
     let wall_now = Utc::now();
     let monotonic_now = Instant::now();
@@ -438,17 +561,19 @@ async fn resume(
             .await;
         let response = match response {
             Ok(response) => response,
-            Err(_) => {
+            Err(error) => {
                 schedule_next_poll(&path, &mut pending, expires_at)?;
-                return Err(LoginError::Unavailable.into());
+                return Err(transport(error).into());
             }
         };
         if response.status().is_success() {
-            let value: serde_json::Value = match response.json().await {
+            let endpoint = response.url().to_string();
+            let status = response.status().as_u16();
+            let value: serde_json::Value = match response_json(response).await {
                 Ok(value) => value,
-                Err(_) => {
+                Err(error) => {
                     schedule_next_poll(&path, &mut pending, expires_at)?;
-                    return Err(LoginError::Unavailable.into());
+                    return Err(error.into());
                 }
             };
             let result = store_delivery(
@@ -457,6 +582,8 @@ async fn resume(
                 pending.profile.as_deref(),
                 value,
                 pending.flow == "agent-key",
+                &endpoint,
+                status,
             )
             .await;
             pending.device_code.zeroize();
@@ -474,7 +601,7 @@ async fn resume(
             pending.interval = pending.interval.saturating_add(5).max(interval);
         }
         next_poll_at = Some(schedule_next_poll(&path, &mut pending, expires_at)?);
-        if error == LoginError::Pending && !once {
+        if error.kind == LoginError::Pending && !once {
             continue;
         }
         return finish_error(&path, &mut pending, error);
@@ -488,33 +615,55 @@ fn state_error(state: &str) -> LoginError {
         _ => LoginError::Delivered,
     }
 }
-fn finish_error(path: &Path, pending: &mut PendingLogin, error: LoginError) -> Result<()> {
+fn finish_error(
+    path: &Path,
+    pending: &mut PendingLogin,
+    error: impl Into<LoginFailure>,
+) -> Result<()> {
+    let error = error.into();
     if matches!(
-        error,
+        error.kind,
         LoginError::Denied | LoginError::Expired | LoginError::Delivered | LoginError::InvalidCode
     ) {
         pending.device_code.zeroize();
-        pending.state = error.code().into();
+        pending.state = error.kind.code().into();
         save_pending(path, pending)?;
     }
     Err(error.into())
 }
 
-async fn poll_error(response: reqwest::Response) -> (LoginError, Option<u64>) {
+async fn poll_error(response: reqwest::Response) -> (LoginFailure, Option<u64>) {
+    let endpoint = response.url().to_string();
     let status = response.status();
     let retry_after = response
         .headers()
         .get(reqwest::header::RETRY_AFTER)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok());
-    let value: serde_json::Value = response.json().await.unwrap_or_default();
+    let value: serde_json::Value = match response_json(response).await {
+        Ok(value) => value,
+        Err(mut error) => {
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                error.kind = LoginError::RateLimited;
+                error.diagnostic = None;
+            }
+            return (
+                error,
+                if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                    retry_after
+                } else {
+                    None
+                },
+            );
+        }
+    };
     let code = value.get("error_code").and_then(serde_json::Value::as_i64);
     let interval = value
         .get("interval")
         .and_then(serde_json::Value::as_u64)
         .or(retry_after)
         .unwrap_or(0);
-    match code {
+    let (kind, interval) = match code {
         Some(11202 | 11902) => (LoginError::Pending, None),
         Some(11203 | 11903) => (LoginError::Pending, Some(interval)),
         Some(11204 | 11904) => (LoginError::Denied, None),
@@ -529,9 +678,26 @@ async fn poll_error(response: reqwest::Response) -> (LoginError, Option<u64>) {
             (LoginError::RateLimited, retry_after)
         }
         _ => (LoginError::Unavailable, None),
-    }
+    };
+    (
+        LoginFailure {
+            kind,
+            diagnostic: (kind == LoginError::Unavailable).then(|| {
+                let mut diagnostic = Diagnostic::new(
+                    Stage::Response,
+                    Some(&endpoint),
+                    Some(status.as_u16()),
+                    "login endpoint returned a non-success status",
+                )
+                .for_login();
+                diagnostic.server_error_code = code;
+                diagnostic
+            }),
+        },
+        interval,
+    )
 }
-async fn response_error(response: reqwest::Response) -> LoginError {
+async fn response_error(response: reqwest::Response) -> LoginFailure {
     poll_error(response).await.0
 }
 
@@ -541,16 +707,18 @@ async fn redeem(
     code: &str,
     output: OutputFormat,
 ) -> Result<()> {
-    let client = build_credential_http_client(profile)?;
+    let client = credential_client(profile)?;
     let response = client.post(format!("{base_url}/api/v1/auth/login-code/redeem"))
         .timeout(std::time::Duration::from_secs(30))
         .json(&serde_json::json!({"code": code, "client_label": super::client_label(), "client_user_agent": device_login_user_agent(), "requested_profile": profile}))
-        .send().await.map_err(|_| LoginError::Unavailable)?;
+        .send().await.map_err(transport)?;
     if !response.status().is_success() {
         return Err(response_error(response).await.into());
     }
-    let value = response.json().await.map_err(|_| LoginError::Unavailable)?;
-    let saved = store_delivery(&client, base_url, profile, value, false).await?;
+    let endpoint = response.url().to_string();
+    let status = response.status().as_u16();
+    let value = response_json(response).await?;
+    let saved = store_delivery(&client, base_url, profile, value, false, &endpoint, status).await?;
     report_delivery(saved, profile, output, true);
     Ok(())
 }
@@ -566,8 +734,18 @@ async fn store_delivery(
     profile: Option<&str>,
     value: serde_json::Value,
     restricted_only: bool,
+    endpoint: &str,
+    status: u16,
 ) -> Result<StoredDelivery> {
-    let delivery: Delivery = serde_json::from_value(value).map_err(|_| LoginError::Unavailable)?;
+    let invalid_delivery = || {
+        unavailable(Diagnostic::new(
+            Stage::Response,
+            Some(endpoint),
+            Some(status),
+            "invalid credential delivery in login response",
+        ))
+    };
+    let delivery: Delivery = serde_json::from_value(value).map_err(|_| invalid_delivery())?;
     let identity = match delivery {
         Delivery::AgentKey(delivery) => {
             let credential = Zeroizing::new(delivery.credential);
@@ -575,16 +753,17 @@ async fn store_delivery(
                 || !credential.starts_with("nyxid_ag_")
                 || !credential[9..].bytes().all(|b| b.is_ascii_hexdigit())
             {
-                return Err(LoginError::Unavailable.into());
+                return Err(invalid_delivery().into());
             }
-            if agent_key::save(profile, base_url, &credential, &delivery.identity).is_err() {
+            if let Err(error) = agent_key::save(profile, base_url, &credential, &delivery.identity)
+            {
                 let _ = client
                     .delete(format!("{base_url}/api/v1/auth/agent-key/self"))
                     .bearer_auth(credential.as_str())
                     .timeout(std::time::Duration::from_secs(5))
                     .send()
                     .await;
-                return Err(LoginError::Storage.into());
+                return Err(storage_error("could not save the local login profile", error).into());
             }
             StoredDelivery {
                 description: agent_key::format_identity(&delivery.identity),
@@ -604,23 +783,23 @@ async fn store_delivery(
                     .timeout(std::time::Duration::from_secs(5))
                     .send()
                     .await;
-                return Err(LoginError::Unavailable.into());
+                return Err(invalid_delivery().into());
             }
             if access.is_empty() || refresh.is_empty() {
-                return Err(LoginError::Unavailable.into());
+                return Err(invalid_delivery().into());
             }
             let result = super::replace_login_files(profile, || {
                 super::save_base_url_for(profile, base_url)?;
                 super::save_tokens_for(profile, &access, Some(&refresh))
             });
-            if result.is_err() {
+            if let Err(error) = result {
                 let _ = client
                     .post(format!("{base_url}/api/v1/auth/logout"))
                     .bearer_auth(access.as_str())
                     .timeout(std::time::Duration::from_secs(5))
                     .send()
                     .await;
-                return Err(LoginError::Storage.into());
+                return Err(storage_error("could not save the local login profile", error).into());
             }
             StoredDelivery {
                 description: "Signed in with an account session.".into(),

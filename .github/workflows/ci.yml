@@ -105,6 +105,7 @@ jobs:
               - '.config/nextest.toml'
             cli:
               - 'cli/**'
+              - 'skills/nyxid/scripts/**'
               - 'cloud-auth/**'
               - 'service-adapters/**'
               - 'nyxid-crypto/**'
