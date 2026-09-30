@@ -269,12 +269,11 @@ fn bind_input(
     if let Some(owner) = input
         .get("target_org_id")
         .and_then(serde_json::Value::as_str)
+        && owner != claim.link.user_id
     {
-        if owner != claim.link.user_id {
-            return Err(AppError::ValidationError(
-                "The owner is fixed by this connect link".into(),
-            ));
-        }
+        return Err(AppError::ValidationError(
+            "The owner is fixed by this connect link".into(),
+        ));
     }
     input.insert("label".into(), claim.link.label.clone().into());
     if claim.link.user_id != actor {
@@ -423,12 +422,11 @@ pub async fn managed_complete(
                 .input
                 .get("connection_id")
                 .and_then(serde_json::Value::as_str)
+                && claim.link.connection_id.as_deref() != Some(id)
             {
-                if claim.link.connection_id.as_deref() != Some(id) {
-                    return Err(AppError::ValidationError(
-                        "OAuth connection does not belong to this link".into(),
-                    ));
-                }
+                return Err(AppError::ValidationError(
+                    "OAuth connection does not belong to this link".into(),
+                ));
             }
             let input = serde_json::from_value(serde_json::Value::Object(body.input))
                 .map_err(|_| AppError::ValidationError("Invalid managed setup fields".into()))?;

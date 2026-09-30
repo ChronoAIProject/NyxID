@@ -288,20 +288,37 @@ pub(crate) async fn complete_with_link(
         body.target_org_id.as_deref(),
     )
     .await?;
-    let created = channel_bot_service::create_managed_bot_linked(
-        &state.db,
-        &state.billing,
-        &state.config,
-        &state.encryption_keys,
-        &state.http_client,
-        adapter.as_ref(),
-        &owner,
-        body.label.trim(),
-        &channel_managed::ManagedOnboardingInput(body.input),
-        progress,
-        link_claim,
-    )
-    .await?;
+    let input = channel_managed::ManagedOnboardingInput(body.input);
+    let created = if let Some(claim) = link_claim {
+        channel_bot_service::create_managed_bot_linked(
+            &state.db,
+            &state.billing,
+            &state.config,
+            &state.encryption_keys,
+            &state.http_client,
+            adapter.as_ref(),
+            &owner,
+            body.label.trim(),
+            &input,
+            progress,
+            Some(claim),
+        )
+        .await?
+    } else {
+        channel_bot_service::create_managed_bot(
+            &state.db,
+            &state.billing,
+            &state.config,
+            &state.encryption_keys,
+            &state.http_client,
+            adapter.as_ref(),
+            &owner,
+            body.label.trim(),
+            &input,
+            progress,
+        )
+        .await?
+    };
     let webhook_url = format!(
         "{}/api/v1/webhooks/channel/{platform}/{}",
         state.config.base_url, created.bot.id
