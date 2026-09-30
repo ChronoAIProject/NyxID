@@ -393,6 +393,8 @@ The approval system works without Telegram -- users can always approve/reject vi
 |----------|---------|-------------|
 | `CONNECT_LINK_EXPIRY_SWEEP_INTERVAL_SECS` | `60` | Interval between sweeps that claim overdue app-bound connect links and dispatch `connect_link.expired`. Effective deadlines include the pinned OAuth/device finalization grace. `0` disables the sweep; query-time expiry remains active. |
 
+The same interval schedules an independent [bot-link recovery and delivery sweep](CHANNEL_BOT_RELAY.md#tracked-bot-connection-links). Setting it to `0` disables background recovery for both link types; request-time reconciliation remains available. Bot links add no environment variable.
+
 ## Device Login Code Compatibility
 
 | Variable | Default | Description |

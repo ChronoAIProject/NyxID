@@ -29,6 +29,8 @@ nyxid connect github --scope public_repo --no-wait --output json
 
 To add scopes to an **existing connection**, use the console: **External Services → connection → Manage permissions**.
 
+For bot setup with signed completion notifications, use [channel-bot connect-link](#channel-bot-connect-link).
+
 ## update
 
 Keep the CLI and your installed AI skills current. With no flags, `nyxid update` upgrades the `nyxid` binary to the latest GitHub release, verifies the release attestation, then hands off to the freshly-installed binary to refresh installed skills.
@@ -231,6 +233,30 @@ nyxid channel-bot show <id>
 nyxid channel-bot delete <id> [--yes]
 nyxid channel-bot verify <id>                # re-check token + re-register webhook
 ```
+
+### channel-bot connect-link
+
+Create a tracked bot setup request and return immediately without polling:
+
+```bash
+nyxid channel-bot connect-link discord --label "Support bot" \
+  --webhook-url https://app.example.com/events/nyxid \
+  --callback-url https://app.example.com/setup/return \
+  --expires-in 900 --output json
+nyxid channel-bot connect-link-status <request-id> --output json
+nyxid channel-bot cancel-connect-link <request-id> --output json
+```
+
+`--org <id|slug|name>` selects an organization you administer. `--requested-by`
+sets an app display name; authenticated agent-key and OAuth app names take
+precedence. The signing secret returned for a direct webhook is shown once.
+The webhook receives signed `channel_connect.completed`, `.cancelled`, or
+`.expired` events. The optional browser callback runs after explicit user
+continuation. `connect-link-status` is available for diagnostics and recovery;
+it returns no tokens or secrets. Existing `nyxid connect` service commands and
+`channel-bot register --managed` retain their current behavior.
+
+This command returns the direct webhook signing secret in its JSON or terminal output. It does not use the browser secret-delivery wizard or require `--no-wait`. See [Receive a completion callback](/docs/web/guides/channel-bots#receive-a-completion-callback) for signature verification and [connect](#connect) for service connection links.
 
 ### channel-bot route
 

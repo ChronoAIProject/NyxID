@@ -5,6 +5,8 @@ description: Register a Telegram, Discord, Lark/Feishu, or Slack bot from the te
 
 A channel bot bridges a messaging platform to an AI agent: inbound messages are relayed to an agent's callback URL, and the agent replies back through NyxID. The CLI registers the bot, wires up webhook verification, and maps conversations to the agent key that should answer them. For the dashboard equivalent and platform-console screenshots, see the [web channel-bots guide](/docs/web/guides/channel-bots).
 
+To send the human a setup link and receive a signed completion notification, use [channel-bot connect-link](/docs/cli/reference/others#channel-bot-connect-link). The [callback guide](/docs/web/guides/channel-bots#receive-a-completion-callback) covers signature verification and recovery.
+
 This assumes you are [logged in](/docs/cli/getting-started/authenticate). Pass secrets via `--*-env` flags so they never land in shell history.
 
 ## 1. Register the bot

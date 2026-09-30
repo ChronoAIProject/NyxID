@@ -3,7 +3,7 @@ import type { UseFormReturn } from "react-hook-form";
 import { useManagedOnboarding } from "@/hooks/use-channel-managed";
 import { useChannelPlatformViews } from "@/hooks/use-channel-platforms";
 import type { CreateChannelBotFormData } from "@/schemas/channels";
-import type { ChannelPlatform } from "@/types/channels";
+import type { CreateChannelBotResponse, ChannelPlatform } from "@/types/channels";
 import { MANAGED_FLOW_COMPONENTS } from "./managed-flows";
 import { TelegramNewConnect } from "./telegram-new-connect";
 
@@ -14,7 +14,7 @@ export interface ChannelBotConnectProps {
   readonly form: UseFormReturn<CreateChannelBotFormData>;
   readonly fullPage?: boolean;
   readonly preferManual?: boolean;
-  readonly onConnected: (id: string, replace?: boolean) => void;
+  readonly onConnected: (id: string, replace?: boolean, result?: CreateChannelBotResponse) => void;
   readonly renderFields: (state: {
     disabled: boolean;
     scopeDescription?: string;
@@ -75,7 +75,7 @@ function ManagedBotConnect({
             label={label}
             orgId={orgId}
             fullPage={fullPage}
-            onConnected={(bot) => onConnected(bot.id)}
+            onConnected={(bot) => onConnected(bot.id, undefined, bot)}
           />
           {!descriptor.managedOnly && (
             <details

@@ -26,6 +26,69 @@ async fn delete_bot_result(api: &mut ApiClient, id: &str) -> Result<Value> {
 
 pub async fn run(command: ChannelBotCommands) -> Result<()> {
     match command {
+        ChannelBotCommands::ConnectLink {
+            platform,
+            label,
+            org,
+            callback_url,
+            webhook_url,
+            expires_in,
+            requested_by,
+            auth,
+        } => {
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let owner = match org {
+                Some(org) => Some(resolve_org_id(&mut api, &org).await?),
+                None => None,
+            };
+            let result: Value = api
+                .post(
+                    "/channel-connect-links",
+                    &serde_json::json!({
+                        "platform": platform, "label": label, "target_org_id": owner,
+                        "callback_url": callback_url, "webhook_url": webhook_url,
+                        "expires_in": expires_in, "requested_by": requested_by,
+                    }),
+                )
+                .await?;
+            if matches!(auth.output, OutputFormat::Json) {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                println!(
+                    "Connection request: {}",
+                    result["id"].as_str().unwrap_or("-")
+                );
+                println!("Open: {}", result["connect_url"].as_str().unwrap_or("-"));
+                println!("Expires: {}", result["expires_at"].as_str().unwrap_or("-"));
+                if let Some(secret) = result["webhook_signing_secret"].as_str() {
+                    println!(
+                        "Webhook signing key ID: {}",
+                        result["webhook_signing_key_id"].as_str().unwrap_or("-")
+                    );
+                    println!("Webhook signing secret (shown once): {secret}");
+                }
+            }
+            Ok(())
+        }
+        ChannelBotCommands::CancelConnectLink { id, auth } => {
+            uuid::Uuid::parse_str(&id).map_err(|_| anyhow::anyhow!("Link ID must be a UUID"))?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let result: Value = api
+                .post(
+                    &format!("/channel-connect-links/{id}/cancel"),
+                    &serde_json::json!({}),
+                )
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            Ok(())
+        }
+        ChannelBotCommands::ConnectLinkStatus { id, auth } => {
+            uuid::Uuid::parse_str(&id).map_err(|_| anyhow::anyhow!("Link ID must be a UUID"))?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let result: Value = api.get(&format!("/channel-connect-links/{id}")).await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            Ok(())
+        }
         ChannelBotCommands::Platforms { auth } => {
             let mut api = ApiClient::from_auth_checked(&auth).await?;
             let result: Value = api.get("/channel-platforms").await?;
@@ -1037,6 +1100,65 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     const ORG_UUID: &str = "00000000-0000-0000-0000-0000000000bb";
+
+    #[tokio::test]
+    async fn connect_link_cancel_uses_bot_route_and_validates_uuid() {
+        use clap::Parser;
+        let id = "00000000-0000-4000-8000-000000000001";
+        crate::cli::Cli::try_parse_from(["nyxid", "channel-bot", "cancel-connect-link", id])
+            .unwrap();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/api/v1/channel-connect-links/{id}/cancel")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"id": id, "status": "cancelled"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        run(ChannelBotCommands::CancelConnectLink {
+            id: id.into(),
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .unwrap();
+        assert!(
+            run(ChannelBotCommands::CancelConnectLink {
+                id: "invalid/id".into(),
+                auth: mock_auth(server.uri())
+            })
+            .await
+            .is_err()
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn connect_link_creates_once_without_polling_or_using_connector_routes() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/channel-connect-links"))
+            .and(body_partial_json(serde_json::json!({"platform": "discord", "label": "Support", "webhook_url": "https://example.com/events", "expires_in": 600})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "00000000-0000-4000-8000-000000000001", "connect_url": "https://nyxid.example/connect/bot/one-time",
+                "expires_at": "2026-09-30T00:00:00Z", "webhook_signing_secret": "test-one-time-secret", "webhook_signing_key_id": "test-key-id"
+            })))
+            .expect(1).mount(&server).await;
+        run(ChannelBotCommands::ConnectLink {
+            platform: "discord".into(),
+            label: "Support".into(),
+            org: None,
+            callback_url: None,
+            webhook_url: Some("https://example.com/events".into()),
+            expires_in: Some(600),
+            requested_by: None,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .unwrap();
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
 
     #[tokio::test]
     async fn platforms_fetches_authoritative_catalog_in_both_output_modes() {

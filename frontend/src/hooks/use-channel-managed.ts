@@ -43,9 +43,10 @@ export async function completeManagedOnboarding(
   onStage: (stage: string) => void,
   signal: AbortSignal,
   apiBaseUrl: string,
+  connectToken?: string,
 ): Promise<CreateChannelBotResponse> {
   const response = await apiFetch(
-    `/channel-bots/managed-onboarding/${encodeURIComponent(platform)}/complete`,
+    connectToken ? "/channel-connect-links/managed/complete" : `/channel-bots/managed-onboarding/${encodeURIComponent(platform)}/complete`,
     {
       method: "POST",
       apiBaseUrl,
@@ -53,7 +54,7 @@ export async function completeManagedOnboarding(
         "Content-Type": "application/json",
         Accept: "text/event-stream",
       },
-      body: managedCompleteSchema.parse(input),
+      body: { ...managedCompleteSchema.parse(input), ...(connectToken ? { token: connectToken } : {}) },
       signal,
     },
   );
@@ -90,21 +91,21 @@ export async function completeManagedOnboarding(
   }
 }
 
-export async function startManagedOAuth(platform: string, label: string, orgId: string | null, signal: AbortSignal) {
+export async function startManagedOAuth(platform: string, label: string, orgId: string | null, signal: AbortSignal, connectToken?: string) {
   return managedOAuthStartSchema.parse(await apiClient(
-    `/channel-bots/managed-onboarding/${encodeURIComponent(platform)}/start`,
-    { method: "POST", body: { label: label.trim(), ...(orgId ? { target_org_id: orgId } : {}) }, signal },
+    connectToken ? "/channel-connect-links/managed/start" : `/channel-bots/managed-onboarding/${encodeURIComponent(platform)}/start`,
+    { method: "POST", body: connectToken ? { token: connectToken } : { label: label.trim(), ...(orgId ? { target_org_id: orgId } : {}) }, signal },
   ));
 }
 
 /** `ownerId` is the bot owner (the target org, or the caller when personal). */
-export async function completeManagedOAuth(platform: string, input: z.infer<typeof oauthConnectionCompleteSchema>, signal: AbortSignal, botId?: string, ownerId?: string | null) {
+export async function completeManagedOAuth(platform: string, input: z.infer<typeof oauthConnectionCompleteSchema>, signal: AbortSignal, botId?: string, ownerId?: string | null, connectToken?: string) {
   const body = oauthConnectionCompleteSchema.parse(input);
   if (botId) {
     await apiClient(`/channel-bots/${encodeURIComponent(botId)}/reconnect`, { method: "POST", body: { connection_id: body.connection_id }, signal, ...(ownerId ? { creditsDenial: mutationCreditsDenial("channel-bot-reconnect", botId, ownerId) } : {}) });
     return { id: botId, platform } as CreateChannelBotResponse;
   }
-  return apiClient<CreateChannelBotResponse>(`/channel-bots/managed-onboarding/${encodeURIComponent(platform)}/complete`, { method: "POST", body, signal, ...(ownerId ? { creditsDenial: mutationCreditsDenial(`channel-managed-${platform}-complete`, body.connection_id, ownerId) } : {}) });
+  return apiClient<CreateChannelBotResponse>(connectToken ? "/channel-connect-links/managed/complete" : `/channel-bots/managed-onboarding/${encodeURIComponent(platform)}/complete`, { method: "POST", body: { ...body, ...(connectToken ? { token: connectToken } : {}) }, signal, ...(ownerId ? { creditsDenial: mutationCreditsDenial(`channel-managed-${platform}-complete`, body.connection_id, ownerId) } : {}) });
 }
 
 export function useReregisterChannelBot() {

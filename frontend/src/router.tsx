@@ -1,3 +1,4 @@
+import { ChannelConnectLinkPage } from "@/pages/channel-connect-link";
 import { AdminOwnershipPage } from "@/pages/admin-ownership";
 import { normalizeAdminUsageSearch } from "@/schemas/admin-usage";
 import { preserveTelegramClaimForLogin } from "@/lib/telegram-claim-handoff";
@@ -304,6 +305,13 @@ export const loginCodeRoute = createRoute({
   // This page mints a new login code; it has no code input to prefill.
   validateSearch: (): Record<string, never> => ({}),
   component: () => <LoginAgentKeyPage mint />,
+});
+
+const channelConnectLinkRoute = createRoute({
+  path: "/connect/bot/$token",
+  getParentRoute: () => rootRoute,
+  validateSearch: (): Record<string, never> => ({}),
+  component: ChannelConnectLinkPage,
 });
 
 const connectLinkRoute = createRoute({
@@ -1029,6 +1037,7 @@ const routeTree = rootRoute.addChildren([
   loginAgentKeyRoute,
   channelBotSetupRoute,
   connectLinkRoute,
+  channelConnectLinkRoute,
   connectLinkReturnRoute,
   sshTerminalRoute,
   assistantRoute,

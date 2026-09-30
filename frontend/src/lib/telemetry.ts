@@ -119,6 +119,7 @@ export const AUTOCAPTURE_DENYLIST = [
  * response) that would leak if captured.
  */
 const SENSITIVE_PATH_PATTERNS: RegExp[] = [
+  /^\/connect\/bot\/[^/]+/,
   /^\/login\/(?:device|agent-key|code)(?:\/|$)/,
   /\/verify-email\/[^/]+/,
   /\/reset-password\/[^/]+/,

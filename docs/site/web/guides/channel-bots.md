@@ -25,6 +25,8 @@ Before routing messages, create an Agent Key with a `callback_url` configured. I
 
 Go to **Channel Bots → Setup links** to copy a dedicated onboarding link for any enabled channel. The list and each page use NyxID's live platform catalog, including credential fields, required/optional labels, secret masking, hints, and setup instructions. New platforms using credential forms or an existing managed connection flow appear without adding another page or route. A new kind of provider authorization flow also needs a frontend flow implementation.
 
+For a single-use request that notifies your app after setup, see [Receive a completion callback](#receive-a-completion-callback).
+
 Use your NyxID frontend origin with `/channel-bots/connect/{platform}`. For example:
 
 | Channel | Setup path |
@@ -94,6 +96,43 @@ url.search = new URLSearchParams({
 Prefilling never submits or connects automatically. Users can review and edit every populated field before submitting. Secret parameters are removed from the current URL with replacement navigation after the form consumes them and are kept only in the mounted form; reloading the cleaned URL requires entering those secrets again. Sign-in preserves the original onboarding parameters until the setup page opens.
 
 Credential-bearing links grant their recipient access to those credentials. URL cleanup happens after the page loads; it does not erase copies from messages, server logs, or browser history recorded before cleanup. Use the credential-free **Setup links** URLs for broadly shared onboarding.
+
+## Receive a completion callback
+
+For app or agent automation, create a tracked setup link with
+`POST /api/v1/channel-connect-links` or the CLI:
+
+```bash
+nyxid channel-bot connect-link discord --label "Support bot" \
+  --webhook-url https://app.example.com/events/nyxid --output json
+```
+
+Save the returned signing secret and share `connect_url` with the bot owner.
+NyxID sends a signed `channel_connect.completed`, `channel_connect.cancelled`, or
+`channel_connect.expired` event to the webhook, so your app can resume without
+polling. OAuth apps use their registered connection webhook. An optional
+`--callback-url` returns the human to your app after they click Continue; it is
+separate from the server notification.
+
+Tracked links fix the requested platform, bot name, and owner. The owner still
+reviews the request, supplies credentials or approves the provider connection,
+and saves any one-time verification secret before continuing. Completion means
+the bot was added: inspect `bot_status` and `webhook_registered` in the event for
+platforms that still require manual webhook setup. Existing reusable setup links
+and service connector links keep their current behavior.
+
+The notification envelope contains `event_id`, `event_type`, `occurred_at`, and `data`. The data identifies the bot owner in `user_id`, the request in `channel_connect_link_id`, and the saved bot in `bot_id` when one exists.
+
+Verify each event before acting on it:
+
+1. Read `X-NyxID-Timestamp` as Unix seconds and reject timestamps outside your receiver's replay window.
+2. Select your saved signing secret using `X-NyxID-Key-Id`.
+3. Compute HMAC-SHA256 over `timestamp + "." + raw_request_body`. Compare the hex digest with `X-NyxID-Signature` after removing its `sha256=` prefix, using a constant-time comparison.
+4. Deduplicate by `event_id`, also sent as `X-NyxID-Delivery-Id`. `X-NyxID-Event` carries the event type. Return a 2xx response after accepting the notification.
+
+NyxID retries delivery with the same event ID, occurrence time, and data, for at most five cycles of three HTTP attempts. Your endpoint must use public HTTPS; redirects are disabled. A link lasts 15 minutes by default, and started setup has 30 minutes of recovery grace. Telegram approval has its own 15-minute deadline and must be resumed by the NyxID account that started it. Cancellation or expiry before a bot is created ends that single-use request.
+
+See the [CLI command reference](/docs/cli/reference/others#channel-bot-connect-link) for creation, status, cancellation, and organization flags. Service onboarding uses the existing [connect command](/docs/cli/reference/others#connect).
 
 ## Create a Telegram bot through Telegram
 

@@ -1711,3 +1711,134 @@ sequenceDiagram
 ## Aurinko email channel
 
 Aurinko is an account-token email adapter with a separate application signing secret. Signed subscription challenges work during pending setup; account/subscription-bound notifications fetch mail and deliver it inline under producer-owned retries. Durable metadata claims distinguish active work from completion, preserve callback UUIDs across retries, and fence uncertain message-bound replies. This adapter returns retryable HTTP failures rather than the legacy always-ACK behavior. See [Aurinko integration](./AURINKO_INTEGRATION.md) for setup, CLI/API contracts, filtering, routing, credential lifecycle, and deletion outcomes.
+
+## Tracked bot connection links
+
+Reference: [bot-link HTTP API](API.md#bot-connection-links), [existing service connection links](API.md#third-party-connector-integration), and [CLI commands](site/cli/reference/others.md#channel-bot-connect-link).
+
+Applications and agents can create a single-use setup request through
+`POST /api/v1/channel-connect-links`. This uses the separate
+`channel_connect_links` collection and `/connect/bot/{token}` page. Existing
+service connector links (`/connect-links`, `/connect/{token}`) keep their current
+request, response, storage, callback and webhook contracts. The reusable channel
+setup URLs also remain available.
+
+```json
+{
+  "platform": "discord",
+  "label": "Support bot",
+  "requested_by": "Support platform",
+  "callback_url": "https://app.example.com/setup/return?state=your-request-id",
+  "webhook_url": "https://app.example.com/events/nyxid",
+  "expires_in": 900
+}
+```
+
+The response contains `id`, `connect_url`, `expires_at`, and optional
+`webhook_signing_secret` / `webhook_signing_key_id`. Share `connect_url` with the
+human owner. `platform`, `label`, and the personal or organization owner
+(`target_org_id`) are fixed when the request is created. Only a signed-in human
+with write access to that owner can complete it; agent keys can create, inspect,
+and cancel requests. Merely opening the link does not create a bot.
+
+`callback_url` is an optional **browser return destination**. After setup, the
+user clicks Continue after saving any one-time platform verification secret.
+The return URL preserves caller query parameters and replaces `status`,
+`channel_connect_link_id`, and `bot_id` with the actual result. The browser return
+is useful for navigation; use the signed webhook as the trusted completion
+signal. No bot credential or platform verification secret appears in either
+callback.
+
+`webhook_url` is a **server-to-server completion destination** for session/CLI/agent
+callers. It must use HTTPS and resolve to public addresses. It is checked again
+at delivery, with DNS addresses pinned and redirects disabled. The signing
+secret is returned once and stored encrypted. OAuth app callers instead use
+their existing registered connection webhook and its signing key; they cannot
+supply `webhook_url`, and any browser callback must satisfy the app's registered
+OAuth redirect URI matching policy. Existing app connection webhooks receive the new event types only
+when that app creates bot connection requests.
+
+Terminal events are `channel_connect.completed`, `channel_connect.cancelled`,
+and `channel_connect.expired`. Example:
+
+```json
+{
+  "event_id": "stable-event-uuid",
+  "event_type": "channel_connect.completed",
+  "occurred_at": "2026-09-30T08:00:00Z",
+  "data": {
+    "user_id": "owner-uuid",
+    "channel_connect_link_id": "request-uuid",
+    "platform": "discord",
+    "status": "completed",
+    "bot_id": "bot-uuid",
+    "bot_status": "pending_webhook",
+    "webhook_registered": false,
+    "is_active": true,
+    "last_error": null,
+    "expires_at": "2026-09-30T08:15:00Z"
+  }
+}
+```
+
+Completion means the bot was saved successfully. Some platforms still need
+manual webhook configuration, so receivers must inspect `bot_status` and
+`webhook_registered` before assuming inbound messages are ready. Agent routing
+is configured separately. `user_id` is the bot owner, including an organization
+UUID for org-owned bots.
+
+Verify `X-NyxID-Signature` (`sha256=<hex digest>`) as HMAC-SHA256 over
+`X-NyxID-Timestamp + "." + raw_request_body` using the signing secret. The other
+headers are `X-NyxID-Event`, `X-NyxID-Delivery-Id`, and `X-NyxID-Key-ID`. Validate the
+timestamp within your allowed replay window, compare signatures in constant
+time, deduplicate by `event_id`, and respond with 2xx. The event ID, occurrence
+time, and result snapshot remain stable across delivery cycles. Delivery is
+at least once: a lost acknowledgement can cause a duplicate.
+
+Terminal state and the pending notification are stored in one atomic write.
+Retries use a five-minute delivery lease, up to five cycles of three bounded
+HTTP attempts each. A separate bot-link sweep recovers interrupted delivery,
+expired requests, and provider/Telegram completion without app polling. It uses
+`CONNECT_LINK_EXPIRY_SWEEP_INTERVAL_SECS`; setting that to `0` disables background
+recovery for both kinds of link. Bot notifications have a separate app rate
+window so they do not consume the existing connector webhook delivery quota.
+
+`GET /api/v1/channel-connect-links/{id}` exposes the result and `delivery_status`
+(`pending`, `delivered`, `abandoned`, or `none`) for diagnostics. It never returns
+the hosted token, webhook destination, or signing secret. A link defaults to 15
+minutes and accepts a lifetime of 60–3600 seconds. A pinned setup gets 30 minutes
+of recovery grace, including Telegram work in `ready` or `provisioning`. After
+that window, incomplete links expire and notify the app. A late Telegram worker
+can still finish the separately authorized bot, but it cannot change a terminal
+link or send a second terminal event. The Telegram approval request has its own
+15-minute lifetime; cancellation or expiry before bot creation ends this
+single-use link too. Create a fresh link to start another attempt. For org-owned
+Telegram setup, the administrator who started the approval must resume it;
+other administrators can view link progress without taking over that consent.
+Cancellation through
+`POST /api/v1/channel-connect-links/{id}/cancel` is available before provider
+setup starts. Once resources exist, resume the saved setup instead of creating
+another bot. Manual and managed operations continue if the browser disconnects;
+the hosted page offers recovery for saved bots and authorized OAuth connections.
+
+### Bot-link implementation and compatibility
+
+Bot links have their own collection and terminal state transitions. The existing service-link model, handlers, hosted page, and callback fields remain unchanged. The shared app lookup validates bot callbacks through the same OAuth redirect policy used by service links.
+
+| Responsibility | Implementation |
+|---|---|
+| Stored link, token hash, encrypted direct receiver, and terminal event | [`models/channel_connect_link.rs`](../backend/src/models/channel_connect_link.rs) |
+| Owner checks, renewable claims, atomic bot association, completion, recovery, and delivery | [`services/channel_connect_link_service.rs`](../backend/src/services/channel_connect_link_service.rs) |
+| Request validation, public preview, human setup, and managed progress streaming | [`handlers/channel_connect_links.rs`](../backend/src/handlers/channel_connect_links.rs) |
+| Bot creation with an optional link claim | [`services/channel_bot_service.rs`](../backend/src/services/channel_bot_service.rs) |
+| Telegram request creation and worker completion | [`services/telegram_new_service.rs`](../backend/src/services/telegram_new_service.rs), [`services/telegram_new_connect.rs`](../backend/src/services/telegram_new_connect.rs) |
+| Registered-app receiver and shared signature sender | [`services/developer_webhook_service.rs`](../backend/src/services/developer_webhook_service.rs), [`services/webhook_delivery_service.rs`](../backend/src/services/webhook_delivery_service.rs) |
+| Routes, API discovery, indexes, and independent sweep task | [`routes.rs`](../backend/src/routes.rs), [`api_docs.rs`](../backend/src/api_docs.rs), [`db.rs`](../backend/src/db.rs), [`main.rs`](../backend/src/main.rs) |
+| Hosted page and optional context for existing setup components | [`pages/channel-connect-link.tsx`](../frontend/src/pages/channel-connect-link.tsx), [`hooks/use-channel-connect-link.tsx`](../frontend/src/hooks/use-channel-connect-link.tsx) |
+| Create, status, and cancellation commands | [`commands/channel_bot.rs`](../cli/src/commands/channel_bot.rs) |
+
+Only one setup attempt can hold a link's renewable claim. Bot insertion and its link association commit together; Telegram request insertion and its link association also share a transaction. Completion checks the saved bot's readiness, then commits the terminal state and notification snapshot together. Delivery failure leaves the terminal result intact and schedules another attempt until the retry limit is reached.
+
+Existing bot creation entry points pass no link claim, and existing frontend callers use their original endpoints outside the hosted context. Existing service callbacks retain their HTTP client, signature contract, timestamp behavior, and `developer_webhook` rate bucket. Bot callbacks opt into public-address validation, DNS pinning, redirects disabled, and the separate `developer_channel_webhook` bucket. Their sweep runs in a separate task while sharing the [configured sweep interval](ENV.md#hosted-connect-links).
+
+Regression coverage lives beside the new service and handlers, in [`telegram_new_tests.rs`](../backend/src/services/telegram_new_tests.rs), and in the [hosted page tests](../frontend/src/pages/channel-connect-link.test.tsx). Existing `connect_link_service`, `connect_links`, `developer_webhook_service`, and CLI `commands::connect` tests cover the shared compatibility boundary.
