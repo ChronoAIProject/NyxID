@@ -264,6 +264,78 @@ static PARSED_SPECS: LazyLock<HashMap<&'static str, Arc<serde_json::Value>>> = L
     },
 );
 
+/// What an overlay says about an operation's effect on existing data.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OperationMarks {
+    /// `x-aevatar-tool.destructive`: the operation deletes or replaces data.
+    pub destructive: bool,
+    /// NyxID's `x-nyxid-changes-existing`: whether the operation changes or
+    /// removes what exists, where its method says otherwise (a POST that
+    /// edits, a PUT that only acts). `None` leaves it to the method.
+    /// Aevatar's marker is Aevatar's contract; NyxID adds its own rather
+    /// than change it.
+    pub changes_existing: Option<bool>,
+}
+
+impl OperationMarks {
+    pub fn of(operation: &serde_json::Value) -> Self {
+        Self {
+            destructive: operation["x-aevatar-tool"]["destructive"].as_bool() == Some(true),
+            changes_existing: operation["x-nyxid-changes-existing"].as_bool(),
+        }
+    }
+}
+
+/// The marks of each overlay's operations, by spec key, keyed by endpoint
+/// name (sanitized operation ID) and by `METHOD path` route.
+static OPERATION_MARKS: LazyLock<HashMap<&'static str, HashMap<String, OperationMarks>>> =
+    LazyLock::new(|| {
+        PARSED_SPECS
+            .iter()
+            .map(|(key, spec)| {
+                let mut operations = HashMap::new();
+                for (path, item) in spec["paths"].as_object().into_iter().flatten() {
+                    for (method, operation) in item.as_object().into_iter().flatten() {
+                        let marks = OperationMarks::of(operation);
+                        if marks == OperationMarks::default() {
+                            continue;
+                        }
+                        operations.insert(format!("{} {path}", method.to_ascii_uppercase()), marks);
+                        if let Some(id) = operation["operationId"].as_str() {
+                            operations.insert(super::openapi_parser::sanitize_name(id), marks);
+                        }
+                    }
+                }
+                (*key, operations)
+            })
+            .collect()
+    });
+
+/// What the hosted overlay of a catalog service says about this operation,
+/// matched literally by name or route. Marks that narrow (destructive,
+/// changes existing) match either; "only acts" (`changes_existing: false`)
+/// needs the exact route, since it widens what guests may do.
+pub fn operation_marks(slug: &str, method: &str, path: &str, name: &str) -> OperationMarks {
+    let Some(operations) = spec_key_for_slug(slug).and_then(|key| OPERATION_MARKS.get(key)) else {
+        return OperationMarks::default();
+    };
+    let by_name = operations.get(name).copied().unwrap_or_default();
+    let by_route = operations
+        .get(&format!("{} {path}", method.to_ascii_uppercase()))
+        .copied()
+        .unwrap_or_default();
+    OperationMarks {
+        destructive: by_name.destructive || by_route.destructive,
+        changes_existing: if by_name.changes_existing == Some(true)
+            || by_route.changes_existing == Some(true)
+        {
+            Some(true)
+        } else {
+            by_route.changes_existing
+        },
+    }
+}
+
 /// Parsed overlay document for a spec key (the `{spec_key}` URL segment).
 pub fn spec_for_key(spec_key: &str) -> Option<Arc<serde_json::Value>> {
     PARSED_SPECS.get(spec_key).cloned()
@@ -313,6 +385,75 @@ pub fn hydrated_slugs() -> impl Iterator<Item = &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Guests' default access follows what overlays say about an operation:
+    /// Aevatar's destructive marker and NyxID's own changes-existing marker,
+    /// matched by endpoint name or route.
+    #[test]
+    fn overlays_say_what_operations_do_to_existing_data() {
+        let marks = operation_marks;
+        assert!(
+            marks(
+                "api-telegram-bot",
+                "POST",
+                "/deleteMessage",
+                "delete_message"
+            )
+            .destructive
+        );
+        assert!(marks("api-telegram-bot", "post", "/deleteMessage", "renamed").destructive);
+        assert_eq!(
+            marks("api-telegram-bot", "POST", "/sendMessage", "send_message"),
+            OperationMarks::default()
+        );
+        assert!(
+            marks(
+                "api-google-sheets",
+                "POST",
+                "/v4/spreadsheets/{spreadsheetId}/values/{range}:clear",
+                "sheets_clear_values"
+            )
+            .destructive
+        );
+        // A POST that edits, and a PUT that only acts.
+        assert_eq!(
+            marks("api-slack", "POST", "/chat.update", "x").changes_existing,
+            Some(true)
+        );
+        assert_eq!(
+            marks(
+                "api-telegram-bot",
+                "POST",
+                "/editMessageText",
+                "edit_message_text"
+            )
+            .changes_existing,
+            Some(true)
+        );
+        assert_eq!(
+            marks("api-spotify", "PUT", "/me/player/play", "start_playback").changes_existing,
+            Some(false)
+        );
+        // "Only acts" widens, so it needs the exact route, not just a name.
+        assert_eq!(
+            marks("api-spotify", "PATCH", "/anything", "start_playback").changes_existing,
+            None
+        );
+        // "Edits" narrows, so a name is enough.
+        assert_eq!(
+            marks("api-slack", "POST", "/elsewhere", "chat_update").changes_existing,
+            Some(true)
+        );
+        // A PATCH update is left to its method; Aevatar's markers are as they were.
+        assert_eq!(
+            marks("api-google", "PATCH", "/nowhere", "calendar_update_event"),
+            OperationMarks::default()
+        );
+        assert_eq!(
+            marks("custom-service", "DELETE", "/x", "delete_x"),
+            OperationMarks::default()
+        );
+    }
 
     /// Frozen from 28fd2c44, including the original eight api-google operations.
     /// Six Drive contracts were deliberately corrected for automatic activation;

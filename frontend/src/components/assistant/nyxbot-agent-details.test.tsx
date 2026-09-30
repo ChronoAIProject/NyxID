@@ -35,6 +35,7 @@ function agentRow(fields: Record<string, unknown>) {
     status: "idle",
     services: ["github"],
     account_read: false,
+    guest_access: { github: "read" },
     pending_requests: [],
     last_reply: null,
     home_conversation_id: null,
@@ -145,7 +146,15 @@ it("replaces a specialist's grants with a dirty-gated save", async () => {
   const save = within(grants).getByRole("button", { name: "Save grants" });
   expect(save).toBeDisabled();
   expect(within(grants).getByRole("checkbox", { name: /GitHub/ })).toBeChecked();
+  const guests = within(grants).getByRole("list", { name: "Guest access" });
+  expect(within(guests).getByRole("combobox", { name: "github" })).toHaveTextContent(
+    "Look things up only",
+  );
   await user.click(within(grants).getByRole("checkbox", { name: /Slack/ }));
+  // A newly granted service starts at the default level.
+  expect(within(guests).getByRole("combobox", { name: "slack" })).toHaveTextContent(
+    "Use, but not change or delete",
+  );
   await user.click(within(grants).getByRole("switch", { name: "Read my account" }));
   expect(save).toBeEnabled();
   await user.click(save);
@@ -153,7 +162,27 @@ it("replaces a specialist's grants with a dirty-gated save", async () => {
     expect(writes).toContainEqual({
       method: "PUT",
       endpoint: "/assistant/nyxagent/agents/agent-researcher/grants",
+      // Unchanged levels are not sent: the server keeps them.
       body: { services: ["github", "slack"], account_read: true },
+    }),
+  );
+});
+
+it("lets the owner choose what others in the agent's chats may do with each service", async () => {
+  const { user } = renderSheet();
+  const sheet = await screen.findByRole("dialog", { name: "Agent details" });
+  const grants = await within(sheet).findByRole("form", { name: "Grants" });
+  const save = within(grants).getByRole("button", { name: "Save grants" });
+  expect(save).toBeDisabled();
+  await user.click(within(grants).getByRole("combobox", { name: "github" }));
+  await user.click(screen.getByRole("option", { name: "Everything this agent can do" }));
+  expect(save).toBeEnabled();
+  await user.click(save);
+  await waitFor(() =>
+    expect(writes).toContainEqual({
+      method: "PUT",
+      endpoint: "/assistant/nyxagent/agents/agent-researcher/grants",
+      body: { services: ["github"], account_read: false, guest_access: { github: "all" } },
     }),
   );
 });

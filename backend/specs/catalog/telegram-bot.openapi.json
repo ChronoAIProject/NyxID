@@ -301,6 +301,7 @@
     "/editMessageText": {
       "post": {
         "operationId": "edit_message_text",
+        "x-nyxid-changes-existing": true,
         "summary": "Edit a message's text",
         "x-aevatar-tool": {
           "name": "edit_message_text",

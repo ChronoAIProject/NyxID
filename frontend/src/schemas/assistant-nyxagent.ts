@@ -28,6 +28,15 @@ export type NyxAgentAttachment = z.infer<typeof nyxAgentAttachmentSchema>;
 export const assistantAgentKindSchema = z.enum(["nyxbot", "specialist"]);
 export type AssistantAgentKind = z.infer<typeof assistantAgentKindSchema>;
 export const assistantAgentStatusSchema = z.enum(["running", "idle", "destroyed"]);
+
+/**
+ * What guests (members of the agent's chats other than you) may do with one
+ * of a specialist's services: look things up only, use it (look up, create and
+ * act, but never change or delete what exists; the default), or everything the
+ * specialist may.
+ */
+export const assistantGuestAccessSchema = z.enum(["read", "use", "all"]);
+export type AssistantGuestAccess = z.infer<typeof assistantGuestAccessSchema>;
 export type AssistantAgentStatus = z.infer<typeof assistantAgentStatusSchema>;
 
 /// The agent a thread belongs to, as carried on each conversation.
@@ -279,6 +288,8 @@ export const assistantAgentSchema = z.object({
   /** Granted service slugs (specialists). */
   services: z.array(z.string()).default([]),
   account_read: z.boolean().default(false),
+  /** What guests (other members of the agent's chats) may do with each service. */
+  guest_access: z.record(z.string(), assistantGuestAccessSchema.catch("use")).default({}),
   pending_requests: z.array(assistantAgentRequestSchema).default([]),
   last_reply: z
     .object({
@@ -413,8 +424,17 @@ export type AssistantAgentProfile = {
 export const assistantAgentGrantsSchema = z.object({
   services: z.array(z.string()),
   account_read: z.boolean(),
+  /** Guest access by service slug; services left out keep their level. */
+  guest_access: z.record(z.string(), assistantGuestAccessSchema),
+});
+/** What the grants endpoint takes: levels only for services whose level changed. */
+export const assistantAgentGrantsRequestSchema = z.object({
+  services: z.array(z.string()),
+  account_read: z.boolean(),
+  guest_access: z.record(z.string(), assistantGuestAccessSchema).optional(),
 });
 export type AssistantAgentGrants = z.infer<typeof assistantAgentGrantsSchema>;
+export type AssistantAgentGrantsRequest = z.infer<typeof assistantAgentGrantsRequestSchema>;
 
 export const assistantAgentDestroyedSchema = z.object({ id: z.string(), destroyed_at: z.string() });
 
