@@ -305,7 +305,7 @@ ordinary conversation with its own key.
 
 NyxBot-only native tools (`nyxid__` prefix): `spawn_subagent`, `message_subagent`,
 `wait_for_subagents` (at most 120 s), `list_subagents`, `read_subagent`,
-`grant_subagent`, `revoke_subagent`, `update_subagent`, `decide_permission`,
+`grant_subagent`, `revoke_subagent`, `set_guest_access`, `update_subagent`, `decide_permission`,
 `destroy_subagent`, `create_group`, `list_groups`, `post_to_group`,
 `update_group`, `delete_group`, `settings_link`, `channel_bot_setup_link`,
 `connect_channel_bot`, `link_channel_bot`, `list_channel_agents`,

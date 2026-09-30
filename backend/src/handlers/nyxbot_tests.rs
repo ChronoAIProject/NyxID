@@ -2402,6 +2402,11 @@ async fn group_chats_share_one_thread_and_members_talk_as_guests() {
 async fn direct_group_messages_need_a_mention_or_a_reply_to_the_bot() {
     let (state, calls, server) = setup("nyxbot_direct_groups").await;
     let (row, _) = channel(&state, "direct").await;
+    // The bot's own Lark open_id, as its app reports it.
+    TEST_BOT_USER_IDS
+        .lock()
+        .unwrap()
+        .insert(row.channel_bot_id.clone(), "ou_bot".into());
     let mut bot = bot_doc("lark", "Helper bot");
     bot.insert("_id", &row.channel_bot_id);
     state
@@ -2543,6 +2548,15 @@ async fn direct_group_messages_need_a_mention_or_a_reply_to_the_bot() {
     )
     .await;
     assert_eq!(turns(2).await, 2);
+    // Mentioning someone else is not talking to the bot.
+    post(
+        "msg-6",
+        ("ou_bob", "Bob"),
+        "@_user_1 can you check?",
+        json!([{"key": "@_user_1", "id": {"open_id": "ou_carol"}, "name": "Carol"}]),
+    )
+    .await;
+    assert_eq!(turns(2).await, 2);
     {
         let calls = calls.lock().await;
         assert_eq!(calls[0]["input"], "Alice (owner): @Helper bot book it");
@@ -2572,53 +2586,63 @@ fn telegram_mentions_and_replies_to_the_bot_are_recognised() {
         }
         json!({"update_id": 1, "message": message})
     };
-    assert_eq!(chats::raw_addressed(&bot, &message(json!({}))), Some(false));
     assert_eq!(
-        chats::raw_addressed(&bot, &message(json!({"text": "hey @Helper_Bot, hi"}))),
+        chats::raw_addressed(&bot, &message(json!({})), None),
+        Some(false)
+    );
+    assert_eq!(
+        chats::raw_addressed(&bot, &message(json!({"text": "hey @Helper_Bot, hi"})), None),
         Some(true)
     );
     assert_eq!(
-        chats::raw_addressed(&bot, &message(json!({"text": "hey @helper_bots"}))),
+        chats::raw_addressed(&bot, &message(json!({"text": "hey @helper_bots"})), None),
         Some(false)
     );
     assert_eq!(
         chats::raw_addressed(
             &bot,
-            &message(json!({"reply_to_message": {"from": {"id": 123}}}))
+            &message(json!({"reply_to_message": {"from": {"id": 123}}})),
+            None
         ),
         Some(true)
     );
     assert_eq!(
         chats::raw_addressed(
             &bot,
-            &message(json!({"entities": [{"type": "text_mention", "user": {"id": 123}}]}))
+            &message(json!({"entities": [{"type": "text_mention", "user": {"id": 123}}]})),
+            None
         ),
         Some(true)
     );
     let discord: ChannelBot = bson::from_document(bot_doc("discord", "Helper bot")).unwrap();
-    assert_eq!(chats::raw_addressed(&discord, &json!({})), None);
+    assert_eq!(chats::raw_addressed(&discord, &json!({}), None), None);
     assert_eq!(
         chats::raw_addressed(
             &discord,
-            &json!({"author": {"id": "9"}, "mentions": [{"id": "123"}]})
+            &json!({"author": {"id": "9"}, "mentions": [{"id": "123"}]}),
+            None
         ),
         Some(true)
     );
     assert_eq!(
-        chats::raw_addressed(&discord, &json!({"author": {"id": "9"}, "mentions": []})),
+        chats::raw_addressed(
+            &discord,
+            &json!({"author": {"id": "9"}, "mentions": []}),
+            None
+        ),
         Some(false)
     );
     let slack: ChannelBot = bson::from_document(bot_doc("slack", "Helper bot")).unwrap();
     assert_eq!(
-        chats::raw_addressed(&slack, &json!({"event": {"type": "app_mention"}})),
+        chats::raw_addressed(&slack, &json!({"event": {"type": "app_mention"}}), None),
         Some(true)
     );
     assert_eq!(
-        chats::raw_addressed(&slack, &json!({"event": {"type": "message"}})),
+        chats::raw_addressed(&slack, &json!({"event": {"type": "message"}}), None),
         None
     );
     assert_eq!(
-        chats::raw_addressed(&discord, &json!({"type": 2, "data": {"name": "ask"}})),
+        chats::raw_addressed(&discord, &json!({"type": 2, "data": {"name": "ask"}}), None),
         Some(true)
     );
     // Private chats are named for the owner ("You") or the person, or by
@@ -3190,6 +3214,26 @@ async fn the_owners_private_chats_share_the_agents_own_thread() {
     server.abort();
 }
 
+/// Reads the home thread once `ready` holds. A relayed message is accepted
+/// (202) before it is recorded, and an instrumented coverage build can take
+/// longer than any fixed sleep to record it.
+async fn home_thread_once(
+    state: &AppState,
+    home: &str,
+    ready: impl Fn(&crate::models::assistant_conversation::AssistantConversation) -> bool,
+) -> crate::models::assistant_conversation::AssistantConversation {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let thread = crate::services::assistant_nyxagent::get(&state.db, OWNER, home)
+            .await
+            .unwrap();
+        if ready(&thread) || tokio::time::Instant::now() >= deadline {
+            return thread;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
 /// A question already being answered, or already queued, is not worked on
 /// again: a repeat from the same chat is told so, and one from another chat
 /// also gets the answer when it is ready.
@@ -3286,10 +3330,13 @@ async fn the_same_question_is_not_worked_on_twice() {
         direct_private(&state, &lark, "msg-q3", "ou_alice", question).await,
         StatusCode::ACCEPTED
     );
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    let thread = crate::services::assistant_nyxagent::get(&state.db, OWNER, &home)
-        .await
-        .unwrap();
+    let thread = home_thread_once(&state, &home, |thread| {
+        thread
+            .active_turn
+            .as_ref()
+            .is_some_and(|turn| !turn.also_deliver.is_empty())
+    })
+    .await;
     let turn = thread.active_turn.as_ref().unwrap();
     assert_eq!(turn.also_deliver.len(), 1);
     assert_eq!(turn.also_deliver[0].nyxbot_channel_id, lark.id);
@@ -3307,10 +3354,13 @@ async fn the_same_question_is_not_worked_on_twice() {
         direct_private(&state, &lark, "msg-q6", "ou_alice", other).await,
         StatusCode::ACCEPTED
     );
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    let thread = crate::services::assistant_nyxagent::get(&state.db, OWNER, &home)
-        .await
-        .unwrap();
+    let thread = home_thread_once(&state, &home, |thread| {
+        thread
+            .pending_events
+            .first()
+            .is_some_and(|event| event.reply_to.len() > 1)
+    })
+    .await;
     assert_eq!(thread.pending_events.len(), 1);
     let waiting: Vec<&str> = thread.pending_events[0]
         .reply_to
@@ -4227,6 +4277,7 @@ async fn org_group_bots_moved_to_a_specialist_keep_answering() {
                 service_ids: vec![office.clone()],
                 platform_service_ids: Vec::new(),
                 slugs: vec!["home-assistant-office".into()],
+                ids_by_request: Default::default(),
             },
             account_read: false,
             specialty: None,
@@ -4487,4 +4538,145 @@ fn lark_mention_keys_become_names() {
         chats::unnamed_sender("lark", "ou_abc123"),
         "Lark user …c123"
     );
+}
+
+/// Reported: after creating a Telegram bot through NyxID's in-Telegram
+/// creation and pressing Start, the bot kept answering "This bot answers only
+/// its owner" until the user went back to NyxID for a verification link. The
+/// Telegram account that created the bot through NyxID for the owner is the
+/// owner's own, so nothing is left to verify.
+#[tokio::test]
+async fn the_telegram_account_that_created_a_bot_through_nyxid_is_its_owner() {
+    use crate::models::telegram_bot_request::COLLECTION_NAME as REQUESTS;
+    let (state, _, server) = setup("nyxbot_bot_creator").await;
+    let (row, _) = channel(&state, "gateway").await;
+    let requests = state.db.collection::<bson::Document>(REQUESTS);
+    requests
+        .insert_one(doc! {"_id": &row.channel_bot_id, "actor_user_id": OWNER,
+        "owner_user_id": OWNER, "status": "provisioning", "telegram_user_id": 777_i64,
+        "start_update_id": 1_i64})
+        .await
+        .unwrap();
+    // Linking the bot already knows its owner.
+    assert_eq!(
+        known_owner_senders(&state, OWNER, "telegram", &row.channel_bot_id).await,
+        vec!["777".to_owned()]
+    );
+    assert!(
+        known_owner_senders(&state, "someone-else", "telegram", &row.channel_bot_id)
+            .await
+            .is_empty()
+    );
+    let sender = |id: &'static str| Sender {
+        id,
+        display_name: None,
+    };
+    // A stranger's Start links nothing.
+    assert!(
+        link_owner(&state, &row, &sender("888"), "/start", true)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // Only in a private chat: a group message never links anyone.
+    assert!(
+        link_owner(&state, &row, &sender("777"), "hi all", false)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // The creator's first message links them and greets them.
+    let linked = link_owner(&state, &row, &sender("777"), "/start", true)
+        .await
+        .unwrap();
+    assert!(matches!(&linked, Some(Inbound::Reply(text)) if text.starts_with("Linked.")));
+    let row = load_channel(&state, OWNER, &row.id).await.unwrap();
+    assert_eq!(row.owner_sender_ids, vec!["777".to_owned()]);
+    // Their next Start is a greeting, not a turn; anything else is a turn.
+    let hi = link_owner(&state, &row, &sender("777"), "/start", true)
+        .await
+        .unwrap();
+    assert!(matches!(&hi, Some(Inbound::Reply(text)) if text.starts_with("Hi, I'm NyxBot")));
+    assert!(
+        link_owner(&state, &row, &sender("777"), "hello", true)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // A creation someone else started never makes its creator this owner's,
+    // and neither does a bot claimed with a code (the code is transferable:
+    // its creator is someone else, never bound by the owner's own setup).
+    for (actor, bound) in [("someone-else", true), (OWNER, false)] {
+        let (other, _) = channel(&state, "gateway").await;
+        let mut request = doc! {"_id": &other.channel_bot_id, "actor_user_id": actor,
+        "owner_user_id": OWNER, "status": "connected", "telegram_user_id": 999_i64};
+        if bound {
+            request.insert("start_update_id", 1_i64);
+        }
+        requests.insert_one(request).await.unwrap();
+        assert!(
+            link_owner(&state, &other, &sender("999"), "/start", true)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            known_owner_senders(&state, OWNER, "telegram", &other.channel_bot_id)
+                .await
+                .is_empty()
+        );
+    }
+    server.abort();
+}
+
+/// Reported: in a Lark group, "@Calvin Tan who are you" was answered by the
+/// bot. Apps granted every group message also get mentions of other people:
+/// only a mention of the bot itself counts.
+#[tokio::test]
+async fn lark_groups_count_only_mentions_of_the_bot_itself() {
+    let (state, _, server) = setup("nyxbot_lark_mentions").await;
+    let bot: ChannelBot = bson::from_document(bot_doc("lark", "Office bot")).unwrap();
+    let raw = |ids: &[&str]| {
+        json!({"event": {"message": {"mentions": ids
+            .iter()
+            .enumerate()
+            .map(|(at, id)| json!({"key": format!("@_user_{}", at + 1),
+                "id": {"open_id": id}, "name": id}))
+            .collect::<Vec<_>>()}}})
+    };
+    assert_eq!(
+        chats::raw_addressed(&bot, &raw(&["ou_calvin"]), Some("ou_bot")),
+        Some(false)
+    );
+    assert_eq!(
+        chats::raw_addressed(&bot, &raw(&["ou_calvin", "ou_bot"]), Some("ou_bot")),
+        Some(true)
+    );
+    assert_eq!(
+        chats::raw_addressed(&bot, &raw(&[]), Some("ou_bot")),
+        Some(false)
+    );
+    // Without the bot's own ID (its lookup failed), any mention counts.
+    assert_eq!(
+        chats::raw_addressed(&bot, &raw(&["ou_calvin"]), None),
+        Some(true)
+    );
+    // The bot's own ID is looked up once, per app.
+    TEST_BOT_USER_IDS
+        .lock()
+        .unwrap()
+        .insert(bot.id.clone(), "ou_bot".into());
+    assert_eq!(own_user_id(&state, &bot).await.as_deref(), Some("ou_bot"));
+    TEST_BOT_USER_IDS
+        .lock()
+        .unwrap()
+        .insert(bot.id.clone(), "ou_changed".into());
+    assert_eq!(own_user_id(&state, &bot).await.as_deref(), Some("ou_bot"));
+    let mut moved = bot.clone();
+    moved.app_id = Some("cli_other_app".into());
+    assert_eq!(
+        own_user_id(&state, &moved).await.as_deref(),
+        Some("ou_changed")
+    );
+    server.abort();
 }

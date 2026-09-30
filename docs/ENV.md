@@ -167,7 +167,7 @@ See [platform keys and inference](PLATFORM_KEYS_AND_INFERENCE.md).
 
 The Lago client is configured only when both `LAGO_API_URL` and `LAGO_API_KEY` are non-empty. With `BILLING_ENABLED=true`, `BILLING_FAIL_CLOSED=false`, and no Lago client, existing chargeable wallets degrade to unreserved meter-only capture and missing wallets cannot be auto-provisioned. `LAGO_WEBHOOK_SECRET` is independent of outbound client configuration: it authenticates inbound `/api/v1/webhooks/lago` calls and must be set to accept wallet or entitlement updates. `LAGO_PLAN_CODE` selects the subscription created during provisioning; `BILLING_RECONCILE_INTERVAL_SECS=0` disables both usage push and settlement recovery sweeps.
 
-Admins may set an exact `credits_per_unit` price in a catalog service's `billing.platform_pricing` block. NyxID owns those prices and synchronizes a stable `platform_svc_{slug}` sum metric plus its standard charge onto `LAGO_PLAN_CODE`. Lago plan updates always round-trip the complete plan and every existing charge because `PUT /plans/{code}` replaces the charge array; existing charge ids and unrelated pricing must never be omitted. The saved row records `pending`, `synced`, or `failed`; failed and pending updates are retried by the reconcile sweep. Traffic switches to the service-specific metric only after synchronization succeeds, so a partial Lago update cannot silently apply a stale local price. Clearing a price immediately restores the legacy metric and persists a cleanup marker until the NyxID charge and local rate-cache row are removed. Catalog services without `platform_pricing` continue using the legacy plan-authored platform metric and rate.
+Admins may set an exact `credits_per_unit` price in a catalog service's `billing.platform_pricing` block. NyxID owns those prices and synchronizes a stable `platform_svc_{slug}` sum metric plus its standard charge onto `LAGO_PLAN_CODE`. Lago plan updates always round-trip the complete plan and every existing charge because `PUT /plans/{code}` replaces the charge array; existing charge ids and unrelated pricing must never be omitted. The saved row records `pending`, `synced`, or `failed`; failed and pending updates are retried by the reconcile sweep. Traffic switches to the service-specific metric only after synchronization succeeds, so a partial Lago update cannot silently apply a stale local price. Clearing a price immediately restores the legacy metric and persists a cleanup marker until the NyxID charge is removed and the local rate-cache row is marked `retired_at` (retained for historical usage pricing). Catalog services without `platform_pricing` continue using the legacy plan-authored platform metric and rate.
 
 Credit benefits use five collections. `credit_grants` stores one attributable row per recipient. `credit_schedules` stores recurring credit policy, and `credit_schedule_periods` stores derived walk progress. `usage_allowances` stores recurring free-unit definitions. `usage_allowance_periods` stores each owner's consumption and reservations for a UTC window. Platform admins manage grants, schedules, and allowances under `/api/v1/admin/credits`. Operators may read those admin endpoints but cannot mutate them. Flagged users read active balances from `GET /api/v1/billing/grants` and `GET /api/v1/billing/allowances`. An authorized organization member may pass `owner_id` to read the organization's benefits. Wallet mutations remain restricted to organization admins.
 
@@ -393,6 +393,8 @@ The approval system works without Telegram -- users can always approve/reject vi
 |----------|---------|-------------|
 | `CONNECT_LINK_EXPIRY_SWEEP_INTERVAL_SECS` | `60` | Interval between sweeps that claim overdue app-bound connect links and dispatch `connect_link.expired`. Effective deadlines include the pinned OAuth/device finalization grace. `0` disables the sweep; query-time expiry remains active. |
 
+The same interval schedules an independent [bot-link recovery and delivery sweep](CHANNEL_BOT_RELAY.md#tracked-bot-connection-links). Setting it to `0` disables background recovery for both link types; request-time reconciliation remains available. Bot links add no environment variable.
+
 ## Device Login Code Compatibility
 
 | Variable | Default | Description |
@@ -511,9 +513,10 @@ All manual forwarding limits return the structured `request_body_too_large` erro
 
 ## Registration Gate
 
+Invitation codes are controlled by the global `auth:invitation-code` feature flag under Admin > Feature Flags. It defaults to enabled; disable it for public registration. `INVITE_CODE_REQUIRED` is no longer read.
+
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `INVITE_CODE_REQUIRED` | `true` | Gate new-user registration behind invite codes. Set to `false` for public registration. Accepts: `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`. |
 | `EMAIL_AUTH_ENABLED` | `false` | Show the email/password auth UI on `/login` and `/register` and accept `POST /api/v1/auth/register`. Defaults to **false** (SSO-only). The self-host quickstart in `README.md` writes this to `true` automatically. The login API is never gated — existing users can always authenticate via direct API call even when the UI is hidden. Accepts: `true`/`1`/`yes`/`on` → enabled; anything else → disabled. |
 
 ## Channel Bot Relay

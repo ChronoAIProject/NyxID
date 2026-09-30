@@ -111,7 +111,7 @@ Notes for admins helping new users:
 - `list` shows `used_count/max_uses`, active state, and the per-redemption `usages` array (who used it, when).
 - Deactivation is immediate and cannot be undone -- create a new code if the user needs another attempt.
 - Create and deactivate are audited (`admin_invite_code_create`, `admin_invite_code_deactivate`) and visible in `nyxid` audit tooling.
-- **Turning the gate off entirely:** set `INVITE_CODE_REQUIRED=false` in the backend environment and restart the server. Public registration then works without a code and first-time social sign-ups succeed normally. Set it back to `true` (or unset it) to re-enable the gate.
+- **Turning the gate off entirely:** disable the global `auth:invitation-code` flag in Admin > Feature Flags. Public registration then works without a code and first-time social sign-ups succeed normally. Enable the flag again to require codes. The change takes effect without a server restart.
 
 ## MCP Configuration
 

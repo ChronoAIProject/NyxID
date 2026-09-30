@@ -15,7 +15,7 @@ import {
   nyxAgentChannelListSchema,
   nyxAgentSettingsSchema,
   type AssistantAgentCreate,
-  type AssistantAgentGrants,
+  type AssistantAgentGrantsRequest,
   type AssistantGroupForm,
   type AssistantGroupUpdate,
   type NyxAgentChannelChatSettings,
@@ -58,7 +58,7 @@ export const nyxBotApi = {
     await assistantJson(agentPath(id), { method: "PATCH", body });
   },
   /** Replaces a specialist's grants. */
-  async setGrants(id: string, body: AssistantAgentGrants) {
+  async setGrants(id: string, body: AssistantAgentGrantsRequest) {
     await assistantJson(`${agentPath(id)}/grants`, { method: "PUT", body });
   },
   async destroyAgent(id: string) {

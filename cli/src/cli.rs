@@ -4878,6 +4878,46 @@ pub enum AiSetupCommands {
 
 #[derive(Subcommand)]
 pub enum ChannelBotCommands {
+    /// Create a one-time hosted setup link, optionally with a completion webhook
+    ConnectLink {
+        /// Platform ID from channel-bot platforms
+        platform: String,
+        /// Fixed bot name for the connection request
+        #[arg(long)]
+        label: String,
+        /// Organization UUID, slug, or display name; omit for personal ownership
+        #[arg(long)]
+        org: Option<String>,
+        /// Browser return URL after the user acknowledges setup
+        #[arg(long)]
+        callback_url: Option<String>,
+        /// Public HTTPS endpoint for signed completion, cancellation, or expiry events
+        #[arg(long, requires = "webhook_signing_secret_file")]
+        webhook_url: Option<String>,
+        /// Save the one-time webhook signing secret to a new private file
+        #[arg(long, requires = "webhook_url")]
+        webhook_signing_secret_file: Option<std::path::PathBuf>,
+        /// Link lifetime in seconds (60–3600, default 900)
+        #[arg(long, value_parser = clap::value_parser!(i64).range(60..=3600))]
+        expires_in: Option<i64>,
+        /// Name of the application requesting this connection
+        #[arg(long)]
+        requested_by: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Cancel an unstarted bot setup request
+    CancelConnectLink {
+        id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Read the current result and webhook delivery state of a bot setup link
+    ConnectLinkStatus {
+        id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
     /// Discover supported platforms, registration fields, and media capabilities
     Platforms {
         #[command(flatten)]

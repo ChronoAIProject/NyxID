@@ -14,7 +14,7 @@ use axum::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{future::Future, pin::Pin, time::Duration};
+use std::{collections::BTreeMap, future::Future, pin::Pin, time::Duration};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
@@ -23,7 +23,7 @@ use crate::{
     errors::{AppError, AppResult},
     models::{
         assistant_acknowledgement::AssistantAcknowledgement,
-        assistant_agent::{AgentGrants, AssistantAgent},
+        assistant_agent::{AgentGrants, AssistantAgent, GuestAccess},
         assistant_conversation::{AssistantConversation, TurnOrigin},
     },
     mw::{
@@ -445,10 +445,12 @@ pub(crate) async fn permission_decided(
 fn guest_note(specialist: bool) -> &'static str {
     if specialist {
         "\n\nThis turn answers someone other than the owner (a member of a chat your channel \
-        bot is in). Help them, reading with your services when useful, but only the owner can \
-        ask for account actions, new connections or changes made with the owner's services: \
-        NyxID refuses those, so say that only the bot's owner can ask for that. Never reveal \
-        the owner's private information (their account, other chats, memory or credentials)."
+        bot is in). Help them with your services as far as the owner lets guests use each \
+        one (by default look things up, turn things on or off, send and create, but not \
+        change or delete what exists). Only the owner can ask for account actions, new connections, more access or \
+        more than that: NyxID refuses those, so say that only the bot's owner can ask for \
+        that. Never reveal the owner's private information (their account, other \
+        chats, memory or credentials)."
     } else {
         "\n\nThis turn answers someone other than the owner (a member of a chat the owner's \
         channel bot is in). Answer from the conversation only: you use no tools or services \
@@ -851,6 +853,76 @@ async fn dispatch(
                 "account_read": agent.grants.account_read});
             if !refused.is_empty() {
                 result[unchanged] = json!(refused);
+            }
+            (result, false)
+        }
+        "set_guest_access" => {
+            let agent = team::live_specialist(db, owner, text_arg(args, "subagent")).await?;
+            let access = args["access"]
+                .as_str()
+                .and_then(GuestAccess::parse)
+                .ok_or_else(|| AppError::ValidationError("access is read, use or all".into()))?;
+            let granted: Vec<&String> = agent
+                .grants
+                .service_ids
+                .iter()
+                .chain(&agent.grants.platform_service_ids)
+                .collect();
+            let requested = string_list(args, "services");
+            // Everything, deleting included, is given service by service.
+            if access == GuestAccess::All && requested.is_empty() {
+                return Err(AppError::ValidationError(
+                    "Name the services guests may do everything with".into(),
+                ));
+            }
+            let mut levels = BTreeMap::new();
+            let mut not_set = Vec::new();
+            if requested.is_empty() {
+                levels.extend(granted.iter().map(|id| ((*id).clone(), access)));
+            } else {
+                let (targets, refused) = team::resolve_each_target(
+                    db,
+                    state.node_ws_manager.as_ref(),
+                    owner,
+                    &requested,
+                )
+                .await?;
+                not_set.extend(refused);
+                for (request, id) in &targets.ids_by_request {
+                    if granted.contains(&id) {
+                        levels.insert(id.clone(), access);
+                    } else {
+                        not_set.push(team::Refused {
+                            service: crate::services::assistant_nyxagent::identifier(request),
+                            reason: "Not granted to this specialist; grant it first with \
+                                nyxid__grant_subagent"
+                                .into(),
+                        });
+                    }
+                }
+            }
+            if levels.is_empty() {
+                return Ok((
+                    json!({"error": "not_set", "subagent": agent.name, "not_set": not_set}),
+                    true,
+                ));
+            }
+            let agent =
+                team::set_grants(db, owner, &agent.id, team::GrantChange::Guests(levels)).await?;
+            let summary = team::summaries(db, owner, false, false, 0)
+                .await?
+                .into_iter()
+                .find(|summary| summary.id == agent.id);
+            let mut result = json!({"subagent": agent.name,
+                "guest_access": summary.map(|summary| summary.guest_access)});
+            if access == GuestAccess::All {
+                result["note"] = json!(
+                    "Guests may now also change and delete with these \
+                    services; tell the user so."
+                );
+            }
+            if !not_set.is_empty() {
+                result["not_set"] = json!(not_set);
             }
             (result, false)
         }
@@ -1446,9 +1518,14 @@ pub async fn update_agent(
 pub struct GrantsRequest {
     services: Vec<String>,
     account_read: bool,
+    /// What guests may do with each of `services` (by the same name or ID);
+    /// services left out keep their current level.
+    #[serde(default)]
+    guest_access: BTreeMap<String, GuestAccess>,
 }
 
-/// The owner sets a specialist's grants directly (replacing them).
+/// The owner sets a specialist's grants directly (replacing them), with
+/// what guests may do with each service.
 pub async fn set_agent_grants(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -1464,15 +1541,28 @@ pub async fn set_agent_grants(
         &body.services,
     )
     .await?;
+    let mut guest_access = BTreeMap::new();
+    for (service, level) in &body.guest_access {
+        let id = targets.ids_by_request.get(service.trim()).ok_or_else(|| {
+            AppError::ValidationError(format!(
+                "Guest access is for granted services only; {} is not among them",
+                crate::services::assistant_nyxagent::identifier(service)
+            ))
+        })?;
+        guest_access.insert(id.clone(), *level);
+    }
     let agent = team::set_grants(
         &state.db,
         &owner,
         &id,
-        team::GrantChange::Replace(AgentGrants {
-            service_ids: targets.service_ids,
-            platform_service_ids: targets.platform_service_ids,
-            account_read: body.account_read,
-        }),
+        team::GrantChange::Replace {
+            grants: AgentGrants {
+                service_ids: targets.service_ids,
+                platform_service_ids: targets.platform_service_ids,
+                account_read: body.account_read,
+            },
+            guests: guest_access,
+        },
     )
     .await?;
     Ok(Json(json!({"id": agent.id, "services": targets.slugs,

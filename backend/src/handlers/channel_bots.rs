@@ -615,6 +615,18 @@ pub(crate) async fn create_bot_with_adapter(
     adapter: &dyn PlatformAdapter,
     telegram_api: &crate::services::telegram_new_api::TelegramApi<'_>,
 ) -> AppResult<(StatusCode, Json<CreateChannelBotResponse>)> {
+    create_bot_with_link(state, auth_user, tele, body, adapter, telegram_api, None).await
+}
+
+pub(crate) async fn create_bot_with_link(
+    state: &AppState,
+    auth_user: AuthUser,
+    tele: TelemetryContext,
+    body: CreateChannelBotRequest,
+    adapter: &dyn PlatformAdapter,
+    telegram_api: &crate::services::telegram_new_api::TelegramApi<'_>,
+    link_claim: Option<&crate::services::channel_connect_link_service::Claim>,
+) -> AppResult<(StatusCode, Json<CreateChannelBotResponse>)> {
     let actor = auth_user.user_id.to_string();
     let descriptor = adapter.registration();
     if descriptor.managed_only {
@@ -653,17 +665,32 @@ pub(crate) async fn create_bot_with_adapter(
     let owner_id = resolve_create_owner(state, &actor, body.target_org_id.as_deref()).await?;
 
     // Create bot: verify token, encrypt, insert in pending status
-    let create_result = channel_bot_service::create_bot(
-        &state.db,
-        &state.config,
-        &state.encryption_keys,
-        &state.http_client,
-        adapter,
-        &owner_id,
-        label,
-        &fields,
-    )
-    .await?;
+    let create_result = if let Some(claim) = link_claim {
+        channel_bot_service::create_bot_linked(
+            &state.db,
+            &state.config,
+            &state.encryption_keys,
+            &state.http_client,
+            adapter,
+            &owner_id,
+            label,
+            &fields,
+            Some(claim),
+        )
+        .await?
+    } else {
+        channel_bot_service::create_bot(
+            &state.db,
+            &state.config,
+            &state.encryption_keys,
+            &state.http_client,
+            adapter,
+            &owner_id,
+            label,
+            &fields,
+        )
+        .await?
+    };
 
     let bot_id = create_result.bot.id.clone();
     let webhook_secret = create_result.webhook_secret;

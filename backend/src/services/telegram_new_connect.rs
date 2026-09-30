@@ -191,6 +191,11 @@ impl TelegramNewService<'_> {
             }
         }
         self.finish_request(id).await?;
+        // Tracked requests reserve their completion notification even when the
+        // browser has gone away. The bot-link sweep recovers any transient error.
+        if let Err(error) = super::channel_connect_link_service::complete(self.db, id).await {
+            tracing::warn!(channel_connect_link_id = id, %error, "Channel setup completion remains pending");
+        }
         super::channel_bot_service::get_bot(self.db, id).await
     }
 
@@ -227,7 +232,7 @@ impl TelegramNewService<'_> {
                 let username = request.bot_username.as_deref().unwrap_or_default();
                 let _ = self.api.call(token, "sendMessage", json!({
                     "chat_id": request.telegram_user_id,
-                    "text": format!("@{username} is connected to NyxID. Setup is complete. Tap Open your bot to go to its chat. You can choose an AI agent for replies in Bot settings."),
+                    "text": format!("@{username} is connected to NyxID. Setup is complete. Tap Open your bot and press Start to talk to it. You can choose an AI agent for replies in Bot settings."),
                     "reply_markup": {"inline_keyboard": [
                         [{"text": "Open your bot", "url": format!("https://t.me/{username}")}],
                         [{"text": "Bot settings", "url": format!("{}/channel-bots/{id}", self.config.frontend_url.trim_end_matches('/'))}],

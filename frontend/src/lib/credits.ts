@@ -55,13 +55,6 @@ export function formatExactCredits(value: string, digits = 6): string {
       .find((part) => part.type === "decimal")?.value ?? ".";
   return `${pico < 0n ? "-" : ""}${grouped}${fraction ? separator + fraction : ""}`;
 }
-export function compareCredits(a: string | null, b: string | null): number {
-  if (a === null) return b === null ? 0 : -1;
-  if (b === null) return 1;
-  const x = parseCredits(a),
-    y = parseCredits(b);
-  return x === y ? 0 : x < y ? -1 : 1;
-}
 export function hasCredits(value: string | number | null | undefined): boolean {
   return (
     value != null &&

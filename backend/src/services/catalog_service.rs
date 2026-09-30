@@ -145,9 +145,6 @@ fn build_catalog_entry(
     if let (Some(product), Some(catalog)) = (google_product, scope_catalog.as_mut()) {
         let allowed = product.allowed_scopes();
         catalog.retain(|entry| allowed.contains(&entry.scope));
-        for entry in catalog {
-            entry.required = product.required_scopes().contains(&entry.scope.as_str());
-        }
     }
     let platform_available = super::platform_key_service::has_platform_key(&svc)
         && svc.platform_key.as_ref().is_none_or(|p| {

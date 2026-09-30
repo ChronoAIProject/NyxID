@@ -43,6 +43,17 @@
         crate::handlers::keys::get_key_authorization,
         crate::handlers::keys::update_key,
         crate::handlers::keys::delete_key,
+        // Hosted bot connection requests
+        crate::handlers::channel_connect_links::create,
+        crate::handlers::channel_connect_links::get,
+        crate::handlers::channel_connect_links::cancel,
+        crate::handlers::channel_connect_links::preview,
+        crate::handlers::channel_connect_links::decline,
+        crate::handlers::channel_connect_links::complete,
+        crate::handlers::channel_connect_links::managed_start,
+        crate::handlers::channel_connect_links::managed_complete,
+        crate::handlers::channel_connect_links::telegram_start,
+        crate::handlers::channel_connect_links::retry,
         // Hosted Connect Links
         crate::handlers::connect_links::create_connect_link,
         crate::handlers::connect_links::get_connect_link,

@@ -35,6 +35,7 @@ pub mod channel_adapters;
 pub mod channel_admission_service;
 pub mod channel_billing_service;
 pub mod channel_bot_service;
+pub mod channel_connect_link_service;
 pub mod channel_connection_webhook_service;
 pub mod channel_credentials;
 pub mod channel_delivery_service;

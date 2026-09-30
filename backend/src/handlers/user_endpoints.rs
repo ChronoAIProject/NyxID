@@ -872,6 +872,8 @@ mod tests {
             request_body_required: false,
             response: Default::default(),
             risk: None,
+            destructive: false,
+            changes_existing: None,
             supports_idempotency_key: false,
         };
         let resp = parsed_endpoint_to_response(parsed);
@@ -898,6 +900,8 @@ mod tests {
             request_body_required: true,
             response: Default::default(),
             risk: None,
+            destructive: false,
+            changes_existing: None,
             supports_idempotency_key: false,
         };
         let resp = parsed_endpoint_to_response(parsed);

@@ -9,6 +9,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { Settings2 } from "lucide-react";
 import { toast } from "sonner";
 import { AssistantShell } from "@/components/assistant/assistant-shell";
+import { AssistantLinkModalHost } from "@/components/assistant/assistant-link-modals";
 import { AssistantEngineSidebar } from "@/components/assistant/assistant-engine-sidebar";
 import { ChatComposer } from "@/components/assistant/chat-composer";
 import { TextBlock } from "@/components/assistant/blocks/text-block";
@@ -455,14 +456,16 @@ export function NyxAgentGroupPage({
               onOpenAgent={setDetailsAgentId}
               onOpenSettings={() => setSettingsOpen(true)}
             />
-            <GroupTranscript
-              group={group}
-              messages={messages}
-              hasOlder={Boolean(transcript.data?.before_seq)}
-              onLoadOlder={transcript.loadOlder}
-              onOpenAgent={setDetailsAgentId}
-              bottomInset={composerHeight}
-            />
+            <AssistantLinkModalHost>
+              <GroupTranscript
+                group={group}
+                messages={messages}
+                hasOlder={Boolean(transcript.data?.before_seq)}
+                onLoadOlder={transcript.loadOlder}
+                onOpenAgent={setDetailsAgentId}
+                bottomInset={composerHeight}
+              />
+            </AssistantLinkModalHost>
             {settingsOpen ? (
               <GroupSettingsDialog
                 group={group}

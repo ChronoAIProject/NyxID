@@ -21,6 +21,7 @@ pub mod catalog_delegation_grant;
 pub mod catalog_identity_reconciliation;
 pub mod chain_verify_status;
 pub mod channel_bot;
+pub mod channel_connect_link;
 pub mod channel_conversation;
 pub mod channel_event_log;
 pub mod channel_message;
