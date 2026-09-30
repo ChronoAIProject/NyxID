@@ -1,0 +1,65 @@
+# Rollup: 2026-09-29 ctkm-1
+
+This rollup was created from `main` commit
+`cf02492bbf2ecd70099f3f9afec7013d9f2f8598` and fast-forwarded to `main` at
+`e96a50782a97cfe6fe46d357019325de0cc36867` before the change below landed, so
+it can merge into `main` without reverting later work. It makes signup
+invitation codes an operator choice now that billing is in place.
+
+## Included changes and provenance
+
+The source PR remains the authoritative implementation discussion and merge
+record.
+
+| Source PR | Reviewed source head | Landed squash | Intended behavior / scope |
+| --- | --- | --- | --- |
+| [#1690](https://github.com/ChronoAIProject/NyxID/pull/1690) | `dc5fb1b4be000995027c90412701d66c97766588` | `e7691afe605770e67128376bf87b610c5e8f37a8` | Gate the signup invitation-code requirement behind the global, default-on `auth:invitation-code` feature flag, replacing the `INVITE_CODE_REQUIRED` environment variable. Invitation-code management is retained. |
+
+The six `main` commits between the rollup base and `e96a5078` (#1694–#1699,
+NyxBot channel/gateway work and service-account catalog skill assignment) are
+inherited `main` history, not part of this rollup's diff. The only overlap was
+`backend/src/services/feature_flag_service.rs`, where `main` added the
+`nyxbot:gateway-*` flags alongside the new `auth:invitation-code` flag; both
+definitions and the pinned registry-key test keep every key.
+
+## Problem and resulting behavior
+
+New registration required an invitation code whenever `INVITE_CODE_REQUIRED`
+was set, and changing that needed a redeploy. With billing now provisioning a
+wallet for every new account, whether signup stays invitation-only should be a
+runtime decision.
+
+- `auth:invitation-code` is enabled by default, so behavior is unchanged
+  until a platform admin turns it off under Admin > Feature Flags. No restart is
+  needed.
+- Enabled: email signup requires a valid code; browser social signup can
+  redeem one; existing social users still sign in; native social token exchange
+  still rejects first-time signup.
+- Disabled: email and first-time social signup succeed without a code.
+- The flag is global only (a new account has no user or org scope yet); scoped
+  overrides are rejected and the admin UI shows only the global control.
+- The backend resolves the flag on every signup attempt. `GET
+  /api/v1/public/config` reports the effective requirement, and the signup
+  screen refreshes it so an open form follows a change; the server stays
+  authoritative if the flag flips between display and submit.
+- Admin invitation-code management (page, API, CLI) remains; the page states
+  when codes are not currently required. Organization membership invitations
+  are separate and unchanged.
+
+## Rollout
+
+- Deploy the backend before the frontend.
+- `INVITE_CODE_REQUIRED` is no longer read. Deployments that set it to `false`
+  will require invitation codes after this lands until a platform admin
+  disables `auth:invitation-code`.
+- Existing invitation-code data is retained.
+
+## Verification
+
+- #1690 CI on `dc5fb1b4be000995027c90412701d66c97766588` (the source branch with `e96a5078` merged):
+  24 checks passed, 10 skipped, none failed, including backend
+  tests, backend and frontend coverage, Clippy, KMS feature builds, billing smoke
+  and all CodeQL languages.
+- Locally on the merged tree against a MongoDB replica set: 45 feature-flag,
+  57 invitation, 36 auth-handler, 57 social-signup and 3 public-config backend
+  tests passed; 874 frontend flag/lib tests passed and TypeScript compiled.
