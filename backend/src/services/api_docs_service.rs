@@ -942,7 +942,7 @@ async fn fetch_json_spec_internal(
     Ok(spec)
 }
 
-fn hosted_catalog_spec_for_url(url: &str) -> AppResult<Option<serde_json::Value>> {
+pub(crate) fn hosted_catalog_spec_for_url(url: &str) -> AppResult<Option<serde_json::Value>> {
     let parsed = url::Url::parse(url)
         .map_err(|_| AppError::BadRequest("Spec URL is invalid".to_string()))?;
     if !matches!(parsed.scheme(), "http" | "https") {

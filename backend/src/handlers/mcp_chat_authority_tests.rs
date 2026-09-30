@@ -1642,14 +1642,17 @@ async fn guest_access_follows_spec_markers() {
     // NyxID's marker says what a method does not: a PUT that only acts is
     // use, a POST that edits is not; a DELETE never is, whatever its spec says.
     set_guest_access(&f, &service, GuestAccess::Use).await;
-    for (method, changes, refused) in [
-        ("PUT", Some(false), false),
-        ("PUT", None, true),
-        ("POST", Some(true), true),
-        ("DELETE", Some(false), true),
+    for (method, changes, contract, refused) in [
+        ("PUT", Some(false), true, false),
+        // "Only acts" widens: a remote spec cannot say it.
+        ("PUT", Some(false), false, true),
+        ("PUT", None, true, true),
+        ("POST", Some(true), false, true),
+        ("DELETE", Some(false), true, true),
     ] {
         let mut marked = services_for(&f, &guest, &service, |metadata| {
             metadata.changes_existing = changes;
+            metadata.catalog_contract = contract;
         })
         .await;
         let search = marked
@@ -1668,7 +1671,7 @@ async fn guest_access_follows_spec_markers() {
                 .await
                 .is_some(),
             refused,
-            "{method} {changes:?}"
+            "{method} {changes:?} {contract}"
         );
     }
     // A read-only DELETE row is still a DELETE.

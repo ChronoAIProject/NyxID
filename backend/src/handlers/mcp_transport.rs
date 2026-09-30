@@ -2163,9 +2163,12 @@ async fn guest_service_refusal(
     // change or remove what exists, unless NyxID's marker says an operation
     // only acts (a PUT that starts playback) or edits (a POST that edits a
     // message); a DELETE and what Aevatar's marker calls destructive never.
-    let changes = metadata
-        .changes_existing
-        .unwrap_or(!(safe || *method == reqwest::Method::POST));
+    // "Only acts" widens, so only a catalog contract may say it.
+    let changes = match metadata.changes_existing {
+        Some(true) => true,
+        Some(false) if metadata.catalog_contract => false,
+        _ => !(safe || *method == reqwest::Method::POST),
+    };
     let uses = *method != reqwest::Method::DELETE && !changes && !metadata.destructive;
     let allowed = match access {
         GuestAccess::All => true,

@@ -312,17 +312,28 @@ static OPERATION_MARKS: LazyLock<HashMap<&'static str, HashMap<String, Operation
     });
 
 /// What the hosted overlay of a catalog service says about this operation,
-/// matched literally by name or route.
+/// matched literally by name or route. Marks that narrow (destructive,
+/// changes existing) match either; "only acts" (`changes_existing: false`)
+/// needs the exact route, since it widens what guests may do.
 pub fn operation_marks(slug: &str, method: &str, path: &str, name: &str) -> OperationMarks {
-    spec_key_for_slug(slug)
-        .and_then(|key| OPERATION_MARKS.get(key))
-        .and_then(|operations| {
-            operations
-                .get(name)
-                .or_else(|| operations.get(&format!("{} {path}", method.to_ascii_uppercase())))
-        })
+    let Some(operations) = spec_key_for_slug(slug).and_then(|key| OPERATION_MARKS.get(key)) else {
+        return OperationMarks::default();
+    };
+    let by_name = operations.get(name).copied().unwrap_or_default();
+    let by_route = operations
+        .get(&format!("{} {path}", method.to_ascii_uppercase()))
         .copied()
-        .unwrap_or_default()
+        .unwrap_or_default();
+    OperationMarks {
+        destructive: by_name.destructive || by_route.destructive,
+        changes_existing: if by_name.changes_existing == Some(true)
+            || by_route.changes_existing == Some(true)
+        {
+            Some(true)
+        } else {
+            by_route.changes_existing
+        },
+    }
 }
 
 /// Parsed overlay document for a spec key (the `{spec_key}` URL segment).
@@ -422,6 +433,16 @@ mod tests {
         assert_eq!(
             marks("api-spotify", "PUT", "/me/player/play", "start_playback").changes_existing,
             Some(false)
+        );
+        // "Only acts" widens, so it needs the exact route, not just a name.
+        assert_eq!(
+            marks("api-spotify", "PATCH", "/anything", "start_playback").changes_existing,
+            None
+        );
+        // "Edits" narrows, so a name is enough.
+        assert_eq!(
+            marks("api-slack", "POST", "/elsewhere", "chat_update").changes_existing,
+            Some(true)
         );
         // A PATCH update is left to its method; Aevatar's markers are as they were.
         assert_eq!(

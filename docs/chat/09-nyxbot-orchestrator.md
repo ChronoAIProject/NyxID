@@ -493,38 +493,45 @@ turn so late tool calls stay restricted):
     writing), or a POST its catalog contract marks read-only
     (`x-aevatar-tool.readOnly`, so a POST search counts); a catalog contract is
     a stored `ServiceEndpoint` row or NyxID's hosted overlay (also when an
-    instance mounts the overlay's URL), never a remote spec read at call time,
-    which may only narrow;
+    instance mounts the overlay's URL, which NyxID serves from its compiled
+    copy whatever the host), never a remote spec read at call time, which may
+    only narrow;
   - `use`, the default: reads, creates and acts (send, create, turn a light
     on, start playback), but never changes or removes what exists. By method:
     PUT, PATCH and DELETE change or remove, GET, HEAD, OPTIONS and POST do
     not, unless NyxID's own per-operation `x-nyxid-changes-existing` says
-    otherwise (`true` for a POST that edits: Slack's `chat.update`, Telegram's
-    `editMessageText`, Aurinko's `send_draft`; `false` for a PUT that only
-    acts: Spotify's play and pause, Discord's add reaction). A DELETE, and an
-    operation Aevatar's `x-aevatar-tool.destructive` marks (Telegram's
-    `deleteMessage`, Sheets' `values:clear` and `values:append`, Docs'
-    `batchUpdate`), never. NyxID adds its own marker rather than change
-    Aevatar's, which Aevatar's approvals read. So editing a sheet, doc, Notion
-    page or calendar event, or trashing a Drive file, is beyond `use`;
+    otherwise: `true` for a POST that edits (Slack's `chat.update`, Telegram's
+    `editMessageText`, Aurinko's `send_draft`), `false` for a PUT that only
+    acts (Spotify's play and pause, Discord's add reaction). `true` may come
+    from any spec and wins; `false` widens, so only a catalog contract says
+    it (an overlay by exact route, not by name). A DELETE, and an operation
+    Aevatar's `x-aevatar-tool.destructive` marks (Telegram's `deleteMessage`,
+    Sheets' `values:clear` and `values:append`, Docs' `batchUpdate`, IFTTT's
+    triggers and tool calls), never. NyxID adds its own marker rather than
+    change Aevatar's, which Aevatar's approvals read. So editing a sheet, doc,
+    Notion page or calendar event, trashing a Drive file or running an IFTTT
+    applet is beyond `use`;
   - `all`: everything the specialist may do with the service, changing and
     deleting included (NyxBot's `nyxid__set_guest_access` says so when it sets
     it).
   A guest call never carries a method override (a header like
   `X-HTTP-Method-Override`, a `_method` or `_HttpMethod` query or body field,
-  or a `method` query or form field naming a changing verb as in Facebook
-  Graph; keys read as PHP reads them; the body read by the content type it is
-  sent with, a JSON body that does not parse counting as one): a server may
-  honour one in place of the method the call is sent with, and approvals see
-  only the latter. Markers come from the overlay compiled into NyxID for
-  catalog services (matched literally by endpoint name or `METHOD path`; no
-  stored endpoint changes, so `operation_generation` is untouched), including a
-  catalog service's instance-mounted spec where its operations match, and from
-  a mounted spec's own markers. Specs an admin adds to the catalog outside
-  NyxID's overlays are stored as rows without markers, and services without
-  typed operations (the generic proxy) have none: they are judged by the
-  method alone, so a POST that deletes there (an RPC-style API) is within
-  `use`: give such a service `read` if its guests must not act.
+  or a `method` field naming a changing verb other than the one sent, as in
+  Facebook Graph; keys normalised as a superset of how PHP reads them, `;`
+  separating fields as `&` does; the body read by the content type it is sent
+  with, a JSON body that does not parse counting as one): a server may honour
+  one in place of the method the call is sent with, and approvals see only the
+  latter. Markers come from the overlay compiled into NyxID for catalog
+  services (matched literally by endpoint name or `METHOD path`; no stored
+  endpoint changes, so `operation_generation` is untouched), including a
+  catalog service's instance-mounted spec where its operations match, and
+  from a mounted spec's own markers (which only narrow). Specs an admin adds to
+  the catalog outside NyxID's overlays are stored as rows without markers, and
+  services without typed operations (the generic proxy) have none: they are
+  judged by the method alone, so a POST that deletes there (an RPC-style API)
+  is within `use`, and a GET that deletes (Telegram's Bot API accepts GET) is
+  within `read`: do not give such a service to a specialist that answers
+  guests unless they may do anything with it.
   Nothing is judged from names or words. The owner sets levels on the agent's
   Grants (a select per service; the page sends only changed levels) or by
   asking NyxBot (`nyxid__set_guest_access`, "let the group edit the office

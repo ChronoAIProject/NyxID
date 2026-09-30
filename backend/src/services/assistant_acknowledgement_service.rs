@@ -91,7 +91,9 @@ pub fn guest_method_override_refusal(service: &str) -> Value {
     json!({"error": "owner_only", "service": service,
         "instructions": format!("You are answering someone other than the owner: calls to \
         {service} for them use the operation's own HTTP method, never a method override \
-        (an X-HTTP-Method-Override header or a _method field). Call it without one.")})
+        (an X-HTTP-Method-Override header, a _method field, or a method field naming another \
+        verb), and a request body sent as JSON must be valid JSON. Call it that way, or say \
+        that only the bot's owner can ask for that.")})
 }
 
 pub async fn for_key(

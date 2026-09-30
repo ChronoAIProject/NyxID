@@ -216,10 +216,11 @@ pub struct McpDurableEndpointMetadata {
     /// method says otherwise (NyxID's `x-nyxid-changes-existing`: a POST that
     /// edits, a PUT that only acts); `None` leaves it to the method.
     pub changes_existing: Option<bool>,
-    /// The operation comes from a stored catalog contract (a
-    /// `ServiceEndpoint` row an admin or NyxID's overlays created), not from
-    /// a remote spec read at call time; only such a contract's `readOnly`
-    /// may count a POST as a read for guests.
+    /// The operation comes from a catalog contract (a stored
+    /// `ServiceEndpoint` row, or NyxID's hosted overlay, including one an
+    /// instance mounts by URL), not a remote spec read at call time. Only
+    /// such a contract may widen what guests may do (a read-only POST, a PUT
+    /// that only acts); a remote spec may only narrow.
     pub catalog_contract: bool,
     pub supports_idempotency_key: bool,
     /// Producer-owned operation revision. Zero means the operation came from a
@@ -1538,7 +1539,11 @@ fn mark_catalog_operations(published: &mut ParsedMcpEndpoints, catalog_slug: &st
         );
         if let Some(metadata) = published.durable_metadata.get_mut(&endpoint.endpoint_id) {
             metadata.destructive |= marks.destructive;
-            metadata.changes_existing = metadata.changes_existing.or(marks.changes_existing);
+            // Whichever says the operation edits wins.
+            metadata.changes_existing = match (metadata.changes_existing, marks.changes_existing) {
+                (Some(true), _) | (_, Some(true)) => Some(true),
+                (own, overlay) => overlay.or(own),
+            };
         }
     }
 }
@@ -1704,12 +1709,9 @@ async fn try_user_spec_endpoints(
 }
 
 /// Whether a spec URL is one of NyxID's hosted catalog overlays, which the
-/// spec fetch serves from the compiled overlay (`api_docs_service`).
+/// spec fetch serves from the compiled overlay, whatever the host.
 fn hosted_catalog_spec_url(spec_url: &str) -> bool {
-    url::Url::parse(spec_url).is_ok_and(|url| {
-        matches!(url.scheme(), "http" | "https")
-            && super::catalog_spec_registry::spec_for_url_path(url.path()).is_some()
-    })
+    api_docs_service::hosted_catalog_spec_for_url(spec_url).is_ok_and(|spec| spec.is_some())
 }
 
 /// Resolve a user-mounted OpenAPI spec into `(endpoints, is_generic_proxy,
@@ -3398,15 +3400,16 @@ impl PreparedProxyCall {
 
     /// Whether this call carries a method override: a header like
     /// `X-HTTP-Method-Override`, a `_method` (or Salesforce-style
-    /// `_HttpMethod`) field in its query or body, or a `method` query or
-    /// form field naming a changing verb (Facebook Graph's `method=delete`),
-    /// which a downstream framework may honour in place of the method the
-    /// call is sent with. Keys are read as PHP reads them (cut at a NUL or
-    /// control byte, leading spaces dropped, `.` and spaces as `_`,
-    /// `_method[]` as `_method`) in any case; anything starting `_method`
-    /// counts. The body is read by the content type it is sent with: a JSON
-    /// body by its keys, and one that does not parse counts (a server's
-    /// parser may read it); any other body as a form too.
+    /// `_HttpMethod`) field in its query or body, or a `method` field naming
+    /// a changing verb other than the one the call is sent with (Facebook
+    /// Graph's `method=delete`), which a downstream framework may honour in
+    /// place of the method the call is sent with. Keys are normalised as a
+    /// superset of how PHP reads them (cut at a NUL or control byte, leading
+    /// spaces dropped, `.`, `-` and spaces as `_`, `_method[]` as `_method`,
+    /// any case); anything starting `_method` counts; `;` separates fields as
+    /// `&` does. The body is read by the content type it is sent with: a JSON
+    /// body by its top-level fields, and one that does not parse counts (a
+    /// server's parser may read it); any other body as a form too.
     pub fn carries_method_override(&self) -> bool {
         fn normalized(key: &str) -> String {
             key.split(|c: char| c.is_control() || c == '[')
@@ -3420,36 +3423,37 @@ impl PreparedProxyCall {
                 })
                 .collect()
         }
-        fn override_key(key: &str) -> bool {
+        let sent = self.method.as_str();
+        let override_field = |key: &str, value: Option<&str>| {
             let key = normalized(key);
-            key.starts_with("_method") || key == "_httpmethod"
-        }
-        fn override_pair(key: &str, value: &str) -> bool {
-            let changing = matches!(
-                value.trim().to_ascii_uppercase().as_str(),
-                "POST" | "PUT" | "PATCH" | "DELETE" | "MERGE"
-            );
-            override_key(key)
-                || (changing
-                    && matches!(
-                        normalized(key).as_str(),
-                        "method" | "x_http_method_override" | "x_http_method" | "x_method_override"
-                    ))
-        }
-        fn override_header(name: &str) -> bool {
+            if key.starts_with("_method") || key == "_httpmethod" {
+                return true;
+            }
+            let verb = value.unwrap_or_default().trim().to_ascii_uppercase();
+            matches!(
+                key.as_str(),
+                "method" | "x_http_method_override" | "x_http_method" | "x_method_override"
+            ) && matches!(verb.as_str(), "POST" | "PUT" | "PATCH" | "DELETE" | "MERGE")
+                && !verb.eq_ignore_ascii_case(sent)
+        };
+        let override_header = |name: &str| {
             let name = name.to_ascii_lowercase().replace('_', "-");
             name.contains("method-override") || name.contains("http-method") || name == "x-method"
-        }
-        let form = |bytes: &[u8]| {
-            url::form_urlencoded::parse(bytes).any(|(key, value)| override_pair(&key, &value))
         };
-        let json_keys = |body: &[u8]| {
+        let form = |bytes: &[u8]| {
+            let text = String::from_utf8_lossy(bytes).replace(';', "&");
+            url::form_urlencoded::parse(text.as_bytes())
+                .any(|(key, value)| override_field(&key, Some(&value)))
+        };
+        let json_fields = |body: &[u8]| {
             let text = String::from_utf8_lossy(body);
             let json = text.trim_start_matches('\u{feff}').trim_start();
             serde_json::from_str::<serde_json::Value>(json).map(|value| {
-                value
-                    .as_object()
-                    .is_some_and(|fields| fields.keys().any(|key| override_key(key)))
+                value.as_object().is_some_and(|fields| {
+                    fields
+                        .iter()
+                        .any(|(key, value)| override_field(key, value.as_str()))
+                })
             })
         };
         let sent_as_json = self
@@ -3465,9 +3469,9 @@ impl PreparedProxyCall {
                 .is_some_and(|query| form(query.as_bytes()))
             || self.body.as_deref().is_some_and(|body| {
                 if sent_as_json {
-                    json_keys(body).unwrap_or(true)
+                    json_fields(body).unwrap_or(true)
                 } else {
-                    form(body) || json_keys(body).unwrap_or(false)
+                    form(body) || json_fields(body).unwrap_or(false)
                 }
             })
     }
@@ -7062,9 +7066,11 @@ mod tests {
             serde_json::json!({"method": "POST", "path": "posts/5", "query": "_HttpMethod=DELETE"}),
             // Facebook Graph's `method` names a changing verb.
             serde_json::json!({"method": "GET", "path": "12345", "query": "method=delete"}),
-            // Sent as JSON but no JSON a server's parser may not still read.
-            serde_json::json!({"method": "POST", "path": "posts/5",
-                "body": "{\"_method\": \"DELETE\", \"n\": 1e400}"}),
+            // Sent as JSON but not JSON NyxID reads: a server's parser may.
+            serde_json::json!({"method": "POST", "path": "posts/5", "body": "{\"a\": 1,}"}),
+            // Graph's `method` in a JSON body, and `;` as a separator.
+            serde_json::json!({"method": "POST", "path": "12345", "body": {"method": "delete"}}),
+            serde_json::json!({"method": "POST", "path": "posts/5", "query": "a=1;_method=DELETE"}),
         ] {
             assert!(overrides(args.clone()), "{args}");
         }
@@ -7077,9 +7083,11 @@ mod tests {
             // A JSON body is read by its keys, not as a form.
             serde_json::json!({"method": "POST", "path": "notes",
                 "body": {"text": "see https://x.test/?a=1&_method=DELETE"}}),
-            // Reading verbs, and `method` as data in a JSON body.
+            // Reading verbs, and `method` naming the verb the call is sent
+            // with (a webhook's method, Twilio's `Method=POST`).
             serde_json::json!({"method": "GET", "path": "12345", "query": "method=get"}),
             serde_json::json!({"method": "POST", "path": "hooks", "body": {"method": "POST"}}),
+            serde_json::json!({"method": "POST", "path": "Calls.json", "query": "Method=POST"}),
         ] {
             assert!(!overrides(args.clone()), "{args}");
         }
@@ -7119,6 +7127,28 @@ mod tests {
         assert!(!prepared("Body=please+remove+it&To=1"));
     }
 
+    /// A service that mounts NyxID's hosted overlay by URL gets it from the
+    /// compiled overlay, as a catalog contract: its read-only POST searches
+    /// are reads for guests.
+    #[tokio::test]
+    async fn mounted_hosted_overlays_are_catalog_contracts() {
+        let parsed = try_user_spec_endpoints(
+            "https://nyx.example/api/v1/catalog-specs/notion/openapi.json",
+            "owner",
+            "service",
+        )
+        .await
+        .unwrap();
+        let search = parsed
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.name == "notion_search")
+            .unwrap();
+        let metadata = parsed.durable_metadata[&search.endpoint_id];
+        assert!(metadata.catalog_contract);
+        assert_eq!(metadata.risk, Some(EndpointRisk::Read));
+    }
+
     #[test]
     fn hosted_catalog_overlays_are_recognised_by_url() {
         assert!(hosted_catalog_spec_url(
@@ -7155,12 +7185,32 @@ mod tests {
                 ),
             ]),
         };
+        // A mounted spec saying an edit "only acts" loses to the overlay.
+        published
+            .durable_metadata
+            .get_mut("endpoint-send_message")
+            .unwrap()
+            .changes_existing = Some(false);
+        published
+            .endpoints
+            .push(endpoint("edit_message_text", "/editMessageText"));
+        published.durable_metadata.insert(
+            "endpoint-edit_message_text".to_string(),
+            McpDurableEndpointMetadata {
+                changes_existing: Some(false),
+                ..Default::default()
+            },
+        );
         mark_catalog_operations(&mut published, "api-telegram-bot");
+        assert_eq!(
+            published.durable_metadata["endpoint-edit_message_text"].changes_existing,
+            Some(true)
+        );
         assert!(published.durable_metadata["endpoint-delete_message"].destructive);
         assert!(!published.durable_metadata["endpoint-send_message"].destructive);
         assert_eq!(
             published.durable_metadata["endpoint-send_message"].changes_existing,
-            None
+            Some(false)
         );
     }
 
