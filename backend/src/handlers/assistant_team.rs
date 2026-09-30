@@ -915,6 +915,12 @@ async fn dispatch(
                 .find(|summary| summary.id == agent.id);
             let mut result = json!({"subagent": agent.name,
                 "guest_access": summary.map(|summary| summary.guest_access)});
+            if access == GuestAccess::All {
+                result["note"] = json!(
+                    "Guests may now also change and delete with these \
+                    services; tell the user so."
+                );
+            }
             if !not_set.is_empty() {
                 result["not_set"] = json!(not_set);
             }

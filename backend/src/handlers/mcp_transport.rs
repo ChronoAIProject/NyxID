@@ -2101,12 +2101,12 @@ fn guest_tool_refusal(
 
 /// Refuse a guest's service call beyond what the owner lets guests do with
 /// that service on this specialist (`AssistantAgent::guest_access`): `read`
-/// runs only reads (an operation its stored catalog contract marks read-only,
-/// else GET, HEAD or OPTIONS), `use` (the default) reads, creates and acts
-/// (GET, HEAD, OPTIONS, POST) but never changes or removes what exists (PUT,
-/// PATCH, DELETE, or an operation marked destructive or
-/// `x-nyxid-changes-existing`), `all` everything the specialist may. A guest
-/// call never carries a method override. The agent's key already
+/// runs only reads (GET, HEAD, OPTIONS, or a POST its stored catalog contract
+/// marks read-only), `use` (the default) reads, creates and acts but never
+/// changes or removes what exists (PUT, PATCH and DELETE by default, a POST
+/// or PUT as NyxID's `x-nyxid-changes-existing` says, never an operation
+/// marked `x-aevatar-tool.destructive`), `all` everything the specialist may.
+/// A guest call never carries a method override. The agent's key already
 /// holds only its granted services, and operations behind the owner's
 /// approval are refused later (`authorize_mcp_operation`) at every level.
 async fn guest_service_refusal(
@@ -2152,23 +2152,25 @@ async fn guest_service_refusal(
         *method,
         reqwest::Method::GET | reqwest::Method::HEAD | reqwest::Method::OPTIONS
     );
-    // An operation its stored catalog contract marks read-only reads, even as
-    // a POST (a search); a remote spec may only narrow. Otherwise the method
-    // decides.
-    let reads = match metadata.risk {
-        Some(crate::models::service_endpoint::EndpointRisk::Read) => {
-            safe || metadata.catalog_contract
-        }
-        Some(crate::models::service_endpoint::EndpointRisk::Write) => false,
-        None => safe,
-    };
-    // Using a service is reading, creating and acting (POST); PUT, PATCH and
-    // DELETE change or remove what exists, as do operations marked so.
-    let uses = (safe || *method == reqwest::Method::POST) && !metadata.destructive;
+    // A POST its stored catalog contract marks read-only reads (a search), a
+    // GET its spec marks as writing does not; a remote spec may only narrow.
+    let reads = (safe
+        && metadata.risk != Some(crate::models::service_endpoint::EndpointRisk::Write))
+        || (*method == reqwest::Method::POST
+            && metadata.catalog_contract
+            && metadata.risk == Some(crate::models::service_endpoint::EndpointRisk::Read));
+    // Using a service is reading, creating and acting: PUT, PATCH and DELETE
+    // change or remove what exists, unless NyxID's marker says an operation
+    // only acts (a PUT that starts playback) or edits (a POST that edits a
+    // message); a DELETE and what Aevatar's marker calls destructive never.
+    let changes = metadata
+        .changes_existing
+        .unwrap_or(!(safe || *method == reqwest::Method::POST));
+    let uses = *method != reqwest::Method::DELETE && !changes && !metadata.destructive;
     let allowed = match access {
         GuestAccess::All => true,
         GuestAccess::Use => uses,
-        GuestAccess::Read => reads && !metadata.destructive,
+        GuestAccess::Read => reads && uses,
     };
     (!allowed).then(|| {
         tool_result(

@@ -1212,7 +1212,7 @@ async fn specialist_guest_turns_never_use_owner_tools_or_ssh() {
 }
 
 /// A specialist's guest turns use its granted services as far as the owner
-/// lets guests (read, use without deleting, or all), refused before anything
+/// lets guests (read, use without changing or deleting, or all), refused before anything
 /// is sent, and never ask the owner to approve or run on the owner's
 /// approvals: a guest's request would look like the owner's.
 #[tokio::test]
@@ -1501,6 +1501,31 @@ async fn set_guest_access(f: &Fixture, service: &str, access: GuestAccess) {
     .unwrap();
 }
 
+/// The owner's services as a guest's key sees them, with this service's
+/// operation metadata adjusted.
+async fn services_for(
+    f: &Fixture,
+    auth: &McpAuthContext,
+    service: &str,
+    adjust: impl Fn(&mut mcp_service::McpDurableEndpointMetadata),
+) -> Vec<mcp_service::McpToolService> {
+    let mut services = load_all_services_for_meta_tools(&f.state, auth)
+        .await
+        .unwrap();
+    let target = services
+        .iter_mut()
+        .find(|candidate| candidate.service_id == service)
+        .unwrap();
+    let endpoint_id = target.endpoints[0].endpoint_id.clone();
+    adjust(
+        target
+            .durable_endpoint_metadata
+            .entry(endpoint_id)
+            .or_default(),
+    );
+    services
+}
+
 /// Guest access is judged from the operation's spec: what it marks as
 /// deleting or replacing data is beyond "use", and what its stored catalog
 /// contract marks read-only is a read even as a POST (a remote spec may only
@@ -1614,6 +1639,61 @@ async fn guest_access_follows_spec_markers() {
             "{args}"
         );
     }
+    // NyxID's marker says what a method does not: a PUT that only acts is
+    // use, a POST that edits is not; a DELETE never is, whatever its spec says.
+    set_guest_access(&f, &service, GuestAccess::Use).await;
+    for (method, changes, refused) in [
+        ("PUT", Some(false), false),
+        ("PUT", None, true),
+        ("POST", Some(true), true),
+        ("DELETE", Some(false), true),
+    ] {
+        let mut marked = services_for(&f, &guest, &service, |metadata| {
+            metadata.changes_existing = changes;
+        })
+        .await;
+        let search = marked
+            .iter_mut()
+            .find(|candidate| candidate.service_id == service)
+            .unwrap();
+        let endpoint = &search.endpoints[0];
+        let prepared = mcp_service::prepare_proxy_tool_call(
+            search,
+            endpoint,
+            &json!({"method": method, "path": "/player/play"}),
+        )
+        .unwrap();
+        assert_eq!(
+            guest_service_refusal(&f.state, &guest, search, endpoint, &prepared, None)
+                .await
+                .is_some(),
+            refused,
+            "{method} {changes:?}"
+        );
+    }
+    // A read-only DELETE row is still a DELETE.
+    set_guest_access(&f, &service, GuestAccess::Read).await;
+    let marked = services_for(&f, &guest, &service, |metadata| {
+        metadata.risk = Some(crate::models::service_endpoint::EndpointRisk::Read);
+        metadata.catalog_contract = true;
+    })
+    .await;
+    let search = marked
+        .iter()
+        .find(|candidate| candidate.service_id == service)
+        .unwrap();
+    let endpoint = &search.endpoints[0];
+    let prepared = mcp_service::prepare_proxy_tool_call(
+        search,
+        endpoint,
+        &json!({"method": "DELETE", "path": "/items/1"}),
+    )
+    .unwrap();
+    assert!(
+        guest_service_refusal(&f.state, &guest, search, endpoint, &prepared, None)
+            .await
+            .is_some()
+    );
     // A remote spec read at call time may say read-only too, but only narrows.
     let mut remote = services;
     remote

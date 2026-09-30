@@ -14,7 +14,7 @@
 //! surface is identical (e.g. `api-github` / `api-github-pat`, or the
 //! Lark / Feishu domain pairs).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 
 const SPEC_PATH_PREFIX: &str = "/api/v1/catalog-specs/";
@@ -264,27 +264,45 @@ static PARSED_SPECS: LazyLock<HashMap<&'static str, Arc<serde_json::Value>>> = L
     },
 );
 
-/// Operations each overlay marks as deleting or replacing data, by spec key:
-/// `x-aevatar-tool.destructive`, or NyxID's own `x-nyxid-changes-existing`
-/// for a POST that edits what exists (Aevatar's marker is Aevatar's
-/// contract; NyxID adds its own rather than change it). Recorded as endpoint
-/// names (sanitized operation IDs) and `METHOD path` routes.
-static DESTRUCTIVE_OPERATIONS: LazyLock<HashMap<&'static str, HashSet<String>>> =
+/// What an overlay says about an operation's effect on existing data.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OperationMarks {
+    /// `x-aevatar-tool.destructive`: the operation deletes or replaces data.
+    pub destructive: bool,
+    /// NyxID's `x-nyxid-changes-existing`: whether the operation changes or
+    /// removes what exists, where its method says otherwise (a POST that
+    /// edits, a PUT that only acts). `None` leaves it to the method.
+    /// Aevatar's marker is Aevatar's contract; NyxID adds its own rather
+    /// than change it.
+    pub changes_existing: Option<bool>,
+}
+
+impl OperationMarks {
+    pub fn of(operation: &serde_json::Value) -> Self {
+        Self {
+            destructive: operation["x-aevatar-tool"]["destructive"].as_bool() == Some(true),
+            changes_existing: operation["x-nyxid-changes-existing"].as_bool(),
+        }
+    }
+}
+
+/// The marks of each overlay's operations, by spec key, keyed by endpoint
+/// name (sanitized operation ID) and by `METHOD path` route.
+static OPERATION_MARKS: LazyLock<HashMap<&'static str, HashMap<String, OperationMarks>>> =
     LazyLock::new(|| {
         PARSED_SPECS
             .iter()
             .map(|(key, spec)| {
-                let mut operations = HashSet::new();
+                let mut operations = HashMap::new();
                 for (path, item) in spec["paths"].as_object().into_iter().flatten() {
                     for (method, operation) in item.as_object().into_iter().flatten() {
-                        if operation["x-aevatar-tool"]["destructive"].as_bool() != Some(true)
-                            && operation["x-nyxid-changes-existing"].as_bool() != Some(true)
-                        {
+                        let marks = OperationMarks::of(operation);
+                        if marks == OperationMarks::default() {
                             continue;
                         }
-                        operations.insert(format!("{} {path}", method.to_ascii_uppercase()));
+                        operations.insert(format!("{} {path}", method.to_ascii_uppercase()), marks);
                         if let Some(id) = operation["operationId"].as_str() {
-                            operations.insert(super::openapi_parser::sanitize_name(id));
+                            operations.insert(super::openapi_parser::sanitize_name(id), marks);
                         }
                     }
                 }
@@ -293,16 +311,18 @@ static DESTRUCTIVE_OPERATIONS: LazyLock<HashMap<&'static str, HashSet<String>>> 
             .collect()
     });
 
-/// Whether the hosted overlay of a catalog service marks this operation as
-/// deleting or replacing data (`x-aevatar-tool.destructive` or
-/// `x-nyxid-changes-existing`), matched by name or route.
-pub fn marks_destructive(slug: &str, method: &str, path: &str, name: &str) -> bool {
+/// What the hosted overlay of a catalog service says about this operation,
+/// matched literally by name or route.
+pub fn operation_marks(slug: &str, method: &str, path: &str, name: &str) -> OperationMarks {
     spec_key_for_slug(slug)
-        .and_then(|key| DESTRUCTIVE_OPERATIONS.get(key))
-        .is_some_and(|operations| {
-            operations.contains(name)
-                || operations.contains(&format!("{} {path}", method.to_ascii_uppercase()))
+        .and_then(|key| OPERATION_MARKS.get(key))
+        .and_then(|operations| {
+            operations
+                .get(name)
+                .or_else(|| operations.get(&format!("{} {path}", method.to_ascii_uppercase())))
         })
+        .copied()
+        .unwrap_or_default()
 }
 
 /// Parsed overlay document for a spec key (the `{spec_key}` URL segment).
@@ -355,56 +375,63 @@ pub fn hydrated_slugs() -> impl Iterator<Item = &'static str> {
 mod tests {
     use super::*;
 
-    /// Guests' default access refuses what an overlay marks destructive,
+    /// Guests' default access follows what overlays say about an operation:
+    /// Aevatar's destructive marker and NyxID's own changes-existing marker,
     /// matched by endpoint name or route.
     #[test]
-    fn overlays_say_which_operations_are_destructive() {
-        assert!(marks_destructive(
-            "api-telegram-bot",
-            "POST",
-            "/deleteMessage",
-            "delete_message"
-        ));
-        assert!(marks_destructive(
-            "api-telegram-bot",
-            "post",
-            "/deleteMessage",
-            "renamed"
-        ));
-        assert!(!marks_destructive(
-            "api-telegram-bot",
-            "POST",
-            "/sendMessage",
-            "send_message"
-        ));
-        assert!(marks_destructive(
-            "api-google-sheets",
-            "POST",
-            "/v4/spreadsheets/{spreadsheetId}/values/{range}:clear",
-            "sheets_clear_values"
-        ));
-        assert!(!marks_destructive(
-            "custom-service",
-            "DELETE",
-            "/x",
-            "delete_x"
-        ));
-        // NyxID's own marker for a POST that edits what exists.
-        assert!(marks_destructive("api-slack", "POST", "/chat.update", "x"));
-        assert!(marks_destructive(
-            "api-telegram-bot",
-            "POST",
-            "/editMessageText",
-            "edit_message_text"
-        ));
-        // Aevatar's markers are left as they are: a PATCH update is beyond
-        // guests' default by its method, not by a marker.
-        assert!(!marks_destructive(
-            "api-google",
-            "PATCH",
-            "/nowhere",
-            "calendar_update_event"
-        ));
+    fn overlays_say_what_operations_do_to_existing_data() {
+        let marks = operation_marks;
+        assert!(
+            marks(
+                "api-telegram-bot",
+                "POST",
+                "/deleteMessage",
+                "delete_message"
+            )
+            .destructive
+        );
+        assert!(marks("api-telegram-bot", "post", "/deleteMessage", "renamed").destructive);
+        assert_eq!(
+            marks("api-telegram-bot", "POST", "/sendMessage", "send_message"),
+            OperationMarks::default()
+        );
+        assert!(
+            marks(
+                "api-google-sheets",
+                "POST",
+                "/v4/spreadsheets/{spreadsheetId}/values/{range}:clear",
+                "sheets_clear_values"
+            )
+            .destructive
+        );
+        // A POST that edits, and a PUT that only acts.
+        assert_eq!(
+            marks("api-slack", "POST", "/chat.update", "x").changes_existing,
+            Some(true)
+        );
+        assert_eq!(
+            marks(
+                "api-telegram-bot",
+                "POST",
+                "/editMessageText",
+                "edit_message_text"
+            )
+            .changes_existing,
+            Some(true)
+        );
+        assert_eq!(
+            marks("api-spotify", "PUT", "/me/player/play", "start_playback").changes_existing,
+            Some(false)
+        );
+        // A PATCH update is left to its method; Aevatar's markers are as they were.
+        assert_eq!(
+            marks("api-google", "PATCH", "/nowhere", "calendar_update_event"),
+            OperationMarks::default()
+        );
+        assert_eq!(
+            marks("custom-service", "DELETE", "/x", "delete_x"),
+            OperationMarks::default()
+        );
     }
 
     /// Frozen from 28fd2c44, including the original eight api-google operations.

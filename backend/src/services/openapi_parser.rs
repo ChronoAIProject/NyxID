@@ -21,9 +21,12 @@ pub struct ParsedEndpoint {
     pub request_body_required: bool,
     pub response: OperationResponseContract,
     pub risk: Option<EndpointRisk>,
-    /// The operation deletes or replaces data: `x-aevatar-tool.destructive`,
-    /// or NyxID's `x-nyxid-changes-existing` (a POST that edits).
+    /// `x-aevatar-tool.destructive`: the operation deletes or replaces data.
     pub destructive: bool,
+    /// NyxID's `x-nyxid-changes-existing`: whether the operation changes or
+    /// removes what exists where its method says otherwise; `None` leaves it
+    /// to the method.
+    pub changes_existing: Option<bool>,
     pub supports_idempotency_key: bool,
 }
 
@@ -159,11 +162,10 @@ fn parse_endpoints_from_spec(
                 .get("x-aevatar-tool")
                 .and_then(|value| value.get("destructive"))
                 .and_then(|value| value.as_bool())
-                .unwrap_or(false)
-                || operation
-                    .get("x-nyxid-changes-existing")
-                    .and_then(|value| value.as_bool())
-                    .unwrap_or(false);
+                .unwrap_or(false);
+            let changes_existing = operation
+                .get("x-nyxid-changes-existing")
+                .and_then(|value| value.as_bool());
             let supports_idempotency_key = operation
                 .get("x-nyxid-idempotency-key")
                 .and_then(|value| value.as_bool())
@@ -206,6 +208,7 @@ fn parse_endpoints_from_spec(
                 response,
                 risk,
                 destructive,
+                changes_existing,
                 supports_idempotency_key,
             });
         }
@@ -2656,9 +2659,17 @@ mod tests {
                 .unwrap()
                 .destructive
         };
+        let changes = |name: &str| {
+            endpoints
+                .iter()
+                .find(|endpoint| endpoint.name == name)
+                .unwrap()
+                .changes_existing
+        };
         assert!(destructive("updateitem"));
-        assert!(destructive("edititem"));
         assert!(!destructive("getitem"));
+        assert_eq!(changes("edititem"), Some(true));
+        assert_eq!(changes("getitem"), None);
     }
 
     // ---- extract_swagger2_consumes ----

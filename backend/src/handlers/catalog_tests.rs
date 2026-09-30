@@ -598,6 +598,7 @@ fn parsed_endpoint_to_response_maps_all_fields() {
         response: Default::default(),
         risk: None,
         destructive: false,
+        changes_existing: None,
         supports_idempotency_key: false,
     };
     let resp = super::parsed_endpoint_to_response(parsed);
@@ -629,6 +630,7 @@ fn parsed_endpoint_to_response_with_request_body() {
         response: Default::default(),
         risk: None,
         destructive: false,
+        changes_existing: None,
         supports_idempotency_key: false,
     };
     let resp = super::parsed_endpoint_to_response(parsed);

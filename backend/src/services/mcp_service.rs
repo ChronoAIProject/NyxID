@@ -210,9 +210,12 @@ pub struct McpToolService {
 pub struct McpDurableEndpointMetadata {
     pub risk: Option<EndpointRisk>,
     /// The operation's spec marks it as deleting or replacing data
-    /// (`x-aevatar-tool.destructive`, or `x-nyxid-changes-existing` for a
-    /// POST that edits), in the catalog overlay or mounted spec.
+    /// (`x-aevatar-tool.destructive`), in the catalog overlay or mounted spec.
     pub destructive: bool,
+    /// Whether the operation changes or removes what exists, where its
+    /// method says otherwise (NyxID's `x-nyxid-changes-existing`: a POST that
+    /// edits, a PUT that only acts); `None` leaves it to the method.
+    pub changes_existing: Option<bool>,
     /// The operation comes from a stored catalog contract (a
     /// `ServiceEndpoint` row an admin or NyxID's overlays created), not from
     /// a remote spec read at call time; only such a contract's `readOnly`
@@ -1379,7 +1382,7 @@ async fn load_user_tools_with_grants(
         };
         let mut published = published;
         if let Some(catalog) = catalog_policy {
-            mark_catalog_destructive(&mut published, &catalog.slug);
+            mark_catalog_operations(&mut published, &catalog.slug);
         }
 
         let recommended_skills = user_endpoint
@@ -1497,19 +1500,23 @@ fn service_endpoint_durable_metadata(
 ) -> HashMap<String, McpDurableEndpointMetadata> {
     eps.iter()
         .map(|endpoint| {
+            let marks = catalog_slug
+                .map(|slug| {
+                    super::catalog_spec_registry::operation_marks(
+                        slug,
+                        &endpoint.method,
+                        &endpoint.path,
+                        &endpoint.name,
+                    )
+                })
+                .unwrap_or_default();
             (
                 endpoint.id.clone(),
                 McpDurableEndpointMetadata {
                     risk: endpoint.risk,
                     catalog_contract: true,
-                    destructive: catalog_slug.is_some_and(|slug| {
-                        super::catalog_spec_registry::marks_destructive(
-                            slug,
-                            &endpoint.method,
-                            &endpoint.path,
-                            &endpoint.name,
-                        )
-                    }),
+                    destructive: marks.destructive,
+                    changes_existing: marks.changes_existing,
                     supports_idempotency_key: endpoint.supports_idempotency_key,
                     operation_generation: endpoint.operation_generation,
                 },
@@ -1518,19 +1525,20 @@ fn service_endpoint_durable_metadata(
         .collect()
 }
 
-/// An instance-mounted spec of a catalog service keeps the catalog
-/// overlay's destructive markers for the operations they share, matched
-/// literally by endpoint name or `METHOD path`.
-fn mark_catalog_destructive(published: &mut ParsedMcpEndpoints, catalog_slug: &str) {
+/// An instance-mounted spec of a catalog service keeps what the catalog
+/// overlay says about the operations they share, matched literally by
+/// endpoint name or `METHOD path`.
+fn mark_catalog_operations(published: &mut ParsedMcpEndpoints, catalog_slug: &str) {
     for endpoint in &published.endpoints {
-        if super::catalog_spec_registry::marks_destructive(
+        let marks = super::catalog_spec_registry::operation_marks(
             catalog_slug,
             &endpoint.method,
             &endpoint.path,
             &endpoint.name,
-        ) && let Some(metadata) = published.durable_metadata.get_mut(&endpoint.endpoint_id)
-        {
-            metadata.destructive = true;
+        );
+        if let Some(metadata) = published.durable_metadata.get_mut(&endpoint.endpoint_id) {
+            metadata.destructive |= marks.destructive;
+            metadata.changes_existing = metadata.changes_existing.or(marks.changes_existing);
         }
     }
 }
@@ -1547,6 +1555,7 @@ fn generic_proxy_endpoints(service_label: &str) -> ParsedMcpEndpoints {
         McpDurableEndpointMetadata {
             risk: None,
             destructive: false,
+            changes_existing: None,
             catalog_contract: false,
             supports_idempotency_key: false,
             // The generic proxy is a NyxID-owned protocol operation. Its
@@ -1621,6 +1630,7 @@ fn parsed_endpoints_to_mcp(parsed: Vec<openapi_parser::ParsedEndpoint>) -> Parse
             McpDurableEndpointMetadata {
                 risk: parsed_endpoint.risk,
                 destructive: parsed_endpoint.destructive,
+                changes_existing: parsed_endpoint.changes_existing,
                 catalog_contract: false,
                 supports_idempotency_key: parsed_endpoint.supports_idempotency_key,
                 // Remote instance specs have no durable producer revision.
@@ -1663,7 +1673,16 @@ async fn try_user_spec_endpoints(
     user_service_id: &str,
 ) -> Option<ParsedMcpEndpoints> {
     match fetch_and_parse_user_spec(spec_url, owner_id).await {
-        Ok(parsed) if !parsed.endpoints.is_empty() => Some(parsed),
+        Ok(mut parsed) if !parsed.endpoints.is_empty() => {
+            // A hosted catalog overlay is served from NyxID's own copy, never
+            // fetched: it is as much a catalog contract as a stored row.
+            if hosted_catalog_spec_url(spec_url) {
+                for metadata in parsed.durable_metadata.values_mut() {
+                    metadata.catalog_contract = true;
+                }
+            }
+            Some(parsed)
+        }
         Ok(_) => {
             tracing::debug!(
                 user_service_id = %user_service_id,
@@ -1682,6 +1701,15 @@ async fn try_user_spec_endpoints(
             None
         }
     }
+}
+
+/// Whether a spec URL is one of NyxID's hosted catalog overlays, which the
+/// spec fetch serves from the compiled overlay (`api_docs_service`).
+fn hosted_catalog_spec_url(spec_url: &str) -> bool {
+    url::Url::parse(spec_url).is_ok_and(|url| {
+        matches!(url.scheme(), "http" | "https")
+            && super::catalog_spec_registry::spec_for_url_path(url.path()).is_some()
+    })
 }
 
 /// Resolve a user-mounted OpenAPI spec into `(endpoints, is_generic_proxy,
@@ -3301,6 +3329,8 @@ pub struct PreparedProxyCall {
     parameter_headers: Vec<(String, String)>,
     server_owned_headers: Vec<(String, String)>,
     body: Option<bytes::Bytes>,
+    /// The content type the body is sent with.
+    body_content_type: Option<String>,
     is_generic_proxy_endpoint: bool,
 }
 
@@ -3367,39 +3397,65 @@ impl PreparedProxyCall {
     }
 
     /// Whether this call carries a method override: a header like
-    /// `X-HTTP-Method-Override`, or a `_method` (or Salesforce-style
-    /// `_HttpMethod`) field in its query or body, which a downstream
-    /// framework may honour in place of the method the call is sent with.
-    /// Keys are read as PHP reads them (cut at a NUL or control byte,
-    /// leading spaces dropped, `.` and spaces as `_`, `_method[]` as
-    /// `_method`) and compared in any case; anything starting `_method`
-    /// counts. A JSON body is read by its keys; any other body also as a
-    /// form.
+    /// `X-HTTP-Method-Override`, a `_method` (or Salesforce-style
+    /// `_HttpMethod`) field in its query or body, or a `method` query or
+    /// form field naming a changing verb (Facebook Graph's `method=delete`),
+    /// which a downstream framework may honour in place of the method the
+    /// call is sent with. Keys are read as PHP reads them (cut at a NUL or
+    /// control byte, leading spaces dropped, `.` and spaces as `_`,
+    /// `_method[]` as `_method`) in any case; anything starting `_method`
+    /// counts. The body is read by the content type it is sent with: a JSON
+    /// body by its keys, and one that does not parse counts (a server's
+    /// parser may read it); any other body as a form too.
     pub fn carries_method_override(&self) -> bool {
-        fn override_key(key: &str) -> bool {
-            let name = key
-                .split(|c: char| c.is_control() || c == '[')
+        fn normalized(key: &str) -> String {
+            key.split(|c: char| c.is_control() || c == '[')
                 .next()
                 .unwrap_or_default()
-                .trim_start_matches(' ');
-            let name: String = name
+                .trim_start_matches(' ')
                 .chars()
-                .map(|c| {
-                    if c == '.' || c == ' ' {
-                        '_'
-                    } else {
-                        c.to_ascii_lowercase()
-                    }
+                .map(|c| match c {
+                    '.' | ' ' | '-' => '_',
+                    c => c.to_ascii_lowercase(),
                 })
-                .collect();
-            name.starts_with("_method") || name == "_httpmethod"
+                .collect()
+        }
+        fn override_key(key: &str) -> bool {
+            let key = normalized(key);
+            key.starts_with("_method") || key == "_httpmethod"
+        }
+        fn override_pair(key: &str, value: &str) -> bool {
+            let changing = matches!(
+                value.trim().to_ascii_uppercase().as_str(),
+                "POST" | "PUT" | "PATCH" | "DELETE" | "MERGE"
+            );
+            override_key(key)
+                || (changing
+                    && matches!(
+                        normalized(key).as_str(),
+                        "method" | "x_http_method_override" | "x_http_method" | "x_method_override"
+                    ))
         }
         fn override_header(name: &str) -> bool {
             let name = name.to_ascii_lowercase().replace('_', "-");
             name.contains("method-override") || name.contains("http-method") || name == "x-method"
         }
-        let form =
-            |bytes: &[u8]| url::form_urlencoded::parse(bytes).any(|(key, _)| override_key(&key));
+        let form = |bytes: &[u8]| {
+            url::form_urlencoded::parse(bytes).any(|(key, value)| override_pair(&key, &value))
+        };
+        let json_keys = |body: &[u8]| {
+            let text = String::from_utf8_lossy(body);
+            let json = text.trim_start_matches('\u{feff}').trim_start();
+            serde_json::from_str::<serde_json::Value>(json).map(|value| {
+                value
+                    .as_object()
+                    .is_some_and(|fields| fields.keys().any(|key| override_key(key)))
+            })
+        };
+        let sent_as_json = self
+            .body_content_type
+            .as_deref()
+            .is_some_and(|content_type| super::content_type::is_json_content_type(content_type));
         self.parameter_headers
             .iter()
             .any(|(name, _)| override_header(name))
@@ -3408,13 +3464,10 @@ impl PreparedProxyCall {
                 .as_deref()
                 .is_some_and(|query| form(query.as_bytes()))
             || self.body.as_deref().is_some_and(|body| {
-                let text = String::from_utf8_lossy(body);
-                let json = text.trim_start_matches('\u{feff}').trim_start();
-                match serde_json::from_str::<serde_json::Value>(json) {
-                    Ok(value) => value
-                        .as_object()
-                        .is_some_and(|fields| fields.keys().any(|key| override_key(key))),
-                    Err(_) => form(body),
+                if sent_as_json {
+                    json_keys(body).unwrap_or(true)
+                } else {
+                    form(body) || json_keys(body).unwrap_or(false)
                 }
             })
     }
@@ -3492,6 +3545,9 @@ pub fn prepare_proxy_tool_call(
         query,
         parameter_headers,
         server_owned_headers: Vec::new(),
+        body_content_type: body
+            .is_some()
+            .then(|| request_content_type_or_default(endpoint).to_string()),
         body,
         is_generic_proxy_endpoint,
     })
@@ -4399,6 +4455,7 @@ pub async fn execute_tool_resolved(
         parameter_headers,
         server_owned_headers,
         body,
+        body_content_type: _,
         is_generic_proxy_endpoint,
     } = prepared;
 
@@ -6148,6 +6205,7 @@ mod tests {
                     McpDurableEndpointMetadata {
                         risk: None,
                         destructive: false,
+                        changes_existing: None,
                         catalog_contract: true,
                         supports_idempotency_key: false,
                         operation_generation: 1,
@@ -7002,6 +7060,11 @@ mod tests {
             serde_json::json!({"method": "POST", "path": "posts/5", "query": "_method%00x=DELETE"}),
             serde_json::json!({"method": "POST", "path": "posts/5", "query": "%20_method=DELETE"}),
             serde_json::json!({"method": "POST", "path": "posts/5", "query": "_HttpMethod=DELETE"}),
+            // Facebook Graph's `method` names a changing verb.
+            serde_json::json!({"method": "GET", "path": "12345", "query": "method=delete"}),
+            // Sent as JSON but no JSON a server's parser may not still read.
+            serde_json::json!({"method": "POST", "path": "posts/5",
+                "body": "{\"_method\": \"DELETE\", \"n\": 1e400}"}),
         ] {
             assert!(overrides(args.clone()), "{args}");
         }
@@ -7014,6 +7077,9 @@ mod tests {
             // A JSON body is read by its keys, not as a form.
             serde_json::json!({"method": "POST", "path": "notes",
                 "body": {"text": "see https://x.test/?a=1&_method=DELETE"}}),
+            // Reading verbs, and `method` as data in a JSON body.
+            serde_json::json!({"method": "GET", "path": "12345", "query": "method=get"}),
+            serde_json::json!({"method": "POST", "path": "hooks", "body": {"method": "POST"}}),
         ] {
             assert!(!overrides(args.clone()), "{args}");
         }
@@ -7036,6 +7102,32 @@ mod tests {
             .unwrap()
             .carries_method_override()
         );
+        // A form endpoint's body is read as a form even when it looks like
+        // JSON.
+        let form = McpToolEndpoint {
+            method: "POST".to_string(),
+            path: "/Messages.json".to_string(),
+            request_content_type: Some("application/x-www-form-urlencoded".to_string()),
+            ..make_endpoint("send_sms", "Send a message")
+        };
+        let prepared = |body: &str| {
+            prepare_proxy_tool_call(&service, &form, &serde_json::json!({"body": body}))
+                .unwrap()
+                .carries_method_override()
+        };
+        assert!(prepared("{\"a\":\"&_method=DELETE&\"}"));
+        assert!(!prepared("Body=please+remove+it&To=1"));
+    }
+
+    #[test]
+    fn hosted_catalog_overlays_are_recognised_by_url() {
+        assert!(hosted_catalog_spec_url(
+            "https://nyx.example/api/v1/catalog-specs/notion/openapi.json"
+        ));
+        assert!(!hosted_catalog_spec_url(
+            "https://api.example.com/openapi.json"
+        ));
+        assert!(!hosted_catalog_spec_url("not a url"));
     }
 
     /// An instance-mounted spec of a catalog service keeps the overlay's
@@ -7063,9 +7155,13 @@ mod tests {
                 ),
             ]),
         };
-        mark_catalog_destructive(&mut published, "api-telegram-bot");
+        mark_catalog_operations(&mut published, "api-telegram-bot");
         assert!(published.durable_metadata["endpoint-delete_message"].destructive);
         assert!(!published.durable_metadata["endpoint-send_message"].destructive);
+        assert_eq!(
+            published.durable_metadata["endpoint-send_message"].changes_existing,
+            None
+        );
     }
 
     /// Catalog rows take the destructive marker from the service's hosted
@@ -7103,7 +7199,7 @@ mod tests {
         assert!(!unmarked["ep-delete_message"].destructive);
         let edit = row("chat_update", "POST", "/chat.update");
         let edited = service_endpoint_durable_metadata(&[&edit], Some("api-slack"));
-        assert!(edited["ep-chat_update"].destructive);
+        assert_eq!(edited["ep-chat_update"].changes_existing, Some(true));
         // Stored rows are catalog contracts; only theirs may widen reads.
         assert!(edited["ep-chat_update"].catalog_contract);
     }
