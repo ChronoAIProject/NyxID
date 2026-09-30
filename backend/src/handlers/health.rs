@@ -4,6 +4,8 @@ use serde::Serialize;
 
 use crate::AppState;
 use crate::crypto::aes::EncryptionDecryptStats;
+use crate::errors::AppResult;
+use crate::services::feature_flag_service;
 
 #[derive(Serialize)]
 pub struct HealthResponse {
@@ -64,7 +66,8 @@ pub struct PublicConfigResponse {
 /// GET /api/v1/public/config
 ///
 /// Returns public configuration needed by the frontend (no auth required).
-pub async fn public_config(State(state): State<AppState>) -> Json<PublicConfigResponse> {
+pub async fn public_config(State(state): State<AppState>) -> AppResult<Json<PublicConfigResponse>> {
+    let invite_code_required = feature_flag_service::invitation_code_required(&state.db).await?;
     let base = state.config.base_url.trim_end_matches('/');
 
     let mut social_providers = Vec::new();
@@ -115,18 +118,18 @@ pub async fn public_config(State(state): State<AppState>) -> Json<PublicConfigRe
         (None, None, false)
     };
 
-    Json(PublicConfigResponse {
+    Ok(Json(PublicConfigResponse {
         frontend_url: state.config.frontend_url.trim_end_matches('/').to_string(),
         mcp_url: format!("{base}/mcp"),
         node_ws_url: format!("{ws_base}/api/v1/nodes/ws"),
         version: env!("CARGO_PKG_VERSION").to_string(),
         social_providers,
-        invite_code_required: state.config.invite_code_required,
+        invite_code_required,
         email_auth_enabled: state.config.email_auth_enabled,
         telemetry_dsn,
         telemetry_host,
         telemetry_share_analytics,
-    })
+    }))
 }
 
 #[cfg(test)]

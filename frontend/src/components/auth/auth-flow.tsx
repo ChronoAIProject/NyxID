@@ -108,7 +108,7 @@ export function AuthFlow({
 }: AuthFlowProps) {
   const normalizedInitialInviteCode =
     initialInviteCode?.trim().toUpperCase() ?? "";
-  const { data: publicConfig } = usePublicConfig();
+  const { data: publicConfig } = usePublicConfig({ refetchInterval: 30_000 });
   const inviteRequired = publicConfig?.invite_code_required ?? true;
   const emailAuthEnabled = publicConfig?.email_auth_enabled ?? false;
 

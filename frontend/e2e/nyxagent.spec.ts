@@ -434,6 +434,11 @@ test("a thread shows what it is waiting for and resumes by itself when it happen
   const waiting = page.getByRole("status", { name: "Waiting" });
   await expect(waiting).toContainText("Waiting for your Telegram bot to be created");
   await expect(waiting).toContainText("NyxBot continues here by itself");
+  await page.getByRole("link", { name: "Telegram bot setup" }).click();
+  const setup = page.getByRole("dialog");
+  await setup.getByLabel("Bot token", { exact: true }).fill("demo-bot-token");
+  await setup.getByRole("button", { name: "Add Bot", exact: true }).click();
+  await setup.getByRole("button", { name: "Done", exact: true }).click();
   // NyxID notices the bot and resumes the thread; the user never replied.
   await expect(page.getByText(/Your Telegram bot @helper_bot is linked/)).toBeVisible({
     timeout: 15_000,
@@ -464,8 +469,13 @@ test("with NyxID's live stream a waiting thread resumes as soon as it happens, n
   await sendMessage(page, "Set up a Telegram bot");
   const waiting = page.getByRole("status", { name: "Waiting" });
   await expect(waiting).toContainText("Waiting for your Telegram bot to be created");
-  // The fixture creates the bot 3 s after the request; the waiting poll alone
-  // would only notice it 10 s later.
+  await page.getByRole("link", { name: "Telegram bot setup" }).click();
+  const setup = page.getByRole("dialog");
+  await setup.getByLabel("Bot token", { exact: true }).fill("demo-bot-token");
+  await setup.getByRole("button", { name: "Add Bot", exact: true }).click();
+  await setup.getByRole("button", { name: "Done", exact: true }).click();
+  // Only the user's submission creates the bot. The live stream resumes the
+  // thread before the ten-second waiting poll would observe that mutation.
   await expect(page.getByText(/Your Telegram bot @helper_bot is linked/)).toBeVisible({
     timeout: 7000,
   });

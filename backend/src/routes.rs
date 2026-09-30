@@ -1317,6 +1317,17 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .layer(middleware::from_fn(reject_api_key_tokens))
         .layer(middleware::from_fn(reject_relay_tokens));
 
+    let channel_connect_link_routes = Router::new()
+        .route("/", post(handlers::channel_connect_links::create))
+        .route("/{id}", get(handlers::channel_connect_links::get))
+        .route(
+            "/{id}/cancel",
+            post(handlers::channel_connect_links::cancel),
+        )
+        .layer(middleware::from_fn(reject_delegated_tokens))
+        .layer(middleware::from_fn(reject_service_account_tokens))
+        .layer(middleware::from_fn(reject_relay_tokens));
+
     let connect_link_routes = Router::new()
         .route("/", post(handlers::connect_links::create_connect_link))
         .route("/{id}", get(handlers::connect_links::get_connect_link))
@@ -1716,6 +1727,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             post(handlers::login_code::redeem),
         )
         .route(
+            "/channel-connect-links/preview",
+            post(handlers::channel_connect_links::preview),
+        )
+        .route(
             "/connect-links/preview",
             post(handlers::connect_links::preview_connect_link),
         )
@@ -1870,6 +1885,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .nest("/nodes", node_registration_routes)
         .nest("/oracle", oracle_consumer_routes)
         .nest("/connect-links", connect_link_routes)
+        .nest("/channel-connect-links", channel_connect_link_routes)
         .nest("/triggers", trigger_routes)
         .nest("/orgs", org_read_routes)
         .layer(middleware::from_fn(reject_delegated_tokens))
@@ -2142,6 +2158,30 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/auth/device/deny",
             post(handlers::auth_device::deny_auth_device),
+        )
+        .route(
+            "/channel-connect-links/complete",
+            post(handlers::channel_connect_links::complete),
+        )
+        .route(
+            "/channel-connect-links/decline",
+            post(handlers::channel_connect_links::decline),
+        )
+        .route(
+            "/channel-connect-links/retry",
+            post(handlers::channel_connect_links::retry),
+        )
+        .route(
+            "/channel-connect-links/managed/start",
+            post(handlers::channel_connect_links::managed_start),
+        )
+        .route(
+            "/channel-connect-links/managed/complete",
+            post(handlers::channel_connect_links::managed_complete),
+        )
+        .route(
+            "/channel-connect-links/telegram/start",
+            post(handlers::channel_connect_links::telegram_start),
         )
         .route(
             "/connect-links/complete",
