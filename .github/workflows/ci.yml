@@ -581,7 +581,9 @@ jobs:
     # Cache a report for every rollup tip, including documentation-only pushes.
     if: inputs.force-all || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/rollup-')) || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # A live suite exceeded 45 minutes on a slow hosted runner. Allow headroom
+    # for compilation, complete test execution and export without retrying tests.
+    timeout-minutes: 90
     # Coverage counters do not require full DWARF; retain line locations.
     # Resource samples record whether compilation approaches runner limits.
     env:
@@ -677,7 +679,7 @@ jobs:
     if: github.event_name == 'pull_request' && (needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true')
     continue-on-error: true
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
       CARGO_PROFILE_TEST_DEBUG: line-tables-only

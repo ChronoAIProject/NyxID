@@ -1,7 +1,7 @@
 # CI robustness and latency investigation
 
 Status: CI-only implementation for repurposed PR #1711 targeting `main`,
-2026-09-30, rebased onto main `1f6fad58` after #1700 merged. Subsequent
+2026-10-01, rebased onto main `5c48735c` after #1700 and #1712 merged. Subsequent
 stages remain proposals. No repository rules are changed. PR #1707 (NyxChat
 setup overlays) is merged. The coverage debug-profile mitigation landed through
 #1705 (`a29056ef`). #1711 was initially closed as a duplicate and is being reused
@@ -34,13 +34,16 @@ at the user's request for the broader CI reliability fix.
   directory, streamed output and command failures. SIGINT/SIGTERM reach the
   child process group; cancellation cannot become success. Unresponsive child
   groups are killed after a bounded grace period.
-- Record memory/swap, free disk, relevant process counts, available cgroup
+- Record memory/swap, free disk, relevant process counts, CPU counters, load,
+  CPU/IO/memory pressure, available cgroup
   counters, actual checkout commit/tree, tool versions and selected profile
   settings. Samples appear every 30 seconds in the live log and in
   `resources-*` artifacts retained for 14 days. Unsupported optional telemetry
   or artifact failure does not change the required command's result.
-- Set a 45-minute timeout on these four heavy jobs, allowing margin over the
-  observed roughly 18–22-minute passing jobs while bounding hung execution.
+- Bound backend tests and billing smoke to 45 minutes and both backend coverage
+  jobs to 90 minutes. The initial 45-minute coverage bound interrupted a live
+  suite on a slow hosted runner; the larger outer limit accommodates observed
+  variability without retrying tests or weakening their assertions.
 - Key cached backend base reports by exact source SHA plus workflow/setup
   script contents, architecture and the **measurement job's** runner image.
   Missing image identity disables report reuse. No broad restore prefix is
@@ -67,7 +70,7 @@ before introducing compiler-worker limits or declaring shutdowns resolved.
 
 ## Coverage preservation and review criteria
 
-After rebasing onto main `1f6fad58`, this PR changes no application source,
+After rebasing onto main `5c48735c`, this PR changes no application source,
 regression test, nextest configuration, feature matrix, or frontend/mobile
 coverage configuration. The earlier NyxBot condition-wait fix is already in
 main through #1700 and is no longer part of this PR's net diff.
@@ -116,6 +119,21 @@ It does **not** establish that GitHub's
 shared compute capacity was exhausted, or that the shutdowns were OOM kills.
 
 ## Measured evidence
+
+The September 30 run at `d62750bb`
+([CI 36734448522](https://github.com/ChronoAIProject/NyxID/actions/runs/36734448522))
+exposed an overly tight timeout introduced in this PR. Head coverage compiled
+in 6m47s, then continued making test progress until three seconds before the
+45-minute job cancellation. It recorded 6,846 passes and two ignored tests;
+one result was outstanding. No assertion failure was recorded, and the
+aggregate correctly failed. The same application source passed all 6,849
+coverage tests in the base job (6,847 passed, two ignored), with a test phase
+of 670.57s. The head runner still had approximately 12 GiB available RAM and
+7.9 GiB free swap at cancellation. This is evidence of a live, slow execution
+clipped by the new limit, not evidence of an OOM or a test deadlock. The cause
+of the timing variation remains unproven. Coverage now has a conservative
+90-minute outer bound, and optional CPU/load/pressure samples help diagnose
+future variance. The bound is a failure limit, not an expected run time.
 
 The timing figures below are elapsed job-minutes, including cancelled work.
 They are neither CPU utilization measurements nor a billing estimate. This is

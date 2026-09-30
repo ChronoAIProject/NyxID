@@ -43,6 +43,15 @@ def snapshot():
         if name in {"cargo", "rustc", "rust-lld", "ld", "ld.lld", "mongod"}:
             processes[name] = processes.get(name, 0) + 1
     result = {"memory": values, "cgroup_root": counters, "process_counts": processes}
+    # CPU counters and pressure distinguish slow execution from memory exhaustion.
+    # These are host observations, not per-command resource accounting.
+    result["load_average"] = read_optional("/proc/loadavg")
+    cpu = (read_optional("/proc/stat") or "").splitlines()
+    result["cpu_times"] = cpu[0] if cpu and cpu[0].startswith("cpu ") else None
+    result["pressure"] = {
+        name: read_optional(Path("/proc/pressure") / name)
+        for name in ("cpu", "io", "memory")
+    }
     try:
         disk = os.statvfs(".")
         result["disk_available_bytes"] = disk.f_bavail * disk.f_frsize
