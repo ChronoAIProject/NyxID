@@ -1085,26 +1085,41 @@ pub(crate) static TEST_BOT_USER_IDS: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<String, String>>,
 > = std::sync::LazyLock::new(Default::default);
 
-/// The bot's own user ID on its platform, cached on the channel after the
-/// first lookup (Lark / Feishu: its `open_id`), so group messages that
-/// mention someone else are not taken as addressed to the bot.
-async fn own_user_id(state: &AppState, row: &NyxbotChannel, bot: &ChannelBot) -> Option<String> {
+/// Bots' own user IDs by bot and app, kept an hour (a failed lookup five
+/// minutes). Keyed by app too, so a bot switched to another Lark app is
+/// looked up again. A cache only: the platform is the source.
+static OWN_USER_IDS: std::sync::LazyLock<
+    std::sync::Mutex<
+        std::collections::HashMap<(String, String), (Option<String>, std::time::Instant)>,
+    >,
+> = std::sync::LazyLock::new(Default::default);
+
+/// The bot's own user ID on Lark / Feishu (its `open_id`), so group messages
+/// that mention someone else are not taken as addressed to the bot. `None`
+/// (the lookup failed) makes any mention count, as before.
+async fn own_user_id(state: &AppState, bot: &ChannelBot) -> Option<String> {
     if !matches!(canonical_platform(&bot.platform), "lark" | "feishu") {
         return None;
     }
-    if let Some(known) = row.gateway_bot_id.clone() {
-        return Some(known);
+    let key = (bot.id.clone(), bot.app_id.clone().unwrap_or_default());
+    if let Some((known, at)) = OWN_USER_IDS
+        .lock()
+        .ok()
+        .and_then(|ids| ids.get(&key).cloned())
+    {
+        let keep = if known.is_some() { 3600 } else { 300 };
+        if at.elapsed() < Duration::from_secs(keep) {
+            return known;
+        }
     }
-    let found = bot_user_id(state, bot).await?;
-    let _ = state
-        .db
-        .collection::<NyxbotChannel>(CHANNELS)
-        .update_one(
-            doc! {"_id": &row.id},
-            doc! {"$set": {"gateway_bot_id": &found}},
-        )
-        .await;
-    Some(found)
+    let found = bot_user_id(state, bot).await;
+    if found.is_none() {
+        tracing::debug!(platform = %bot.platform, "NyxBot could not look up the bot's own ID; any mention counts");
+    }
+    if let Ok(mut ids) = OWN_USER_IDS.lock() {
+        ids.insert(key, (found.clone(), std::time::Instant::now()));
+    }
+    found
 }
 
 /// The bot's own user ID on its platform (best effort).
@@ -3980,7 +3995,15 @@ pub async fn relay_callback(
                 if chats::replies_to_bot(&state, &bot, &chat_id, reply_to.as_deref()).await? {
                     Some(true)
                 } else {
-                    let bot_id = own_user_id(&state, &row, &bot).await;
+                    // Only messages that mention someone need the bot's own ID.
+                    let mentions = raw["event"]["message"]["mentions"]
+                        .as_array()
+                        .is_some_and(|mentions| !mentions.is_empty());
+                    let bot_id = if mentions {
+                        own_user_id(&state, &bot).await
+                    } else {
+                        None
+                    };
                     chats::raw_addressed(&bot, &raw, bot_id.as_deref())
                 }
             };

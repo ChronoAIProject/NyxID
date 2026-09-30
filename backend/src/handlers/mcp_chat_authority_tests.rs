@@ -1178,8 +1178,8 @@ async fn specialist_guest_turns_use_services_but_never_delete() {
         .await
         .unwrap();
     assert!(!String::from_utf8_lossy(&bytes).contains("owner_only"));
-    // Service operations: reads and changes pass on to the usual checks;
-    // deleting (and SSH, where a shell can delete anything) is the owner's.
+    // Operations: an HTTP DELETE and SSH (a shell can delete anything) are
+    // the owner's; reads and changes pass on to the usual checks.
     let target = crate::services::mcp_approval::McpApprovalTarget {
         service_id: uuid::Uuid::new_v4().to_string(),
         service_name: "Example".into(),
@@ -1187,46 +1187,147 @@ async fn specialist_guest_turns_use_services_but_never_delete() {
         service_owner_user_id: f.owner.clone(),
         is_auto_connected: false,
     };
-    for (method, path) in [
-        ("DELETE", "/items/1"),
-        ("POST", "/bot123/deleteMessage"),
-        ("POST", "/api/users/1/remove"),
-    ] {
-        let operation = operation_descriptor::build_mcp_descriptor(method, path, None);
-        let refused =
-            authorize_mcp_operation(&f.state, &auth, target.clone(), &operation, Some(json!(1)))
-                .await
-                .unwrap_err();
-        assert_eq!(
-            result(refused, true).await["error"],
-            "owner_only",
-            "{method} {path}"
-        );
-    }
+    let delete = operation_descriptor::build_mcp_descriptor("DELETE", "/items/1", None);
     let ssh = operation_descriptor::build_ssh_descriptor(
         operation_descriptor::SshOperationKind::Exec,
         Some("ls"),
     );
-    let refused = authorize_mcp_operation(&f.state, &auth, target.clone(), &ssh, Some(json!(1)))
-        .await
-        .unwrap_err();
-    assert_eq!(result(refused, true).await["error"], "owner_only");
+    for operation in [&delete, &ssh] {
+        let refused =
+            authorize_mcp_operation(&f.state, &auth, target.clone(), operation, Some(json!(1)))
+                .await
+                .unwrap_err();
+        assert_eq!(result(refused, true).await["error"], "owner_only");
+    }
     for method in ["GET", "POST", "PUT", "PATCH"] {
         let operation =
             operation_descriptor::build_mcp_descriptor(method, "/api/services/light/turn_on", None);
-        if let Err(response) =
-            authorize_mcp_operation(&f.state, &auth, target.clone(), &operation, Some(json!(1)))
-                .await
-        {
-            let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-                .await
-                .unwrap();
-            assert!(
-                !String::from_utf8_lossy(&bytes).contains("owner_only"),
-                "{method}"
-            );
-        }
+        authorize_mcp_operation(&f.state, &auth, target.clone(), &operation, Some(json!(1)))
+            .await
+            .unwrap_or_else(|_| panic!("{method}"));
     }
+}
+
+/// A specialist's guest turns use its granted services end to end, are
+/// refused anything that looks like deleting before it is sent, and never
+/// ask the owner to approve: a guest's request would look like the owner's.
+#[tokio::test]
+async fn specialist_guests_use_a_granted_service_but_never_delete_through_it() {
+    let f = fixture("chat_mcp_guest_calls").await;
+    let hits = Arc::new(AtomicUsize::new(0));
+    let count = hits.clone();
+    let upstream = Router::new().route(
+        "/{*path}",
+        any(move || {
+            count.fetch_add(1, Ordering::SeqCst);
+            async { Json(json!({"ok": true})) }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+    let service = connected(&f.state.db, &f.owner, "home", &address).await;
+    // The owner grants the service to the specialist.
+    let auth = authenticate(&f).await;
+    let search = result(
+        handle_meta_search(
+            &f.state,
+            &auth,
+            None,
+            &json!({"query": "home"}),
+            None,
+            false,
+        )
+        .await,
+        false,
+    )
+    .await;
+    let name = search["matches"][0]["name"].as_str().unwrap().to_string();
+    let ask = result(
+        call(&f, &auth, &name, json!({"method": "GET", "path": "/ok"})).await,
+        true,
+    )
+    .await;
+    acks::decide(
+        &f.state.db,
+        &f.owner,
+        &f.row.id,
+        ask["acknowledgement_id"].as_str().unwrap(),
+        true,
+    )
+    .await
+    .unwrap();
+    mark_guest(&f, true).await;
+    let guest = authenticate(&f).await;
+    for args in [
+        json!({"method": "DELETE", "path": "/items/1"}),
+        json!({"method": "POST", "path": "/bot1/deleteMessage"}),
+        json!({"method": "POST", "path": "/items/1?_method=DELETE"}),
+        json!({"method": "POST", "path": "/graphql",
+            "body": {"query": "mutation { removeUser(id: 1) }"}}),
+    ] {
+        let refused = result(call(&f, &guest, &name, args.clone()).await, true).await;
+        assert_eq!(refused["error"], "owner_only", "{args}");
+    }
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
+    for args in [
+        json!({"method": "GET", "path": "/api/states"}),
+        json!({"method": "POST", "path": "/api/services/light/turn_on",
+            "body": {"entity_id": "light.office"}}),
+    ] {
+        let used = result(call(&f, &guest, &name, args.clone()).await, false).await;
+        assert_eq!(used["ok"], true, "{args}");
+    }
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+    // A service the owner has put behind approval: the guest is refused and
+    // no approval request reaches the owner.
+    let now = chrono::Utc::now();
+    f.state
+        .db
+        .collection::<crate::models::service_approval_config::ServiceApprovalConfig>(
+            crate::models::service_approval_config::COLLECTION_NAME,
+        )
+        .insert_one(
+            crate::models::service_approval_config::ServiceApprovalConfig {
+                id: uuid::Uuid::new_v4().to_string(),
+                user_id: f.owner.clone(),
+                service_id: service.clone(),
+                service_name: "home".into(),
+                approval_required: true,
+                approval_mode: Default::default(),
+                rules: Vec::new(),
+                default_effect: None,
+                created_at: now,
+                updated_at: now,
+            },
+        )
+        .await
+        .unwrap();
+    let refused = result(
+        call(
+            &f,
+            &guest,
+            &name,
+            json!({"method": "GET", "path": "/api/states"}),
+        )
+        .await,
+        true,
+    )
+    .await;
+    assert_eq!(refused["error"], "owner_only");
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        f.state
+            .db
+            .collection::<mongodb::bson::Document>(
+                crate::models::approval_request::COLLECTION_NAME,
+            )
+            .count_documents(doc! {"service_id": &service})
+            .await
+            .unwrap(),
+        0
+    );
+    server.abort();
 }
 
 /// A guest never widens what a specialist may use: an ungranted service is

@@ -65,9 +65,9 @@ pub fn orchestrator_guest_refusal() -> Value {
 /// for something only the owner can ask for.
 pub fn guest_refusal() -> Value {
     json!({"error": "owner_only", "instructions": "You are answering someone other than the \
-        owner. Only the owner can ask for account actions, new connections, more access or \
-        deleting anything. Help with your services otherwise, and say that only the bot's owner \
-        can ask for that."})
+        owner. Only the owner can ask for account actions, new connections, more access, \
+        anything that needs their approval or deleting anything. Help with your services \
+        otherwise, and say that only the bot's owner can ask for that."})
 }
 
 pub async fn for_key(

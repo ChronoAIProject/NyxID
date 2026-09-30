@@ -482,16 +482,27 @@ turn so late tool calls stay restricted):
   the owner gives the chat a specialist with just that service;
 - a specialist's guest turns use its granted services: they discover tools and
   run operations that read or change things (turning a light on, creating or
-  updating), including through the generic proxy tool, but never delete: an HTTP
-  DELETE, an operation whose path is named for deleting (`delete`, `remove`,
-  `destroy`, `purge`, `erase`, `wipe`, `revoke`, `uninstall`, such as Telegram's
-  `deleteMessage`) and SSH (a shell can delete anything) are refused with
-  `owner_only`, as are `nyxid__` account, team, memory and posting tools and
-  connection and Oracle tools (the user's decision: "anyone in the group can talk
-  to the bot … dangerous command should only be allowed by the owner", with the
-  agent's key scoped to its granted services);
-- an ungranted service is refused without a permission request, so a guest
-  never widens what a specialist may use;
+  updating), including through the generic proxy tool, but never delete. A call
+  is refused with `owner_only` before it is sent when it looks like deleting
+  (`PreparedProxyCall::looks_like_deleting`): an HTTP DELETE or a method override
+  asking for one, or a change whose decoded path or query, operation name, body
+  keys or operation-like body fields (`query`, `action`, `command`, …) name a
+  deleting word as a whole word (`delete`, `remove`, `destroy`, `purge`, `erase`,
+  `wipe`, `revoke`, `uninstall`, `trash`, `truncate`, `drop`, `flush`, `clear`,
+  `unlink`, `archive`, …; `deleteMessage`, a GraphQL `deleteItem`, Drive's
+  `trashed`, Docs' `deleteContentRange`). Descriptions are not read, since they
+  mention deleting in passing ("rename, move, or move a file to trash"), and
+  text a guest writes in a message field is not either. SSH (a shell can delete
+  anything) is refused too, as are `nyxid__` account, team, memory and posting
+  tools and connection and Oracle tools (the user's decision: "anyone in the
+  group can talk to the bot … dangerous command should only be allowed by the
+  owner", with the agent's key scoped to its granted services). The check is
+  best effort: an API that deletes under an unrelated name is not recognised,
+  so a specialist given to a group should hold only services its members may
+  use;
+- an ungranted service, and an operation the owner put behind approval, are
+  refused without a permission or approval request, so a guest never widens
+  what a specialist may use or asks the owner in their name;
 - guests' messages are never queued as the owner's work: a busy agent asks them
   to try again (only if they spoke to the bot), a guest turn leaves the owner's
   queued events alone, and guest turns never reset the owner's event-turn loop

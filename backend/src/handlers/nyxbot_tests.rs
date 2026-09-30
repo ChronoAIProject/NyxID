@@ -4620,18 +4620,22 @@ async fn lark_groups_count_only_mentions_of_the_bot_itself() {
         chats::raw_addressed(&bot, &raw(&["ou_calvin"]), None),
         Some(true)
     );
-    // The bot's own ID is looked up once and kept on the channel.
-    let (mut row, _) = channel(&state, "direct").await;
-    row.channel_bot_id = bot.id.clone();
+    // The bot's own ID is looked up once, per app.
     TEST_BOT_USER_IDS
         .lock()
         .unwrap()
         .insert(bot.id.clone(), "ou_bot".into());
+    assert_eq!(own_user_id(&state, &bot).await.as_deref(), Some("ou_bot"));
+    TEST_BOT_USER_IDS
+        .lock()
+        .unwrap()
+        .insert(bot.id.clone(), "ou_changed".into());
+    assert_eq!(own_user_id(&state, &bot).await.as_deref(), Some("ou_bot"));
+    let mut moved = bot.clone();
+    moved.app_id = Some("cli_other_app".into());
     assert_eq!(
-        own_user_id(&state, &row, &bot).await.as_deref(),
-        Some("ou_bot")
+        own_user_id(&state, &moved).await.as_deref(),
+        Some("ou_changed")
     );
-    let stored = load_channel(&state, OWNER, &row.id).await.unwrap();
-    assert_eq!(stored.gateway_bot_id.as_deref(), Some("ou_bot"));
     server.abort();
 }

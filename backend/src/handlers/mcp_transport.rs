@@ -1744,6 +1744,9 @@ async fn dispatch_tools_call(
             );
         }
     };
+    if let Some(refused) = guest_deleting_refusal(auth, &prepared, endpoint, request.id.clone()) {
+        return refused;
+    }
     let operation = prepared.operation_descriptor();
     if let Err(resp) =
         authorize_mcp_tool_operation(state, auth, service, &operation, request.id.clone()).await
@@ -1899,6 +1902,11 @@ async fn authorize_mcp_operation(
                 "Operation denied by approval policy",
                 true,
             ));
+        }
+        // Nobody but the owner asks the owner to approve: a guest's request
+        // would look like the owner's own.
+        approval_service::ApprovalOutcome::NeedsApproval(_) if guest_turn(auth) => {
+            return Err(guest_refused(request_id));
         }
         approval_service::ApprovalOutcome::NeedsApproval(pending) => pending,
     };
@@ -2077,34 +2085,24 @@ fn guest_tool_refusal(
 
 /// What a guest (someone in the chat other than the owner) may run with the
 /// chat agent's services: anything but deleting. The agent's key already
-/// holds only the services it was granted. An operation that deletes (HTTP
-/// DELETE, or a path named for deleting, such as Telegram's `deleteMessage`)
-/// and SSH (a shell can delete anything) stay the owner's. The generic proxy
-/// tool is checked the same way, on the method and path the call chose.
+/// holds only the services it was granted. An HTTP DELETE and SSH (a shell
+/// can delete anything) stay the owner's; service tool calls are also checked
+/// on everything they send (`PreparedProxyCall::looks_like_deleting`), and
+/// anything that needs the owner's approval is refused rather than asked.
 fn guest_may_run(operation: &operation_descriptor::OperationDescriptor) -> bool {
     use crate::models::service_approval_config::ApprovalVerb;
-    if operation.protocol == operation_descriptor::Protocol::Ssh
-        || operation.verb == ApprovalVerb::Destructive
-    {
-        return false;
-    }
-    let path = operation
-        .resource
-        .as_deref()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    ![
-        "delete",
-        "remove",
-        "destroy",
-        "purge",
-        "erase",
-        "wipe",
-        "revoke",
-        "uninstall",
-    ]
-    .iter()
-    .any(|word| path.contains(word))
+    operation.protocol != operation_descriptor::Protocol::Ssh
+        && operation.verb != ApprovalVerb::Destructive
+}
+
+/// A guest's service tool call that looks like it deletes something.
+fn guest_deleting_refusal(
+    auth: &McpAuthContext,
+    prepared: &mcp_service::PreparedProxyCall,
+    endpoint: &mcp_service::McpToolEndpoint,
+    request_id: Option<serde_json::Value>,
+) -> Option<Response> {
+    (guest_turn(auth) && prepared.looks_like_deleting(endpoint)).then(|| guest_refused(request_id))
 }
 
 /// A channel chat member who is not the owner asked for this turn.
@@ -2112,9 +2110,10 @@ fn guest_turn(auth: &McpAuthContext) -> bool {
     auth.chat.as_ref().is_some_and(|chat| chat.guest)
 }
 
-/// Guest turns may discover tools and read with services (each operation is
-/// checked in `authorize_mcp_tool_operation`). Account, team, memory,
-/// connection, SSH and Oracle tools act for the owner and are refused.
+/// Guest turns may discover tools and use services (each call is checked by
+/// `guest_deleting_refusal` and `authorize_mcp_tool_operation`). Account,
+/// team, memory, connection, SSH and Oracle tools act for the owner and are
+/// refused.
 fn guest_tool_allowed(tool_name: &str) -> bool {
     if tool_name.starts_with("nyxid__") {
         return false;
@@ -2309,6 +2308,9 @@ async fn handle_meta_call_tool(
             return tool_result(request_id, &format!("Invalid tool arguments: {e}"), true);
         }
     };
+    if let Some(refused) = guest_deleting_refusal(auth, &prepared, endpoint, request_id.clone()) {
+        return refused;
+    }
     let operation = prepared.operation_descriptor();
     if let Err(resp) =
         authorize_mcp_tool_operation(state, auth, service, &operation, request_id.clone()).await
