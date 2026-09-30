@@ -8,6 +8,7 @@ pub mod meter;
 pub mod metric_resolution;
 pub mod owner_resolver;
 pub mod periods;
+pub mod pool_attempt;
 pub mod pricing;
 pub mod provisioning;
 pub mod reconcile;
@@ -139,6 +140,22 @@ pub async fn startup_diagnostics(
                 .get_datetime("updated_at")
                 .map(|value| value.to_chrono())
                 .unwrap_or_else(|_| Utc::now()),
+        });
+    }
+    if let Some(diagnostic) = db
+        .collection::<crate::models::pool_recovery_diagnostic::PoolRecoveryDiagnostic>(
+            crate::models::pool_recovery_diagnostic::COLLECTION_NAME,
+        )
+        .find_one(doc! {"name":"pool_recovery"})
+        .await?
+    {
+        items.push(BillingStartupDiagnostic {
+            code:"billing_pool_recovery".into(),
+            summary:"Pool recovery has observed errors".into(),
+            detail:format!("{} recovery failures; recent requests: {}", diagnostic.failures,
+                diagnostic.samples.iter().map(|failure| format!("{}: {}",failure.request_id.as_deref().unwrap_or("recovery phase"),failure.detail)).collect::<Vec<_>>().join("; ")),
+            remediation:"Inspect the affected request's meter, funding holds and settlement intent. Recovery keeps reservations intact and retries on later passes; do not fabricate balance corrections.".into(),
+            detected_at:diagnostic.updated_at,
         });
     }
     Ok(items)
@@ -462,6 +479,11 @@ impl BillingService {
             return Err(crate::errors::AppError::BillingNotConfigured(
                 "Channel billing could not reserve funding".into(),
             ));
+        }
+        if ctx.pool_attempt.is_some() && reservation.is_some() {
+            // Pool funding and meter rows committed together; cancellation at
+            // any later await can recover from the durable attempt lease.
+            return Ok(MeteredProxyContext::from_route(&ctx));
         }
         match meter::open(&self.db, &ctx, reservation.as_ref()).await {
             Ok(metered) => Ok(metered),

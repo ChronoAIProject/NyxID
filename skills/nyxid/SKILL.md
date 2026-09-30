@@ -165,7 +165,7 @@ Proxy to a pool by its slug exactly like a normal service slug:
 nyxid proxy request <pool_slug> /v1/path -m POST -d '<body>'
 ```
 
-Raw HTTP clients use the same slug route: `/api/v1/proxy/s/{pool_slug}/{path}`. For the shipped proxy behavior and current documentation bounds, load `references/service-pools.md`.
+Raw HTTP clients use the same slug route: `/api/v1/proxy/s/{pool_slug}/{path}`. For priority/failover, AI aliases, owner-aware CLI management and health, load `references/service-pools.md`.
 
 ## External Endpoints
 

@@ -1,6 +1,12 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import type {
+  PoolCandidatesResponse,
   CreateServicePoolInput,
   ServicePool,
   ServicePoolListResponse,
@@ -11,11 +17,15 @@ import type {
 
 const SERVICE_POOLS_KEY = ["service-pools"] as const;
 
-export function useServicePools() {
+export function useServicePools(orgId?: string) {
   return useQuery({
-    queryKey: SERVICE_POOLS_KEY,
+    queryKey: [...SERVICE_POOLS_KEY, "list", orgId],
     queryFn: async (): Promise<readonly ServicePool[]> => {
-      const res = await api.get<ServicePoolListResponse>("/service-pools");
+      const res = await api.get<ServicePoolListResponse>(
+        orgId
+          ? `/service-pools?org_id=${encodeURIComponent(orgId)}`
+          : "/service-pools",
+      );
       return res.pools;
     },
   });
@@ -25,7 +35,9 @@ export function useServicePool(poolId: string | null | undefined) {
   return useQuery({
     queryKey: [...SERVICE_POOLS_KEY, poolId],
     queryFn: async (): Promise<ServicePool> => {
-      return api.get<ServicePool>(`/service-pools/${encodeURIComponent(poolId!)}`);
+      return api.get<ServicePool>(
+        `/service-pools/${encodeURIComponent(poolId!)}`,
+      );
     },
     enabled: Boolean(poolId),
   });
@@ -68,7 +80,8 @@ export function useUpdateServicePool() {
         body,
       );
     },
-    onSuccess: (_data, variables) => invalidatePools(queryClient, variables.poolId),
+    onSuccess: (_data, variables) =>
+      invalidatePools(queryClient, variables.poolId),
   });
 }
 
@@ -96,7 +109,8 @@ export function useSetServicePoolMembers() {
         { members },
       );
     },
-    onSuccess: (_data, variables) => invalidatePools(queryClient, variables.poolId),
+    onSuccess: (_data, variables) =>
+      invalidatePools(queryClient, variables.poolId),
   });
 }
 
@@ -113,7 +127,8 @@ export function useAddServicePoolMember() {
         member,
       );
     },
-    onSuccess: (_data, variables) => invalidatePools(queryClient, variables.poolId),
+    onSuccess: (_data, variables) =>
+      invalidatePools(queryClient, variables.poolId),
   });
 }
 
@@ -129,6 +144,85 @@ export function useRemoveServicePoolMember() {
         `/service-pools/${encodeURIComponent(input.poolId)}/members/${encodeURIComponent(input.userServiceId)}`,
       );
     },
-    onSuccess: (_data, variables) => invalidatePools(queryClient, variables.poolId),
+    onSuccess: (_data, variables) =>
+      invalidatePools(queryClient, variables.poolId),
+  });
+}
+
+export interface PoolInspectionOptions {
+  poolId?: string;
+  orgId?: string;
+  contract?: "same_api" | "ai_chat";
+  method?: string;
+  path?: string;
+  search?: string;
+  peerIds?: string[];
+  declaredPeerIds?: string[];
+  strategy?: "priority" | "round_robin" | "weighted";
+}
+function inspectionPath(
+  options: PoolInspectionOptions,
+  health: boolean,
+  after?: string,
+) {
+  const base = options.poolId
+    ? `/service-pools/${encodeURIComponent(options.poolId)}/${health ? "health" : "candidates"}`
+    : "/service-pools/candidates";
+  const query = new URLSearchParams({
+    member_contract: options.contract ?? "same_api",
+    method: options.method ?? "POST",
+    path:
+      options.path ??
+      (options.contract === "ai_chat" ? "chat/completions" : "/"),
+    limit: "100",
+  });
+  if (options.orgId) query.set("org_id", options.orgId);
+  if (options.strategy) query.set("strategy", options.strategy);
+  if (options.declaredPeerIds)
+    query.set("declared_peer_ids", options.declaredPeerIds.join(","));
+  if (options.peerIds) query.set("peer_ids", options.peerIds.join(","));
+  if (options.search) query.set("search", options.search);
+  if (after) query.set("after", after);
+  return `${base}?${query.toString()}`;
+}
+export function usePoolCandidates(
+  options: PoolInspectionOptions,
+  enabled = true,
+) {
+  return useInfiniteQuery({
+    queryKey: [...SERVICE_POOLS_KEY, "candidates", options],
+    enabled,
+    initialPageParam: undefined as string | undefined,
+    queryFn: ({ pageParam }) =>
+      api.get<PoolCandidatesResponse>(
+        inspectionPath(options, false, pageParam),
+      ),
+    getNextPageParam: (page) =>
+      page.has_more ? (page.next_cursor ?? undefined) : undefined,
+  });
+}
+export function usePoolHealth(options: PoolInspectionOptions) {
+  return useQuery({
+    queryKey: [...SERVICE_POOLS_KEY, "health", options],
+    enabled: Boolean(options.poolId),
+    queryFn: () =>
+      api.get<PoolCandidatesResponse>(inspectionPath(options, true)),
+    refetchInterval: 15000,
+  });
+}
+export function useResetPoolHealth() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      poolId,
+      userServiceId,
+    }: {
+      poolId: string;
+      userServiceId?: string;
+    }) =>
+      api.post(`/service-pools/${encodeURIComponent(poolId)}/health/reset`, {
+        user_service_id: userServiceId ?? null,
+      }),
+    onSuccess: () => invalidatePools(client),
   });
 }

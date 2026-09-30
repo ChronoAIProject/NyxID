@@ -141,7 +141,28 @@ pub enum ProxyResponseType {
     /// Standard request/response (v1 behavior)
     Complete(NodeProxyResponse),
     /// Streaming response: chunks arrive through the channel
-    Streaming(mpsc::Receiver<StreamChunk>),
+    Streaming(NodeProxyStream),
+}
+
+/// Owns only the receiver and a pending-request cancellation guard. A stream
+/// observer must not retain a sender: dropping the last transport sender is a
+/// terminal signal used by overflow and connection removal.
+pub struct NodeProxyStream {
+    receiver: mpsc::Receiver<StreamChunk>,
+    _guard: Option<PendingProxyGuard>,
+}
+impl NodeProxyStream {
+    pub async fn recv(&mut self) -> Option<StreamChunk> {
+        self.receiver.recv().await
+    }
+}
+impl From<mpsc::Receiver<StreamChunk>> for NodeProxyStream {
+    fn from(receiver: mpsc::Receiver<StreamChunk>) -> Self {
+        Self {
+            receiver,
+            _guard: None,
+        }
+    }
 }
 
 /// Failure from the node proxy transport annotated with the mutation-safety
@@ -418,6 +439,7 @@ struct NodeConnection {
 /// haven't been upgraded yet.
 #[derive(Debug, Clone, Copy, Default, Serialize)]
 pub struct NodeCapabilitiesFlags {
+    pub http_cancellation: bool,
     pub http_signature_v2: bool,
     pub credential_ack_correlation: bool,
     pub remote_credential_crypto_v1: bool,
@@ -649,6 +671,63 @@ struct WsSshNodeExecOpen {
     nonce: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     hmac: Option<String>,
+}
+
+struct PendingProxyGuard {
+    request_id: String,
+    tx: mpsc::Sender<NodeOutboundMessage>,
+    close_tx: tokio::sync::watch::Sender<Option<NodeOutboundMessage>>,
+    pending: Arc<DashMap<String, PendingRequest>>,
+    armed: bool,
+    capabilities: Arc<std::sync::Mutex<NodeCapabilitiesFlags>>,
+}
+
+fn send_proxy_cancel(
+    tx: &mpsc::Sender<NodeOutboundMessage>,
+    close_tx: &tokio::sync::watch::Sender<Option<NodeOutboundMessage>>,
+    request_id: &str,
+    capabilities: &std::sync::Mutex<NodeCapabilitiesFlags>,
+) {
+    if !capabilities
+        .lock()
+        .is_ok_and(|flags| flags.http_cancellation)
+    {
+        return;
+    }
+    let message =
+        serde_json::json!({ "type": "proxy_cancel", "request_id": request_id }).to_string();
+    if tx.try_send(NodeOutboundMessage::Text(message)).is_err() {
+        let _ = close_tx.send(Some(NodeOutboundMessage::Close {
+            code: 1011,
+            reason: "HTTP cancellation channel unavailable".into(),
+        }));
+    }
+}
+
+impl PendingProxyGuard {
+    fn new(conn: &NodeConnection, request_id: &str) -> Self {
+        Self {
+            request_id: request_id.into(),
+            tx: conn.tx.clone(),
+            close_tx: conn.close_tx.clone(),
+            pending: conn.pending.clone(),
+            armed: true,
+            capabilities: conn.capabilities.clone(),
+        }
+    }
+}
+
+impl Drop for PendingProxyGuard {
+    fn drop(&mut self) {
+        if self.armed && self.pending.remove(&self.request_id).is_some() {
+            send_proxy_cancel(
+                &self.tx,
+                &self.close_tx,
+                &self.request_id,
+                &self.capabilities,
+            );
+        }
+    }
 }
 
 struct PendingSshExecGuard {
@@ -1030,6 +1109,8 @@ pub enum CredentialAckOutcome {
 /// seventh-round Codex P2).
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct NodeCapabilitiesMsg {
+    #[serde(default)]
+    pub http_cancellation: bool,
     #[serde(default)]
     pub http_signature_v2: bool,
     /// Node echoes the `request_id` from a `credential_update` /
@@ -1986,6 +2067,7 @@ impl NodeWsManager {
             }
         }
 
+        let mut cancellation_guard = PendingProxyGuard::new(&conn, &request_id);
         drop(_dispatch_guard);
 
         // Drop the connection ref before awaiting
@@ -1994,7 +2076,10 @@ impl NodeWsManager {
         // Wait for response with timeout
         let timeout = std::time::Duration::from_secs(self.proxy_timeout_secs);
         match tokio::time::timeout(timeout, resp_rx).await {
-            Ok(Ok(NodeProxyOutcome::Response(response))) => Ok(response),
+            Ok(Ok(NodeProxyOutcome::Response(response))) => {
+                cancellation_guard.armed = false;
+                Ok(response)
+            }
             Ok(Ok(NodeProxyOutcome::RetryableFailure { message, reason })) => {
                 let error = map_retryable_node_failure(message, reason.as_deref());
                 if matches!(error, AppError::NodeCredentialMissing(_)) {
@@ -2010,10 +2095,7 @@ impl NodeWsManager {
                 format!("Node {node_id} disconnected during request"),
             ))),
             Err(_) => {
-                // Timeout -- clean up pending request
-                if let Some(conn) = self.connections.get(node_id) {
-                    conn.pending.remove(&request_id);
-                }
+                // The guard removes pending and sends cancellation to the node.
                 Err(NodeProxyFailure::after_dispatch(AppError::NodeProxyTimeout))
             }
         }
@@ -2695,6 +2777,7 @@ impl NodeWsManager {
             && let Ok(mut flags) = conn.capabilities.lock()
         {
             flags.http_signature_v2 = caps.http_signature_v2;
+            flags.http_cancellation = caps.http_cancellation;
             flags.credential_ack_correlation = caps.credential_ack_correlation;
             flags.remote_credential_crypto_v1 = caps.remote_credential_crypto_v1;
             flags.proxy_max_body_size = caps.proxy_max_body_size;
@@ -2927,18 +3010,16 @@ impl NodeWsManager {
                 ) {
                     return false;
                 }
-                if response_tx
+                conn.pending
+                    .insert(request_id.to_string(), PendingRequest::Streaming(stream_tx));
+                response_tx
                     .send(NodeProxyOutcome::Response(ProxyResponseType::Streaming(
-                        stream_rx,
+                        NodeProxyStream {
+                            receiver: stream_rx,
+                            _guard: Some(PendingProxyGuard::new(&conn, request_id)),
+                        },
                     )))
                     .is_ok()
-                {
-                    conn.pending
-                        .insert(request_id.to_string(), PendingRequest::Streaming(stream_tx));
-                    true
-                } else {
-                    false
-                }
             }
             PendingRequest::Streaming(tx) => {
                 // Already streaming (duplicate start?). Send the start chunk and re-insert.
@@ -2952,6 +3033,7 @@ impl NodeWsManager {
                         .insert(request_id.to_string(), PendingRequest::Streaming(tx));
                     true
                 } else {
+                    send_proxy_cancel(&conn.tx, &conn.close_tx, request_id, &conn.capabilities);
                     false
                 }
             }
@@ -2980,10 +3062,14 @@ impl NodeWsManager {
                         capacity = STREAM_BUFFER_CAPACITY,
                         "Dropping node proxy stream due to full receive buffer"
                     );
-                    conn.pending.remove(request_id);
+                    if conn.pending.remove(request_id).is_some() {
+                        send_proxy_cancel(&conn.tx, &conn.close_tx, request_id, &conn.capabilities);
+                    }
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
-                    conn.pending.remove(request_id);
+                    if conn.pending.remove(request_id).is_some() {
+                        send_proxy_cancel(&conn.tx, &conn.close_tx, request_id, &conn.capabilities);
+                    }
                 }
             }
         }
@@ -3005,8 +3091,10 @@ impl NodeWsManager {
     }
 
     pub(crate) fn cancel_proxy_request(&self, node_id: &str, request_id: &str) {
-        if let Some(conn) = self.connections.get(node_id) {
-            conn.pending.remove(request_id);
+        if let Some(conn) = self.connections.get(node_id)
+            && conn.pending.remove(request_id).is_some()
+        {
+            send_proxy_cancel(&conn.tx, &conn.close_tx, request_id, &conn.capabilities);
         }
     }
 
@@ -3033,7 +3121,14 @@ impl NodeWsManager {
             std::time::Instant::now()
                 + std::time::Duration::from_secs(self.proxy_timeout_secs.saturating_add(5)),
         );
-        connection.pending.remove(request_id);
+        if connection.pending.remove(request_id).is_some() {
+            send_proxy_cancel(
+                &connection.tx,
+                &connection.close_tx,
+                request_id,
+                &connection.capabilities,
+            );
+        }
         Ok(())
     }
 
@@ -4131,6 +4226,249 @@ mod tests {
         .expect("test billing route classification must be valid")
     }
 
+    #[tokio::test]
+    async fn pool_node_cancel_queue_failure_closes_only_capable_session() {
+        for capable in [false, true] {
+            let manager = NodeWsManager::new(30, 100);
+            let (tx, mut rx) = mpsc::channel(1);
+            manager.register_connection_with_id("node", "socket".into(), tx);
+            manager.record_capabilities(
+                "node",
+                &NodeCapabilitiesMsg {
+                    http_cancellation: capable,
+                    ..Default::default()
+                },
+            );
+            let conn = manager.connections.get("node").unwrap();
+            let close = conn.close_tx.subscribe();
+            conn.tx
+                .try_send(NodeOutboundMessage::Text("already queued".into()))
+                .unwrap();
+            send_proxy_cancel(&conn.tx, &conn.close_tx, "request", &conn.capabilities);
+            assert_eq!(close.borrow().is_some(), capable);
+            assert!(matches!(
+                rx.recv().await,
+                Some(NodeOutboundMessage::Text(_))
+            ));
+            assert!(
+                !conn.tx.is_closed(),
+                "receiver remains owned by the same session"
+            );
+        }
+    }
+
+    fn cancellation_request(id: &str) -> NodeProxyRequest {
+        NodeProxyRequest {
+            target_id: None,
+            request_id: id.into(),
+            service_id: "service".into(),
+            service_slug: "service".into(),
+            base_url: "http://127.0.0.1".into(),
+            method: "GET".into(),
+            path: "/".into(),
+            query: None,
+            headers: Vec::new(),
+            body: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn pool_node_own_header_timeout_cancels_provider_and_cleans_pending() {
+        let manager = NodeWsManager::new(1, 100);
+        let (tx, mut rx) = mpsc::channel(256);
+        manager.register_connection_with_id("pool-node", "socket".into(), tx);
+        manager.record_capabilities(
+            "pool-node",
+            &NodeCapabilitiesMsg {
+                http_cancellation: true,
+                ..Default::default()
+            },
+        );
+        let failure = manager
+            .send_proxy_request_classified_prepared(
+                "pool-node",
+                cancellation_request("timed-request"),
+                None,
+                Some("socket"),
+                billing_egress_permit(crate::services::billing::BillingIngress::Proxy),
+            )
+            .await
+            .err()
+            .expect("request must time out");
+        assert!(matches!(failure.error, AppError::NodeProxyTimeout));
+        assert!(!manager.has_pending_proxy_request("pool-node", "timed-request"));
+        let _request = rx.recv().await.unwrap();
+        let NodeOutboundMessage::Text(cancel) =
+            tokio::time::timeout(Duration::from_secs(1), rx.recv())
+                .await
+                .unwrap()
+                .unwrap()
+        else {
+            panic!("cancel expected")
+        };
+        let cancel: Value = serde_json::from_str(&cancel).unwrap();
+        assert_eq!(cancel["type"], "proxy_cancel");
+        assert_eq!(cancel["request_id"], "timed-request");
+    }
+
+    #[tokio::test]
+    async fn pool_node_dropped_header_wait_cancels_transport_and_cleans_pending() {
+        let manager = NodeWsManager::new(30, 100);
+        let (tx, mut rx) = mpsc::channel(256);
+        manager.register_connection_with_id("pool-node", "socket".into(), tx);
+        manager.record_capabilities(
+            "pool-node",
+            &NodeCapabilitiesMsg {
+                http_cancellation: true,
+                ..Default::default()
+            },
+        );
+        let mut pending = Box::pin(manager.send_proxy_request_classified_prepared(
+            "pool-node",
+            cancellation_request("pool-request"),
+            None,
+            Some("socket"),
+            billing_egress_permit(crate::services::billing::BillingIngress::Proxy),
+        ));
+        tokio::select! {
+            message = rx.recv() => { assert!(message.is_some()); }
+            _ = &mut pending => panic!("request must wait for headers"),
+        }
+        assert!(manager.has_pending_proxy_request("pool-node", "pool-request"));
+        drop(pending);
+        assert!(!manager.has_pending_proxy_request("pool-node", "pool-request"));
+        let message = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let NodeOutboundMessage::Text(message) = message else {
+            panic!("expected cancellation frame")
+        };
+        let frame: Value = serde_json::from_str(&message).unwrap();
+        assert_eq!(frame["type"], "proxy_cancel");
+        assert_eq!(frame["request_id"], "pool-request");
+    }
+
+    #[tokio::test]
+    async fn pool_node_dropped_stream_cancels_transport_and_cleans_pending() {
+        let manager = NodeWsManager::new(30, 100);
+        let (tx, mut rx) = mpsc::channel(256);
+        manager.register_connection_with_id("pool-node", "socket".into(), tx);
+        manager.record_capabilities(
+            "pool-node",
+            &NodeCapabilitiesMsg {
+                http_cancellation: true,
+                ..Default::default()
+            },
+        );
+        let mut pending = Box::pin(manager.send_proxy_request_classified_prepared(
+            "pool-node",
+            cancellation_request("pool-stream"),
+            None,
+            Some("socket"),
+            billing_egress_permit(crate::services::billing::BillingIngress::Proxy),
+        ));
+        tokio::select! {
+            message = rx.recv() => { assert!(message.is_some()); }
+            _ = &mut pending => panic!("request must wait for headers"),
+        }
+        assert!(manager.deliver_stream_start("pool-node", "pool-stream", 200, Vec::new()));
+        let response = pending.await.unwrap_or_else(|_| panic!("stream response"));
+        drop(response);
+        let message = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let NodeOutboundMessage::Text(message) = message else {
+            panic!("expected cancellation frame")
+        };
+        let frame: Value = serde_json::from_str(&message).unwrap();
+        assert_eq!(frame["type"], "proxy_cancel");
+        assert!(!manager.has_pending_proxy_request("pool-node", "pool-stream"));
+    }
+
+    #[tokio::test]
+    async fn pool_node_overflow_and_disconnect_close_receiver_without_sender_leaks() {
+        for overflow in [true, false] {
+            let manager = NodeWsManager::new(30, 100);
+            let (tx, mut outbound) = mpsc::channel(256);
+            manager.register_connection_with_id("pool-node", "socket".into(), tx);
+            manager.record_capabilities(
+                "pool-node",
+                &NodeCapabilitiesMsg {
+                    http_cancellation: true,
+                    ..Default::default()
+                },
+            );
+            let mut pending = Box::pin(manager.send_proxy_request_classified_prepared(
+                "pool-node",
+                cancellation_request("pool-stream"),
+                None,
+                Some("socket"),
+                billing_egress_permit(crate::services::billing::BillingIngress::Proxy),
+            ));
+            tokio::select! { message = outbound.recv() => { assert!(message.is_some()); } _ = &mut pending => panic!("waiting for headers"), }
+            assert!(manager.deliver_stream_start("pool-node", "pool-stream", 200, Vec::new()));
+            let ProxyResponseType::Streaming(mut stream) =
+                pending.await.unwrap_or_else(|_| panic!("stream response"))
+            else {
+                panic!("expected stream");
+            };
+            if overflow {
+                for _ in 0..=STREAM_BUFFER_CAPACITY {
+                    manager.deliver_stream_chunk("pool-node", "pool-stream", vec![1]);
+                }
+                let NodeOutboundMessage::Text(frame) =
+                    tokio::time::timeout(Duration::from_secs(1), outbound.recv())
+                        .await
+                        .unwrap()
+                        .unwrap()
+                else {
+                    panic!("cancellation frame");
+                };
+                assert_eq!(
+                    serde_json::from_str::<Value>(&frame).unwrap()["type"],
+                    "proxy_cancel"
+                );
+            } else {
+                assert!(manager.unregister_connection_if("pool-node", "socket"));
+            }
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while stream.recv().await.is_some() {}
+            })
+            .await
+            .expect("last sender removal must close stream immediately");
+            assert!(!manager.has_pending_proxy_request("pool-node", "pool-stream"));
+        }
+    }
+
+    #[tokio::test]
+    async fn pool_node_normal_end_does_not_send_cancellation() {
+        let manager = NodeWsManager::new(30, 100);
+        let (tx, mut outbound) = mpsc::channel(256);
+        manager.register_connection_with_id("pool-node", "socket".into(), tx);
+        manager.record_capabilities(
+            "pool-node",
+            &NodeCapabilitiesMsg {
+                http_cancellation: true,
+                ..Default::default()
+            },
+        );
+        let mut pending = Box::pin(manager.send_proxy_request_classified_prepared(
+            "pool-node",
+            cancellation_request("pool-stream"),
+            None,
+            Some("socket"),
+            billing_egress_permit(crate::services::billing::BillingIngress::Proxy),
+        ));
+        tokio::select! { _ = outbound.recv() => {} _ = &mut pending => panic!("waiting for headers"), }
+        assert!(manager.deliver_stream_start("pool-node", "pool-stream", 200, Vec::new()));
+        let response = pending.await.unwrap_or_else(|_| panic!("stream response"));
+        manager.deliver_stream_end("pool-node", "pool-stream");
+        drop(response);
+        assert!(outbound.try_recv().is_err());
+    }
+
     #[test]
     fn node_proxy_ws_limit_accounts_for_base64_and_envelope_overhead() {
         let raw_limit: usize = 100 * 1024 * 1024;
@@ -4228,6 +4566,7 @@ mod tests {
             "node-small",
             &NodeCapabilitiesMsg {
                 http_signature_v2: false,
+                http_cancellation: false,
                 proxy_max_body_size: Some(4),
                 ..NodeCapabilitiesMsg::default()
             },
@@ -5387,6 +5726,7 @@ mod tests {
             "node-cap",
             &NodeCapabilitiesMsg {
                 http_signature_v2: false,
+                http_cancellation: false,
                 credential_ack_correlation: true,
                 remote_credential_crypto_v1: true,
                 proxy_max_body_size: None,
@@ -5413,6 +5753,7 @@ mod tests {
             "node-rci",
             &NodeCapabilitiesMsg {
                 http_signature_v2: false,
+                http_cancellation: false,
                 remote_credential_crypto_v1: true,
                 ..NodeCapabilitiesMsg::default()
             },

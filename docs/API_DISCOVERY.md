@@ -314,3 +314,18 @@ Images over 1 MiB are described in the note but not inlined. Assistant chat keys
 receive the note only, because the image is shown in the chat instead. Every other response
 type keeps its previous text form. Assistant chat keys additionally get the image
 attached to the live chat turn (see `docs/chat/08-nyxagent-engine.md`, Tool images).
+
+## AI pool aliases
+
+`GET /api/v1/llm/pools?offset=0&limit=100` discovers active priority AI chat aliases
+that the caller can resolve through the normal personal/organization cascade.
+Entries include `id: "pool:<slug>"`, `pool_id`, `name`, `owner_id`, `slug_route`
+and availability; follow `next_offset` to continue. Read-only planning applies
+service/node scopes and live contract metadata without decrypting credentials or
+dispatching a request. Availability is a current snapshot, not a reservation.
+
+Use the alias as `model` at the chat gateway or call its slug route. Management
+candidates are paged at `/service-pools/candidates` or `/{pool_id}/candidates`;
+health/reset use `/{pool_id}/health` and `/{pool_id}/health/reset`. See
+[Service pools](SERVICE_POOLS.md) for draft peer compatibility, native operation
+selection, atomic edits and authorization.

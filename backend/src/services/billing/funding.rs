@@ -27,6 +27,167 @@ use super::route_context::BillingRouteContext;
 const FUNDING_CLAIM_LEASE_SECS: i64 = 60;
 const RESOURCE_LOCK_RETRIES: usize = 4;
 
+/// Pool admission has a cancellation deadline. Commit every funding hold and
+/// its recoverable meter row together, including allowance and grant funding.
+pub(super) async fn reserve_and_open_pool(
+    db: &mongodb::Database,
+    ctx: &BillingRouteContext,
+    wallet: &crate::models::billing_wallet::BillingWallet,
+    layers: Vec<LayerReservation>,
+) -> AppResult<super::reservation::BillingReservation> {
+    let service_id = ctx
+        .catalog_service_id
+        .as_deref()
+        .or(ctx.user_service_id.as_deref());
+    let now = Utc::now();
+    let mut allowance_candidates = Vec::with_capacity(layers.len());
+    for layer in &layers {
+        let mut periods = Vec::new();
+        if layer.layer == BillingLayer::Platform {
+            for definition in super::allowances::applicable_allowances(
+                db,
+                &ctx.billing_owner_id,
+                service_id,
+                ctx.service_slug.as_deref(),
+                layer.metric,
+            )
+            .await?
+            {
+                // Period creation carries no reservation and can safely precede
+                // the transaction. Read its live availability inside it.
+                periods.push(
+                    super::allowances::ensure_current_period(
+                        db,
+                        &definition,
+                        &ctx.billing_owner_id,
+                        now,
+                    )
+                    .await?,
+                );
+            }
+        }
+        periods.sort_by(|a, b| expiry_order(a.period_end, b.period_end));
+        allowance_candidates.push(periods);
+    }
+    let mut grants = super::grants::list_active_for_user(db, &ctx.billing_owner_id, now).await?;
+    grants.retain(|grant| {
+        super::grants::service_scope_applies(&grant.scope, service_id, ctx.service_slug.as_deref())
+    });
+    grants.sort_by(|a, b| {
+        expiry_order(a.expires_at, b.expires_at).then_with(|| a.created_at.cmp(&b.created_at))
+    });
+    let mut session = db.client().start_session().await?;
+    let db = db.clone();
+    let ctx = ctx.clone();
+    let wallet_id = wallet.id.clone();
+    let failure_db = db.clone();
+    let owner_id = ctx.billing_owner_id.clone();
+    let result = session.start_transaction().and_run2(async move |session| {
+        let result: AppResult<super::reservation::BillingReservation> = async {
+            let now = Utc::now();
+            if ctx.pool_attempt.as_ref().is_none_or(|attempt| attempt.lease_until <= now) {
+                return Err(AppError::BillingProviderUnavailable("Pool admission expired".into()));
+            }
+            let wallets = db.collection::<crate::models::billing_wallet::BillingWallet>(
+                crate::models::billing_wallet::COLLECTION_NAME,
+            );
+            let wallet = wallets.find_one(doc! { "_id": &wallet_id, "owner_id": &ctx.billing_owner_id })
+                .session(&mut *session).await?
+                .ok_or_else(|| AppError::BillingNotConfigured("Wallet no longer exists".into()))?;
+            if wallet.is_suspended() { return Err(AppError::WalletSuspended); }
+            let mut layers = layers.clone();
+            for (layer, candidates) in layers.iter_mut().zip(&allowance_candidates) {
+                let mut remaining = layer.estimated_quantity.max(0);
+                for candidate in candidates {
+                    if remaining == 0 { break; }
+                    let periods = db.collection::<UsageAllowancePeriod>(USAGE_ALLOWANCE_PERIODS);
+                    let Some(period) = periods.find_one(doc! { "_id": &candidate.id })
+                        .session(&mut *session).await? else { continue; };
+                    if period.period_end.is_some_and(|end| end <= now) { continue; }
+                    let wanted = remaining.min(super::allowances::available_period_quantity(&period));
+                    if wanted <= 0 { continue; }
+                    let changed = periods.update_one(doc! { "_id": &period.id }, doc! {
+                        "$inc": { "reserved_quantity": wanted },
+                        "$set": { "updated_at": bson::DateTime::from_chrono(now) },
+                    }).session(&mut *session).await?;
+                    if changed.modified_count != 1 {
+                        return Err(AppError::Conflict("Allowance changed during admission".into()));
+                    }
+                    layer.allowance_reservations.push(AllowanceReservationAllocation {
+                        allowance_id: period.allowance_id, period_id: period.id, quantity: wanted,
+                    });
+                    remaining -= wanted;
+                }
+                let rate = super::amounts::rate_pico(layer.credits_per_unit_pico, layer.credits_per_unit_micros);
+                let mut remaining_cost = super::amounts::cost(rate, remaining)?;
+                for candidate in &grants {
+                    if remaining_cost == Credits::ZERO { break; }
+                    let collection = db.collection::<CreditGrant>(CREDIT_GRANTS);
+                    let Some(grant) = collection.find_one(doc! { "_id": &candidate.id })
+                        .session(&mut *session).await? else { continue; };
+                    let wanted = remaining_cost.min(super::grants::available_grant(&grant)?);
+                    if wanted <= Credits::ZERO { continue; }
+                    let changed = collection.update_one(spendable_grant_filter(&grant.id, wanted, now), doc! {
+                        "$inc": { "reserved": wanted },
+                        "$set": { "updated_at": bson::DateTime::from_chrono(now) },
+                    }).session(&mut *session).await?;
+                    if changed.modified_count == 0 { continue; }
+                    layer.grant_reservations.push(GrantReservationAllocation { grant_id: grant.id, amount: wanted });
+                    remaining_cost = remaining_cost.checked_sub(wanted)?;
+                }
+                layer.reserved_credits = remaining_cost;
+            }
+            let total = layers.iter().map(|layer| layer.reserved_credits)
+                .try_fold(Credits::ZERO, Credits::checked_add)?;
+            if total > Credits::ZERO {
+                let prepaid = wallet.plan_kind == crate::models::billing_wallet::PlanKind::Prepaid;
+                let available = if !prepaid && wallet.has_payment_instrument {
+                    wallet.available_with_overdraft_credits()?
+                } else { wallet.available_credits()? };
+                if !prepaid && wallet.available_with_overdraft_credits()? <= Credits::ZERO {
+                    return Err(AppError::WalletSuspended);
+                }
+                if available < total {
+                    return Err(if !prepaid && wallet.has_payment_instrument {
+                        AppError::WalletSuspended
+                    } else { AppError::InsufficientCredits });
+                }
+                let reserved = wallet.reserved_credits.checked_add(total)?;
+                let changed = wallets.update_one(doc! { "_id": &wallet.id }, doc! {
+                    "$set": { "reserved_credits": reserved, "updated_at": bson::DateTime::from_chrono(now) },
+                }).session(&mut *session).await?;
+                if changed.modified_count != 1 {
+                    return Err(AppError::Conflict("Wallet changed during admission".into()));
+                }
+            }
+            let reservation = super::reservation::BillingReservation {
+                owner_id: ctx.billing_owner_id.clone(), wallet_id: wallet.id,
+                total_reserved_credits: total, layers,
+            };
+            let mut rows = Vec::new();
+            if ctx.platform_metered() {
+                for (metric, code) in ctx.platform_specs() {
+                    rows.push(super::meter::reserved_row(&ctx, BillingLayer::Platform, metric,
+                        code.to_owned(), Some(&reservation), None));
+                }
+            }
+            if let Some(resale) = &ctx.resale {
+                rows.push(super::meter::reserved_row(&ctx, BillingLayer::Resale, resale.metric,
+                    resale.lago_metric_code.clone(), Some(&reservation), None));
+            }
+            if !rows.is_empty() {
+                db.collection::<UsageMeterRow>(USAGE_METER).insert_many(rows).session(&mut *session).await?;
+            }
+            Ok(reservation)
+        }.await;
+        crate::services::api_key_mutation_service::transaction_result(result)
+    }).await.map_err(crate::services::api_key_mutation_service::map_transaction_error);
+    if matches!(result, Err(AppError::WalletSuspended)) {
+        super::reservation::suspend_wallet(&failure_db, &owner_id).await?;
+    }
+    result
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FundingSettlement {
     pub wallet_charge_credits: Credits,
@@ -1387,6 +1548,7 @@ mod tests {
             quantity: Some(10),
             pending_resale_quantity: None,
             pending_platform_usage: None,
+            pool_attempt: None,
             status: UsageStatus::Finalized,
             forwarded: true,
             released: false,
@@ -1531,3 +1693,6 @@ mod tests {
 
 #[cfg(test)]
 mod target_tests;
+
+#[cfg(test)]
+mod pool_tests;

@@ -60,6 +60,25 @@ pub struct ErrorResponse {
     pub details: Option<serde_json::Value>,
 }
 
+/// Safe metadata for attempted, authorized pool members. No endpoint or credential identity.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct PoolAttemptSummary {
+    pub attempt: u32,
+    pub priority: u32,
+    pub reason: String,
+    pub upstream_status: Option<u16>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PoolAttemptTransportKind {
+    Connect,
+    Timeout,
+    AfterDispatch,
+    NodeUnsent,
+    NodeTimeout,
+    NodeAfterDispatch,
+}
+
 // Retired error codes 11800 and 11801 are reserved; never reuse them.
 
 /// Application-level error variants.
@@ -95,6 +114,9 @@ pub enum AppError {
 
     #[error("Internal server error: {0}")]
     Internal(String),
+
+    #[error("Pool attempt transport failed ({0:?})")]
+    PoolAttemptTransport(PoolAttemptTransportKind),
 
     #[error("Database error: {0}")]
     DatabaseError(#[from] mongodb::error::Error),
@@ -589,6 +611,21 @@ pub enum AppError {
     #[error("Service pool has no viable member: {0}")]
     ServicePoolNoViableMember(String),
 
+    #[error("No service pool attempt completed successfully")]
+    ServicePoolAttemptsExhausted { attempts: Vec<PoolAttemptSummary> },
+
+    #[error("Pool accounting is temporarily unavailable")]
+    ServicePoolInfrastructureUnavailable,
+
+    #[error("Pool upstream returned an unsupported content encoding")]
+    ServicePoolUpstreamEncodingUnsupported,
+
+    #[error("All eligible pool members are cooling down")]
+    ServicePoolCoolingDown,
+
+    #[error("Pool request deadline exceeded")]
+    ServicePoolDeadlineExceeded { attempts: Vec<PoolAttemptSummary> },
+
     #[error("Insufficient billing credits")]
     InsufficientCredits,
 
@@ -777,17 +814,26 @@ impl AppError {
             Self::OracleWorkerLabelUnavailable(_) => StatusCode::CONFLICT,
             Self::OracleLoginSnapshotNotFound(_) => StatusCode::NOT_FOUND,
             Self::OracleWorkerCredentialRenewalRequired => StatusCode::CONFLICT,
+            Self::ServicePoolInfrastructureUnavailable | Self::ServicePoolCoolingDown => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+            Self::ServicePoolDeadlineExceeded { .. } => StatusCode::GATEWAY_TIMEOUT,
+            Self::ServicePoolUpstreamEncodingUnsupported => StatusCode::BAD_GATEWAY,
             Self::ServicePoolNotFound(_) => StatusCode::NOT_FOUND,
             Self::ServicePoolSlugTaken(_) => StatusCode::CONFLICT,
             Self::ServicePoolMemberInvalid(_) => StatusCode::BAD_REQUEST,
-            Self::ServicePoolNoViableMember(_) => StatusCode::BAD_GATEWAY,
+            Self::ServicePoolNoViableMember(_) | Self::ServicePoolAttemptsExhausted { .. } => {
+                StatusCode::BAD_GATEWAY
+            }
             Self::InsufficientCredits
             | Self::BillingNotConfigured(_)
             | Self::BillingProviderUnavailable(_)
             | Self::PlanEntitlementRequired(_)
             | Self::WalletSuspended => StatusCode::PAYMENT_REQUIRED,
             Self::AnonymousIncompatibleBilling(_) => StatusCode::BAD_REQUEST,
-            Self::Internal(_) | Self::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Internal(_) | Self::PoolAttemptTransport(_) | Self::DatabaseError(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
         }
     }
 
@@ -801,7 +847,7 @@ impl AppError {
             Self::Conflict(_) => 1004,
             Self::AssistantTurnActive => 12100,
             Self::RateLimited => 1005,
-            Self::Internal(_) => 1006,
+            Self::Internal(_) | Self::PoolAttemptTransport(_) => 1006,
             Self::DatabaseError(_) => 1007,
             Self::ValidationError(_) => 1008,
             Self::EmailSignupDisabled => 1009,
@@ -968,10 +1014,14 @@ impl AppError {
             Self::OracleWorkerLabelUnavailable(_) => 11014,
             Self::OracleLoginSnapshotNotFound(_) => 11015,
             Self::OracleWorkerCredentialRenewalRequired => 11016,
+            Self::ServicePoolUpstreamEncodingUnsupported => 11407,
+            Self::ServicePoolInfrastructureUnavailable => 11404,
+            Self::ServicePoolCoolingDown => 11405,
+            Self::ServicePoolDeadlineExceeded { .. } => 11406,
             Self::ServicePoolNotFound(_) => 11400,
             Self::ServicePoolSlugTaken(_) => 11401,
             Self::ServicePoolMemberInvalid(_) => 11402,
-            Self::ServicePoolNoViableMember(_) => 11403,
+            Self::ServicePoolNoViableMember(_) | Self::ServicePoolAttemptsExhausted { .. } => 11403,
             Self::InsufficientCredits => 11300,
             Self::BillingNotConfigured(_) => 11301,
             Self::BillingProviderUnavailable(_) => 11302,
@@ -1010,7 +1060,9 @@ impl AppError {
             | Self::AuthenticationFailed(_)
             | Self::ServiceAccountNotFound(_)
             | Self::ServiceAccountInactive => StatusCode::UNAUTHORIZED,
-            Self::Internal(_) | Self::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Internal(_) | Self::PoolAttemptTransport(_) | Self::DatabaseError(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
             _ => StatusCode::BAD_REQUEST,
         }
     }
@@ -1026,7 +1078,7 @@ impl AppError {
             Self::AssistantTurnActive => "turn_active",
             Self::GrantCascadeConfirmationRequired(_) => "grant_cascade_confirmation_required",
             Self::RateLimited => "rate_limited",
-            Self::Internal(_) => "internal_error",
+            Self::Internal(_) | Self::PoolAttemptTransport(_) => "internal_error",
             Self::DatabaseError(_) => "database_error",
             Self::ValidationError(_) => "validation_error",
             Self::EmailSignupDisabled => "email_signup_disabled",
@@ -1197,10 +1249,18 @@ impl AppError {
             Self::OracleWorkerCredentialRenewalRequired => {
                 "oracle_worker_credential_renewal_required"
             }
+            Self::ServicePoolUpstreamEncodingUnsupported => {
+                "service_pool_upstream_encoding_unsupported"
+            }
+            Self::ServicePoolInfrastructureUnavailable => "service_pool_infrastructure_unavailable",
+            Self::ServicePoolCoolingDown => "service_pool_cooling_down",
+            Self::ServicePoolDeadlineExceeded { .. } => "service_pool_deadline_exceeded",
             Self::ServicePoolNotFound(_) => "service_pool_not_found",
             Self::ServicePoolSlugTaken(_) => "service_pool_slug_taken",
             Self::ServicePoolMemberInvalid(_) => "service_pool_member_invalid",
-            Self::ServicePoolNoViableMember(_) => "service_pool_no_viable_member",
+            Self::ServicePoolNoViableMember(_) | Self::ServicePoolAttemptsExhausted { .. } => {
+                "service_pool_no_viable_member"
+            }
             Self::InsufficientCredits => "insufficient_credits",
             Self::BillingNotConfigured(_) => "billing_not_configured",
             Self::BillingProviderUnavailable(_) => "billing_provider_unavailable",
@@ -1232,6 +1292,10 @@ impl AppError {
             _ => None,
         };
         let details = match &self {
+            AppError::ServicePoolAttemptsExhausted { attempts }
+            | AppError::ServicePoolDeadlineExceeded { attempts } => {
+                Some(serde_json::json!({ "attempts": attempts }))
+            }
             AppError::GrantCascadeConfirmationRequired(payload) => Some(
                 serde_json::to_value(payload.as_ref())
                     .expect("grant cascade payload must be serializable"),
@@ -1244,9 +1308,9 @@ impl AppError {
             error_code: self.error_code(),
             message: match &self {
                 // Never leak internal details to clients
-                AppError::Internal(_) | AppError::DatabaseError(_) => {
-                    "An internal error occurred".to_string()
-                }
+                AppError::Internal(_)
+                | AppError::PoolAttemptTransport(_)
+                | AppError::DatabaseError(_) => "An internal error occurred".to_string(),
                 AppError::MfaRequired { .. } => "MFA verification required".to_string(),
                 AppError::ConsentRequired { .. } => {
                     "Consent required. Complete authorization in browser flow.".to_string()
@@ -1278,6 +1342,9 @@ impl IntoResponse for AppError {
         // Log server errors at error level; client errors at warn level.
         match &self {
             AppError::Internal(msg) => tracing::error!(error = %msg, "Internal server error"),
+            AppError::PoolAttemptTransport(kind) => {
+                tracing::error!(?kind, "Pool attempt transport failure")
+            }
             AppError::DatabaseError(err) => tracing::error!(error = %err, "Database error"),
             _ => tracing::warn!(error = %self, "Client error"),
         }

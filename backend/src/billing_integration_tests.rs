@@ -352,6 +352,22 @@ async fn run_billing_route_coverage_smoke() {
     let (_, private) = crate::routes::build_router();
     let app = private.with_state(state.clone());
 
+    let aliases = call_mounted_route(
+        &app,
+        route_request(Method::GET, "/api/v1/llm/pools", &token, Body::empty()),
+    )
+    .await;
+    let aliases: serde_json::Value = serde_json::from_slice(&aliases).unwrap();
+    assert_eq!(aliases["pools"], serde_json::json!([]));
+    assert_eq!(
+        db.collection::<UsageMeterRow>(USAGE_METER)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0,
+        "alias discovery must remain billing-exempt"
+    );
+
     let direct_body = serde_json::json!({
         "messages": [{"role": "user", "content": "route boundary"}],
         "model": "gpt-5.5",

@@ -355,6 +355,7 @@ async fn node_upload(
         "upload-node",
         &NodeCapabilitiesMsg {
             http_signature_v2: true,
+            http_cancellation: false,
             ..Default::default()
         },
     );

@@ -91,7 +91,13 @@ pub mod runtime_config;
 pub mod service_account_key_reads;
 #[cfg(test)]
 mod service_account_key_reads_tests;
+#[cfg(test)]
+mod service_pool_ai_tests;
+#[cfg(test)]
+mod service_pool_proxy_tests;
 pub mod service_pools_handler;
+#[cfg(test)]
+mod service_pools_tests;
 pub mod service_requirements;
 pub mod services;
 pub(crate) mod services_helpers;

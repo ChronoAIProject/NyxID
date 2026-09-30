@@ -39,16 +39,19 @@ async function transcript(id: string, query = "") {
 /** Let the fixture's simulated agents finish working. */
 function later(ms: number) {
   now += ms;
+  vi.setSystemTime(now);
 }
 
 beforeEach(() => {
   sessionStorage.clear();
   now = Date.parse("2026-09-29T10:00:00Z");
-  vi.spyOn(Date, "now").mockImplementation(() => now);
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(now);
   fixture = new NyxAgentHttpFixtures();
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   sessionStorage.clear();
 });

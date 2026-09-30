@@ -113,6 +113,11 @@ pub async fn gate_and_reserve(
     }
 
     let mut layers = estimate_layer_reservations(db, ctx, rate_cache_ttl_secs).await?;
+    if ctx.pool_attempt.is_some() {
+        return super::funding::reserve_and_open_pool(db, ctx, &wallet, layers)
+            .await
+            .map(Some);
+    }
     super::funding::reserve_estimated_funding(db, ctx, &mut layers).await?;
     let total_reserved_credits = layers
         .iter()
@@ -1209,7 +1214,7 @@ async fn release_one_unforwarded_row(
     Ok(true)
 }
 
-async fn suspend_wallet(db: &mongodb::Database, owner_id: &str) -> AppResult<()> {
+pub(super) async fn suspend_wallet(db: &mongodb::Database, owner_id: &str) -> AppResult<()> {
     db.collection::<BillingWallet>(BILLING_WALLET)
         .update_one(
             doc! { "owner_id": owner_id },

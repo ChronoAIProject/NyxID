@@ -1298,6 +1298,7 @@ pub enum PoolStrategyArg {
     #[value(name = "round_robin", alias = "round-robin")]
     RoundRobin,
     Weighted,
+    Priority,
 }
 
 impl PoolStrategyArg {
@@ -1305,8 +1306,95 @@ impl PoolStrategyArg {
         match self {
             Self::RoundRobin => "round_robin",
             Self::Weighted => "weighted",
+            Self::Priority => "priority",
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum PoolRetryCauseArg {
+    #[value(name = "connect_error")]
+    ConnectError,
+    #[value(name = "node_offline")]
+    NodeOffline,
+    #[value(name = "transport_error")]
+    TransportError,
+    Timeout,
+    #[value(name = "http_401", alias = "401")]
+    Http401,
+    #[value(name = "http_403", alias = "403")]
+    Http403,
+    #[value(name = "http_408", alias = "408")]
+    Http408,
+    #[value(name = "http_429", alias = "429")]
+    Http429,
+    #[value(name = "http_500", alias = "500")]
+    Http500,
+    #[value(name = "http_502", alias = "502")]
+    Http502,
+    #[value(name = "http_503", alias = "503")]
+    Http503,
+    #[value(name = "http_504", alias = "504")]
+    Http504,
+    #[value(name = "http_529", alias = "529")]
+    Http529,
+    /// Expand to http_500,http_502,http_503,http_504,http_529 only.
+    #[value(name = "5xx")]
+    ServerErrors,
+    /// Clear all retry causes; cannot be combined with another cause.
+    None,
+}
+
+impl PoolRetryCauseArg {
+    pub fn causes(self) -> &'static [&'static str] {
+        match self {
+            Self::ConnectError => &["connect_error"],
+            Self::NodeOffline => &["node_offline"],
+            Self::TransportError => &["transport_error"],
+            Self::Timeout => &["timeout"],
+            Self::Http401 => &["http_401"],
+            Self::Http403 => &["http_403"],
+            Self::Http408 => &["http_408"],
+            Self::Http429 => &["http_429"],
+            Self::Http500 => &["http_500"],
+            Self::Http502 => &["http_502"],
+            Self::Http503 => &["http_503"],
+            Self::Http504 => &["http_504"],
+            Self::Http529 => &["http_529"],
+            Self::ServerErrors => &["http_500", "http_502", "http_503", "http_504", "http_529"],
+            Self::None => &[],
+        }
+    }
+}
+
+#[derive(Args, Default)]
+#[group(id = "inline_failover", multiple = true)]
+pub struct PoolFailoverArgs {
+    /// Retry causes, comma-separated or repeated. Numeric HTTP aliases are accepted.
+    /// 5xx expands to 500/502/503/504/529; none clears causes. Replay safety is unchanged.
+    #[arg(long, value_enum, value_delimiter = ',', value_name = "CAUSE,...")]
+    pub retry_on: Vec<PoolRetryCauseArg>,
+    #[arg(long, value_parser = clap::value_parser!(u8).range(1..=5))]
+    pub max_attempts: Option<u8>,
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1_000..=300_000))]
+    pub per_attempt_timeout_ms: Option<u32>,
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1_000..=600_000))]
+    pub overall_deadline_ms: Option<u32>,
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    pub max_replay_body_bytes: Option<u32>,
+    /// Allow replay after ambiguous dispatch, including unsafe POSTs; may duplicate work/charges.
+    /// Use =false to turn it off. Omit to preserve the saved value.
+    #[arg(long, visible_alias = "retry-non-idempotent", num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+    pub retry_ambiguous_dispatch: Option<bool>,
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=3_600_000))]
+    pub cooldown_base_ms: Option<u32>,
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=3_600_000))]
+    pub cooldown_max_ms: Option<u32>,
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    pub cooldown_failures_to_open: Option<u32>,
+    /// Honor upstream Retry-After during cooldown; use =false to turn it off.
+    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+    pub honor_retry_after: Option<bool>,
 }
 
 #[derive(Subcommand)]
@@ -1328,6 +1416,16 @@ pub enum PoolCommands {
         /// Service slug or ID to add as an initial member. Repeatable.
         #[arg(long = "member", value_name = "SERVICE_SLUG_OR_ID")]
         members: Vec<String>,
+        /// JSON array of member objects (model, priority, weight, compatibility).
+        #[arg(long, conflicts_with = "members")]
+        members_file: Option<std::path::PathBuf>,
+        #[arg(long, value_parser = ["same_api", "ai_chat"], default_value = "same_api")]
+        contract: String,
+        #[arg(long, value_parser = ["round_robin", "weighted"], default_value = "round_robin")]
+        tier_balance: String,
+        /// JSON failover policy. Omit to use server defaults for priority pools.
+        #[arg(long)]
+        failover_file: Option<std::path::PathBuf>,
         /// Create this pool under the given org (you must be an admin of that org).
         #[arg(
             long,
@@ -1354,17 +1452,28 @@ pub enum PoolCommands {
     Show {
         /// Pool slug or ID
         pool: String,
+        /// Organization owning this pool (UUID, slug, or name).
+        #[arg(long)]
+        org: Option<String>,
+        /// Operation whose cooldowns to show. Omit path for the contract default.
+        #[arg(long)]
+        method: Option<String>,
+        #[arg(long)]
+        path: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },
     /// Delete a service pool
     Delete {
-        /// Pool ID
+        /// Pool slug or ID
         pool_id: String,
+        /// Organization owning this pool (UUID, slug, or name).
+        #[arg(long)]
+        org: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },
-    /// Add a service member to a pool
+    /// Add or update a service member; omitted settings are preserved
     AddMember {
         /// Pool slug or ID
         pool: String,
@@ -1377,6 +1486,18 @@ pub enum PoolCommands {
         /// Enable or disable this member
         #[arg(long)]
         enabled: Option<bool>,
+        #[arg(long)]
+        priority: Option<u32>,
+        #[arg(long, conflicts_with = "clear_model")]
+        model: Option<String>,
+        #[arg(long)]
+        clear_model: bool,
+        /// Explicitly declare this custom/different catalog API compatible.
+        #[arg(long)]
+        same_api_compatible: Option<bool>,
+        /// Organization owning this pool (UUID, slug, or name).
+        #[arg(long)]
+        org: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -1387,6 +1508,9 @@ pub enum PoolCommands {
         /// Service slug or ID
         #[arg(long)]
         service: String,
+        /// Organization owning this pool (UUID, slug, or name).
+        #[arg(long)]
+        org: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -1397,6 +1521,88 @@ pub enum PoolCommands {
         /// Routing strategy
         #[arg(value_enum)]
         strategy: PoolStrategyArg,
+        /// Balancing within each priority tier.
+        #[arg(long, value_parser = ["round_robin", "weighted"])]
+        tier_balance: Option<String>,
+        /// Organization owning this pool (UUID, slug, or name).
+        #[arg(long)]
+        org: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Atomically edit configuration, including members. JSON null clears nullable fields.
+    Update {
+        pool: String,
+        /// JSON update object. A missing expected_revision is filled from the current pool.
+        #[arg(long)]
+        file: std::path::PathBuf,
+        #[arg(long)]
+        org: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Merge supplied policy flags, replace from JSON, restore defaults, or use one attempt.
+    SetFailover {
+        pool: String,
+        /// Replace the policy with a JSON object; omitted fields use server defaults. Null restores defaults.
+        #[arg(long, conflicts_with_all = ["disable", "defaults", "inline_failover"], required_unless_present_any = ["disable", "defaults", "inline_failover"])]
+        file: Option<std::path::PathBuf>,
+        /// Replace policy with max_attempts=1; other policy fields use server defaults.
+        #[arg(long, conflicts_with_all = ["defaults", "inline_failover"])]
+        disable: bool,
+        /// Clear the saved override (JSON null), restoring priority defaults.
+        #[arg(long, conflicts_with = "inline_failover")]
+        defaults: bool,
+        #[command(flatten)]
+        settings: PoolFailoverArgs,
+        #[arg(long)]
+        org: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Inspect candidate eligibility before creation or against an existing pool.
+    Candidates {
+        #[arg(long)]
+        pool: Option<String>,
+        #[arg(long, value_parser = ["same_api", "ai_chat"])]
+        contract: Option<String>,
+        #[arg(long, value_enum)]
+        strategy: Option<PoolStrategyArg>,
+        #[arg(long, default_value = "POST")]
+        method: String,
+        #[arg(long)]
+        path: Option<String>,
+        #[arg(long)]
+        org: Option<String>,
+        /// Pagination cursor from the previous response.
+        #[arg(long)]
+        after: Option<String>,
+        #[arg(long)]
+        search: Option<String>,
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Inspect cooldown for the effective member credentials and operation.
+    Health {
+        pool: String,
+        #[arg(long, default_value = "POST")]
+        method: String,
+        #[arg(long)]
+        path: Option<String>,
+        #[arg(long)]
+        org: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Reset all member cooldowns, or only one member.
+    ResetHealth {
+        pool: String,
+        #[arg(long)]
+        service: Option<String>,
+        #[arg(long)]
+        org: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },

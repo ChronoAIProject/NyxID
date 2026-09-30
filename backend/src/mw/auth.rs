@@ -2419,7 +2419,8 @@ mod tests {
         };
         use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
         use crate::models::service_pool::{
-            COLLECTION_NAME as SERVICE_POOLS, PoolStrategy, ServicePool, ServicePoolMember,
+            COLLECTION_NAME as SERVICE_POOLS, PoolMemberContract, PoolStrategy, ServicePool,
+            ServicePoolMember,
         };
         use crate::models::user::{COLLECTION_NAME as USERS, UserType};
         use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
@@ -2763,12 +2764,23 @@ mod tests {
                 name: "Delegated pool fixture".to_string(),
                 description: None,
                 strategy: PoolStrategy::RoundRobin,
+                tier_balance: Default::default(),
+                member_contract: PoolMemberContract::SameApi,
+                failover: None,
                 members: vec![ServicePoolMember {
                     user_service_id: actor_service_id.clone(),
                     weight: 1,
                     enabled: true,
+                    priority: 0,
+                    model: None,
+                    same_api_compatible: false,
+                    health_reset_generation: 0,
                 }],
                 rr_counter: 0,
+                tier_counters: Default::default(),
+                config_revision: 0,
+                health_reset_generation: 0,
+                health_observation_sequence: 0,
                 is_active: true,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),

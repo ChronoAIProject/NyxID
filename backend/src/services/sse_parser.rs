@@ -68,6 +68,66 @@ pub fn parse_next_event(buffer: &mut String) -> Option<SseEvent> {
     }
 }
 
+/// Incremental bounded framing shared by native response translation and usage
+/// observation. CRLF counts as one line ending even across network chunks.
+#[derive(Default)]
+pub struct BoundedEventDecoder {
+    buffer: Vec<u8>,
+    previous_cr: bool,
+    line_has_content: bool,
+    discarding: bool,
+}
+
+#[derive(Debug)]
+pub enum EventDecodeError {
+    TooLarge,
+    InvalidUtf8,
+}
+
+impl BoundedEventDecoder {
+    pub fn has_incomplete_event(&self) -> bool {
+        self.discarding || self.buffer.iter().any(|byte| !byte.is_ascii_whitespace())
+    }
+
+    pub fn push_byte(&mut self, byte: u8) -> Option<Result<SseEvent, EventDecodeError>> {
+        if self.previous_cr && byte == b'\n' {
+            self.previous_cr = false;
+            return None;
+        }
+        self.previous_cr = byte == b'\r';
+        if matches!(byte, b'\r' | b'\n') {
+            let boundary = !self.line_has_content;
+            self.line_has_content = false;
+            if boundary {
+                if self.discarding {
+                    self.discarding = false;
+                    return None;
+                }
+                self.buffer.push(b'\n');
+                let frame = std::mem::take(&mut self.buffer);
+                return match String::from_utf8(frame) {
+                    Ok(mut frame) => parse_next_event(&mut frame).map(Ok),
+                    Err(_) => Some(Err(EventDecodeError::InvalidUtf8)),
+                };
+            }
+            if !self.discarding {
+                self.buffer.push(b'\n');
+            }
+        } else {
+            self.line_has_content = true;
+            if !self.discarding {
+                self.buffer.push(byte);
+            }
+        }
+        if self.buffer.len() >= 512 * 1024 {
+            self.buffer.clear();
+            self.discarding = true;
+            return Some(Err(EventDecodeError::TooLarge));
+        }
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
