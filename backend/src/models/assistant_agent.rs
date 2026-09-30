@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -34,6 +36,42 @@ pub struct AgentGrants {
     pub account_read: bool,
 }
 
+/// What guests may do with one of a specialist's services. Operations the
+/// owner put behind approval stay the owner's at every level.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GuestAccess {
+    /// Reads only: an operation its stored catalog contract marks
+    /// read-only, else GET, HEAD or OPTIONS.
+    Read,
+    /// Reads, creates and acts (GET, HEAD, OPTIONS, POST), never changes or
+    /// removes what exists (PUT, PATCH, DELETE, or an operation its spec
+    /// marks as deleting or replacing data).
+    #[default]
+    Use,
+    /// Everything the specialist may do with the service.
+    All,
+}
+
+impl GuestAccess {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Use => "use",
+            Self::All => "all",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "read" => Some(Self::Read),
+            "use" => Some(Self::Use),
+            "all" => Some(Self::All),
+            _ => None,
+        }
+    }
+}
+
 /// One thing the agent chose to remember. Agent-authored, bounded, never
 /// secrets; shown to the owner, who can delete it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -64,6 +102,12 @@ pub struct AssistantAgent {
     pub specialty: Option<String>,
     #[serde(default)]
     pub grants: AgentGrants,
+    /// What people other than the owner (guests in the chats a specialist
+    /// answers) may do with each granted service, by service ID. A service
+    /// without an entry uses [`GuestAccess::Use`]. Beside `grants`, not in it,
+    /// so writers of `grants` that predate it never erase it.
+    #[serde(default)]
+    pub guest_access: BTreeMap<String, GuestAccess>,
     /// `user` or `nyxbot`.
     pub created_by: String,
     /// NyxAgent profile for new threads.

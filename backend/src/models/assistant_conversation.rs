@@ -198,8 +198,9 @@ pub struct AssistantConversation {
     pub group_seen_seq: i64,
     /// The newest turn was started by someone other than the owner, e.g. a
     /// member of a group chat. Its tool calls are restricted (NyxBot: none;
-    /// specialists: curated reads within their grants). Kept after the turn
-    /// settles so late tool calls stay restricted.
+    /// specialists: their grants, as far as the owner's guest access for each
+    /// service allows). Kept after the turn settles so late tool calls stay
+    /// restricted.
     #[serde(default)]
     pub guest_turn: bool,
 }

@@ -416,6 +416,7 @@
     "/channels/{channel_id}/messages/{message_id}/reactions/{emoji_name}/@me": {
       "put": {
         "operationId": "add_reaction",
+        "x-nyxid-changes-existing": false,
         "summary": "Add a reaction",
         "x-aevatar-tool": {
           "name": "add_reaction",

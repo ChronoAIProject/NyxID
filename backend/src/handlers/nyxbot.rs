@@ -452,11 +452,16 @@ async fn active_for_bot(
 }
 
 /// Owner-verified senders from NyxID's own Telegram notification link.
-async fn known_owner_senders(state: &AppState, owner: &str, platform: &str) -> Vec<String> {
+async fn known_owner_senders(
+    state: &AppState,
+    owner: &str,
+    platform: &str,
+    bot_id: &str,
+) -> Vec<String> {
     if platform != "telegram" {
         return Vec::new();
     }
-    state
+    let mut ids: Vec<String> = state
         .db
         .collection::<crate::models::notification_channel::NotificationChannel>(
             crate::models::notification_channel::COLLECTION_NAME,
@@ -467,7 +472,36 @@ async fn known_owner_senders(state: &AppState, owner: &str, platform: &str) -> V
         .flatten()
         .and_then(|row| row.telegram_chat_id)
         .map(|id| vec![id.to_string()])
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if let Some(creator) = bot_creator(state, owner, bot_id).await
+        && !ids.contains(&creator)
+    {
+        ids.push(creator);
+    }
+    ids
+}
+
+/// The Telegram account that created this bot through NyxID's in-Telegram
+/// bot creation, when `owner` started that creation and bound that account
+/// with their own setup challenge (`start_update_id`, set only by the
+/// challenge's `/start`): Telegram confirmed the account created the bot, for
+/// this NyxID account. It is the owner's own account, as surely as one that
+/// opened the owner-verification link. A bot claimed with a code is not: the
+/// code is transferable, and its creator is someone else.
+async fn bot_creator(state: &AppState, owner: &str, bot_id: &str) -> Option<String> {
+    use crate::models::telegram_bot_request::COLLECTION_NAME as REQUESTS;
+    state
+        .db
+        .collection::<bson::Document>(REQUESTS)
+        .find_one(doc! {"_id": bot_id, "actor_user_id": owner,
+        "status": {"$in": ["provisioning", "connected"]},
+        "start_update_id": {"$ne": null}})
+        .projection(doc! {"telegram_user_id": 1})
+        .await
+        .ok()
+        .flatten()
+        .and_then(|request| request.get_i64("telegram_user_id").ok())
+        .map(|id| id.to_string())
 }
 
 /// The channel's gateway agent key. It is the creator bearer on channel
@@ -667,7 +701,7 @@ pub async fn connect(
         pending_agent_api_key_id: None,
         pending_route_api_key_id: None,
         owner_sender_ids: {
-            let mut ids = known_owner_senders(state, owner, &platform).await;
+            let mut ids = known_owner_senders(state, owner, &platform, &bot.id).await;
             for id in verified_owners {
                 if !ids.contains(&id) {
                     ids.push(id);
@@ -746,6 +780,18 @@ pub async fn connect(
                 }),
             )
             .await;
+            if let Some(creator) = bot_creator(state, owner, &bot.id).await
+                && row.owner_sender_ids.contains(&creator)
+            {
+                audit(
+                    state,
+                    owner,
+                    "nyxbot_channel_owner_linked",
+                    json!({"channel_agent_id": &id, "platform": &platform,
+                        "method": "bot_creator"}),
+                )
+                .await;
+            }
             // A rebuilt connection keeps its chats, their settings and threads.
             if let Some(previous) = rebuilt_from.as_ref() {
                 let reaches = |row: &NyxbotChannel| row.agent_id.clone();
@@ -1038,6 +1084,44 @@ async fn connect_gateway(
 pub(crate) static TEST_BOT_USER_IDS: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<String, String>>,
 > = std::sync::LazyLock::new(Default::default);
+
+/// Bots' own user IDs by bot and app, kept an hour (a failed lookup five
+/// minutes). Keyed by app too, so a bot switched to another Lark app is
+/// looked up again. A cache only: the platform is the source.
+type OwnUserIds = std::collections::HashMap<(String, String), (Option<String>, std::time::Instant)>;
+static OWN_USER_IDS: std::sync::LazyLock<std::sync::Mutex<OwnUserIds>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// The bot's own user ID on Lark / Feishu (its `open_id`), so group messages
+/// that mention someone else are not taken as addressed to the bot. `None`
+/// (the lookup failed) makes any mention count, as before.
+async fn own_user_id(state: &AppState, bot: &ChannelBot) -> Option<String> {
+    if !matches!(canonical_platform(&bot.platform), "lark" | "feishu") {
+        return None;
+    }
+    let key = (bot.id.clone(), bot.app_id.clone().unwrap_or_default());
+    if let Some((known, at)) = OWN_USER_IDS
+        .lock()
+        .ok()
+        .and_then(|ids| ids.get(&key).cloned())
+    {
+        let keep = if known.is_some() { 3600 } else { 300 };
+        if at.elapsed() < Duration::from_secs(keep) {
+            return known;
+        }
+    }
+    let found = bot_user_id(state, bot).await;
+    if found.is_none() {
+        tracing::warn!(
+            platform = %bot.platform,
+            "NyxBot could not look up the bot's own ID; any mention counts for five minutes"
+        );
+    }
+    if let Ok(mut ids) = OWN_USER_IDS.lock() {
+        ids.insert(key, (found.clone(), std::time::Instant::now()));
+    }
+    found
+}
 
 /// The bot's own user ID on its platform (best effort).
 async fn bot_user_id(state: &AppState, bot: &ChannelBot) -> Option<String> {
@@ -2100,6 +2184,18 @@ async fn channel_bot_watch(state: &AppState, watch: &NyxbotWatch) -> AppResult<(
             Err(error) => Err(error),
         };
     let text = match &outcome {
+        // Created in Telegram through NyxID: the account that created it is
+        // already the owner's, so nothing is left to verify.
+        Ok((agent, value)) if value["channel_agent"]["owner_linked"] == true => format!(
+            "The {} channel bot {} the user just created is now linked to {}, and their \
+            account there is already verified. Tell them to open the bot and press Start (or \
+            send a message): it answers there. Only if they chat from a different account, \
+            give them this verification step: {}",
+            identifier(&bot.platform),
+            identifier(&bot.label),
+            identifier(&agent.name),
+            value["link"]
+        ),
         Ok((agent, value)) => format!(
             "The {} channel bot {} the user just created is now linked to {}. Give the user \
             its owner-verification step: {}",
@@ -2379,7 +2475,8 @@ async fn inbound_message(
     text: &str,
     addressed: Option<bool>,
 ) -> AppResult<Inbound> {
-    if let Some(linked) = link_owner(state, row, sender, text).await? {
+    let private = chat.kind.as_deref() == Some("private");
+    if let Some(linked) = link_owner(state, row, sender, text, private).await? {
         return Ok(linked);
     }
     let chat = &chats::note_owner_presence(state, row, chat, sender.id).await?;
@@ -2399,13 +2496,18 @@ async fn inbound_message(
     start_chat_turn(state, row, chat, sender, text, guest, addressed).await
 }
 
-/// Link a sender presenting the owner's one-time code.
+/// Link the owner's chat-app account: a sender presenting the owner's
+/// one-time code, or, in a private chat, the Telegram account that created
+/// the bot through NyxID for the owner (no code needed). A verified owner's
+/// bare `/start` in a private chat is greeted instead of starting a turn.
 async fn link_owner(
     state: &AppState,
     row: &NyxbotChannel,
     sender: &Sender<'_>,
     text: &str,
+    private: bool,
 ) -> AppResult<Option<Inbound>> {
+    let known = row.owner_sender_ids.iter().any(|id| id == sender.id);
     if let (Some(hash), Some(expires_at)) =
         (row.link_code_hash.as_deref(), row.link_code_expires_at)
         && expires_at > Utc::now()
@@ -2426,56 +2528,92 @@ async fn link_owner(
                 "$set": {"updated_at": bson::DateTime::now()}},
             )
             .await?;
-        audit(
-            state,
-            &row.user_id,
-            "nyxbot_channel_owner_linked",
-            json!({
-                "channel_agent_id": &row.id, "platform": &row.platform,
-            }),
-        )
-        .await;
-        let agent_name = match row.agent_id.as_deref() {
-            Some(agent_id) => {
-                crate::services::assistant_team_service::agent(&state.db, &row.user_id, agent_id)
-                    .await
-                    .map(|agent| agent.name)
-                    .unwrap_or_else(|_| "NyxBot".into())
-            }
-            None => "NyxBot".into(),
-        };
-        // The chat that set the bot up hears about it without the user
-        // coming back to say so.
-        if let Some(source) = row.source_conversation_id.clone() {
-            let state = state.clone();
-            let owner = row.user_id.clone();
-            let text = format!(
-                "The user verified their {} account on channel bot {}; it now reaches {} \
-                there. No confirmation is needed.",
-                identifier(&row.platform),
-                identifier(&row.bot_label),
-                identifier(&agent_name)
-            );
-            tokio::spawn(async move {
-                super::assistant_team::notify(
-                    &state,
-                    &owner,
-                    &source,
-                    vec![crate::services::assistant_team_service::event(
-                        "channel_owner_verified",
-                        text,
-                        None,
-                    )],
-                )
-                .await;
-            });
-        }
+        return Ok(Some(owner_linked(state, row, "link_code").await));
+    }
+    if !known
+        && private
+        && !sender.id.is_empty()
+        && canonical_platform(&row.platform) == "telegram"
+        && bot_creator(state, &row.user_id, &row.channel_bot_id)
+            .await
+            .as_deref()
+            == Some(sender.id)
+    {
+        state
+            .db
+            .collection::<NyxbotChannel>(CHANNELS)
+            .update_one(
+                doc! {"_id": &row.id},
+                doc! {"$addToSet": {"owner_sender_ids": sender.id},
+                "$set": {"updated_at": bson::DateTime::now()}},
+            )
+            .await?;
+        return Ok(Some(owner_linked(state, row, "bot_creator").await));
+    }
+    if known && private && text.trim() == "/start" {
         return Ok(Some(Inbound::Reply(format!(
-            "Linked. I'm {agent_name}, your NyxID agent: I can use your NyxID services and \
-            account here. Send me anything to get started."
+            "Hi, I'm {}, your NyxID agent. Send me anything to get started.",
+            channel_agent_name(state, row).await
         ))));
     }
     Ok(None)
+}
+
+async fn channel_agent_name(state: &AppState, row: &NyxbotChannel) -> String {
+    match row.agent_id.as_deref() {
+        Some(agent_id) => {
+            crate::services::assistant_team_service::agent(&state.db, &row.user_id, agent_id)
+                .await
+                .map(|agent| agent.name)
+                .unwrap_or_else(|_| "NyxBot".into())
+        }
+        None => "NyxBot".into(),
+    }
+}
+
+/// The owner's account was just linked: audit it, tell the chat that set the
+/// bot up, and greet them.
+async fn owner_linked(state: &AppState, row: &NyxbotChannel, method: &str) -> Inbound {
+    audit(
+        state,
+        &row.user_id,
+        "nyxbot_channel_owner_linked",
+        json!({
+            "channel_agent_id": &row.id, "platform": &row.platform, "method": method,
+        }),
+    )
+    .await;
+    let agent_name = channel_agent_name(state, row).await;
+    // The chat that set the bot up hears about it without the user coming
+    // back to say so.
+    if let Some(source) = row.source_conversation_id.clone() {
+        let state = state.clone();
+        let owner = row.user_id.clone();
+        let text = format!(
+            "The user verified their {} account on channel bot {}; it now reaches {} there. \
+            No confirmation is needed.",
+            identifier(&row.platform),
+            identifier(&row.bot_label),
+            identifier(&agent_name)
+        );
+        tokio::spawn(async move {
+            super::assistant_team::notify(
+                &state,
+                &owner,
+                &source,
+                vec![crate::services::assistant_team_service::event(
+                    "channel_owner_verified",
+                    text,
+                    None,
+                )],
+            )
+            .await;
+        });
+    }
+    Inbound::Reply(format!(
+        "Linked. I'm {agent_name}, your NyxID agent: I can use your NyxID services and \
+        account here. Send me anything to get started."
+    ))
 }
 
 async fn thread_conversation(
@@ -3858,7 +3996,16 @@ pub async fn relay_callback(
                 if chats::replies_to_bot(&state, &bot, &chat_id, reply_to.as_deref()).await? {
                     Some(true)
                 } else {
-                    chats::raw_addressed(&bot, &raw)
+                    // Only messages that mention someone need the bot's own ID.
+                    let mentions = raw["event"]["message"]["mentions"]
+                        .as_array()
+                        .is_some_and(|mentions| !mentions.is_empty());
+                    let bot_id = if mentions {
+                        own_user_id(&state, &bot).await
+                    } else {
+                        None
+                    };
+                    chats::raw_addressed(&bot, &raw, bot_id.as_deref())
                 }
             };
             let sender = Sender {

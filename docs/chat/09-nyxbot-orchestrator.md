@@ -116,7 +116,8 @@ NyxBot only: `spawn_subagent` (name, description, services, account_read,
 specialty, optional task), `message_subagent` (runs in the specialist's home
 thread; returns started, busy or pool_full), `wait_for_subagents` (≤ 120 s),
 `list_subagents`, `read_subagent`, `grant_subagent`, `revoke_subagent`,
-`update_subagent`, `decide_permission`, `destroy_subagent`,
+`set_guest_access` (what guests may do with a specialist's services: `read`,
+`use` or `all`), `update_subagent`, `decide_permission`, `destroy_subagent`,
 `create_group`, `list_groups`, `post_to_group`, `update_group`, `delete_group`,
 `settings_link` (the exact NyxID page for configuration the tools do not cover,
 such as creating an agent key, security, profile, billing, organizations or
@@ -171,8 +172,11 @@ ends its turn; NyxID resumes that thread with an event as soon as it happens:
   inside Telegram when an administrator configured it, else the token form) and
   records a `channel_bot` watch. The next active bot of that platform the owner
   creates is linked to the chosen agent and the thread gets the
-  owner-verification step to pass on. Secrets are entered on the page, never in
-  chat.
+  owner-verification step to pass on. A bot created inside Telegram through
+  NyxID needs no step: the Telegram account that created it (confirmed by
+  Telegram, for the owner who started the creation) is its verified owner, so
+  the thread just tells them to open the bot and press Start. Secrets are
+  entered on the page, never in chat.
 - **Owner verification**: when the owner uses the link or code in the chat app,
   the thread that set the bot up is told.
 - **Proxy approvals** need no watch: the tool call itself waits for the decision
@@ -348,7 +352,13 @@ settings, or relinked later); each chat becomes a thread of the linked agent
   org's other admins can link the bot, and nothing reaches or leaves their
   agent. Disconnecting removes the org's route and key too.
 - **Right user.** The owner is verified through NyxID's Telegram notification
-  link or a one-time link code (a `t.me/<bot>?start=<code>` link for Telegram);
+  link, a one-time link code (a `t.me/<bot>?start=<code>` link for Telegram), or,
+  for a Telegram bot created inside Telegram through NyxID, as the account that
+  created it (`telegram_bot_requests` provisioning or connected, started by this
+  owner and bound by their own setup challenge, `start_update_id`; a bot claimed
+  with a transferable code never qualifies). It is linked when the bot is linked,
+  or on its first private message (greeted); a verified owner's bare `/start` in
+  a private chat is greeted without a turn;
   only they act with the agent's full authority. Everyone else is a guest
   (§12a): in private chats they get a short refusal unless the owner opened the
   bot's private chats to everyone; in groups they may talk to the agent unless
@@ -456,8 +466,12 @@ the gateway passes every group message on (`all`, recorded as
 or a reply to one of the bot's sent messages (NyxID records the platform
 message an inbound message replies to). Directly relayed Telegram messages are
 judged from the update (an @username or text mention, a reply to the bot); Lark
-and Feishu count any @mention (they deliver unmentioned group messages only to
-apps granted every group message); Slack counts `app_mention` events and
+and Feishu count only a mention of the bot itself, by its `open_id` (looked up
+through the adapter's `bot_user_id` when a message mentions someone and cached
+in memory per bot and app for an hour; apps granted every group message also
+get mentions of other people, and `@all` is not a mention of the bot), or any
+mention for five minutes after a failed lookup (logged as a warning); Slack
+counts `app_mention` events and
 Discord its `mentions` and replied-to author; a reply to one of the bot's sent
 messages counts everywhere, and Discord slash commands always do. When a
 platform cannot tell, only the owner's messages count as addressed. Telegram bots see every group message only with privacy mode off or
@@ -470,13 +484,79 @@ turn so late tool calls stay restricted):
 - NyxBot holds every service of the owner, so its guest turns call no tools at
   all and answer from the conversation; to let a chat's members use a service,
   the owner gives the chat a specialist with just that service;
-- a specialist's guest turns may discover tools and read within its grants:
-  no `nyxid__` account, team, memory or posting tools, no connection, SSH or
-  Oracle tools, only curated operations (never the generic proxy tool, whose
-  GET can still change things) and only read verbs; everything else is refused
-  with `owner_only`;
-- an ungranted service is refused without a permission request, so a guest
-  never widens what a specialist may use;
+- a specialist's guest turns use its granted services as far as the owner lets
+  guests use each one (`AssistantAgent::guest_access`, per specialist and
+  service, stored beside `grants` so writers of `grants` that predate it never
+  erase it; the user's decision: guests "can use them" but not delete, and
+  sometimes the owner wants them to edit sheets, docs or pages too). Levels:
+  - `read`: reads only: GET, HEAD or OPTIONS (not one its spec marks as
+    writing), or a POST its catalog contract marks read-only
+    (`x-aevatar-tool.readOnly`, so a POST search counts); a catalog contract is
+    a stored `ServiceEndpoint` row or NyxID's hosted overlay (also when an
+    instance mounts the overlay's URL, which NyxID serves from its compiled
+    copy whatever the host), never a remote spec read at call time, which may
+    only narrow;
+  - `use`, the default: reads, creates and acts (send, create, turn a light
+    on, start playback), but never changes or removes what exists. By method:
+    PUT, PATCH and DELETE change or remove, GET, HEAD, OPTIONS and POST do
+    not, unless NyxID's own per-operation `x-nyxid-changes-existing` says
+    otherwise: `true` for a POST that edits (Slack's `chat.update`, Telegram's
+    `editMessageText`, Aurinko's `send_draft`), `false` for a PUT that only
+    acts (Spotify's play and pause, Discord's add reaction). `true` may come
+    from any spec and wins; `false` widens, so only a catalog contract says
+    it (an overlay by exact route, not by name; a catalog service that mounts
+    a remote spec instead of the overlay loses it, failing closed). An owner
+    who mounts a hosted overlay on another API applies that overlay's marks
+    to it. A DELETE, and an operation
+    Aevatar's `x-aevatar-tool.destructive` marks (Telegram's `deleteMessage`,
+    Sheets' `values:clear` and `values:append`, Docs' `batchUpdate`, IFTTT's
+    triggers and tool calls), never. NyxID adds its own marker rather than
+    change Aevatar's, which Aevatar's approvals read. So editing a sheet, doc,
+    Notion page or calendar event, trashing a Drive file or running an IFTTT
+    applet is beyond `use`;
+  - `all`: everything the specialist may do with the service, changing and
+    deleting included (NyxBot's `nyxid__set_guest_access` says so when it sets
+    it).
+  A guest call never carries a method override (a header like
+  `X-HTTP-Method-Override`, a `_method` or `_HttpMethod` query or body field,
+  or a `method` field naming a changing verb other than the one sent, as in
+  Facebook Graph; keys normalised as a superset of how PHP reads them, `;`
+  separating fields as `&` does; the body read by the content type it is sent
+  with, a JSON body that does not parse counting as one): a server may honour
+  one in place of the method the call is sent with, and approvals see only the
+  latter. Markers come from the overlay compiled into NyxID for catalog
+  services (matched literally by endpoint name or `METHOD path`; no stored
+  endpoint changes, so `operation_generation` is untouched), including a
+  catalog service's instance-mounted spec where its operations match, and
+  from a mounted spec's own markers (which only narrow). Specs an admin adds to
+  the catalog outside NyxID's overlays are stored as rows without markers, and
+  services without typed operations (the generic proxy) have none: they are
+  judged by the method alone, so a POST that deletes there (an RPC-style API)
+  is within `use`, and a GET that deletes (Telegram's Bot API accepts GET) is
+  within `read`, as are batch envelopes (a `requests` array naming methods):
+  do not give such a service to a specialist that answers guests unless they
+  may do anything with it. Override checks read a JSON body by its top-level
+  fields and a form body as a form; text and binary bodies (uploads) and empty
+  bodies carry no override.
+  Nothing is judged from names or words. The owner sets levels on the agent's
+  Grants (a select per service; the page sends only changed levels) or by
+  asking NyxBot (`nyxid__set_guest_access`, "let the group edit the office
+  sheet"; `all` must name its services); `nyxid__list_subagents` and the agent
+  summary show them (`guest_access`). Levels are kept across other grant
+  changes and dropped with the service; a service granted anew starts at
+  `use`. Calls beyond the level are refused with
+  `owner_only` (naming the service and its level) before anything is sent. SSH
+  (a shell can do anything) stays the owner's, as do `nyxid__` account, team,
+  memory and posting tools and connection and Oracle tools (the user's
+  decision: "anyone in the group can talk to the bot … dangerous command should
+  only be allowed by the owner", with the agent's key scoped to its granted
+  services);
+- an ungranted service, and an operation the owner put behind approval, are
+  refused without a permission or approval request at every level, and an
+  approval the owner granted for their own requests does not let a guest in
+  (the chat's key is shared, the approval is not), so a guest never widens
+  what a specialist may use or acts in the owner's name; audit rows of chat
+  tool calls record `guest`;
 - guests' messages are never queued as the owner's work: a busy agent asks them
   to try again (only if they spoke to the bot), a guest turn leaves the owner's
   queued events alone, and guest turns never reset the owner's event-turn loop

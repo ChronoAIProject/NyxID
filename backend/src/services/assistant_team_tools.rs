@@ -16,6 +16,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "read_subagent",
     "grant_subagent",
     "revoke_subagent",
+    "set_guest_access",
     "decide_permission",
     "destroy_subagent",
     "update_subagent",
@@ -166,6 +167,19 @@ pub fn schema(name: &str) -> Value {
             json!({"subagent": subagent, "services": services(),
                 "account_read": {"type": "boolean"}}),
             vec!["subagent"],
+        ),
+        "set_guest_access" => (
+            json!({"subagent": subagent,
+                "services": {"type": "array", "maxItems": 32, "items": string(200),
+                    "description": "The specialist's services (slugs or IDs); omit for all \
+                    of them (read or use only)"},
+                "access": {"type": "string", "enum": ["read", "use", "all"],
+                    "description": "read: guests only look things up; use (the default): \
+                    guests look things up, create and act (send, turn on), but never change or \
+                    delete what exists (edit a sheet, doc, page or event, delete a file); all: \
+                    guests may do everything the specialist may, editing and deleting \
+                    included"}}),
+            vec!["subagent", "access"],
         ),
         "decide_permission" => (
             json!({
@@ -322,7 +336,10 @@ fn description(name: &str) -> &'static str {
             replies, who is still running, and pending permission requests. You can also end \
             your turn instead; NyxID wakes you with an event."
         }
-        "list_subagents" => "List your specialists with status, grants and pending requests.",
+        "list_subagents" => {
+            "List your specialists with status, grants, what guests may do with each service \
+            (guest_access) and pending requests."
+        }
         "read_subagent" => "Read a specialist's recent home-thread messages (bounded excerpts).",
         "grant_subagent" => {
             "Grant a specialist more services or read-only account access. Grant only what the \
@@ -331,6 +348,16 @@ fn description(name: &str) -> &'static str {
             not_granted with the reason; the rest are granted."
         }
         "revoke_subagent" => "Revoke services or account access from a specialist.",
+        "set_guest_access" => {
+            "Set what people other than the user (guests: other members of a group or shared \
+            chat the specialist answers) may do with its services, when the user asks, e.g. \
+            \"let the group edit the office sheet\" (all) or \"guests may only look things up\" \
+            (read). The default, use, lets guests look things up, create and act, but never \
+            change or delete what exists; all (edit and delete too) is set service by \
+            service. Operations the \
+            user put behind approval stay the user's at every level. Only services granted to \
+            the specialist; the rest come back in not_set."
+        }
         "decide_permission" => {
             "Allow or deny a specialist's pending permission request. Allow only what fulfils \
             the user's request; deny anything the user did not ask for; if unsure, ask the \
@@ -405,8 +432,10 @@ fn description(name: &str) -> &'static str {
             mentions and replies (groups default to mentions); let members other than the user \
             talk to the agent (default once the user has talked to the bot there); allow \
             posting there; or give the chat its own agent. Guests never act for the user: you \
-            answer them without tools, and a specialist given the chat reads only with its \
-            own services, so give a chat a specialist when its members need a service."
+            answer them without tools, and a specialist given the chat uses only its own \
+            services, as far as nyxid__set_guest_access lets guests (by default looking up, \
+            creating and acting, never changing or deleting what exists), so give a chat a \
+            specialist when its members need a service."
         }
         "update_channel_access" => {
             "Set who may talk to the agent in private chats with a channel bot: only the user \
