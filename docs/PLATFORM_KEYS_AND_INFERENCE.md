@@ -237,7 +237,9 @@ Stable primary Lago codes remain `platform_svc_{slug}_byok` / `platform_svc_{slu
 additional components use `platform_svc_{slug}_{byok|pk}_{metric}`. Each price has its
 own rate-cache row and synchronization state. Removed components are recorded in
 server-owned `component_cleanup_metric_codes`, including when their entire lane is
-removed. The same pricing synchronizer, full Lago plan charge array with IDs, and
+removed. Completed removals mark the code's rate-cache row `retired_at` instead of
+deleting it: usage metered under the old code stays priced, while new reservations
+refuse retired rates until a re-authored price replaces the row. The same pricing synchronizer, full Lago plan charge array with IDs, and
 reconcile interval handle all charges. Price/metric/code fences prevent stale admin
 sync completions from activating obsolete prices; stale writes after removal restore
 cleanup intent. Clients cannot control metric codes, sync state, or cleanup markers.

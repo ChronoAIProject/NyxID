@@ -225,7 +225,38 @@ export function assistantFixtureFrames(
   turnId: string,
   messageId: string,
   output = FIXTURE_REPLY,
+  options: { readonly includeActionFrames?: boolean } = {},
 ): unknown[] {
+  const includeActionFrames = options.includeActionFrames ?? true;
+  const splitAt = Math.max(1, Math.floor(output.length / 4));
+  const chunks = [
+    output.slice(0, splitAt),
+    output.slice(splitAt, splitAt * 2),
+    output.slice(splitAt * 2, splitAt * 3),
+    output.slice(splitAt * 3),
+  ].filter(Boolean);
+
+  if (!includeActionFrames) {
+    return [
+      {
+        runStarted: { actorId, runId: turnId, commandId: `command-${turnId}` },
+      },
+      { textMessageStart: { messageId, role: "assistant" } },
+      ...chunks.map((delta) => ({ textMessageContent: { messageId, delta } })),
+      { textMessageEnd: { messageId, message: output } },
+      {
+        runFinished: {
+          actorId,
+          runId: turnId,
+          result: {
+            output,
+            usage: { totalTokens: 12, model: "mock-link-journey" },
+          },
+        },
+      },
+    ];
+  }
+
   const task = activeTaskFixture(actorId, turnId);
   const step = task.steps[0]!;
   const actionRequest = {
@@ -243,13 +274,6 @@ export function assistantFixtureFrames(
       },
     },
   };
-  const splitAt = Math.max(1, Math.floor(output.length / 4));
-  const chunks = [
-    output.slice(0, splitAt),
-    output.slice(splitAt, splitAt * 2),
-    output.slice(splitAt * 2, splitAt * 3),
-    output.slice(splitAt * 3),
-  ].filter(Boolean);
   return [
     { runStarted: { actorId, runId: turnId, commandId: `command-${turnId}` } },
     {

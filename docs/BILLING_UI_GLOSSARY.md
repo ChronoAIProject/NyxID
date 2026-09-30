@@ -272,33 +272,59 @@ never sent to Lago, and render **Free** with **—** cost.
 
 ### Summary and expandable details
 
-| Group                               | Meaning                                                                                                                                                                                                                     |
-| ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Spend**                           | Estimated credits, covered by benefits (grants + allowances), and wallet-funded cost. Any unknown component makes that total Unavailable; known records remain readable. Empty usage totals are zero.                       |
-| **Activity**                        | Metered request quantity, services used, images and bytes. These are metric quantities, not unique HTTP request counts.                                                                                                     |
-| **Tokens**                          | Total-token metric plus separate input/output and cache-read/write metrics. Missing classes show a dash, not a fabricated count. Token totals and classes may overlap and are never added together.                         |
-| **All metrics & funding**           | Exact quantities grouped into Tokens, Cache, and Requests & other units. Funding shows all three sources; allowance-covered units stay separate by metric. All-service API request/byte/event totals remain available here. |
-| **Service rows**                    | Catalog display name, quantities, estimated cost and settlement status. Services are grouped under AI models, Connected apps, or Other services using catalog inference metadata.                                           |
-| **Service expansion**               | Metered quantities and funding, then Models, agents & billing layers, with every returned aggregate record accessible.                                                                                                      |
-| **Full metering & funding details** | Per-record costs, funding, allowance-covered units, requests, bytes, events, original provider token breakdown, meter code and agent-key identity.                                                                          |
+| Group                               | Meaning                                                                                                                                                                                                                                                                                                                                                                                  |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Spend**                           | Estimated credits, covered by benefits (grants + allowances), and wallet-funded cost. When some records cannot be priced, the total is shown as a lower bound (`≥`) over the priced records with a note counting the unpriced ones; it reads Unavailable only when no charged record is priced (free records contribute zero but never make a total known). Empty usage totals are zero. |
+| **Activity**                        | Metered request quantity, services used, images and bytes. These are metric quantities, not unique HTTP request counts.                                                                                                                                                                                                                                                                  |
+| **Tokens**                          | Total-token metric plus separate input/output and cache-read/write metrics. Missing classes show a dash, not a fabricated count. Token totals and classes may overlap and are never added together.                                                                                                                                                                                      |
+| **All metrics & funding**           | Exact quantities grouped into Tokens, Cache, and Requests & other units. Funding shows all three sources; allowance-covered units stay separate by metric. All-service API request/byte/event totals remain available here.                                                                                                                                                              |
+| **Service rows**                    | Catalog display name, quantities, estimated cost and settlement status. Services are grouped under AI models, Connected apps, or Other services using catalog inference metadata.                                                                                                                                                                                                        |
+| **Service expansion**               | Metered quantities and funding, then Models, agents & billing layers, with every returned aggregate record accessible.                                                                                                                                                                                                                                                                   |
+| **Full metering & funding details** | Per-record costs, funding, allowance-covered units, requests, bytes, events, original provider token breakdown, meter code and agent-key identity.                                                                                                                                                                                                                                       |
 
 Estimated cost is the gross cost of the full finalized quantity, including benefit-covered
-units. New settlements use persisted exact gross costs; historical rows use current cached
-model/metric rates. Funding values are exact credits; wallet-funded cost equals the wallet debit.
+units. New settlements use persisted exact gross costs; historical rows are priced by the
+precedence described below. Funding values are exact credits; wallet-funded cost equals the wallet debit.
 
 **Acknowledged** means Lago accepted a billable event or duplicate, not that an invoice was
 paid. **Pending** means a charged row is unacknowledged; forwarded dead-letter rows can stay
 pending until operator action. **Free** rows have no charge and display a dash for cost.
 Mixed groups say Includes free usage and compute acknowledgement from charged rows only.
 
-For pre-change funded rows, grant funding is the sum of `grant_consumptions.amount_micros`;
-allowance units are the sum of `allowance_consumptions.quantity`, valued at the current rate.
-Wallet funding is `max(0, estimated gross cost − grant funding − allowance funding)`.
-Rows without funding metadata use the same current-rate estimate, funded entirely by the wallet.
-Missing rates leave unknown estimates null, including groups mixing exact settlements with
-historical usage that cannot be priced. Grant amounts remain known from consumption records.
-MongoDB aggregates the consumption arrays before responses are built. Costs are summed
-consistently from the API rows into both totals and service rows; non-billable rows contribute zero.
+For pre-change funded rows, grant funding is the sum of `grant_consumptions.amount_micros`
+and allowance units are the sum of `allowance_consumptions.quantity`. The historical rows of
+one API group are priced by the first rule that applies:
+
+1. **Grant-settled derivation.** Every historical row is settled with a zero wallet debit and zero
+   consumed allowance units. Settlements before exact accounting rounded any positive wallet
+   remainder up to at least one whole credit, so a zero debit means the grants covered the full
+   gross exactly: gross cost equals the grant consumption, wallet cost is zero. This is exact and
+   beats any estimate.
+2. **Current cached rate.** The model-specific, then generic, `billing_rate_cache` row prices the
+   legacy quantity and the allowance-covered units exactly (rate × quantity). In-place price edits
+   keep the same Lago code, so this rule wins for them and reprices that code's history at the
+   current rate.
+3. **Per-row reservation rate.** Applies only when no cached rate exists for the code. Every
+   historical row must carry its own reservation-time rate (`funding.credits_per_unit_pico`, or a
+   positive `credits_per_unit_micros`; a zero micro rate without pico counts as no rate). Each row
+   is then valued at the rate it was metered under: MongoDB multiplies the rate by the row's
+   quantity in exact Decimal128 credits, with no rounding, as exact settlement does. Allowance-covered
+   units are valued per row as rate × allowance units, which equals settlement's
+   `cost(quantity) − cost(quantity − allowance units)` because exact cost is linear.
+4. **Unknown.** Gross, wallet and allowance costs are null; grant amounts remain known from the
+   consumption records. A grant-covered charge can therefore show grant funding while its gross
+   cost is unavailable; the grant itself is never the cause.
+
+In every priced case wallet funding is `max(0, gross − grant funding − allowance funding)`, and
+rows without funding metadata are funded entirely by the wallet. Groups mixing exact settlements
+with unpriceable history stay null. Historical costs went missing when a price was removed (a
+cleared legacy price, lane, or component), because cleanup deleted the code's rate-cache row;
+in-place edits never dropped it. Removal now marks the row `retired_at` instead (usable for
+history, refused for new reservations), so only rows metered under codes removed before that
+retention shipped, and lacking a reservation rate or a grant-settled derivation, remain unknown.
+Pending refers separately to Lago acknowledgement. MongoDB aggregates the consumption arrays
+before responses are built. Costs are summed consistently from the API rows into both totals and
+service rows; non-billable rows contribute zero.
 
 Settlement stores this display metadata atomically with `funding.settled = true`. Retries reuse
 the stored settlement. Funding order (allowances → grants → wallet), exact wallet debit,
@@ -340,11 +366,16 @@ no provider-independent non-overlapping grand total can be reconstructed from
 historical `token_breakdown` alone. Estimated tokens without a breakdown remain
 visible in metric quantities, not in provider token-class totals.
 
-Costs follow the personal Usage card: exact persisted settlements first, then
-current model-specific/generic rates for legacy billable groups; free events cost
-zero. Known costs are summed, unknown groups remain null and are skipped by totals.
-A **Partial estimate** notice exposes missing historical rates. Grant amounts stay
-known even without a rate. The wallet-funded amount equals the wallet debit; other funding comes from allowances and grants.
+Costs use exact persisted settlements first, then the current cached
+model-specific/generic rate for legacy billable groups; free events cost zero.
+Unlike the personal Usage card there is no grant-settled derivation and no per-row
+reservation-rate fallback. Known costs are summed, unknown groups remain null and
+are skipped by totals, and a **Partial estimate** notice exposes missing historical
+rates. Grant amounts stay known even without a rate. Retired rate-cache rows are
+retained, so a future price removal keeps its history priced here; codes whose rows
+were deleted before that retention shipped stay unknown on this page even where the
+personal Usage card recovers them through a grant-settled derivation or per-row
+reservation rates. The wallet-funded amount equals the wallet debit; other funding comes from allowances and grants.
 Ranking is paged by actor × billing owner × service, descending by requests, cost,
 a selected metric's quantity, or a token class, with stable identity tie-breakers.
 A quantity ranking never adds unlike metrics. Expanding a user shows all their
@@ -465,8 +496,9 @@ numbers and no receipts.
   is capped at 3,650 days for Usage but unbounded for Top-up history.
 - Metered requests and bytes are not unique traffic counts. Each metric keeps its own units;
   reported request/byte/event counts remain in expanded details.
-- Historical usage can have unknown costs. The page marks affected totals Unavailable instead
-  of displaying a partial sum as complete.
+- Historical usage can have unknown costs. The page shows affected totals as a `≥` lower bound
+  over the priced records, with the unpriced count, and never presents a partial sum as complete.
+  Unavailable appears only when no charged record in the selection could be priced.
 - Gross cost equals allowance, grant and wallet funding combined; the wallet debit equals the wallet-funded part.
 - Catalog lookup failures have an explicit retry state; a readable slug fallback remains until
   names load. Catalog names are authoritative even when an administrator chooses a slug-like name.

@@ -450,14 +450,43 @@ describe("BillingPage", () => {
       query(
         usage([
           row({ estimated_credits_micros: null }),
-          row({ billable: false, lago_acked: false, grant_credits_micros: 0 }),
+          row(),
+          row({
+            billable: false,
+            lago_acked: false,
+            estimated_credits_micros: 0,
+            wallet_credits_micros: 0,
+            grant_credits_micros: 0,
+            allowance_credits_micros: 0,
+          }),
         ]),
       ),
     );
     await renderPage();
+    const spend = screen.getByRole("heading", { name: "Spend" }).parentElement!;
     expect(
-      screen.getAllByText("Unavailable", { exact: false }).length,
+      within(spend).getByText("≥ 0.00244", { exact: false }),
+    ).toBeVisible();
+    expect(
+      within(spend).getByText(
+        "Estimated usage cost · lower bound, 1 record unpriced",
+      ),
+    ).toBeVisible();
+    expect(within(spend).queryByText("Unavailable")).not.toBeInTheDocument();
+    expect(
+      screen.getByText("≥ 0.00244", { selector: ".row-credit", exact: false }),
+    ).toBeVisible();
+    expect(
+      screen.getAllByText(
+        /^1 charged record was metered under a price that is no longer available, so its gross, wallet and allowance costs cannot be estimated\. Amounts marked ≥ are lower bounds\./,
+      ).length,
     ).toBeGreaterThan(0);
+    // The single expanded record has nothing to expand and no ≥ marks.
+    expect(
+      screen.getByText(
+        /^This charged record was metered under a price that is no longer available, so its gross, wallet and allowance costs cannot be estimated\. Credit-grant funding is still exact\.$/,
+      ),
+    ).toBeInTheDocument();
     expect(screen.getByText("Includes free usage")).toBeVisible();
     expect(
       screen.getByText("Acknowledged", { selector: ".usage-status" }),
@@ -465,6 +494,32 @@ describe("BillingPage", () => {
     expect(
       screen.queryByText("Pending", { exact: true }),
     ).not.toBeInTheDocument();
+  });
+  it("shows the spend as unavailable when no charged record is priced", async () => {
+    mocks.usage.mockReturnValue(
+      query(
+        usage([
+          row({ estimated_credits_micros: null }),
+          // A free row's zero cost must not make the charged total known.
+          row({
+            service_slug: "free-service",
+            billable: false,
+            lago_acked: false,
+            estimated_credits_micros: 0,
+            wallet_credits_micros: 0,
+            grant_credits_micros: 0,
+            allowance_credits_micros: 0,
+          }),
+        ]),
+      ),
+    );
+    await renderPage();
+    const spend = screen.getByRole("heading", { name: "Spend" }).parentElement!;
+    expect(spend.querySelector("strong")).toHaveTextContent(
+      "Unavailable credits",
+    );
+    expect(within(spend).getByText("Estimated usage cost")).toBeVisible();
+    expect(within(spend).queryByText(/lower bound/)).not.toBeInTheDocument();
   });
   it("shows usage and history errors as retryable failures instead of empty results", async () => {
     mocks.usage.mockReturnValue(query(undefined, new Error("Usage failed")));

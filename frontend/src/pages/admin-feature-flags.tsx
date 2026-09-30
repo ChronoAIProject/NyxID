@@ -38,6 +38,7 @@ import {
 } from "@/schemas/admin-feature-flags";
 import { useAuthStore } from "@/stores/auth-store";
 import { canAdminWrite } from "@/types/api";
+import { FEATURE_FLAG } from "@/lib/feature-flags";
 
 type ScopeState = "inherit" | "enabled" | "disabled";
 type FlagKind = "experiment" | "entitlement" | "ops";
@@ -495,72 +496,76 @@ function FlagCard({
             />
           </Group>
 
-          <Group label="By organization">
-            {canWrite && (
-              <AccountSearchPicker
-                kind="org"
-                excludedIds={orgIds}
-                onPick={(org) => {
-                  setStagedOrgLabels((labels) => ({
-                    ...labels,
-                    [org.id]: org.label,
-                  }));
-                  stage("org", org.id, "enabled");
-                }}
-              />
-            )}
-            {orgIds.map((id) => {
-              const assignment = flag.orgs.find((org) => org.id === id);
-              return (
-                <div
-                  key={id}
-                  title={assignment?.missingAccount ? id : undefined}
-                >
-                  <ScopeRow
-                    label={labelFor("org", id)}
-                    state={stateFor("org", id)}
-                    pending={isPending("org", id)}
-                    disabled={!canWrite}
-                    onChange={(s) => stage("org", id, s)}
-                  />
-                </div>
-              );
-            })}
-          </Group>
+          {flag.key !== FEATURE_FLAG.INVITATION_CODE && (
+            <Group label="By organization">
+              {canWrite && (
+                <AccountSearchPicker
+                  kind="org"
+                  excludedIds={orgIds}
+                  onPick={(org) => {
+                    setStagedOrgLabels((labels) => ({
+                      ...labels,
+                      [org.id]: org.label,
+                    }));
+                    stage("org", org.id, "enabled");
+                  }}
+                />
+              )}
+              {orgIds.map((id) => {
+                const assignment = flag.orgs.find((org) => org.id === id);
+                return (
+                  <div
+                    key={id}
+                    title={assignment?.missingAccount ? id : undefined}
+                  >
+                    <ScopeRow
+                      label={labelFor("org", id)}
+                      state={stateFor("org", id)}
+                      pending={isPending("org", id)}
+                      disabled={!canWrite}
+                      onChange={(s) => stage("org", id, s)}
+                    />
+                  </div>
+                );
+              })}
+            </Group>
+          )}
 
-          <Group label="By user">
-            {canWrite && (
-              <AccountSearchPicker
-                kind="person"
-                excludedIds={userIds}
-                onPick={(user) => {
-                  setStagedUserLabels((labels) => ({
-                    ...labels,
-                    [user.id]: user.label,
-                  }));
-                  stage("user", user.id, "enabled");
-                }}
-              />
-            )}
-            {userIds.map((id) => {
-              const assignment = flag.users.find((user) => user.id === id);
-              const label = labelFor("user", id);
-              return (
-                <div
-                  key={id}
-                  title={assignment?.missingAccount ? id : undefined}
-                >
-                  <ScopeRow
-                    label={label}
-                    state={stateFor("user", id)}
-                    pending={isPending("user", id)}
-                    disabled={!canWrite}
-                    onChange={(state) => stage("user", id, state)}
-                  />
-                </div>
-              );
-            })}
-          </Group>
+          {flag.key !== FEATURE_FLAG.INVITATION_CODE && (
+            <Group label="By user">
+              {canWrite && (
+                <AccountSearchPicker
+                  kind="person"
+                  excludedIds={userIds}
+                  onPick={(user) => {
+                    setStagedUserLabels((labels) => ({
+                      ...labels,
+                      [user.id]: user.label,
+                    }));
+                    stage("user", user.id, "enabled");
+                  }}
+                />
+              )}
+              {userIds.map((id) => {
+                const assignment = flag.users.find((user) => user.id === id);
+                const label = labelFor("user", id);
+                return (
+                  <div
+                    key={id}
+                    title={assignment?.missingAccount ? id : undefined}
+                  >
+                    <ScopeRow
+                      label={label}
+                      state={stateFor("user", id)}
+                      pending={isPending("user", id)}
+                      disabled={!canWrite}
+                      onChange={(state) => stage("user", id, state)}
+                    />
+                  </div>
+                );
+              })}
+            </Group>
+          )}
         </div>
       }
     </Card>

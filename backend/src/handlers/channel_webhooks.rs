@@ -1332,7 +1332,6 @@ mod tests {
             billing_default_overdraft_cap_credits: 0,
             billing_fail_closed: false,
             billing_resale_enabled: false,
-            invite_code_required: true,
             email_auth_enabled: false,
             auto_verify_email: false,
             telemetry_dsn: None,
@@ -1712,7 +1711,6 @@ mod tests {
         assert_eq!(config.channel_relay_message_ttl_days, 30);
         assert_eq!(config.channel_event_rate_limit_per_second, 100);
         assert_eq!(config.channel_event_dedup_ttl_secs, 300);
-        assert!(config.invite_code_required);
         assert!(!config.auto_verify_email);
     }
 

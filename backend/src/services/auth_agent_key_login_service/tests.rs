@@ -1511,3 +1511,23 @@ async fn consent_platform_grants_are_owner_bound_and_use_live_platform_readiness
     assert_ne!(enabled.permission_snapshot, disabled.permission_snapshot);
     db.drop().await.unwrap();
 }
+
+#[test]
+fn assistant_conversation_keys_never_back_a_cli_login() {
+    let key = |platform: Option<&str>| -> ApiKey {
+        let mut document = doc! {"_id": Uuid::new_v4().to_string(), "user_id": "owner",
+        "name": "key", "key_prefix": "nyxid_ag_x", "key_hash": "hash", "scopes": "proxy",
+        "is_active": true, "allow_all_services": false, "allow_all_nodes": true,
+        "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
+        "state_version": 1_i64};
+        if let Some(platform) = platform {
+            document.insert("platform", platform);
+        }
+        bson::from_document(document).unwrap()
+    };
+    assert!(key_is_eligible(&key(None)));
+    assert!(key_is_eligible(&key(Some("claude-code"))));
+    assert!(!key_is_eligible(&key(Some(
+        crate::services::assistant_agent_credential_service::ASSISTANT_PLATFORM
+    ))));
+}

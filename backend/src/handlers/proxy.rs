@@ -1903,6 +1903,37 @@ async fn preflight_proxy_deny_before_resolution(
     Ok(())
 }
 
+/// NyxAgent calls its model through this proxy with the conversation's own
+/// assistant key, and a specialist's key holds only its grants. Such a key may
+/// always reach a catalog model inference service (`inference` metadata): that
+/// is its thinking, not a tool. Nothing else outside its grants is allowed, and
+/// MCP tools are unaffected. Checked only when the key would be refused.
+async fn assistant_model_call(
+    state: &AppState,
+    auth_user: &AuthUser,
+    catalog: Option<mongodb::bson::Document>,
+) -> AppResult<bool> {
+    let (Some(key_id), Some(mut catalog)) = (auth_user.api_key_id.as_deref(), catalog) else {
+        return Ok(false);
+    };
+    catalog.insert("inference", doc! {"$ne": null});
+    catalog.insert("is_active", true);
+    let model_service = state
+        .db
+        .collection::<mongodb::bson::Document>(crate::models::downstream_service::COLLECTION_NAME)
+        .count_documents(catalog)
+        .limit(1)
+        .await?
+        > 0;
+    Ok(model_service
+        && crate::services::assistant_agent_credential_service::is_conversation_key(
+            &state.db,
+            &auth_user.user_id.to_string(),
+            key_id,
+        )
+        .await?)
+}
+
 /// Inner proxy execution with optional pre-resolved target from UserService path.
 ///
 /// When `pre_resolved` is `Some`, the target and node routing are already known
@@ -2041,6 +2072,14 @@ async fn execute_proxy_inner(
         if let Some(ref us_id) = pre.user_service_id
             && !auth_user.allow_all_services
             && !auth_user.allowed_service_ids.contains(us_id)
+            && !assistant_model_call(
+                state,
+                auth_user,
+                pre.catalog_service_slug
+                    .as_deref()
+                    .map(|slug| doc! {"slug": slug}),
+            )
+            .await?
         {
             let err = AppError::ApiKeyScopeForbidden(
                 "API key does not have access to this service".to_string(),
@@ -2186,7 +2225,9 @@ async fn execute_proxy_inner(
         // services. Emit a `proxy_request_denied` audit event on 403 so
         // Usage aggregation counts these failures
         // (see ChronoAIProject/NyxID#341).
-        if !auth_user.allow_all_services {
+        if !auth_user.allow_all_services
+            && !assistant_model_call(state, auth_user, Some(doc! {"_id": service_id})).await?
+        {
             let err = AppError::ApiKeyScopeForbidden(
                 "Scoped API keys must use configured services".to_string(),
             );

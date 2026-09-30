@@ -1277,6 +1277,7 @@ mod tests {
                 credits_per_unit_micros: 500_000,
                 credits_per_unit_pico: None,
                 synced_at: now,
+                retired_at: None,
             })
             .await
             .expect("insert rate");
