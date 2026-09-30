@@ -230,6 +230,20 @@ describe("NyxAgent server-backed transport", () => {
     expect(transport.getHistory(id)?.before_seq).toBeNull();
   });
 
+  it("marks messages the user wrote in a chat app with its platform", async () => {
+    globalThis.__nyxidAssistantHttpMock = () => {
+      const page = history();
+      page.messages = [{ ...page.messages[0]!, via: "telegram" }, page.messages[1]!];
+      return json(page);
+    };
+    const transport = new NyxAgentTransport();
+    await transport.history(id);
+    expect(transport.session(id).messages.map((message) => message.via ?? null)).toEqual([
+      "telegram",
+      null,
+    ]);
+  });
+
   it("surfaces stable HTTP errors without treating them as an expired login", async () => {
     globalThis.__nyxidAssistantHttpMock = () =>
       json(

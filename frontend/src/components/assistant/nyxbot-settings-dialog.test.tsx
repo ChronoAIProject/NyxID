@@ -5,6 +5,10 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { useAuthStore } from "@/stores/auth-store";
 import { NyxBotSettingsButton } from "./nyxbot-settings-dialog";
 
+vi.mock("@/hooks/use-orgs", () => ({
+  useOrgs: () => ({ data: [], isPending: false, error: null }),
+}));
+
 vi.mock("@/hooks/use-channel-bots", () => ({
   useChannelBots: () => ({
     isPending: false,
@@ -25,6 +29,8 @@ const json = (value: unknown, status = 200) =>
 
 let settings: Record<string, unknown>;
 let channelAgentId: string | null;
+let privateChats: string;
+let chats: Record<string, unknown>[];
 const at = "2026-09-28T00:00:00Z";
 function agent(id: string, kind: "nyxbot" | "specialist", name: string, status = "idle") {
   return {
@@ -70,8 +76,17 @@ beforeEach(() => {
     last_error: null,
     owner_linked: true,
     agent_id: channelAgentId,
+    private_chats: privateChats,
     created_at: "2026-09-28T00:00:00Z",
   });
+  privateChats = "owner";
+  const chat = (id: string, kind: string, title: string) => ({
+    id, channel_agent_id: "channel-1", platform: "telegram", bot_label: "Home bot", kind, title,
+    agent_id: null, reply_mode: kind === "private" ? "all" : "mention", members: "everyone",
+    members_setting: null, owner_seen: false, allow_posts: false, conversation_id: null,
+    last_message_at: at,
+  });
+  chats = [chat("chat-g", "group", "Team chat"), chat("chat-p", "private", "Alice")];
   globalThis.__nyxidAssistantHttpMock = ({ endpoint, init }) => {
     const method = init.method ?? "GET";
     const body = init.body ? (JSON.parse(String(init.body)) as unknown) : null;
@@ -86,8 +101,29 @@ beforeEach(() => {
         limits: settings,
       });
     }
+    if (endpoint === "/assistant/nyxagent/channels/channel-1/chats") {
+      return json({ chats });
+    }
+    const chatPatch = /^\/assistant\/nyxagent\/channels\/channel-1\/chats\/([\w-]+)$/.exec(
+      endpoint,
+    );
+    if (chatPatch && method === "PATCH") {
+      const index = chats.findIndex((row) => row.id === chatPatch[1]);
+      const update = body as Record<string, unknown>;
+      chats[index] = {
+        ...chats[index]!,
+        ...update,
+        ...(update.members ? { members_setting: update.members } : {}),
+      };
+      return json({ chat: chats[index] });
+    }
     if (endpoint === "/assistant/nyxagent/channels/channel-1" && method === "PATCH") {
-      channelAgentId = (body as { agent_id: string }).agent_id;
+      const update = body as { agent_id?: string; private_chats?: string };
+      if (update.private_chats) {
+        privateChats = update.private_chats;
+        return json({ channel_agent_id: "channel-1", private_chats: privateChats });
+      }
+      channelAgentId = update.agent_id ?? null;
       return json({ channel_agent_id: "channel-1", agent: "writer", changed: true });
     }
     if (endpoint === "/assistant/nyxagent/settings") {
@@ -252,4 +288,64 @@ it("lists connected bots with their agent, relinks one, and connects another to 
     bot_id: "bot-dc",
     agent_id: "agent-writer",
   });
+});
+
+it("opens a bot's chats and saves who can talk and how it answers", async () => {
+  const user = renderButton();
+  await user.click(screen.getByRole("button", { name: "NyxBot settings" }));
+  const dialog = await screen.findByRole("dialog", { name: "NyxBot settings" });
+  const connected = await within(dialog).findByRole("list", { name: "Connected channel bots" });
+  const toggle = within(connected).getByRole("button", { name: "Chats and who can talk" });
+  expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await user.click(toggle);
+  const list = await within(connected).findByRole("list", { name: "Chats of Home bot" });
+  // Groups have reply and member settings; private chats do not.
+  expect(within(list).getByRole("combobox", { name: "Replies in Team chat" })).toHaveTextContent(
+    "When mentioned",
+  );
+  expect(within(list).queryByRole("combobox", { name: "Replies in Alice" })).not.toBeInTheDocument();
+  await user.click(within(list).getByRole("combobox", { name: "Replies in Team chat" }));
+  await user.click(screen.getByRole("option", { name: "Every message" }));
+  await waitFor(() =>
+    expect(writes).toContainEqual({
+      method: "PATCH",
+      endpoint: "/assistant/nyxagent/channels/channel-1/chats/chat-g",
+      body: { reply_mode: "all" },
+    }),
+  );
+  // Before the user has talked there, only they can; they can pin that.
+  const members = within(list).getByRole("combobox", { name: "Who can talk in Team chat" });
+  expect(members).toHaveTextContent("You, until you talk here");
+  await user.click(members);
+  await user.click(screen.getByRole("option", { name: "Only you" }));
+  await waitFor(() =>
+    expect(writes).toContainEqual({
+      method: "PATCH",
+      endpoint: "/assistant/nyxagent/channels/channel-1/chats/chat-g",
+      body: { members: "owner" },
+    }),
+  );
+  await user.click(
+    within(list).getByRole("switch", { name: "Let the agent post in Team chat on its own" }),
+  );
+  await waitFor(() =>
+    expect(writes).toContainEqual({
+      method: "PATCH",
+      endpoint: "/assistant/nyxagent/channels/channel-1/chats/chat-g",
+      body: { allow_posts: true },
+    }),
+  );
+  await user.click(
+    within(connected).getByRole("combobox", {
+      name: "Who can talk to Home bot in private chats",
+    }),
+  );
+  await user.click(screen.getByRole("option", { name: "Anyone" }));
+  await waitFor(() =>
+    expect(writes).toContainEqual({
+      method: "PATCH",
+      endpoint: "/assistant/nyxagent/channels/channel-1",
+      body: { private_chats: "everyone" },
+    }),
+  );
 });

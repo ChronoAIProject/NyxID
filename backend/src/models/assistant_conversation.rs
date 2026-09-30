@@ -51,13 +51,21 @@ pub struct AgentEvent {
     /// Specialist agent the event concerns, when any.
     #[serde(default)]
     pub agent_id: Option<String>,
+    /// A queued chat message: its question key (see `question_key`), so the
+    /// same question is not queued twice.
+    #[serde(default)]
+    pub question_key: Option<String>,
+    /// A queued chat message: the chats that asked it, which get the answer
+    /// of the turn that drains it.
+    #[serde(default)]
+    pub reply_to: Vec<ChannelOrigin>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
 }
 
 /// The external channel a conversation answers, when it was started by a
 /// channel bot through the Agent Event Gateway. Identifiers only.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChannelOrigin {
     /// The NyxBot channel (`nyxbot_channels._id`).
     pub nyxbot_channel_id: String,
@@ -115,6 +123,20 @@ pub struct ActiveTurn {
     /// verified identity. Bounded; never secrets.
     #[serde(default)]
     pub note: Option<String>,
+    /// The question this turn answers: a digest of its normalized text (so a
+    /// repeat is recognized) and a short excerpt (so the agent's other threads
+    /// know what is in progress). `None` for event and short messages.
+    #[serde(default)]
+    pub question_key: Option<String>,
+    #[serde(default)]
+    pub question: Option<String>,
+    /// The chat app chat that asked, for channel turns.
+    #[serde(default)]
+    pub asked_from: Option<ChannelOrigin>,
+    /// Other chats that asked the same question while this turn ran; its
+    /// answer is delivered to them too. Bounded.
+    #[serde(default)]
+    pub also_deliver: Vec<ChannelOrigin>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -158,6 +180,15 @@ pub struct AssistantConversation {
     /// Set on threads that answer a channel bot.
     #[serde(default)]
     pub channel: Option<ChannelOrigin>,
+    /// An agent's own thread that the owner also reaches from their private
+    /// chats: the chat the owner last wrote from, where asynchronous replies
+    /// go. Cleared when the owner writes in the NyxID app.
+    #[serde(default)]
+    pub reply_channel: Option<ChannelOrigin>,
+    /// Chats still owed the newest turn's answer (they asked the same
+    /// question while it ran); taken once by the settlement hook.
+    #[serde(default)]
+    pub deliver_also: Vec<ChannelOrigin>,
     /// Set on a member's hidden thread in a group chat: the agent speaks in
     /// the group through it, with its own key and memory.
     #[serde(default)]
@@ -165,6 +196,12 @@ pub struct AssistantConversation {
     /// The newest group message this member has already been given.
     #[serde(default)]
     pub group_seen_seq: i64,
+    /// The newest turn was started by someone other than the owner, e.g. a
+    /// member of a group chat. Its tool calls are restricted (NyxBot: none;
+    /// specialists: curated reads within their grants). Kept after the turn
+    /// settles so late tool calls stay restricted.
+    #[serde(default)]
+    pub guest_turn: bool,
 }
 
 impl AssistantConversation {

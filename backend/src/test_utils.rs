@@ -2188,6 +2188,7 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         ),
         billing,
         audit_event_types: Arc::default(),
+        assistant_live: Arc::default(),
         telemetry: None,
     }
 }

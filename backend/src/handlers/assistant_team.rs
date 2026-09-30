@@ -169,6 +169,10 @@ fn event_turn(conversation_id: &str) -> TurnStart {
         agent_id: None,
         report_to: None,
         group_id: None,
+        guest: false,
+        question_key: None,
+        question: None,
+        reply_channel: None,
     }
 }
 
@@ -308,10 +312,31 @@ pub(crate) async fn after_turn(
             wake(state, owner, &other.id).await;
         }
     }
+    // Chats that asked the same question while it was being answered get the
+    // answer too (taken once, whatever the outcome).
+    let also = engine::take_deliveries(&state.db, owner, &row.id)
+        .await
+        .unwrap_or_default();
+    if error.is_some() {
+        // They were told an answer would come: say it did not.
+        for origin in &also {
+            super::nyxbot::deliver_to(
+                state,
+                row,
+                origin,
+                "I couldn't finish answering that question. Please ask again.",
+            )
+            .await;
+        }
+        return;
+    }
     // Only asynchronous event turns reach the chat: a channel turn answers its
     // own event, and a turn the owner starts in the web app stays in the web app.
-    if row.channel.is_some() && turn.origin == TurnOrigin::Event && error.is_none() {
+    if (row.channel.is_some() || row.reply_channel.is_some()) && turn.origin == TurnOrigin::Event {
         super::nyxbot::deliver_update(state, row, text).await;
+    }
+    for origin in &also {
+        super::nyxbot::deliver_to(state, row, origin, text).await;
     }
 }
 
@@ -415,6 +440,61 @@ pub(crate) async fn permission_decided(
     .await;
 }
 
+/// The instructions of a turn for someone other than the owner. NyxBot holds
+/// every service of the owner, so it uses none for other people.
+fn guest_note(specialist: bool) -> &'static str {
+    if specialist {
+        "\n\nThis turn answers someone other than the owner (a member of a chat your channel \
+        bot is in). Help them, reading with your services when useful, but only the owner can \
+        ask for account actions, new connections or changes made with the owner's services: \
+        NyxID refuses those, so say that only the bot's owner can ask for that. Never reveal \
+        the owner's private information (their account, other chats, memory or credentials)."
+    } else {
+        "\n\nThis turn answers someone other than the owner (a member of a chat the owner's \
+        channel bot is in). Answer from the conversation only: you use no tools or services \
+        for them, and only the owner can ask you to act. If they need a service, say the \
+        owner can give this chat its own agent with just that service. Never reveal the \
+        owner's private information (their account, services, other chats, memory or \
+        credentials)."
+    }
+}
+
+/// What the agent's other threads are working on right now, so it neither
+/// redoes that work nor starts it twice. Lookup failures only omit it.
+async fn in_progress_note(
+    state: &AppState,
+    row: &AssistantConversation,
+    agent: &AssistantAgent,
+) -> String {
+    let Ok(others) = team::in_progress(&state.db, &row.user_id, &agent.id, &row.id).await else {
+        return String::new();
+    };
+    if others.is_empty() {
+        return String::new();
+    }
+    let this = row
+        .active_turn
+        .as_ref()
+        .and_then(|turn| turn.question_key.as_deref());
+    let mut note = String::from(
+        "\n\nYour other threads are working on these right now; do not start the same work \
+        again (if you are asked the same thing, say it is in progress there):",
+    );
+    for (title, question, key) in others {
+        note.push_str(&format!(
+            "\n- \"{}\": \"{}\"{}",
+            excerpt(&title, 60).replace('"', "'"),
+            excerpt(question.as_deref().unwrap_or("(working)"), 200).replace('"', "'"),
+            if this.is_some() && key.as_deref() == this {
+                " (the same question as this one)"
+            } else {
+                ""
+            }
+        ));
+    }
+    note
+}
+
 /// Turn-scoped notes appended to the instructions: drained events, a channel
 /// sender's context, the agent's memory, and for NyxBot its roster, direct
 /// user chats with specialists and pending permission requests. NyxID-authored
@@ -442,8 +522,18 @@ pub(crate) async fn turn_notes(
             notes.push_str(note);
         }
     }
+    // Someone other than the owner is talking: nothing private to the owner
+    // (memory, other chats, the team, pending requests) goes into this turn.
+    if row.guest_turn {
+        notes.push_str(guest_note(row.is_subagent()));
+        return notes;
+    }
     if let Some(agent) = agent {
         notes.push_str(&team::memory_note(agent));
+        // Only the agent's own threads hear about its other chats.
+        if row.channel.is_none() {
+            notes.push_str(&in_progress_note(state, row, agent).await);
+        }
         if let Some(note) = super::assistant_group::group_note(state, row, agent).await {
             notes.push_str("\n\n");
             notes.push_str(&note);
@@ -542,6 +632,10 @@ pub(crate) async fn assign(
             agent_id: None,
             report_to: report_to.map(str::to_owned),
             group_id: None,
+            guest: false,
+            question_key: None,
+            question: None,
+            reply_channel: None,
         },
         Pool::Team { owner, limit },
     )
@@ -572,7 +666,7 @@ pub(crate) async fn execute_tool(
     args: &Value,
 ) -> (Value, bool) {
     let name = tool_name.strip_prefix("nyxid__").unwrap_or_default();
-    if !chat.is_orchestrator() && !assistant_team_tools::is_memory_tool(name) {
+    if !chat.is_orchestrator() && !assistant_team_tools::is_agent_tool(name) {
         return refusal(
             "orchestrator_only",
             "Only NyxBot manages agents and channel bots. Report what you need in your reply.",
@@ -954,8 +1048,13 @@ async fn dispatch(
         }
         "connect_channel_bot" => {
             let agent = target_agent(state, owner, args["agent"].as_str()).await?;
-            super::nyxbot::connect_tool(state, owner, caller, text_arg(args, "bot_id"), &agent)
-                .await?
+            // By id or by label, among the owner's bots and their orgs' bots.
+            let reference = args["bot"]
+                .as_str()
+                .or_else(|| args["bot_id"].as_str())
+                .ok_or_else(|| AppError::ValidationError("bot is required".into()))?;
+            let bot = super::nyxbot::resolve_bot_ref(state, owner, reference).await?;
+            super::nyxbot::connect_tool(state, owner, caller, &bot.id, &agent).await?
         }
         "link_channel_bot" => {
             let agent = target_agent(state, owner, args["agent"].as_str()).await?;
@@ -966,6 +1065,66 @@ async fn dispatch(
             )
         }
         "list_channel_agents" => (super::nyxbot::list_tool(state, owner).await?, false),
+        "list_channel_chats" => {
+            let chats = Box::pin(super::nyxbot::chats::list_chats(
+                state,
+                owner,
+                args["channel_agent_id"].as_str(),
+            ))
+            .await?;
+            (json!({"chats": chats}), false)
+        }
+        "update_channel_chat" => {
+            let agent_id = match args["agent"].as_str() {
+                Some("default") => Some("default".to_owned()),
+                Some(name) => Some(target_agent(state, owner, Some(name)).await?.id),
+                None => None,
+            };
+            let settings = super::nyxbot::chats::ChatSettings {
+                reply_mode: args["reply_mode"].as_str().map(str::to_owned),
+                members: args["members"].as_str().map(str::to_owned),
+                allow_posts: args["allow_posts"].as_bool(),
+                agent_id,
+            };
+            // Boxed: the gateway update is a large future.
+            (
+                Box::pin(super::nyxbot::chats::update_chat(
+                    state,
+                    owner,
+                    text_arg(args, "chat_id"),
+                    &settings,
+                ))
+                .await?,
+                false,
+            )
+        }
+        "update_channel_access" => (
+            Box::pin(super::nyxbot::chats::set_private_chats(
+                state,
+                owner,
+                text_arg(args, "channel_agent_id"),
+                text_arg(args, "private_chats"),
+            ))
+            .await?,
+            false,
+        ),
+        "post_to_chat" => {
+            // NyxBot posts to any of the owner's chats; a specialist only to
+            // chats it answers.
+            let agent = (!chat.is_orchestrator()).then_some(chat.agent_id.as_str());
+            // Boxed: the platform send is a large future.
+            (
+                Box::pin(super::nyxbot::chats::post(
+                    state,
+                    owner,
+                    text_arg(args, "chat_id"),
+                    text_arg(args, "text"),
+                    agent,
+                ))
+                .await?,
+                false,
+            )
+        }
         "disconnect_channel_bot" => (
             super::nyxbot::disconnect(state, owner, text_arg(args, "channel_agent_id")).await?,
             false,
@@ -981,6 +1140,7 @@ pub(crate) async fn destroy_agent(
     agent_id: &str,
 ) -> AppResult<AssistantAgent> {
     let agent = team::destroy(&state.db, owner, agent_id).await?;
+    super::nyxbot::chats::release_agent_chats(state, owner, &agent.id).await?;
     for channel in super::nyxbot::list(state, owner).await? {
         if channel.agent_id.as_deref() == Some(agent.id.as_str())
             && let Err(error) = super::nyxbot::disconnect(state, owner, &channel.id).await
@@ -1535,6 +1695,10 @@ pub fn spawn_sweeps(state: AppState) {
             // Linked chat apps whose messages stopped reaching their agent.
             if let Err(error) = super::nyxbot::check_deliveries(&state).await {
                 tracing::debug!(%error, "NyxBot delivery sweep deferred");
+            }
+            // Personal bots on a platform the gateway now relays move there.
+            if let Err(error) = super::nyxbot::switch_to_gateway(&state).await {
+                tracing::debug!(%error, "NyxBot gateway switch-over deferred");
             }
             if let Ok(rows) = team::queued(&state.db, None).await {
                 for row in rows {

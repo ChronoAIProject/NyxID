@@ -117,6 +117,13 @@ describe("feature flag catalog", () => {
       BILLING: "experimental:billing",
       AEVATAR_CHAT_WIRE_LOG: "experimental:aevatar-chat-wire-log",
       DIRECT_CHAT_ENGINE: "experimental:direct-chat-engine",
+      NYXBOT_GATEWAY_LARK: "nyxbot:gateway-lark",
+      NYXBOT_GATEWAY_FEISHU: "nyxbot:gateway-feishu",
+      NYXBOT_GATEWAY_DISCORD: "nyxbot:gateway-discord",
+      NYXBOT_GATEWAY_SLACK: "nyxbot:gateway-slack",
+      NYXBOT_GATEWAY_WHATSAPP: "nyxbot:gateway-whatsapp",
+      NYXBOT_GATEWAY_X: "nyxbot:gateway-x",
+      NYXBOT_GATEWAY_AURINKO: "nyxbot:gateway-aurinko",
     });
   });
 });

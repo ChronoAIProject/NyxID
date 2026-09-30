@@ -94,6 +94,14 @@ pub struct AgentRefResponse {
 #[derive(Serialize)]
 pub struct ChannelOriginResponse {
     platform: String,
+    /// The channel bot connection (`/nyxagent/channels/{id}`).
+    channel_agent_id: String,
+    bot_label: Option<String>,
+    /// The chat this thread answers (`/nyxagent/channels/{id}/chats`), its
+    /// kind (`private`, `group`, `channel`) and name, when known.
+    chat_id: Option<String>,
+    chat_kind: Option<String>,
+    chat_title: Option<String>,
 }
 #[derive(Serialize)]
 pub struct ConversationResponse {
@@ -136,6 +144,19 @@ impl ConversationResponse {
         });
         self
     }
+    /// Fill in a channel thread's bot and chat.
+    pub(crate) fn with_chat(
+        mut self,
+        details: &std::collections::HashMap<String, super::nyxbot::chats::ChatDetails>,
+    ) -> Self {
+        if let (Some(channel), Some(detail)) = (self.channel.as_mut(), details.get(&self.id)) {
+            channel.bot_label = Some(detail.bot_label.clone());
+            channel.chat_id = detail.chat_id.clone();
+            channel.chat_kind = detail.kind.clone();
+            channel.chat_title = detail.title.clone();
+        }
+        self
+    }
 }
 impl From<AssistantConversation> for ConversationResponse {
     fn from(row: AssistantConversation) -> Self {
@@ -171,6 +192,11 @@ impl From<AssistantConversation> for ConversationResponse {
             pending_events: row.pending_events.len(),
             channel: row.channel.map(|channel| ChannelOriginResponse {
                 platform: channel.platform,
+                channel_agent_id: channel.nyxbot_channel_id,
+                bot_label: None,
+                chat_id: None,
+                chat_kind: None,
+                chat_title: None,
             }),
         }
     }
@@ -187,6 +213,8 @@ pub struct MessageResponse {
     created_at: DateTime<Utc>,
     activities: Vec<ActivityResponse>,
     attachments: Vec<AttachmentResponse>,
+    /// A user message written in a chat app: its platform.
+    via: Option<String>,
 }
 impl From<AssistantMessage> for MessageResponse {
     fn from(row: AssistantMessage) -> Self {
@@ -209,6 +237,7 @@ impl From<AssistantMessage> for MessageResponse {
                 .into_iter()
                 .map(AttachmentResponse::from)
                 .collect(),
+            via: row.via,
         }
     }
 }
@@ -272,14 +301,18 @@ pub async fn list(
     let next_cursor = more.then(|| engine::index_cursor(rows.last().expect("nonempty page")));
     let ids: Vec<String> = rows.iter().map(|row| row.id.clone()).collect();
     let counts = acknowledgements::pending_counts(&state.db, &user_id, &ids).await?;
+    let chats =
+        super::nyxbot::chats::thread_details(&state, &user_id, &rows.iter().collect::<Vec<_>>())
+            .await?;
     Ok(Json(IndexResponse {
         conversations: rows
             .into_iter()
             .map(|row| {
                 let count = counts.get(&row.id).copied().unwrap_or(0);
                 let agent_id = row.agent_id.clone();
-                let mut dto =
-                    ConversationResponse::from(row).with_agent(agent_id.as_deref(), &agents);
+                let mut dto = ConversationResponse::from(row)
+                    .with_agent(agent_id.as_deref(), &agents)
+                    .with_chat(&chats);
                 dto.pending_acknowledgements = count;
                 dto
             })
@@ -358,8 +391,10 @@ pub async fn history(
         });
     let agents = crate::services::assistant_team_service::agents(&state.db, &user_id, true).await?;
     let agent_id = conversation.agent_id.clone();
-    let mut conversation =
-        ConversationResponse::from(conversation).with_agent(agent_id.as_deref(), &agents);
+    let chats = super::nyxbot::chats::thread_details(&state, &user_id, &[&conversation]).await?;
+    let mut conversation = ConversationResponse::from(conversation)
+        .with_agent(agent_id.as_deref(), &agents)
+        .with_chat(&chats);
     conversation.pending_acknowledgements = acknowledgements
         .iter()
         .filter(|ack| ack.status == "pending")
@@ -529,7 +564,10 @@ pub async fn rename(
             .await?;
     let count = counts.get(&row.id).copied().unwrap_or(0);
     let agent_id = row.agent_id.clone();
-    let mut dto = ConversationResponse::from(row).with_agent(agent_id.as_deref(), &agents);
+    let chats = super::nyxbot::chats::thread_details(&state, &user_id, &[&row]).await?;
+    let mut dto = ConversationResponse::from(row)
+        .with_agent(agent_id.as_deref(), &agents)
+        .with_chat(&chats);
     dto.pending_acknowledgements = count;
     Ok(Json(dto))
 }
@@ -855,6 +893,12 @@ fn subscribe_events(mut receiver: broadcast::Receiver<Value>) -> Response {
             }
         }
     };
+    sse_response(stream)
+}
+
+fn sse_response(
+    stream: impl futures::Stream<Item = Result<Event, Infallible>> + Send + 'static,
+) -> Response {
     let mut response = Sse::new(stream)
         .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
         .into_response();
@@ -865,6 +909,76 @@ fn subscribe_events(mut receiver: broadcast::Receiver<Value>) -> Response {
         .headers_mut()
         .insert("cache-control", "no-cache, no-transform".parse().unwrap());
     response
+}
+
+/// How long one live stream stays open before the browser reconnects (and
+/// is authenticated again).
+const LIVE_STREAM_SECS: u64 = 300;
+
+/// `GET /assistant/nyxagent/live`: the owner's assistant changes as they
+/// happen, so the browser refreshes a thread, the agents or a group the
+/// moment NyxID changes it instead of polling. Frames carry identifiers
+/// only, each also naming its `type`: `ready`, `conversation` `{id,
+/// group_id, turn_id, messages}`, `group` `{id}`, `channels`, and `resync`
+/// when changes may have been missed. 503 while this replica's change stream
+/// is not delivering, 429 past the per-owner stream cap: the browser keeps
+/// polling and retries.
+pub async fn live(State(state): State<AppState>, auth: AuthUser) -> AppResult<Response> {
+    use crate::services::assistant_live::LiveEvent;
+    let user_id = auth.user_id.to_string();
+    engine::require_enabled(&state.db, &user_id).await?;
+    // Promise live updates only while this replica's change stream delivers;
+    // otherwise the browser keeps polling and retries shortly.
+    let mut open = state.assistant_live.watch_open();
+    if !*open.borrow_and_update() {
+        let mut response = StatusCode::SERVICE_UNAVAILABLE.into_response();
+        response
+            .headers_mut()
+            .insert("retry-after", "5".parse().unwrap());
+        return Ok(response);
+    }
+    let Some(mut subscription) = state.assistant_live.subscribe_owner(&user_id) else {
+        let mut response = StatusCode::TOO_MANY_REQUESTS.into_response();
+        response
+            .headers_mut()
+            .insert("retry-after", "30".parse().unwrap());
+        return Ok(response);
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(LIVE_STREAM_SECS);
+    let stream = async_stream::stream! {
+        yield Ok::<_, Infallible>(
+            Event::default().event("ready").data(json!({"type": "ready"}).to_string()),
+        );
+        loop {
+            let event = tokio::select! {
+                event = subscription.events.recv() => event,
+                _ = tokio::time::sleep_until(deadline) => break,
+                // The change stream dropped: end, so the browser polls again.
+                _ = open.wait_for(|open| !*open) => break,
+            };
+            let (name, data) = match event {
+                Ok(LiveEvent::Conversation { id, user_id: owner, group_id, turn_id, messages })
+                    if owner == user_id =>
+                {
+                    ("conversation", json!({"type": "conversation", "id": id,
+                        "group_id": group_id, "turn_id": turn_id, "messages": messages}))
+                }
+                Ok(LiveEvent::Group { id, user_id: owner }) if owner == user_id => {
+                    ("group", json!({"type": "group", "id": id}))
+                }
+                Ok(LiveEvent::ChannelBot { user_id: owner, .. }) if owner == user_id => {
+                    ("channels", json!({"type": "channels"}))
+                }
+                Ok(LiveEvent::Resync) | Err(broadcast::error::RecvError::Lagged(_)) => {
+                    ("resync", json!({"type": "resync"}))
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+                Ok(_) => continue,
+            };
+            yield Ok(Event::default().event(name).data(data.to_string()));
+        }
+    };
+    Ok(sse_response(stream))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1082,7 +1196,7 @@ async fn execute_turn(
     partial: &mut String,
 ) -> Result<TurnResult, TurnError> {
     let turn_id = &row.active_turn.as_ref().expect("claimed turn").turn_id;
-    let history = engine::messages(
+    let mut history = engine::messages(
         &state.db,
         &row.user_id,
         &row.id,
@@ -1091,6 +1205,17 @@ async fn execute_turn(
     )
     .await
     .map_err(|_| TurnError::new("assistant_unavailable"))?;
+    // A guest's recap holds only what the chat itself saw.
+    if row.guest_turn {
+        use crate::models::assistant_conversation::TurnOrigin;
+        // Only the chat's own messages and the replies to them; never NyxID's
+        // notices, event-turn replies (not always delivered) or anything
+        // said in the app.
+        history.retain(|message| {
+            message.origin == Some(TurnOrigin::Channel)
+                && matches!(message.role.as_str(), "user" | "assistant")
+        });
+    }
     // Cards decided while an earlier turn was still running never reached the
     // model: NyxAgent ends a turn on a card and answers repeats locally. Report
     // decisions made since the previous user message; a lookup failure only
@@ -1100,7 +1225,7 @@ async fn execute_turn(
         .rev()
         .find(|message| message.role == "user")
         .map(|message| message.created_at);
-    let mut decisions = match previous {
+    let mut decisions = match previous.filter(|_| !row.guest_turn) {
         Some(previous) => {
             acknowledgements::decided_since(&state.db, &row.user_id, &row.id, previous)
                 .await

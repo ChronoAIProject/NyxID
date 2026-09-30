@@ -119,5 +119,14 @@ export interface Conversation {
   readonly llm_route?: string | null;
   readonly llm_model?: string | null;
   /** NyxBot threads that answer one of the user's channel bots. */
-  readonly channel?: { readonly platform: string } | null;
+  readonly channel?: {
+    readonly platform: string;
+    /** The channel bot connection; the sidebar groups its chats together. */
+    readonly channel_agent_id?: string | null;
+    readonly bot_label?: string | null;
+    readonly chat_id?: string | null;
+    /** `private`, `group` or `channel`. */
+    readonly chat_kind?: string | null;
+    readonly chat_title?: string | null;
+  } | null;
 }

@@ -11,7 +11,10 @@ import {
   agentHandle,
   agentTitle,
   channelPlatformName,
+  splitChannelThreads,
+  type ChannelThreadGroup,
 } from "@/lib/assistant/nyxbot-labels";
+import { ChatKindIcon } from "@/components/assistant/nyxbot-channel-chats";
 import type { AssistantAgent, AssistantGroup } from "@/schemas/assistant-nyxagent";
 import {
   Activity,
@@ -138,6 +141,8 @@ function ConversationRow({
       : "",
   );
   const draftPreview = draft.replace(/\s+/g, " ").trim().slice(0, 80);
+  // A chat app thread is named after its chat (group name, or the person).
+  const shownTitle = conversation.channel?.chat_title ?? conversation.title;
   const showDraft = !active && draftPreview.length > 0;
   const draftPreviewId = `assistant-draft-${conversation.id}`;
 
@@ -151,7 +156,7 @@ function ConversationRow({
       <button
         type="button"
         onClick={onSelect}
-        aria-label={conversation.title}
+        aria-label={shownTitle}
         aria-describedby={showDraft ? draftPreviewId : undefined}
         className={cn(
           "w-full overflow-hidden px-3 py-2 text-left text-[13px] transition-colors",
@@ -164,12 +169,11 @@ function ConversationRow({
         )}
       >
         <span className="flex min-w-0 items-center gap-1.5">
-          <span className="min-w-0 truncate">{conversation.title}</span>
-          {conversation.channel ? (
-            <span className="shrink-0 rounded-md border border-hairline bg-overlay px-1 text-[9px] font-medium leading-4 text-text-tertiary">
-              {channelPlatformName(conversation.channel.platform)}
-            </span>
-          ) : null}
+          <ChatKindIcon
+            kind={conversation.channel?.chat_kind}
+            className="h-3 w-3 shrink-0 text-text-tertiary"
+          />
+          <span className="min-w-0 truncate">{shownTitle}</span>
         </span>
         {showDraft && (
           <span
@@ -186,7 +190,7 @@ function ConversationRow({
         <DropdownMenuTrigger asChild>
           <button
             type="button"
-            aria-label={`Options for ${conversation.title}`}
+            aria-label={`Options for ${shownTitle}`}
             data-keep-drawer-open=""
             className={cn(
               "absolute right-1 top-1 flex h-6 w-6 items-center justify-center rounded-md bg-card text-muted-foreground shadow-sm outline-none transition-opacity hover:bg-overlay-strong hover:text-foreground",
@@ -269,19 +273,94 @@ function agentAccessibleName(agent: AssistantAgent): string {
  * One agent. Selecting it expands its threads beneath it with a
  * per-agent "New chat"; destroyed specialists are dimmed.
  */
+/** Chats of one channel bot shown before "Show more". */
+const CHANNEL_THREADS_SHOWN = 5;
+
+/**
+ * One channel bot's chats under its agent: collapsed to a single row (open
+ * while it holds the open thread) so busy bots do not flood the sidebar.
+ */
+function ChannelThreadsGroup({
+  group,
+  activeThreadId,
+  renderThread,
+}: {
+  readonly group: ChannelThreadGroup;
+  readonly activeThreadId: string | undefined;
+  readonly renderThread: (conversation: Conversation) => ReactNode;
+}) {
+  const holdsActive = group.threads.some((thread) => thread.id === activeThreadId);
+  // A click opens or closes the section for the thread open at that moment;
+  // opening another of its chats opens it again.
+  const [pinned, setPinned] = useState<{ open: boolean; active: string | undefined }>();
+  const [shown, setShown] = useState(CHANNEL_THREADS_SHOWN);
+  const open =
+    pinned && (pinned.active === activeThreadId || !holdsActive) ? pinned.open : holdsActive;
+  const running = group.threads.some((thread) => thread.active_turn);
+  const visible = group.threads.filter(
+    (thread, index) => index < shown || thread.id === activeThreadId,
+  );
+  const hidden = group.threads.length - visible.length;
+  const platform = channelPlatformName(group.platform);
+  const count = group.threads.length;
+  return (
+    <div>
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-label={`${group.label} on ${platform}, ${String(count)} ${count === 1 ? "chat" : "chats"}${running ? ", working" : ""}`}
+        onClick={() => setPinned({ open: !open, active: activeThreadId })}
+        data-keep-drawer-open=""
+        className="flex w-full items-center gap-1.5 rounded-lg px-3 py-1.5 text-left text-[12px] text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
+      >
+        <ChevronRight
+          aria-hidden="true"
+          className={cn("h-3 w-3 shrink-0 transition-transform", open && "rotate-90")}
+        />
+        <span className="min-w-0 flex-1 truncate">{group.label}</span>
+        <span className="shrink-0 rounded-md border border-hairline bg-overlay px-1 text-[9px] font-medium leading-4 text-text-tertiary">
+          {platform}
+        </span>
+        {running ? (
+          <span aria-hidden="true" className="h-1.5 w-1.5 shrink-0 rounded-full bg-primary" />
+        ) : null}
+        <span className="shrink-0 tabular-nums text-[11px]">{count}</span>
+      </button>
+      {open ? (
+        <div className="ml-3 space-y-0.5 border-l border-border/60 pl-1.5">
+          {visible.map((thread) => renderThread(thread))}
+          {hidden > 0 ? (
+            <button
+              type="button"
+              onClick={() => setShown((value) => value + CHANNEL_THREADS_SHOWN * 4)}
+              data-keep-drawer-open=""
+              className="w-full rounded-lg px-3 py-1 text-left text-[11px] text-text-tertiary transition-colors hover:bg-overlay hover:text-muted-foreground"
+            >
+              Show {String(Math.min(hidden, CHANNEL_THREADS_SHOWN * 4))} more
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function AgentRow({
   agent,
   selected,
   model,
+  activeThreadId,
   renderThread,
 }: {
   readonly agent: AssistantAgent;
   readonly selected: boolean;
   readonly model: SidebarAgents;
+  readonly activeThreadId: string | undefined;
   readonly renderThread: (conversation: Conversation) => ReactNode;
 }) {
   const nyxbot = agent.kind === "nyxbot";
   const platforms = [...new Set(agent.channels.map((channel) => channel.platform))];
+  const threads = selected ? splitChannelThreads(model.threads) : { own: [], bots: [] };
   const pending = agent.pending_acknowledgements;
   const name = agentTitle(agent);
   const handle = agentHandle(agent);
@@ -344,10 +423,18 @@ function AgentRow({
           aria-label={`Threads with ${name}`}
           className="mb-1 ml-3 mt-0.5 space-y-0.5 border-l border-border/60 pl-1.5"
         >
-          {model.threads.map((conversation) => renderThread(conversation))}
+          {threads.own.map((conversation) => renderThread(conversation))}
           {model.threadsLoading && !model.threads.length ? (
             <p className="px-3 py-1.5 text-[11px] text-text-tertiary">Loading threads...</p>
           ) : null}
+          {threads.bots.map((group) => (
+            <ChannelThreadsGroup
+              key={group.key}
+              group={group}
+              activeThreadId={activeThreadId}
+              renderThread={renderThread}
+            />
+          ))}
           {agent.status === "destroyed" ? null : (
             <button
               type="button"
@@ -367,9 +454,11 @@ function AgentRow({
 
 function AgentsSection({
   model,
+  activeThreadId,
   renderThread,
 }: {
   readonly model: SidebarAgents;
+  readonly activeThreadId: string | undefined;
   readonly renderThread: (conversation: Conversation) => ReactNode;
 }) {
   const [showDestroyed, setShowDestroyed] = useState(false);
@@ -386,6 +475,7 @@ function AgentsSection({
           agent={agent}
           selected={agent.id === model.selectedAgentId}
           model={model}
+          activeThreadId={activeThreadId}
           renderThread={renderThread}
         />
       ))}
@@ -648,7 +738,11 @@ export function AssistantSidebar({
                 <Plus className="h-3.5 w-3.5" />
               </button>
             </div>
-            <AgentsSection model={agents} renderThread={renderRow} />
+            <AgentsSection
+              model={agents}
+              activeThreadId={activeConversationId}
+              renderThread={renderRow}
+            />
           </>
         ) : null}
         {groups ? (

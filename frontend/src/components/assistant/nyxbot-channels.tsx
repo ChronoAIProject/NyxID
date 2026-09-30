@@ -10,8 +10,11 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { CopyableField } from "@/components/shared/copyable-field";
+import { ChannelChats } from "@/components/assistant/nyxbot-channel-chats";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { useChannelBots } from "@/hooks/use-channel-bots";
+import { useOrgs } from "@/hooks/use-orgs";
+import { useAuthStore } from "@/stores/auth-store";
 import {
   nyxBotOf,
   useConnectNyxBotChannel,
@@ -84,7 +87,15 @@ export function ChannelBotsManager({
   readonly agent?: AssistantAgent;
 }) {
   const channels = useNyxBotChannels();
-  const bots = useChannelBots();
+  // The user's bots and those of the organizations they administer.
+  const bots = useChannelBots({ scope: "all" });
+  const orgs = useOrgs();
+  const orgName = (orgId: string | null | undefined) => {
+    if (!orgId) return undefined;
+    const org = orgs.data?.find((row) => row.id === orgId);
+    return org?.display_name?.trim() || org?.slug || "Organization";
+  };
+  const currentUserId = useAuthStore((state) => state.user?.id);
   const connect = useConnectNyxBotChannel();
   const link = useLinkNyxBotChannel();
   const disconnect = useDisconnectNyxBotChannel();
@@ -170,6 +181,7 @@ export function ChannelBotsManager({
                     </p>
                     <div className="flex flex-wrap items-center gap-1.5">
                       <Badge variant="secondary">{channelPlatformName(row.platform)}</Badge>
+                      {row.org_id ? <Badge variant="secondary">{orgName(row.org_id)}</Badge> : null}
                       <Badge variant={status?.variant ?? "secondary"}>
                         {status?.label ?? row.status}
                       </Badge>
@@ -189,6 +201,9 @@ export function ChannelBotsManager({
                 {row.last_error ? (
                   <p className="text-[11px] text-destructive">Last error: {row.last_error}</p>
                 ) : null}
+                {!row.owner_linked && row.inbound_hint ? (
+                  <p className="text-[11px] text-muted-foreground">{row.inbound_hint}</p>
+                ) : null}
                 {row.delivery_status === "failing" ? (
                   <p className="text-[11px] text-destructive">
                     Messages are not reaching the agent: {row.delivery_reason ?? "delivery failed"}
@@ -198,6 +213,16 @@ export function ChannelBotsManager({
                     .
                   </p>
                 ) : null}
+                {row.status === "failed" ? null : (
+                  <ChannelChats
+                    channel={row}
+                    agents={targets}
+                    botAgentName={(() => {
+                      const current = agents.find((candidate) => candidate.id === agentOf(row));
+                      return current ? agentLabel(current) : "NyxBot";
+                    })()}
+                  />
+                )}
                 {confirming === row.id ? (
                   <div className="flex flex-wrap items-center justify-end gap-2 rounded-lg bg-overlay px-3 py-2">
                     <span className="mr-auto text-[12px] text-muted-foreground">
@@ -269,6 +294,7 @@ export function ChannelBotsManager({
                   <p className="truncate text-[12px] font-medium text-foreground">{bot.label}</p>
                   <p className="text-[11px] text-text-tertiary">
                     {channelPlatformName(bot.platform)}
+                    {bot.user_id !== currentUserId ? ` · ${orgName(bot.user_id) ?? ""}` : ""}
                   </p>
                 </div>
                 <div className="flex shrink-0 items-center gap-1.5">

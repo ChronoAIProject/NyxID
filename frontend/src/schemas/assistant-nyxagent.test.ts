@@ -65,7 +65,28 @@ describe("NyxBot conversation schema", () => {
       destroyed: true,
     });
     expect(row.pending_events).toBe(2);
-    expect(row.channel).toEqual({ platform: "telegram" });
+    // Older servers send only the platform; the chat details default.
+    expect(row.channel).toEqual({
+      platform: "telegram",
+      channel_agent_id: null,
+      bot_label: null,
+      chat_id: null,
+      chat_kind: null,
+      chat_title: null,
+    });
+    const chat = nyxAgentConversationSchema.parse({
+      ...legacyConversation,
+      channel: {
+        platform: "lark",
+        channel_agent_id: "channel-1",
+        bot_label: "Office bot",
+        chat_id: "chat-1",
+        chat_kind: "group",
+        chat_title: "Team chat",
+      },
+    });
+    expect(chat.channel?.chat_kind).toBe("group");
+    expect(chat.channel?.bot_label).toBe("Office bot");
     expect(row).not.toHaveProperty("team_id");
     expect(row).not.toHaveProperty("members");
     expect(() =>

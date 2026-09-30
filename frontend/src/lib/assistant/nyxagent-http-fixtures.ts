@@ -13,6 +13,7 @@ import {
   type AssistantGroupMessage,
   type NyxAgentAcknowledgement,
   type NyxAgentChannelAgent,
+  type NyxAgentChannelChat,
   type NyxAgentConversation,
   type NyxAgentHistory,
   type NyxAgentMessageRole,
@@ -121,6 +122,7 @@ interface State {
   agents: AgentRecord[];
   settings: Settings;
   channels: NyxAgentChannelAgent[];
+  chats?: NyxAgentChannelChat[];
   groups?: GroupRecord[];
 }
 
@@ -205,6 +207,7 @@ export class NyxAgentHttpFixtures {
   private agents: AgentRecord[] = [];
   private settings: Settings = { ...DEFAULT_SETTINGS };
   private channels: NyxAgentChannelAgent[] = [];
+  private chats: NyxAgentChannelChat[] = [];
   private groups: GroupRecord[] = [];
 
   constructor() {
@@ -215,6 +218,7 @@ export class NyxAgentHttpFixtures {
         this.agents = state.agents;
         this.settings = { ...DEFAULT_SETTINGS, ...state.settings };
         this.channels = state.channels;
+        this.chats = state.chats ?? [];
         this.groups = state.groups ?? [];
       }
     } catch {
@@ -265,7 +269,14 @@ export class NyxAgentHttpFixtures {
     this.push(home, "assistant", NYXAGENT_FIXTURE_RESEARCHER_REPLY, turnId);
     // A NyxBot thread that answers the user's Telegram bot.
     const briefing = this.thread(this.nyxbot(), NYXAGENT_FIXTURE_CHANNEL_THREAD);
-    briefing.history.conversation.channel = { platform: "telegram" };
+    briefing.history.conversation.channel = {
+      platform: "telegram",
+      channel_agent_id: null,
+      bot_label: null,
+      chat_id: null,
+      chat_kind: "private",
+      chat_title: null,
+    };
     const briefingTurn = crypto.randomUUID();
     this.push(briefing, "user", "What is on my calendar today?", briefingTurn);
     this.push(
@@ -283,6 +294,7 @@ export class NyxAgentHttpFixtures {
       agents: this.agents,
       settings: this.settings,
       channels: this.channels,
+      chats: this.chats,
       groups: this.groups,
     };
     sessionStorage.setItem(STORAGE, JSON.stringify(state));
@@ -552,6 +564,7 @@ export class NyxAgentHttpFixtures {
         {
           kind: "channel_bot",
           title: "Waiting for your Telegram bot to be created",
+          detail: null,
           since: now.toISOString(),
           expires_at: new Date(now.getTime() + 7_200_000).toISOString(),
         },
@@ -797,6 +810,8 @@ export class NyxAgentHttpFixtures {
       }
       return json({ channel_agents: this.channels });
     }
+    const chats = /\/channels\/([\w-]+)\/chats(?:\/([\w-]+))?$/.exec(url.pathname);
+    if (chats) return this.chatsRoute(chats[1] ?? "", chats[2], method, body);
     const match = /\/channels\/([\w-]+)$/.exec(url.pathname);
     if (!match) return undefined;
     const row = this.channels.find((channel) => channel.id === match[1]);
@@ -805,6 +820,15 @@ export class NyxAgentHttpFixtures {
       this.channels = this.channels.filter((channel) => channel.id !== row.id);
       this.save();
       return json({ disconnected: row.id, platform: row.platform, gateway_released: true });
+    }
+    if (method === "PATCH" && body().private_chats !== undefined) {
+      const access = body().private_chats;
+      if (access !== "owner" && access !== "everyone") {
+        return failure(400, "private_chats must be owner or everyone");
+      }
+      row.private_chats = access;
+      this.save();
+      return json({ channel_agent_id: row.id, private_chats: access });
     }
     if (method === "PATCH") {
       const agent = this.agents.find((candidate) => candidate.id === body().agent_id);
@@ -816,6 +840,58 @@ export class NyxAgentHttpFixtures {
       return json({ channel_agent_id: row.id, agent: agent.name, changed });
     }
     return undefined;
+  }
+
+  private chatsRoute(
+    channelId: string,
+    chatId: string | undefined,
+    method: string,
+    body: () => Record<string, unknown>,
+  ) {
+    if (!this.channels.some((channel) => channel.id === channelId)) {
+      return failure(404, "Channel agent not found");
+    }
+    if (!chatId) return json({ chats: this.chats.filter((chat) => chat.channel_agent_id === channelId) });
+    const chat = this.chats.find((row) => row.id === chatId && row.channel_agent_id === channelId);
+    if (!chat) return failure(404, "Chat not found");
+    if (method !== "PATCH") return undefined;
+    const update = body();
+    const group = chat.kind !== "private";
+    if (update.reply_mode !== undefined) {
+      if (!group) return failure(400, "Private chats always answer every message");
+      chat.reply_mode = update.reply_mode === "all" ? "all" : "mention";
+    }
+    if (update.members !== undefined) {
+      if (!group) return failure(400, "Who may talk in private chats is set on the channel bot");
+      chat.members_setting =
+        update.members === "owner" ? "owner" : update.members === "everyone" ? "everyone" : null;
+      chat.members = chat.members_setting ?? (chat.owner_seen ? "everyone" : "owner");
+    }
+    if (typeof update.allow_posts === "boolean") chat.allow_posts = update.allow_posts;
+    let agentName: string | undefined;
+    if (typeof update.agent_id === "string") {
+      if (update.agent_id === "default") {
+        chat.agent_id = null;
+      } else {
+        const agent = this.agents.find((candidate) => candidate.id === update.agent_id);
+        if (!agent) return failure(404, "Agent not found");
+        chat.agent_id = agent.id;
+        agentName = agent.name;
+      }
+      chat.conversation_id = null;
+    }
+    this.save();
+    return json({
+      chat,
+      ...(update.reply_mode === "all"
+        ? {
+            note:
+              "Telegram bots only see every group message when privacy mode is off " +
+              "(BotFather /setprivacy) or the bot is a group admin.",
+          }
+        : {}),
+      ...(agentName ? { agent: agentName } : {}),
+    });
   }
 
   private connectChannel(botId: string, agentId: string | undefined) {
@@ -837,13 +913,40 @@ export class NyxAgentHttpFixtures {
         last_error: null,
         owner_linked: false,
         agent_id: null,
+        org_id: null,
+        private_chats: "owner",
         delivery_status: null,
         delivery_error: null,
         delivery_reason: null,
         delivery_failed_at: null,
+        inbound_hint: null,
         created_at: new Date().toISOString(),
       };
       this.channels.unshift(row);
+      // The bot has already been used in a private chat and a group.
+      const now = new Date().toISOString();
+      for (const [kind, title] of [
+        ["private", "You"],
+        ["group", "Team chat"],
+      ] as const) {
+        this.chats.push({
+          id: crypto.randomUUID(),
+          channel_agent_id: row.id,
+          platform: row.platform,
+          bot_label: row.bot_label,
+          kind,
+          title,
+          agent_id: null,
+          reply_mode: kind === "private" ? "all" : "mention",
+          members: kind === "private" ? "owner" : "everyone",
+          members_setting: null,
+          owner_seen: kind !== "private",
+          owner: kind === "private",
+          allow_posts: false,
+          conversation_id: null,
+          last_message_at: now,
+        });
+      }
     }
     // Re-posting refreshes the link and relinks to the requested agent.
     row.agent_id = agent?.id ?? null;
@@ -1109,8 +1212,57 @@ export class NyxAgentHttpFixtures {
     return undefined;
   }
 
-  readonly handler: AssistantHttpMockHandler = async ({ endpoint, init }) => {
-    if (!endpoint.startsWith(ROOT)) return undefined;
+  /** Open live streams (only when the `nyxagentLive` fault enables them). */
+  private liveStreams = new Set<ReadableStreamDefaultController<Uint8Array>>();
+  private liveTimer: ReturnType<typeof setInterval> | undefined;
+  private liveSignatures = new Map<string, string>();
+
+  /** What a live `conversation`/`group` event would report as changed. */
+  private signatures() {
+    const signatures = new Map<string, string>();
+    for (const [id, row] of this.rows) {
+      const conversation = row.history.conversation;
+      signatures.set(
+        `conversation:${id}`,
+        [
+          row.history.messages.length,
+          conversation.active_turn?.turn_id ?? "",
+          row.history.waiting.length,
+          conversation.pending_events,
+        ].join(":"),
+      );
+    }
+    for (const group of this.groups) {
+      signatures.set(`group:${group.id}`, `${String(group.messages.length)}:${String(group.queue.length)}`);
+    }
+    return signatures;
+  }
+
+  private emitLive() {
+    if (!this.liveStreams.size) return;
+    const encoder = new TextEncoder();
+    const next = this.signatures();
+    for (const [key, signature] of next) {
+      if (this.liveSignatures.get(key) === signature) continue;
+      const [kind, id] = key.split(/:(.*)/s) as [string, string];
+      const row = kind === "conversation" ? this.rows.get(id) : undefined;
+      const event = row
+        ? {
+            type: "conversation",
+            id,
+            group_id: null,
+            turn_id: row.history.conversation.active_turn?.turn_id ?? null,
+            messages: row.history.messages.length,
+          }
+        : { type: "group", id };
+      const frame = encoder.encode(`data: ${JSON.stringify(event)}\n\n`);
+      for (const controller of this.liveStreams) controller.enqueue(frame);
+    }
+    this.liveSignatures = next;
+  }
+
+  /** NyxID's server-side progress: turns settle, waits resolve, groups answer. */
+  private tick() {
     for (const row of [...this.rows.values()]) {
       if (row.settleAt && row.settleAt <= Date.now()) this.settle(row);
       if (
@@ -1130,8 +1282,41 @@ export class NyxAgentHttpFixtures {
       }
     }
     this.settleGroups();
+    this.emitLive();
+  }
+
+  private live(): Response {
+    const encoder = new TextEncoder();
+    let own: ReadableStreamDefaultController<Uint8Array> | undefined;
+    const stream = new ReadableStream<Uint8Array>({
+      start: (controller) => {
+        own = controller;
+        this.liveStreams.add(controller);
+        this.liveSignatures = this.signatures();
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "ready" })}\n\n`));
+        this.liveTimer ??= setInterval(() => this.tick(), 200);
+      },
+      cancel: () => {
+        if (own) this.liveStreams.delete(own);
+        if (!this.liveStreams.size && this.liveTimer) {
+          clearInterval(this.liveTimer);
+          this.liveTimer = undefined;
+        }
+      },
+    });
+    return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+  }
+
+  readonly handler: AssistantHttpMockHandler = async ({ endpoint, init }) => {
+    if (!endpoint.startsWith(ROOT)) return undefined;
+    this.tick();
     const url = new URL(endpoint, window.location.origin);
     const method = init.method ?? "GET";
+    if (url.pathname === `${ROOT}/live`) {
+      return globalThis.__nyxidAssistantHttpFaults?.nyxagentLive
+        ? this.live()
+        : failure(404, "Assistant route not found.");
+    }
     const body = () => JSON.parse(String(init.body)) as Record<string, unknown>;
     const groups = this.groupsRoute(url, method, body);
     if (groups) return groups;

@@ -380,6 +380,18 @@ async fn ensure_catalog_editor_route(
         )
         .await;
     }
+    if *method == Method::PUT
+        && path != "/api/v1/keys"
+        && crate::services::service_account_key_read_service::is_key_metadata_path(path)
+    {
+        return catalog_editor_service::authorize(
+            db,
+            sa,
+            scope,
+            curation_grant_service::WRITE_SCOPE,
+        )
+        .await;
+    }
     if path_matches_prefix(path, "/api/v1/catalog-curation") {
         return Ok(());
     }

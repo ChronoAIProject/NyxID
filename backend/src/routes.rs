@@ -1269,7 +1269,8 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         );
 
     // These inventory reads retain the service-account restriction. Key GETs
-    // below separately check SA scope and grants. Writes stay human-only.
+    // below separately check SA scope and grants. Writes stay human-only except
+    // for the CatalogEditor recommendation PUT in key_update_routes.
     let service_inventory_read_routes = Router::new()
         .route(
             "/keys/{key_id}/authorization",
@@ -1308,10 +1309,13 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::service_history::get_history),
         )
         .route("/", post(handlers::keys::create_key))
-        .route(
-            "/{key_id}",
-            put(handlers::keys::update_key).delete(handlers::keys::delete_key),
-        );
+        .route("/{key_id}", delete(handlers::keys::delete_key));
+
+    let key_update_routes = Router::new()
+        .route("/keys/{key_id}", put(handlers::key_updates::update_key))
+        .layer(middleware::from_fn(reject_delegated_tokens))
+        .layer(middleware::from_fn(reject_api_key_tokens))
+        .layer(middleware::from_fn(reject_relay_tokens));
 
     let connect_link_routes = Router::new()
         .route("/", post(handlers::connect_links::create_connect_link))
@@ -1902,6 +1906,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         ),
     ));
     let assistant_routes = Router::new()
+        .route("/nyxagent/live", get(handlers::assistant_nyxagent::live))
         .route(
             "/nyxagent/conversations",
             get(handlers::assistant_nyxagent::list),
@@ -1968,6 +1973,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/nyxagent/channels/{id}",
             delete(handlers::nyxbot::disconnect_channel).patch(handlers::nyxbot::link_channel),
+        )
+        .route(
+            "/nyxagent/channels/{id}/chats",
+            get(handlers::nyxbot::list_channel_chats),
+        )
+        .route(
+            "/nyxagent/channels/{id}/chats/{chat_id}",
+            patch(handlers::nyxbot::update_channel_chat),
         )
         .route(
             "/nyxagent/conversations/{id}/acknowledgements/{ack_id}",
@@ -2211,6 +2224,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .merge(api_v1_delegated)
         .merge(api_v1_shared)
         .merge(api_v1_human_only)
+        .merge(key_update_routes)
         .merge(ownership_routes);
 
     let well_known_routes = Router::new()

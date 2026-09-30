@@ -171,13 +171,33 @@ ends its turn; NyxID resumes that thread with an event as soon as it happens:
   would run the call twice.
 
 Watches are TTL-expired and claimed atomically, so replicas never link or report
-twice.
+twice. They resolve **as soon as it happens**: every replica follows one MongoDB
+change stream (`services/assistant_live.rs`; NyxID already requires a replica
+set or mongos), projected inside MongoDB to identifiers, owner and status only.
+A connect link reaching a terminal status, or a new (or reactivated) channel
+bot of the owner, resolves the matching watches at once on whichever replica
+sees it first; the atomic claim keeps the others out. A new bot is linked as
+soon as it is saved, even while its webhook is still being verified. After a
+stream reopens, every consumer re-reads what it may have missed, and the
+15-second sweep remains the backstop.
+
+Browsers get the same changes over `GET /assistant/nyxagent/live` (human-only,
+server-sent events, reopened by the client): frames carry only
+`{type, id, group_id, turn_id, messages}` for the owner's conversations and
+groups,
+`channels` when a bot changes, and `resync` when changes may have been missed.
+Each owner has their own channel and at most eight open streams (429 beyond);
+a replica whose change stream is not delivering answers 503, and streams end
+after five minutes so the browser re-authenticates.
+The page refreshes exactly the affected thread, lists and group; its polls
+drop to a 30-second backstop while the stream is open and return to their
+normal cadence without it (an older server answers 404).
 
 While a thread waits, its history carries `waiting` items (`channel_bot`,
 `connect_link`, `owner_verification`, each with a title and expiry). The chat
-shows them under the header with "continues here by itself", and the browser
-polls the thread every 10 seconds until they clear, so the resumed turn appears
-without a reload.
+shows them under the header with "continues here by itself"; the live stream
+shows the resumed turn at once (without it, the thread is polled every 10
+seconds until the items clear).
 
 ## 10. Talking to agents directly
 
@@ -233,8 +253,8 @@ Account deletion purges agents, settings, threads and channel records.
 ## 12. Channel bots
 
 Any channel bot can be linked to NyxBot or a specialist (`connect_channel_bot`,
-settings, or relinked later); each chat partition becomes a thread of the linked
-agent, with that agent's authority and memory.
+settings, or relinked later); each chat becomes a thread of the linked agent
+(or of the chat's own agent, §12a), with that agent's authority and memory.
 
 - **Everything is answerable in the chat.** A chat app cannot show NyxID's cards
   or buttons, so channel threads are told to give every link as a full URL and
@@ -258,12 +278,73 @@ agent, with that agent's authority and memory.
   streams only the final answer as a committed message; `event_context` is stored
   encrypted and served verbatim for `readEventContext`.
 - **Other NyxID platforms** use NyxID's relay directly (`/api/v1/nyxbot/relay/{id}`,
-  verified with NyxID's relay callback token) because the gateway relay supports
-  Telegram only today.
-- **Right user.** Only senders verified as the owner reach the agent: NyxID's
-  Telegram notification link or a one-time link code (a `t.me/<bot>?start=<code>`
-  link for Telegram). Strangers get a short refusal in private chats and silence
-  in groups; no turn runs. Each turn names the platform, bot, chat type and sender.
+  verified with NyxID's relay callback token) unless the platform's gateway
+  flag is on for the bot's owner. Each NyxID channel platform other than
+  Telegram (which always uses the gateway) has a feature flag
+  `nyxbot:gateway-{platform}` (lark, feishu, discord, slack, whatsapp, x,
+  aurinko), off by default and toggled by platform admins on the feature-flag
+  page (global, org cohort or one person, resolved for each bot's owner) with
+  no restart. The gateway itself decides what it can take: it refuses to create
+  a channel for a platform whose raw events it cannot verify itself (cma#957:
+  Telegram, Lark and Feishu are verified; Discord, Slack and WhatsApp need a
+  `trust_normalized` opt-in NyxID does not send, since the gateway would then
+  lose mention and reply evidence) or does not know (X, Aurinko), and those bots
+  stay on NyxID's relay, retried daily, so a flag turned on early takes effect
+  once the gateway supports its platform. Turning a flag off stops further
+  moves; bots already moved stay on the gateway until reconnected. Once a
+  platform's flag is on for an owner, their verified personal bots on it move
+  to the gateway by themselves
+  (each replica's 15-second sweep moves one bot at a time, each at most daily;
+  a bot with a turn running answers first and is looked at again ten minutes
+  later). A move builds first and swaps last. Beside the working bot, NyxID
+  makes a new route key and gateway agent key, registers the agent key as the
+  channel's `pending_agent_api_key_id` (the gateway binds its provider while
+  creating the channel, and the provider endpoints accept that key), creates the
+  gateway channel, points the new route key at it and attaches the bot's
+  existing route. Then one transaction switches the channel record
+  (compare-and-set on its transport, route key and pending key) and the route's
+  key; the old route key is deleted. The connection keeps its id, route,
+  verified owners, chats, settings and link code. A private chat's first
+  gateway message takes over its relay-era thread (the gateway reports the same
+  chat and sender IDs), with conversations answering into it following; until
+  then, and for an answer that raced the move, replies go through NyxID's relay
+  as the new route key. The gateway source names the platform, and for
+  platforms other than Telegram pins the bot's own user ID (Lark: its `open_id`,
+  looked up with the bot's credentials) instead of a username; without it the
+  gateway counts any mention of a bot as addressing it. If the
+  gateway refuses, its channel is released at its current version, the new keys
+  are deleted and the bot stays exactly as it was (`gateway_fallback_at`),
+  retried the next day; a manual connect never rebuilds a working bot just to
+  change transport. A new bot on a listed platform the gateway refuses is
+  connected through NyxID's relay with a fresh route key the gateway never saw;
+  Telegram failures are still reported as errors. Through the gateway, Lark and
+  Feishu carry plain text only (images, files and rich posts are refused there,
+  while NyxID's relay passes them on). A message whose route the relay looked up
+  just before the swap committed reaches NyxID's relay endpoint after it and is
+  refused and reported like any lost message. A move whose replica stopped
+  midway leaves `pending_agent_api_key_id`/`pending_route_api_key_id`; the sweep
+  deletes those keys after 30 minutes. The swap needs MongoDB transactions (a
+  replica set, as in production); on a standalone development database every
+  move ends as `swap_failed` and the bot stays on NyxID's relay.
+- **Organization bots.** An owner can link bots of organizations they
+  administer (the rule for managing org bots), found by id or label:
+  `nyxid__list_channel_bots` and the route tools cover personal and administered
+  org bots and name each bot's org. The bot's route and route key are owned by
+  the org (the key has no service grants; org routes must use org keys), and org
+  bots always use NyxID's relay, including Telegram, because a gateway channel is
+  bound to one person. Every inbound message re-checks that the owner still
+  administers the org, as does the 15-second sweep (so a demotion or removal is
+  noticed even without traffic) and every reply NyxBot sends; otherwise the link
+  fails with `org_access_lost`, its org route and route key are removed so the
+  org's other admins can link the bot, and nothing reaches or leaves their
+  agent. Disconnecting removes the org's route and key too.
+- **Right user.** The owner is verified through NyxID's Telegram notification
+  link or a one-time link code (a `t.me/<bot>?start=<code>` link for Telegram);
+  only they act with the agent's full authority. Everyone else is a guest
+  (§12a): in private chats they get a short refusal unless the owner opened the
+  bot's private chats to everyone; in groups they may talk to the agent unless
+  the owner restricted that chat. Each turn names the platform, bot, chat and
+  sender, and whether the sender is the owner.
 - **Delivery health.** A linked chat app must never go quiet silently. The
   15-second sweep judges each active channel's newest inbound message: a failed
   relay callback (NyxID keeps the HTTP status, never the body) is lost
@@ -277,7 +358,18 @@ agent, with that agent's authority and memory.
   six hours; the channel list shows the reason, and the next message that
   arrives marks it `ok`. A channel's first check looks back one hour only.
   Reconnecting a failing channel rebuilds it from scratch and keeps its verified
-  owners.
+  owners. Chat-specific routes win over a channel's default route, so the owner's
+  private messages that another route on the bot takes (typically a leftover
+  from an earlier setup) are lost as `routed_elsewhere`, and the agent is told
+  to show the user that route and remove it with their OK; connecting reports
+  such routes up front (`other_routes`).
+- **Verification hints.** While the owner has not verified a channel, the chat's
+  waiting note and `nyxid__list_channel_agents` (`inbound_hint`) say what NyxID saw
+  from the bot since the code was issued: nothing at all (check the platform's
+  event subscription / Request URL against the bot's page in NyxID), a message
+  another route took, or a message that reached the agent without the code.
+  Linking an existing bot also ends the chat's wait for a new one from a setup
+  link. Bots whose platform's gateway flag is off use NyxID's direct relay.
 - **Updates.** Asynchronous replies (event turns, such as a specialist's report)
   are delivered to the chat through the gateway's `replyToEvent` while the newest
   event reference is valid, or through the relay reply API; messages that arrive
@@ -309,6 +401,158 @@ channels; each running turn holds a slot for its whole duration. 256 equals
 the gateway-wide ceiling (`CMAEG_PROVIDER_MAX_INFLIGHT`) and `cma_codex`, and
 each provider has its own pool. NyxID still limits each owner to two
 concurrent channel turns and queues the rest.
+
+### 12a. Chats, groups and guests
+
+Chats and their kind are recorded automatically as messages arrive: NyxID's
+relay passes each message's own chat type (`private`, `group`, `channel`) to
+the agent, never the type configured on the route that caught it (a default
+route answers every kind of chat). Before 0.36.1 a group reached through a
+default route looked like private chats, one per member; those records are
+removed once the group's next message arrives, and a startup migration (once)
+forgets directly relayed reply chats of the owner's own threads, which such a
+misfiled group could have set. A bot's chats are threads of their own: each group, channel or forum topic is
+one thread its members share, and each other person's private chat is one
+thread. The owner's own private chats are the exception (§12b): they continue
+the agent's own thread. Messages in
+a shared thread start with their sender's name, and the agent is told that
+everyone in the chat sees its reply. Chats are recorded in `nyxbot_threads`
+(kind, title, platform chat and topic IDs, settings). Private chats keep their
+earlier partitions (the gateway conversation, or the direct chat-and-sender
+digest), so their history continues; a group's thread is `chat_` plus a digest
+of the chat and topic, whatever the sender. Through the gateway, which keeps
+partitioning by conversation and sender, every sender's gateway conversation in
+a group maps onto the group's one thread. Group titles come from the platform
+payload or, once, from the platform's chat lookup (Telegram `getChat`, Lark
+`im/v1/chats`).
+
+**Per-chat settings** (the owner, via NyxBot's `nyxid__list_channel_chats` and
+`nyxid__update_channel_chat`, or the chats list under each connected bot):
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `reply_mode` | `mention` (groups, channels) | Answer only when the bot is mentioned or a message replies to one of its messages; `all` answers every message. Private chats always answer. |
+| `members` | default: `everyone` once the owner has talked to the bot there, else `owner` (groups, channels) | Members other than the owner may talk to the agent as guests; `owner` answers only the owner; `default` returns to the default. A stranger who adds the bot to their own group gets nothing; a member who addresses it before the owner has talked there is told why, at most daily. |
+| `allow_posts` | off | The chat's agent may post there without being asked (`nyxid__post_to_chat`). |
+| agent | the bot's agent | The chat reaches another agent; it starts a new thread with it, and relinking the bot leaves such chats alone. |
+
+Per bot, `private_chats` (`nyxid__update_channel_access`) is `owner` (default)
+or `everyone`: anyone who messages the bot privately gets their own thread, as a
+guest.
+
+**Addressed messages.** Through the gateway, group admission is
+`mention_or_reply_to_bot` unless one of the bot's chats answers everything; then
+the gateway passes every group message on (`all`, recorded as
+`gateway_groups`), and NyxID decides per chat from the gateway's `mentions_bot`
+or a reply to one of the bot's sent messages (NyxID records the platform
+message an inbound message replies to). Directly relayed Telegram messages are
+judged from the update (an @username or text mention, a reply to the bot); Lark
+and Feishu count any @mention (they deliver unmentioned group messages only to
+apps granted every group message); Slack counts `app_mention` events and
+Discord its `mentions` and replied-to author; a reply to one of the bot's sent
+messages counts everywhere, and Discord slash commands always do. When a
+platform cannot tell, only the owner's messages count as addressed. Telegram bots see every group message only with privacy mode off or
+as group admins, and NyxBot says so when a chat is set to `all`.
+
+**Guests.** A turn started by someone other than the verified owner is a guest
+turn (`guest_turn` on the thread, `guest` on its chat authority; kept after the
+turn so late tool calls stay restricted):
+
+- NyxBot holds every service of the owner, so its guest turns call no tools at
+  all and answer from the conversation; to let a chat's members use a service,
+  the owner gives the chat a specialist with just that service;
+- a specialist's guest turns may discover tools and read within its grants:
+  no `nyxid__` account, team, memory or posting tools, no connection, SSH or
+  Oracle tools, only curated operations (never the generic proxy tool, whose
+  GET can still change things) and only read verbs; everything else is refused
+  with `owner_only`;
+- an ungranted service is refused without a permission request, so a guest
+  never widens what a specialist may use;
+- guests' messages are never queued as the owner's work: a busy agent asks them
+  to try again (only if they spoke to the bot), a guest turn leaves the owner's
+  queued events alone, and guest turns never reset the owner's event-turn loop
+  guard;
+- in a shared thread the owner's messages are marked `(owner)`; guests' names
+  cannot carry the mark, their text is kept on one line and any `(owner)` in
+  it is unbracketed, so no one passes for the owner;
+- the owner's memory, roster, direct chats, pending requests and card
+  decisions stay out of the turn's instructions; the first guest turn after an
+  owner turn starts from the transcript rather than the owner's live context,
+  and a guest's recap holds only the chat's own messages and the replies to
+  them (messages record the turn origin), never what the owner said in the
+  app, NyxID's notices, or event-turn replies (not always delivered);
+- only the owner's words confirm action cards.
+
+Guests' turns are billed to the owner, like every channel turn, and share the
+owner's channel pool. Messages no turn answered (e.g. group chatter while the
+gateway admits every group message) keep no content: a refused event's stored
+context is dropped at once.
+
+**Lifecycle.** Chats given to an agent that is destroyed go back to the bot's
+agent. A rebuilt connection carries its groups and direct chats over with their
+settings (chats without their own agent start new threads if the connection now
+reaches another agent) and keeps `private_chats`. The 15-second sweep retries a
+gateway admission update that failed or raced, at most every ten minutes after
+the gateway refused one (`gateway_groups_retry_at`).
+
+**Posting.** `nyxid__post_to_chat` sends through the bot's own route (NyxID's
+initiated-send path: rate limit, outbound record and audit) into a chat that
+allows posts: the chat's agent or NyxBot, never a guest turn. Posts go to the
+chat itself, not a topic.
+
+**UI.** Under each agent, a bot's chats are one collapsed section (label,
+platform, count, a dot while one is working) that opens for the thread being
+viewed and shows five chats, then more on request. Each thread row shows a
+private, group or channel icon. Thread listings carry `channel.channel_agent_id`,
+`bot_label`, `chat_id`, `chat_kind` and `chat_title`.
+
+### 12b. One context for the owner, and no double work
+
+**The owner's own thread.** The owner's private chats with an agent, on every
+bot attached to it (Telegram, Lark, Discord, ...), continue that agent's own
+thread: its home thread in NyxID (a first chat-app message creates it when the
+agent has none; a deleted home is replaced). A home is never a chat app channel
+thread (a group's or someone else's private chat): such a pointer is replaced
+(lazily, and for existing agents once at startup), and channel threads never
+become home. Organization bots are excluded:
+the owner's private chats with an org's bot keep their own thread, so personal
+context never flows through an organization's bot. The app and every chat app share
+that one transcript and live context. The thread is not a channel thread
+(`channel` stays unset, so the sidebar keeps it with the agent's own threads);
+instead `reply_channel` remembers the chat the owner last wrote from. A channel
+turn's answer goes back to the chat that asked; asynchronous replies (event
+turns such as a specialist's report, or a message queued while the agent was
+busy) go to `reply_channel`, which a message written in the app clears. Each
+user message records the chat app it came from (`via`), shown as a badge in the
+app, and the turn's instructions tell the agent where its reply is read (plain
+text, full URLs, word confirmations) and that this is its own thread with the
+owner. The chat row points at the thread, so word confirmations of the thread's
+cards work from any of the owner's chats. Groups and other people's private
+chats keep their own threads.
+
+**The same question is not worked on twice.** A running turn records its
+question: a digest of its normalized words (case, punctuation, spacing and
+leading @mentions ignored; short messages such as "yes" are never keyed) and a
+short excerpt. When a message arrives while its thread is busy:
+
+- if it is the question being answered, it is not queued: from the chat that
+  asked, the sender is told the answer is coming; from another chat (e.g. the
+  owner asked on Telegram and again on Lark), that chat is added to the running
+  answer's recipients (`also_deliver`, at most four), and at settlement the
+  answer is sent there too (`deliver_also`, taken once by the settlement hook);
+- if the same question is already queued, it is not queued again, and a repeat
+  from another chat is added to the queued message's recipients.
+
+Queued messages remember the chats that asked them (`reply_to`); on the
+owner's own thread the turn that drains them also answers there, even when the
+owner's next message comes from the app. On a chat app thread (a group's), a
+message the owner writes in the app never takes the chat's queued messages: its
+reply stays in the app, and the queued messages wait for a turn that answers in
+the chat. When a turn fails, chats that were promised its answer are told to ask
+again. The agent's own threads are also told, in the owner's turn instructions,
+what its other threads are answering right now (thread title and question
+excerpt, the same question marked), so it does not start that work again;
+channel threads never get this note, so no chat hears about another.
 
 ## 13. No-break guarantees
 

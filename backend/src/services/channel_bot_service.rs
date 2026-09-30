@@ -1580,8 +1580,9 @@ pub async fn list_bots(db: &mongodb::Database, user_id: &str) -> AppResult<Vec<C
     Ok(bots)
 }
 
-/// List active personal and administered-org bots in one newest-first list.
-pub async fn list_all_bots(db: &mongodb::Database, actor: &str) -> AppResult<Vec<ChannelBot>> {
+/// The actor and every organization they administer: the owners whose
+/// channel bots and routes the actor manages.
+pub async fn managed_owner_ids(db: &mongodb::Database, actor: &str) -> AppResult<Vec<String>> {
     use crate::models::user::{COLLECTION_NAME as USERS, User};
 
     let memberships = super::org_service::list_memberships_for_member(db, actor, false).await?;
@@ -1601,7 +1602,12 @@ pub async fn list_all_bots(db: &mongodb::Database, actor: &str) -> AppResult<Vec
             .await?;
         owner_ids.extend(orgs.into_iter().map(|org| org.id));
     }
+    Ok(owner_ids)
+}
 
+/// List active personal and administered-org bots in one newest-first list.
+pub async fn list_all_bots(db: &mongodb::Database, actor: &str) -> AppResult<Vec<ChannelBot>> {
+    let owner_ids = managed_owner_ids(db, actor).await?;
     Ok(db
         .collection::<ChannelBot>(COLLECTION_NAME)
         .find(doc! { "user_id": { "$in": owner_ids }, "is_active": true })

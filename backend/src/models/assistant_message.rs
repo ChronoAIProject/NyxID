@@ -23,6 +23,13 @@ pub struct AssistantMessage {
     /// Images tools returned during the turn that produced this reply.
     #[serde(default)]
     pub attachments: Vec<super::assistant_conversation::TurnAttachment>,
+    /// What started the turn this message belongs to; `None` on rows written
+    /// before it was recorded. A chat app saw only channel and event turns.
+    #[serde(default)]
+    pub origin: Option<super::assistant_conversation::TurnOrigin>,
+    /// A user message written in a chat app: its platform.
+    #[serde(default)]
+    pub via: Option<String>,
 }
 
 impl std::fmt::Debug for AssistantMessage {

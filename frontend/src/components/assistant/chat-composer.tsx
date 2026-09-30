@@ -182,6 +182,16 @@ function DraftedChatComposer({
   const renderedDraftKeyRef = useRef(draftKey);
   const draftTimerRef = useRef<number | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  /** Where the caret goes once an inserted mention is committed. */
+  const pendingCaretRef = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    const element = textareaRef.current;
+    const caret = pendingCaretRef.current;
+    if (!element || caret === null) return;
+    pendingCaretRef.current = null;
+    element.focus();
+    element.setSelectionRange(caret, caret);
+  });
   const composerRef = useRef<HTMLDivElement>(null);
   const controlsRef = useRef<HTMLDivElement>(null);
   const textMeasureRef = useRef<HTMLSpanElement>(null);
@@ -534,13 +544,13 @@ function DraftedChatComposer({
     const element = textareaRef.current;
     if (!element || !mention) return;
     const next = insertMention(content, mention, element.selectionStart, name);
+    // Placed right after React commits the new text (below), before any
+    // further keystroke: a frame later, fast typing would land first and
+    // the caret would jump back in front of it.
+    pendingCaretRef.current = next.caret;
     updateContent(next.text);
     scheduleDraftSave();
     setMention(undefined);
-    requestAnimationFrame(() => {
-      element.focus();
-      element.setSelectionRange(next.caret, next.caret);
-    });
   }
 
   async function submit() {
@@ -601,11 +611,19 @@ function DraftedChatComposer({
 
   return (
     <div
-      className="shrink-0"
+      // Opaque: the transcript scrolls underneath the composer, so its band
+      // must hide it instead of showing text around and below the input.
+      data-composer-band
+      className="relative shrink-0 bg-background"
       style={{
         width: "calc(100% - var(--assistant-scrollbar-width, 0px))",
       }}
     >
+      <div
+        aria-hidden="true"
+        data-composer-fade
+        className="pointer-events-none absolute inset-x-0 bottom-full h-6 bg-gradient-to-t from-background to-transparent"
+      />
       <div
         className="mx-auto w-full max-w-[758px] px-4 pt-2 sm:px-6"
         style={{ paddingBottom: "max(1rem, var(--sab))" }}

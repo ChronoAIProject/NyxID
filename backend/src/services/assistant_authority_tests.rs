@@ -193,6 +193,7 @@ fn orchestrator_chat() -> acks::ChatAuthority {
         role: crate::models::assistant_conversation::AgentRole::Orchestrator,
         agent_id: "agent".into(),
         agent_name: "NyxBot".into(),
+        guest: false,
     }
 }
 
@@ -666,7 +667,7 @@ fn native_inventory_is_closed_and_schemas_exclude_secret_inputs() {
     // NyxBot also gets the team and memory tools; specialists get read-only
     // account tools plus their own memory.
     let team = super::assistant_team_tools::TOOL_NAMES.len();
-    let memory = super::assistant_team_tools::MEMORY_TOOL_NAMES.len();
+    let memory = super::assistant_team_tools::AGENT_TOOL_NAMES.len();
     assert_eq!(
         service.endpoints.len(),
         tools::TOOL_NAMES.len() + team + memory
@@ -676,13 +677,13 @@ fn native_inventory_is_closed_and_schemas_exclude_secret_inputs() {
     let limited = tools::virtual_service(&subagent);
     assert!(!limited.endpoints.is_empty());
     assert!(limited.endpoints.iter().all(|e| {
-        tools::read_only(&e.name) || super::assistant_team_tools::is_memory_tool(&e.name)
+        tools::read_only(&e.name) || super::assistant_team_tools::is_agent_tool(&e.name)
     }));
     assert_eq!(
         limited
             .endpoints
             .iter()
-            .filter(|e| super::assistant_team_tools::is_memory_tool(&e.name))
+            .filter(|e| super::assistant_team_tools::is_agent_tool(&e.name))
             .count(),
         memory
     );

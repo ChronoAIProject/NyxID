@@ -3475,7 +3475,10 @@ pub fn build_mcp_operation_descriptor(
     Ok(prepare_proxy_tool_call(service, endpoint, args)?.operation_descriptor())
 }
 
-fn is_generic_proxy_dispatch(service: &McpToolService, endpoint: &McpToolEndpoint) -> bool {
+pub(crate) fn is_generic_proxy_dispatch(
+    service: &McpToolService,
+    endpoint: &McpToolEndpoint,
+) -> bool {
     service.is_generic_proxy && endpoint.endpoint_id == GENERIC_PROXY_ENDPOINT_ID
 }
 
@@ -4856,6 +4859,13 @@ pub struct SearchResult {
     pub matched_service_ids: Vec<String>,
 }
 
+/// Words too common to say which tool a query names ("create an agent":
+/// "an" is inside `channel`).
+const FILLER_WORDS: &[&str] = &[
+    "a", "an", "and", "the", "to", "for", "of", "in", "on", "or", "is", "it", "be", "me", "my",
+    "i", "you", "with", "that", "this", "can", "please",
+];
+
 /// Search ALL user tools (regardless of activation state) and return matches
 /// plus the service IDs they belong to.
 pub fn search_all_tools(services: &[McpToolService], query: &str) -> SearchResult {
@@ -4871,6 +4881,7 @@ pub fn search_all_tools(services: &[McpToolService], query: &str) -> SearchResul
         .map(str::to_owned)
         .collect();
     let mut candidates: Vec<(
+        usize,
         usize,
         usize,
         &McpToolService,
@@ -4891,18 +4902,41 @@ pub fn search_all_tools(services: &[McpToolService], query: &str) -> SearchResul
                 .iter()
                 .filter(|token| haystack.contains(token.as_str()))
                 .count();
+            // Among equally complete matches, a tool whose own name holds the
+            // words ("create agent" -> `spawn_subagent`) beats one that only
+            // mentions them in passing.
+            let lowered_name = name.to_lowercase();
+            let in_name = tokens
+                .iter()
+                .filter(|token| !FILLER_WORDS.contains(&token.as_str()))
+                .filter(|token| lowered_name.contains(token.as_str()))
+                .count();
             if tokens.is_empty() || matched > 0 {
                 let order = candidates.len();
-                candidates.push((matched, order, service, endpoint, name, description));
+                candidates.push((
+                    matched,
+                    in_name,
+                    order,
+                    service,
+                    endpoint,
+                    name,
+                    description,
+                ));
             }
         }
     }
-    candidates.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));
+    candidates.sort_by(|left, right| {
+        right
+            .0
+            .cmp(&left.0)
+            .then(right.1.cmp(&left.1))
+            .then(left.2.cmp(&right.2))
+    });
     candidates.truncate(MAX_SEARCH_RESULTS);
 
     let mut matches = Vec::with_capacity(candidates.len());
     let mut matched_ids: HashSet<String> = HashSet::new();
-    for (_, _, service, endpoint, name, description) in candidates {
+    for (_, _, _, service, endpoint, name, description) in candidates {
         matched_ids.insert(service.service_id.clone());
         let input_schema = if service.is_generic_proxy {
             build_generic_proxy_input_schema()

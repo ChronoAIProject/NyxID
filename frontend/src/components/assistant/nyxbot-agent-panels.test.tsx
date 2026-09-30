@@ -126,12 +126,14 @@ it("shows what the thread is waiting for and that the agent continues by itself"
         {
           kind: "channel_bot",
           title: "Waiting for your Telegram bot to be created",
+          detail: null,
           since: at,
           expires_at: soon,
         },
         {
           kind: "owner_verification",
           title: "Waiting for you to verify your Telegram account with @helper_bot",
+          detail: "NyxID has not received any message from this bot yet.",
           since: at,
           expires_at: null,
         },
@@ -142,5 +144,6 @@ it("shows what the thread is waiting for and that the agent continues by itself"
   expect(note).toHaveTextContent("Waiting for your Telegram bot to be created");
   expect(note).toHaveTextContent("expires in 30m");
   expect(note).toHaveTextContent("verify your Telegram account with @helper_bot");
+  expect(note).toHaveTextContent("NyxID has not received any message from this bot yet.");
   expect(note).toHaveTextContent("NyxBot continues here by itself when this happens");
 });

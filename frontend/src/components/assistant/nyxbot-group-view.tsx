@@ -342,35 +342,43 @@ export function GroupPendingActions({
 }) {
   if (!actions.length) return null;
   return (
-    <div className="mx-auto w-full max-w-3xl space-y-1.5 px-4 pb-2" aria-label="Actions waiting for you">
-      {actions.map((action) => {
-        const member = members.find((candidate) => candidate.id === action.agent_id);
-        const who = member?.display_name ?? member?.name ?? "An agent";
-        const code = action.confirm_phrase.slice(4);
-        return (
-          <div
-            key={action.acknowledgement_id}
-            role="region"
-            aria-label={`Confirm: ${action.summary}`}
-            className="flex items-center gap-3 rounded-lg border border-border bg-overlay px-3 py-2"
-          >
-            <p className="min-w-0 flex-1 text-[12px] text-foreground">
-              <span className="font-medium">{who}</span> wants to: {action.summary}
-            </p>
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={sending}
-              onClick={() => void onAnswer(`no ${code}`)}
+    // Opaque and above the composer's fade: the transcript scrolls
+    // underneath, and the fade must not cover these cards' buttons.
+    <div className="relative z-[1] bg-background">
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-x-0 bottom-full h-6 bg-gradient-to-t from-background to-transparent"
+      />
+      <div className="mx-auto w-full max-w-3xl space-y-1.5 px-4 pb-2" aria-label="Actions waiting for you">
+        {actions.map((action) => {
+          const member = members.find((candidate) => candidate.id === action.agent_id);
+          const who = member?.display_name ?? member?.name ?? "An agent";
+          const code = action.confirm_phrase.slice(4);
+          return (
+            <div
+              key={action.acknowledgement_id}
+              role="region"
+              aria-label={`Confirm: ${action.summary}`}
+              className="flex items-center gap-3 rounded-lg border border-border bg-overlay px-3 py-2"
             >
-              Cancel
-            </Button>
-            <Button size="sm" disabled={sending} onClick={() => void onAnswer(action.confirm_phrase)}>
-              Confirm
-            </Button>
-          </div>
-        );
-      })}
+              <p className="min-w-0 flex-1 text-[12px] text-foreground">
+                <span className="font-medium">{who}</span> wants to: {action.summary}
+              </p>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={sending}
+                onClick={() => void onAnswer(`no ${code}`)}
+              >
+                Cancel
+              </Button>
+              <Button size="sm" disabled={sending} onClick={() => void onAnswer(action.confirm_phrase)}>
+                Confirm
+              </Button>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
