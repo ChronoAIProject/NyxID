@@ -418,14 +418,37 @@ pub async fn resolve_targets(
     owner: &str,
     targets: &[String],
 ) -> AppResult<GrantTargets> {
+    let (resolved, refused) = resolve_each_target(db, node_manager, owner, targets).await?;
+    match refused.into_iter().next() {
+        Some(refused) => Err(AppError::ValidationError(refused.reason)),
+        None => Ok(resolved),
+    }
+}
+
+/// A requested service that cannot be granted, and why (for the agent).
+#[derive(Clone, Debug, Serialize)]
+pub struct Refused {
+    pub service: String,
+    pub reason: String,
+}
+
+/// Resolve each target on its own: what resolves is granted, and each
+/// refusal says why, so one unusable service does not block the others.
+pub async fn resolve_each_target(
+    db: &Database,
+    node_manager: &NodeWsManager,
+    owner: &str,
+    targets: &[String],
+) -> AppResult<(GrantTargets, Vec<Refused>)> {
     if targets.len() > MAX_GRANT_TARGETS {
         return Err(AppError::ValidationError(format!(
             "At most {MAX_GRANT_TARGETS} services can be granted at once"
         )));
     }
     let mut resolved = GrantTargets::default();
+    let mut refused = Vec::new();
     if targets.is_empty() {
-        return Ok(resolved);
+        return Ok((resolved, refused));
     }
     let catalog = mcp_service::load_operation_catalog(
         db,
@@ -437,21 +460,40 @@ pub async fn resolve_targets(
     .await?;
     for target in targets {
         let target = target.trim();
-        let service = catalog
+        let refuse = |reason: String| Refused {
+            service: identifier(target),
+            reason,
+        };
+        // Every agent runs on NyxAgent and thinks with NyxID's model
+        // services; the engine itself is not a service an agent calls.
+        if target.eq_ignore_ascii_case(crate::services::assistant_nyxagent::SERVICE_SLUG)
+            || target.eq_ignore_ascii_case("nyxagent")
+        {
+            refused.push(refuse(
+                "NyxAgent is the assistant engine every agent already runs on; it is not \
+                granted as a service"
+                    .into(),
+            ));
+            continue;
+        }
+        let Some(service) = catalog
             .services
             .iter()
             .find(|service| service.service_slug == target || service.service_id == target)
-            .ok_or_else(|| {
-                AppError::ValidationError(format!(
-                    "Unknown or unavailable service: {}",
-                    identifier(target)
-                ))
-            })?;
+        else {
+            refused.push(refuse(format!(
+                "Unknown or unavailable service: {}. Use a slug or ID from \
+                nyx__list_connected_services",
+                identifier(target)
+            )));
+            continue;
+        };
         let (list, id) = match &service.source {
             mcp_service::McpToolSource::Internal => {
-                return Err(AppError::ValidationError(
+                refused.push(refuse(
                     "Grant account access with account_read instead of the nyxid service".into(),
                 ));
+                continue;
             }
             mcp_service::McpToolSource::Platform { .. } => (
                 &mut resolved.platform_service_ids,
@@ -466,7 +508,7 @@ pub async fn resolve_targets(
             resolved.slugs.push(service.service_slug.clone());
         }
     }
-    Ok(resolved)
+    Ok((resolved, refused))
 }
 
 // ---------------------------------------------------------------------------

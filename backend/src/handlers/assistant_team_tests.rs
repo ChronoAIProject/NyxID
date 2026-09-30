@@ -1087,3 +1087,105 @@ async fn grants_decisions_and_destroy_reach_every_live_thread_key() {
 }
 
 use mongodb::bson as bson_doc;
+
+/// Reported: NyxBot could not add services to a specialist it had created
+/// with an organization's service ("NyxID returned a validation error").
+#[tokio::test]
+async fn nyxbot_adds_services_to_a_specialist_holding_an_org_service() {
+    use crate::models::org_membership::{COLLECTION_NAME as MEMBERSHIPS, OrgMembership, OrgRole};
+    let (state, _, server) = setup("team_org_grants").await;
+    let (_, chat) = orchestrator(&state).await;
+    let org = Uuid::new_v4().to_string();
+    state
+        .db
+        .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+        .insert_one(crate::test_utils::test_user(
+            &org,
+            crate::models::user::UserType::Org,
+        ))
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<OrgMembership>(MEMBERSHIPS)
+        .insert_one(crate::test_utils::test_membership(
+            &org,
+            OWNER,
+            OrgRole::Admin,
+            None,
+        ))
+        .await
+        .unwrap();
+    connected(
+        &state.db,
+        &org,
+        "home-assistant-office",
+        "https://ha.example",
+    )
+    .await;
+    connected(&state.db, OWNER, "ornn-api", "https://ornn.example").await;
+    spawn(
+        &state,
+        &chat,
+        json!({"name": "office", "description": "Office assistant",
+            "services": ["home-assistant-office"]}),
+    )
+    .await;
+    // One service NyxBot cannot grant does not block the others, and it is
+    // told why.
+    let (value, error) = execute_tool(
+        &state,
+        &chat,
+        "nyxid__grant_subagent",
+        &json!({"subagent": "office", "services": ["ornn-api", "llm-nyx", "no-such-api"]}),
+    )
+    .await;
+    assert!(!error, "{value}");
+    assert_eq!(
+        value["services"],
+        json!(["home-assistant-office", "ornn-api"])
+    );
+    let refused = value["not_granted"].as_array().unwrap();
+    assert_eq!(refused.len(), 2, "{value}");
+    assert!(
+        refused[0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("assistant engine"),
+        "{value}"
+    );
+    assert!(
+        refused[1]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("Unknown or unavailable service: no-such-api"),
+        "{value}"
+    );
+    // Nothing grantable: an error that says why.
+    let (value, error) = execute_tool(
+        &state,
+        &chat,
+        "nyxid__grant_subagent",
+        &json!({"subagent": "office", "services": ["nyxagent"]}),
+    )
+    .await;
+    assert!(error, "{value}");
+    assert_eq!(value["error"], "not_granted");
+    // Validation messages reach NyxBot instead of a generic one.
+    let (value, error) = execute_tool(
+        &state,
+        &chat,
+        "nyxid__spawn_subagent",
+        &json!({"name": "x", "description": "c", "services": ["no-such-api"]}),
+    )
+    .await;
+    assert!(error, "{value}");
+    assert!(
+        value["message"]
+            .as_str()
+            .unwrap()
+            .contains("Unknown or unavailable service: no-such-api"),
+        "{value}"
+    );
+    server.abort();
+}

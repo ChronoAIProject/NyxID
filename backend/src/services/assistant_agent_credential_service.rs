@@ -146,6 +146,18 @@ fn unavailable() -> AppError {
     AppError::Internal("Assistant credential storage unavailable".into())
 }
 
+/// Whether `key_id` is a live assistant conversation key of `user_id` (NyxID
+/// stores one per conversation; people cannot create these rows).
+pub async fn is_conversation_key(db: &Database, user_id: &str, key_id: &str) -> AppResult<bool> {
+    Ok(db
+        .collection::<AssistantAgentCredential>(CREDENTIALS)
+        .count_documents(doc! {"user_id": user_id, "api_key_id": key_id})
+        .limit(1)
+        .await
+        .map_err(|_| unavailable())?
+        > 0)
+}
+
 /// Used by key revocation in the same transaction when one exists.
 /// Exact key matching prevents a late invalidation from deleting its successor.
 pub async fn invalidate_for_key(
