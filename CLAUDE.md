@@ -210,7 +210,7 @@ First-party RFC 8628-style login: plain `nyxid login` and `--device` display a s
 
 ### 13. Hosted Connect Links
 
-Single-use hosted credential setup for agents and CLI callers. An authenticated creator requests a catalog service link, gives the returned URL to the same account's human user, and polls until the service is provisioned.
+Single-use hosted credential setup for agents and CLI callers. An authenticated creator requests a catalog service link and gives the returned URL to the same account's human user. App callers can receive lifecycle webhooks; polling remains available. See [Third-party Connector Integration](docs/API.md#third-party-connector-integration) for the API and webhook contracts.
 
 - `connect_links` stores UUID-string IDs and only SHA-256 hashes of `nyx_clk_` tokens. Raw tokens appear once in the hosted URL and must never be logged, audited, or persisted in OAuth state.
 - Links default to 15 minutes, are clamped to 60-3600 seconds, and retain an observable `expired` terminal state through atomic query-time expiry claims. An OAuth or device flow pinned before expiry gets 30 minutes of finalization grace, then expires if it remains pending.
@@ -220,6 +220,14 @@ Single-use hosted credential setup for agents and CLI callers. An authenticated 
 - Hosted human decline uses the same raw-token and owner checks as completion but only transitions the link to `cancelled`. Every terminal callback is built from the stored URI with `status` and `connect_link_id`; existing query parameters are preserved, reserved parameters are replaced, and raw tokens are never added. Provider callback errors store only a normalized `last_error` code and timestamp while the link remains retryable.
 - API-key and OAuth provisioning must reuse `unified_key_service`; completion is atomically serialized and single-use. OAuth state carries only `connect_link_id`, while the browser keeps the raw token in session storage across the redirect.
 - MCP callers use `nyx__connect_service` followed by `nyx__wait_for_connection`. A pending link must not activate service tools or emit `tools/list_changed`; activation happens only after completed status is observed.
+
+### 13a. Bot Connection Links
+
+- Tracked bot setup uses separate `channel_connect_links` storage, `/api/v1/channel-connect-links` endpoints, and `/connect/bot/{token}`. Preserve the existing service Connector link contracts and reusable channel setup URLs. See [API reference](docs/API.md#bot-connection-links) and [implementation and lifecycle](docs/CHANNEL_BOT_RELAY.md#tracked-bot-connection-links).
+- Owner, platform, and label are fixed at creation. Agent Keys can create/read/cancel; setup routes require a human account with owner write access. Telegram consent remains bound to the account that started it, including for org-owned bots.
+- Renewable claims fence setup. Bot insertion and link association are transactional, as are Telegram request insertion and association. Completion reserves one stable terminal event snapshot atomically. Manual `pending_webhook` can count as saved; managed setup must satisfy its readiness checks. Never discard a successful secret-bearing response because terminal recording failed.
+- Events are `channel_connect.completed`, `.cancelled`, and `.expired`. App callers use their registered connection webhook; direct callers receive one encrypted-at-rest signing secret once. Bot delivery opts into public HTTPS validation, DNS pinning, redirects disabled, and a separate app quota. Preserve the existing Connector delivery path. The independent bot sweep shares `CONNECT_LINK_EXPIRY_SWEEP_INTERVAL_SECS`; `0` disables both sweeps.
+- CLI direct webhooks require `--webhook-signing-secret-file` with `--webhook-url`. Create a new file with mode `0600` on Unix; reject existing paths and symlinks before creating the link. JSON and terminal output contain the file path and key ID only. Keep the raw secret out of output and logs; the direct HTTP API still returns it once.
 
 ### 14. Connection Webhooks and Triggers
 
@@ -290,6 +298,7 @@ All API routes under `/api/v1`:
 - `/auth/login-code`, `/options`, `/redeem`, `/{id}`, `/{id}/revoke` -- human-issued single-use grants (Rule 12)
 - `/auth/agent-key/{request,poll,preview,options,approve,deny,self}` -- Agent Key login and calling-credential identity/revocation (Critical Rule 15)
 - `/connect-links` -- create, poll, creator cancel, public preview, human decline, and human-only completion for hosted service connections (see Critical Rule 13)
+- `/channel-connect-links` -- tracked bot setup, signed terminal notifications, status and cancellation; human-only manual/managed/Telegram setup (see Critical Rule 13a)
 - `/developer/oauth-clients/{client_id}/connection-webhook` -- human-only developer-app lifecycle webhook configure/disable; `/connection-webhook/rotate-secret` returns a new signing secret and key ID once
 - `/triggers` -- trigger CRUD; `/{id}/rotate-secret`, `/{id}/rotate-delivery-secret`, `/{id}/deliveries`, and `/{id}/deliveries/{event_id}/redeliver` cover inbound/outbound secret rotation, delivery history, and retained-envelope replay (JWT or agent API key; delegated, relay, and service-account tokens rejected)
 - `/webhooks/triggers/{trigger_id}` -- unauthenticated trigger ingress verified by token or raw-body HMAC (see Critical Rule 14)
@@ -452,7 +461,7 @@ TELEGRAM_WEBHOOK_SECRET=            # Random string for webhook verification
 TELEGRAM_WEBHOOK_URL=               # e.g. https://auth.nyxid.dev/api/v1/webhooks/telegram
 TELEGRAM_BOT_USERNAME=              # Without @
 APPROVAL_EXPIRY_INTERVAL_SECS=5     # Interval between expiry sweeps
-CONNECT_LINK_EXPIRY_SWEEP_INTERVAL_SECS=60  # App connect-link expiry webhooks; 0 disables
+CONNECT_LINK_EXPIRY_SWEEP_INTERVAL_SECS=60  # Service-link expiry and bot-link recovery sweeps; 0 disables both
 AGENT_KEY_LOGIN_SWEEP_INTERVAL_SECS=60    # Revoke expired undelivered Agent Key credentials; 0 disables
 
 # OAuth token refresh (optional)

@@ -1,9 +1,10 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import { TelegramNew } from "./telegram-new";
 import type { TelegramNewRequest } from "@/schemas/telegram-new";
+import { ChannelConnectLinkContext } from "@/hooks/use-channel-connect-link";
 
 const { mockGet, mockPost, mockDelete, mockActor } = vi.hoisted(() => ({
   mockGet: vi.fn(),
@@ -77,6 +78,18 @@ beforeEach(() => {
     location: { replace },
     close,
   } as unknown as Window);
+});
+
+it("starts a tracked request without adopting an unrelated active Telegram request", async () => {
+  mockGet.mockResolvedValue(configuration(request));
+  mockPost.mockResolvedValue({ request, launch_url: "https://t.me/NyxSetupBot?start=challenge" });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const refresh = vi.fn().mockResolvedValue(undefined);
+  render(<QueryClientProvider client={client}><ChannelConnectLinkContext.Provider value={{ token: "nyx_bcl_tracked", id: "tracked", refresh }}><TelegramNew label="Fixed name" orgId={null} fullPage onConnected={vi.fn()} /></ChannelConnectLinkContext.Provider></QueryClientProvider>);
+  fireEvent.click(await screen.findByRole("button", { name: "Continue in Telegram" }));
+  await waitFor(() => expect(mockPost).toHaveBeenCalledWith("/channel-connect-links/telegram/start", { token: "nyx_bcl_tracked" }));
+  expect(mockPost).toHaveBeenCalledTimes(1);
+  expect(refresh).toHaveBeenCalled();
 });
 
 it("saves and opens Telegram with one click, then completes from server status without a Connect request", async () => {
