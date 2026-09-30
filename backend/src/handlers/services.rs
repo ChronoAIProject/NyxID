@@ -4023,6 +4023,7 @@ mod tests {
                 credits_per_unit_micros: 125_000,
                 credits_per_unit_pico: None,
                 synced_at: chrono::Utc::now(),
+                retired_at: None,
             })
             .await
             .expect("insert service rate");
@@ -4076,13 +4077,13 @@ mod tests {
                 .as_ref()
                 .is_some_and(|billing| billing.platform_pricing_cleanup_metric_code.is_none())
         );
-        assert_eq!(
-            db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME,)
-                .count_documents(doc! { "lago_metric_code": metric_code })
-                .await
-                .expect("count stale rates"),
-            0
-        );
+        let rate = db
+            .collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
+            .find_one(doc! { "lago_metric_code": metric_code })
+            .await
+            .expect("find removed rate")
+            .expect("removed rate is retained for historical usage");
+        assert!(rate.retired_at.is_some());
     }
 
     #[test]
