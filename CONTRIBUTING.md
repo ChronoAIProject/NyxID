@@ -362,6 +362,8 @@ check evidence:
 - At least one approval is required before merge
 - All CI checks must pass (see above)
 - Security-sensitive changes require explicit security review
+- Merge branch-sync PRs with **Create a merge commit**. Squashing drops the
+  merged branch's ancestry, so GitHub can still report the same conflicts.
 
 ---
 
