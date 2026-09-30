@@ -90,7 +90,12 @@ notice).
   including destructive tools, is NyxBot-only; NyxBot's destructive actions still
   show the owner a confirmation card unless the owner turned confirmations off.
 - Grants resolve through the owner's MCP catalog, so NyxBot can grant only what
-  it can reach. Every thread key converges to its agent's authority at each turn
+  it can reach. `nyxid__grant_subagent` resolves each service on its own: what
+  resolves is granted and the rest come back in `not_granted` (or `not_revoked`)
+  with the reason, so one unusable service never blocks the others. NyxAgent's
+  own service (`llm-nyx`) is never granted: every agent already runs on it.
+  Validation messages of account and team tools reach the agent as written
+  (bounded), instead of one generic message. Every thread key converges to its agent's authority at each turn
   start, rotation and replacement; grant changes update all thread keys at once.
 - Specialists cannot create agents, grant, decide, or link channels. Memory tools
   belong to every agent. Assistant keys stay unmodifiable by native tools.

@@ -399,9 +399,16 @@ pub fn error_result(error: AppError) -> ToolResult {
         AppError::NotFound(_) | AppError::NodeNotFound(_) | AppError::ChannelBotNotFound(_) => {
             "Resource not found."
         }
-        AppError::ValidationError(_) => {
-            "Invalid account tool arguments or target. Assistant chat keys \
-                cannot be modified or used as route agents."
+        // Validation messages are written for the caller: the agent needs
+        // them to fix its request or tell the user what cannot be done.
+        AppError::ValidationError(message) => {
+            let message: String = message.chars().take(300).collect();
+            return ToolResult {
+                permission_request: None,
+                is_error: true,
+                value: json!({"error": body.error, "error_code": body.error_code,
+                    "message": message}),
+            };
         }
         AppError::Forbidden(_) | AppError::Unauthorized(_) => {
             "This operation requires a conversation key and human acknowledgement."
