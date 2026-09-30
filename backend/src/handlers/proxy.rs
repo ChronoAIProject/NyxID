@@ -1903,17 +1903,6 @@ async fn preflight_proxy_deny_before_resolution(
     Ok(())
 }
 
-/// Inner proxy execution with optional pre-resolved target from UserService path.
-///
-/// When `pre_resolved` is `Some`, the target and node routing are already known
-/// (from `resolve_proxy_target_from_user_service`). When `None`, resolution
-/// follows `target_mode`: caller-addressed requests fall back to the original
-/// DownstreamService path, server-chosen platform targets resolve the admin
-/// row alone (see [`execute_admin_proxy`]).
-// One argument over the lint's threshold: every parameter is a distinct
-// security-relevant input to resolution, and bundling them into a struct
-// would only move the same fields behind one more indirection.
-#[allow(clippy::too_many_arguments)]
 /// NyxAgent calls its model through this proxy with the conversation's own
 /// assistant key, and a specialist's key holds only its grants. Such a key may
 /// always reach a catalog model inference service (`inference` metadata): that
@@ -1945,6 +1934,17 @@ async fn assistant_model_call(
         .await?)
 }
 
+/// Inner proxy execution with optional pre-resolved target from UserService path.
+///
+/// When `pre_resolved` is `Some`, the target and node routing are already known
+/// (from `resolve_proxy_target_from_user_service`). When `None`, resolution
+/// follows `target_mode`: caller-addressed requests fall back to the original
+/// DownstreamService path, server-chosen platform targets resolve the admin
+/// row alone (see [`execute_admin_proxy`]).
+// One argument over the lint's threshold: every parameter is a distinct
+// security-relevant input to resolution, and bundling them into a struct
+// would only move the same fields behind one more indirection.
+#[allow(clippy::too_many_arguments)]
 async fn execute_proxy_inner(
     state: &AppState,
     auth_user: &AuthUser,
