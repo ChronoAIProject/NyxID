@@ -4188,18 +4188,15 @@ async fn org_group_bots_moved_to_a_specialist_keep_answering() {
                 .collect::<Vec<_>>()
         }
     };
-    let settled = |count: usize| {
-        let replies = replies.clone();
-        async move {
-            for _ in 0..200 {
-                let now = replies().await;
-                if now.len() >= count {
-                    return now;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    let settled = |count: usize| async move {
+        for _ in 0..200 {
+            let now = replies().await;
+            if now.len() >= count {
+                return now;
             }
-            replies().await
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
+        replies().await
     };
     // Through NyxBot: the owner and a guest are answered.
     assert_eq!(
@@ -4369,7 +4366,7 @@ async fn org_group_bots_moved_to_a_specialist_keep_answering() {
         service.service_category = "internal".into();
         service.requires_user_credential = false;
         service.inference =
-            inference.then(|| crate::models::downstream_service::ServiceInference {
+            inference.then_some(crate::models::downstream_service::ServiceInference {
                 wire_protocol:
                     crate::models::downstream_service::InferenceWireProtocol::OpenaiCompletions,
                 model_list: false,
