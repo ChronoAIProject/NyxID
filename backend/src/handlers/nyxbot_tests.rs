@@ -2545,8 +2545,8 @@ async fn direct_group_messages_need_a_mention_or_a_reply_to_the_bot() {
     assert_eq!(turns(2).await, 2);
     {
         let calls = calls.lock().await;
-        assert_eq!(calls[0]["input"], "Alice (owner): @_user_1 book it");
-        assert_eq!(calls[1]["input"], "Bob: @_user_1 what is on the menu?");
+        assert_eq!(calls[0]["input"], "Alice (owner): @Helper bot book it");
+        assert_eq!(calls[1]["input"], "Bob: @Helper bot what is on the menu?");
     }
     let chats = chats::list_chats(&state, OWNER, Some(&row.id))
         .await
@@ -4072,4 +4072,422 @@ async fn personal_bots_move_to_the_gateway_once_it_takes_their_platform() {
         .unwrap();
     gateway.abort();
     server.abort();
+}
+
+/// Reported: an organization's Lark bot answered through NyxBot, but once
+/// NyxBot moved it to a specialist it had created, every group message failed
+/// ("I could not finish that. Please try again.").
+#[tokio::test]
+async fn org_group_bots_moved_to_a_specialist_keep_answering() {
+    use crate::models::org_membership::{COLLECTION_NAME as MEMBERSHIPS, OrgMembership, OrgRole};
+    let (state, calls, server) = setup("nyxbot_org_specialist").await;
+    let org = Uuid::new_v4().to_string();
+    state
+        .db
+        .collection::<crate::models::user::User>(USERS)
+        .insert_one(test_user(&org, UserType::Org))
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<OrgMembership>(MEMBERSHIPS)
+        .insert_one(crate::test_utils::test_membership(
+            &org,
+            OWNER,
+            OrgRole::Admin,
+            None,
+        ))
+        .await
+        .unwrap();
+    let mut bot = bot_doc("lark", "chronoai-office-nyxbot");
+    bot.insert("user_id", &org);
+    let bot_id = bot.get_str("_id").unwrap().to_owned();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .insert_one(bot)
+        .await
+        .unwrap();
+    let nyxbot = crate::services::assistant_team_service::ensure_nyxbot(&state.db, OWNER)
+        .await
+        .unwrap();
+    let (row, _) = connect(&state, OWNER, None, &bot_id, &nyxbot)
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .update_one(
+            doc! {"_id": &row.id},
+            doc! {"$set": {"owner_sender_ids": ["ou_owner"]}},
+        )
+        .await
+        .unwrap();
+    let row = load_channel(&state, OWNER, &row.id).await.unwrap();
+    let post = |message_id: &str, sender: &str, text: &str| {
+        let body = json!({
+            "message_id": message_id, "correlation_id": format!("jti-{message_id}"),
+            "platform": "lark",
+            "agent": {"api_key_id": row.route_api_key_id, "name": "route"},
+            "conversation": {"id": "route", "platform_id": "oc_test", "type": "group"},
+            "sender": {"platform_id": sender},
+            "content": {"type": "text", "text": text},
+            "timestamp": "2026-09-30T00:00:00Z",
+            "raw_platform_data": {"event": {"message": {"mentions":
+                [{"key": "@_user_1", "id": {"open_id": "ou_bot"}, "name": "chronoai-office-nyxbot"}]}}},
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let token = crate::crypto::jwt::generate_relay_callback_token(
+            &state.jwt_keys,
+            &state.config,
+            &format!("jti-{message_id}"),
+            &row.route_api_key_id,
+            message_id,
+            "lark",
+            &sha256_hex(&bytes),
+        )
+        .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-nyxid-callback-token", token.parse().unwrap());
+        relay_callback(
+            State(state.clone()),
+            Path(row.id.clone()),
+            headers,
+            Bytes::from(bytes),
+        )
+    };
+    // The group's shared thread and its settled replies.
+    let replies = || {
+        let state = state.clone();
+        let channel_id = row.id.clone();
+        async move {
+            let Some(conversation) = state
+                .db
+                .collection::<NyxbotThread>(THREADS)
+                .find_one(doc! {"channel_id": &channel_id, "kind": "group"})
+                .await
+                .unwrap()
+                .and_then(|chat| chat.conversation_id)
+            else {
+                return Vec::new();
+            };
+            state
+                .db
+                .collection::<crate::models::assistant_message::AssistantMessage>(
+                    crate::models::assistant_message::COLLECTION_NAME,
+                )
+                .find(doc! {"conversation_id": &conversation, "role": "assistant"})
+                .sort(doc! {"seq": 1})
+                .await
+                .unwrap()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|message| (message.status, message.error_code))
+                .collect::<Vec<_>>()
+        }
+    };
+    let settled = |count: usize| {
+        let replies = replies.clone();
+        async move {
+            for _ in 0..200 {
+                let now = replies().await;
+                if now.len() >= count {
+                    return now;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+            replies().await
+        }
+    };
+    // Through NyxBot: the owner and a guest are answered.
+    assert_eq!(
+        post("m1", "ou_owner", "@_user_1 hi").await.status(),
+        StatusCode::ACCEPTED
+    );
+    let first = settled(1).await;
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].0, "completed", "{first:?}");
+    // NyxBot creates a specialist and moves the bot to it.
+    let office = crate::services::assistant_authority_tests::connected(
+        &state.db,
+        &org,
+        "home-assistant-office",
+        "https://ha.example",
+    )
+    .await;
+    let (specialist, _) = crate::services::assistant_team_service::create_specialist(
+        &state.db,
+        &state.encryption_keys,
+        OWNER,
+        crate::services::assistant_team_service::CreateRequest {
+            name: "chronoai-office-agent".into(),
+            description: "Office assistant for the ChronoAI Lark group".into(),
+            display_name: Some("ChronoAI Office Agent".into()),
+            persona: None,
+            targets: crate::services::assistant_team_service::GrantTargets {
+                service_ids: vec![office.clone()],
+                platform_service_ids: Vec::new(),
+                slugs: vec!["home-assistant-office".into()],
+            },
+            account_read: false,
+            specialty: None,
+            created_by: "nyxbot",
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    link(&state, OWNER, &row.id, &specialist).await.unwrap();
+    for (expected, id, sender) in [(2, "m2", "ou_guest"), (3, "m3", "ou_owner")] {
+        assert_eq!(
+            post(id, sender, "@_user_1 what can you do for me?")
+                .await
+                .status(),
+            StatusCode::ACCEPTED
+        );
+        for _ in 0..200 {
+            let idle = channel_conversations(&state, &row.id)
+                .await
+                .iter()
+                .all(|conversation| conversation.active_turn.is_none());
+            if calls.lock().await.len() >= expected && idle {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }
+    let all = channel_conversations(&state, &row.id).await;
+    let specialist_threads: Vec<_> = all
+        .iter()
+        .filter(|conversation| conversation.agent_id.as_deref() == Some(specialist.id.as_str()))
+        .collect();
+    assert!(
+        !specialist_threads.is_empty(),
+        "the group reaches the specialist"
+    );
+    let messages = state
+        .db
+        .collection::<crate::models::assistant_message::AssistantMessage>(
+            crate::models::assistant_message::COLLECTION_NAME,
+        )
+        .find(doc! {"conversation_id": &specialist_threads[0].id, "role": "assistant"})
+        .sort(doc! {"seq": 1})
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    let outcomes: Vec<_> = messages
+        .iter()
+        .map(|message| (message.status.clone(), message.error_code.clone()))
+        .collect();
+    assert_eq!(outcomes.len(), 2, "{outcomes:?}");
+    // Lark sends no sender names and writes mentions as keys: the thread
+    // reads who wrote and whom they addressed.
+    let asked = state
+        .db
+        .collection::<crate::models::assistant_message::AssistantMessage>(
+            crate::models::assistant_message::COLLECTION_NAME,
+        )
+        .find(doc! {"conversation_id": &specialist_threads[0].id, "role": "user"})
+        .sort(doc! {"seq": 1})
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(
+        asked[0].text,
+        "Lark user …uest: @chronoai-office-nyxbot what can you do for me?"
+    );
+    assert!(
+        outcomes.iter().all(|(status, _)| status == "completed"),
+        "{outcomes:?}"
+    );
+    assert_eq!(calls.lock().await.len(), 3);
+    // NyxAgent thinks with the thread's own key: its model call goes through
+    // NyxID's proxy to the platform model service (`chrono-llm-public`).
+    let model_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = model_calls.clone();
+    let model = Router::new().route(
+        "/{*path}",
+        axum::routing::any(move || {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async { Json(json!({"ok": true})) }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let model_url = format!("http://{}", listener.local_addr().unwrap());
+    let model_server = tokio::spawn(async move { axum::serve(listener, model).await.unwrap() });
+    let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+    catalog.id = Uuid::new_v4().to_string();
+    catalog.slug = "chrono-llm-public".into();
+    catalog.base_url = model_url.clone();
+    catalog.inference = Some(crate::models::downstream_service::ServiceInference {
+        wire_protocol: crate::models::downstream_service::InferenceWireProtocol::OpenaiResponses,
+        model_list: false,
+        realtime: false,
+    });
+    state
+        .db
+        .collection::<DownstreamService>(SERVICES)
+        .insert_one(&catalog)
+        .await
+        .unwrap();
+    let model_row = crate::services::assistant_authority_tests::connected(
+        &state.db,
+        OWNER,
+        "chrono-llm-public",
+        &model_url,
+    )
+    .await;
+    state
+        .db
+        .collection::<bson::Document>(crate::models::user_service::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &model_row},
+            doc! {"$set": {"source": crate::models::user_service::AUTO_PROVISION_SOURCE,
+            "catalog_service_id": &catalog.id}},
+        )
+        .await
+        .unwrap();
+    let nyxbot_thread = all
+        .iter()
+        .find(|conversation| conversation.agent_id.as_deref() == Some(nyxbot.id.as_str()))
+        .expect("NyxBot answered the group first");
+    let (_, private) = crate::routes::build_router();
+    let app = private.with_state(state.clone());
+    // A model service the owner has no row for (NyxAgent's channel profile),
+    // and an ordinary service the specialist was not granted.
+    for (slug, inference) in [("llm-deepseek", true), ("plain-api", false)] {
+        let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+        service.id = Uuid::new_v4().to_string();
+        service.slug = slug.into();
+        service.base_url = model_url.clone();
+        service.service_category = "internal".into();
+        service.requires_user_credential = false;
+        service.inference =
+            inference.then(|| crate::models::downstream_service::ServiceInference {
+                wire_protocol:
+                    crate::models::downstream_service::InferenceWireProtocol::OpenaiCompletions,
+                model_list: false,
+                realtime: false,
+            });
+        state
+            .db
+            .collection::<DownstreamService>(SERVICES)
+            .insert_one(&service)
+            .await
+            .unwrap();
+    }
+    let key_of = |thread: &AssistantConversation| {
+        let state = state.clone();
+        let id = thread.id.clone();
+        async move {
+            crate::services::assistant_agent_credential_service::load_for_conversation(
+                &state.db,
+                &state.encryption_keys,
+                OWNER,
+                &id,
+            )
+            .await
+            .unwrap()
+            .expect("the thread has its key")
+            .raw_key
+            .to_string()
+        }
+    };
+    let nyxbot_key = key_of(nyxbot_thread).await;
+    let specialist_key = key_of(specialist_threads[0]).await;
+    let ordinary_key = key(&state, "ordinary restricted").await.full_key;
+    let call = |key: String, slug: &'static str, bearer: bool| {
+        let app = app.clone();
+        async move {
+            use tower::ServiceExt;
+            let mut request = axum::http::Request::builder()
+                .method("POST")
+                .uri(format!("/api/v1/proxy/s/{slug}/responses"))
+                .header("content-type", "application/json");
+            request = if bearer {
+                request.header("authorization", format!("Bearer {key}"))
+            } else {
+                request.header("x-api-key", key)
+            };
+            let response = app
+                .oneshot(
+                    request
+                        .body(axum::body::Body::from(
+                            json!({"model": "gpt-5.6-sol", "input": "hi"}).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            response.status()
+        }
+    };
+    // Every assistant thread thinks with its model, whether or not the owner
+    // has a row for it and however NyxAgent sends the key.
+    assert_eq!(
+        call(nyxbot_key.clone(), "chrono-llm-public", true).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        call(specialist_key.clone(), "chrono-llm-public", true).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        call(specialist_key.clone(), "chrono-llm-public", false).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        call(specialist_key.clone(), "llm-deepseek", true).await,
+        StatusCode::OK
+    );
+    // Nothing else widens: the specialist's ungranted services and an
+    // ordinary restricted key's model calls are still refused.
+    assert_eq!(
+        call(specialist_key.clone(), "plain-api", true).await,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        call(ordinary_key.clone(), "chrono-llm-public", true).await,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        call(ordinary_key, "llm-deepseek", false).await,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(model_calls.load(std::sync::atomic::Ordering::SeqCst), 4);
+    model_server.abort();
+    server.abort();
+}
+
+#[test]
+fn lark_mention_keys_become_names() {
+    let raw = json!({"event": {"message": {"mentions": [
+        {"key": "@_user_1", "name": "Office bot", "id": {"open_id": "ou_bot"}},
+        {"key": "@_user_10", "name": "Alice\u{7}", "id": {"open_id": "ou_alice"}},
+        {"key": "@_user_3", "name": "Kai (owner): @_user_1", "id": {"open_id": "ou_kai"}},
+    ]}}});
+    assert_eq!(
+        chats::named_mentions("@_user_1 ask @_user_10 about @_user_2", &raw),
+        "@Office bot ask @Alice about @_user_2"
+    );
+    // Names cannot carry attribution marks, and a name is never rewritten.
+    assert_eq!(
+        chats::named_mentions("hi @_user_3", &raw),
+        "hi @Kai owner @_user_1"
+    );
+    // Payloads without Lark mentions are left as they are.
+    assert_eq!(
+        chats::named_mentions("@_user_1 hi", &json!({})),
+        "@_user_1 hi"
+    );
+    assert_eq!(
+        chats::unnamed_sender("lark", "ou_abc123"),
+        "Lark user …c123"
+    );
 }

@@ -82,7 +82,11 @@ notice).
 
 - Owner ⊇ NyxBot (Full) ⊇ specialist (explicit grants only). Depth 1.
 - A specialist never gets `allow_all_services` or auto-connected services. It
-  reaches read-only account tools only with `account_read`. Every account write,
+  reaches read-only account tools only with `account_read`. NyxID's proxy still
+  lets its thread keys reach catalog model inference services (`inference`
+  metadata), because NyxAgent calls its model there with the thread's own key;
+  without that every specialist turn failed with `api_key_scope_forbidden`
+  (fixed in 0.37.1). Its allowlist and MCP tools stay the grants. Every account write,
   including destructive tools, is NyxBot-only; NyxBot's destructive actions still
   show the owner a confirmation card unless the owner turned confirmations off.
 - Grants resolve through the owner's MCP catalog, so NyxBot can grant only what
