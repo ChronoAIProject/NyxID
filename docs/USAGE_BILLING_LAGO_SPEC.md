@@ -342,6 +342,13 @@ for. **Indexes:** unique `{ owner_id: 1 }`, unique `{ lago_customer_id: 1 }`.
 model and BSON `synced_at`. It adds optional `credits_per_unit_pico: i64` alongside
 legacy `credits_per_unit_micros: i64`. `UsageFunding` and `LayerReservation` carry both.
 New code prefers pico (10^-12 credits); missing pico scales the legacy micro rate.
+Optional BSON `retired_at` marks a row whose NyxID-authored price was removed: price
+cleanup sets it instead of deleting the row, `fresh_rate` refuses it for new
+reservations, and historical usage pricing (`/billing/usage`, admin usage, settlement
+fallbacks) keeps reading it. A later full-row sync of the same code clears it.
+Finish upgrading all backend replicas before removing prices: old replicas ignore
+`retired_at` and could still reserve against a removed price until the rate TTL
+(`BILLING_RATE_CACHE_TTL_SECS`, default 900s) expires, whereas deletion refused immediately.
 NyxID's `PRICE_FRACTIONAL_DIGITS = 12`, maximum 1,000,000 credits/unit, fits i64.
 Lago receives the normalized decimal string exactly, and `plan_rates` plus reconcile
 preserve all 12 digits when mirroring it. External Lago rates outside the precise

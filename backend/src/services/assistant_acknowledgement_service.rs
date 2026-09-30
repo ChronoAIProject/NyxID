@@ -14,6 +14,7 @@ use crate::{
     models::{
         api_key::{ApiKey, COLLECTION_NAME as KEYS},
         assistant_acknowledgement::{AssistantAcknowledgement, COLLECTION_NAME as ACKS},
+        assistant_agent::GuestAccess,
         assistant_agent_credential::COLLECTION_NAME as CREDENTIALS,
         assistant_conversation::{
             AgentRole, AssistantConversation, COLLECTION_NAME as CONVERSATIONS,
@@ -37,7 +38,8 @@ pub struct ChatAuthority {
     pub agent_id: String,
     pub agent_name: String,
     /// The thread's newest turn acts for a channel chat guest (not the
-    /// owner): read-only service calls only; see `guest_refusal`.
+    /// owner): service calls only as far as the owner lets guests use each
+    /// service (`AssistantAgent::guest_access`); see `guest_refusal`.
     pub guest: bool,
 }
 impl ChatAuthority {
@@ -65,9 +67,33 @@ pub fn orchestrator_guest_refusal() -> Value {
 /// for something only the owner can ask for.
 pub fn guest_refusal() -> Value {
     json!({"error": "owner_only", "instructions": "You are answering someone other than the \
-        owner. Only the owner can ask for account actions, new connections, more access or \
-        changes made with their services. Answer in words or with read-only lookups, and say \
-        that only the bot's owner can ask for that."})
+        owner. Only the owner can ask for account actions, new connections, more access, \
+        anything that needs their approval, or more than the owner lets guests do with a \
+        service. Help with your services otherwise, and say that only the bot's owner can \
+        ask for that."})
+}
+
+/// What a guest turn is told when a service call goes beyond what the owner
+/// lets guests do with that service.
+pub fn guest_service_refusal(service: &str, access: GuestAccess) -> Value {
+    let allowed = match access {
+        GuestAccess::Read => "only look things up with",
+        _ => "look things up, create and act with, but not change or delete anything in,",
+    };
+    json!({"error": "owner_only", "service": service, "guest_access": access.as_str(),
+        "instructions": format!("You are answering someone other than the owner, who may \
+        {allowed} {service}. Help within that, and say that only the bot's owner can ask for \
+        more; the owner can change it by asking NyxBot.")})
+}
+
+/// What a guest turn is told when a service call carries a method override.
+pub fn guest_method_override_refusal(service: &str) -> Value {
+    json!({"error": "owner_only", "service": service,
+        "instructions": format!("You are answering someone other than the owner: calls to \
+        {service} for them use the operation's own HTTP method, never a method override \
+        (an X-HTTP-Method-Override header, a _method field, or a method field naming another \
+        verb), and a request body sent as JSON must be valid JSON. Call it that way, or say \
+        that only the bot's owner can ask for that.")})
 }
 
 pub async fn for_key(

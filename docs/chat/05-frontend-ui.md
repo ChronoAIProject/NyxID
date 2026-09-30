@@ -225,6 +225,31 @@ Restored drafts place the caret at the end.
 
 Implementation: `frontend/src/components/assistant/chat-composer.tsx` and `frontend/src/stores/assistant-draft-store.ts`.
 
+## Setup links in chat
+
+NyxBot thread and group transcripts, and the retained actor transcript, wrap
+their existing message components in `AssistantLinkModalHost`. An ordinary
+click on a same-origin `/connect/nyx_clk_<token>` or
+`/channel-bots/connect/<platform>` link opens the shared setup component in
+place. Links remain ordinary URLs: direct navigation uses the standalone page,
+modified clicks keep browser behavior, and unrelated or external URLs are not
+intercepted. Channel links retain only `label` and `target_org_id` query values.
+
+The chat adapter owns link selection, the overlay, and focus restoration to the
+initiating link. The connector overlay displays `ConnectLinkContent` directly
+with a close button; its standalone page renders the same content. Channel
+setup reuses `ChannelBotSetup` with an opt-in `stayInPlace` presentation, while
+existing callers retain their navigation defaults. Completion stays in chat.
+These are frontend presentation choices; no backend or message protocol is
+changed.
+
+External OAuth authorization still uses the provider's window. It is reserved
+during the submit gesture, and receives its recovery token in its own session
+storage before navigating away. The return page can therefore complete even
+when provider isolation removes `window.opener`; the chat also polls link
+status. Dismissing setup while its request is pending cannot open a later
+orphan window. Device-code and token entry keep their existing setup behavior.
+
 ## Sidebar and history
 
 The sidebar has a primary New chat command, workspace destinations, and a Chats navigation list. The chat list is a semantic `nav`. Each conversation title is a button whose accessible name is the title.

@@ -535,6 +535,7 @@ fn delegated_read_denied_path(path: &str) -> bool {
                 | "channel-bots"
                 | "channel-conversations"
                 | "connect-links"
+                | "channel-connect-links"
                 | "catalog-curation"
         )
     ) {

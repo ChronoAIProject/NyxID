@@ -1545,6 +1545,7 @@ async fn dispatch_tools_call(
             Some(serde_json::json!({
                 "conversation_id": chat.conversation_id,
                 "agent_role": chat.role,
+                "guest": chat.guest,
                 "tool_name": if known_meta_tool || known_account_tool {
                     tool_name
                 } else {
@@ -1734,9 +1735,6 @@ async fn dispatch_tools_call(
         );
     }
 
-    if let Some(refused) = guest_endpoint_refusal(auth, service, endpoint, request.id.clone()) {
-        return refused;
-    }
     let prepared = match mcp_service::prepare_proxy_tool_call(service, endpoint, &arguments) {
         Ok(prepared) => prepared,
         Err(e) => {
@@ -1747,6 +1745,18 @@ async fn dispatch_tools_call(
             );
         }
     };
+    if let Some(refused) = guest_service_refusal(
+        state,
+        auth,
+        service,
+        endpoint,
+        &prepared,
+        request.id.clone(),
+    )
+    .await
+    {
+        return refused;
+    }
     let operation = prepared.operation_descriptor();
     if let Err(resp) =
         authorize_mcp_tool_operation(state, auth, service, &operation, request.id.clone()).await
@@ -1869,10 +1879,9 @@ async fn authorize_mcp_operation(
     operation: &operation_descriptor::OperationDescriptor,
     request_id: Option<serde_json::Value>,
 ) -> Result<(), Response> {
-    // A guest turn only reads with the chat agent's services.
-    if guest_turn(auth)
-        && operation.verb != crate::models::service_approval_config::ApprovalVerb::Read
-    {
+    // A shell can do anything: SSH stays the owner's. Service calls were
+    // checked against the owner's guest access before this point.
+    if guest_turn(auth) && operation.protocol == operation_descriptor::Protocol::Ssh {
         return Err(guest_refused(request_id));
     }
     let approval_owner_user_id = auth.effective_approval_owner_user_id();
@@ -1897,6 +1906,11 @@ async fn authorize_mcp_operation(
     })?;
 
     let pending = match approval_outcome {
+        // An approval the owner granted for their own requests is theirs: a
+        // guest in the same chat shares the chat's key, not the approval.
+        approval_service::ApprovalOutcome::Allowed { required: true } if guest_turn(auth) => {
+            return Err(guest_refused(request_id));
+        }
         approval_service::ApprovalOutcome::Allowed { .. } => return Ok(()),
         approval_service::ApprovalOutcome::Denied => {
             return Err(tool_result(
@@ -1904,6 +1918,11 @@ async fn authorize_mcp_operation(
                 "Operation denied by approval policy",
                 true,
             ));
+        }
+        // Nobody but the owner asks the owner to approve: a guest's request
+        // would look like the owner's own.
+        approval_service::ApprovalOutcome::NeedsApproval(_) if guest_turn(auth) => {
+            return Err(guest_refused(request_id));
         }
         approval_service::ApprovalOutcome::NeedsApproval(pending) => pending,
     };
@@ -2080,16 +2099,93 @@ fn guest_tool_refusal(
     (!guest_tool_allowed(tool_name)).then(|| guest_refused(request_id))
 }
 
-/// The generic proxy tool lets the caller choose any method and path, and a
-/// GET is not always harmless; guest turns use curated operations only.
-fn guest_endpoint_refusal(
+/// Refuse a guest's service call beyond what the owner lets guests do with
+/// that service on this specialist (`AssistantAgent::guest_access`): `read`
+/// runs only reads (GET, HEAD, OPTIONS, or a POST its stored catalog contract
+/// marks read-only), `use` (the default) reads, creates and acts but never
+/// changes or removes what exists (PUT, PATCH and DELETE by default, a POST
+/// or PUT as NyxID's `x-nyxid-changes-existing` says, never an operation
+/// marked `x-aevatar-tool.destructive`), `all` everything the specialist may.
+/// A guest call never carries a method override. The agent's key already
+/// holds only its granted services, and operations behind the owner's
+/// approval are refused later (`authorize_mcp_operation`) at every level.
+async fn guest_service_refusal(
+    state: &AppState,
     auth: &McpAuthContext,
     service: &mcp_service::McpToolService,
     endpoint: &mcp_service::McpToolEndpoint,
+    prepared: &mcp_service::PreparedProxyCall,
     request_id: Option<serde_json::Value>,
 ) -> Option<Response> {
-    (guest_turn(auth) && mcp_service::is_generic_proxy_dispatch(service, endpoint))
-        .then(|| guest_refused(request_id))
+    use crate::models::assistant_agent::GuestAccess;
+    let chat = auth.chat.as_ref().filter(|chat| chat.guest)?;
+    let Ok(agent) =
+        crate::services::assistant_team_service::agent(&state.db, &chat.user_id, &chat.agent_id)
+            .await
+    else {
+        return Some(guest_refused(request_id));
+    };
+    let access = agent
+        .guest_access
+        .get(&service.service_id)
+        .copied()
+        .unwrap_or_default();
+    let metadata = service
+        .durable_endpoint_metadata
+        .get(&endpoint.endpoint_id)
+        .copied()
+        .unwrap_or_default();
+    // A method override may be honoured in place of the method the call is
+    // sent with, and approvals see only the latter: guests never send one.
+    if prepared.carries_method_override() {
+        return Some(tool_result(
+            request_id,
+            &crate::services::assistant_acknowledgement_service::guest_method_override_refusal(
+                &service.service_slug,
+            )
+            .to_string(),
+            true,
+        ));
+    }
+    let method = prepared.method();
+    let safe = matches!(
+        *method,
+        reqwest::Method::GET | reqwest::Method::HEAD | reqwest::Method::OPTIONS
+    );
+    // A POST its stored catalog contract marks read-only reads (a search), a
+    // GET its spec marks as writing does not; a remote spec may only narrow.
+    let reads = (safe
+        && metadata.risk != Some(crate::models::service_endpoint::EndpointRisk::Write))
+        || (*method == reqwest::Method::POST
+            && metadata.catalog_contract
+            && metadata.risk == Some(crate::models::service_endpoint::EndpointRisk::Read));
+    // Using a service is reading, creating and acting: PUT, PATCH and DELETE
+    // change or remove what exists, unless NyxID's marker says an operation
+    // only acts (a PUT that starts playback) or edits (a POST that edits a
+    // message); a DELETE and what Aevatar's marker calls destructive never.
+    // "Only acts" widens, so only a catalog contract may say it.
+    let changes = match metadata.changes_existing {
+        Some(true) => true,
+        Some(false) if metadata.catalog_contract => false,
+        _ => !(safe || *method == reqwest::Method::POST),
+    };
+    let uses = *method != reqwest::Method::DELETE && !changes && !metadata.destructive;
+    let allowed = match access {
+        GuestAccess::All => true,
+        GuestAccess::Use => uses,
+        GuestAccess::Read => reads && uses,
+    };
+    (!allowed).then(|| {
+        tool_result(
+            request_id,
+            &crate::services::assistant_acknowledgement_service::guest_service_refusal(
+                &service.service_slug,
+                access,
+            )
+            .to_string(),
+            true,
+        )
+    })
 }
 
 /// A channel chat member who is not the owner asked for this turn.
@@ -2097,9 +2193,10 @@ fn guest_turn(auth: &McpAuthContext) -> bool {
     auth.chat.as_ref().is_some_and(|chat| chat.guest)
 }
 
-/// Guest turns may discover tools and read with services (each operation is
-/// checked in `authorize_mcp_tool_operation`). Account, team, memory,
-/// connection, SSH and Oracle tools act for the owner and are refused.
+/// Guest turns may discover tools and use services (each call is checked by
+/// `guest_service_refusal` and `authorize_mcp_tool_operation`). Account,
+/// team, memory, connection, SSH and Oracle tools act for the owner and are
+/// refused.
 fn guest_tool_allowed(tool_name: &str) -> bool {
     if tool_name.starts_with("nyxid__") {
         return false;
@@ -2288,15 +2385,24 @@ async fn handle_meta_call_tool(
         return response;
     }
 
-    if let Some(refused) = guest_endpoint_refusal(auth, service, endpoint, request_id.clone()) {
-        return refused;
-    }
     let prepared = match mcp_service::prepare_proxy_tool_call(service, endpoint, &inner_args) {
         Ok(prepared) => prepared,
         Err(e) => {
             return tool_result(request_id, &format!("Invalid tool arguments: {e}"), true);
         }
     };
+    if let Some(refused) = guest_service_refusal(
+        state,
+        auth,
+        service,
+        endpoint,
+        &prepared,
+        request_id.clone(),
+    )
+    .await
+    {
+        return refused;
+    }
     let operation = prepared.operation_descriptor();
     if let Err(resp) =
         authorize_mcp_tool_operation(state, auth, service, &operation, request_id.clone()).await

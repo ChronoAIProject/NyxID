@@ -1,5 +1,6 @@
 import type { AssistantHttpMockHandler } from "@/lib/assistant/assistant-http";
 import { mentionedNames } from "@/lib/assistant/nyxbot-mentions";
+import { createMockConnectReply, mockCreatedBotCount } from "@/lib/assistant/mock-setup-journeys";
 import {
   ASSISTANT_AGENT_DISPLAY_NAME_MAX,
   ASSISTANT_AGENT_NAME,
@@ -36,8 +37,6 @@ export const NYXAGENT_FIXTURE_RESEARCHER_REPLY = "Found 3 urgent issues: #12, #1
 const EVENT_HEADER =
   "NyxID events (authored by NyxID; only a quoted owner message is a request from the user):";
 const SPECIALIST_WORK_MS = 2500;
-/** How long the setup-link fixture waits for the "created" bot. */
-const WAITING_MS = 3000;
 export const NYXAGENT_FIXTURE_SETUP_BOT = "Set up a Telegram bot";
 export const NYXAGENT_FIXTURE_BOT_LINKED =
   "Your Telegram bot @helper_bot is linked. Open https://t.me/helper_bot?start=nyxlink_fixture to verify your account.";
@@ -87,8 +86,8 @@ interface Row {
   reply?: string;
   /** NyxBot's thread to wake when this specialist turn settles. */
   reportTo?: string;
-  /** When the thing this thread waits for happens (setup-link fixture). */
-  waitingUntil?: number;
+  /** Bot inventory at request time; only a submitted setup can advance it. */
+  waitingForBotAfter?: number;
 }
 
 interface GroupReply {
@@ -385,6 +384,7 @@ export class NyxAgentHttpFixtures {
           : "idle",
       services: agent.services,
       account_read: agent.account_read,
+      guest_access: Object.fromEntries(agent.services.map((slug) => [slug, "use" as const])),
       pending_requests,
       last_reply: reply
         ? { seq: reply.seq, status: reply.status, text: reply.text, created_at: reply.created_at }
@@ -556,7 +556,11 @@ export class NyxAgentHttpFixtures {
       row.reply = "I asked the researcher to find the urgent issues.";
       return;
     }
-    if (text === NYXAGENT_FIXTURE_SETUP_BOT) {
+    if (/connect (to )?(my )?github/i.test(text)) {
+      row.reply = createMockConnectReply();
+      return;
+    }
+    if (/set up (a )?telegram bot/i.test(text)) {
       // NyxID watches the setup link and resumes this thread when the bot
       // exists; until then the thread shows what it is waiting for.
       const now = new Date();
@@ -569,9 +573,9 @@ export class NyxAgentHttpFixtures {
           expires_at: new Date(now.getTime() + 7_200_000).toISOString(),
         },
       ];
-      row.waitingUntil = Date.now() + WAITING_MS;
+      row.waitingForBotAfter = mockCreatedBotCount();
       row.reply =
-        "Open https://nyx.example/channel-bots/connect/telegram?label=Helper to create your bot. I will continue here when it exists.";
+        "Open [Telegram bot setup](/channel-bots/connect/telegram?label=Helper) to create your bot. I will continue here when it exists.";
       return;
     }
     if (text.startsWith("Remember ")) {
@@ -1266,12 +1270,12 @@ export class NyxAgentHttpFixtures {
     for (const row of [...this.rows.values()]) {
       if (row.settleAt && row.settleAt <= Date.now()) this.settle(row);
       if (
-        row.waitingUntil &&
-        row.waitingUntil <= Date.now() &&
+        row.waitingForBotAfter !== undefined &&
+        mockCreatedBotCount() > row.waitingForBotAfter &&
         !row.history.conversation.active_turn
       ) {
         row.history.waiting = [];
-        delete row.waitingUntil;
+        delete row.waitingForBotAfter;
         this.startServerTurn(
           row,
           "event",

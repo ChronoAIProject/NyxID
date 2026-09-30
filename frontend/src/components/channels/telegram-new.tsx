@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Check, ExternalLink, Loader2 } from "lucide-react";
 import { useTelegramNew } from "@/hooks/use-telegram-new";
+import { useChannelConnectLinkContext } from "@/hooks/use-channel-connect-link";
 import { useAuthStore } from "@/stores/auth-store";
 import { Button } from "@/components/ui/button";
 import { ErrorBanner } from "@/components/shared/error-banner";
@@ -24,6 +25,7 @@ export function TelegramNew({
 }) {
   const { configuration, begin, launch, cancel, connect } =
     useTelegramNew(requestId);
+  const link = useChannelConnectLinkContext();
   const actor = useAuthStore((state) => state.user?.id);
   const active = useRef(true);
   const currentActor = useRef(actor);
@@ -170,6 +172,11 @@ export function TelegramNew({
   return (
     <div className={fullPage ? "space-y-4 break-words" : "space-y-4 break-words rounded-xl border border-border bg-card p-4 sm:p-5"}>
       {error && <ErrorBanner message={error.message} />}
+      {link && begin.error && (
+        <a href="/channel-bots?connect=telegram-new" target="_blank" rel="noopener noreferrer" className="text-sm underline underline-offset-4">
+          Open existing Telegram setup
+        </a>
+      )}
       {(connecting && request?.auto_connect) || connected ? (
         <div className="space-y-3">
           <p role="status" className="flex items-center gap-2 text-sm">

@@ -21,6 +21,12 @@ pub struct ParsedEndpoint {
     pub request_body_required: bool,
     pub response: OperationResponseContract,
     pub risk: Option<EndpointRisk>,
+    /// `x-aevatar-tool.destructive`: the operation deletes or replaces data.
+    pub destructive: bool,
+    /// NyxID's `x-nyxid-changes-existing`: whether the operation changes or
+    /// removes what exists where its method says otherwise; `None` leaves it
+    /// to the method.
+    pub changes_existing: Option<bool>,
     pub supports_idempotency_key: bool,
 }
 
@@ -152,6 +158,14 @@ fn parse_endpoints_from_spec(
                         EndpointRisk::Write
                     }
                 });
+            let destructive = operation
+                .get("x-aevatar-tool")
+                .and_then(|value| value.get("destructive"))
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            let changes_existing = operation
+                .get("x-nyxid-changes-existing")
+                .and_then(|value| value.as_bool());
             let supports_idempotency_key = operation
                 .get("x-nyxid-idempotency-key")
                 .and_then(|value| value.as_bool())
@@ -193,6 +207,8 @@ fn parse_endpoints_from_spec(
                 request_body_required: request_body.required,
                 response,
                 risk,
+                destructive,
+                changes_existing,
                 supports_idempotency_key,
             });
         }
@@ -343,7 +359,7 @@ fn generate_name(method: &str, path: &str) -> String {
 }
 
 /// Sanitize a string into a valid MCP tool name: ^[a-z][a-z0-9_]*$
-fn sanitize_name(raw: &str) -> String {
+pub(crate) fn sanitize_name(raw: &str) -> String {
     let cleaned: String = raw
         .chars()
         .map(|c| {
@@ -2611,6 +2627,49 @@ mod tests {
         let endpoints = parse_openapi_spec_value(&spec).unwrap();
         assert_eq!(endpoints[0].risk, Some(EndpointRisk::Write));
         assert!(endpoints[0].supports_idempotency_key);
+    }
+
+    #[test]
+    fn operations_carry_their_destructive_marker() {
+        let spec = serde_json::json!({
+            "openapi": "3.1.0",
+            "paths": {
+                "/items/{id}": {
+                    "patch": {
+                        "operationId": "updateItem",
+                        "x-aevatar-tool": { "readOnly": false, "destructive": true },
+                        "responses": { "200": {} }
+                    },
+                    "get": { "operationId": "getItem", "responses": { "200": {} } }
+                },
+                "/items/{id}/edit": {
+                    "post": {
+                        "operationId": "editItem",
+                        "x-nyxid-changes-existing": true,
+                        "responses": { "200": {} }
+                    }
+                }
+            }
+        });
+        let endpoints = parse_openapi_spec_value(&spec).unwrap();
+        let destructive = |name: &str| {
+            endpoints
+                .iter()
+                .find(|endpoint| endpoint.name == name)
+                .unwrap()
+                .destructive
+        };
+        let changes = |name: &str| {
+            endpoints
+                .iter()
+                .find(|endpoint| endpoint.name == name)
+                .unwrap()
+                .changes_existing
+        };
+        assert!(destructive("updateitem"));
+        assert!(!destructive("getitem"));
+        assert_eq!(changes("edititem"), Some(true));
+        assert_eq!(changes("getitem"), None);
     }
 
     // ---- extract_swagger2_consumes ----

@@ -14,9 +14,10 @@ const USER_SERVICES_KEY = ["user-services"] as const;
  * group personal items vs. org-inherited ones and disable viewer-role items
  * (`credential_source.allowed === false`).
  */
-export function useUserServices() {
+export function useUserServices(enabled = true) {
   return useQuery({
     queryKey: USER_SERVICES_KEY,
+    enabled,
     queryFn: async (): Promise<readonly UserServiceResponse[]> => {
       const res = await api.get<UserServiceListResponse>("/user-services");
       return res.services;

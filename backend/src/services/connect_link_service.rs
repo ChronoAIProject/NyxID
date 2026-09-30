@@ -1378,7 +1378,7 @@ fn normalize_optional(
     Ok(Some(value.to_string()))
 }
 
-async fn resolve_requesting_app(
+pub(crate) async fn resolve_requesting_app(
     db: &mongodb::Database,
     oauth_client_id: Option<&str>,
     callback_url: Option<&str>,

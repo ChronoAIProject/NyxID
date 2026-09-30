@@ -24,6 +24,13 @@ import {
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   Sheet,
   SheetContent,
   SheetDescription,
@@ -60,6 +67,7 @@ import {
   type AssistantAgent,
   type AssistantAgentGrants,
   type AssistantAgentMemoryNote,
+  type AssistantGuestAccess,
   type AssistantAgentProfile,
 } from "@/schemas/assistant-nyxagent";
 import { useAuthStore } from "@/stores/auth-store";
@@ -152,7 +160,7 @@ export function AgentDetailsSheet({
               />
               {agent.kind === "specialist" ? (
                 <GrantsForm
-                  key={`${agent.id}:${agent.services.join(",")}:${String(agent.account_read)}`}
+                  key={`${agent.id}:${agent.services.join(",")}:${String(agent.account_read)}:${JSON.stringify(agent.guest_access)}`}
                   agent={agent}
                 />
               ) : (
@@ -333,14 +341,31 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
   const readOnly = agent.status === "destroyed";
   const form = useAppForm<AssistantAgentGrants>({
     resolver: zodResolver(assistantAgentGrantsSchema),
-    defaultValues: { services: agent.services, account_read: agent.account_read },
+    defaultValues: {
+      services: agent.services,
+      account_read: agent.account_read,
+      guest_access: agent.guest_access,
+    },
   });
   const [error, setError] = useState<string>();
+  const services = form.watch("services");
 
   async function save(values: AssistantAgentGrants) {
     setError(undefined);
+    // Send only the levels changed here, for services being granted: the
+    // server keeps the others, and drops levels of services taken away.
+    const changed = Object.fromEntries(
+      values.services
+        .map((slug) => [slug, values.guest_access[slug] ?? "use"] as const)
+        .filter(([slug, level]) => level !== (agent.guest_access[slug] ?? "use")),
+    );
     try {
-      await grants.mutateAsync({ id: agent.id, ...values });
+      await grants.mutateAsync({
+        id: agent.id,
+        services: values.services,
+        account_read: values.account_read,
+        ...(Object.keys(changed).length ? { guest_access: changed } : {}),
+      });
       form.reset(values);
     } catch (cause) {
       setError(errorMessage(cause, "Could not save the grants. Try again."));
@@ -367,6 +392,22 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
               </FormItem>
             )}
           />
+          {services.length ? (
+            <FormField
+              control={form.control}
+              name="guest_access"
+              render={({ field }) => (
+                <FormItem>
+                  <GuestAccessList
+                    services={services}
+                    value={field.value}
+                    onChange={field.onChange}
+                    disabled={readOnly}
+                  />
+                </FormItem>
+              )}
+            />
+          ) : null}
           <FormField
             control={form.control}
             name="account_read"
@@ -411,6 +452,78 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
         </form>
       </Form>
     </Section>
+  );
+}
+
+const GUEST_ACCESS_LABEL: Record<AssistantGuestAccess, string> = {
+  read: "Look things up only",
+  use: "Use, but not change or delete",
+  all: "Everything this agent can do",
+};
+
+/**
+ * What people other than you may do with each granted service when they talk
+ * to this agent in a group or shared chat. Anything behind your approval
+ * stays yours at every level.
+ */
+function GuestAccessList({
+  services,
+  value,
+  onChange,
+  disabled,
+}: {
+  readonly services: readonly string[];
+  readonly value: Record<string, AssistantGuestAccess>;
+  readonly onChange: (value: Record<string, AssistantGuestAccess>) => void;
+  readonly disabled?: boolean;
+}) {
+  return (
+    <div className="space-y-2 rounded-lg border border-border p-4">
+      <div className="space-y-1">
+        <p className="text-[12px] font-medium text-foreground">
+          What others in its chats may do
+        </p>
+        <p className="text-[12px] text-muted-foreground">
+          For people other than you in the agent&apos;s group and shared chats. &ldquo;Use&rdquo;
+          lets them look things up, create and act (send a message, turn a light on), but not
+          change or delete what already exists. Anything behind your approval stays yours. You
+          can also ask NyxBot to change this.
+        </p>
+      </div>
+      <ul aria-label="Guest access" className="space-y-1.5">
+        {services.map((slug) => {
+          const id = `guest-access-${slug}`;
+          return (
+            <li key={slug} className="flex items-center justify-between gap-3">
+              <label
+                htmlFor={id}
+                className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground"
+              >
+                {slug}
+              </label>
+              <Select
+                value={value[slug] ?? "use"}
+                disabled={disabled}
+                onValueChange={(level) =>
+                  onChange({ ...value, [slug]: level as AssistantGuestAccess })
+                }
+              >
+                <SelectTrigger id={id} className="w-56">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {(Object.keys(GUEST_ACCESS_LABEL) as AssistantGuestAccess[]).map((level) => (
+                    <SelectItem key={level} value={level}>
+                      {GUEST_ACCESS_LABEL[level]}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
   );
 }
 

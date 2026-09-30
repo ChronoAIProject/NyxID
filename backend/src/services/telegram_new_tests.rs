@@ -23,6 +23,127 @@ use crate::test_utils::{connect_transaction_test_database, test_app_state, test_
 const MANAGER: &str = "100:manager-test-secret";
 const CHILD: &str = "900:child-test-secret";
 
+#[tokio::test]
+async fn channel_link_telegram_worker_reserves_callback_without_browser_polling() {
+    use super::channel_connect_link_service as links;
+    use crate::models::channel_connect_link::{
+        COLLECTION_NAME as LINKS, ChannelConnectLink, LinkStatus,
+    };
+    let (state, actor, server) = fixture().await;
+    let created = links::create(
+        &state.db,
+        &state.encryption_keys,
+        links::CreateInput {
+            owner: actor.clone(),
+            actor: actor.clone(),
+            platform: "telegram-new".into(),
+            label: "Support".into(),
+            requested_by: None,
+            app_id: None,
+            callback_url: None,
+            webhook_url: None,
+            expires_in: None,
+        },
+    )
+    .await
+    .unwrap();
+    state
+        .db
+        .collection::<bson::Document>(LINKS)
+        .update_one(
+            doc! {"_id": &created.link.id},
+            doc! {"$set": {"receiver": {"kind": "app", "app_id": "callback-app"}}},
+        )
+        .await
+        .unwrap();
+    let claim = links::claim(&state.db, &actor, &created.token, "telegram")
+        .await
+        .unwrap();
+    let base = server.uri();
+    let service = service(&state, &base);
+    let (other, _) = service
+        .begin(&actor, &actor, "Other setup", true)
+        .await
+        .unwrap();
+    assert!(
+        service
+            .begin_linked(&actor, &actor, "Support", &claim)
+            .await
+            .is_err()
+    );
+    assert!(
+        links::get(&state.db, &created.link.id)
+            .await
+            .unwrap()
+            .telegram_request_id
+            .is_none()
+    );
+    service.cancel(&actor, &other.id).await.unwrap();
+    let (request, launch) = service
+        .begin_linked(&actor, &actor, "Support", &claim)
+        .await
+        .unwrap();
+    links::release(&state.db, &claim, false).await.unwrap();
+    let challenge = reqwest::Url::parse(&launch)
+        .unwrap()
+        .query_pairs()
+        .find(|(key, _)| key == "start")
+        .unwrap()
+        .1
+        .to_string();
+    let headers = headers(&state).await;
+    webhook(
+        &service,
+        &headers,
+        message(json!({"text": format!("/start {challenge}")})),
+    )
+    .await;
+    webhook(&service, &headers, json!({"update_id": 2, "managed_bot": {"user": {"id": 700, "is_bot": false}, "bot": bot()}})).await;
+    let mut update = message(json!({"managed_bot_created": {"bot": bot()}}));
+    update["update_id"] = json!(3);
+    webhook(&service, &headers, update).await;
+    provider_connection(&server, &request.id, 200).await;
+    service.complete_pending_creations().await.unwrap();
+    let saved = state
+        .db
+        .collection::<ChannelConnectLink>(LINKS)
+        .find_one(doc! {"_id": &created.link.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.status, LinkStatus::Completed);
+    assert_eq!(saved.bot_id.as_deref(), Some(request.id.as_str()));
+    assert_eq!(saved.delivery_status.as_deref(), Some("pending"));
+    assert_eq!(
+        saved
+            .event_data
+            .as_ref()
+            .unwrap()
+            .get_str("bot_status")
+            .unwrap(),
+        "active"
+    );
+    let event_id = saved.event_id.unwrap();
+    service.complete_pending_creations().await.unwrap();
+    assert_eq!(
+        links::get(&state.db, &created.link.id)
+            .await
+            .unwrap()
+            .event_id
+            .as_deref(),
+        Some(event_id.as_str())
+    );
+    assert_eq!(
+        state
+            .db
+            .collection::<ChannelBot>(BOTS)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        1
+    );
+}
+
 async fn fixture() -> (crate::AppState, String, MockServer) {
     let db = connect_transaction_test_database("telegram_new").await;
     telegram_new_service::ensure_indexes(&db).await.unwrap();
