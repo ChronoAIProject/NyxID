@@ -4502,7 +4502,8 @@ async fn the_telegram_account_that_created_a_bot_through_nyxid_is_its_owner() {
     let requests = state.db.collection::<bson::Document>(REQUESTS);
     requests
         .insert_one(doc! {"_id": &row.channel_bot_id, "actor_user_id": OWNER,
-        "owner_user_id": OWNER, "status": "connected", "telegram_user_id": 777_i64})
+        "owner_user_id": OWNER, "status": "provisioning", "telegram_user_id": 777_i64,
+        "start_update_id": 1_i64})
         .await
         .unwrap();
     // Linking the bot already knows its owner.
@@ -4521,43 +4522,58 @@ async fn the_telegram_account_that_created_a_bot_through_nyxid_is_its_owner() {
     };
     // A stranger's Start links nothing.
     assert!(
-        link_owner(&state, &row, &sender("888"), "/start")
+        link_owner(&state, &row, &sender("888"), "/start", true)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // Only in a private chat: a group message never links anyone.
+    assert!(
+        link_owner(&state, &row, &sender("777"), "hi all", false)
             .await
             .unwrap()
             .is_none()
     );
     // The creator's first message links them and greets them.
-    let linked = link_owner(&state, &row, &sender("777"), "/start")
+    let linked = link_owner(&state, &row, &sender("777"), "/start", true)
         .await
         .unwrap();
     assert!(matches!(&linked, Some(Inbound::Reply(text)) if text.starts_with("Linked.")));
     let row = load_channel(&state, OWNER, &row.id).await.unwrap();
     assert_eq!(row.owner_sender_ids, vec!["777".to_owned()]);
     // Their next Start is a greeting, not a turn; anything else is a turn.
-    let hi = link_owner(&state, &row, &sender("777"), "/start")
+    let hi = link_owner(&state, &row, &sender("777"), "/start", true)
         .await
         .unwrap();
     assert!(matches!(&hi, Some(Inbound::Reply(text)) if text.starts_with("Hi, I'm NyxBot")));
     assert!(
-        link_owner(&state, &row, &sender("777"), "hello")
+        link_owner(&state, &row, &sender("777"), "hello", true)
             .await
             .unwrap()
             .is_none()
     );
-    // A creation someone else started never makes its creator this owner's.
-    let (other, _) = channel(&state, "gateway").await;
-    requests
-        .insert_one(
-            doc! {"_id": &other.channel_bot_id, "actor_user_id": "someone-else",
-            "owner_user_id": OWNER, "status": "connected", "telegram_user_id": 999_i64},
-        )
-        .await
-        .unwrap();
-    assert!(
-        link_owner(&state, &other, &sender("999"), "/start")
-            .await
-            .unwrap()
-            .is_none()
-    );
+    // A creation someone else started never makes its creator this owner's,
+    // and neither does a bot claimed with a code (the code is transferable:
+    // its creator is someone else, never bound by the owner's own setup).
+    for (actor, bound) in [("someone-else", true), (OWNER, false)] {
+        let (other, _) = channel(&state, "gateway").await;
+        let mut request = doc! {"_id": &other.channel_bot_id, "actor_user_id": actor,
+        "owner_user_id": OWNER, "status": "connected", "telegram_user_id": 999_i64};
+        if bound {
+            request.insert("start_update_id", 1_i64);
+        }
+        requests.insert_one(request).await.unwrap();
+        assert!(
+            link_owner(&state, &other, &sender("999"), "/start", true)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            known_owner_senders(&state, OWNER, "telegram", &other.channel_bot_id)
+                .await
+                .is_empty()
+        );
+    }
     server.abort();
 }

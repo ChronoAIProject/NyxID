@@ -353,9 +353,11 @@ settings, or relinked later); each chat becomes a thread of the linked agent
 - **Right user.** The owner is verified through NyxID's Telegram notification
   link, a one-time link code (a `t.me/<bot>?start=<code>` link for Telegram), or,
   for a Telegram bot created inside Telegram through NyxID, as the account that
-  created it (`telegram_bot_requests`: connected, started by this owner; linked on
-  its first message and greeted, and a verified owner's bare `/start` is
-  greeted without a turn);
+  created it (`telegram_bot_requests` provisioning or connected, started by this
+  owner and bound by their own setup challenge, `start_update_id`; a bot claimed
+  with a transferable code never qualifies). It is linked when the bot is linked,
+  or on its first private message (greeted); a verified owner's bare `/start` in
+  a private chat is greeted without a turn;
   only they act with the agent's full authority. Everyone else is a guest
   (§12a): in private chats they get a short refusal unless the owner opened the
   bot's private chats to everyone; in groups they may talk to the agent unless

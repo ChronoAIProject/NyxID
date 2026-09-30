@@ -482,16 +482,20 @@ async fn known_owner_senders(
 }
 
 /// The Telegram account that created this bot through NyxID's in-Telegram
-/// bot creation, when `owner` started that creation: Telegram confirmed the
-/// account created the bot, and it confirmed it was setting it up for this
-/// NyxID account. It is the owner's own account, as surely as one that opened
-/// the owner-verification link.
+/// bot creation, when `owner` started that creation and bound that account
+/// with their own setup challenge (`start_update_id`, set only by the
+/// challenge's `/start`): Telegram confirmed the account created the bot, for
+/// this NyxID account. It is the owner's own account, as surely as one that
+/// opened the owner-verification link. A bot claimed with a code is not: the
+/// code is transferable, and its creator is someone else.
 async fn bot_creator(state: &AppState, owner: &str, bot_id: &str) -> Option<String> {
     use crate::models::telegram_bot_request::COLLECTION_NAME as REQUESTS;
     state
         .db
         .collection::<bson::Document>(REQUESTS)
-        .find_one(doc! {"_id": bot_id, "actor_user_id": owner, "status": "connected"})
+        .find_one(doc! {"_id": bot_id, "actor_user_id": owner,
+        "status": {"$in": ["provisioning", "connected"]},
+        "start_update_id": {"$ne": null}})
         .projection(doc! {"telegram_user_id": 1})
         .await
         .ok()
@@ -776,6 +780,18 @@ pub async fn connect(
                 }),
             )
             .await;
+            if let Some(creator) = bot_creator(state, owner, &bot.id).await
+                && row.owner_sender_ids.contains(&creator)
+            {
+                audit(
+                    state,
+                    owner,
+                    "nyxbot_channel_owner_linked",
+                    json!({"channel_agent_id": &id, "platform": &platform,
+                        "method": "bot_creator"}),
+                )
+                .await;
+            }
             // A rebuilt connection keeps its chats, their settings and threads.
             if let Some(previous) = rebuilt_from.as_ref() {
                 let reaches = |row: &NyxbotChannel| row.agent_id.clone();
@@ -2133,12 +2149,14 @@ async fn channel_bot_watch(state: &AppState, watch: &NyxbotWatch) -> AppResult<(
         // Created in Telegram through NyxID: the account that created it is
         // already the owner's, so nothing is left to verify.
         Ok((agent, value)) if value["channel_agent"]["owner_linked"] == true => format!(
-            "The {} channel bot {} the user just created is now linked to {}, and the account \
-            that created it is already verified as theirs. Tell them to open the bot and press \
-            Start (or send a message): it answers there. No verification step is needed.",
+            "The {} channel bot {} the user just created is now linked to {}, and their \
+            account there is already verified. Tell them to open the bot and press Start (or \
+            send a message): it answers there. Only if they chat from a different account, \
+            give them this verification step: {}",
             identifier(&bot.platform),
             identifier(&bot.label),
             identifier(&agent.name),
+            value["link"]
         ),
         Ok((agent, value)) => format!(
             "The {} channel bot {} the user just created is now linked to {}. Give the user \
@@ -2419,7 +2437,8 @@ async fn inbound_message(
     text: &str,
     addressed: Option<bool>,
 ) -> AppResult<Inbound> {
-    if let Some(linked) = link_owner(state, row, sender, text).await? {
+    let private = chat.kind.as_deref() == Some("private");
+    if let Some(linked) = link_owner(state, row, sender, text, private).await? {
         return Ok(linked);
     }
     let chat = &chats::note_owner_presence(state, row, chat, sender.id).await?;
@@ -2440,14 +2459,15 @@ async fn inbound_message(
 }
 
 /// Link the owner's chat-app account: a sender presenting the owner's
-/// one-time code, or the Telegram account that created the bot through NyxID
-/// for the owner (no code needed). A verified owner's bare `/start` is
-/// greeted instead of starting a turn.
+/// one-time code, or, in a private chat, the Telegram account that created
+/// the bot through NyxID for the owner (no code needed). A verified owner's
+/// bare `/start` in a private chat is greeted instead of starting a turn.
 async fn link_owner(
     state: &AppState,
     row: &NyxbotChannel,
     sender: &Sender<'_>,
     text: &str,
+    private: bool,
 ) -> AppResult<Option<Inbound>> {
     let known = row.owner_sender_ids.iter().any(|id| id == sender.id);
     if let (Some(hash), Some(expires_at)) =
@@ -2473,6 +2493,7 @@ async fn link_owner(
         return Ok(Some(owner_linked(state, row, "link_code").await));
     }
     if !known
+        && private
         && !sender.id.is_empty()
         && canonical_platform(&row.platform) == "telegram"
         && bot_creator(state, &row.user_id, &row.channel_bot_id)
@@ -2491,7 +2512,7 @@ async fn link_owner(
             .await?;
         return Ok(Some(owner_linked(state, row, "bot_creator").await));
     }
-    if known && text.trim() == "/start" {
+    if known && private && text.trim() == "/start" {
         return Ok(Some(Inbound::Reply(format!(
             "Hi, I'm {}, your NyxID agent. Send me anything to get started.",
             channel_agent_name(state, row).await
