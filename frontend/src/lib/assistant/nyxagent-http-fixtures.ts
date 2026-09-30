@@ -385,6 +385,7 @@ export class NyxAgentHttpFixtures {
           : "idle",
       services: agent.services,
       account_read: agent.account_read,
+      guest_access: Object.fromEntries(agent.services.map((slug) => [slug, "use" as const])),
       pending_requests,
       last_reply: reply
         ? { seq: reply.seq, status: reply.status, text: reply.text, created_at: reply.created_at }

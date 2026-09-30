@@ -17,6 +17,7 @@ function agent(fields: Partial<AssistantAgent>): AssistantAgent {
     status: "idle",
     services: [],
     account_read: false,
+    guest_access: {},
     pending_requests: [],
     last_reply: null,
     home_conversation_id: null,
