@@ -4048,6 +4048,8 @@ pub async fn relay_callback(
         if let Err(error) = result {
             tracing::debug!(%error, "NyxBot direct channel message not answered");
         }
+        #[cfg(test)]
+        tests::relay_callback_completed(&row.id, &message_id);
     });
     StatusCode::ACCEPTED.into_response()
 }
