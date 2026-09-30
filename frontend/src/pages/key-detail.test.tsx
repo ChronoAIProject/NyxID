@@ -262,6 +262,24 @@ describe("KeyDetailPage — Google permissions", () => {
     expect(within(screen.getByText("Gmail send").parentElement!).getByText("Unknown")).toBeVisible();
     expect(screen.queryByText("Reported OAuth scopes")).not.toBeInTheDocument();
   });
+
+  it.each([
+    ["api-google-calendar", "Calendar", "https://www.googleapis.com/auth/calendar.readonly", "Read only"],
+    ["api-google-drive", "Drive, Docs, Sheets, Slides", "https://www.googleapis.com/auth/drive.file", "App files"],
+    ["api-google-docs", "Docs", "https://www.googleapis.com/auth/drive.file", "App files"],
+    ["api-google-sheets", "Sheets", "https://www.googleapis.com/auth/drive.file", "App files"],
+    ["api-google-slides", "Slides", "https://www.googleapis.com/auth/drive.file", "App files"],
+  ])("shows the relevant grant for %s", (slug, label, scope, access) => {
+    hooks.key.data = makeKey({
+      credential_type: "oauth2",
+      catalog_service_slug: slug,
+      granted_scopes: [scope],
+    });
+    render(<KeyDetailPage />);
+
+    expect(within(screen.getByText(label).parentElement!).getByText(access)).toBeVisible();
+    expect(screen.queryByText("Gmail send")).not.toBeInTheDocument();
+  });
 });
 
 describe("KeyDetailPage — load states", () => {

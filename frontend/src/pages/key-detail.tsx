@@ -167,6 +167,15 @@ function LarkPermissionSetupCard({
 }
 
 const GOOGLE_SCOPE_PREFIX = "https://www.googleapis.com/auth/";
+const GOOGLE_WORKSPACE_SERVICE_SLUGS = new Set([
+  "api-google-workspace",
+  "api-google-calendar",
+  "api-google-drive",
+  "api-google-gmail",
+  "api-google-docs",
+  "api-google-sheets",
+  "api-google-slides",
+]);
 
 function GooglePermissionsSection({
   product,
@@ -175,7 +184,7 @@ function GooglePermissionsSection({
   onRefresh,
   refreshing,
 }: {
-  readonly product: "api-google-workspace" | "api-google-gmail";
+  readonly product: string;
   readonly grantedScopes?: readonly string[] | null;
   readonly lastAuthorizedAt?: string | null;
   readonly onRefresh: () => void;
@@ -203,6 +212,12 @@ function GooglePermissionsSection({
       : has("calendar.readonly")
         ? "Read only"
         : "Not granted";
+  const driveLabels: Record<string, string> = {
+    "api-google-drive": "Drive, Docs, Sheets, Slides",
+    "api-google-docs": "Docs",
+    "api-google-sheets": "Sheets",
+    "api-google-slides": "Slides",
+  };
   const rows = product === "api-google-workspace"
     ? [
         ["Drive, Docs, Sheets, Slides", driveAccess],
@@ -210,10 +225,12 @@ function GooglePermissionsSection({
         ["Gmail read", access("gmail.readonly")],
         ["Gmail send", access("gmail.send")],
       ]
-    : [
+    : product === "api-google-gmail" ? [
         ["Gmail read", access("gmail.readonly")],
         ["Gmail send", access("gmail.send")],
-      ];
+      ] : product === "api-google-calendar" ? [
+        ["Calendar", calendarAccess],
+      ] : [[driveLabels[product] ?? "Drive", driveAccess]];
 
   return (
     <Card>
@@ -2865,10 +2882,9 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
               />
             </div>
 
-            {(keyInfo.catalog_service_slug === "api-google-workspace" ||
-              keyInfo.catalog_service_slug === "api-google-gmail") && (
+            {GOOGLE_WORKSPACE_SERVICE_SLUGS.has(keyInfo.catalog_service_slug ?? "") && (
               <GooglePermissionsSection
-                product={keyInfo.catalog_service_slug}
+                product={keyInfo.catalog_service_slug ?? ""}
                 grantedScopes={keyInfo.granted_scopes}
                 lastAuthorizedAt={keyInfo.last_authorized_at}
                 onRefresh={() => void refetch()}
