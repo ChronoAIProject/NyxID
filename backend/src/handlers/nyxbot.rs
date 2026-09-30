@@ -1085,6 +1085,28 @@ pub(crate) static TEST_BOT_USER_IDS: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<String, String>>,
 > = std::sync::LazyLock::new(Default::default);
 
+/// The bot's own user ID on its platform, cached on the channel after the
+/// first lookup (Lark / Feishu: its `open_id`), so group messages that
+/// mention someone else are not taken as addressed to the bot.
+async fn own_user_id(state: &AppState, row: &NyxbotChannel, bot: &ChannelBot) -> Option<String> {
+    if !matches!(canonical_platform(&bot.platform), "lark" | "feishu") {
+        return None;
+    }
+    if let Some(known) = row.gateway_bot_id.clone() {
+        return Some(known);
+    }
+    let found = bot_user_id(state, bot).await?;
+    let _ = state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .update_one(
+            doc! {"_id": &row.id},
+            doc! {"$set": {"gateway_bot_id": &found}},
+        )
+        .await;
+    Some(found)
+}
+
 /// The bot's own user ID on its platform (best effort).
 async fn bot_user_id(state: &AppState, bot: &ChannelBot) -> Option<String> {
     #[cfg(test)]
@@ -3958,7 +3980,8 @@ pub async fn relay_callback(
                 if chats::replies_to_bot(&state, &bot, &chat_id, reply_to.as_deref()).await? {
                     Some(true)
                 } else {
-                    chats::raw_addressed(&bot, &raw)
+                    let bot_id = own_user_id(&state, &row, &bot).await;
+                    chats::raw_addressed(&bot, &raw, bot_id.as_deref())
                 }
             };
             let sender = Sender {

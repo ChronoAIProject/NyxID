@@ -458,7 +458,13 @@ fn mentions_username(text: &str, username: &str) -> bool {
 /// Whether a direct message in a group mentions the bot or replies to it,
 /// read from the platform's payload. `None` when the payload does not say:
 /// then only the owner is answered (as before chats had settings).
-pub(super) fn raw_addressed(bot: &ChannelBot, raw: &Value) -> Option<bool> {
+/// `bot_user_id`: the bot's own user ID on its platform when known (Lark:
+/// its `open_id`), so a mention of someone else is not a mention of the bot.
+pub(super) fn raw_addressed(
+    bot: &ChannelBot,
+    raw: &Value,
+    bot_user_id: Option<&str>,
+) -> Option<bool> {
     match canonical_platform(&bot.platform) {
         "telegram" => {
             let message = ["message", "edited_message", "channel_post"]
@@ -485,13 +491,20 @@ pub(super) fn raw_addressed(bot: &ChannelBot, raw: &Value) -> Option<bool> {
                     }),
             )
         }
-        // Lark delivers group messages that do not @mention the bot only to
-        // apps granted every group message; any mention counts.
-        "lark" | "feishu" => Some(
-            raw["event"]["message"]["mentions"]
-                .as_array()
-                .is_some_and(|mentions| !mentions.is_empty()),
-        ),
+        // Only a mention of the bot itself counts: apps granted every group
+        // message also get mentions of other people. Without the bot's own
+        // ID (its lookup failed), any mention counts, as Lark then delivers
+        // only messages that mention the bot to most apps.
+        "lark" | "feishu" => Some(raw["event"]["message"]["mentions"].as_array().is_some_and(
+            |mentions| {
+                match bot_user_id {
+                    Some(bot_id) => mentions
+                        .iter()
+                        .any(|mention| mention["id"]["open_id"].as_str() == Some(bot_id)),
+                    None => !mentions.is_empty(),
+                }
+            },
+        )),
         // Slack says so with its own event type; other channel messages
         // cannot be told apart here.
         "slack" => (raw["event"]["type"] == "app_mention").then_some(true),

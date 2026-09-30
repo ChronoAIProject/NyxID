@@ -1734,9 +1734,6 @@ async fn dispatch_tools_call(
         );
     }
 
-    if let Some(refused) = guest_endpoint_refusal(auth, service, endpoint, request.id.clone()) {
-        return refused;
-    }
     let prepared = match mcp_service::prepare_proxy_tool_call(service, endpoint, &arguments) {
         Ok(prepared) => prepared,
         Err(e) => {
@@ -1869,10 +1866,8 @@ async fn authorize_mcp_operation(
     operation: &operation_descriptor::OperationDescriptor,
     request_id: Option<serde_json::Value>,
 ) -> Result<(), Response> {
-    // A guest turn only reads with the chat agent's services.
-    if guest_turn(auth)
-        && operation.verb != crate::models::service_approval_config::ApprovalVerb::Read
-    {
+    // A guest turn uses the chat agent's services, but never deletes.
+    if guest_turn(auth) && !guest_may_run(operation) {
         return Err(guest_refused(request_id));
     }
     let approval_owner_user_id = auth.effective_approval_owner_user_id();
@@ -2080,16 +2075,36 @@ fn guest_tool_refusal(
     (!guest_tool_allowed(tool_name)).then(|| guest_refused(request_id))
 }
 
-/// The generic proxy tool lets the caller choose any method and path, and a
-/// GET is not always harmless; guest turns use curated operations only.
-fn guest_endpoint_refusal(
-    auth: &McpAuthContext,
-    service: &mcp_service::McpToolService,
-    endpoint: &mcp_service::McpToolEndpoint,
-    request_id: Option<serde_json::Value>,
-) -> Option<Response> {
-    (guest_turn(auth) && mcp_service::is_generic_proxy_dispatch(service, endpoint))
-        .then(|| guest_refused(request_id))
+/// What a guest (someone in the chat other than the owner) may run with the
+/// chat agent's services: anything but deleting. The agent's key already
+/// holds only the services it was granted. An operation that deletes (HTTP
+/// DELETE, or a path named for deleting, such as Telegram's `deleteMessage`)
+/// and SSH (a shell can delete anything) stay the owner's. The generic proxy
+/// tool is checked the same way, on the method and path the call chose.
+fn guest_may_run(operation: &operation_descriptor::OperationDescriptor) -> bool {
+    use crate::models::service_approval_config::ApprovalVerb;
+    if operation.protocol == operation_descriptor::Protocol::Ssh
+        || operation.verb == ApprovalVerb::Destructive
+    {
+        return false;
+    }
+    let path = operation
+        .resource
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    ![
+        "delete",
+        "remove",
+        "destroy",
+        "purge",
+        "erase",
+        "wipe",
+        "revoke",
+        "uninstall",
+    ]
+    .iter()
+    .any(|word| path.contains(word))
 }
 
 /// A channel chat member who is not the owner asked for this turn.
@@ -2288,9 +2303,6 @@ async fn handle_meta_call_tool(
         return response;
     }
 
-    if let Some(refused) = guest_endpoint_refusal(auth, service, endpoint, request_id.clone()) {
-        return refused;
-    }
     let prepared = match mcp_service::prepare_proxy_tool_call(service, endpoint, &inner_args) {
         Ok(prepared) => prepared,
         Err(e) => {

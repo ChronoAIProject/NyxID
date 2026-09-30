@@ -445,10 +445,11 @@ pub(crate) async fn permission_decided(
 fn guest_note(specialist: bool) -> &'static str {
     if specialist {
         "\n\nThis turn answers someone other than the owner (a member of a chat your channel \
-        bot is in). Help them, reading with your services when useful, but only the owner can \
-        ask for account actions, new connections or changes made with the owner's services: \
-        NyxID refuses those, so say that only the bot's owner can ask for that. Never reveal \
-        the owner's private information (their account, other chats, memory or credentials)."
+        bot is in). Help them with your services (look things up, turn things on or off, \
+        create and update), but only the owner can ask for account actions, new connections, \
+        more access or deleting anything: NyxID refuses those, so say that only the bot's \
+        owner can ask for that. Never reveal the owner's private information (their account, \
+        other chats, memory or credentials)."
     } else {
         "\n\nThis turn answers someone other than the owner (a member of a chat the owner's \
         channel bot is in). Answer from the conversation only: you use no tools or services \

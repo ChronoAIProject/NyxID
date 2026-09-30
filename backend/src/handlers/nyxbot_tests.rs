@@ -2572,53 +2572,63 @@ fn telegram_mentions_and_replies_to_the_bot_are_recognised() {
         }
         json!({"update_id": 1, "message": message})
     };
-    assert_eq!(chats::raw_addressed(&bot, &message(json!({}))), Some(false));
     assert_eq!(
-        chats::raw_addressed(&bot, &message(json!({"text": "hey @Helper_Bot, hi"}))),
+        chats::raw_addressed(&bot, &message(json!({})), None),
+        Some(false)
+    );
+    assert_eq!(
+        chats::raw_addressed(&bot, &message(json!({"text": "hey @Helper_Bot, hi"})), None),
         Some(true)
     );
     assert_eq!(
-        chats::raw_addressed(&bot, &message(json!({"text": "hey @helper_bots"}))),
+        chats::raw_addressed(&bot, &message(json!({"text": "hey @helper_bots"})), None),
         Some(false)
     );
     assert_eq!(
         chats::raw_addressed(
             &bot,
-            &message(json!({"reply_to_message": {"from": {"id": 123}}}))
+            &message(json!({"reply_to_message": {"from": {"id": 123}}})),
+            None
         ),
         Some(true)
     );
     assert_eq!(
         chats::raw_addressed(
             &bot,
-            &message(json!({"entities": [{"type": "text_mention", "user": {"id": 123}}]}))
+            &message(json!({"entities": [{"type": "text_mention", "user": {"id": 123}}]})),
+            None
         ),
         Some(true)
     );
     let discord: ChannelBot = bson::from_document(bot_doc("discord", "Helper bot")).unwrap();
-    assert_eq!(chats::raw_addressed(&discord, &json!({})), None);
+    assert_eq!(chats::raw_addressed(&discord, &json!({}), None), None);
     assert_eq!(
         chats::raw_addressed(
             &discord,
-            &json!({"author": {"id": "9"}, "mentions": [{"id": "123"}]})
+            &json!({"author": {"id": "9"}, "mentions": [{"id": "123"}]}),
+            None
         ),
         Some(true)
     );
     assert_eq!(
-        chats::raw_addressed(&discord, &json!({"author": {"id": "9"}, "mentions": []})),
+        chats::raw_addressed(
+            &discord,
+            &json!({"author": {"id": "9"}, "mentions": []}),
+            None
+        ),
         Some(false)
     );
     let slack: ChannelBot = bson::from_document(bot_doc("slack", "Helper bot")).unwrap();
     assert_eq!(
-        chats::raw_addressed(&slack, &json!({"event": {"type": "app_mention"}})),
+        chats::raw_addressed(&slack, &json!({"event": {"type": "app_mention"}}), None),
         Some(true)
     );
     assert_eq!(
-        chats::raw_addressed(&slack, &json!({"event": {"type": "message"}})),
+        chats::raw_addressed(&slack, &json!({"event": {"type": "message"}}), None),
         None
     );
     assert_eq!(
-        chats::raw_addressed(&discord, &json!({"type": 2, "data": {"name": "ask"}})),
+        chats::raw_addressed(&discord, &json!({"type": 2, "data": {"name": "ask"}}), None),
         Some(true)
     );
     // Private chats are named for the owner ("You") or the person, or by
@@ -4575,5 +4585,53 @@ async fn the_telegram_account_that_created_a_bot_through_nyxid_is_its_owner() {
                 .is_empty()
         );
     }
+    server.abort();
+}
+
+/// Reported: in a Lark group, "@Calvin Tan who are you" was answered by the
+/// bot. Apps granted every group message also get mentions of other people:
+/// only a mention of the bot itself counts.
+#[tokio::test]
+async fn lark_groups_count_only_mentions_of_the_bot_itself() {
+    let (state, _, server) = setup("nyxbot_lark_mentions").await;
+    let bot: ChannelBot = bson::from_document(bot_doc("lark", "Office bot")).unwrap();
+    let raw = |ids: &[&str]| {
+        json!({"event": {"message": {"mentions": ids
+            .iter()
+            .enumerate()
+            .map(|(at, id)| json!({"key": format!("@_user_{}", at + 1),
+                "id": {"open_id": id}, "name": id}))
+            .collect::<Vec<_>>()}}})
+    };
+    assert_eq!(
+        chats::raw_addressed(&bot, &raw(&["ou_calvin"]), Some("ou_bot")),
+        Some(false)
+    );
+    assert_eq!(
+        chats::raw_addressed(&bot, &raw(&["ou_calvin", "ou_bot"]), Some("ou_bot")),
+        Some(true)
+    );
+    assert_eq!(
+        chats::raw_addressed(&bot, &raw(&[]), Some("ou_bot")),
+        Some(false)
+    );
+    // Without the bot's own ID (its lookup failed), any mention counts.
+    assert_eq!(
+        chats::raw_addressed(&bot, &raw(&["ou_calvin"]), None),
+        Some(true)
+    );
+    // The bot's own ID is looked up once and kept on the channel.
+    let (mut row, _) = channel(&state, "direct").await;
+    row.channel_bot_id = bot.id.clone();
+    TEST_BOT_USER_IDS
+        .lock()
+        .unwrap()
+        .insert(bot.id.clone(), "ou_bot".into());
+    assert_eq!(
+        own_user_id(&state, &row, &bot).await.as_deref(),
+        Some("ou_bot")
+    );
+    let stored = load_channel(&state, OWNER, &row.id).await.unwrap();
+    assert_eq!(stored.gateway_bot_id.as_deref(), Some("ou_bot"));
     server.abort();
 }

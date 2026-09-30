@@ -1139,7 +1139,7 @@ async fn nyxbot_guest_turns_call_no_tools() {
 /// reads: account, team, memory, connection and Oracle tools and every
 /// service change are refused, whichever way they are called.
 #[tokio::test]
-async fn specialist_guest_turns_only_discover_and_read() {
+async fn specialist_guest_turns_use_services_but_never_delete() {
     let f = fixture("chat_mcp_guest").await;
     mark_guest(&f, true).await;
     let auth = authenticate(&f).await;
@@ -1178,7 +1178,8 @@ async fn specialist_guest_turns_only_discover_and_read() {
         .await
         .unwrap();
     assert!(!String::from_utf8_lossy(&bytes).contains("owner_only"));
-    // Service operations: reads pass on to the usual checks, changes stop.
+    // Service operations: reads and changes pass on to the usual checks;
+    // deleting (and SSH, where a shell can delete anything) is the owner's.
     let target = crate::services::mcp_approval::McpApprovalTarget {
         service_id: uuid::Uuid::new_v4().to_string(),
         service_name: "Example".into(),
@@ -1186,56 +1187,46 @@ async fn specialist_guest_turns_only_discover_and_read() {
         service_owner_user_id: f.owner.clone(),
         is_auto_connected: false,
     };
-    for method in ["POST", "PUT", "PATCH", "DELETE"] {
-        let operation = operation_descriptor::build_mcp_descriptor(method, "/items", None);
+    for (method, path) in [
+        ("DELETE", "/items/1"),
+        ("POST", "/bot123/deleteMessage"),
+        ("POST", "/api/users/1/remove"),
+    ] {
+        let operation = operation_descriptor::build_mcp_descriptor(method, path, None);
         let refused =
             authorize_mcp_operation(&f.state, &auth, target.clone(), &operation, Some(json!(1)))
                 .await
                 .unwrap_err();
-        assert_eq!(result(refused, true).await["error"], "owner_only");
+        assert_eq!(
+            result(refused, true).await["error"],
+            "owner_only",
+            "{method} {path}"
+        );
     }
-    let read = operation_descriptor::build_mcp_descriptor("GET", "/items", None);
-    if let Err(response) =
-        authorize_mcp_operation(&f.state, &auth, target.clone(), &read, Some(json!(1))).await
-    {
-        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-            .await
-            .unwrap();
-        assert!(!String::from_utf8_lossy(&bytes).contains("owner_only"));
-    }
-    // The generic proxy tool picks any method and path: never for guests.
-    let generic = mcp_service::McpToolService {
-        workspace_destinations_pending: false,
-        service_id: "service-1".into(),
-        service_name: "Example".into(),
-        service_slug: "example".into(),
-        description: None,
-        service_category: "custom".into(),
-        endpoints: vec![],
-        durable_endpoint_metadata: Default::default(),
-        source: mcp_service::McpToolSource::Internal,
-        executable: true,
-        is_generic_proxy: true,
-        invalid_openapi_contract: false,
-        recommended_skills: vec![],
-        recommended_skill_refs: None,
-        skills_revision: None,
-        proxy_operation_policy: None,
-    };
-    let endpoint = mcp_service::McpToolEndpoint {
-        endpoint_id: mcp_service::GENERIC_PROXY_ENDPOINT_ID.into(),
-        ..Default::default()
-    };
-    assert!(guest_endpoint_refusal(&auth, &generic, &endpoint, None).is_some());
-    assert!(
-        guest_endpoint_refusal(
-            &auth,
-            &generic,
-            &mcp_service::McpToolEndpoint::default(),
-            None
-        )
-        .is_none()
+    let ssh = operation_descriptor::build_ssh_descriptor(
+        operation_descriptor::SshOperationKind::Exec,
+        Some("ls"),
     );
+    let refused = authorize_mcp_operation(&f.state, &auth, target.clone(), &ssh, Some(json!(1)))
+        .await
+        .unwrap_err();
+    assert_eq!(result(refused, true).await["error"], "owner_only");
+    for method in ["GET", "POST", "PUT", "PATCH"] {
+        let operation =
+            operation_descriptor::build_mcp_descriptor(method, "/api/services/light/turn_on", None);
+        if let Err(response) =
+            authorize_mcp_operation(&f.state, &auth, target.clone(), &operation, Some(json!(1)))
+                .await
+        {
+            let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            assert!(
+                !String::from_utf8_lossy(&bytes).contains("owner_only"),
+                "{method}"
+            );
+        }
+    }
 }
 
 /// A guest never widens what a specialist may use: an ungranted service is

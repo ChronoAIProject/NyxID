@@ -60,9 +60,9 @@ pub struct NyxbotChannel {
     /// `mention_or_reply_to_bot`.
     #[serde(default)]
     pub gateway_groups: Option<String>,
-    /// Gateway only, for platforms other than Telegram: the bot's own user ID
-    /// there (Lark: its `open_id`), pinned on the gateway source so mentions
-    /// of the bot are recognised.
+    /// For platforms other than Telegram: the bot's own user ID there (Lark:
+    /// its `open_id`), pinned on the gateway source and, on NyxID's relay,
+    /// used to tell mentions of the bot from mentions of other people.
     #[serde(default)]
     pub gateway_bot_id: Option<String>,
     /// When NyxID last tried to move this personal bot onto the gateway

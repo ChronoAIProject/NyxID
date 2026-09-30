@@ -465,8 +465,9 @@ the gateway passes every group message on (`all`, recorded as
 or a reply to one of the bot's sent messages (NyxID records the platform
 message an inbound message replies to). Directly relayed Telegram messages are
 judged from the update (an @username or text mention, a reply to the bot); Lark
-and Feishu count any @mention (they deliver unmentioned group messages only to
-apps granted every group message); Slack counts `app_mention` events and
+and Feishu count only a mention of the bot itself, by its `open_id` (looked up
+once and kept as `gateway_bot_id`; apps granted every group message also get
+mentions of other people), or any mention while that lookup fails; Slack counts `app_mention` events and
 Discord its `mentions` and replied-to author; a reply to one of the bot's sent
 messages counts everywhere, and Discord slash commands always do. When a
 platform cannot tell, only the owner's messages count as addressed. Telegram bots see every group message only with privacy mode off or
@@ -479,11 +480,16 @@ turn so late tool calls stay restricted):
 - NyxBot holds every service of the owner, so its guest turns call no tools at
   all and answer from the conversation; to let a chat's members use a service,
   the owner gives the chat a specialist with just that service;
-- a specialist's guest turns may discover tools and read within its grants:
-  no `nyxid__` account, team, memory or posting tools, no connection, SSH or
-  Oracle tools, only curated operations (never the generic proxy tool, whose
-  GET can still change things) and only read verbs; everything else is refused
-  with `owner_only`;
+- a specialist's guest turns use its granted services: they discover tools and
+  run operations that read or change things (turning a light on, creating or
+  updating), including through the generic proxy tool, but never delete: an HTTP
+  DELETE, an operation whose path is named for deleting (`delete`, `remove`,
+  `destroy`, `purge`, `erase`, `wipe`, `revoke`, `uninstall`, such as Telegram's
+  `deleteMessage`) and SSH (a shell can delete anything) are refused with
+  `owner_only`, as are `nyxid__` account, team, memory and posting tools and
+  connection and Oracle tools (the user's decision: "anyone in the group can talk
+  to the bot … dangerous command should only be allowed by the owner", with the
+  agent's key scoped to its granted services);
 - an ungranted service is refused without a permission request, so a guest
   never widens what a specialist may use;
 - guests' messages are never queued as the owner's work: a busy agent asks them
