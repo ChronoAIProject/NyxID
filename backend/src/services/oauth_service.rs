@@ -97,11 +97,48 @@ pub async fn create_authorization_code(
     allowed_service_ids: &[String],
     allow_all_services: bool,
 ) -> AppResult<String> {
+    create_authorization_code_with_incremental(
+        db,
+        client_id,
+        user_id,
+        redirect_uri,
+        scope,
+        code_challenge,
+        code_challenge_method,
+        nonce,
+        external_subject,
+        binding_grant_id,
+        resource_uris,
+        allowed_service_ids,
+        allow_all_services,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn create_authorization_code_with_incremental(
+    db: &mongodb::Database,
+    client_id: &str,
+    user_id: &str,
+    redirect_uri: &str,
+    scope: &str,
+    code_challenge: Option<&str>,
+    code_challenge_method: Option<&str>,
+    nonce: Option<&str>,
+    external_subject: Option<&ExternalSubjectRef>,
+    binding_grant_id: Option<&str>,
+    resource_uris: &[String],
+    allowed_service_ids: &[String],
+    allow_all_services: bool,
+    incremental_consent: Option<&crate::models::consent::IncrementalConsent>,
+) -> AppResult<String> {
     let code = generate_random_token();
     let code_hash = hash_token(&code);
     let now = Utc::now();
 
     let new_code = AuthorizationCode {
+        incremental_consent: incremental_consent.cloned(),
         id: Uuid::new_v4().to_string(),
         code_hash,
         client_id: client_id.to_string(),
@@ -190,6 +227,7 @@ fn validate_client_secret(client: &OauthClient, client_secret: Option<&str>) -> 
 ///
 /// Returns the minted token strings plus metadata needed by the OAuth broker path.
 pub struct ExchangedTokens {
+    pub incremental_consent: Option<crate::models::consent::IncrementalConsent>,
     pub access_token: String,
     pub refresh_token: String,
     pub refresh_token_jti: String,
@@ -390,6 +428,26 @@ pub async fn exchange_authorization_code(
         }
     }
 
+    if let Some(snapshot) = &stored.incremental_consent {
+        super::incremental_consent_service::validate_current(
+            db,
+            &stored.user_id,
+            client_id,
+            snapshot,
+            stored.binding_grant_id.as_deref(),
+            stored.external_subject.as_ref(),
+        )
+        .await?;
+        validate_scopes(&stored.scope, &client.allowed_scopes)?;
+    }
+    let requested_resources = requested_resources.or_else(|| {
+        stored
+            .incremental_consent
+            .as_ref()
+            .map(|snapshot| snapshot.access_resources.as_slice())
+            .filter(|resources| !resources.is_empty())
+    });
+
     // Parse user_id back to Uuid for JWT generation
     let user_uuid = Uuid::parse_str(&stored.user_id)
         .map_err(|e| AppError::Internal(format!("Invalid user_id in authorization code: {e}")))?;
@@ -479,8 +537,23 @@ pub async fn exchange_authorization_code(
         None
     };
 
+    if let Some(snapshot) = &stored.incremental_consent
+        && let Err(error) = super::incremental_consent_service::validate_issued(
+            db,
+            &stored.user_id,
+            client_id,
+            snapshot,
+            stored.binding_grant_id.as_deref(),
+            stored.external_subject.as_ref(),
+        )
+        .await
+    {
+        revoke_issued_refresh(db, &issued_refresh.refresh_token_jti).await?;
+        return Err(error);
+    }
     let granted_scope = stored.scope.clone();
     Ok(ExchangedTokens {
+        incremental_consent: stored.incremental_consent,
         access_token,
         refresh_token: issued_refresh.refresh_token,
         refresh_token_jti: issued_refresh.refresh_token_jti,
@@ -497,6 +570,16 @@ pub async fn exchange_authorization_code(
         refresh_token_allowed_service_ids: stored.allowed_service_ids,
         refresh_token_allow_all_services: stored.allow_all_services,
     })
+}
+
+pub async fn revoke_issued_refresh(db: &mongodb::Database, jti: &str) -> AppResult<()> {
+    db.collection::<RefreshToken>(REFRESH_TOKENS)
+        .update_one(
+            doc! { "jti": jti },
+            doc! { "$set": { "revoked": true, "revoked_at": bson::DateTime::now() } },
+        )
+        .await?;
+    Ok(())
 }
 
 /// Check whether a redirect URI is a loopback address per RFC 8252 section 7.3.
@@ -788,6 +871,7 @@ mod tests {
 
         db.collection::<AuthorizationCode>(AUTH_CODES)
             .insert_one(AuthorizationCode {
+                incremental_consent: None,
                 id: Uuid::new_v4().to_string(),
                 code_hash: hash_token(code),
                 client_id: client.id.clone(),
@@ -888,6 +972,7 @@ mod tests {
         let code = "consent-only-resource-code";
         db.collection::<AuthorizationCode>(AUTH_CODES)
             .insert_one(AuthorizationCode {
+                incremental_consent: None,
                 id: Uuid::new_v4().to_string(),
                 code_hash: hash_token(code),
                 client_id: client.id.clone(),
@@ -990,6 +1075,7 @@ mod tests {
         let code = "consent-only-resource-reject-code";
         db.collection::<AuthorizationCode>(AUTH_CODES)
             .insert_one(AuthorizationCode {
+                incremental_consent: None,
                 id: Uuid::new_v4().to_string(),
                 code_hash: hash_token(code),
                 client_id: client.id.clone(),
@@ -1057,6 +1143,7 @@ mod tests {
 
         db.collection::<AuthorizationCode>(AUTH_CODES)
             .insert_one(AuthorizationCode {
+                incremental_consent: None,
                 id: Uuid::new_v4().to_string(),
                 code_hash: hash_token(code),
                 client_id: client_id.to_string(),

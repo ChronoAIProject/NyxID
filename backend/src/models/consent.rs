@@ -12,6 +12,12 @@ pub struct Consent {
     pub user_id: String,
     pub client_id: String,
     pub scopes: String,
+    /// Opaque version fences browser decisions and pending incremental codes.
+    #[serde(default)]
+    pub revision: Option<String>,
+    /// Serializes incremental token issuance with transactional revocation.
+    #[serde(default)]
+    pub issuance_fence: Option<String>,
     /// Explicitly grants unrestricted service access. Legacy rows lack this
     /// field and deserialize to false.
     #[serde(default)]
@@ -25,6 +31,31 @@ pub struct Consent {
     pub granted_at: DateTime<Utc>,
     #[serde(default, with = "bson_datetime::optional")]
     pub expires_at: Option<DateTime<Utc>>,
+}
+
+/// Explicit opt-in; omission retains the existing replacement/review behavior.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceAccessMode {
+    Incremental,
+}
+
+/// Server-authored snapshot carried in the signed consent request and code.
+/// Browser fields can never supply this authority. The version after approval
+/// also fences token exchange against later consent changes or revocation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IncrementalConsent {
+    pub consent_id: String,
+    pub consent_revision: Option<String>,
+    pub consent_fingerprint: String,
+    pub binding_grant_version: Option<u32>,
+    pub client_name: String,
+    pub current_scopes: String,
+    pub scopes: String,
+    pub current_service_ids: Vec<String>,
+    pub allow_all_services: bool,
+    pub required_service_ids: Vec<String>,
+    pub access_resources: Vec<String>,
 }
 
 #[cfg(test)]
@@ -42,6 +73,8 @@ mod tests {
             user_id: "user-1".to_string(),
             client_id: "client-1".to_string(),
             scopes: "openid profile email".to_string(),
+            revision: None,
+            issuance_fence: None,
             allow_all_services: false,
             allowed_service_ids: None,
             granted_at: Utc::now(),
