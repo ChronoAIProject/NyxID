@@ -389,7 +389,7 @@ function ExternalServicesTab({
       credential_source: keyInfo.credential_source ?? sourceById.get(keyInfo.id),
     }))}
     catalog={catalog}
-    actions={(compact) => <AddCtaButton label="Connect Service" onClick={onAdd} compact={compact} />}
+    actions={(compact) => <AddCtaButton label="Connect Service" onClick={onAdd} compact={compact} compactLabel="Connect" />}
     renderTable={viewMode === "table" ? (filteredKeys) => (
       <div className="overflow-hidden rounded-xl border border-border bg-card">
         <ServiceConnectionTable connections={filteredKeys} serviceName="All services" renderActions={(key) => <ConnectionReconnect connection={key} onReconnect={onReconnect} />} />
@@ -617,7 +617,7 @@ export function KeysPage() {
           {previewActive && RoutingPreview ? (
             <Suspense fallback={<Skeleton className="h-96 w-full" />}>
               <RoutingPreview
-                actions={(compact) => <AddCtaButton label="Connect Service" onClick={() => setAddServiceOpen(true)} compact={compact} />}
+                actions={(compact) => <AddCtaButton label="Connect Service" onClick={() => setAddServiceOpen(true)} compact={compact} compactLabel="Connect" />}
                 renderConnectionActions={(connection) => (
                   <ConnectionReconnect connection={connection} onReconnect={(keyInfo) => {
                     setReconnectKey(keyInfo);

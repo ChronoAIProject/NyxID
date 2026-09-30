@@ -29,6 +29,7 @@ const personal = {
   credential_source: { type: "personal" },
   credential_binding: "user",
   auth_method: "bearer",
+  credential_type: "api_key",
   is_active: true,
 } as KeyInfo;
 const org = {
@@ -104,6 +105,88 @@ function mount(connections: KeyInfo[] = [personal]) {
 }
 
 describe("deployed service insight compatibility", () => {
+  it("does not classify an OAuth login as a supplied developer app", () => {
+    const bill = configuredBilling({
+      ...personal,
+      credential_type: "oauth2",
+      api_key_id: "oauth-token",
+    });
+    expect(bill.provider_billing).toBe("unknown");
+    expect(bill.credential_label).toBe("Connected account · app unverified");
+    expect(bill.credential_label).not.toContain("BYOK");
+  });
+
+  it("reads legacy catalog credit billing without claiming the caller has been charged", async () => {
+    responses.set("/catalog", {
+      entries: [
+        {
+          slug: "openai",
+          billing: {
+            platform_billable: true,
+            platform_metric: "requests",
+            platform_pricing: {
+              credits_per_unit: "0.2",
+              sync_status: "synced",
+            },
+          },
+        },
+      ],
+    });
+    const [item] = await loadConfiguredServiceInsights([personal], "person");
+    expect(item!.billing).toMatchObject({
+      credit_billing_configured: true,
+      charge_status: "conditional",
+      rates: [{ credits_per_unit: "0.2", metric: "requests" }],
+    });
+  });
+
+  it("does not apply legacy pricing over a different credential lane", () => {
+    const bill = configuredBilling(personal, {
+      slug: "openai",
+      billing: {
+        platform_billable: true,
+        platform_metric: "requests",
+        platform_key_pricing: {
+          metric: "requests",
+          credits_per_unit: "0.5",
+          sync_status: "synced",
+        },
+      },
+    });
+    expect(bill.credit_billing_configured).toBe(false);
+    expect(bill.rates).toEqual([]);
+    expect(bill.charge_status).toBe("conditional");
+  });
+
+  it("does not advertise platform-only charges on a known user-supplied API key", () => {
+    const bill = configuredBilling(personal, {
+      slug: "openai",
+      billing: {
+        platform_billable: true,
+        platform_charge_nyxid_credentials_only: true,
+        byok_pricing: {
+          metric: "requests",
+          credits_per_unit: "0.5",
+          sync_status: "synced",
+        },
+      },
+    });
+    expect(bill.credit_billing_configured).toBe(false);
+    expect(bill.rates).toEqual([]);
+  });
+
+  it("preserves unreported plan rates without inventing a numeric price", () => {
+    const bill = configuredBilling(personal, {
+      slug: "openai",
+      billing: {
+        platform_billable: true,
+        platform_metric: "requests",
+      },
+    });
+    expect(bill.credit_billing_configured).toBe(true);
+    expect(bill.rates[0]?.credits_per_unit).toBeNull();
+  });
+
   it("accepts the deployed key list's omitted expiry and zero binding count", async () => {
     const {
       expires_at: _expiry,

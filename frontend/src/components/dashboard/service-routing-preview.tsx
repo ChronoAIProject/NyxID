@@ -1,7 +1,7 @@
 import { canEditConnection } from "@/lib/connection-access";
 import { useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
-import { ChevronRight, RefreshCw } from "lucide-react";
+import { ChevronRight } from "lucide-react";
 import { useKeys, useCatalog } from "@/hooks/use-keys";
 import { useUserServices } from "@/hooks/use-user-services";
 import { Button } from "@/components/ui/button";
@@ -108,23 +108,7 @@ export default function ServiceRoutingPreview({
       }))}
       catalog={catalog.data}
       renderConnectionActions={renderConnectionActions}
-      actions={(compact) => (
-        <>
-          <Button
-            size="icon"
-            variant="ghost"
-            aria-label="Refresh metadata"
-            onClick={() => {
-              void keys.refetch();
-              void catalog.refetch();
-              void services.refetch();
-            }}
-          >
-            <RefreshCw className="size-4" />
-          </Button>
-          {typeof actions === "function" ? actions(compact) : actions}
-        </>
-      )}
+      actions={actions}
     />
   );
 }

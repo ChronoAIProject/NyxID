@@ -26,6 +26,7 @@ import {
   accessReasonLabel,
   billingAccountLabel,
   billingModelLabel,
+  billingExplanation,
   callerKindLabel,
   callerLabel,
   credentialLabel,
@@ -125,13 +126,7 @@ function ConnectionBillingPanel({
             <Badge variant="secondary">{billingModelLabel(bill)}</Badge>
             {bill.status !== "restricted" && bill.status !== "unavailable" && (
               <span className="text-muted-foreground">
-                {bill.provider_billing === "separate_provider_account"
-                  ? "Your connected provider account handles provider charges. Any NyxID service fees are additional."
-                  : bill.provider_billing === "nyxid_credential"
-                    ? "NyxID supplies the credential and handles provider billing. Applicable NyxID charges are shown below."
-                    : bill.provider_billing === "no_credential"
-                      ? "No provider account is connected. Applicable NyxID charges are shown below."
-                      : "This connection's billing model has not been reported."}
+                {billingExplanation(bill)}
               </span>
             )}
           </div>
@@ -181,8 +176,9 @@ function ConnectionBillingPanel({
                   Eligible allowances → Credit grants → Wallet credits
                 </p>
                 <p className="mt-1 text-[11px] text-muted-foreground">
-                  Applied within the selected billing account. Amounts depend on
-                  available benefits and usage.
+                  Applied within the selected billing account, including
+                  eligible platform-issued grants. Actual funding is determined
+                  per request; the grant used is not reported in this preview.
                 </p>
                 <p className="mt-1 text-[11px] text-muted-foreground">
                   If a request fails, NyxID does not retry the other connections

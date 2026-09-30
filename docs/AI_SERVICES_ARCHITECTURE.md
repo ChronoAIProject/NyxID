@@ -44,9 +44,9 @@ The toolbar keeps Organization, Service, and search as its filtering controls;
 the additional Filters menu has been removed. Search applies on submit or blur.
 Older saved source, service-state, type, and auto-connected criteria remain visible
 as removable pills so they cannot silently hide connections. Active criteria can
-also be cleared together. In sticky mode Connect Service becomes a plus icon and
+also be cleared together. In sticky mode Connect Service becomes **+ Connect** and
 Personal/All services becomes its active view icon, with accessible labels and
-hover titles. Returning to the normal position restores their text. Explicit
+hover tooltips. The preview refresh button is removed. Returning to the normal position restores their text. Explicit
 12px toolbar padding and a 10px gap separate controls from the selected pills;
 pills retain their own 6px gaps and fit within two rows before scrolling.
 These controls apply to both the grid and table. Personal is the default service scope: a group is included when it has
@@ -66,13 +66,26 @@ Sources and Billing use stationary overlapping avatar circles. Hovering or focus
 a circle brings it to the front and shows its full details in a tooltip. Circles do
 not move or resize, and tooltips do not animate. Extra sources remain reachable
 through the overflow count.
-Billing also has an always-visible model label: **BYOK**, **NyxID-managed**, or
-**BYOK + NyxID** for a group with both. Each connection row repeats its own model,
-NyxID payer, and explicitly labeled NyxID fee. Models come from `provider_billing`,
-not ownership or payer identity. BYOK includes connected provider accounts such as
-OAuth and node-held credentials; provider charges are separate from any NyxID
-service fees. No-credential, unknown, restricted, and partly reported models remain
-distinct; missing rates never imply free usage.
+Billing shows **NyxID credits**, **No NyxID charge**, or **Credit billing unverified**,
+independently of credential supply. Configuration-only data is labeled
+**NyxID credits · configured**; mixed charge states say they vary by connection.
+Each row shows the credential supplier under ownership, and the charge model,
+expected/resolved payer, and rate in Billing. Hover reveals the explanation.
+
+BYOK means a supplied API key or developer app. A user's OAuth token is not proof
+of their own app: the internal BYOK price lane also includes NyxID's shared OAuth
+app. Verified `nyxid_platform_oauth_app` shows **NyxID developer app**; a master key
+shows **NyxID key**. The older-server compatibility view labels OAuth app ownership
+unverified instead of inferring BYOK from `credential_binding: user` or a token ID.
+It reads legacy catalog credit pricing as well as credential lanes, honors known
+platform-only exclusions, and never invents free usage or a numeric plan rate.
+
+Credential source, NyxID charges, and funding are separate. A platform credit grant
+can fund an eligible NyxID fee even when the caller supplies their own provider key;
+it does not change the provider credential's owner. Conversely, signing into an
+account through NyxID's app is not BYOK. This preview shows the configured funding
+order; identifying the actual allowance, grant, or wallet used requires per-request
+settlement data and is not claimed here.
 Card billing summaries keep each source separate even when the expected payer is
 the same. Personal credentials normally use the personal account, organization
 credentials use the owning organization's account, and a platform key uses the

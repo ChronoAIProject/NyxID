@@ -2,6 +2,12 @@ import { useRef, useState, type ReactNode, type Ref } from "react";
 import { ArrowLeftRight, Layers, UserRound, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import {
   ServiceFilterMultiselect,
   type ServiceFilterOption,
 } from "./service-filter-multiselect";
@@ -135,40 +141,46 @@ export function ServiceViewToolbar({
     });
   };
   const sourceToggle = (
-    <Button
-      variant="outline"
-      size={stuck ? "icon" : "default"}
-      className="shrink-0 rounded-full"
-      aria-label={`Service view: ${filters.source === "personal" ? "Personal" : "All services"}`}
-      title={
-        filters.source === "personal"
-          ? "Services with a personal connection, including their organization and platform counterparts. Switch to All services."
-          : "Switch to services with a personal connection, including their organization and platform counterparts."
-      }
-      onClick={() =>
-        setFilters({
-          ...filters,
-          source: filters.source === "personal" ? "all" : "personal",
-          organization_ids:
-            filters.source === "personal" ? filters.organization_ids : [],
-        })
-      }
-    >
-      {filters.source === "personal" ? (
-        <UserRound className="size-3.5" aria-hidden="true" />
-      ) : (
-        <Layers className="size-3.5" aria-hidden="true" />
-      )}
-      {!stuck && (
-        <>
-          {filters.source === "personal" ? "Personal" : "All services"}
-          <ArrowLeftRight
-            className="ml-1 size-3 text-muted-foreground"
-            aria-hidden="true"
-          />
-        </>
-      )}
-    </Button>
+    <TooltipProvider delayDuration={200}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            variant="outline"
+            size={stuck ? "icon" : "default"}
+            className="shrink-0 rounded-full"
+            aria-label={`Service view: ${filters.source === "personal" ? "Personal" : "All services"}`}
+            onClick={() =>
+              setFilters({
+                ...filters,
+                source: filters.source === "personal" ? "all" : "personal",
+                organization_ids:
+                  filters.source === "personal" ? filters.organization_ids : [],
+              })
+            }
+          >
+            {filters.source === "personal" ? (
+              <UserRound className="size-3.5" aria-hidden="true" />
+            ) : (
+              <Layers className="size-3.5" aria-hidden="true" />
+            )}
+            {!stuck && (
+              <>
+                {filters.source === "personal" ? "Personal" : "All services"}
+                <ArrowLeftRight
+                  className="ml-1 size-3 text-muted-foreground"
+                  aria-hidden="true"
+                />
+              </>
+            )}
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent side="bottom" sideOffset={8} className="max-w-64">
+          {filters.source === "personal"
+            ? "Personal view includes your services and their organization/platform counterparts. Click to show all services."
+            : "All services. Click to show services with a personal connection."}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   );
 
   return (

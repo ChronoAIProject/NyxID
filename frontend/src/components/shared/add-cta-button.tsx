@@ -1,11 +1,18 @@
 import { Plus } from "lucide-react";
 import { Button, ButtonIcon } from "@/components/ui/button";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 
 interface AddCtaButtonProps {
   readonly label: string;
   readonly onClick: () => void;
   readonly disabled?: boolean;
   readonly compact?: boolean;
+  readonly compactLabel?: string;
   readonly icon?: React.ComponentType<{ className?: string }>;
   /**
    * "primary" (default) → the goal-completing CTA on this page. Renders
@@ -26,21 +33,24 @@ export function AddCtaButton({
   onClick,
   disabled = false,
   compact = false,
+  compactLabel,
   icon: Icon = Plus,
   variant = "primary",
 }: AddCtaButtonProps) {
   if (variant === "primary") {
-    return (
+    const button = (
       <Button
         variant="primary"
-        size={compact ? "icon" : "lg"}
+        size={compact ? (compactLabel ? "default" : "icon") : "lg"}
         aria-label={label}
-        title={compact ? label : undefined}
         onClick={onClick}
         disabled={disabled}
       >
         {compact ? (
-          <Icon className="size-3.5" aria-hidden="true" />
+          <>
+            <Icon className="size-3.5" aria-hidden="true" />
+            {compactLabel}
+          </>
         ) : (
           <>
             <ButtonIcon variant="primary">
@@ -50,6 +60,18 @@ export function AddCtaButton({
           </>
         )}
       </Button>
+    );
+    return compact ? (
+      <TooltipProvider delayDuration={200}>
+        <Tooltip>
+          <TooltipTrigger asChild>{button}</TooltipTrigger>
+          <TooltipContent side="bottom" sideOffset={8}>
+            {label}
+          </TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+    ) : (
+      button
     );
   }
 

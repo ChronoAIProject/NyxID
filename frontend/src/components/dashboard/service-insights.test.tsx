@@ -15,6 +15,7 @@ import type { ServiceInsightsState } from "@/hooks/use-service-insights";
 import {
   billingAccountLabel,
   billingModelLabel,
+  credentialLabel,
   summarizeBilling,
   summarizeBillingModel,
 } from "@/lib/service-insights";
@@ -334,14 +335,14 @@ describe("service card billing and caller details", () => {
     mount();
     expect(screen.getByRole("columnheader", { name: "Billing" })).toBeVisible();
     expect(screen.getByText("Personal account")).toBeVisible();
-    expect(screen.getByText(/NyxID credential/)).toBeVisible();
+    expect(screen.getByText(/NyxID key/)).toBeVisible();
     expect(
       within(
         screen.getByRole("button", { name: "Recent requests for Team OpenAI" }),
       ).getByText(/Codex CI/),
     ).toBeVisible();
-    expect(screen.getByText("NyxID-managed")).toBeVisible();
-    expect(screen.getByText("NyxID fee: 0.25 credits / request")).toBeVisible();
+    expect(screen.getByText("NyxID credits")).toBeVisible();
+    expect(screen.getByText("Rate: 0.25 credits / request")).toBeVisible();
     expect(screen.getByText(/· 1 override$/)).toBeVisible();
     expect(screen.getByTitle(/^Your keys with access/)).toBeVisible();
     expect(screen.queryByText("Provisioning app")).not.toBeInTheDocument();
@@ -358,11 +359,7 @@ describe("service card billing and caller details", () => {
     expect(
       screen.getByRole("table", { name: "Applicable NyxID rates" }),
     ).toBeVisible();
-    expect(
-      screen.getByText(
-        /NyxID supplies the credential and handles provider billing/,
-      ),
-    ).toBeVisible();
+    expect(screen.getByText(/NyxID supplies the provider key/)).toBeVisible();
     await user.click(
       screen.getByRole("button", { name: "Agent key access for Team OpenAI" }),
     );
@@ -526,32 +523,33 @@ describe("service card billing and caller details", () => {
     ).toBe("Billing unavailable");
   });
 
-  it("shows BYOK with separate NyxID fees even when the payer is personal", async () => {
+  it("separates a supplied API key from its NyxID credit charges", async () => {
     const user = userEvent.setup();
     mount({
       ...insight,
       billing: {
         ...insight.billing!,
         provider_billing: "separate_provider_account",
+        credential_class: "user_owned",
       },
     });
     const cell = within(
       screen.getByRole("button", { name: "Billing for Team OpenAI" }),
     );
-    expect(cell.getByText("BYOK")).toBeVisible();
+    expect(cell.getByText("NyxID credits")).toBeVisible();
     expect(cell.getByText("Personal account")).toBeVisible();
-    expect(cell.getByText("NyxID fee: 0.25 credits / request")).toBeVisible();
+    expect(cell.getByText("Rate: 0.25 credits / request")).toBeVisible();
     await user.click(
       screen.getByRole("button", { name: "Billing for Team OpenAI" }),
     );
     expect(
       within(
         screen.getByRole("region", { name: "Billing for Team OpenAI" }),
-      ).getByText(/Any NyxID service fees are additional/),
+      ).getByText(/Any NyxID fees are additional/),
     ).toBeVisible();
   });
 
-  it("keeps the NyxID-managed model when the service has no NyxID charge", () => {
+  it("keeps NyxID credential supply separate from a confirmed absence of NyxID charges", () => {
     mount({
       ...insight,
       billing: { ...insight.billing!, charge_status: "not_charged", rates: [] },
@@ -559,8 +557,8 @@ describe("service card billing and caller details", () => {
     const cell = within(
       screen.getByRole("button", { name: "Billing for Team OpenAI" }),
     );
-    expect(cell.getByText("NyxID-managed")).toBeVisible();
-    expect(cell.getByText("No NyxID charge")).toBeVisible();
+    expect(cell.getAllByText("No NyxID charge")[0]).toBeVisible();
+    expect(screen.getByText(/NyxID key/)).toBeVisible();
     expect(cell.queryByText("BYOK")).not.toBeInTheDocument();
   });
 
@@ -573,7 +571,7 @@ describe("service card billing and caller details", () => {
       },
     };
     expect(summarizeBillingModel("ready", [insight, byok])).toBe(
-      "BYOK + NyxID",
+      "NyxID credits",
     );
     expect(summarizeBillingModel("ready", [byok, undefined])).toBe(
       "Billing partly reported",
@@ -583,7 +581,7 @@ describe("service card billing and caller details", () => {
     );
     expect(
       billingModelLabel({ ...insight.billing!, provider_billing: "unknown" }),
-    ).toBe("Billing model unknown");
+    ).toBe("NyxID credits");
     expect(
       billingModelLabel({ ...insight.billing!, status: "restricted" }),
     ).toBe("Billing restricted");
@@ -595,6 +593,47 @@ describe("service card billing and caller details", () => {
         ...insight.billing!,
         provider_billing: "no_credential",
       }),
-    ).toBe("No provider account");
+    ).toBe("NyxID credits");
+  });
+
+  it("identifies NyxID's shared OAuth app independently of its internal price category", () => {
+    const billing = {
+      ...insight.billing!,
+      credential_class: "nyxid_platform_oauth_app",
+      provider_billing: "separate_provider_account" as const,
+    };
+    expect(
+      credentialLabel({ ...connection, credential_type: "oauth2" }, billing),
+    ).toBe("NyxID developer app");
+    expect(billingModelLabel(billing)).toBe("NyxID credits");
+  });
+
+  it("keeps configured pricing distinct from resolved credit charges and missing metadata", () => {
+    expect(
+      billingModelLabel(
+        configuredBilling({
+          ...connection,
+          credential_binding: "user",
+          credential_type: "oauth2",
+        }),
+      ),
+    ).toBe("Credit billing unverified");
+    expect(
+      billingModelLabel(
+        configuredBilling(
+          { ...connection, credential_binding: "user" },
+          { slug: "openai", billing: { platform_billable: true } },
+        ),
+      ),
+    ).toBe("NyxID credits · configured");
+    expect(
+      summarizeBillingModel("ready", [
+        insight,
+        {
+          ...insight,
+          billing: { ...insight.billing!, charge_status: "not_charged" },
+        },
+      ]),
+    ).toBe("Charges vary by connection");
   });
 });

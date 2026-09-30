@@ -205,7 +205,7 @@ describe("live grouped services", () => {
     ).not.toBeInTheDocument();
     const card = screen.getByRole("region", { name: "OpenAI" });
     expect(within(card).getByText("3 connections")).toBeVisible();
-    expect(within(card).getByText("BYOK + NyxID")).toBeVisible();
+    expect(within(card).getByText("Credit billing unverified")).toBeVisible();
     expect(screen.queryByText("Your personal account")).not.toBeInTheDocument();
     await user.hover(
       screen.getByRole("button", { name: "Show Personal billing for OpenAI" }),
@@ -216,7 +216,9 @@ describe("live grouped services", () => {
       ),
     ).toBeInTheDocument();
     expect(
-      within(screen.getByRole("tooltip")).getByText("BYOK"),
+      within(screen.getByRole("tooltip")).getByText(
+        "Credit billing unverified",
+      ),
     ).toBeInTheDocument();
     await user.keyboard("{Escape}");
     await user.hover(
@@ -239,7 +241,9 @@ describe("live grouped services", () => {
       ).getByText(/Acting user's personal account/),
     ).toBeInTheDocument();
     expect(
-      within(screen.getByRole("tooltip")).getByText("NyxID-managed"),
+      within(screen.getByRole("tooltip")).getByText(
+        "Credit billing unverified",
+      ),
     ).toBeInTheDocument();
     await user.keyboard("{Escape}");
     await user.click(
@@ -315,12 +319,10 @@ describe("live grouped services", () => {
       screen.getByRole("button", { name: "Show Personal billing for OpenAI" }),
     );
     const tooltip = within(await screen.findByRole("tooltip"));
-    expect(tooltip.getByText("BYOK")).toBeInTheDocument();
+    expect(tooltip.getByText("Credit billing unverified")).toBeInTheDocument();
     expect(tooltip.getByText(/Your personal account/)).toBeInTheDocument();
     expect(tooltip.getByText(/Provider billed separately/)).toBeInTheDocument();
-    expect(
-      tooltip.getByText(/NyxID fee: Rate not reported/),
-    ).toBeInTheDocument();
+    expect(tooltip.getByText(/Rate not reported/)).toBeInTheDocument();
     expect(screen.queryByText("Latest request")).not.toBeInTheDocument();
     expect(screen.queryByText(/No recorded requests/)).not.toBeInTheDocument();
   });
@@ -566,6 +568,7 @@ describe("live grouped services", () => {
           actions={(compact) => (
             <AddCtaButton
               compact={compact}
+              compactLabel="Connect"
               label="Connect Service"
               onClick={connect}
             />
@@ -601,7 +604,12 @@ describe("live grouped services", () => {
     const compactConnect = screen.getByRole("button", {
       name: "Connect Service",
     });
-    expect(compactConnect).toHaveTextContent(/^$/);
+    expect(compactConnect).toHaveTextContent(/^Connect$/);
+    await user.hover(compactConnect);
+    expect(
+      await screen.findByRole("tooltip", { name: "Connect Service" }),
+    ).toBeInTheDocument();
+    await user.keyboard("{Escape}");
     expect(
       screen.getByRole("button", { name: "Service view: Personal" }),
     ).toHaveTextContent(/^$/);
@@ -612,8 +620,8 @@ describe("live grouped services", () => {
     ).not.toBeInTheDocument();
     // Primary actions stay reachable in the stuck filter row.
     expect(
-      screen.getByRole("button", { name: "Refresh metadata" }),
-    ).toBeVisible();
+      screen.queryByRole("button", { name: "Refresh metadata" }),
+    ).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Collapse" }),
     ).not.toBeInTheDocument();
@@ -646,8 +654,8 @@ describe("live grouped services", () => {
       screen.getByRole("button", { name: "Save as default" }),
     ).toBeVisible();
     expect(
-      screen.getByRole("button", { name: "Refresh metadata" }),
-    ).toBeVisible();
+      screen.queryByRole("button", { name: "Refresh metadata" }),
+    ).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Collapse" })).toBeVisible();
     expect(screen.getByText(/matching connection/)).toBeVisible();
     expect(
@@ -673,8 +681,8 @@ describe("live grouped services", () => {
       within(filters).getByText("1 service · 3 matching connections"),
     ).toBeVisible();
     expect(
-      within(filters).getByRole("button", { name: "Refresh metadata" }),
-    ).toBeVisible();
+      within(filters).queryByRole("button", { name: "Refresh metadata" }),
+    ).not.toBeInTheDocument();
     expect(
       within(filters).getByRole("button", { name: "Save as default" }),
     ).toBeVisible();

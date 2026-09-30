@@ -36,6 +36,7 @@ export const serviceBillingExplanationSchema = z.object({
     "unknown",
   ]),
   context: z.string(),
+  credit_billing_configured: z.boolean().optional(),
   payer_rule: z.string().optional(),
   notes: z.array(z.string()),
 });
@@ -143,6 +144,22 @@ export const configuredCatalogSchema = z.object({
     z.object({
       slug: z.string(),
       byok_pricing: lanePricingViewSchema.nullish(),
+      billing: z
+        .object({
+          byok_pricing: lanePricingViewSchema.nullish(),
+          platform_key_pricing: lanePricingViewSchema.nullish(),
+          platform_billable: z.boolean().optional(),
+          platform_charge_nyxid_credentials_only: z.boolean().optional(),
+          platform_metric: z.string().nullish(),
+          platform_pricing: z
+            .object({
+              credits_per_unit: z.string(),
+              sync_status: z.string().optional(),
+            })
+            .nullish(),
+          resale_billable: z.boolean().optional(),
+        })
+        .nullish(),
       platform_key: z
         .object({ pricing: lanePricingViewSchema.nullish() })
         .nullish(),

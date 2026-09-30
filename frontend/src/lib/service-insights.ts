@@ -22,7 +22,22 @@ export function credentialLabel(
   connection: KeyInfo,
   billing?: ServiceBillingExplanation | null,
 ): string {
-  if (billing) return billing.credential_label;
+  if (billing) {
+    if (billing.status === "restricted" || billing.status === "unavailable")
+      return billing.credential_label;
+    if (billing.context === "configuration") return billing.credential_label;
+    if (billing.credential_class === "nyxid_platform_oauth_app")
+      return "NyxID developer app";
+    if (billing.credential_class === "nyxid_managed_master") return "NyxID key";
+    if (
+      ["user_owned", "agent_override_user_owned"].includes(
+        billing.credential_class ?? "",
+      ) &&
+      connection.credential_type === "api_key"
+    )
+      return `${connection.credential_source?.type === "org" ? "Organization" : "Your"} API key (BYOK)`;
+    return billing.credential_label;
+  }
   if (connection.credential_binding === "platform") return "NyxID credential";
   if (connection.node_id || connection.has_node_binding)
     return "Node credential";
@@ -59,7 +74,9 @@ export function rateLabel(billing: ServiceBillingExplanation): string {
     const rate = billing.rates[0]!;
     const label =
       billing.rates.length === 1
-        ? `${rate.credits_per_unit} credits / ${metricLabel(rate.metric, 1)} · configured`
+        ? rate.credits_per_unit == null
+          ? "Plan rate not reported"
+          : `${rate.credits_per_unit} credits / ${metricLabel(rate.metric, 1)} · configured`
         : `${billing.rates.length} configured rates`;
     return `${label}${pending ? " · sync unconfirmed" : ""}`;
   }
@@ -164,6 +181,8 @@ export function providerBillingLabel(
 ): string {
   if (billing?.status === "restricted") return "Provider billing restricted";
   if (billing?.status === "unavailable") return "Provider billing unavailable";
+  if (billing?.credential_class === "nyxid_platform_oauth_app")
+    return "NyxID supplies the developer app; signing in connects your provider account";
   if (billing?.provider_billing === "separate_provider_account")
     return "Provider billed separately";
   if (billing?.provider_billing === "nyxid_credential")
@@ -179,15 +198,20 @@ export function billingModelLabel(
   if (!billing) return "Billing not reported";
   if (billing.status === "restricted") return "Billing restricted";
   if (billing.status === "unavailable") return "Billing unavailable";
-  switch (billing.provider_billing) {
-    case "separate_provider_account":
-      return "BYOK";
-    case "nyxid_credential":
-      return "NyxID-managed";
-    case "no_credential":
-      return "No provider account";
+  switch (billing.charge_status) {
+    case "usage_based":
+      return "NyxID credits";
+    case "not_charged":
+      return "No NyxID charge";
+    case "restricted":
+      return "Billing restricted";
+    case "unavailable":
+      return "Billing unavailable";
     default:
-      return "Billing model unknown";
+      return billing.context === "configuration" &&
+        (billing.credit_billing_configured || billing.rates.length > 0)
+        ? "NyxID credits · configured"
+        : "Credit billing unverified";
   }
 }
 
@@ -201,18 +225,46 @@ export function summarizeBillingModel(
   );
   if (!models.size) return "Billing not reported";
   if (models.size === 1) return [...models][0]!;
-  if ([...models].some((model) => model.startsWith("Billing")))
+  if (
+    [...models].some(
+      (model) =>
+        model.startsWith("Billing") || model === "Credit billing unverified",
+    )
+  )
     return "Billing partly reported";
-  if (models.size === 2 && models.has("BYOK") && models.has("NyxID-managed"))
-    return "BYOK + NyxID";
-  return "Multiple billing models";
+  return "Charges vary by connection";
 }
 
 export function nyxidChargeLabel(billing: ServiceBillingExplanation): string {
   if (billing.status === "restricted") return "NyxID fees restricted";
   if (billing.status === "unavailable") return "NyxID fees unavailable";
   if (billing.charge_status === "not_charged") return "No NyxID charge";
-  return `NyxID fee: ${rateLabel(billing)}`;
+  if (!billing.rates.length) return "Rate not reported";
+  return `Rate: ${rateLabel(billing)}`;
+}
+
+export function billingExplanation(billing: ServiceBillingExplanation): string {
+  if (billing.status === "restricted" || billing.status === "unavailable")
+    return billingModelLabel(billing);
+  const supply =
+    billing.credential_class === "nyxid_platform_oauth_app"
+      ? "NyxID supplies the developer app. Signing into your provider account is not BYOK."
+      : billing.provider_billing === "nyxid_credential"
+        ? "NyxID supplies the provider key."
+        : billing.provider_billing === "separate_provider_account"
+          ? "Your supplied credential uses a separate provider account. Any NyxID fees are additional to the provider's charges."
+          : billing.provider_billing === "no_credential"
+            ? "No provider credential is required."
+            : "The supplier of this connection's key or developer app is unverified.";
+  const charges =
+    billing.charge_status === "not_charged"
+      ? "NyxID does not charge this caller for this connection."
+      : billing.charge_status === "usage_based"
+        ? "NyxID meters usage against the billing account shown."
+        : billing.credit_billing_configured || billing.rates.length
+          ? "NyxID credit billing is configured; caller eligibility and the active rate are verified at execution."
+          : "NyxID credit charges have not been verified. A missing rate does not mean usage is free.";
+  return `${supply} ${charges}`;
 }
 
 export function summarizeBillingDetail(

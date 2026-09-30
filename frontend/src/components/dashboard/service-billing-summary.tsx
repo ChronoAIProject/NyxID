@@ -4,6 +4,7 @@ import {
   summarizeBilling,
   summarizeBillingDetail,
   summarizeBillingModel,
+  credentialLabel,
 } from "@/lib/service-insights";
 import { connectionSource, connectionSourceLabel } from "@/lib/service-view";
 import type { KeyInfo } from "@/types/keys";
@@ -67,7 +68,7 @@ export function ServiceBillingSummary({
                 detail: sourceModel,
                 description:
                   insights.status === "ready"
-                    ? `NyxID: ${summarizeBilling(sourceInsights)} · ${summarizeBillingDetail(sourceInsights)}`
+                    ? `${[...new Set(rows.map((row) => credentialLabel(row, insights.connections.get(row.id)?.billing)))].join(" / ")} · NyxID payer: ${summarizeBilling(sourceInsights)} · ${summarizeBillingDetail(sourceInsights)}`
                     : undefined,
                 actionLabel: `Show ${source} billing for ${serviceName}`,
                 onSelect: () => onOpen(first.id),

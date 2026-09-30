@@ -1,5 +1,4 @@
 import { api } from "@/lib/api-client";
-import { credentialLabel } from "@/lib/service-insights";
 import {
   configuredAgentKeyListSchema,
   configuredBindingsSchema,
@@ -24,8 +23,10 @@ export function configuredBilling(
   catalog?: ConfiguredCatalogEntry,
 ): ServiceBillingExplanation {
   const platform = connection.credential_binding === "platform";
+  const node = Boolean(connection.node_id || connection.has_node_binding);
   const userCredential =
     !platform &&
+    (connection.auth_method !== "none" || node) &&
     Boolean(
       connection.credential_binding === "user" ||
       connection.api_key_id ||
@@ -36,18 +37,55 @@ export function configuredBilling(
     connection.credential_source?.type === "org"
       ? connection.credential_source
       : null;
-  const lane = platform
-    ? (connection.platform_key_pricing ?? catalog?.platform_key?.pricing)
+  const oauth = ["oauth2", "device_code"].includes(connection.credential_type);
+  const billing = catalog?.billing;
+  const configuredLane = platform
+    ? (connection.platform_key_pricing ??
+      catalog?.platform_key?.pricing ??
+      billing?.platform_key_pricing)
     : userCredential
-      ? (connection.byok_pricing ?? catalog?.byok_pricing)
+      ? (connection.byok_pricing ??
+        catalog?.byok_pricing ??
+        billing?.byok_pricing)
       : undefined;
+  const hasLanes = Boolean(
+    configuredLane ||
+    connection.byok_pricing ||
+    connection.platform_key_pricing ||
+    catalog?.byok_pricing ||
+    catalog?.platform_key?.pricing ||
+    billing?.byok_pricing ||
+    billing?.platform_key_pricing,
+  );
+  const ownApiKey =
+    userCredential &&
+    !node &&
+    !oauth &&
+    connection.credential_type === "api_key";
+  const excludedFromPlatformCharge =
+    billing?.platform_charge_nyxid_credentials_only === true &&
+    !platform &&
+    (ownApiKey || node || connection.auth_method === "none");
+  const lane = excludedFromPlatformCharge ? undefined : configuredLane;
+  const legacyConfigured =
+    !hasLanes &&
+    !excludedFromPlatformCharge &&
+    billing?.platform_billable === true;
+  const credentialLabel = platform
+    ? "NyxID key"
+    : node
+      ? "Node credential · supplier unverified"
+      : connection.auth_method === "none"
+        ? "No credential"
+        : oauth
+          ? "Connected account · app unverified"
+          : ownApiKey
+            ? `${org ? "Organization" : "Your"} API key (BYOK)`
+            : "Credential supplier unverified";
   return {
     status: "conditional",
     credential_class: null,
-    credential_label:
-      platform || userCredential || connection.auth_method === "none"
-        ? credentialLabel(connection)
-        : "Connection default · unverified",
+    credential_label: credentialLabel,
     account: null,
     payer_rule: platform
       ? "Acting user's personal account"
@@ -57,6 +95,9 @@ export function configuredBilling(
           ? `${org.org_name} · organization`
           : "Your personal account",
     charge_status: "conditional",
+    credit_billing_configured: Boolean(
+      lane || legacyConfigured || (platform && billing?.resale_billable),
+    ),
     rates: lane
       ? [lane, ...(lane.components ?? [])].map((rate) => ({
           layer: "platform",
@@ -66,17 +107,49 @@ export function configuredBilling(
           source: "configuration",
           sync_status: rate.sync_status ?? "unknown",
         }))
-      : [],
+      : legacyConfigured && billing?.platform_metric
+        ? [
+            {
+              layer: "platform",
+              metric: billing.platform_metric,
+              credits_per_unit:
+                billing.platform_pricing?.credits_per_unit ?? null,
+              currency: "credits",
+              source: "configuration",
+              sync_status: billing.platform_pricing?.sync_status ?? "unknown",
+            },
+          ]
+        : [],
     provider_billing: platform
       ? "nyxid_credential"
       : connection.auth_method === "none"
         ? "no_credential"
-        : userCredential
+        : ownApiKey
           ? "separate_provider_account"
           : "unknown",
     context: "configuration",
     notes: [
       "Configured billing for the connection default. The payer and applicable charges are verified at execution; agent credential overrides can change them.",
+      ...(oauth
+        ? [
+            "Signing in does not identify the developer app's owner. This server does not report whether this connection uses your app or NyxID's app.",
+          ]
+        : []),
+      ...(billing?.platform_charge_nyxid_credentials_only
+        ? [
+            "Configured NyxID charges are limited to NyxID-supplied credentials or OAuth apps; eligibility must be verified at execution.",
+          ]
+        : []),
+      ...(legacyConfigured
+        ? [
+            "The catalog configures NyxID credit billing for this service. Caller eligibility and the active plan rate are verified at execution.",
+          ]
+        : []),
+      ...(platform && billing?.resale_billable
+        ? [
+            "Provider usage through NyxID is configured for credit billing; its rate is not reported here.",
+          ]
+        : []),
       ...(lane &&
       [lane, ...(lane.components ?? [])].some(
         (rate) => rate.sync_status !== "synced",
@@ -85,7 +158,7 @@ export function configuredBilling(
             "Unsynced prices are not confirmed as active. Current billing rules apply until price synchronization completes.",
           ]
         : []),
-      ...(lane
+      ...(lane || legacyConfigured
         ? []
         : [
             "This server does not report a credential-specific rate here. This does not mean usage is free.",
