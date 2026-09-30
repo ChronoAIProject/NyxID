@@ -6,7 +6,8 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 #[command(
     name = "nyxid",
     about = "NyxID CLI -- manage your NyxID account from the terminal",
-    version
+    version,
+    after_help = crate::tls::ENV_HELP
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -499,6 +500,12 @@ impl BaseUrlArgs {
 
 #[derive(Args, Clone)]
 pub struct DoctorArgs {
+    /// NyxID API base URL to check (otherwise the selected profile's saved URL)
+    #[arg(long)]
+    pub base_url: Option<String>,
+    /// Saved CLI profile to inspect
+    #[arg(long)]
+    pub profile: Option<String>,
     /// Emit machine-readable JSON
     #[arg(long)]
     pub json: bool,
@@ -601,7 +608,8 @@ pub enum PublicCommands {
 
 #[derive(Args, Default)]
 #[command(
-    after_long_help = "Agent login URL:\n  nyxid login --agent-key --no-wait --output json --profile my-agent\n\nShare verification_uri_complete from the JSON with the human. The request is\nnot approved until they finish the browser review. Resume after approval:\n  nyxid login resume <request_id> --once --output json\n\nAdd --scopes, --service, --service-permission, --key-source, --key-name, and\n--expiry-days to prefill the requested access. Use --device instead of\n--agent-key when either full account or restricted access is acceptable."
+    after_help = crate::tls::ENV_HELP,
+    after_long_help = concat!("Agent login URL:\n  nyxid login --agent-key --no-wait --output json --profile my-agent\n\nShare verification_uri_complete from the JSON with the human. The request is\nnot approved until they finish the browser review. Resume after approval:\n  nyxid login resume <request_id> --once --output json\n\nAdd --scopes, --service, --service-permission, --key-source, --key-name, and\n--expiry-days to prefill the requested access. Use --device instead of\n--agent-key when either full account or restricted access is acceptable.\n\nNetwork / TLS: NYXID_CA_CERT adds a PEM CA file; SSL_CERT_FILE / SSL_CERT_DIR select system roots. HTTPS_PROXY / NO_PROXY control HTTP proxies. Run nyxid doctor for diagnostics.")
 )]
 pub struct LoginArgs {
     /// NyxID base URL, e.g. https://auth.nyxid.dev

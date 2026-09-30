@@ -112,6 +112,41 @@ The install root is resolved as:
 
 The active symlink defaults to `$HOME/.local/bin/nyxid`. `NYXID_ACTIVE_SYMLINK` can override it. When the currently-running binary is already in a directory on `PATH` and is not inside the versioned install root, the updater prefers that path. This preserves source-built installs at locations such as `~/.cargo/bin/nyxid` until the first prebuilt update migrates them.
 
+The skill's `skills/nyxid/scripts/install.sh` wrapper uses this same layout for
+both prebuilt and source installs. It downloads the real cargo-dist 0.30.0
+installer into private staging and sets `NYXID_CLI_UNMANAGED_INSTALL=<staging>`
+(flat layout, no receipt, no RC modifications) and `NYXID_CLI_NO_MODIFY_PATH=1`.
+It clears `NYXID_CLI_INSTALL_DIR` and `CARGO_DIST_FORCE_INSTALL_DIR` for that child:
+those controls take precedence over unmanaged staging in 0.30.0. The wrapper
+validates the staged `--version`, installs mode 0755, atomically replaces the active
+symlink, configures its actual parent directory in the RC file, and verifies the
+active executable. Re-runs support symlinks, legacy files and the same version.
+Only unsupported targets or installer download/run failure trigger source fallback;
+a missing, non-executable, unversioned binary or relocation failure is fatal.
+Temporary staging is removed on exit.
+
+Neither the updater nor doctor reads cargo-dist receipts; both use the versioned
+root/active path contract above. `scripts/uninstall.sh` removes the self-hosted
+Docker deployment and configuration, not the CLI, and does not consume receipts.
+
+CLI HTTPS/WSS trust and daemon CA environment persistence are documented in
+[Network, proxies and TLS](site/cli/guides/network.md). All directly constructed
+reqwest clients and WSS connectors share `cli/src/tls.rs`. `self_update` is used
+only for local archive extraction (`Extract`), not its HTTP/download APIs.
+The node IFTTT adapter accepts a builder; the CLI supplies the shared TLS builder
+instead of calling the adapter crate's default-client singleton.
+Sigstore 0.13's `SigstoreTrustRoot::new` constructs a private tough HTTP client
+and exposes no injection hook. The CLI instead builds a separate client with shared TLS roots and tough's
+original timeouts/default headers (never GitHub Authorization), retry budget/backoff,
+and range recovery. It supplies the client through
+`tough::Transport` in `commands/update_attestation/trust.rs`, authenticates the TUF
+target, then calls Sigstore's parsing-only constructor. The bootstrap signing
+root in `cli/resources/sigstore-root.json` is copied byte-for-byte from
+sigstore 0.13.0's `trust_root/prod/root.json` (upstream sigstore-rs, Apache-2.0).
+When upgrading Sigstore, review this bootstrap root alongside that dependency;
+normal TUF root rotation remains signature-verified. TLS CA configuration never
+bypasses TUF/attestation verification.
+
 On every successful Unix prebuilt update, the updater:
 
 - Writes the new binary to `{install-root}/{tag}/nyxid` with mode `0755`.
@@ -125,6 +160,13 @@ Archive extraction is staged before publication and always publishes the flat
 the directory entry atomically instead of truncating the running executable.
 
 Opt-in automatic upgrades use the same verifier, activation and retention paths.
+Enabling the scheduler validates explicit TLS configuration and persists only
+`NYXID_CA_CERT`, `SSL_CERT_FILE` and `SSL_CERT_DIR` as absolute, escaped paths in
+launchd/systemd, using the same helper as node daemon installation. Proxy variables
+are never persisted. Re-run `nyxid update auto enable` with the intended interval
+to update the CA paths; omitted or empty variables remove previous entries.
+Native OS roots are lazy fallback roots, loaded only after eager verification
+fails (or explicitly by doctor); scheduled updates use the same full trust union.
 See [automatic upgrade operations](site/cli/getting-started/install.md#automatic-upgrades)
 for scheduling, holds, controller recovery, skills, and deferred node adoption.
 

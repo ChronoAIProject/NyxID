@@ -1,6 +1,6 @@
 [package]
 name = "nyxid-cli"
-version = "0.38.1"
+version = "0.38.2"
 edition = "2024"
 rust-version.workspace = true
 license.workspace = true
@@ -32,6 +32,8 @@ tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 
 anyhow = "1"
+regex = "1"
+tough = { version = "0.21", default-features = false }
 clap = { version = "4.6", features = ["derive", "env"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false }
 dirs = "6"
@@ -76,6 +78,8 @@ const-oid = { version = "0.9", features = ["db"] }
 # which leaves auto-detection ambiguous and panics on first TLS use
 # (rustls/src/crypto/mod.rs:249). See issue #696.
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "logging", "aws_lc_rs"] }
+rustls-native-certs = "0.8"
+webpki-roots = "1"
 pki-types = { package = "rustls-pki-types", version = "1.11" }
 self-replace = "1.5"
 self_update = { version = "0.44", default-features = false, features = ["reqwest", "rustls", "compression-flate2", "archive-tar", "archive-zip"] }
@@ -100,6 +104,8 @@ rust-embed = { version = "8", features = ["include-exclude"] }
 constant_time_eq = "=0.4.2"
 
 [dev-dependencies]
+rcgen = "0.14"
+tokio-rustls = "0.26"
 nyxid-service-adapters = { path = "../service-adapters", features = ["test-support"] }
 tempfile = "3"
 # HTTP mock server for command-level integration tests: point an

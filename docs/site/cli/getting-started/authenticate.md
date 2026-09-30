@@ -152,3 +152,11 @@ Profiles also scope the `nyxid node` daemon, so you can run multiple credential-
 ## Next
 
 - [Your first connection](/docs/cli/getting-started/first-connection) — connect a service and verify a proxied call.
+
+## Network troubleshooting
+
+Use `nyxid doctor --json` to inspect trust sources and network failures.
+`login_unavailable` keeps exit code 19 and adds a sanitized `error.diagnostic`
+with the stage, status when available, endpoint, causes and a hint.
+See [Network, proxies and TLS](/docs/cli/guides/network) for CA configuration,
+proxy behavior, and background node services.

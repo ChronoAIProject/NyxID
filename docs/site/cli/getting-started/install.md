@@ -16,6 +16,36 @@ export PATH="$HOME/.local/bin:$PATH"
 
 The installer uses attested prebuilt binaries for macOS x64/arm64 and Linux x64/arm64. Linux arm64 binaries target Ubuntu 20.04 / `glibc 2.31`, so Jetson-class Ubuntu 20.04 hosts use the prebuilt path instead of compiling locally.
 
+## Custom installation paths
+
+The wrapper installs to `${XDG_DATA_HOME:-$HOME/.local/share}/nyxid/versions/vX.Y.Z/nyxid`
+and atomically links `$HOME/.local/bin/nyxid` to that executable. Override either
+path independently:
+
+```sh
+export NYXID_INSTALL_ROOT="$HOME/tools/nyxid/versions"
+export NYXID_ACTIVE_SYMLINK="$HOME/tools/bin/nyxid"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/scripts/install.sh)"
+export PATH="$(dirname "$NYXID_ACTIVE_SYMLINK"):$PATH"
+```
+
+The script configures the active binary's actual directory in your shell RC file
+(bash, zsh, fish, or profile), then verifies that path with `--version`. Existing
+symlinks, legacy regular files, and reinstalling the same version are supported.
+Keep the overrides set for later updates and `doctor` checks.
+
+The cargo-dist installer runs in private temporary staging with
+`NYXID_CLI_UNMANAGED_INSTALL`; it does not write shell RC files or a cargo-dist
+receipt. The wrapper controls the final layout and removes staging on exit.
+Source fallback happens only for unsupported targets or installer download/run
+failure. A successful installer that yields an unusable binary, or a relocation
+failure, stops with an error and never starts Rust installation. Source fallback
+also ends in the versioned layout and configured active symlink.
+
+See [Network, proxies and TLS](/docs/cli/guides/network) for enterprise CAs,
+`HTTPS_PROXY`, and safe login diagnostics. The shell installer itself uses curl's
+TLS configuration; `NYXID_CA_CERT` configures the installed CLI.
+
 ## Verify
 
 ```bash

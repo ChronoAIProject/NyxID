@@ -311,9 +311,16 @@ async fn run_terminal(
         .headers_mut()
         .insert(AUTHORIZATION, bearer_header(&token)?);
 
-    let (ws_stream, _) = tokio_tungstenite::connect_async(request)
-        .await
-        .context("Failed to open SSH terminal WebSocket")?;
+    let (ws_stream, _) = tokio_tungstenite::connect_async_tls_with_config(
+        request,
+        None,
+        false,
+        Some(tokio_tungstenite::Connector::Rustls(
+            crate::tls::shared_config()?,
+        )),
+    )
+    .await
+    .context("Failed to open SSH terminal WebSocket")?;
     let (mut ws_sink, mut ws_stream) = ws_stream.split();
 
     let mut stdin = tokio::io::stdin();
@@ -485,9 +492,16 @@ async fn run_proxy(base_url: &str, service_id: &str, token: &str) -> Result<()> 
         .headers_mut()
         .insert(AUTHORIZATION, bearer_header(token)?);
 
-    let (ws_stream, _) = tokio_tungstenite::connect_async(request)
-        .await
-        .context("Failed to open SSH WebSocket tunnel")?;
+    let (ws_stream, _) = tokio_tungstenite::connect_async_tls_with_config(
+        request,
+        None,
+        false,
+        Some(tokio_tungstenite::Connector::Rustls(
+            crate::tls::shared_config()?,
+        )),
+    )
+    .await
+    .context("Failed to open SSH WebSocket tunnel")?;
     let (mut ws_sink, mut ws_stream) = ws_stream.split();
 
     let mut stdin = tokio::io::stdin();

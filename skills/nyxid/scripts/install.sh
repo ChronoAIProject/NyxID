@@ -1,15 +1,23 @@
 #!/usr/bin/env bash
 # SECURITY MANIFEST:
 # Environment variables accessed: HOME, SHELL, PATH, CARGO_HOME, XDG_CONFIG_HOME,
-#   XDG_DATA_HOME, NYXID_INSTALL_ROOT, NYXID_ACTIVE_SYMLINK, CC
-# External endpoints called: github.com (prebuilt installer), sh.rustup.rs
-#   (fallback Rust installer), github.com (fallback cargo install)
+#   XDG_DATA_HOME, NYXID_INSTALL_ROOT, NYXID_ACTIVE_SYMLINK, CC, TMPDIR, PWD
+# Subprocess controls: NYXID_CLI_UNMANAGED_INSTALL, NYXID_CLI_INSTALL_DIR,
+#   CARGO_DIST_FORCE_INSTALL_DIR, NYXID_CLI_NO_MODIFY_PATH (set for staging);
+#   curl/cargo/rustup retain their standard network environment settings.
+# External endpoints called: github.com and release-assets.githubusercontent.com
+#   (prebuilt installer/assets), sh.rustup.rs and static.rust-lang.org (fallback
+#   Rust installer/toolchain), github.com, crates.io and static.crates.io
+#   (fallback cargo source/dependencies)
 # Local files read: shell RC files (~/.zshrc, ~/.bashrc, etc.)
-# Local files written: shell RC files (adds ~/.local/bin if missing),
-#   ~/.local/bin/nyxid, ~/.local/share/nyxid/versions/<version>/nyxid
+# Local files written: shell RC files (adds the active binary directory),
+#   NYXID_ACTIVE_SYMLINK (default ~/.local/bin/nyxid),
+#   NYXID_INSTALL_ROOT/vX.Y.Z/nyxid (default $XDG_DATA_HOME/nyxid/versions
+#   or ~/.local/share/nyxid/versions), private temporary staging files;
+#   source fallback may install Rust under CARGO_HOME (default ~/.cargo).
 #
 # NyxID CLI installer -- prefers the prebuilt cargo-dist binary installer and
-# only falls back to cargo install when the host platform has no release asset.
+# falls back to cargo install only when no prebuilt installer can be obtained/run.
 set -euo pipefail
 
 REPO="https://github.com/ChronoAIProject/NyxID"
@@ -20,6 +28,22 @@ VERSIONS_ROOT="${NYXID_INSTALL_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/nyxid/
 CARGO_HOME_DIR="${CARGO_HOME:-$HOME/.cargo}"
 CARGO_BIN="$CARGO_HOME_DIR/bin"
 CARGO_ENV="$CARGO_HOME_DIR/env"
+# Symlink targets must remain valid when invoked from another directory.
+case "$ACTIVE_NYXID" in /*) ;; *) ACTIVE_NYXID="$PWD/$ACTIVE_NYXID" ;; esac
+case "$VERSIONS_ROOT" in /*) ;; *) VERSIONS_ROOT="$PWD/$VERSIONS_ROOT" ;; esac
+ACTIVE_DIR="$(dirname "$ACTIVE_NYXID")"
+STAGING_DIR=""
+TMP_LINK=""
+TMP_BINARY=""
+cleanup() {
+  [ -z "$STAGING_DIR" ] || rm -rf -- "$STAGING_DIR"
+  [ -z "$TMP_LINK" ] || rm -f -- "$TMP_LINK"
+  [ -z "$TMP_BINARY" ] || rm -f -- "$TMP_BINARY"
+  return 0
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -60,12 +84,15 @@ path_in_rc() {
   local rc_file="$1"
   [ -f "$rc_file" ] || return 1
 
-  grep -Fq "$LOCAL_BIN" "$rc_file" 2>/dev/null && return 0
-  grep -Eq '(\$HOME|\$\{HOME\}|~)/\.local/bin|fish_add_path.*\.local/bin' "$rc_file" 2>/dev/null
+  grep -Fq -- "$ACTIVE_DIR" "$rc_file" 2>/dev/null && return 0
+  if [ "$ACTIVE_DIR" = "$LOCAL_BIN" ]; then
+    grep -Eq '(\$HOME|\$\{HOME\}|~)/\.local/bin|fish_add_path.*\.local/bin' "$rc_file" 2>/dev/null && return 0
+  fi
+  return 1
 }
 
-ensure_local_bin_path() {
-  local rc_file shell_name
+ensure_active_path() {
+  local rc_file shell_name escaped_dir
   rc_file="$(detect_shell_rc)"
   shell_name="$(basename "${SHELL:-/bin/sh}")"
 
@@ -74,15 +101,17 @@ ensure_local_bin_path() {
     return
   fi
 
-  info "Adding $LOCAL_BIN to PATH in $rc_file..."
+  info "Adding $ACTIVE_DIR to PATH in $rc_file..."
   mkdir -p "$(dirname "$rc_file")"
+  # Double-quoted literal path, safe even with shell metacharacters in HOME.
+  escaped_dir="$(printf '%s' "$ACTIVE_DIR" | sed 's/[\\"$`]/\\&/g')"
   {
     echo ""
     echo "# NyxID CLI"
     if [ "$shell_name" = "fish" ]; then
-      printf 'fish_add_path "%s"\n' "$LOCAL_BIN"
+      printf 'fish_add_path "%s"\n' "$escaped_dir"
     else
-      printf 'export PATH="%s:$PATH"\n' "$LOCAL_BIN"
+      printf 'export PATH="%s:$PATH"\n' "$escaped_dir"
     fi
   } >> "$rc_file"
 
@@ -109,22 +138,21 @@ prebuilt_target_supported() {
 }
 
 install_prebuilt() {
-  mkdir -p "$LOCAL_BIN"
   info "Installing NyxID CLI prebuilt binary..."
-
-  if curl --proto '=https' --tlsv1.2 -fsSL "$INSTALLER_URL" | sh; then
-    if [ -x "$ACTIVE_NYXID" ]; then
-      migrate_prebuilt_to_versioned_layout
-      info "NyxID CLI installed at $ACTIVE_NYXID"
-      return 0
-    fi
-
-    warn "prebuilt installer completed but $ACTIVE_NYXID was not found"
-  else
-    warn "prebuilt installer failed"
+  if ! curl --proto '=https' --tlsv1.2 -fsSL "$INSTALLER_URL" -o "$STAGING_DIR/installer.sh"; then
+    warn "prebuilt installer download failed"
+    return 1
   fi
-
-  return 1
+  # cargo-dist 0.30.0: INSTALL_DIR / FORCE_INSTALL_DIR precede UNMANAGED_INSTALL.
+  # Unmanaged mode installs flat and writes neither shell RC files nor receipts.
+  if ! NYXID_CLI_INSTALL_DIR= CARGO_DIST_FORCE_INSTALL_DIR= \
+      NYXID_CLI_UNMANAGED_INSTALL="$STAGING_DIR/prebuilt" \
+      NYXID_CLI_NO_MODIFY_PATH=1 sh "$STAGING_DIR/installer.sh"; then
+    warn "prebuilt installer failed"
+    return 1
+  fi
+  install_versioned_binary "$STAGING_DIR/prebuilt/nyxid"
+  info "NyxID CLI installed at $ACTIVE_NYXID"
 }
 
 is_linux_arm64() {
@@ -210,36 +238,29 @@ cargo_log_mentions_aws_lc_gcc_guard() {
     && grep -Eiq 'gcc#95189|memcmp|compiler[- ]bug' "$cargo_log"
 }
 
-detect_nyxid_version() {
-  "$ACTIVE_NYXID" --version 2>/dev/null \
-    | grep -Eo 'v?[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?' \
-    | head -n 1
-}
-
-migrate_prebuilt_to_versioned_layout() {
-  local raw_version version version_dir versioned_bin active_dir tmp_link
-  raw_version="$(detect_nyxid_version || true)"
-  if [ -z "$raw_version" ]; then
-    fail "could not determine nyxid version from $ACTIVE_NYXID --version"
-  fi
-
-  case "$raw_version" in
-    v*) version="$raw_version" ;;
-    *) version="v$raw_version" ;;
-  esac
-
+install_versioned_binary() {
+  local binary="$1" output raw_version version version_dir versioned_bin
+  [ -f "$binary" ] && [ -x "$binary" ] || fail "installer succeeded but staged binary is missing or not executable: $binary"
+  output="$("$binary" --version 2>/dev/null)" || fail "staged binary failed to run: $binary --version"
+  raw_version="$(printf '%s\n' "$output" | sed -nE 's/^nyxid v?([0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?)$/\1/p')"
+  [ -n "$raw_version" ] || fail "could not determine staged nyxid version: $binary --version"
+  version="v$raw_version"
   version_dir="$VERSIONS_ROOT/$version"
   versioned_bin="$version_dir/nyxid"
-  active_dir="$(dirname "$ACTIVE_NYXID")"
-  tmp_link="$active_dir/nyxid.tmp.$$"
 
-  mkdir -p "$version_dir" "$active_dir"
-  install -m 755 "$ACTIVE_NYXID" "$versioned_bin"
-
-  rm -f "$tmp_link"
-  ln -s "$versioned_bin" "$tmp_link"
-  mv -f "$tmp_link" "$ACTIVE_NYXID"
-
+  mkdir -p "$version_dir" "$ACTIVE_DIR" || fail "could not create install directories: $version_dir / $ACTIVE_DIR"
+  [ ! -d "$ACTIVE_NYXID" ] || fail "active binary path is a directory: $ACTIVE_NYXID"
+  [ ! -d "$versioned_bin" ] || fail "versioned binary path is a directory: $versioned_bin"
+  TMP_BINARY="$(mktemp "$version_dir/.nyxid.XXXXXX")" || fail "could not stage versioned binary in $version_dir"
+  install -m 755 "$binary" "$TMP_BINARY" || fail "could not copy staged binary into $version_dir"
+  mv -f "$TMP_BINARY" "$versioned_bin" || fail "could not activate versioned binary: $versioned_bin"
+  TMP_BINARY=""
+  # Reserve a unique name in the same directory for an atomic symlink rename.
+  TMP_LINK="$(mktemp "$ACTIVE_DIR/.nyxid-link.XXXXXX")" || fail "could not stage active symlink in $ACTIVE_DIR"
+  rm -f "$TMP_LINK" || fail "could not prepare active symlink: $TMP_LINK"
+  ln -s "$versioned_bin" "$TMP_LINK" || fail "could not create active symlink: $TMP_LINK"
+  mv -f "$TMP_LINK" "$ACTIVE_NYXID" || fail "could not replace active binary: $ACTIVE_NYXID"
+  TMP_LINK=""
   info "Versioned install: $versioned_bin"
 }
 
@@ -268,8 +289,8 @@ install_from_source() {
 
   configure_source_build_compiler
 
-  cargo_log="$(mktemp)"
-  if cargo install --git "$REPO" nyxid-cli --force --locked 2>&1 | tee "$cargo_log"; then
+  cargo_log="$STAGING_DIR/cargo.log"
+  if cargo install --git "$REPO" nyxid-cli --force --locked --root "$STAGING_DIR/source" 2>&1 | tee "$cargo_log"; then
     rm -f "$cargo_log"
   else
     cargo_status=$?
@@ -281,18 +302,15 @@ install_from_source() {
     fail "cargo install failed with exit code $cargo_status"
   fi
 
-  if [ ! -x "$CARGO_BIN/nyxid" ]; then
-    fail "cargo install completed but $CARGO_BIN/nyxid was not found"
-  fi
-
-  mkdir -p "$LOCAL_BIN"
-  install -m 755 "$CARGO_BIN/nyxid" "$LOCAL_BIN/nyxid"
-  info "NyxID CLI installed at $LOCAL_BIN/nyxid"
+  install_versioned_binary "$STAGING_DIR/source/bin/nyxid"
+  info "NyxID CLI installed at $ACTIVE_NYXID"
 }
 
 # ---------------------------------------------------------------------------
 # Install
 # ---------------------------------------------------------------------------
+
+STAGING_DIR="$(mktemp -d "${TMPDIR:-/tmp}/nyxid-install.XXXXXX")" || fail "could not create private staging directory"
 
 if prebuilt_target_supported; then
   if ! install_prebuilt; then
@@ -304,17 +322,15 @@ else
   install_from_source
 fi
 
-ensure_local_bin_path
+ensure_active_path
 
 # ---------------------------------------------------------------------------
 # Verify
 # ---------------------------------------------------------------------------
 
-if [ -x "$LOCAL_BIN/nyxid" ]; then
-  info "Verified: $("$LOCAL_BIN/nyxid" --version 2>/dev/null || echo 'nyxid is available')"
-else
-  fail "nyxid binary not found -- installation may have failed"
-fi
+[ -x "$ACTIVE_NYXID" ] || fail "active nyxid binary is missing: $ACTIVE_NYXID"
+VERIFIED_VERSION="$("$ACTIVE_NYXID" --version)" || fail "active binary failed verification: $ACTIVE_NYXID --version"
+info "Verified: $VERIFIED_VERSION"
 
 info ""
 info "Installation complete!"

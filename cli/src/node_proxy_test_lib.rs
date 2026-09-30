@@ -19,6 +19,7 @@ pub mod proxy_executor;
 mod secret_backend;
 #[path = "node/signing.rs"]
 mod signing;
+pub mod tls;
 
 pub mod ws_client {
     pub enum NodeWsMessage {
