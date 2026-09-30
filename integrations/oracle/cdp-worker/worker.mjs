@@ -634,7 +634,7 @@ async function assertPublicTarget(rawUrl) {
 // Ported from the proven userscript extractors: KaTeX/MathJax → LaTeX, the
 // Pro-reasoning "still generating" probe, latest-answer + full-transcript
 // extraction. Installed on window.__nyx and re-installed after navigation.
-export const DOM_CORE_VERSION = 6;
+export const DOM_CORE_VERSION = 7;
 const DOM_CORE = `
 window.__nyx = (function () {
   const artifactFileId = ${artifactFileId.toString()};
@@ -649,7 +649,7 @@ window.__nyx = (function () {
     // Screen-reader-only labels ("You said:", "ChatGPT said:") share a line
     // with the first words of the message in the 2026-09 layout, so a
     // line-based filter cannot drop them. They are never message content.
-    for (const sr of Array.from(clone.querySelectorAll(".sr-only"))) sr.remove();
+    for (const sr of Array.from(clone.querySelectorAll('.sr-only, .ProseMirror-widget, [contenteditable="false"][aria-hidden="true"]'))) sr.remove();
     for (const ann of Array.from(clone.querySelectorAll('annotation[encoding="application/x-tex"]'))) {
       const latex = (ann.textContent || "").trim();
       if (!latex) continue;
@@ -791,6 +791,23 @@ window.__nyx = (function () {
 
   function assistantCount() {
     return turnNodes().filter((turn) => turn.role === 'assistant').length;
+  }
+
+  // The 2026-09 composer turns every URL into a rich link node carrying an
+  // icon widget (contenteditable=false, aria-hidden). Those widgets add a
+  // phantom space to innerText in front of each link, so a prompt with 54
+  // links read back 54 characters longer than it was typed and failed the
+  // read-back on every worker (observed 2026-09-30, ~100 failures per worker
+  // in six hours, each forcing a Chrome relaunch). Hide the widgets while
+  // reading; innerText on a detached clone would lose block boundaries.
+  function composerText(el) {
+    if (!el) return "";
+    if (typeof el.value === "string") return el.value;
+    const widgets = [...el.querySelectorAll('.ProseMirror-widget, [contenteditable="false"][aria-hidden="true"]')];
+    const previous = widgets.map((w) => w.style.display);
+    widgets.forEach((w) => { w.style.display = "none"; });
+    try { return el.innerText; }
+    finally { widgets.forEach((w, i) => { w.style.display = previous[i]; }); }
   }
 
   // Structure only, never content: what the page looked like when a task
@@ -999,7 +1016,7 @@ window.__nyx = (function () {
     return item && (item.innerText || item.textContent || "").trim() === text ? item : null;
   }
 
-  return { version: ${DOM_CORE_VERSION}, discoverControls, structuralProbe, diagnosticSummary, errorCode, isStillGenerating, assistantCount, extractResponse, extractImages, extractFiles, extractTranscript, extractTranscriptKeys, scrollContainer, extractTextWithMath, cleanText,
+  return { version: ${DOM_CORE_VERSION}, discoverControls, structuralProbe, diagnosticSummary, composerText, errorCode, isStillGenerating, assistantCount, extractResponse, extractImages, extractFiles, extractTranscript, extractTranscriptKeys, scrollContainer, extractTextWithMath, cleanText,
     beginModelPicker, finishNestedModelPicker, modelPickerMenus, modelPickerItems, modelPickerTrigger, modelPickerItem, compactModelLabel };
 })();
 `;
@@ -3173,7 +3190,7 @@ async function handlePrompt(runtime, page, task, recovering) {
   await ensureComposerUnobstructed(page);
   await input.click({ timeout: PRE_SEND_ACTION_MS });
   await input.fill(task.prompt, { timeout: promptFillTimeout(task.prompt?.length) });
-  const typed = await input.evaluate(el => el.value ?? el.innerText);
+  const typed = await input.evaluate(el => window.__nyx?.composerText(el) ?? (el.value ?? el.innerText));
   if (normalizePromptText(typed) !== normalizePromptText(task.prompt)) throw Object.assign(new Error('composer_readback_failed'), { code: 'composer_readback_failed' });
   await installDomCore(page);
   const before = await boundedRead(interactionBudget(PRE_SEND_ACTION_MS), (timeout) =>
