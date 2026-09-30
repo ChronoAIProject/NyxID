@@ -106,7 +106,15 @@ one of its threads: `allow_all_services=false`, `allow_auto_connected_services=f
 `allowed_service_ids`/`allowed_platform_service_ids` from the agent's `grants`, and
 `assistant:account` only with an `account_read` grant, which reaches read-only
 account tools. The agent document is the durable source; thread keys mirror it
-at every turn start, rotation and replacement.
+at every turn start, rotation and replacement. NyxAgent calls its model through
+NyxID's proxy (`/api/v1/proxy/s/{model service}`, e.g. `chrono-llm-public`,
+`llm-deepseek`) with the thread's own key. The proxy therefore lets a live
+assistant conversation key (an `assistant_agent_credentials` row, which people
+cannot create) reach any active catalog service with `inference` metadata even
+outside its grants (`proxy::assistant_model_call`), whether the owner's own row,
+an org row or the catalog row resolves it. Nothing else widens: the key's
+allowlist, inventory, delegation tokens, consent screens and MCP tools stay its
+grants.
 
 Legacy conversations deserialize with `access_mode: ask` and no `agent_id`. The
 next `begin_turn` adopts them as NyxBot threads inside the transaction that

@@ -326,7 +326,9 @@ fn description(name: &str) -> &'static str {
         "read_subagent" => "Read a specialist's recent home-thread messages (bounded excerpts).",
         "grant_subagent" => {
             "Grant a specialist more services or read-only account access. Grant only what the \
-            user's request needs."
+            user's request needs. Agents already run on NyxAgent and think with NyxID's model \
+            services, so those need no grant. Services that cannot be granted are listed in \
+            not_granted with the reason; the rest are granted."
         }
         "revoke_subagent" => "Revoke services or account access from a specialist.",
         "decide_permission" => {
