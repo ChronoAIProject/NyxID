@@ -72,12 +72,10 @@ jobs:
       cursor_plugin: ${{ steps.filter.outputs.cursor_plugin }}
       oracle_worker: ${{ steps.filter.outputs.oracle_worker }}
       ci: ${{ steps.filter.outputs.ci }}
-      workflow_hash: ${{ steps.workflow-hash.outputs.value }}
     steps:
       - uses: actions/checkout@v6
-      - name: Hash CI workflow
-        id: workflow-hash
-        run: echo "value=$(sha256sum .github/workflows/ci.yml | cut -d ' ' -f1)" >> "$GITHUB_OUTPUT"
+      - name: Test CI helpers
+        run: python3 -m unittest discover -s .github/scripts -p 'test_*.py'
       - uses: dorny/paths-filter@v4
         id: filter
         with:
@@ -220,7 +218,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
@@ -237,7 +235,7 @@ jobs:
       - uses: actions/checkout@v6
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -254,11 +252,9 @@ jobs:
     needs: changes
     if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
-    # Full DWARF for the nyxid test binary exhausts the hosted runner's memory
-    # while it is codegen'd and linked: the runner dies with exit 143 ("The
-    # runner has received a shutdown signal") four to five minutes into the
-    # crate compile, before any test runs. Line tables keep panic locations
-    # and backtraces while cutting debuginfo volume several-fold.
+    timeout-minutes: 45
+    # Reduce debug-information volume while retaining locations and backtraces.
+    # Resource samples distinguish future compilation shutdowns from test failures.
     env:
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
@@ -267,7 +263,7 @@ jobs:
         run: bash .github/scripts/start-test-mongodb.sh
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
         with:
           key: backend
@@ -277,7 +273,7 @@ jobs:
         run: bash scripts/check-rci-backend-boundary.sh
 
       - name: Run backend tests
-        run: cargo nextest run -p nyxid -p nyxid-service-adapters --profile ci
+        run: python3 .github/scripts/ci_resources.py backend-test cargo nextest run -p nyxid -p nyxid-service-adapters --profile ci
 
       - name: Publish test summary
         if: always()
@@ -294,6 +290,16 @@ jobs:
           path: target/nextest/ci/junit.xml
           if-no-files-found: warn
 
+      - name: Upload resource samples
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: resources-backend-test
+          path: ${{ runner.temp }}/nyxid-ci-resources
+          if-no-files-found: ignore
+          retention-days: 14
+
   # Keep the standalone test-profile build and smoke assertion. It exercises
   # a different Cargo feature-unification path from the combined nextest run.
   backend-billing-smoke:
@@ -301,6 +307,7 @@ jobs:
     needs: changes
     if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     # Same test-binary compile as backend-test; see the note there.
     env:
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
@@ -310,12 +317,22 @@ jobs:
         run: bash .github/scripts/start-test-mongodb.sh
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
         with:
           key: backend-billing-smoke
       - name: Billing route coverage smoke
-        run: cargo test -p nyxid billing_route_coverage_smoke -- --nocapture
+        run: python3 .github/scripts/ci_resources.py billing-smoke cargo test -p nyxid billing_route_coverage_smoke -- --nocapture
+
+      - name: Upload resource samples
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: resources-backend-billing-smoke
+          path: ${{ runner.temp }}/nyxid-ci-resources
+          if-no-files-found: ignore
+          retention-days: 14
 
   # Keep the production feature/profile and dep-info guard together while
   # letting the full backend tests run on their own runner.
@@ -328,7 +345,7 @@ jobs:
       - uses: actions/checkout@v6
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
         with:
           key: backend-image-inputs
@@ -349,7 +366,7 @@ jobs:
       - uses: actions/checkout@v6
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
         with:
           key: cli
@@ -398,7 +415,7 @@ jobs:
       - uses: actions/checkout@v6
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
         with:
           key: features-${{ matrix.cache-suffix }}
@@ -483,7 +500,7 @@ jobs:
       - uses: actions/checkout@v6
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
         with:
           key: wizard-freshness
@@ -549,25 +566,31 @@ jobs:
     # Cache a report for every rollup tip, including documentation-only pushes.
     if: inputs.force-all || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/rollup-')) || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
-    # Coverage counters do not need full DWARF; keep line locations without
-    # exhausting the hosted runner while compiling the backend test binary.
+    timeout-minutes: 45
+    # Coverage counters do not require full DWARF; retain line locations.
+    # Resource samples record whether compilation approaches runner limits.
     env:
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+      - name: Identify coverage measurement inputs
+        id: coverage-identity
+        run: python3 .github/scripts/coverage_identity.py
       - name: Start transaction-capable MongoDB
         run: bash .github/scripts/start-test-mongodb.sh
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
         with:
           key: coverage-backend
-      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.9.1
 
       # Head: instrument + measure WITHOUT the gate, emitting an lcov report and
       # a one-line summary JSON. The threshold is enforced as the final step in
@@ -576,8 +599,9 @@ jobs:
       # `report` is package-scoped so the % isn't diluted by the rest of the
       # workspace (whose tests this job does not run).
       - name: Measure (head)
+        run: python3 .github/scripts/ci_resources.py coverage-test cargo llvm-cov --package nyxid --no-report
+      - name: Export head coverage
         run: |
-          cargo llvm-cov --package nyxid --summary-only
           cargo llvm-cov report --package nyxid --lcov --output-path coverage-backend.lcov
           cargo llvm-cov report --package nyxid --json --summary-only --output-path coverage-backend.raw.json
 
@@ -588,18 +612,17 @@ jobs:
             coverage-backend.raw.json coverage-backend.json
 
       # Push and publish runs make their measured head available to PRs whose
-      # base is this exact commit. A workflow edit changes the key so the PR
-      # falls back to a fresh base measurement.
+      # base is this exact commit. Recipe or runner-image changes invalidate it.
       - name: Prepare reusable base report
         if: github.event_name != 'pull_request'
         run: cp coverage-backend.raw.json coverage-backend.base.json
       - name: Cache reusable base report
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && steps.coverage-identity.outputs.reusable == 'true'
         continue-on-error: true
         uses: actions/cache/save@v4
         with:
           path: coverage-backend.base.json
-          key: coverage-backend-base-v1-${{ github.sha }}-${{ needs.changes.outputs.workflow_hash }}
+          key: coverage-backend-base-v2-${{ github.sha }}-${{ steps.coverage-identity.outputs.fingerprint }}
 
       # Re-reads the existing profdata (no re-run). The report and summary are
       # produced before a regression fails the job and remain available to the
@@ -617,8 +640,18 @@ jobs:
             coverage-backend.json
           if-no-files-found: warn
 
+      - name: Upload resource samples
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: resources-coverage-backend
+          path: ${{ runner.temp }}/nyxid-ci-resources
+          if-no-files-found: ignore
+          retention-days: 14
+
   # The base percentage is informational. Reuse only a report for the exact
-  # base SHA and CI workflow; otherwise run the same Mongo-backed measurement
+  # base SHA, measurement recipe and runner image; otherwise measure afresh
   # as before on the base commit, in parallel with PR-head coverage.
   coverage-backend-base:
     name: Coverage (Backend Base)
@@ -626,17 +659,22 @@ jobs:
     if: github.event_name == 'pull_request' && (needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true')
     continue-on-error: true
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v6
+      - name: Identify coverage measurement inputs
+        id: coverage-identity
+        run: python3 .github/scripts/coverage_identity.py
       - name: Restore exact base report
+        if: steps.coverage-identity.outputs.reusable == 'true'
         id: base-cache
         uses: actions/cache/restore@v4
         with:
           path: coverage-backend.base.json
-          key: coverage-backend-base-v1-${{ github.event.pull_request.base.sha }}-${{ needs.changes.outputs.workflow_hash }}
+          key: coverage-backend-base-v2-${{ github.event.pull_request.base.sha }}-${{ steps.coverage-identity.outputs.fingerprint }}
       - name: Checkout base tree
         if: steps.base-cache.outputs.cache-hit != 'true'
         uses: actions/checkout@v6
@@ -649,7 +687,7 @@ jobs:
       - name: Install system dependencies
         if: steps.base-cache.outputs.cache-hit != 'true'
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
         if: steps.base-cache.outputs.cache-hit != 'true'
         with:
           components: llvm-tools-preview
@@ -657,22 +695,27 @@ jobs:
         if: steps.base-cache.outputs.cache-hit != 'true'
         with:
           key: coverage-backend-base
-      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@v2
         if: steps.base-cache.outputs.cache-hit != 'true'
+        with:
+          tool: cargo-llvm-cov@0.9.1
       - name: Measure base branch
         if: steps.base-cache.outputs.cache-hit != 'true'
         working-directory: base-coverage
+        run: python3 "$GITHUB_WORKSPACE/.github/scripts/ci_resources.py" coverage-test cargo llvm-cov --package nyxid --no-report
+      - name: Export base coverage
+        if: steps.base-cache.outputs.cache-hit != 'true'
+        working-directory: base-coverage
         run: |
-          cargo llvm-cov --package nyxid --summary-only
           cargo llvm-cov report --package nyxid --json --summary-only \
             --output-path "$GITHUB_WORKSPACE/coverage-backend.base.json"
       - name: Cache measured base report
-        if: steps.base-cache.outputs.cache-hit != 'true'
+        if: steps.base-cache.outputs.cache-hit != 'true' && steps.coverage-identity.outputs.reusable == 'true'
         continue-on-error: true
         uses: actions/cache/save@v4
         with:
           path: coverage-backend.base.json
-          key: coverage-backend-base-v1-${{ github.event.pull_request.base.sha }}-${{ needs.changes.outputs.workflow_hash }}
+          key: coverage-backend-base-v2-${{ github.event.pull_request.base.sha }}-${{ steps.coverage-identity.outputs.fingerprint }}
       - name: Upload base report
         if: always()
         uses: actions/upload-artifact@v4
@@ -680,6 +723,16 @@ jobs:
           name: backend-base-report
           path: coverage-backend.base.json
           if-no-files-found: warn
+
+      - name: Upload resource samples
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: resources-coverage-backend-base
+          path: ${{ runner.temp }}/nyxid-ci-resources
+          if-no-files-found: ignore
+          retention-days: 14
 
   # Restore the original PR artifact contract after the parallel base lookup.
   # This is informational; the coverage-backend job remains the threshold gate.
@@ -733,19 +786,21 @@ jobs:
           fetch-depth: 0
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
         with:
           key: coverage-cli
-      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.9.1
 
       # Measure WITHOUT the gate (enforced as the final step below). `report` is
       # package-scoped so the % isn't diluted by the rest of the workspace.
       - name: Measure (head)
         run: |
-          cargo llvm-cov --package nyxid-cli --summary-only
+          cargo llvm-cov --package nyxid-cli --no-report
           cargo llvm-cov report --package nyxid-cli --lcov --output-path coverage-cli.lcov
           cargo llvm-cov report --package nyxid-cli --json --summary-only --output-path coverage-cli.raw.json
 
@@ -762,7 +817,7 @@ jobs:
           BASE_REF: ${{ github.event.pull_request.base.sha }}
         run: |
           git worktree add ../base-coverage "$BASE_REF"
-          ( cd ../base-coverage && cargo llvm-cov --package nyxid-cli --summary-only \
+          ( cd ../base-coverage && cargo llvm-cov --package nyxid-cli --no-report \
               && cargo llvm-cov report --package nyxid-cli --json --summary-only \
                  --output-path "$GITHUB_WORKSPACE/coverage-cli.base.json" )
 
@@ -958,6 +1013,7 @@ jobs:
       - cli-test
       - rust-features
       - frontend
+      - mobile
       - wizard-bundle-freshness
       - sdk
       - coverage-backend
@@ -983,6 +1039,7 @@ jobs:
             cli-test=${{ needs.cli-test.result }}
             rust-features=${{ needs.rust-features.result }}
             frontend=${{ needs.frontend.result }}
+            mobile=${{ needs.mobile.result }}
             wizard-bundle-freshness=${{ needs.wizard-bundle-freshness.result }}
             sdk=${{ needs.sdk.result }}
             coverage-backend=${{ needs.coverage-backend.result }}
@@ -991,10 +1048,10 @@ jobs:
         run: |
           set -eu
           echo "Job results:"
-          echo "$RESULTS" | sed 's/^/  /'
           failed=0
           while IFS='=' read -r job result; do
             [ -z "$job" ] && continue
+            printf '  %s=%s\n' "$job" "$result"
             case "$result" in
               success|skipped) ;;
               *)
