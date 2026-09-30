@@ -1,7 +1,7 @@
 # CI robustness and latency investigation
 
 Status: CI-only implementation for repurposed PR #1711 targeting `main`,
-2026-09-30. Subsequent
+2026-09-30, rebased onto main `1f6fad58` after #1700 merged. Subsequent
 stages remain proposals. No repository rules are changed. PR #1707 (NyxChat
 setup overlays) is merged. The coverage debug-profile mitigation landed through
 #1705 (`a29056ef`). #1711 was initially closed as a duplicate and is being reused
@@ -9,8 +9,8 @@ at the user's request for the broader CI reliability fix.
 
 ## Implemented first stage
 
-- Apply the rollup-tested line-table profile to main for backend tests, smoke
-  and both coverage jobs; retain existing compiler/test concurrency. Pin
+- Retain main's line-table profile for backend tests, smoke and both coverage
+  jobs and preserve existing compiler/test concurrency. Pin
   Rust to 1.98.1, cargo-nextest to 0.9.146, cargo-llvm-cov to 0.9.1
   and the MongoDB 8 image to the digest
   from the passing September 30 coverage run. These inputs can be upgraded
@@ -41,10 +41,6 @@ at the user's request for the broader CI reliability fix.
 - Cancel only superseded revisions of the same PR's CodeQL scan; keep push
   and schedule groups separate and retain all four language scans.
 - Add Mobile to both the aggregate's dependencies and result enforcement.
-- Carry the already-tested `7848cce1` NyxBot regression-test fix to main: wait
-  for the recorded reply target after a 202 callback instead of sleeping
-  300 ms. Both waits retain their original assertions and a ten-second bound.
-  Production application code is unchanged.
 - Use `cargo llvm-cov --no-report` before the existing exports and final
   threshold check. This removes an unused report pass without changing tests,
   instrumentation, produced artifacts or thresholds.
@@ -61,6 +57,42 @@ and/or Mongo image digest in the workflow/setup script together with their
 validation evidence. The recipe fingerprint changes automatically. A runner
 image rollout also causes a safe fresh base measurement. Observe future runs
 before introducing compiler-worker limits or declaring shutdowns resolved.
+
+## Coverage preservation and review criteria
+
+After rebasing onto main `1f6fad58`, this PR changes no application source,
+regression test, nextest configuration, feature matrix, or frontend/mobile
+coverage configuration. The earlier NyxBot condition-wait fix is already in
+main through #1700 and is no longer part of this PR's net diff.
+
+The test commands retain their package/feature selection. `--no-report` only
+suppresses cargo-llvm-cov's initial report generation: instrumentation and test
+execution remain enabled, followed by the same LCOV/JSON exports and final
+threshold enforcement. Head coverage always measures the current tested tree;
+only the informational base report can be restored from an exact-identity
+cache. Backend, CLI and frontend thresholds remain 73%, 64% and 15%.
+
+Required command failures and cancellations remain failures. Only optional
+resource artifacts and the existing informational base comparison tolerate
+failure; head coverage and the aggregate gate do not. Mobile is newly included
+in the aggregate. No retries, ignored tests or looser assertions are introduced.
+
+The final hosted validation must compare head/base executed test counts,
+ignored/skipped counts and coverage totals as well as job success. Small line
+percentage differences alone are not proof of changed coverage scope; compare
+source identity and instrumented denominators before attributing them. The
+baseline before the reserve passed 6,838 backend nextest tests (2 skipped) and
+6,823 backend coverage tests (2 ignored) at 87.40% lines on the previous main
+base. The rebased run includes #1700's additional source and tests, so those
+older counts are historical evidence, not an exact acceptance count.
+
+Resource reserve provisioning, pinned measurement inputs, bounded jobs,
+condition-based waits, failure propagation and exact cache identity follow
+established CI practices. Added swap provides measured capacity headroom; it
+is not evidence that all previous shutdowns were OOM, and can trade latency for
+survival under memory pressure. Preserve useful concurrency and measure future
+runs before further tuning. One passing pipeline cannot establish a long-term
+flake rate or a guaranteed speedup.
 
 ## Recommendation
 
@@ -286,8 +318,8 @@ blindly sharing or retaining all workspace artifacts. Evaluate warm/cold
 behavior, correctness and cache eviction before changing this policy.
 
 The line-table profile originally proposed in #1711 has now landed through
-#1705. The repurposed #1711 carries it to main with resource telemetry and the other
-first-stage controls.
+#1705. Main now includes it through #1700; the repurposed #1711 adds resource
+telemetry and the other first-stage controls without duplicating that change.
 If attribution remains necessary, run an isolated paired compile experiment
 on immutable, identical application trees with only the debug profile varying.
 Keep Rust/LLVM/tool
