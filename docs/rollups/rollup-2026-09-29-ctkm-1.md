@@ -6,7 +6,7 @@ This rollup was created from `main` commit
 it can merge into `main` without reverting later work. It makes signup
 invitation codes an operator choice now that billing is in place, redesigns
 the OAuth consent screen to match the connection flows, and keeps historical
-usage priced on the Billing → Usage page after a service price is removed.
+usage priced on the Billing → Usage page after a service price is removed. Chat setup links reuse in-page overlays, and tracked bot setup links send signed lifecycle callbacks. Main #1703 (`ce4414e6`) was subsequently merged as `3b80d68f`, retaining main history before #1705 landed.
 
 ## Included changes and provenance
 
@@ -19,6 +19,8 @@ record. For each, the source and squash deltas share a stable patch ID and
 | [#1690](https://github.com/ChronoAIProject/NyxID/pull/1690) | `dc5fb1b4be000995027c90412701d66c97766588` | `e7691afe605770e67128376bf87b610c5e8f37a8` | Gate the signup invitation-code requirement behind the global, default-on `auth:invitation-code` feature flag, replacing the `INVITE_CODE_REQUIRED` environment variable. Invitation-code management is retained. |
 | [#1701](https://github.com/ChronoAIProject/NyxID/pull/1701) | `fbf21ac1e7dbed35656b777f64526d8d5bf0f867` | `68ad6d8146460ebd721158522c9fabea4256140e` | Redesign `/oauth-consent` to match the connect-link and channel-bot screens: plain-language permissions, collapsed app details, no client-side risk badges, catalog service descriptions, and scrollable service lists. `GET /api/v1/user-services` list rows add optional `catalog_service_description`. The decision form posted to `/oauth/authorize/decision` is unchanged. |
 | [#1702](https://github.com/ChronoAIProject/NyxID/pull/1702) | `595ed4b3f192aea999def3abf46b2b6dfce9b859` | `c3d49700f98be5bb31f1beacb3700bb25564fbbd` | Keep historical usage priced after a service price is removed: price removal marks the code's `billing_rate_cache` row `retired_at` instead of deleting it, `GET /api/v1/billing/usage` prices historical groups by grant-settled derivation → cached rate → exact per-row reservation rates, and the Usage page shows `≥` lower bounds instead of Unavailable when only some records are unpriced. Patch ID `8a146dbbd181cf376a67c6573838770d2b228a4e`; landed tree `8f684a12f046fc81bf2ade427ca4a17fdb12d7e3` equals the source tree. The source branch was created from this rollup's head `b98949e1`, so no main-sync merge was involved. |
+| [#1707](https://github.com/ChronoAIProject/NyxID/pull/1707) | `9d6d4618b9fd4156f5686402a54fb57b6fdb96e6` | `012dd86f840e77fcb0486120e965b430d4dcc25d` | Reuse connector and channel setup in chat overlays; preserve standalone URLs, explicit submission, popup recovery and focus restoration. Stable patch ID `c7f68e947408a6e2881a3191a8989fd9b373cfc9`; source and landed tree `f15e3e2cfc9e037bf71c652049b4f53b1c87fd5e`. |
+| [#1705](https://github.com/ChronoAIProject/NyxID/pull/1705) | `d08d3d0c2fb2eedf0da13de21bd5048f6b797fe6` | `a29056ef8328ae3cfd5bcca51a352e1408163c04` | Tracked bot setup links, signed callbacks, CLI secret-file protection, integration docs and CI fixes. Stable patch ID `dc667b78bfb183574b91a365e7d3e1c7db454d05`; source and landed tree `d63cd0f6141262cde6737c89ec9ea3deeec398d7`. |
 
 The six `main` commits between the rollup base and `e96a5078` (#1694–#1699,
 NyxBot channel/gateway work and service-account catalog skill assignment) are
@@ -123,8 +125,52 @@ known from the rows' own consumption records. Credit grants were not the cause.
   the 04:17 pull_request run had hit the identical failure. The runner's memory
   is exhausted while the full-DWARF test binary is codegen'd and linked. Both
   jobs now build with `CARGO_PROFILE_TEST_DEBUG=line-tables-only`, which keeps
-  panic locations and backtraces and changes nothing for local development or
-  the coverage jobs. CI-only; should also land on `main`.
+  panic locations and backtraces and changes nothing for local development. #1705 subsequently applies the same profile to both
+  backend coverage jobs while preserving instrumentation and thresholds. CI-only; should also land on `main`.
+
+## Tracked bot setup links (#1705)
+
+Platforms and agents can create a single-use bot setup URL through
+`POST /api/v1/channel-connect-links` or `nyxid channel-bot connect-link`, send it
+to the human owner, and receive signed `channel_connect.completed`,
+`channel_connect.cancelled`, or `channel_connect.expired` notifications. The
+hosted page is `/connect/bot/{token}`. An optional `callback_url` returns the
+browser after the owner acknowledges any one-time setup secret.
+
+- Direct HTTP callers receive the webhook signing secret once. The CLI requires
+  `--webhook-signing-secret-file` and saves it to a new file (mode `0600` on Unix);
+  terminal and JSON output contain only the path and signing key ID. Existing
+  files and symlinks are rejected before link creation. OAuth apps reuse their
+  registered connection webhook and redirect policy.
+- Terminal callbacks have a stable event identity and snapshot, leased retries,
+  public HTTPS destinations with DNS pinning, disabled redirects, and a separate
+  app quota. Agent Keys can create, read, and cancel requests; completion requires
+  an authorized human and preserves the owner, platform, and label from creation.
+- Manual, managed, and Telegram setup share the tracked lifecycle. Completion
+  means the bot was saved; receivers inspect `bot_status` and
+  `webhook_registered` to determine inbound-message readiness.
+- The bot-link change preserves production Connector-link routes, schemas,
+  tokens, events, standalone browser flows, webhook client behavior, and quota. Ordinary bot
+  setup continues through the original service entry points.
+- API examples and implementation references are in `docs/API.md` and
+  `docs/CHANNEL_BOT_RELAY.md`; published CLI/web guides and the agent playbook
+  cover creation, signing, retries, expiry, and callback setup.
+- Live external-provider onboarding was not manually exercised. Automated
+  regressions cover tracked setup and existing Connector-link behavior.
+
+The shared setup-component conflict with #1707 preserves chat overlays and
+tracked-link one-time results. Main #1703 was merged into the rollup as
+`3b80d68f`; the CLI wizard was rebuilt from the combined source and its Rust
+freshness test passed. Existing main history remains an ancestor of the rollup.
+
+CI repairs keep ordinary bot creation using its existing service functions,
+resolve strict Clippy warnings, save CLI webhook signing secrets in private
+files instead of logging them, and apply `CARGO_PROFILE_TEST_DEBUG=line-tables-only`
+to both backend coverage jobs. Tests, coverage instrumentation and thresholds
+remain enabled. The high-severity CodeQL logging alert was fixed in source,
+without dismissal or suppression.
+
+The source delta from `3b80d68f5431585f3f628bdc376aa7f86fba840d` to `d08d3d0c2fb2eedf0da13de21bd5048f6b797fe6` and landed squash delta share stable patch ID `dc667b78bfb183574b91a365e7d3e1c7db454d05`. The landed tree and `git merge-tree` result both equal the validated source tree `d63cd0f6141262cde6737c89ec9ea3deeec398d7`.
 
 ## Verification
 
@@ -146,3 +192,5 @@ known from the rows' own consumption records. Credit grants were not the cause.
   and `handlers::services::tests` — 141 passed, 0 failed; Clippy `-D warnings`
   clean; frontend eslint 0 errors, vitest 66/66 for the billing and credits
   files, and the type-checking build passed.
+
+- #1705 final source `d08d3d0c2fb2eedf0da13de21bd5048f6b797fe6`: [CI](https://github.com/ChronoAIProject/NyxID/actions/runs/36716172518), [CodeQL](https://github.com/ChronoAIProject/NyxID/actions/runs/36716172473) and [Release](https://github.com/ChronoAIProject/NyxID/actions/runs/36716172450) passed, including backend tests/coverage, baseline coverage comparison, workspace Clippy, KMS builds, frontend/CLI tests and coverage, wizard freshness, image inputs, billing smoke and all CodeQL analyses. The PR has no open code-scanning alerts. Local integration checks passed 134 focused frontend tests, 25 Playwright browser cases, targeted ESLint, the production build and the regenerated wizard freshness test. Earlier focused validation passed 19 bot-link backend tests, 180 compatibility regressions, 92 CLI tests and 18 documentation tests; the backend groups overlap by one test.
