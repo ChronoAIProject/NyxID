@@ -31,11 +31,12 @@ import {
   type ServiceInsightsState,
 } from "@/hooks/use-service-insights";
 import {
-  callerLabel,
   summarizeBilling,
+  summarizeBillingDetail,
+  latestRecordedUse,
   insightStatusLabel,
 } from "@/lib/service-insights";
-import { formatRelativeTime } from "@/lib/utils";
+import { ServiceUseSummary } from "./service-use-summary";
 import type { CatalogEntry, KeyInfo } from "@/types/keys";
 
 function GroupCard({
@@ -128,9 +129,6 @@ function GroupCard({
   const connectionInsights = connections.map((key) =>
     insights.connections.get(key.id),
   );
-  const recent = connectionInsights
-    .flatMap((item) => item?.usage?.activity.requests ?? [])
-    .sort((a, b) => b.occurred_at.localeCompare(a.occurred_at))[0];
   const billingSummary =
     insights.status !== "ready"
       ? insightStatusLabel(insights.status, "Billing")
@@ -139,40 +137,63 @@ function GroupCard({
             .filter((key) => key.is_active)
             .map((key) => insights.connections.get(key.id)),
         );
-  const ownRequests = connectionInsights.every(
-    (item) => item?.usage?.activity.visibility === "own_requests",
-  );
-  const configuredAccess = connectionInsights.every(
-    (item) =>
-      item?.usage?.access.basis === "configuration" &&
-      item.usage.activity.tracking === "unavailable",
-  );
+  const activeInsights = connections
+    .filter((key) => key.is_active)
+    .map((key) => insights.connections.get(key.id));
+  const billingDetail =
+    insights.status === "ready"
+      ? summarizeBillingDetail(activeInsights)
+      : "Rates unavailable";
+  const access = connectionInsights.map((item) => item?.usage?.access);
   const configuredKeys = [
     ...new Map(
-      connectionInsights.flatMap((item) =>
-        (item?.usage?.access.keys ?? []).map(
-          (key) => [key.id, key.name] as const,
-        ),
+      access.flatMap((item) =>
+        (item?.keys ?? []).map((key) => [key.id, key.name] as const),
       ),
     ).values(),
   ];
-  const callerSummary =
-    insights.status !== "ready"
-      ? insightStatusLabel(insights.status, "Activity")
-      : recent
-        ? `${callerLabel(recent.caller)} · ${formatRelativeTime(recent.occurred_at)}`
-        : configuredAccess
-          ? configuredKeys.length
-            ? `${configuredKeys.slice(0, 2).join(" · ")}${configuredKeys.length > 2 ? ` +${configuredKeys.length - 2}` : ""}`
-            : connectionInsights.some((item) => item?.usage?.access.incomplete)
-              ? "Key inventory incomplete"
-              : "No matching keys"
-          : connectionInsights.every(
-                (item) =>
-                  item?.usage && item.usage.activity.tracking !== "unavailable",
-              )
-            ? "No recorded requests · 30d"
-            : "Activity not reported";
+  const accessIncomplete = access.some(
+    (item) =>
+      !item ||
+      item.incomplete ||
+      item.truncated ||
+      item.visibility === "unavailable",
+  );
+  const accessSummary = configuredKeys.length
+    ? `${configuredKeys.slice(0, 2).join(" · ")}${configuredKeys.length > 2 ? ` +${configuredKeys.length - 2}` : ""}`
+    : accessIncomplete
+      ? "Key access incomplete"
+      : "No matching keys";
+  const openSummary = (view: "billing" | "requests" | "access") => {
+    if (!expanded) {
+      onToggle(cardRef.current);
+      return;
+    }
+    const lastConnection =
+      view === "requests"
+        ? connections
+            .map((connection) => ({
+              id: connection.id,
+              request: latestRecordedUse(
+                insights.connections.get(connection.id)?.usage,
+              ),
+            }))
+            .filter((item) => item.request)
+            .sort((a, b) =>
+              b.request!.occurred_at.localeCompare(a.request!.occurred_at),
+            )[0]?.id
+        : undefined;
+    const buttons = [
+      ...(cardRef.current?.querySelectorAll<HTMLButtonElement>(
+        `[data-insight-view="${view}"]`,
+      ) ?? []),
+    ];
+    const button =
+      buttons.find((item) => item.dataset.connectionId === lastConnection) ??
+      buttons[0];
+    button?.click();
+    button?.focus({ preventScroll: true });
+  };
 
   return (
     <section
@@ -199,7 +220,7 @@ function GroupCard({
         <div
           className={cn(
             "relative flex flex-col rounded-t-xl bg-card",
-            expanded ? "shadow-sm" : "min-h-64",
+            expanded ? "shadow-sm" : "min-h-80",
           )}
         >
           <div className="flex flex-1 flex-col gap-3 p-5">
@@ -242,8 +263,13 @@ function GroupCard({
                 {group.description}
               </p>
             )}
-            {!expanded && (
-              <div className="mt-auto space-y-2 text-xs">
+            <div
+              className={cn(
+                "mt-auto text-xs",
+                expanded ? "grid gap-4 md:grid-cols-3" : "space-y-3",
+              )}
+            >
+              {!expanded && (
                 <p
                   className="flex min-w-0 items-center gap-2 overflow-hidden text-muted-foreground"
                   title={sources.map((source) => source.name).join(" · ")}
@@ -259,57 +285,72 @@ function GroupCard({
                     </span>
                   ))}
                 </p>
-                <button
-                  type="button"
-                  onClick={() => onToggle(cardRef.current)}
-                  aria-expanded={expanded}
-                  aria-controls={contentId}
-                  aria-label={`Expand ${group.name} to compare ${configuredAccess ? "agent key scope" : "caller activity"}`}
-                  className="grid w-full grid-cols-[6rem_1fr] items-center gap-2 rounded-sm text-left focus-visible:outline-2 focus-visible:outline-ring"
-                >
-                  <span className="text-muted-foreground">
-                    {configuredAccess
-                      ? "Agent keys"
-                      : ownRequests
-                        ? "Your latest"
-                        : "Latest request"}
-                  </span>
-                  <span className="flex min-w-0 items-center gap-1.5">
-                    <UsersRound className="size-3.5 shrink-0 text-muted-foreground" />
-                    <span
-                      className="truncate"
-                      title={`${configuredAccess ? "Configured key scope" : "Latest recorded caller"}: ${callerSummary}`}
-                    >
-                      {callerSummary}
-                    </span>
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onToggle(cardRef.current)}
-                  aria-expanded={expanded}
-                  aria-controls={contentId}
-                  aria-label={`Expand ${group.name} to compare billing`}
-                  className="grid w-full grid-cols-[6rem_1fr] items-center gap-2 rounded-sm text-left focus-visible:outline-2 focus-visible:outline-ring"
-                >
-                  <span className="text-muted-foreground">Billing</span>
-                  <span className="flex min-w-0 items-center gap-1.5">
+              )}
+              <button
+                type="button"
+                onClick={() => {
+                  openSummary("billing");
+                }}
+                aria-expanded={expanded}
+                aria-controls={contentId}
+                aria-label={`Expand ${group.name} to compare billing`}
+                className="grid w-full grid-cols-[6rem_minmax(0,1fr)] items-start gap-2 rounded-sm text-left focus-visible:outline-2 focus-visible:outline-ring"
+              >
+                <span className="pt-0.5 text-muted-foreground">Billing</span>
+                <span className="min-w-0">
+                  <span className="flex min-h-5 min-w-0 items-center gap-1.5 font-medium">
                     <CreditCard className="size-3.5 shrink-0 text-muted-foreground" />
                     <span className="truncate" title={billingSummary}>
                       {billingSummary}
                     </span>
                   </span>
-                </button>
-                {search.trim() && (
-                  <p
-                    className="truncate text-[11px] text-muted-foreground"
-                    title={connections.map((key) => key.label).join(" · ")}
+                  <span
+                    className="mt-1 block min-h-8 text-[11px] leading-4 text-muted-foreground line-clamp-2"
+                    title={billingDetail}
                   >
-                    Matches: {connections.map((key) => key.label).join(" · ")}
-                  </p>
-                )}
-              </div>
-            )}
+                    {billingDetail}
+                  </span>
+                </span>
+              </button>
+              <ServiceUseSummary
+                connections={connections}
+                insights={insights}
+                onClick={() => {
+                  openSummary("requests");
+                }}
+                expanded={expanded}
+                controls={contentId}
+              />
+              <button
+                type="button"
+                onClick={() => {
+                  openSummary("access");
+                }}
+                aria-expanded={expanded}
+                aria-controls={contentId}
+                aria-label={`Expand ${group.name} to compare agent key scope`}
+                className="grid w-full grid-cols-[6rem_minmax(0,1fr)] items-start gap-2 rounded-sm text-left focus-visible:outline-2 focus-visible:outline-ring"
+              >
+                <span className="pt-0.5 text-muted-foreground">Agent keys</span>
+                <span className="flex min-h-5 min-w-0 items-center gap-1.5">
+                  <UsersRound className="size-3.5 shrink-0 text-muted-foreground" />
+                  <span
+                    className="truncate"
+                    title={`Configured scope: ${accessSummary}`}
+                  >
+                    {accessSummary}
+                  </span>
+                </span>
+              </button>
+              {search.trim() && (
+                <p
+                  className="truncate text-[11px] text-muted-foreground"
+                  title={connections.map((key) => key.label).join(" · ")}
+                >
+                  Matches: {connections.map((key) => key.label).join(" · ")}
+                </p>
+              )}
+            </div>
           </div>
           <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border/70 px-4 py-3">
             <Button

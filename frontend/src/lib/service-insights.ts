@@ -3,6 +3,7 @@ import type {
   ServiceBillingExplanation,
   ServiceCaller,
   ServiceInsight,
+  ConnectionActivity,
 } from "@/schemas/service-insights";
 import type { KeyInfo } from "@/types/keys";
 import type { ServiceInsightsState } from "@/hooks/use-service-insights";
@@ -119,6 +120,76 @@ export function accessReasonLabel(reason: string): string {
       } as Record<string, string>
     )[reason] ?? reason.replaceAll("_", " ")
   );
+}
+
+export function accessCountLabel(access: ConnectionActivity["access"]): string {
+  if (access.visibility === "unavailable") return "Key access unavailable";
+  if (!access.keys.length && (access.incomplete || access.truncated))
+    return "Key access incomplete";
+  return `${access.keys.length}${access.incomplete || access.truncated ? "+" : ""} agent ${access.keys.length === 1 ? "key" : "keys"}`;
+}
+
+export function latestRecordedUse(usage?: ConnectionActivity | null) {
+  if (usage?.activity.last_used !== undefined)
+    return usage.activity.last_used ?? undefined;
+  return usage?.activity.requests
+    .filter(
+      (request) =>
+        request.outcome === "completed" ||
+        (request.response_status != null &&
+          ["response_received", "connection_opened", "failed"].includes(
+            request.outcome,
+          )),
+    )
+    .sort((a, b) => b.occurred_at.localeCompare(a.occurred_at))[0];
+}
+
+export function recordedSourceLabel(
+  request: NonNullable<ReturnType<typeof latestRecordedUse>>,
+  connection: KeyInfo,
+): string {
+  if (request.source?.kind === "platform") return "Platform";
+  if (request.source?.kind === "personal") return "Personal";
+  if (request.source?.kind === "org") {
+    const source = connection.credential_source;
+    return source?.type === "org" && source.org_id === request.source.owner_id
+      ? `Organization · ${source.org_name}`
+      : "Organization";
+  }
+  return "Layer not recorded";
+}
+
+export function providerBillingLabel(
+  billing?: ServiceBillingExplanation | null,
+): string {
+  if (billing?.provider_billing === "separate_provider_account")
+    return "Provider billed separately";
+  if (billing?.provider_billing === "nyxid_credential")
+    return "NyxID supplies the credential";
+  if (billing?.provider_billing === "no_credential")
+    return "No provider credential";
+  return "Provider billing not reported";
+}
+
+export function summarizeBillingDetail(
+  insights: readonly (ServiceInsight | undefined)[],
+): string {
+  const bills = insights.map((item) => item?.billing);
+  if (!bills.length || bills.some((bill) => !bill)) return "Rates unavailable";
+  const first = bills[0]!;
+  const rates = bills.every(
+    (bill) =>
+      JSON.stringify(bill!.rates) === JSON.stringify(first.rates) &&
+      bill!.charge_status === first.charge_status,
+  )
+    ? rateLabel(first)
+    : "Rates vary by connection";
+  const providers = bills.every(
+    (bill) => bill!.provider_billing === first.provider_billing,
+  )
+    ? providerBillingLabel(first)
+    : "Provider billing varies";
+  return `${rates} · ${providers}`;
 }
 
 export function summarizeBilling(

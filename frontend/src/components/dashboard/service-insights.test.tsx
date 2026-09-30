@@ -147,6 +147,7 @@ const insight: ServiceInsight = {
           occurred_at: "2026-09-29T00:00:00Z",
           outcome: "response_received",
           response_status: 200,
+          source: { kind: "platform", owner_id: "org" },
         },
       ],
       truncated: false,
@@ -180,6 +181,99 @@ afterEach(() => {
 });
 
 describe("service card billing and caller details", () => {
+  it("shows the recorded layer even when today's connection binding is different", () => {
+    mount({
+      ...insight,
+      usage: {
+        ...insight.usage!,
+        activity: {
+          ...insight.usage!.activity,
+          requests: [
+            {
+              ...insight.usage!.activity.requests[0]!,
+              source: { kind: "org", owner_id: "org" },
+            },
+          ],
+        },
+      },
+    });
+    expect(
+      screen.getByText("Organization · ChronoAI · openai-team"),
+    ).toBeVisible();
+    expect(screen.getByText(/Codex CI · Release app/)).toBeVisible();
+    expect(screen.getByText("Personal account")).toBeVisible();
+  });
+  it("does not present incomplete key inventory as zero keys", () => {
+    mount({
+      ...insight,
+      usage: {
+        ...insight.usage!,
+        access: { ...insight.usage!.access, keys: [], incomplete: true },
+      },
+    });
+    expect(screen.getByText("Key access incomplete")).toBeVisible();
+    expect(screen.queryByText("0 agent keys")).not.toBeInTheDocument();
+  });
+  it("shows the separately recorded last use even when all three recent requests were denied", () => {
+    const last = insight.usage!.activity.requests[0]!;
+    mount({
+      ...insight,
+      usage: {
+        ...insight.usage!,
+        activity: {
+          ...insight.usage!.activity,
+          last_used: last,
+          requests: Array.from({ length: 3 }, (_, index) => ({
+            ...last,
+            id: `denied-${index}`,
+            outcome: "denied",
+            response_status: 403,
+            source: null,
+          })),
+        },
+      },
+    });
+    expect(screen.getByText("Platform · openai-team")).toBeVisible();
+    expect(screen.getByText(/Codex CI · Release app/)).toBeVisible();
+  });
+  it("leaves legacy request layers unknown even when the current binding is platform", () => {
+    mount({
+      ...insight,
+      usage: {
+        ...insight.usage!,
+        activity: {
+          ...insight.usage!.activity,
+          requests: [{ ...insight.usage!.activity.requests[0]!, source: null }],
+        },
+      },
+    });
+    expect(screen.getByText("Layer not recorded · openai-team")).toBeVisible();
+    expect(
+      screen.queryByText("Platform · openai-team"),
+    ).not.toBeInTheDocument();
+  });
+  it("does not infer the last used layer from credential timestamps or rejected requests", () => {
+    mount({
+      ...insight,
+      usage: {
+        ...insight.usage!,
+        activity: {
+          ...insight.usage!.activity,
+          requests: [
+            {
+              ...insight.usage!.activity.requests[0]!,
+              outcome: "denied",
+              response_status: 403,
+            },
+          ],
+        },
+      },
+    });
+    expect(screen.getByText("Not recorded")).toBeVisible();
+    expect(
+      screen.queryByText("Platform · openai-team"),
+    ).not.toBeInTheDocument();
+  });
   it("shows configured key access and the billing flow on older servers without claiming recorded use", async () => {
     const user = userEvent.setup();
     mount({
@@ -209,7 +303,7 @@ describe("service card billing and caller details", () => {
         },
       },
     });
-    expect(screen.getByText("Codex CI")).toBeVisible();
+    expect(screen.getByText(/Codex CI/)).toBeVisible();
     expect(screen.getByText("Configured scope")).toBeVisible();
     expect(screen.getByText("Acting user's personal account")).toBeVisible();
     expect(screen.queryByText(/No recorded requests/)).not.toBeInTheDocument();
@@ -241,7 +335,11 @@ describe("service card billing and caller details", () => {
     expect(screen.getByRole("columnheader", { name: "Billing" })).toBeVisible();
     expect(screen.getByText("Personal account")).toBeVisible();
     expect(screen.getByText("NyxID credential")).toBeVisible();
-    expect(screen.getByText("Codex CI")).toBeVisible();
+    expect(
+      within(
+        screen.getByRole("button", { name: "Recent requests for Team OpenAI" }),
+      ).getByText(/Codex CI/),
+    ).toBeVisible();
     expect(screen.getByText("0.25 credits / request")).toBeVisible();
     expect(
       screen.getByText(/Your keys with access · 1 overrides/),
@@ -356,7 +454,7 @@ describe("service card billing and caller details", () => {
   it("shows server compatibility failures instead of claiming free service or no usage", async () => {
     mount({ ...insight, billing: null, usage: null }, "unavailable");
     expect(screen.getByText("Billing not reported")).toBeVisible();
-    expect(screen.getByText("Activity not reported")).toBeVisible();
+    expect(screen.getByText("Not recorded")).toBeVisible();
     expect(screen.queryByText(/free|never used/i)).not.toBeInTheDocument();
     await userEvent.click(
       screen.getByRole("button", { name: "Billing for Team OpenAI" }),
@@ -364,9 +462,9 @@ describe("service card billing and caller details", () => {
     expect(screen.getByText(/This server does not provide/)).toBeVisible();
   });
   it.each([
-    ["restricted", "Activity restricted", "Billing restricted"],
-    ["error", "Activity couldn't load", "Billing couldn't load"],
-    ["loading", "Loading activity…", "Loading billing…"],
+    ["restricted", "History restricted", "Billing restricted"],
+    ["error", "History couldn't load", "Billing couldn't load"],
+    ["loading", "Loading…", "Loading billing…"],
   ] as const)(
     "distinguishes %s insights from an empty history",
     (status, activity, billing) => {
@@ -390,7 +488,9 @@ describe("service card billing and caller details", () => {
         },
       },
     });
-    expect(screen.getByText("No recorded requests · 30d")).toBeVisible();
+    expect(
+      screen.getByText("No dispatched request in available history · 30d"),
+    ).toBeVisible();
     expect(screen.queryByText("Activity not reported")).not.toBeInTheDocument();
   });
   it("does not merge different payer accounts or hide a restricted connection in the group summary", () => {

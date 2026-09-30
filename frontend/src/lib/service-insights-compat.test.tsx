@@ -104,6 +104,21 @@ function mount(connections: KeyInfo[] = [personal]) {
 }
 
 describe("deployed service insight compatibility", () => {
+  it("accepts the deployed key list's omitted expiry and zero binding count", async () => {
+    const {
+      expires_at: _expiry,
+      bindings_count: _count,
+      ...withoutOptionalFields
+    } = key;
+    void _expiry;
+    void _count;
+    responses.set("/api-keys", { keys: [withoutOptionalFields] });
+    const [insight] = await loadConfiguredServiceInsights([personal], "person");
+    expect(insight!.usage!.access.incomplete).toBe(false);
+    expect(insight!.usage!.access.keys).toMatchObject([
+      { id: "key", name: "Codex", credential_override: false },
+    ]);
+  });
   it("uses live scope and catalog metadata when the insights route is absent, without inventing recorded use or settled billing", async () => {
     const { result } = mount();
     await waitFor(() => expect(result.current.status).toBe("ready"));

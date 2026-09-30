@@ -29,6 +29,7 @@ import {
   callerLabel,
   credentialLabel,
   outcomeLabel,
+  recordedSourceLabel,
 } from "@/lib/service-insights";
 import { formatDateTime } from "@/lib/utils";
 import type { KeyInfo } from "@/types/keys";
@@ -409,6 +410,7 @@ export function ConnectionInsightPanel({
               <tr>
                 <th className="py-2 pr-3 font-medium">Caller</th>
                 <th className="px-3 py-2 font-medium">Type / application</th>
+                <th className="px-3 py-2 font-medium">Recorded layer</th>
                 <th className="px-3 py-2 font-medium">Time</th>
                 <th className="px-3 py-2 font-medium">Outcome</th>
               </tr>
@@ -429,6 +431,9 @@ export function ConnectionInsightPanel({
                             : "Application not recorded")}
                       </span>
                     )}
+                  </td>
+                  <td className="px-3 py-2.5">
+                    {recordedSourceLabel(request, connection)}
                   </td>
                   <td className="px-3 py-2.5">
                     <time dateTime={request.occurred_at}>

@@ -62,6 +62,7 @@ pub struct ActivitySummary {
     pub tracking: String,
     pub request_count: u64,
     pub requests: Vec<RecentRequest>,
+    pub last_used: Option<RecentRequest>,
     pub truncated: bool,
 }
 
@@ -73,6 +74,13 @@ pub struct RecentRequest {
     pub occurred_at: DateTime<Utc>,
     pub outcome: String,
     pub response_status: Option<u16>,
+    pub source: Option<RecordedConnectionSource>,
+}
+
+#[derive(Clone, Serialize, ToSchema)]
+pub struct RecordedConnectionSource {
+    pub kind: String,
+    pub owner_id: String,
 }
 
 #[derive(Clone, Serialize, ToSchema)]
@@ -262,6 +270,7 @@ pub async fn insights(
                     tracking: "partial".into(),
                     request_count: 0,
                     requests: Vec::new(),
+                    last_used: None,
                     truncated: false,
                 },
             },
@@ -273,9 +282,17 @@ pub async fn insights(
     let groups: Vec<Document> = db.collection::<Document>("audit_log").aggregate(vec![
         doc! { "$match": filter },
         doc! { "$sort": { "created_at": -1, "_id": -1 } },
-        doc! { "$group": { "_id": "$event_data.user_service_id", "count": { "$sum": 1 }, "requests": { "$firstN": { "input": "$$ROOT", "n": REQUEST_LIMIT } } } },
+        doc! { "$set": { "_service_dispatched": { "$or": [
+            { "$eq": ["$event_data.outcome", "completed"] },
+            { "$and": [ { "$isNumber": "$event_data.response_status" }, { "$in": ["$event_data.outcome", ["response_received", "connection_opened", "failed"]] } ] },
+        ] } } },
+        doc! { "$group": { "_id": "$event_data.user_service_id", "count": { "$sum": 1 },
+            "requests": { "$firstN": { "input": "$$ROOT", "n": REQUEST_LIMIT } },
+            "last_used": { "$top": { "sortBy": { "_service_dispatched": -1, "created_at": -1, "_id": -1 }, "output": { "$cond": ["$_service_dispatched", "$$ROOT", null] } } },
+        } },
     ]).max_time(Duration::from_secs(3)).await?.try_collect().await?;
     let mut events = Vec::new();
+    let mut last_uses = Vec::new();
     for group in groups {
         let Some(summary) = group.get_str("_id").ok().and_then(|id| result.get_mut(id)) else {
             continue;
@@ -293,10 +310,15 @@ pub async fn insights(
             }
         }
         summary.activity.truncated = summary.activity.request_count > REQUEST_LIMIT as u64;
+        if let Ok(row) = group.get_document("last_used")
+            && let Ok(event) = bson::from_document::<AuditLog>(row.clone())
+        {
+            last_uses.push(event);
+        }
     }
     let mut app_ids = HashSet::new();
     let mut subject_ids = HashSet::new();
-    for event in &events {
+    for event in events.iter().chain(last_uses.iter()) {
         if let Some(app) = event_string(event, "oauth_client_id")
             .or_else(|| event_string(event, "acting_client_id"))
         {
@@ -316,16 +338,23 @@ pub async fn insights(
     let subjects: Vec<_> = subject_ids.into_iter().collect();
     let users = names(db, "users", "display_name", subjects.clone()).await?;
     let accounts = names(db, "service_accounts", "name", subjects).await?;
-    for event in events {
+    for (event, is_last_use) in events
+        .into_iter()
+        .map(|event| (event, false))
+        .chain(last_uses.into_iter().map(|event| (event, true)))
+    {
         let Some(summary) =
             event_string(&event, "user_service_id").and_then(|id| result.get_mut(id))
         else {
             continue;
         };
-        summary
-            .activity
-            .requests
-            .push(recent_request(&event, actor_id, &apps, &users, &accounts));
+        let mut request = recent_request(&event, actor_id, &apps, &users, &accounts);
+        request.source = recorded_source(&event, &owner_access);
+        if is_last_use {
+            summary.activity.last_used = Some(request);
+        } else {
+            summary.activity.requests.push(request);
+        }
     }
     Ok(result)
 }
@@ -371,6 +400,34 @@ async fn names(
 
 fn event_string<'a>(event: &'a AuditLog, key: &str) -> Option<&'a str> {
     event.event_data.as_ref()?.get(key)?.as_str()
+}
+
+fn recorded_source(
+    event: &AuditLog,
+    owners: &HashMap<String, OwnerAccess>,
+) -> Option<RecordedConnectionSource> {
+    let owner_id = event_string(event, "owner_user_id")?;
+    let access = owners.get(owner_id)?;
+    if !access.can_read() {
+        return None;
+    }
+    let kind = match event_string(event, "credential_class")? {
+        "nyxid_managed_master" => "platform",
+        "user_owned"
+        | "agent_override_user_owned"
+        | "node_managed"
+        | "nyxid_platform_oauth_app"
+        | "no_auth" => match access {
+            OwnerAccess::Direct => "personal",
+            OwnerAccess::AsOrgAdmin { .. } | OwnerAccess::AsOrgMember { .. } => "org",
+            OwnerAccess::Forbidden => return None,
+        },
+        _ => return None,
+    };
+    Some(RecordedConnectionSource {
+        kind: kind.into(),
+        owner_id: owner_id.into(),
+    })
 }
 
 fn recent_request(
@@ -438,6 +495,7 @@ fn recent_request(
     };
     RecentRequest {
         id: event.id.clone(),
+        source: None,
         execution_id: event_string(event, "execution_id").map(str::to_owned),
         caller: RequestCaller {
             id,
@@ -610,6 +668,44 @@ mod tests {
             "event_data": { "user_service_id": "connection", "execution_id": "execution", "auth_kind": "session", "outcome": "response_received", "response_status": 200 },
             "created_at": bson::DateTime::now(),
         }).unwrap()
+    }
+
+    #[test]
+    fn recorded_source_follows_the_request_credential_and_owner_not_current_binding() {
+        let owners = HashMap::from([
+            ("person".into(), OwnerAccess::Direct),
+            (
+                "org".into(),
+                OwnerAccess::AsOrgAdmin {
+                    org_user_id: "org".into(),
+                    membership_id: "member".into(),
+                    allowed_service_ids: None,
+                },
+            ),
+        ]);
+        let mut row = event();
+        for (owner, class, expected) in [
+            ("person", "user_owned", "personal"),
+            ("org", "user_owned", "org"),
+            ("org", "nyxid_managed_master", "platform"),
+            ("org", "agent_override_user_owned", "org"),
+            ("org", "nyxid_platform_oauth_app", "org"),
+            ("person", "node_managed", "personal"),
+        ] {
+            row.event_data =
+                Some(serde_json::json!({ "owner_user_id": owner, "credential_class": class }));
+            let source = recorded_source(&row, &owners).unwrap();
+            assert_eq!(source.kind, expected);
+            assert_eq!(source.owner_id, owner);
+        }
+        for data in [
+            serde_json::json!({ "owner_user_id": "org" }),
+            serde_json::json!({ "owner_user_id": "org", "credential_class": "future_class" }),
+            serde_json::json!({ "owner_user_id": "inaccessible", "credential_class": "user_owned" }),
+        ] {
+            row.event_data = Some(data);
+            assert!(recorded_source(&row, &owners).is_none());
+        }
     }
 
     #[test]
@@ -801,7 +897,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let admin = insights(&db, "viewer", &[a, b]).await.unwrap();
+        let admin = insights(&db, "viewer", &[a.clone(), b]).await.unwrap();
         assert!(!admin.contains_key("b"));
         assert_eq!(admin["a"].activity.request_count, 2);
         assert_eq!(admin["a"].access.total, 2);
@@ -830,6 +926,47 @@ mod tests {
         for secret_field in ["external-secret", "key_hash", "key_prefix"] {
             assert!(!serialized.contains(secret_field));
         }
+        db.collection::<Document>("org_memberships")
+            .update_one(
+                doc! { "_id": &membership.id },
+                doc! { "$set": { "role": "member" } },
+            )
+            .await
+            .unwrap();
+        for (actor_id, outcome, status) in [
+            ("viewer", "response_received", 200),
+            ("viewer", "denied", 403),
+            ("viewer", "denied", 403),
+            ("viewer", "denied", 403),
+            ("viewer", "denied", 403),
+            ("other", "response_received", 200),
+        ] {
+            audit_service::log_actor_event(db.clone(), &audit_service::AuditActor {
+                user_id: actor_id.into(), ip_address: None, user_agent: None, api_key_id: None, api_key_name: None,
+            }, "service_request", Some(serde_json::json!({
+                "user_service_id": "a", "owner_user_id": "org", "credential_class": "nyxid_managed_master",
+                "auth_kind": "session", "outcome": outcome, "response_status": status,
+            }))).await.unwrap();
+        }
+        let history = insights(&db, "viewer", &[a]).await.unwrap();
+        let activity = &history["a"].activity;
+        assert_eq!(activity.requests.len(), 3);
+        assert!(
+            activity
+                .requests
+                .iter()
+                .all(|request| request.outcome == "denied")
+        );
+        let last = activity.last_used.as_ref().unwrap();
+        assert_eq!(last.caller.name, "You");
+        assert_eq!(last.outcome, "response_received");
+        assert_eq!(last.source.as_ref().unwrap().kind, "platform");
+        assert!(
+            !activity
+                .requests
+                .iter()
+                .any(|request| request.id == last.id)
+        );
     }
 
     #[tokio::test]

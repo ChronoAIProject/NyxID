@@ -747,6 +747,20 @@ applied before aggregation. Requests use verified auth identities; an agent's
 platform label or the service's provisioning application cannot establish which
 application executed a request.
 
+Cards keep separate **Billing**, **Last used**, and **Agent keys** summaries in
+both collapsed and expanded states. Billing includes the NyxID payer, rate summary
+and separate provider-charge disclosure. Last used includes the exact connection
+slug, recorded personal/organization/platform layer, caller/application and time.
+Its source comes from the audit event's credential class and owner under current
+visibility checks, never today's credential binding or a shared credential's
+`last_used_at`. Denied admission and unknown dispatch do not count as recorded use;
+they remain in request history. Missing source evidence stays unrecorded. Historical
+coverage is bounded to 30 days. The latest dispatched request is aggregated
+separately from the three recent events, so newer denials cannot hide recorded use.
+The compatibility key parser accepts omitted non-expiring expiry and zero binding
+count fields, matching the deployed API contract; incomplete inventory never reads
+as a definitive zero keys.
+
 The `service_request` event is appended through the existing audit hash chain for
 resolved HTTP proxy, node, streaming, WebSocket, LLM, and MCP requests. It records
 the exact `user_service_id` and a server-generated execution ID shared with the

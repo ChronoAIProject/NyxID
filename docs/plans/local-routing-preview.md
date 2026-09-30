@@ -295,3 +295,29 @@ Configured agent-key names also appear on collapsed cards when exact request
 history is unavailable. Validation for this revision: 124 frontend tests,
 TypeScript, production build, and changed-file ESLint passed. The running preview
 serves the updated modules; signed-in visual verification remains outstanding.
+
+## Billing and last-used layer — 30 September 2026
+
+Billing, Last used and Agent keys now keep separate positions on collapsed cards
+and stay visible in the expanded header. Each table row includes the last-use
+summary too. Billing shows payer, rates and separate provider charges; last use
+shows recorded layer, exact connection slug, caller/application and time. Clicking
+an expanded header summary opens its corresponding inline row panel. The last-use
+time has reserved space so a long caller name cannot hide it. All collapsed card
+summaries share a 320px minimum height.
+
+The draft backend now projects the layer recorded by each exact request. A change
+to today's credential binding cannot rewrite the historical source. Requests
+denied before dispatch remain in history but do not count as use. The latest
+dispatched request is queried separately from the three recent events, so repeated
+denials do not hide it. Production must
+deploy this response before its recorded layer can populate locally. The existing
+credential timestamp is deliberately not substituted for exact connection use.
+
+Fixed the compatibility inventory parser: absent `expires_at` and `bindings_count`
+mean no expiry and zero overrides respectively, per the deployed response contract.
+An incomplete inventory is labelled as incomplete rather than showing zero keys.
+
+Validation: 131 frontend tests, TypeScript, production build and changed-file
+ESLint passed. The running preview serves the updated summary and schema modules.
+Signed-in visual verification remains outstanding because no browser is connected.

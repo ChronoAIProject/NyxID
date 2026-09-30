@@ -48,6 +48,21 @@ export const serviceCallerSchema = z.object({
   app_name: z.string().nullable(),
 });
 
+export const serviceRequestSchema = z.object({
+  id: z.string(),
+  execution_id: z.string().nullable(),
+  caller: serviceCallerSchema,
+  occurred_at: z.string(),
+  outcome: z.string(),
+  response_status: z.number().nullable(),
+  source: z
+    .object({
+      kind: z.enum(["personal", "org", "platform"]),
+      owner_id: z.string(),
+    })
+    .nullish(),
+});
+
 export const connectionActivitySchema = z.object({
   access: z.object({
     visibility: z.string(),
@@ -70,16 +85,8 @@ export const connectionActivitySchema = z.object({
     period_days: z.number(),
     tracking: z.string(),
     request_count: z.number(),
-    requests: z.array(
-      z.object({
-        id: z.string(),
-        execution_id: z.string().nullable(),
-        caller: serviceCallerSchema,
-        occurred_at: z.string(),
-        outcome: z.string(),
-        response_status: z.number().nullable(),
-      }),
-    ),
+    requests: z.array(serviceRequestSchema),
+    last_used: serviceRequestSchema.nullish(),
     truncated: z.boolean(),
   }),
 });
@@ -105,12 +112,12 @@ export const configuredAgentKeySchema = z.object({
   platform: z.string().nullish(),
   purpose: z.string().optional(),
   is_active: z.boolean(),
-  expires_at: z.string().nullable(),
+  expires_at: z.string().nullish(),
   scopes: z.string(),
   allow_all_services: z.boolean(),
   allow_auto_connected_services: z.boolean().optional(),
   allowed_service_ids: z.array(z.string()),
-  bindings_count: z.number(),
+  bindings_count: z.number().default(0),
 });
 export const configuredAgentKeyListSchema = z.object({
   keys: z.array(configuredAgentKeySchema),

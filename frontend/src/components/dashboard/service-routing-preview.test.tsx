@@ -207,8 +207,70 @@ describe("live grouped services", () => {
     expect(screen.getByText("Agent keys")).toBeVisible();
     expect(screen.getByText("Codex CI")).toBeVisible();
     expect(screen.getByText("Expected: Your personal account")).toBeVisible();
+    expect(screen.getByText("Last used")).toBeVisible();
+    expect(screen.getByText("Not recorded")).toBeVisible();
+    expect(screen.getByText(/Provider billed separately/)).toBeVisible();
     expect(screen.queryByText("Latest request")).not.toBeInTheDocument();
     expect(screen.queryByText(/No recorded requests/)).not.toBeInTheDocument();
+  });
+  it("keeps last-used layer and billing visible when the card is expanded and opens row details", async () => {
+    const user = userEvent.setup();
+    insightConnections.set("mine", {
+      service_id: "mine",
+      billing: configuredBilling(records[0]!),
+      usage: {
+        access: { visibility: "own_keys", keys: [], truncated: false },
+        activity: {
+          visibility: "own_requests",
+          tracking: "partial",
+          period_days: 30,
+          request_count: 1,
+          truncated: false,
+          requests: [
+            {
+              id: "event",
+              execution_id: "request",
+              occurred_at: "2026-09-29T12:00:00Z",
+              outcome: "response_received",
+              response_status: 200,
+              caller: {
+                id: "agent",
+                kind: "agent_key",
+                name: "Codex worker",
+                app_id: "app",
+                app_name: "Release app",
+              },
+              source: { kind: "platform", owner_id: "user-a" },
+            },
+          ],
+        },
+      },
+    });
+    render(preview());
+    expect(screen.getByText("Platform · openai-personal")).toBeVisible();
+    expect(screen.getByText(/Codex worker · Release app/)).toBeVisible();
+    await user.click(
+      screen.getByRole("button", { name: "Expand OpenAI connections" }),
+    );
+    const summary = screen.getByRole("button", {
+      name: "View last used connection",
+    });
+    expect(
+      within(summary).getByText("Platform · openai-personal"),
+    ).toBeVisible();
+    await user.click(summary);
+    expect(
+      screen.getByRole("table", { name: "Recent connection requests" }),
+    ).toBeVisible();
+    await user.click(
+      screen.getByRole("button", { name: "Expand OpenAI to compare billing" }),
+    );
+    expect(
+      screen.getByRole("region", { name: "Billing for Personal account" }),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("table", { name: "Recent connection requests" }),
+    ).not.toBeInTheDocument();
   });
   it("keeps scroll height stable when compacting at the bottom of a short filtered view", () => {
     const callbacks: ResizeObserverCallback[] = [];
@@ -891,7 +953,7 @@ describe("live grouped services", () => {
     expect(within(table).getByText("Credential missing")).toBeVisible();
     expect(within(table).getByText("Changed by Build agent")).toBeVisible();
     expect(
-      within(table).queryByText(/Last used|Ready|Provisioning app/),
+      within(table).queryByText(/Ready|Provisioning app/),
     ).not.toBeInTheDocument();
   });
 

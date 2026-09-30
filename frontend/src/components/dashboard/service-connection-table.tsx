@@ -39,12 +39,11 @@ import {
   billingAccountLabel,
   credentialLabel,
   rateLabel,
-  callerLabel,
-  callerKindLabel,
-  outcomeLabel,
+  accessCountLabel,
+  providerBillingLabel,
   insightStatusLabel,
 } from "@/lib/service-insights";
-import { formatRelativeTime } from "@/lib/utils";
+import { ServiceUseSummary } from "./service-use-summary";
 
 const authNames: Record<string, string> = {
   bearer: "Bearer",
@@ -174,7 +173,6 @@ export function ServiceConnectionTable({
           const insight = insights.connections.get(key.id);
           const billing = insight?.billing;
           const usage = insight?.usage;
-          const latest = usage?.activity.requests[0];
           const source = connectionSource(key);
           const org =
             key.credential_source?.type === "org"
@@ -321,15 +319,14 @@ export function ServiceConnectionTable({
                     aria-expanded={expanded && open.view === "access"}
                     aria-controls={panelId}
                     aria-label={`Agent key access for ${key.label}`}
+                    data-insight-view="access"
+                    data-connection-id={key.id}
                     className="inline-flex items-center gap-1.5 rounded-sm text-xs font-medium text-primary hover:underline focus-visible:outline-2 focus-visible:outline-ring"
                   >
                     <UsersRound className="size-3.5 shrink-0" />
-                    {usage && usage.access.visibility !== "unavailable"
-                      ? `${usage.access.keys.length}${usage.access.truncated ? "+" : ""} agent ${usage.access.keys.length === 1 ? "key" : "keys"}`
-                      : insightStatusLabel(
-                          usage ? "error" : insights.status,
-                          "Access",
-                        )}
+                    {usage
+                      ? accessCountLabel(usage.access)
+                      : insightStatusLabel(insights.status, "Access")}
                   </button>
                   {usage && (
                     <p className="mt-1 text-[10px] text-muted-foreground">
@@ -360,47 +357,15 @@ export function ServiceConnectionTable({
                         : ""}
                     </p>
                   )}
-                  <button
-                    type="button"
+                  <ServiceUseSummary
+                    row
+                    connections={[key]}
+                    insights={insights}
                     onClick={() => toggle(key.id, "requests")}
-                    aria-expanded={expanded && open.view === "requests"}
-                    aria-controls={panelId}
-                    aria-label={`Recent requests for ${key.label}`}
-                    className="mt-2 block max-w-full rounded-sm text-left text-[11px] hover:text-primary focus-visible:outline-2 focus-visible:outline-ring"
-                  >
-                    <span
-                      className="block truncate font-medium"
-                      title={
-                        usage?.activity.visibility === "own_requests"
-                          ? "Your latest recorded request"
-                          : "Latest recorded request"
-                      }
-                    >
-                      {latest && (
-                        <span className="font-normal text-muted-foreground">
-                          Latest:{" "}
-                        </span>
-                      )}
-                      {latest
-                        ? callerLabel(latest.caller)
-                        : usage?.activity.tracking === "unavailable"
-                          ? "Caller history unavailable"
-                          : usage && usage.activity.tracking !== "unavailable"
-                            ? "No recorded requests · 30d"
-                            : insightStatusLabel(insights.status, "Activity")}
-                      {latest && (
-                        <span className="ml-1 font-normal text-muted-foreground">
-                          · {formatRelativeTime(latest.occurred_at)}
-                        </span>
-                      )}
-                    </span>
-                    {latest && (
-                      <span className="mt-0.5 block text-muted-foreground">
-                        {callerKindLabel(latest.caller.kind)} ·{" "}
-                        {outcomeLabel(latest.outcome)}
-                      </span>
-                    )}
-                  </button>
+                    expanded={expanded && open.view === "requests"}
+                    controls={panelId}
+                    className="mt-3 grid-cols-1 gap-1"
+                  />
                 </TableCell>
                 <TableCell>
                   <button
@@ -409,11 +374,13 @@ export function ServiceConnectionTable({
                     aria-expanded={expanded && open.view === "billing"}
                     aria-controls={panelId}
                     aria-label={`Billing for ${key.label}`}
+                    data-insight-view="billing"
+                    data-connection-id={key.id}
                     className="block w-full rounded-sm text-left text-xs hover:text-primary focus-visible:outline-2 focus-visible:outline-ring"
                   >
                     <span className="mb-1 block text-[10px] text-muted-foreground">
                       {billing?.context === "configuration"
-                        ? "Expected payer · connection default"
+                        ? "Expected NyxID payer"
                         : billing?.status === "unavailable" ||
                             billing?.status === "restricted"
                           ? "Billing preview"
@@ -431,6 +398,9 @@ export function ServiceConnectionTable({
                         : billing
                           ? rateLabel(billing)
                           : "Rate not reported"}
+                    </span>
+                    <span className="mt-1 block text-[11px] text-muted-foreground">
+                      {providerBillingLabel(billing)}
                     </span>
                     <span className="mt-1.5 block text-[11px] text-primary">
                       View billing
