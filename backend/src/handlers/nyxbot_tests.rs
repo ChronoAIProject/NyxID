@@ -16,6 +16,48 @@ const PARTITION: &str = "conv_0123456789abcdef0123456789abcdef";
 
 type Calls = Arc<Mutex<Vec<Value>>>;
 
+type RelayCompletionKey = (String, String);
+static RELAY_COMPLETIONS: std::sync::LazyLock<
+    std::sync::Mutex<
+        std::collections::HashMap<RelayCompletionKey, tokio::sync::oneshot::Sender<()>>,
+    >,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+struct RelayCompletionGuard(RelayCompletionKey);
+
+impl Drop for RelayCompletionGuard {
+    fn drop(&mut self) {
+        RELAY_COMPLETIONS.lock().unwrap().remove(&self.0);
+    }
+}
+
+fn watch_relay_callback(
+    channel_id: &str,
+    message_id: &str,
+) -> (RelayCompletionGuard, tokio::sync::oneshot::Receiver<()>) {
+    let key = (channel_id.to_owned(), message_id.to_owned());
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let previous = RELAY_COMPLETIONS
+        .lock()
+        .unwrap()
+        .insert(key.clone(), sender);
+    assert!(
+        previous.is_none(),
+        "callback already has a completion observer"
+    );
+    (RelayCompletionGuard(key), receiver)
+}
+
+pub(super) fn relay_callback_completed(channel_id: &str, message_id: &str) {
+    if let Some(sender) = RELAY_COMPLETIONS
+        .lock()
+        .unwrap()
+        .remove(&(channel_id.to_owned(), message_id.to_owned()))
+    {
+        let _ = sender.send(());
+    }
+}
+
 async fn setup(name: &str) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
     let db = connect_transaction_test_database(name).await;
     engine::ensure_indexes(&db).await.unwrap();
@@ -2448,12 +2490,22 @@ async fn direct_group_messages_need_a_mention_or_a_reply_to_the_bot() {
         .unwrap();
         let mut headers = HeaderMap::new();
         headers.insert("x-nyxid-callback-token", token.parse().unwrap());
-        relay_callback(
-            State(state.clone()),
-            Path(row.id.clone()),
-            headers,
-            Bytes::from(bytes),
-        )
+        let (observer, completed) = watch_relay_callback(&row.id, message_id);
+        let state = state.clone();
+        let channel_id = row.id.clone();
+        async move {
+            let _observer = observer;
+            let response =
+                relay_callback(State(state), Path(channel_id), headers, Bytes::from(bytes)).await;
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+            // A 202 only acknowledges admission. Even a silent callback must
+            // finish before its exact zero/unchanged-call assertions are valid.
+            tokio::time::timeout(Duration::from_secs(10), completed)
+                .await
+                .expect("direct relay callback did not finish")
+                .expect("direct relay completion observer was dropped");
+            response
+        }
     };
     let mention =
         || json!([{"key": "@_user_1", "id": {"open_id": "ou_bot"}, "name": "Helper bot"}]);
@@ -2463,18 +2515,21 @@ async fn direct_group_messages_need_a_mention_or_a_reply_to_the_bot() {
         let calls = calls.clone();
         let channel_id = row.id.clone();
         async move {
-            for _ in 0..200 {
-                let settled = channel_conversations(&state, &channel_id)
-                    .await
-                    .iter()
-                    .all(|conversation| conversation.active_turn.is_none());
-                if calls.lock().await.len() >= count && settled {
-                    break;
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let settled = channel_conversations(&state, &channel_id)
+                        .await
+                        .iter()
+                        .all(|conversation| conversation.active_turn.is_none());
+                    let actual = calls.lock().await.len();
+                    if actual >= count && settled {
+                        return actual;
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            calls.lock().await.len()
+            })
+            .await
+            .expect("direct relay turn did not settle")
         }
     };
     // Before NyxID passed on each message's own chat type, this group looked

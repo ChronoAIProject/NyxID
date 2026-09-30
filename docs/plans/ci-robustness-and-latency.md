@@ -1,7 +1,7 @@
 # CI robustness and latency investigation
 
-Status: CI-only implementation for repurposed PR #1711 targeting `main`,
-2026-10-01, rebased onto main `5c48735c` after #1700 and #1712 merged. Subsequent
+Status: CI and test-reliability implementation for repurposed PR #1711 targeting
+`main`, 2026-10-01, rebased onto main `fa96a28a`. Subsequent
 stages remain proposals. No repository rules are changed. PR #1707 (NyxChat
 setup overlays) is merged. The coverage debug-profile mitigation landed through
 #1705 (`a29056ef`). #1711 was initially closed as a duplicate and is being reused
@@ -54,6 +54,11 @@ at the user's request for the broader CI reliability fix.
 - Use `cargo llvm-cov --no-report` before the existing exports and final
   threshold check. This removes an unused report pass without changing tests,
   instrumentation, produced artifacts or thresholds.
+- Synchronize the existing NyxBot direct-group test with each real callback's
+  completion instead of a fixed 100 ms sleep. A test-only observer, keyed by
+  channel/message and bounded to ten seconds, also makes zero/unchanged-call
+  assertions run after silent callbacks finish. All message cases and exact
+  assertions remain. The handler hook is compiled only under `cfg(test)`.
 
 Resource interpretation: cgroup-root counters can include other processes or
 earlier job setup, and `child_max_rss_bytes` is the maximum reported child RSS,
@@ -70,10 +75,10 @@ before introducing compiler-worker limits or declaring shutdowns resolved.
 
 ## Coverage preservation and review criteria
 
-After rebasing onto main `5c48735c`, this PR changes no application source,
-regression test, nextest configuration, feature matrix, or frontend/mobile
-coverage configuration. The earlier NyxBot condition-wait fix is already in
-main through #1700 and is no longer part of this PR's net diff.
+Production behavior, nextest configuration, feature matrices and frontend/mobile
+coverage configuration are unchanged. The earlier NyxBot condition-wait fix
+landed through #1700. A newly observed timing race in #1712's direct-group test
+is fixed with a test-only completion observer; its original assertions remain.
 
 The test commands retain their package/feature selection. `--no-report` only
 suppresses cargo-llvm-cov's initial report generation: instrumentation and test
@@ -145,6 +150,16 @@ pressure with low CPU pressure and negligible memory pressure. These are host
 observations, not proof of a specific disk or database cause. The full suite
 therefore also gets the conservative 90-minute outer bound; test concurrency,
 assertions and retries remain unchanged. Billing smoke retains 45 minutes.
+
+That run's independent base measurement exposed the direct-group test race on
+unchanged main source: 6,857 passed, one failed, two ignored. The group row
+existed but `guest_hint_at` was still absent when the test unwrapped it. The
+callback returns 202 before recording the hint, and waiting for zero agent
+calls plus a 100 ms sleep did not establish completion. Head coverage and
+nextest passed the same test. The test now observes completion of each actual
+callback, preserving the real asynchronous response and strengthening the
+silent-message assertions. The base failure remains recorded as a failed
+measurement; the informational base job does not block the existing aggregate.
 
 The timing figures below are elapsed job-minutes, including cancelled work.
 They are neither CPU utilization measurements nor a billing estimate. This is
