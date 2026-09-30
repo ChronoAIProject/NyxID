@@ -209,7 +209,8 @@ The service layer contains all business logic. Services receive database connect
 | `admin_user_service.rs` | Admin user CRUD (update profile, set role, set status), cascade user deletion across 8 collections, force password reset, manual email verification, session listing and bulk revocation |
 | `role_service.rs`   | Role CRUD (slug uniqueness, system role protection), user role assignment/revocation, system role seeding at startup |
 | `group_service.rs`  | Group CRUD (slug uniqueness), membership management (add/remove members via `group_ids` on User), user group queries |
-| `consent_service.rs`| Consent creation (upsert by user+client), user consent listing, consent revocation |
+| `consent_service.rs`| Consent creation, versioned replacement by user+client, user consent listing, transactional consent/refresh revocation |
+| `incremental_consent_service.rs` | Add-only grant snapshots, exact-service ACL checks, revision/fingerprint conflict detection, and token issuance fencing against revocation |
 | `service_account_service.rs` | Service account CRUD, client credentials authentication (SHA-256 secret verification, JWT issuance), secret rotation, bulk token revocation |
 | `rbac_helpers.rs`   | Resolves effective RBAC for a user: direct roles + group-inherited roles, deduplication, permission aggregation |
 | `audit_service.rs`  | Asynchronous audit log insertion (fire-and-forget via `tokio::spawn`), captures user, action, resource, IP, user-agent |
@@ -750,6 +751,7 @@ Short-lived OIDC authorization codes (typically 60-second TTL).
 | `code_challenge`       | string        | NULLABLE        | PKCE code challenge             |
 | `code_challenge_method`| string        | NULLABLE        | PKCE method (S256)              |
 | `nonce`                | string        | NULLABLE        | OIDC nonce for ID token         |
+| `incremental_consent`  | object        | NULLABLE        | Approved grant snapshot and versions for live validation at exchange; absent on ordinary codes |
 | `expires_at`           | ISO 8601 date | NOT NULL        | Code expiration                 |
 | `used`                 | boolean       | NOT NULL, DEFAULT false | Prevents code reuse      |
 | `created_at`           | ISO 8601 date | NOT NULL        | Code creation timestamp         |
@@ -1010,10 +1012,16 @@ OAuth consent records tracking which scopes a user has granted to each client ap
 | `user_id`    | UUID (string) | NOT NULL          | User who granted consent      |
 | `client_id`  | UUID (string) | NOT NULL          | OAuth client                  |
 | `scopes`     | string        | NOT NULL          | Space-separated granted scopes|
+| `revision`   | string        | NULLABLE          | Opaque version for compare-and-swap consent updates; legacy rows default to null |
+| `issuance_fence` | string    | NULLABLE          | Written after incremental token insertion to serialize against transactional revocation; excluded from the grant fingerprint |
+| `allow_all_services` | boolean | DEFAULT false | Explicit unrestricted service authority |
+| `allowed_service_ids` | array | NULLABLE        | Exact granted UserService UUIDs |
 | `granted_at` | ISO 8601 date | NOT NULL          | Consent grant timestamp       |
 | `expires_at` | ISO 8601 date | NULLABLE          | Optional consent expiration   |
 
 **Indexes:** `(user_id, client_id)` (unique)
+
+Incremental consent snapshots bind the current revision and a fingerprint of the legacy grant fields, plus the selected binding's grant version when applicable. Routine broker token rotation changes only the rotation version. Consent updates compare the grant fields before replacing the row. Token issuance performs live checks and a consent write after refresh insertion. For an existing binding, the final consent write, previous refresh revocation, and binding pointer update share one transaction; a failed check cannot leave the handle pointing to a revoked replacement. See the [OAuth contract](site/shared/concepts/oauth-oidc.md#adding-service-access-incrementally) for persistent-grant versus access-token resource semantics and deployment requirements.
 
 #### service_accounts
 

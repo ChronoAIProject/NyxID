@@ -1,6 +1,6 @@
 use axum::{
     Json,
-    extract::State,
+    extract::{Path, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
@@ -20,7 +20,7 @@ use crate::handlers::admin_helpers::{extract_ip, extract_user_agent};
 use crate::models::authorization_code::{ExternalSubjectRef, validate_external_subject_params};
 // Keep both import surfaces: this handler resolves consent-scoped resources and
 // service-account principals in the OAuth endpoints.
-use crate::models::consent::Consent;
+use crate::models::consent::{Consent, IncrementalConsent, ServiceAccessMode};
 use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
 use crate::models::service_account_token::{COLLECTION_NAME as SA_TOKENS, ServiceAccountToken};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
@@ -31,15 +31,16 @@ use crate::models::user_service::UserService;
 use crate::models::user_service::COLLECTION_NAME as USER_SERVICES;
 use crate::mw::auth::{AuthMethod, AuthUser, OptionalAuthUser};
 use crate::services::{
-    audit_service, consent_service, oauth_broker_service, oauth_client_service,
-    oauth_resource_service, oauth_service, par_service, service_account_service,
-    social_token_exchange_service, token_exchange_service, user_service_service,
+    audit_service, consent_service, incremental_consent_service, oauth_broker_service,
+    oauth_client_service, oauth_consent_request_service, oauth_resource_service, oauth_service,
+    par_service, service_account_service, social_token_exchange_service, token_exchange_service,
+    user_service_service,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event, hash_short_id};
 
 // --- Request / Response types ---
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct AuthorizeQuery {
     #[serde(default)]
     pub response_type: String,
@@ -63,6 +64,14 @@ pub struct AuthorizeQuery {
     pub request_uri: Option<String>,
     #[serde(default)]
     pub resource: Vec<String>,
+    #[serde(default)]
+    pub service_access_mode: Option<ServiceAccessMode>,
+    #[serde(default)]
+    pub include_granted_scopes: bool,
+    #[serde(default)]
+    pub requested_service_ids: Vec<String>,
+    #[serde(skip)]
+    pub incremental_consent: Option<IncrementalConsent>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -88,6 +97,10 @@ pub struct ConsentDecisionForm {
     #[serde(default)]
     pub resource: Vec<String>,
     pub decision: String,
+    #[serde(default)]
+    pub service_access_mode: Option<ServiceAccessMode>,
+    #[serde(default)]
+    pub requested_service_ids: Vec<String>,
 }
 
 fn default_allow_all_services_form() -> bool {
@@ -280,6 +293,12 @@ pub struct PushedAuthorizationRequestForm {
     pub external_subject_tenant: Option<String>,
     pub external_subject_external_user_id: Option<String>,
     pub binding_grant_id: Option<String>,
+    #[serde(default)]
+    pub service_access_mode: Option<ServiceAccessMode>,
+    #[serde(default)]
+    pub include_granted_scopes: bool,
+    #[serde(default)]
+    pub requested_service_ids: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -325,6 +344,12 @@ struct ConsentRequestClaims {
     binding_grant_id: Option<String>,
     prompt: Option<String>,
     resource: Vec<String>,
+    #[serde(default)]
+    service_access_mode: Option<ServiceAccessMode>,
+    #[serde(default)]
+    requested_service_ids: Vec<String>,
+    #[serde(default)]
+    incremental_consent: Option<IncrementalConsent>,
 }
 
 /// Map internal `AppError` to an RFC 6749 §5.2 JSON error response.
@@ -518,6 +543,17 @@ async fn resolve_binding_grant_review(
     let Some(binding_hash) = params.binding_grant_id.as_deref() else {
         return Ok(None);
     };
+    if params.service_access_mode.is_some() {
+        return oauth_broker_service::resolve_binding_grant_for_subject(
+            &state.db,
+            &params.client_id,
+            user_id,
+            external_subject,
+            binding_hash,
+        )
+        .await
+        .map(Some);
+    }
     let external_subject = external_subject.ok_or_else(|| {
         AppError::InvalidTarget("binding grant review requires an external subject".to_string())
     })?;
@@ -547,6 +583,10 @@ fn params_from_consent_form(form: &ConsentDecisionForm) -> AuthorizeQuery {
         external_subject_tenant: form.external_subject_tenant.clone(),
         external_subject_external_user_id: form.external_subject_external_user_id.clone(),
         binding_grant_id: form.binding_grant_id.clone(),
+        service_access_mode: form.service_access_mode,
+        include_granted_scopes: form.service_access_mode.is_some(),
+        requested_service_ids: form.requested_service_ids.clone(),
+        incremental_consent: None,
         prompt: form.prompt.clone(),
         resource: form.resource.clone(),
         request_uri: None,
@@ -576,7 +616,14 @@ fn sign_consent_request(
         response_type: params.response_type.clone(),
         client_id: params.client_id.clone(),
         redirect_uri: params.redirect_uri.clone(),
-        scope: Some(validated_scope.to_string()),
+        scope: Some(
+            params
+                .incremental_consent
+                .as_ref()
+                .map(|s| s.scopes.as_str())
+                .unwrap_or(validated_scope)
+                .to_string(),
+        ),
         state: params.state.clone(),
         code_challenge: params.code_challenge.clone(),
         code_challenge_method: params.code_challenge_method.clone(),
@@ -585,6 +632,9 @@ fn sign_consent_request(
         external_subject_tenant: params.external_subject_tenant.clone(),
         external_subject_external_user_id: params.external_subject_external_user_id.clone(),
         binding_grant_id: params.binding_grant_id.clone(),
+        service_access_mode: params.service_access_mode,
+        requested_service_ids: params.requested_service_ids.clone(),
+        incremental_consent: params.incremental_consent.clone(),
         prompt: params.prompt.clone(),
         resource: params.resource.clone(),
     };
@@ -601,15 +651,31 @@ fn verify_consent_request(
     token: &str,
     user_id: &str,
 ) -> AppResult<AuthorizeQuery> {
+    verify_consent_request_with_expiry(state, token, user_id, false)
+}
+
+fn verify_consent_request_with_expiry(
+    state: &AppState,
+    token: &str,
+    user_id: &str,
+    allow_expired: bool,
+) -> AppResult<AuthorizeQuery> {
     let mut validation = Validation::new(Algorithm::RS256);
     validation.set_issuer(&[&state.config.jwt_issuer]);
     validation.set_audience(&[CONSENT_REQUEST_AUDIENCE]);
+    validation.validate_exp = !allow_expired;
 
     let claims = decode::<ConsentRequestClaims>(token, &state.jwt_keys.decoding, &validation)
-        .map_err(|_| AppError::BadRequest("Invalid consent request".to_string()))?
+        .map_err(|error| match error.kind() {
+            jsonwebtoken::errors::ErrorKind::ExpiredSignature => consent_service::grant_changed(),
+            _ => AppError::BadRequest("Invalid consent request".to_string()),
+        })?
         .claims;
 
-    if claims.token_type != CONSENT_REQUEST_TOKEN_TYPE || claims.sub != user_id {
+    if claims.token_type != CONSENT_REQUEST_TOKEN_TYPE
+        || claims.sub != user_id
+        || (allow_expired && claims.exp < Utc::now().timestamp() - 24 * 60 * 60)
+    {
         return Err(AppError::BadRequest("Invalid consent request".to_string()));
     }
 
@@ -626,6 +692,10 @@ fn verify_consent_request(
         external_subject_tenant: claims.external_subject_tenant,
         external_subject_external_user_id: claims.external_subject_external_user_id,
         binding_grant_id: claims.binding_grant_id,
+        service_access_mode: claims.service_access_mode,
+        include_granted_scopes: claims.service_access_mode.is_some(),
+        requested_service_ids: claims.requested_service_ids,
+        incremental_consent: claims.incremental_consent,
         prompt: claims.prompt,
         resource: claims.resource,
         request_uri: None,
@@ -733,6 +803,17 @@ pub async fn authorize(
                 error = %err,
                 "OAuth authorize failed, redirecting to error page"
             );
+            if (params.service_access_mode.is_some() || params.include_granted_scopes)
+                && oauth_service::validate_client(
+                    &state.db,
+                    &params.client_id,
+                    &params.redirect_uri,
+                )
+                .await
+                .is_ok()
+            {
+                return Ok(incremental_authorize_error_callback(&params, err));
+            }
             let error_url = build_frontend_authorization_error_url(&state.config.frontend_url, err);
             Ok(redirect_302(&error_url))
         }
@@ -744,6 +825,65 @@ pub async fn authorize(
 ///
 /// Browser consent decision endpoint. Accepts allow/deny from the consent page
 /// and either issues an authorization code or redirects with access_denied.
+pub async fn authorize_incremental_decision(
+    State(state): State<AppState>,
+    opt_auth: OptionalAuthUser,
+    tele: TelemetryContext,
+    Form(form): Form<ConsentDecisionForm>,
+) -> Result<Response, AppError> {
+    if form.service_access_mode != Some(ServiceAccessMode::Incremental) {
+        return Err(AppError::BadRequest(
+            "Incremental consent required".to_string(),
+        ));
+    }
+    let review_user = opt_auth.0.as_ref().map(|user| user.user_id.to_string());
+    let signed_request = form.consent_request.clone();
+    match authorize_decision(State(state.clone()), opt_auth, tele, Form(form)).await {
+        Ok(response) => Ok(response),
+        Err(error) => {
+            if let (Some(user_id), Some(signed_request)) = (review_user, signed_request)
+                && let Ok(params) =
+                    verify_consent_request_with_expiry(&state, &signed_request, &user_id, true)
+                && params.service_access_mode.is_some()
+                && oauth_service::validate_client(
+                    &state.db,
+                    &params.client_id,
+                    &params.redirect_uri,
+                )
+                .await
+                .is_ok()
+            {
+                return Ok(incremental_error_callback(&params, &error));
+            }
+            Err(error)
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct ConsentRequestResponse {
+    token: String,
+}
+
+pub async fn get_consent_request(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(handle): Path<String>,
+) -> AppResult<Json<ConsentRequestResponse>> {
+    if !matches!(
+        auth_user.auth_method,
+        AuthMethod::Session | AuthMethod::AccessToken
+    ) {
+        return Err(AppError::Forbidden(
+            "Browser authentication required".to_string(),
+        ));
+    }
+    let token =
+        oauth_consent_request_service::get(&state.db, &auth_user.user_id.to_string(), &handle)
+            .await?;
+    Ok(Json(ConsentRequestResponse { token }))
+}
+
 pub async fn authorize_decision(
     State(state): State<AppState>,
     opt_auth: OptionalAuthUser,
@@ -765,22 +905,28 @@ pub async fn authorize_decision(
     };
 
     let user_id_str = auth_user.user_id.to_string();
-    let params = verify_consent_request(
-        &state,
-        form.consent_request
-            .as_deref()
-            .ok_or_else(|| AppError::BadRequest("Missing consent request".to_string()))?,
-        &user_id_str,
-    )?;
+    let consent_request = form
+        .consent_request
+        .as_deref()
+        .ok_or_else(|| AppError::BadRequest("Missing consent request".to_string()))?;
+    let mut params = if form.decision == "deny" && form.service_access_mode.is_some() {
+        let params =
+            verify_consent_request_with_expiry(&state, consent_request, &user_id_str, true)?;
+        if params.service_access_mode.is_none() {
+            return Err(AppError::BadRequest("Invalid consent request".to_string()));
+        }
+        params
+    } else {
+        verify_consent_request(&state, consent_request, &user_id_str)?
+    };
     let external_subject = validate_external_subject_params(
         params.external_subject_platform.as_deref(),
         params.external_subject_tenant.as_deref(),
         params.external_subject_external_user_id.as_deref(),
     )?;
 
-    let (_client, validated_scope) = validate_authorize_request(&state, &params).await?;
-
     if form.decision == "deny" {
+        oauth_service::validate_client(&state.db, &params.client_id, &params.redirect_uri).await?;
         let redirect_url = build_callback_error_url(
             &params,
             "access_denied",
@@ -793,6 +939,8 @@ pub async fn authorize_decision(
         return Err(AppError::BadRequest("Invalid consent decision".to_string()));
     }
 
+    let (client, validated_scope) = validate_authorize_request(&state, &params).await?;
+
     // Re-resolve the reviewed binding after the consent round-trip. The
     // signed consent request carries only its hash; current ownership and
     // active grant state remain authoritative in the database.
@@ -804,36 +952,65 @@ pub async fn authorize_decision(
         ));
     }
 
-    let consent_allowed_service_ids = if form.allow_all_services {
-        None
-    } else {
-        let mut selected_service_ids = normalize_allowed_service_ids(form.allowed_service_ids);
-        let required_service_ids = oauth_resource_service::resolve_resource_service_ids_for_user(
+    let consent = if params.service_access_mode.is_some() {
+        let snapshot = params.incremental_consent.as_ref().ok_or_else(|| {
+            AppError::BadRequest("Missing incremental consent snapshot".to_string())
+        })?;
+        oauth_service::validate_scopes(&snapshot.scopes, &client.allowed_scopes)?;
+        let approved = incremental_consent_service::approve(
             &state.db,
-            &state.config,
             &user_id_str,
-            &params.resource,
+            &params.client_id,
+            snapshot,
+            &normalize_allowed_service_ids(form.allowed_service_ids),
+            form.allow_all_services,
+            params.binding_grant_id.as_deref(),
+            external_subject.as_ref(),
         )
-        .await?;
-        for service_id in required_service_ids {
-            if !selected_service_ids
-                .iter()
-                .any(|selected| selected == &service_id)
-            {
-                selected_service_ids.push(service_id);
+        .await;
+        let approved = match approved {
+            Ok(approved) => approved,
+            Err(error) => return Ok(incremental_error_callback(&params, &error)),
+        };
+        params.incremental_consent = Some(approved);
+        // The code below uses the approved binding-specific grant. This value
+        // supplies the existing API's ordinary consent argument only.
+        consent_service::check_consent(&state.db, &user_id_str, &params.client_id, "")
+            .await?
+            .ok_or_else(consent_service::grant_changed)?
+    } else {
+        let consent_allowed_service_ids = if form.allow_all_services {
+            None
+        } else {
+            let mut selected_service_ids = normalize_allowed_service_ids(form.allowed_service_ids);
+            let required_service_ids =
+                oauth_resource_service::resolve_resource_service_ids_for_user(
+                    &state.db,
+                    &state.config,
+                    &user_id_str,
+                    &params.resource,
+                )
+                .await?;
+            for service_id in required_service_ids {
+                if !selected_service_ids
+                    .iter()
+                    .any(|selected| selected == &service_id)
+                {
+                    selected_service_ids.push(service_id);
+                }
             }
-        }
-        validate_allowed_service_ids(&state.db, &user_id_str, &selected_service_ids).await?;
-        Some(selected_service_ids)
+            validate_allowed_service_ids(&state.db, &user_id_str, &selected_service_ids).await?;
+            Some(selected_service_ids)
+        };
+        consent_service::grant_consent_with_services(
+            &state.db,
+            &user_id_str,
+            &params.client_id,
+            &validated_scope,
+            consent_allowed_service_ids,
+        )
+        .await?
     };
-    let consent = consent_service::grant_consent_with_services(
-        &state.db,
-        &user_id_str,
-        &params.client_id,
-        &validated_scope,
-        consent_allowed_service_ids,
-    )
-    .await?;
 
     let code = issue_authorization_code(
         &state,
@@ -907,7 +1084,17 @@ async fn authorize_inner(
     is_browser_mode: bool,
     external_subject: Option<&ExternalSubjectRef>,
 ) -> Result<Response, AppError> {
+    let mut normalized_params = params.clone();
+    if normalized_params.include_granted_scopes {
+        normalized_params.service_access_mode = Some(ServiceAccessMode::Incremental);
+    }
+    let params = &normalized_params;
     let (client, validated_scope) = validate_authorize_request(state, params).await?;
+    if !is_browser_mode && params.service_access_mode.is_some() {
+        return Err(AppError::BadRequest(
+            "Incremental consent requires a browser review".to_string(),
+        ));
+    }
     let prompts = parse_prompt(params.prompt.as_deref());
 
     // OIDC Core §3.1.2.1: prompt=none is incompatible with login/consent.
@@ -970,7 +1157,8 @@ async fn authorize_inner(
                     resolve_binding_grant_review(state, params, &user_id_str, external_subject)
                         .await?;
 
-                let needs_consent = binding_grant.is_some()
+                let needs_consent = params.service_access_mode.is_some()
+                    || binding_grant.is_some()
                     || consent_requires_prompt(consent.as_ref(), resolved_resources.as_ref())
                     || force_consent;
 
@@ -989,19 +1177,25 @@ async fn authorize_inner(
                         resolve_app_default_service_hints(state, &client, &user_id_str).await?;
                     default_service_hints
                         .include_flow_grants(resolved_resources.as_ref(), binding_grant.as_ref());
-                    let consent_url = build_consent_url(
-                        &state.config.frontend_url,
+                    let prepared = prepare_incremental_params(
+                        state,
+                        params,
+                        &client,
+                        &user_id_str,
+                        resolved_resources.as_ref(),
+                        binding_grant.as_ref(),
+                    )
+                    .await?;
+                    let params = &prepared;
+                    let consent_url = build_review_consent_url(
+                        state,
+                        &user_id_str,
                         params,
                         &client.client_name,
                         &validated_scope,
-                        Some(&sign_consent_request(
-                            state,
-                            &user_id_str,
-                            params,
-                            &validated_scope,
-                        )?),
                         &default_service_hints,
-                    );
+                    )
+                    .await?;
                     return Ok(redirect_302(&consent_url));
                 }
 
@@ -1052,7 +1246,8 @@ async fn authorize_inner(
         let binding_grant =
             resolve_binding_grant_review(state, params, &user_id_str, external_subject).await?;
 
-        if binding_grant.is_some()
+        if params.service_access_mode.is_some()
+            || binding_grant.is_some()
             || consent_requires_prompt(consent.as_ref(), resolved_resources.as_ref())
             || force_consent
         {
@@ -1060,19 +1255,25 @@ async fn authorize_inner(
                 resolve_app_default_service_hints(state, &client, &user_id_str).await?;
             default_service_hints
                 .include_flow_grants(resolved_resources.as_ref(), binding_grant.as_ref());
-            let consent_url = build_consent_url(
-                &state.config.frontend_url,
+            let prepared = prepare_incremental_params(
+                state,
+                params,
+                &client,
+                &user_id_str,
+                resolved_resources.as_ref(),
+                binding_grant.as_ref(),
+            )
+            .await?;
+            let params = &prepared;
+            let consent_url = build_review_consent_url(
+                state,
+                &user_id_str,
                 params,
                 &client.client_name,
                 &validated_scope,
-                Some(&sign_consent_request(
-                    state,
-                    &user_id_str,
-                    params,
-                    &validated_scope,
-                )?),
                 &default_service_hints,
-            );
+            )
+            .await?;
             return Err(AppError::ConsentRequired { consent_url });
         }
 
@@ -1094,10 +1295,58 @@ async fn authorize_inner(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn prepare_incremental_params(
+    state: &AppState,
+    params: &AuthorizeQuery,
+    client: &crate::models::oauth_client::OauthClient,
+    user_id: &str,
+    resources: Option<&oauth_resource_service::ResolvedOAuthResources>,
+    binding: Option<&oauth_broker_service::BindingGrantSnapshot>,
+) -> AppResult<AuthorizeQuery> {
+    let mut params = params.clone();
+    if params.service_access_mode.is_some() {
+        let required = incremental_consent_service::union(
+            &params.requested_service_ids,
+            resources
+                .map(|r| r.service_ids.as_slice())
+                .unwrap_or_default(),
+        );
+        let snapshot = incremental_consent_service::prepare(
+            &state.db,
+            user_id,
+            &params.client_id,
+            &client.client_name,
+            params.scope.as_deref(),
+            &required,
+            &params.resource,
+            binding,
+        )
+        .await?;
+        oauth_service::validate_scopes(&snapshot.scopes, &client.allowed_scopes)?;
+        params.scope = Some(snapshot.scopes.clone());
+        params.incremental_consent = Some(snapshot);
+    }
+    Ok(params)
+}
+
+fn validate_service_access_request(
+    mode: Option<ServiceAccessMode>,
+    ids: &[String],
+) -> AppResult<()> {
+    if mode.is_none() && !ids.is_empty() {
+        return Err(AppError::BadRequest(
+            "requested_service_ids requires service_access_mode=incremental".to_string(),
+        ));
+    }
+    incremental_consent_service::validate_requested_ids(ids)
+}
+
 async fn validate_authorize_request(
     state: &AppState,
     params: &AuthorizeQuery,
 ) -> AppResult<(crate::models::oauth_client::OauthClient, String)> {
+    validate_service_access_request(params.service_access_mode, &params.requested_service_ids)?;
     if params.response_type != "code" {
         return Err(AppError::BadRequest(
             "Only response_type=code is supported".to_string(),
@@ -1257,6 +1506,9 @@ fn has_non_par_authorize_params(params: &AuthorizeQuery) -> bool {
         || params.external_subject_platform.is_some()
         || params.external_subject_tenant.is_some()
         || params.external_subject_external_user_id.is_some()
+        || params.service_access_mode.is_some()
+        || params.include_granted_scopes
+        || !params.requested_service_ids.is_empty()
         || params.binding_grant_id.is_some()
         || params.prompt.is_some()
         || !params.resource.is_empty()
@@ -1304,6 +1556,10 @@ async fn resolve_pushed_authorize_params(
         external_subject_tenant,
         external_subject_external_user_id,
         binding_grant_id: record.binding_grant_id,
+        service_access_mode: record.service_access_mode,
+        include_granted_scopes: record.service_access_mode.is_some(),
+        requested_service_ids: record.requested_service_ids,
+        incremental_consent: None,
         prompt: record.prompt,
         resource: record.resources,
         request_uri: None,
@@ -1381,6 +1637,18 @@ fn build_authorize_url(base_url: &str, params: &AuthorizeQuery) -> String {
     if let Some(ref prompt) = params.prompt {
         url.push_str(&format!("&prompt={}", urlencoding::encode(prompt)));
     }
+    if params.service_access_mode.is_some() {
+        url.push_str("&service_access_mode=incremental");
+    }
+    if params.include_granted_scopes {
+        url.push_str("&include_granted_scopes=true");
+    }
+    for id in &params.requested_service_ids {
+        url.push_str(&format!(
+            "&requested_service_ids={}",
+            urlencoding::encode(id)
+        ));
+    }
     for resource in &params.resource {
         url.push_str(&format!("&resource={}", urlencoding::encode(resource)));
     }
@@ -1408,6 +1676,35 @@ fn build_callback_error_url(params: &AuthorizeQuery, error: &str, description: &
         url.push_str(&format!("&state={}", urlencoding::encode(state_param)));
     }
     url
+}
+
+fn incremental_error_callback(params: &AuthorizeQuery, error: &AppError) -> Response {
+    tracing::warn!(client_id = %params.client_id, error = %error, "Incremental consent failed");
+    let code = match error {
+        AppError::Conflict(_) | AppError::InvalidTarget(_) => "interaction_required",
+        _ => "server_error",
+    };
+    redirect_302(&build_callback_error_url(
+        params,
+        code,
+        "Service access could not be confirmed. Restart authorization.",
+    ))
+}
+
+fn incremental_authorize_error_callback(params: &AuthorizeQuery, error: &AppError) -> Response {
+    let code = match error {
+        AppError::InvalidScope(_) => "invalid_scope",
+        AppError::InvalidTarget(_) => "invalid_target",
+        AppError::BadRequest(_) | AppError::ValidationError(_) => "invalid_request",
+        AppError::Conflict(_) => "interaction_required",
+        _ => "server_error",
+    };
+    tracing::warn!(client_id = %params.client_id, error = %error, "Incremental authorization failed");
+    redirect_302(&build_callback_error_url(
+        params,
+        code,
+        "Authorization could not be completed. Restart authorization.",
+    ))
 }
 
 fn build_frontend_authorization_error_url(frontend_url: &str, err: &AppError) -> String {
@@ -1565,6 +1862,32 @@ async fn resolve_app_default_service_hints(
     })
 }
 
+async fn build_review_consent_url(
+    state: &AppState,
+    user_id: &str,
+    params: &AuthorizeQuery,
+    client_name: &str,
+    validated_scope: &str,
+    hints: &AppDefaultServiceHints,
+) -> AppResult<String> {
+    let signed = sign_consent_request(state, user_id, params, validated_scope)?;
+    if params.service_access_mode.is_some() {
+        let handle = oauth_consent_request_service::create(&state.db, user_id, &signed).await?;
+        return Ok(format!(
+            "{}/oauth-consent?service_access_mode=incremental&consent_request_id={handle}",
+            state.config.frontend_url.trim_end_matches('/'),
+        ));
+    }
+    Ok(build_consent_url(
+        &state.config.frontend_url,
+        params,
+        client_name,
+        validated_scope,
+        Some(&signed),
+        hints,
+    ))
+}
+
 fn build_consent_url(
     frontend_url: &str,
     params: &AuthorizeQuery,
@@ -1632,6 +1955,15 @@ fn build_consent_url(
     if let Some(ref prompt) = params.prompt {
         url.push_str(&format!("&prompt={}", urlencoding::encode(prompt)));
     }
+    if params.service_access_mode.is_some() {
+        url.push_str("&service_access_mode=incremental");
+    }
+    for id in &params.requested_service_ids {
+        url.push_str(&format!(
+            "&requested_service_ids={}",
+            urlencoding::encode(id)
+        ));
+    }
     for resource in &params.resource {
         url.push_str(&format!("&resource={}", urlencoding::encode(resource)));
     }
@@ -1685,6 +2017,47 @@ async fn issue_authorization_code(
     external_subject: Option<&ExternalSubjectRef>,
 ) -> AppResult<String> {
     let user_id_str = auth_user.user_id.to_string();
+    if let Some(snapshot) = &params.incremental_consent {
+        incremental_consent_service::validate_current(
+            &state.db,
+            &user_id_str,
+            &params.client_id,
+            snapshot,
+            params.binding_grant_id.as_deref(),
+            external_subject,
+        )
+        .await?;
+        let code = oauth_service::create_authorization_code_with_incremental(
+            &state.db,
+            &params.client_id,
+            &user_id_str,
+            &params.redirect_uri,
+            &snapshot.scopes,
+            params.code_challenge.as_deref(),
+            params.code_challenge_method.as_deref(),
+            params.nonce.as_deref(),
+            external_subject,
+            params.binding_grant_id.as_deref(),
+            &[],
+            &snapshot.current_service_ids,
+            snapshot.allow_all_services,
+            Some(snapshot),
+        )
+        .await?;
+        audit_service::log_for_user(
+            state.db.clone(),
+            auth_user,
+            "oauth_code_issued",
+            Some(serde_json::json!({
+                "client_id": params.client_id,
+                "scope": snapshot.scopes,
+                "service_access_mode": "incremental",
+                "allow_all_services": snapshot.allow_all_services,
+                "allowed_service_ids_count": snapshot.current_service_ids.len(),
+            })),
+        );
+        return Ok(code);
+    }
     let resolved_resources = oauth_resource_service::resolve_requested_resources(
         &state.db,
         &state.config,
@@ -1827,8 +2200,14 @@ pub async fn pushed_authorization_request(
         body.external_subject_tenant.as_deref(),
         body.external_subject_external_user_id.as_deref(),
     )?;
+    let service_access_mode = body.service_access_mode.or_else(|| {
+        body.include_granted_scopes
+            .then_some(ServiceAccessMode::Incremental)
+    });
+    validate_service_access_request(service_access_mode, &body.requested_service_ids)?;
     if let Some(binding_grant_id) = body.binding_grant_id.as_deref()
-        && (external_subject.is_none() || !oauth_broker_service::is_binding_hash(binding_grant_id))
+        && ((external_subject.is_none() && service_access_mode.is_none())
+            || !oauth_broker_service::is_binding_hash(binding_grant_id))
     {
         return Err(AppError::InvalidTarget(
             "binding grant review requires a valid external subject and binding hash".to_string(),
@@ -1838,7 +2217,7 @@ pub async fn pushed_authorization_request(
         oauth_resource_service::validate_resource_uri(resource)?;
     }
 
-    let (request_uri, expires_in) = par_service::create_request(
+    let (request_uri, expires_in) = par_service::create_request_with_service_access(
         &state.db,
         &client_id,
         &body.response_type,
@@ -1852,6 +2231,8 @@ pub async fn pushed_authorization_request(
         &body.resource,
         external_subject,
         body.binding_grant_id.as_deref(),
+        service_access_mode,
+        &body.requested_service_ids,
     )
     .await?;
 
@@ -1880,6 +2261,15 @@ pub async fn token(
     match token_inner(&state, &tele, &headers, body).await {
         Ok(json) => json.into_response(),
         Err(err) => oauth_error_response(err),
+    }
+}
+
+fn authorization_code_grant_error(error: AppError) -> AppError {
+    match error {
+        AppError::Conflict(_) => AppError::ExternalTokenInvalid(
+            "Authorization grant has changed or been revoked".to_string(),
+        ),
+        other => other,
     }
 }
 
@@ -1933,7 +2323,8 @@ async fn token_inner(
                 dpop_jkt,
                 mtls_x5t_s256,
             )
-            .await?;
+            .await
+            .map_err(authorization_code_grant_error)?;
 
             if exchanged.broker_capability_enabled {
                 let granted_scopes: Vec<String> = exchanged
@@ -1992,9 +2383,9 @@ async fn token_inner(
                         refresh_token_jti: exchanged.refresh_token_jti.clone(),
                     }
                 };
-                let (binding_id, binding_hash, binding_updated) =
-                    if let Some(binding_hash) = exchanged.binding_grant_id.as_deref() {
-                        oauth_broker_service::update_binding_grant(
+                let binding_result: AppResult<_> = async {
+                    let result = if let Some(binding_hash) = exchanged.binding_grant_id.as_deref() {
+                        oauth_broker_service::update_binding_grant_with_version(
                             &state.db,
                             &state.encryption_keys,
                             client_id_str,
@@ -2004,6 +2395,7 @@ async fn token_inner(
                             &binding_refresh.refresh_token_jti,
                             &granted_scopes,
                             exchanged.external_subject.as_ref(),
+                            exchanged.incremental_consent.as_ref(),
                         )
                         .await?;
                         (None, binding_hash.to_string(), true)
@@ -2023,6 +2415,38 @@ async fn token_inner(
                         .await?;
                         (Some(binding_id), binding_hash, false)
                     };
+                    if let Some(snapshot) = &exchanged.incremental_consent
+                        && exchanged.binding_grant_id.is_none()
+                    {
+                        incremental_consent_service::validate_issued(
+                            &state.db,
+                            &exchanged.user_id,
+                            client_id_str,
+                            snapshot,
+                            None,
+                            exchanged.external_subject.as_ref(),
+                        )
+                        .await?;
+                    }
+                    Ok(result)
+                }
+                .await;
+                let (binding_id, binding_hash, binding_updated) = match binding_result {
+                    Ok(result) => result,
+                    Err(error) => {
+                        oauth_service::revoke_issued_refresh(
+                            &state.db,
+                            &binding_refresh.refresh_token_jti,
+                        )
+                        .await?;
+                        oauth_service::revoke_issued_refresh(
+                            &state.db,
+                            &exchanged.refresh_token_jti,
+                        )
+                        .await?;
+                        return Err(authorization_code_grant_error(error));
+                    }
+                };
                 audit_service::log_async(
                     state.db.clone(),
                     Some(exchanged.user_id.clone()),
@@ -3332,6 +3756,7 @@ mod tests {
             external_subject: None,
             cnf: None,
             rotation_version: 0,
+            grant_version: 0,
             revoked: false,
             last_used_at: None,
             revoked_at: None,
@@ -3371,6 +3796,7 @@ mod tests {
         let now = Utc::now();
         db.collection::<AuthorizationCode>(AUTH_CODES)
             .insert_one(AuthorizationCode {
+                incremental_consent: None,
                 id: Uuid::new_v4().to_string(),
                 code_hash: crate::crypto::token::hash_token(code),
                 client_id: client_id.to_string(),
@@ -3401,6 +3827,8 @@ mod tests {
     ) {
         db.collection::<Consent>(CONSENTS)
             .insert_one(Consent {
+                revision: None,
+                issuance_fence: None,
                 id: Uuid::new_v4().to_string(),
                 user_id: user_id.to_string(),
                 client_id: client_id.to_string(),
@@ -3601,6 +4029,10 @@ mod tests {
         .expect("grant restricted consent");
 
         let params = AuthorizeQuery {
+            service_access_mode: None,
+            include_granted_scopes: false,
+            requested_service_ids: Vec::new(),
+            incremental_consent: None,
             response_type: "code".to_string(),
             client_id: client_id.to_string(),
             redirect_uri: "http://localhost/callback".to_string(),
@@ -3662,6 +4094,10 @@ mod tests {
         .expect("grant restricted consent");
 
         let params = AuthorizeQuery {
+            service_access_mode: None,
+            include_granted_scopes: false,
+            requested_service_ids: Vec::new(),
+            incremental_consent: None,
             response_type: "code".to_string(),
             client_id: client_id.to_string(),
             redirect_uri: "http://localhost/callback".to_string(),
@@ -3732,6 +4168,10 @@ mod tests {
         .expect("grant restricted consent");
 
         let params = AuthorizeQuery {
+            service_access_mode: None,
+            include_granted_scopes: false,
+            requested_service_ids: Vec::new(),
+            incremental_consent: None,
             response_type: "code".to_string(),
             client_id: client_id.to_string(),
             redirect_uri: "https://app.example/callback".to_string(),
@@ -3802,6 +4242,10 @@ mod tests {
         .expect("grant restricted consent");
 
         let params = AuthorizeQuery {
+            service_access_mode: None,
+            include_granted_scopes: false,
+            requested_service_ids: Vec::new(),
+            incremental_consent: None,
             response_type: "code".to_string(),
             client_id: client_id.to_string(),
             redirect_uri: "http://localhost/callback".to_string(),
@@ -3859,6 +4303,10 @@ mod tests {
         insert_legacy_consent(&db, &user_id, client_id, "openid").await;
 
         let params = AuthorizeQuery {
+            service_access_mode: None,
+            include_granted_scopes: false,
+            requested_service_ids: Vec::new(),
+            incremental_consent: None,
             response_type: "code".to_string(),
             client_id: client_id.to_string(),
             redirect_uri: "http://localhost/callback".to_string(),
@@ -3916,6 +4364,10 @@ mod tests {
         insert_legacy_consent(&db, &user_id, client_id, "openid").await;
 
         let params = AuthorizeQuery {
+            service_access_mode: None,
+            include_granted_scopes: false,
+            requested_service_ids: Vec::new(),
+            incremental_consent: None,
             response_type: "code".to_string(),
             client_id: client_id.to_string(),
             redirect_uri: "http://localhost/callback".to_string(),
@@ -3968,6 +4420,10 @@ mod tests {
             .expect("grant explicit unrestricted consent");
 
         let params = AuthorizeQuery {
+            service_access_mode: None,
+            include_granted_scopes: false,
+            requested_service_ids: Vec::new(),
+            incremental_consent: None,
             response_type: "code".to_string(),
             client_id: client_id.to_string(),
             redirect_uri: "http://localhost/callback".to_string(),
@@ -4022,6 +4478,10 @@ mod tests {
             .expect("grant explicit unrestricted consent");
 
         let params = AuthorizeQuery {
+            service_access_mode: None,
+            include_granted_scopes: false,
+            requested_service_ids: Vec::new(),
+            incremental_consent: None,
             response_type: "code".to_string(),
             client_id: client_id.to_string(),
             redirect_uri: "https://app.example/callback".to_string(),
@@ -4081,6 +4541,10 @@ mod tests {
         insert_public_client(&db, client_id, "openid").await;
 
         let params = AuthorizeQuery {
+            service_access_mode: None,
+            include_granted_scopes: false,
+            requested_service_ids: Vec::new(),
+            incremental_consent: None,
             response_type: "code".to_string(),
             client_id: client_id.to_string(),
             redirect_uri: "http://localhost/callback".to_string(),
@@ -4105,6 +4569,8 @@ mod tests {
             OptionalAuthUser(Some(crate::test_utils::test_auth_user(&user_id))),
             TelemetryContext::default(),
             Form(ConsentDecisionForm {
+                service_access_mode: None,
+                requested_service_ids: Vec::new(),
                 response_type: "code".to_string(),
                 client_id: client_id.to_string(),
                 redirect_uri: "http://localhost/callback".to_string(),
@@ -4537,6 +5003,10 @@ mod tests {
             .map(|service| service.id.clone())
             .collect::<Vec<_>>();
         let params = AuthorizeQuery {
+            service_access_mode: None,
+            include_granted_scopes: false,
+            requested_service_ids: Vec::new(),
+            incremental_consent: None,
             response_type: "code".to_string(),
             client_id: client_id.to_string(),
             redirect_uri: redirect_uri.to_string(),
@@ -4585,6 +5055,8 @@ mod tests {
             OptionalAuthUser(Some(crate::test_utils::test_auth_user(&user_id))),
             TelemetryContext::default(),
             Form(ConsentDecisionForm {
+                service_access_mode: None,
+                requested_service_ids: Vec::new(),
                 response_type: params.response_type.clone(),
                 client_id: params.client_id.clone(),
                 redirect_uri: params.redirect_uri.clone(),
@@ -5207,6 +5679,10 @@ mod tests {
             .expect("insert oauth client");
 
         let trusted_params = AuthorizeQuery {
+            service_access_mode: None,
+            include_granted_scopes: false,
+            requested_service_ids: Vec::new(),
+            incremental_consent: None,
             response_type: "code".to_string(),
             client_id: client_id.to_string(),
             redirect_uri: "http://localhost/callback".to_string(),
@@ -5231,6 +5707,8 @@ mod tests {
             OptionalAuthUser(Some(crate::test_utils::test_auth_user(&user_id))),
             TelemetryContext::default(),
             Form(ConsentDecisionForm {
+                service_access_mode: None,
+                requested_service_ids: Vec::new(),
                 response_type: "code".to_string(),
                 client_id: client_id.to_string(),
                 redirect_uri: "http://localhost/callback".to_string(),
@@ -5621,6 +6099,10 @@ mod tests {
     #[test]
     fn build_consent_url_appends_default_service_hints_as_repeated_params() {
         let params = AuthorizeQuery {
+            service_access_mode: None,
+            include_granted_scopes: false,
+            requested_service_ids: Vec::new(),
+            incremental_consent: None,
             response_type: "code".to_string(),
             client_id: "c1".to_string(),
             redirect_uri: "http://localhost/cb".to_string(),
@@ -5695,4 +6177,5 @@ mod tests {
             Some("Chrono Public LLM")
         );
     }
+    include!("oauth_incremental_tests.rs");
 }
