@@ -34,6 +34,10 @@ at the user's request for the broader CI reliability fix.
 - Cancel only superseded revisions of the same PR's CodeQL scan; keep push
   and schedule groups separate and retain all four language scans.
 - Add Mobile to both the aggregate's dependencies and result enforcement.
+- Carry the already-tested `7848cce1` NyxBot regression-test fix to main: wait
+  for the recorded reply target after a 202 callback instead of sleeping
+  300 ms. Both waits retain their original assertions and a ten-second bound.
+  Production application code is unchanged.
 - Use `cargo llvm-cov --no-report` before the existing exports and final
   threshold check. This removes an unused report pass without changing tests,
   instrumentation, produced artifacts or thresholds.
