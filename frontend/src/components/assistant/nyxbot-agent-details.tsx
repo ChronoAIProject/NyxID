@@ -352,13 +352,21 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
 
   async function save(values: AssistantAgentGrants) {
     setError(undefined);
-    // Levels only for the services being granted.
-    const guestAccess = Object.fromEntries(
-      values.services.map((slug) => [slug, values.guest_access[slug] ?? "use"]),
+    // Send only the levels changed here, for services being granted: the
+    // server keeps the others, and drops levels of services taken away.
+    const changed = Object.fromEntries(
+      values.services
+        .map((slug) => [slug, values.guest_access[slug] ?? "use"] as const)
+        .filter(([slug, level]) => level !== (agent.guest_access[slug] ?? "use")),
     );
+    const { guest_access: _levels, ...body } = values;
     try {
-      await grants.mutateAsync({ id: agent.id, ...values, guest_access: guestAccess });
-      form.reset({ ...values, guest_access: guestAccess });
+      await grants.mutateAsync({
+        id: agent.id,
+        ...body,
+        ...(Object.keys(changed).length ? { guest_access: changed } : {}),
+      });
+      form.reset(values);
     } catch (cause) {
       setError(errorMessage(cause, "Could not save the grants. Try again."));
     }
@@ -449,7 +457,7 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
 
 const GUEST_ACCESS_LABEL: Record<AssistantGuestAccess, string> = {
   read: "Look things up only",
-  use: "Use, but not delete or overwrite",
+  use: "Use, but not delete",
   all: "Everything this agent can do",
 };
 
@@ -472,11 +480,14 @@ function GuestAccessList({
   return (
     <div className="space-y-2 rounded-lg border border-border p-4">
       <div className="space-y-1">
-        <FormLabel>What others in its chats may do</FormLabel>
-        <FormDescription className="text-[12px]">
-          For people other than you in the agent&apos;s group and shared chats. Anything behind
-          your approval stays yours. You can also ask NyxBot to change this.
-        </FormDescription>
+        <p id="guest-access-title" className="text-[12px] font-medium text-foreground">
+          What others in its chats may do
+        </p>
+        <p className="text-[12px] text-muted-foreground">
+          For people other than you in the agent&apos;s group and shared chats. &ldquo;Use&rdquo;
+          lets them read and change, but not delete or run what a service marks destructive.
+          Anything behind your approval stays yours. You can also ask NyxBot to change this.
+        </p>
       </div>
       <ul aria-label="Guest access" className="space-y-1.5">
         {services.map((slug) => {

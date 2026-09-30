@@ -267,7 +267,7 @@
           "name": "drive_update_file",
           "description": "Update file metadata, rename, move, or move a file to trash.",
           "readOnly": false,
-          "destructive": false,
+          "destructive": true,
           "requiresApproval": true
         },
         "parameters": [
@@ -610,7 +610,7 @@
           "name": "drive_upload_file_content",
           "description": "Replace Drive file content with raw media or replace a Google Doc by importing HTML using multipart/related metadata and content. For HTTP/CLI multipart requests set Content-Type: multipart/related; boundary=nyxid_google_doc and send JSON File metadata first, then text/html content. Set metadata mimeType to application/vnd.google-apps.document for the HTML Google Doc import. This replaces the whole document; use docs_batch_update_document for targeted edits. The generated MCP tool supports only uploadType=media with a base64 body and application/octet-stream. Move files using addParents/removeParents on drive_update_file, not parents in PATCH metadata.",
           "readOnly": false,
-          "destructive": false,
+          "destructive": true,
           "requiresApproval": true
         },
         "parameters": [

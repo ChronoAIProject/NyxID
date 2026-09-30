@@ -447,9 +447,9 @@ fn guest_note(specialist: bool) -> &'static str {
         "\n\nThis turn answers someone other than the owner (a member of a chat your channel \
         bot is in). Help them with your services as far as the owner lets guests use each \
         one (by default look things up, turn things on or off, create and update, but not \
-        delete or overwrite). Only the owner can ask for account actions, new connections, \
-        more access or more than that: NyxID refuses those, so say that only the bot's owner \
-        can ask for that. Never reveal the owner's private information (their account, other \
+        delete). Only the owner can ask for account actions, new connections, more access or \
+        more than that: NyxID refuses those, so say that only the bot's owner can ask for \
+        that. Never reveal the owner's private information (their account, other \
         chats, memory or credentials)."
     } else {
         "\n\nThis turn answers someone other than the owner (a member of a chat the owner's \
@@ -837,7 +837,6 @@ async fn dispatch(
                 service_ids: targets.service_ids,
                 platform_service_ids: targets.platform_service_ids,
                 account_read: args["account_read"].as_bool().unwrap_or(false),
-                guest_access: Default::default(),
             };
             let change = if name == "grant_subagent" {
                 team::GrantChange::Add(targets)
@@ -870,6 +869,12 @@ async fn dispatch(
                 .chain(&agent.grants.platform_service_ids)
                 .collect();
             let requested = string_list(args, "services");
+            // Everything, deleting included, is given service by service.
+            if access == GuestAccess::All && requested.is_empty() {
+                return Err(AppError::ValidationError(
+                    "Name the services guests may do everything with".into(),
+                ));
+            }
             let mut levels = BTreeMap::new();
             let mut not_set = Vec::new();
             if requested.is_empty() {
@@ -1544,12 +1549,14 @@ pub async fn set_agent_grants(
         &state.db,
         &owner,
         &id,
-        team::GrantChange::Replace(AgentGrants {
-            service_ids: targets.service_ids,
-            platform_service_ids: targets.platform_service_ids,
-            account_read: body.account_read,
-            guest_access,
-        }),
+        team::GrantChange::Replace {
+            grants: AgentGrants {
+                service_ids: targets.service_ids,
+                platform_service_ids: targets.platform_service_ids,
+                account_read: body.account_read,
+            },
+            guests: guest_access,
+        },
     )
     .await?;
     Ok(Json(json!({"id": agent.id, "services": targets.slugs,

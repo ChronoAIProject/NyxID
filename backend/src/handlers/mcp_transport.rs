@@ -2100,10 +2100,12 @@ fn guest_tool_refusal(
 }
 
 /// Refuse a guest's service call beyond what the owner lets guests do with
-/// that service on this specialist (`AgentGrants::guest_access`): `read`
-/// runs only reads, `use` (the default) anything but an HTTP DELETE (or a
-/// method override asking for one) or an operation its spec marks
-/// destructive, `all` everything the specialist may. The agent's key already
+/// that service on this specialist (`AssistantAgent::guest_access`): `read`
+/// runs only reads (an operation its spec marks read-only, else GET, HEAD or
+/// OPTIONS), `use` (the default) anything but an HTTP DELETE or an
+/// operation its spec marks destructive, `all` everything the specialist
+/// may. Method overrides count as the call's method too, so none hides a
+/// DELETE or passes a change off as a read. The agent's key already
 /// holds only its granted services, and operations behind the owner's
 /// approval are refused later (`authorize_mcp_operation`) at every level.
 async fn guest_service_refusal(
@@ -2123,25 +2125,34 @@ async fn guest_service_refusal(
         return Some(guest_refused(request_id));
     };
     let access = agent
-        .grants
         .guest_access
         .get(&service.service_id)
         .copied()
         .unwrap_or_default();
-    let destructive = service
+    let metadata = service
         .durable_endpoint_metadata
         .get(&endpoint.endpoint_id)
-        .is_some_and(|metadata| metadata.destructive);
-    let method = prepared.effective_method();
+        .copied()
+        .unwrap_or_default();
+    // The call is judged on every method it may act as: the one it is sent
+    // with and any a method override asks for.
+    let methods = prepared.requested_methods();
+    let deletes = methods.iter().any(|method| method == "DELETE");
+    let overrides_read = methods
+        .iter()
+        .skip(1)
+        .all(|method| matches!(method.as_str(), "GET" | "HEAD" | "OPTIONS"));
+    // An operation its spec marks read-only reads, whatever its method (a
+    // POST search); otherwise the method decides.
+    let reads = match metadata.risk {
+        Some(crate::models::service_endpoint::EndpointRisk::Read) => true,
+        Some(crate::models::service_endpoint::EndpointRisk::Write) => false,
+        None => matches!(methods[0].as_str(), "GET" | "HEAD" | "OPTIONS"),
+    } && overrides_read;
     let allowed = match access {
         GuestAccess::All => true,
-        GuestAccess::Use => method != reqwest::Method::DELETE && !destructive,
-        GuestAccess::Read => {
-            matches!(
-                method,
-                reqwest::Method::GET | reqwest::Method::HEAD | reqwest::Method::OPTIONS
-            ) && !destructive
-        }
+        GuestAccess::Use => !deletes && !metadata.destructive,
+        GuestAccess::Read => reads && !deletes && !metadata.destructive,
     };
     (!allowed).then(|| {
         tool_result(

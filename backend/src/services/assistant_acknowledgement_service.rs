@@ -39,7 +39,7 @@ pub struct ChatAuthority {
     pub agent_name: String,
     /// The thread's newest turn acts for a channel chat guest (not the
     /// owner): service calls only as far as the owner lets guests use each
-    /// service (`AgentGrants::guest_access`); see `guest_refusal`.
+    /// service (`AssistantAgent::guest_access`); see `guest_refusal`.
     pub guest: bool,
 }
 impl ChatAuthority {
@@ -78,7 +78,7 @@ pub fn guest_refusal() -> Value {
 pub fn guest_service_refusal(service: &str, access: GuestAccess) -> Value {
     let allowed = match access {
         GuestAccess::Read => "only look things up with",
-        GuestAccess::Use | GuestAccess::All => "use, but not delete or overwrite with,",
+        _ => "use, but not delete with (nor run what it marks destructive),",
     };
     json!({"error": "owner_only", "service": service, "guest_access": access.as_str(),
         "instructions": format!("You are answering someone other than the owner, who may \

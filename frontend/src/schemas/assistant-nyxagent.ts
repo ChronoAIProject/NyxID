@@ -426,7 +426,14 @@ export const assistantAgentGrantsSchema = z.object({
   /** Guest access by service slug; services left out keep their level. */
   guest_access: z.record(z.string(), assistantGuestAccessSchema),
 });
+/** What the grants endpoint takes: levels only for services whose level changed. */
+export const assistantAgentGrantsRequestSchema = z.object({
+  services: z.array(z.string()),
+  account_read: z.boolean(),
+  guest_access: z.record(z.string(), assistantGuestAccessSchema).optional(),
+});
 export type AssistantAgentGrants = z.infer<typeof assistantAgentGrantsSchema>;
+export type AssistantAgentGrantsRequest = z.infer<typeof assistantAgentGrantsRequestSchema>;
 
 export const assistantAgentDestroyedSchema = z.object({ id: z.string(), destroyed_at: z.string() });
 

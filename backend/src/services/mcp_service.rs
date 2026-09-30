@@ -1371,6 +1371,23 @@ async fn load_user_tools_with_grants(
         } else {
             (generic_proxy_endpoints(endpoint_label), true, false)
         };
+        // An instance-mounted spec of a catalog service keeps the catalog
+        // overlay's destructive markers for the operations they share.
+        let mut published = published;
+        if let Some(catalog) = catalog_policy {
+            for endpoint in &published.endpoints {
+                if super::catalog_spec_registry::marks_destructive(
+                    &catalog.slug,
+                    &endpoint.method,
+                    &endpoint.path,
+                    &endpoint.name,
+                ) && let Some(metadata) =
+                    published.durable_metadata.get_mut(&endpoint.endpoint_id)
+                {
+                    metadata.destructive = true;
+                }
+            }
+        }
 
         let recommended_skills = user_endpoint
             .and_then(|ep| ep.recommended_skills.clone())
@@ -3331,34 +3348,44 @@ impl PreparedProxyCall {
         )
     }
 
-    /// The method the downstream acts on: the request's own, or the one a
-    /// method override asks for (an `X-HTTP-Method-Override`-style header,
-    /// or a `_method` query or body field, as Rails and Laravel honour).
-    pub fn effective_method(&self) -> reqwest::Method {
-        let from_query = |query: &str| {
-            url::form_urlencoded::parse(query.as_bytes())
-                .find(|(key, _)| key == "_method")
-                .map(|(_, value)| value.into_owned())
-        };
-        let from_body = |body: &[u8]| match serde_json::from_slice::<serde_json::Value>(body) {
-            Ok(value) => value["_method"].as_str().map(str::to_owned),
-            Err(_) => url::form_urlencoded::parse(body)
-                .find(|(key, _)| key == "_method")
-                .map(|(_, value)| value.into_owned()),
-        };
-        self.parameter_headers
-            .iter()
-            .find(|(name, _)| {
-                let name = name.to_ascii_lowercase();
-                name.contains("method-override") || name == "x-http-method"
-            })
-            .map(|(_, value)| value.clone())
-            .or_else(|| self.query.as_deref().and_then(from_query))
-            .or_else(|| self.body.as_deref().and_then(from_body))
-            .and_then(|method| {
-                reqwest::Method::from_bytes(method.trim().to_ascii_uppercase().as_bytes()).ok()
-            })
-            .unwrap_or_else(|| self.method.clone())
+    /// Every method this call may act as, uppercase: the method it is sent
+    /// with, and each one a method override asks for (an
+    /// `X-HTTP-Method-Override`-style header, or a `_method` query or body
+    /// field, as Rails and Laravel honour). A check must accept all of them:
+    /// the downstream may honour either.
+    pub fn requested_methods(&self) -> Vec<String> {
+        let mut methods = vec![self.method.as_str().to_ascii_uppercase()];
+        let mut add = |value: &str| methods.push(value.trim().to_ascii_uppercase());
+        for (name, value) in &self.parameter_headers {
+            let name = name.to_ascii_lowercase();
+            if name.contains("method-override") || name == "x-http-method" {
+                add(value);
+            }
+        }
+        for (key, value) in
+            url::form_urlencoded::parse(self.query.as_deref().unwrap_or_default().as_bytes())
+        {
+            if key == "_method" {
+                add(&value);
+            }
+        }
+        if let Some(body) = self.body.as_deref() {
+            match serde_json::from_slice::<serde_json::Value>(body) {
+                Ok(value) => {
+                    if let Some(method) = value.get("_method") {
+                        add(method.as_str().unwrap_or("?"));
+                    }
+                }
+                Err(_) => {
+                    for (key, value) in url::form_urlencoded::parse(body) {
+                        if key == "_method" {
+                            add(&value);
+                        }
+                    }
+                }
+            }
+        }
+        methods
     }
 }
 
@@ -6912,6 +6939,46 @@ mod tests {
 
         assert!(
             matches!(error, AppError::BadRequest(msg) if msg.contains("Unsupported HTTP method: DESTROY"))
+        );
+    }
+
+    /// Catalog rows take the destructive marker from the service's hosted
+    /// overlay, matched by name or route; other services have none.
+    #[test]
+    fn catalog_rows_carry_their_overlay_destructive_markers() {
+        let row = |name: &str, method: &str, path: &str| ServiceEndpoint {
+            target_id: None,
+            id: format!("ep-{name}"),
+            service_id: "svc".to_string(),
+            name: name.to_string(),
+            description: None,
+            method: method.to_string(),
+            path: path.to_string(),
+            parameters: None,
+            request_body_schema: None,
+            request_content_type: None,
+            request_body_required: false,
+            response_description: None,
+            response: OperationResponseContract::default(),
+            risk: None,
+            supports_idempotency_key: false,
+            is_active: true,
+            operation_generation: 1,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let delete = row("delete_message", "POST", "/deleteMessage");
+        let send = row("send_message", "POST", "/sendMessage");
+        let rows = [&delete, &send];
+        let marked = service_endpoint_durable_metadata(&rows, Some("api-telegram-bot"));
+        assert!(marked["ep-delete_message"].destructive);
+        assert!(!marked["ep-send_message"].destructive);
+        let unmarked = service_endpoint_durable_metadata(&rows, None);
+        assert!(!unmarked["ep-delete_message"].destructive);
+        let drive = row("drive_update_file", "PATCH", "/drive/v3/files/{fileId}");
+        assert!(
+            service_endpoint_durable_metadata(&[&drive], Some("api-google"))["ep-drive_update_file"]
+                .destructive
         );
     }
 

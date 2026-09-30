@@ -497,7 +497,7 @@
           "name": "drive_update_file",
           "description": "Update file metadata, rename, move, or move a file to trash.",
           "readOnly": false,
-          "destructive": false,
+          "destructive": true,
           "requiresApproval": true
         },
         "parameters": [
@@ -832,7 +832,7 @@
           "name": "drive_upload_file_content",
           "description": "Replace a Drive file's content. Uploading Markdown to a Google Doc, Sheet, or Slides file rewrites the document body; Drive converts it into the native format.",
           "readOnly": false,
-          "destructive": false,
+          "destructive": true,
           "requiresApproval": true
         },
         "parameters": [

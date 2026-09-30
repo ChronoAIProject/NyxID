@@ -3,7 +3,7 @@ import { nyxBotApi } from "@/lib/assistant/nyxbot-api";
 import type {
   AssistantAgent,
   AssistantAgentCreate,
-  AssistantAgentGrants,
+  AssistantAgentGrantsRequest,
   AssistantAgentList,
   NyxAgentChannelChatSettings,
   NyxAgentSettingsUpdate,
@@ -108,7 +108,7 @@ export function useUpdateNyxBotAgent() {
 }
 
 export function useSetNyxBotAgentGrants() {
-  return useAgentsMutation(({ id, ...grants }: AssistantAgentGrants & { id: string }) =>
+  return useAgentsMutation(({ id, ...grants }: AssistantAgentGrantsRequest & { id: string }) =>
     nyxBotApi.setGrants(id, grants),
   );
 }

@@ -485,31 +485,41 @@ turn so late tool calls stay restricted):
   all and answer from the conversation; to let a chat's members use a service,
   the owner gives the chat a specialist with just that service;
 - a specialist's guest turns use its granted services as far as the owner lets
-  guests use each one (`AgentGrants::guest_access`, per specialist and service,
-  the user's decision: guests "can use them" but not delete, and sometimes the
-  owner wants them to edit sheets, docs or pages too). Levels:
-  - `read`: reads only (GET, HEAD, OPTIONS);
-  - `use`, the default: reads and changes, but never an HTTP DELETE (or a
-    method override asking for one: an `X-HTTP-Method-Override`-style header or
-    a `_method` query or body field) or an operation its spec marks
-    destructive (`x-aevatar-tool.destructive`: the catalog overlays mark
-    deletes and overwrites, such as Telegram's `deleteMessage`, Sheets'
-    `values:clear` and `values` updates, Docs' `batchUpdate` and Notion's page
-    update; read from the overlay compiled into NyxID, so no stored endpoint
-    changes, or from a mounted instance spec);
+  guests use each one (`AssistantAgent::guest_access`, per specialist and
+  service, stored beside `grants` so writers of `grants` that predate it never
+  erase it; the user's decision: guests "can use them" but not delete, and
+  sometimes the owner wants them to edit sheets, docs or pages too). Levels:
+  - `read`: reads only: an operation its spec marks read-only
+    (`x-aevatar-tool.readOnly`, so a POST search counts), else GET, HEAD or
+    OPTIONS;
+  - `use`, the default: reads and changes, but never an HTTP DELETE or an
+    operation its spec marks destructive (`x-aevatar-tool.destructive`: the
+    catalog overlays mark deletes and overwrites, such as Telegram's
+    `deleteMessage`, Drive's update (it can trash) and content upload (it
+    replaces a document), Sheets' `values:clear` and `values` updates, Docs'
+    `batchUpdate` and Notion's page update);
   - `all`: everything the specialist may do with the service.
-  Nothing is judged from names or words: a service without typed operations
-  (the generic proxy) is judged by its HTTP method alone. The owner sets levels
-  on the agent's Grants (a select per service) or by asking NyxBot
-  (`nyxid__set_guest_access`, "let the group edit the office sheet");
-  `nyxid__list_subagents` and the agent summary show them (`guest_access`).
-  Levels are kept across other grant changes and dropped with the service.
-  Calls beyond the level are refused with `owner_only` (naming the service and
-  its level) before anything is sent. SSH (a shell can do anything) stays the
-  owner's, as do `nyxid__` account, team, memory and posting tools and
-  connection and Oracle tools (the user's decision: "anyone in the group can
-  talk to the bot … dangerous command should only be allowed by the owner",
-  with the agent's key scoped to its granted services);
+  A call is judged on every method it may act as: the one it is sent with and
+  any a method override asks for (an `X-HTTP-Method-Override`-style header or
+  a `_method` query or body field), so an override neither hides a DELETE nor
+  passes a change off as a read. Markers come from the overlay compiled into
+  NyxID for catalog services (matched by endpoint name or `METHOD path`; no
+  stored endpoint changes, so `operation_generation` is untouched), including
+  a catalog service's instance-mounted spec, and from a mounted spec's own
+  markers. Catalog services outside NyxID's overlays, and services without
+  typed operations (the generic proxy), are judged by the HTTP method alone.
+  Nothing is judged from names or words. The owner sets levels on the agent's
+  Grants (a select per service; the page sends only changed levels) or by
+  asking NyxBot (`nyxid__set_guest_access`, "let the group edit the office
+  sheet"; `all` must name its services); `nyxid__list_subagents` and the agent
+  summary show them (`guest_access`). Levels are kept across other grant
+  changes and dropped with the service. Calls beyond the level are refused with
+  `owner_only` (naming the service and its level) before anything is sent. SSH
+  (a shell can do anything) stays the owner's, as do `nyxid__` account, team,
+  memory and posting tools and connection and Oracle tools (the user's
+  decision: "anyone in the group can talk to the bot … dangerous command should
+  only be allowed by the owner", with the agent's key scoped to its granted
+  services);
 - an ungranted service, and an operation the owner put behind approval, are
   refused without a permission or approval request at every level, and an
   approval the owner granted for their own requests does not let a guest in

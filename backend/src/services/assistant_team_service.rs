@@ -151,6 +151,7 @@ pub async fn ensure_nyxbot(db: &Database, owner: &str) -> AppResult<AssistantAge
         description: String::new(),
         specialty: None,
         grants: AgentGrants::default(),
+        guest_access: BTreeMap::new(),
         created_by: "user".into(),
         model: routing::model_for(db, RouteRole::Orchestrator, engine::DEFAULT_MODEL).await,
         home_conversation_id: None,
@@ -606,8 +607,8 @@ pub async fn create_specialist(
             service_ids: request.targets.service_ids.clone(),
             platform_service_ids: request.targets.platform_service_ids.clone(),
             account_read: request.account_read,
-            guest_access: BTreeMap::new(),
         },
+        guest_access: BTreeMap::new(),
         created_by: request.created_by.into(),
         model,
         home_conversation_id: None,
@@ -808,13 +809,16 @@ pub async fn update_agent(
 
 /// A change to a specialist's grants. Merged inside the transaction against
 /// the grants it reads, so concurrent changes never undo each other. Guest
-/// access entries given with a change are laid over the current ones; every
-/// change keeps entries only for granted services, and none for the default
-/// level.
+/// access levels given with a change are laid over the current ones; every
+/// change keeps levels only for granted services, and none for the default.
 #[derive(Clone, Debug)]
 pub enum GrantChange {
-    /// The owner's full replacement of services and account access.
-    Replace(AgentGrants),
+    /// The owner's full replacement of services and account access, with
+    /// the guest access levels it names (others are kept).
+    Replace {
+        grants: AgentGrants,
+        guests: BTreeMap<String, GuestAccess>,
+    },
     /// Add these targets, and account access when `account_read` is set.
     Add(AgentGrants),
     /// Remove these targets, and account access when `account_read` is set.
@@ -824,16 +828,21 @@ pub enum GrantChange {
 }
 
 impl GrantChange {
-    pub fn apply(&self, current: &AgentGrants) -> AgentGrants {
+    /// The grants and guest access levels after this change.
+    pub fn apply(
+        &self,
+        current: &AgentGrants,
+        current_guests: &BTreeMap<String, GuestAccess>,
+    ) -> (AgentGrants, BTreeMap<String, GuestAccess>) {
         let mut grants = current.clone();
-        let mut guests = BTreeMap::new();
+        let mut guests = current_guests.clone();
         match self {
-            Self::Replace(replacement) => {
-                grants = AgentGrants {
-                    guest_access: current.guest_access.clone(),
-                    ..replacement.clone()
-                };
-                guests = replacement.guest_access.clone();
+            Self::Replace {
+                grants: replacement,
+                guests: levels,
+            } => {
+                grants = replacement.clone();
+                guests.extend(levels.clone());
             }
             Self::Add(add) => {
                 for (list, ids) in [
@@ -847,7 +856,6 @@ impl GrantChange {
                     }
                 }
                 grants.account_read |= add.account_read;
-                guests = add.guest_access.clone();
             }
             Self::Remove(remove) => {
                 grants
@@ -858,21 +866,15 @@ impl GrantChange {
                     .retain(|id| !remove.platform_service_ids.contains(id));
                 grants.account_read &= !remove.account_read;
             }
-            Self::Guests(levels) => guests = levels.clone(),
+            Self::Guests(levels) => guests.extend(levels.clone()),
         }
-        grants.guest_access.extend(guests);
         let granted: HashSet<&String> = grants
             .service_ids
             .iter()
             .chain(&grants.platform_service_ids)
             .collect();
-        grants.guest_access = grants
-            .guest_access
-            .iter()
-            .filter(|(id, level)| granted.contains(id) && **level != GuestAccess::Use)
-            .map(|(id, level)| (id.clone(), *level))
-            .collect();
-        grants
+        guests.retain(|id, level| granted.contains(id) && *level != GuestAccess::Use);
+        (grants, guests)
     }
 }
 
@@ -923,7 +925,7 @@ pub async fn apply_grants_in_session(
         .session(&mut *session)
         .await?
         .ok_or_else(not_found)?;
-    let grants = change.apply(&agent.grants);
+    let (grants, guest_access) = change.apply(&agent.grants, &agent.guest_access);
     let removed: Vec<String> = agent
         .grants
         .service_ids
@@ -934,11 +936,15 @@ pub async fn apply_grants_in_session(
         .collect();
     let lost_account = agent.grants.account_read && !grants.account_read;
     agent.grants = grants;
+    agent.guest_access = guest_access;
+    let encode = |value: bson::ser::Result<bson::Bson>| {
+        value.map_err(|_| AppError::Internal("Grant encoding failed".into()))
+    };
     collection
         .update_one(
             filter,
-            doc! {"$set": {"grants": bson::to_bson(&agent.grants)
-            .map_err(|_| AppError::Internal("Grant encoding failed".into()))?,
+            doc! {"$set": {"grants": encode(bson::to_bson(&agent.grants))?,
+            "guest_access": encode(bson::to_bson(&agent.guest_access))?,
             "updated_at": bson::DateTime::now()}},
         )
         .session(&mut *session)
@@ -1007,7 +1013,7 @@ pub async fn set_grants(
             "service_ids": &agent.grants.service_ids,
             "platform_service_ids": &agent.grants.platform_service_ids,
             "account_read": agent.grants.account_read,
-            "guest_access": &agent.grants.guest_access,
+            "guest_access": &agent.guest_access,
         }),
     )
     .await;
@@ -1543,12 +1549,7 @@ pub async fn summaries(
                 .chain(&agent.grants.platform_service_ids)
                 .map(|id| {
                     let name = names.get(id).cloned().unwrap_or_else(|| id.clone());
-                    let level = agent
-                        .grants
-                        .guest_access
-                        .get(id)
-                        .copied()
-                        .unwrap_or_default();
+                    let level = agent.guest_access.get(id).copied().unwrap_or_default();
                     (name, level.as_str())
                 })
                 .collect(),

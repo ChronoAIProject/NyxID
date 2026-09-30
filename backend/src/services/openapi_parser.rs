@@ -2621,6 +2621,33 @@ mod tests {
         assert!(endpoints[0].supports_idempotency_key);
     }
 
+    #[test]
+    fn operations_carry_their_destructive_marker() {
+        let spec = serde_json::json!({
+            "openapi": "3.1.0",
+            "paths": {
+                "/items/{id}": {
+                    "patch": {
+                        "operationId": "updateItem",
+                        "x-aevatar-tool": { "readOnly": false, "destructive": true },
+                        "responses": { "200": {} }
+                    },
+                    "get": { "operationId": "getItem", "responses": { "200": {} } }
+                }
+            }
+        });
+        let endpoints = parse_openapi_spec_value(&spec).unwrap();
+        let destructive = |name: &str| {
+            endpoints
+                .iter()
+                .find(|endpoint| endpoint.name == name)
+                .unwrap()
+                .destructive
+        };
+        assert!(destructive("updateitem"));
+        assert!(!destructive("getitem"));
+    }
+
     // ---- extract_swagger2_consumes ----
 
     #[test]

@@ -153,7 +153,7 @@ it("replaces a specialist's grants with a dirty-gated save", async () => {
   await user.click(within(grants).getByRole("checkbox", { name: /Slack/ }));
   // A newly granted service starts at the default level.
   expect(within(guests).getByRole("combobox", { name: "slack" })).toHaveTextContent(
-    "Use, but not delete or overwrite",
+    "Use, but not delete",
   );
   await user.click(within(grants).getByRole("switch", { name: "Read my account" }));
   expect(save).toBeEnabled();
@@ -162,11 +162,8 @@ it("replaces a specialist's grants with a dirty-gated save", async () => {
     expect(writes).toContainEqual({
       method: "PUT",
       endpoint: "/assistant/nyxagent/agents/agent-researcher/grants",
-      body: {
-        services: ["github", "slack"],
-        account_read: true,
-        guest_access: { github: "read", slack: "use" },
-      },
+      // Unchanged levels are not sent: the server keeps them.
+      body: { services: ["github", "slack"], account_read: true },
     }),
   );
 });

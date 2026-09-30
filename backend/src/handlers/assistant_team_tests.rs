@@ -660,7 +660,7 @@ async fn owners_create_specialists_within_limits_and_grants_resolve_only_visible
     let key = key_service::get_api_key(&state.db, OWNER, &second.credential_api_key_id)
         .await
         .unwrap();
-    assert_eq!(key.allowed_service_ids, vec![github]);
+    assert_eq!(key.allowed_service_ids, vec![github.clone()]);
     assert!(
         key.scopes
             .contains(crate::mw::auth::ASSISTANT_ACCOUNT_SCOPE)
@@ -706,6 +706,59 @@ async fn owners_create_specialists_within_limits_and_grants_resolve_only_visible
     )
     .await;
     assert!(error);
+    // Everything, deleting included, is given service by service.
+    let (value, error) = execute_tool(
+        &state,
+        &chat,
+        "nyxid__set_guest_access",
+        &json!({"subagent": "coder", "access": "all"}),
+    )
+    .await;
+    assert!(error, "{value}");
+    // The owner's grants form: levels it leaves out are kept, named ones set,
+    // "use" resets, and only granted services take a level.
+    let coder = team::specialist(&state.db, OWNER, "coder").await.unwrap();
+    let put = |body: Value| {
+        set_agent_grants(
+            State(state.clone()),
+            test_auth_user(OWNER),
+            Path(coder.id.clone()),
+            Json(serde_json::from_value(body).unwrap()),
+        )
+    };
+    let Json(saved) = put(json!({"services": ["github"], "account_read": true}))
+        .await
+        .unwrap();
+    assert_eq!(saved["services"], json!(["github"]));
+    let level = || {
+        let state = state.clone();
+        let github = github.clone();
+        async move {
+            team::specialist(&state.db, OWNER, "coder")
+                .await
+                .unwrap()
+                .guest_access
+                .get(&github)
+                .copied()
+        }
+    };
+    assert_eq!(level().await, Some(GuestAccess::Read));
+    let _ = put(json!({"services": ["github"], "account_read": true,
+        "guest_access": {"github": "all"}}))
+    .await
+    .unwrap();
+    assert_eq!(level().await, Some(GuestAccess::All));
+    assert!(
+        put(json!({"services": ["github"], "account_read": true,
+            "guest_access": {"slack": "all"}}))
+        .await
+        .is_err()
+    );
+    let _ = put(json!({"services": ["github"], "account_read": true,
+        "guest_access": {"github": "use"}}))
+    .await
+    .unwrap();
+    assert_eq!(level().await, None);
     settings::update(
         &state.db,
         OWNER,
@@ -912,37 +965,41 @@ fn grant_changes_merge_against_the_current_grants() {
         service_ids: ids(&["a", "b"]),
         platform_service_ids: ids(&["p"]),
         account_read: true,
-        guest_access: Default::default(),
     };
     // Adds and removes apply to what is stored now, so NyxBot's change never
     // undoes a concurrent change by the owner (or a card decision).
-    let added = team::GrantChange::Add(AgentGrants {
+    let no_guests = std::collections::BTreeMap::new();
+    let (added, _) = team::GrantChange::Add(AgentGrants {
         service_ids: ids(&["b", "c"]),
         ..Default::default()
     })
-    .apply(&current);
+    .apply(&current, &no_guests);
     assert_eq!(added.service_ids, ids(&["a", "b", "c"]));
     assert_eq!(added.platform_service_ids, ids(&["p"]));
     assert!(added.account_read);
-    let removed = team::GrantChange::Remove(AgentGrants {
+    let (removed, _) = team::GrantChange::Remove(AgentGrants {
         service_ids: ids(&["a"]),
         platform_service_ids: ids(&["p"]),
         account_read: false,
-        guest_access: Default::default(),
     })
-    .apply(&added);
+    .apply(&added, &no_guests);
     assert_eq!(removed.service_ids, ids(&["b", "c"]));
     assert!(removed.platform_service_ids.is_empty());
     assert!(removed.account_read);
-    let revoked = team::GrantChange::Remove(AgentGrants {
+    let (revoked, _) = team::GrantChange::Remove(AgentGrants {
         account_read: true,
         ..Default::default()
     })
-    .apply(&removed);
+    .apply(&removed, &no_guests);
     assert!(!revoked.account_read);
     assert_eq!(revoked.service_ids, ids(&["b", "c"]));
     assert_eq!(
-        team::GrantChange::Replace(AgentGrants::default()).apply(&current),
+        team::GrantChange::Replace {
+            grants: AgentGrants::default(),
+            guests: Default::default(),
+        }
+        .apply(&current, &no_guests)
+        .0,
         AgentGrants::default()
     );
     // Guest access: set per granted service, kept across other changes,
@@ -953,48 +1010,50 @@ fn grant_changes_merge_against_the_current_grants() {
             .map(|(id, level)| ((*id).to_owned(), *level))
             .collect::<std::collections::BTreeMap<_, _>>()
     };
-    let guests = team::GrantChange::Guests(levels(&[
+    let none = levels(&[]);
+    let (_, guests) = team::GrantChange::Guests(levels(&[
         ("a", GuestAccess::All),
         ("p", GuestAccess::Read),
         ("b", GuestAccess::Use),
         ("not-granted", GuestAccess::All),
     ]))
-    .apply(&current);
+    .apply(&current, &none);
     assert_eq!(
-        guests.guest_access,
+        guests,
         levels(&[("a", GuestAccess::All), ("p", GuestAccess::Read)])
     );
-    let added = team::GrantChange::Add(AgentGrants {
+    let (added, kept) = team::GrantChange::Add(AgentGrants {
         service_ids: ids(&["c"]),
         ..Default::default()
     })
-    .apply(&guests);
-    assert_eq!(added.guest_access, guests.guest_access);
-    let removed = team::GrantChange::Remove(AgentGrants {
+    .apply(&current, &guests);
+    assert_eq!(kept, guests);
+    let (removed, kept) = team::GrantChange::Remove(AgentGrants {
         platform_service_ids: ids(&["p"]),
         ..Default::default()
     })
-    .apply(&added);
-    assert_eq!(removed.guest_access, levels(&[("a", GuestAccess::All)]));
+    .apply(&added, &kept);
+    assert_eq!(kept, levels(&[("a", GuestAccess::All)]));
     // The owner's replacement keeps levels for services it keeps, and sets
     // the ones it names.
-    let replaced = team::GrantChange::Replace(AgentGrants {
-        service_ids: ids(&["a", "c"]),
-        guest_access: levels(&[("c", GuestAccess::Read)]),
-        ..Default::default()
-    })
-    .apply(&removed);
+    let (replaced, kept) = team::GrantChange::Replace {
+        grants: AgentGrants {
+            service_ids: ids(&["a", "c"]),
+            ..Default::default()
+        },
+        guests: levels(&[("c", GuestAccess::Read)]),
+    }
+    .apply(&removed, &kept);
     assert_eq!(
-        replaced.guest_access,
+        kept,
         levels(&[("a", GuestAccess::All), ("c", GuestAccess::Read)])
     );
-    let reset = team::GrantChange::Replace(AgentGrants {
-        service_ids: ids(&["a", "c"]),
-        guest_access: levels(&[("a", GuestAccess::Use)]),
-        ..Default::default()
-    })
-    .apply(&replaced);
-    assert_eq!(reset.guest_access, levels(&[("c", GuestAccess::Read)]));
+    let (_, reset) = team::GrantChange::Replace {
+        grants: replaced,
+        guests: levels(&[("a", GuestAccess::Use)]),
+    }
+    .apply(&current, &kept);
+    assert_eq!(reset, levels(&[("c", GuestAccess::Read)]));
 }
 
 async fn event_budget_used(state: &AppState) -> i64 {

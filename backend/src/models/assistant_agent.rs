@@ -34,12 +34,6 @@ pub struct AgentGrants {
     /// Read-only NyxID account tools.
     #[serde(default)]
     pub account_read: bool,
-    /// What people other than the owner (guests in the chats the specialist
-    /// answers) may do with each granted service, by service ID. A service
-    /// without an entry uses [`GuestAccess::Use`]; entries exist only for
-    /// granted services.
-    #[serde(default)]
-    pub guest_access: BTreeMap<String, GuestAccess>,
 }
 
 /// What guests may do with one of a specialist's services. Operations the
@@ -49,8 +43,8 @@ pub struct AgentGrants {
 pub enum GuestAccess {
     /// Reads only (GET, HEAD, OPTIONS).
     Read,
-    /// Reads and changes, never an HTTP DELETE or an operation its catalog
-    /// marks destructive.
+    /// Reads and changes, never an HTTP DELETE (or an override asking for
+    /// one) or an operation its spec marks destructive.
     #[default]
     Use,
     /// Everything the specialist may do with the service.
@@ -106,6 +100,12 @@ pub struct AssistantAgent {
     pub specialty: Option<String>,
     #[serde(default)]
     pub grants: AgentGrants,
+    /// What people other than the owner (guests in the chats a specialist
+    /// answers) may do with each granted service, by service ID. A service
+    /// without an entry uses [`GuestAccess::Use`]. Beside `grants`, not in it,
+    /// so writers of `grants` that predate it never erase it.
+    #[serde(default)]
+    pub guest_access: BTreeMap<String, GuestAccess>,
     /// `user` or `nyxbot`.
     pub created_by: String,
     /// NyxAgent profile for new threads.
