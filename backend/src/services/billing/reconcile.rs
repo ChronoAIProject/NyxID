@@ -212,6 +212,7 @@ impl BillingReconciler {
                 credits_per_unit_micros,
                 credits_per_unit_pico,
                 synced_at: now,
+                retired_at: None,
             };
             collection
                 .replace_one(doc! { "_id": &row.id }, &row)
@@ -1220,6 +1221,7 @@ mod tests {
                 credits_per_unit_micros: 7,
                 credits_per_unit_pico: None,
                 synced_at: Utc::now(),
+                retired_at: None,
             })
             .await
             .expect("seed rate");
@@ -1262,6 +1264,7 @@ mod tests {
                 credits_per_unit_micros: 7,
                 credits_per_unit_pico: None,
                 synced_at: Utc::now(),
+                retired_at: None,
             })
             .await
             .unwrap();

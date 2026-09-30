@@ -1136,6 +1136,11 @@ async fn fresh_rate(
                 "billing rate cache is missing for metric {lago_metric_code}"
             ))
         })?;
+    if rate.retired_at.is_some() {
+        return Err(AppError::BillingNotConfigured(format!(
+            "billing rate is retired for metric {lago_metric_code}"
+        )));
+    }
     let max_age_secs = i64::try_from(rate_cache_ttl_secs).unwrap_or(i64::MAX);
     if rate.synced_at < Utc::now() - Duration::seconds(max_age_secs) {
         return Err(AppError::BillingNotConfigured(format!(
@@ -1367,6 +1372,7 @@ mod tests {
                 credits_per_unit_micros: credits * 1_000_000,
                 credits_per_unit_pico: None,
                 synced_at: Utc::now(),
+                retired_at: None,
             })
             .await
             .expect("insert platform rate");
@@ -1521,6 +1527,61 @@ mod tests {
         assert_eq!(
             saved.available_credits().unwrap(),
             crate::models::credits::Credits::from_whole(7)
+        );
+    }
+
+    #[tokio::test]
+    async fn gate_fails_closed_when_rate_is_retired() {
+        let Some(db) = connect_test_database("billing_gate_retired_rate").await else {
+            return;
+        };
+        let owner_id = "owner-retired-rate";
+        db.collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
+            .insert_one(wallet(owner_id, 10))
+            .await
+            .expect("insert wallet");
+        insert_platform_rate(&db, 3).await;
+        let lago = EntitledLago {
+            entitlements: vec![Entitlement {
+                code: "service-one".to_string(),
+                raw: json!({}),
+            }],
+        };
+        let live = gate_and_reserve(&db, Some(&lago), &route_context(owner_id), false, 900)
+            .await
+            .expect("live rate gate")
+            .expect("live rate reservation");
+        assert_eq!(
+            live.total_reserved_credits,
+            crate::models::credits::Credits::from_whole(3)
+        );
+
+        db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
+            .update_one(
+                doc! { "_id": BillingRateCache::cache_id("platform_requests", None) },
+                doc! { "$set": { "retired_at": mongodb::bson::DateTime::from_chrono(Utc::now()) } },
+            )
+            .await
+            .expect("retire rate");
+        let err = gate_and_reserve(&db, Some(&lago), &route_context(owner_id), false, 900)
+            .await
+            .expect_err("a retired rate must deny new reservations");
+        let saved = db
+            .collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
+            .find_one(doc! { "owner_id": owner_id })
+            .await
+            .expect("find wallet")
+            .expect("wallet exists");
+
+        assert!(matches!(
+            err,
+            crate::errors::AppError::BillingNotConfigured(ref message)
+                if message == "billing rate is retired for metric platform_requests"
+        ));
+        // Only the live-rate reservation holds credits; the refusal reserved none.
+        assert_eq!(
+            saved.reserved_credits,
+            crate::models::credits::Credits::from_whole(3)
         );
     }
 }

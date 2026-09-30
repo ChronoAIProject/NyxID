@@ -1126,6 +1126,7 @@ async fn billing_gate_rejects_missing_and_stale_rate_cache_entries() {
             credits_per_unit_micros: 1_000_000,
             credits_per_unit_pico: None,
             synced_at: Utc::now() - Duration::seconds(901),
+            retired_at: None,
         })
         .await
         .expect("insert stale rate");
@@ -2631,6 +2632,7 @@ fn rate(metric: &str, synced_at: chrono::DateTime<Utc>) -> BillingRateCache {
         credits_per_unit_micros: 1_000_000,
         credits_per_unit_pico: None,
         synced_at,
+        retired_at: None,
     }
 }
 
