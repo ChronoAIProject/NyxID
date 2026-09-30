@@ -539,6 +539,10 @@ jobs:
     # Cache a report for every rollup tip, including documentation-only pushes.
     if: inputs.force-all || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/rollup-')) || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
+    # Coverage counters do not need full DWARF; keep line locations without
+    # exhausting the hosted runner while compiling the backend test binary.
+    env:
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v6
         with:
@@ -614,6 +618,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v6
       - name: Restore exact base report
