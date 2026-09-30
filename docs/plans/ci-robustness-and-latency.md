@@ -15,6 +15,13 @@ at the user's request for the broader CI reliability fix.
   and the MongoDB 8 image to the digest
   from the passing September 30 coverage run. These inputs can be upgraded
   deliberately with full CI instead of changing between identical revisions.
+- Ensure at least 8 GiB total swap on those four backend runners, allocating
+  only the deficit and requiring at least 8 GiB disk space remain afterward.
+  A passing measured compile on the initial PR revision reached 14.2 GiB child
+  maximum RSS, less than 1 GiB available RAM and 2.4 GiB of the default 3 GiB
+  swap while just one rustc process remained. The reserve adds margin for
+  memory peaks without reducing compiler/test concurrency or changing
+  swappiness. Failure to establish the reserve fails the setup step explicitly.
 - Wrap backend tests, standalone billing smoke and head/base backend coverage
   with `ci_resources.py`. It preserves arguments, environment, working
   directory, streamed output and command failures. SIGINT/SIGTERM reach the
@@ -64,8 +71,9 @@ by #1669. Remove redundant and obsolete workflow executions and make merge
 gates explicit. Tune concurrency inside a runner only after measuring its
 limiting resource. Do not globally serialize the backend correctness gate.
 
-The available evidence establishes substantial duplicate work and repeated
-runner shutdowns during compilation. It does **not** establish that GitHub's
+The available evidence establishes substantial duplicate work, repeated
+compilation shutdowns, and measured memory/swap pressure in a passing build.
+It does **not** establish that GitHub's
 shared compute capacity was exhausted, or that the shutdowns were OOM kills.
 
 ## Measured evidence
@@ -197,29 +205,20 @@ The immediate implementation order is:
 
 ## Stage 1: observability, obsolete work and gate correctness
 
-Add a small resource recorder to expensive Rust jobs. Record runner image,
-CPU count, memory/swap, disk, Rust/LLVM/coverage-tool versions, build/test
-concurrency, profile settings, run attempt, checkout commit and tree, and cache
-hit/miss. Sample memory, swap, disk and cgroup peak/OOM counters where available
-every 30 seconds during compilation. Emit short samples directly into the
-Actions log as well as an artifact: abrupt runner loss can prevent upload.
-Record command timing and maximum RSS with `/usr/bin/time -v`, while documenting
-that it does not measure total simultaneous child-process and MongoDB memory.
-Missing optional telemetry must not fail a test job. Do not log credentials,
-environment dumps or complete process command lines.
+The first implementation above supplies resource sampling, pinned measurement
+inputs, the swap reserve and PR-scoped CodeQL cancellation. Samples and actual
+job outcomes must guide subsequent tuning. Further diagnostics can add precise
+per-process accounting or kernel OOM evidence where available; missing optional
+telemetry must never override required command failure. The recorder's current
+RSS and cgroup limitations are described above.
 
-Add CodeQL cancellation scoped to the PR number for PR events. Keep push and
-scheduled scans in separate event/ref groups, preserve all languages and
-`fail-fast: false`, and cancel only superseded PR revisions initially. A
-scheduled scan must never cancel a required PR scan.
-
-Audit enforcement before describing the aggregate as a guarantee. The current
-aggregate omits `mobile` from its `needs` and result list, although the job runs.
+Audit enforcement before describing the aggregate as a guarantee. Before this change, the aggregate omitted `mobile` from its `needs` and result
+list; the implementation includes it in both.
 Effective `main` rules fetched during this review require a PR and one review
 and restrict deletion/force pushes, but contain no `required_status_checks`
 rule. The legacy branch-protection endpoint returns 404 because rulesets are
-used. Proposed correction: include Mobile in the aggregate and make the
-intended CI gate a required status through repository rules. Rule changes are
+used. The remaining policy proposal is to make the intended CI gate a required
+status through repository rules. Rule changes are
 a separate operator policy decision; none were made in this investigation.
 
 ## Stage 2: admit one authoritative validation where equivalence is proven

@@ -12,6 +12,7 @@ INPUTS = (
     ".github/scripts/coverage_identity.py",
     ".github/scripts/ci_resources.py",
     ".github/scripts/start-test-mongodb.sh",
+    ".github/scripts/prepare-backend-runner.sh",
 )
 
 

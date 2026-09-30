@@ -31,7 +31,9 @@ def snapshot():
     }
     counters = {}
     for name in ("memory.current", "memory.peak", "memory.max", "memory.events",
-                 "memory.swap.current", "cpu.max"):
+                 "memory.swap.current", "memory.swap.max", "cpu.max",
+                 "memory/memory.limit_in_bytes", "memory/memory.memsw.limit_in_bytes",
+                 "memory/memory.max_usage_in_bytes", "memory/memory.failcnt"):
         value = read_optional(Path("/sys/fs/cgroup") / name)
         if value is not None:
             counters[name] = value

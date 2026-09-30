@@ -259,6 +259,8 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v6
+      - name: Prepare backend memory reserve
+        run: bash .github/scripts/prepare-backend-runner.sh
       - name: Start transaction-capable MongoDB
         run: bash .github/scripts/start-test-mongodb.sh
       - name: Install system dependencies
@@ -315,6 +317,8 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v6
+      - name: Prepare backend memory reserve
+        run: bash .github/scripts/prepare-backend-runner.sh
       - name: Start transaction-capable MongoDB
         run: bash .github/scripts/start-test-mongodb.sh
       - name: Install system dependencies
@@ -582,6 +586,8 @@ jobs:
       - name: Identify coverage measurement inputs
         id: coverage-identity
         run: python3 .github/scripts/coverage_identity.py
+      - name: Prepare backend memory reserve
+        run: bash .github/scripts/prepare-backend-runner.sh
       - name: Start transaction-capable MongoDB
         run: bash .github/scripts/start-test-mongodb.sh
       - name: Install system dependencies
@@ -685,6 +691,9 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           path: base-coverage
+      - name: Prepare backend memory reserve
+        if: steps.base-cache.outputs.cache-hit != 'true'
+        run: bash .github/scripts/prepare-backend-runner.sh
       - name: Start transaction-capable MongoDB
         if: steps.base-cache.outputs.cache-hit != 'true'
         run: bash .github/scripts/start-test-mongodb.sh
