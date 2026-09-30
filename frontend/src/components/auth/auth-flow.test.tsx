@@ -333,14 +333,19 @@ describe("AuthFlow — register", () => {
     );
     await user.click(screen.getByRole("button", { name: "Create Account" }));
 
-    await waitFor(() => {
-      expect(registerFn).toHaveBeenCalledWith({
-        display_name: "Ada Lovelace",
-        email: "ada@example.com",
-        password: "Hunter22",
-        invite_code: "",
-      });
-    });
+    // Validation and submit run asynchronously; the instrumented coverage
+    // build can exceed the default 1 s wait.
+    await waitFor(
+      () => {
+        expect(registerFn).toHaveBeenCalledWith({
+          display_name: "Ada Lovelace",
+          email: "ada@example.com",
+          password: "Hunter22",
+          invite_code: "",
+        });
+      },
+      { timeout: 5000 },
+    );
   });
 
   it("blocks the email step and shows the invite gate when no code is entered", async () => {

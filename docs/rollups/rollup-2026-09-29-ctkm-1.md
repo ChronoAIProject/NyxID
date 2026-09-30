@@ -65,6 +65,11 @@ runtime decision.
   accepts (202) before recording; the instrumented coverage build ran slower
   than that. It now polls, bounded to 10 s, until the message is recorded. The
   assertions are unchanged. This is test-only and should also land on `main`.
+- `AuthFlow — register > allows email registration without a code when the
+  flag is disabled` (added by #1690) failed once in the frontend coverage run:
+  submit had not reached the register call within the default 1 s `waitFor`.
+  It passed in the other three runs on the same head and on rerun. Its wait is
+  now 5 s, matching existing `waitFor` timeouts in the frontend tests.
 
 ## Verification
 
