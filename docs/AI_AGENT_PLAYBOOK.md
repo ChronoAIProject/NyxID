@@ -3239,11 +3239,12 @@ To have the human connect a bot and resume your agent when setup finishes, creat
 ```bash
 nyxid channel-bot connect-link discord --label "Support bot" \
 	--webhook-url https://agent.example.com/setup-events \
+	--webhook-signing-secret-file ./nyxid-webhook.key \
 	--callback-url https://app.example.com/setup/return \
 	--output json
 ```
 
-Save the one-time signing secret in your receiver and share `connect_url` with the human owner. Verify the signed `channel_connect.completed`, `channel_connect.cancelled`, or `channel_connect.expired` notification before resuming work. The command returns immediately; app polling is unnecessary. OAuth app callers use their registered connection webhook instead of supplying `webhook_url`.
+Configure your receiver with the one-time signing secret saved in `nyxid-webhook.key` and share `connect_url` with the human owner. The CLI requires a new file, restricts it to mode `0600` on Unix, and omits the secret from JSON and terminal output. Direct HTTP API callers still receive the secret once. Verify the signed `channel_connect.completed`, `channel_connect.cancelled`, or `channel_connect.expired` notification before resuming work. The command returns immediately; app polling is unnecessary. OAuth app callers use their registered connection webhook instead of supplying `webhook_url`.
 
 On completion, inspect `data.bot_status` and `data.webhook_registered`, then configure the bot's conversation route. Manual platform webhook steps may still be required. The setup `webhook_url` receives setup outcomes; the Agent Key callback in the relay setup below receives chat messages.
 

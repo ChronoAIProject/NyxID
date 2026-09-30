@@ -1758,6 +1758,12 @@ supply `webhook_url`, and any browser callback must satisfy the app's registered
 OAuth redirect URI matching policy. Existing app connection webhooks receive the new event types only
 when that app creates bot connection requests.
 
+The CLI requires `--webhook-signing-secret-file <new-path>` together with
+`--webhook-url`. It saves the secret to that file (mode `0600` on Unix), refuses
+existing files and symlinks before creating a request, and prints only the file
+path and signing key ID. CLI JSON uses `webhook_signing_secret_file` instead of
+returning the raw secret. The direct HTTP API response above is unchanged.
+
 Terminal events are `channel_connect.completed`, `channel_connect.cancelled`,
 and `channel_connect.expired`. Example:
 

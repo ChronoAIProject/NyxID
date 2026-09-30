@@ -104,10 +104,13 @@ For app or agent automation, create a tracked setup link with
 
 ```bash
 nyxid channel-bot connect-link discord --label "Support bot" \
-  --webhook-url https://app.example.com/events/nyxid --output json
+  --webhook-url https://app.example.com/events/nyxid \
+  --webhook-signing-secret-file ./nyxid-webhook.key --output json
 ```
 
-Save the returned signing secret and share `connect_url` with the bot owner.
+Configure your receiver with the signing secret saved in `nyxid-webhook.key`
+and share `connect_url` with the bot owner. The CLI requires a new file and
+does not print the secret; direct HTTP API callers receive it once in the response.
 NyxID sends a signed `channel_connect.completed`, `channel_connect.cancelled`, or
 `channel_connect.expired` event to the webhook, so your app can resume without
 polling. OAuth apps use their registered connection webhook. An optional

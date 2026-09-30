@@ -4884,8 +4884,11 @@ pub enum ChannelBotCommands {
         #[arg(long)]
         callback_url: Option<String>,
         /// Public HTTPS endpoint for signed completion, cancellation, or expiry events
-        #[arg(long)]
+        #[arg(long, requires = "webhook_signing_secret_file")]
         webhook_url: Option<String>,
+        /// Save the one-time webhook signing secret to a new private file
+        #[arg(long, requires = "webhook_url")]
+        webhook_signing_secret_file: Option<std::path::PathBuf>,
         /// Link lifetime in seconds (60–3600, default 900)
         #[arg(long, value_parser = clap::value_parser!(i64).range(60..=3600))]
         expires_in: Option<i64>,

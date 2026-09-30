@@ -227,6 +227,7 @@ Single-use hosted credential setup for agents and CLI callers. An authenticated 
 - Owner, platform, and label are fixed at creation. Agent Keys can create/read/cancel; setup routes require a human account with owner write access. Telegram consent remains bound to the account that started it, including for org-owned bots.
 - Renewable claims fence setup. Bot insertion and link association are transactional, as are Telegram request insertion and association. Completion reserves one stable terminal event snapshot atomically. Manual `pending_webhook` can count as saved; managed setup must satisfy its readiness checks. Never discard a successful secret-bearing response because terminal recording failed.
 - Events are `channel_connect.completed`, `.cancelled`, and `.expired`. App callers use their registered connection webhook; direct callers receive one encrypted-at-rest signing secret once. Bot delivery opts into public HTTPS validation, DNS pinning, redirects disabled, and a separate app quota. Preserve the existing Connector delivery path. The independent bot sweep shares `CONNECT_LINK_EXPIRY_SWEEP_INTERVAL_SECS`; `0` disables both sweeps.
+- CLI direct webhooks require `--webhook-signing-secret-file` with `--webhook-url`. Create a new file with mode `0600` on Unix; reject existing paths and symlinks before creating the link. JSON and terminal output contain the file path and key ID only. Keep the raw secret out of output and logs; the direct HTTP API still returns it once.
 
 ### 14. Connection Webhooks and Triggers
 

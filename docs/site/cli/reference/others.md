@@ -241,6 +241,7 @@ Create a tracked bot setup request and return immediately without polling:
 ```bash
 nyxid channel-bot connect-link discord --label "Support bot" \
   --webhook-url https://app.example.com/events/nyxid \
+  --webhook-signing-secret-file ./nyxid-webhook.key \
   --callback-url https://app.example.com/setup/return \
   --expires-in 900 --output json
 nyxid channel-bot connect-link-status <request-id> --output json
@@ -249,14 +250,15 @@ nyxid channel-bot cancel-connect-link <request-id> --output json
 
 `--org <id|slug|name>` selects an organization you administer. `--requested-by`
 sets an app display name; authenticated agent-key and OAuth app names take
-precedence. The signing secret returned for a direct webhook is shown once.
+precedence. Direct webhooks require `--webhook-signing-secret-file` to save the
+one-time signing secret for your receiver.
 The webhook receives signed `channel_connect.completed`, `.cancelled`, or
 `.expired` events. The optional browser callback runs after explicit user
 continuation. `connect-link-status` is available for diagnostics and recovery;
 it returns no tokens or secrets. Existing `nyxid connect` service commands and
 `channel-bot register --managed` retain their current behavior.
 
-This command returns the direct webhook signing secret in its JSON or terminal output. It does not use the browser secret-delivery wizard or require `--no-wait`. See [Receive a completion callback](/docs/web/guides/channel-bots#receive-a-completion-callback) for signature verification and [connect](#connect) for service connection links.
+The CLI creates the secret file with mode `0600` on Unix and refuses existing files or symlinks before creating the request. JSON and terminal output contain the file path and signing key ID, never the signing secret. JSON uses `webhook_signing_secret_file` for the path. Configure your receiver with the file's contents. The HTTP API still returns the signing secret once to the creating platform. This command does not use the browser secret-delivery wizard or require `--no-wait`. See [Receive a completion callback](/docs/web/guides/channel-bots#receive-a-completion-callback) for signature verification and [connect](#connect) for service connection links.
 
 ### channel-bot route
 
