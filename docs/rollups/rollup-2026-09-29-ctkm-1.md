@@ -54,6 +54,15 @@ runtime decision.
   disables `auth:invitation-code`.
 - Existing invitation-code data is retained.
 
+## Rollup-only follow-up
+
+- `handlers::nyxbot::tests::the_same_question_is_not_worked_on_twice`
+  (inherited from `main` #1697) failed once in the #1700 backend coverage run.
+  The test waited a fixed 300 ms for a relayed Lark message that the handler
+  accepts (202) before recording; the instrumented coverage build ran slower
+  than that. It now polls, bounded to 10 s, until the message is recorded. The
+  assertions are unchanged. This is test-only and should also land on `main`.
+
 ## Verification
 
 - #1690 CI on `dc5fb1b4be000995027c90412701d66c97766588` (the source branch with `e96a5078` merged):
