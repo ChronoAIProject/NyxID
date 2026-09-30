@@ -6,7 +6,7 @@ This rollup was created from `main` commit
 it can merge into `main` without reverting later work. It makes signup
 invitation codes an operator choice now that billing is in place, redesigns
 the OAuth consent screen to match the connection flows, and keeps historical
-usage priced on the Billing → Usage page after a service price is removed. Chat setup links reuse in-page overlays, and tracked bot setup links send signed lifecycle callbacks. Main #1703 (`ce4414e6`) was subsequently merged as `3b80d68f`, retaining main history before #1705 landed.
+usage priced on the Billing → Usage page after a service price is removed. Chat setup links reuse in-page overlays, tracked bot setup links send signed lifecycle callbacks, and Google Workspace product connections accept partial OAuth grants. Main #1703 (`ce4414e6`) was subsequently merged as `3b80d68f`, retaining main history before #1705 landed.
 
 ## Included changes and provenance
 
@@ -21,6 +21,7 @@ record. For each, the source and squash deltas share a stable patch ID and
 | [#1702](https://github.com/ChronoAIProject/NyxID/pull/1702) | `595ed4b3f192aea999def3abf46b2b6dfce9b859` | `c3d49700f98be5bb31f1beacb3700bb25564fbbd` | Keep historical usage priced after a service price is removed: price removal marks the code's `billing_rate_cache` row `retired_at` instead of deleting it, `GET /api/v1/billing/usage` prices historical groups by grant-settled derivation → cached rate → exact per-row reservation rates, and the Usage page shows `≥` lower bounds instead of Unavailable when only some records are unpriced. Patch ID `8a146dbbd181cf376a67c6573838770d2b228a4e`; landed tree `8f684a12f046fc81bf2ade427ca4a17fdb12d7e3` equals the source tree. The source branch was created from this rollup's head `b98949e1`, so no main-sync merge was involved. |
 | [#1707](https://github.com/ChronoAIProject/NyxID/pull/1707) | `9d6d4618b9fd4156f5686402a54fb57b6fdb96e6` | `012dd86f840e77fcb0486120e965b430d4dcc25d` | Reuse connector and channel setup in chat overlays; preserve standalone URLs, explicit submission, popup recovery and focus restoration. Stable patch ID `c7f68e947408a6e2881a3191a8989fd9b373cfc9`; source and landed tree `f15e3e2cfc9e037bf71c652049b4f53b1c87fd5e`. |
 | [#1705](https://github.com/ChronoAIProject/NyxID/pull/1705) | `d08d3d0c2fb2eedf0da13de21bd5048f6b797fe6` | `a29056ef8328ae3cfd5bcca51a352e1408163c04` | Tracked bot setup links, signed callbacks, CLI secret-file protection, integration docs and CI fixes. Stable patch ID `dc667b78bfb183574b91a365e7d3e1c7db454d05`; source and landed tree `d63cd0f6141262cde6737c89ec9ea3deeec398d7`. |
+| [#1706](https://github.com/ChronoAIProject/NyxID/pull/1706) | `a42bf8a892a214412aeb6ee71a5bac438f48cdde` | `c883ea0e350e5e7f7a14047e905aa0483e137a35` | Accept partial Google OAuth grants, make every scope optional for all seven Workspace product presets, and show the last Google-reported grant in service details. Stable patch ID `0e7f97b85b9ff989f7aa29480725fa39a811abdf`; the landed tree `c441d75b3d0f2cea08adebc6d4afb37580a05268` matches the source merge-tree result. |
 
 The six `main` commits between the rollup base and `e96a5078` (#1694–#1699,
 NyxBot channel/gateway work and service-account catalog skill assignment) are
@@ -172,6 +173,23 @@ without dismissal or suppression.
 
 The source delta from `3b80d68f5431585f3f628bdc376aa7f86fba840d` to `d08d3d0c2fb2eedf0da13de21bd5048f6b797fe6` and landed squash delta share stable patch ID `dc667b78bfb183574b91a365e7d3e1c7db454d05`. The landed tree and `git merge-tree` result both equal the validated source tree `d63cd0f6141262cde6737c89ec9ea3deeec398d7`.
 
+## Optional Google Workspace grants (#1706)
+
+All seven Google Workspace product presets treat their requested OAuth scopes
+as optional. A connection can complete with a partial grant, including only
+identity scopes, even when the initial request included Drive, Calendar, or
+Gmail permissions. Startup removes previously seeded required-scope metadata
+from the catalog and provider requirements while preserving unrelated custom
+requirements. Gmail sending remains a default request, not a required grant.
+
+Google-reported scopes are saved with the connection and shown with derived
+product access in AI Service details. A refresh updates that evidence when
+Google returns a scope list; an absent scope response can leave the previous
+list in place. Ordinary Google API calls do not return a fresh grant list, so
+the display identifies the last reported grant rather than claiming a check on
+every use. Google rejects an operation if the token lacks its required scope.
+See `docs/GOOGLE_WORKSPACE_OAUTH.md` for the product scopes and rollout details.
+
 ## Verification
 
 - #1690 CI on `dc5fb1b4be000995027c90412701d66c97766588` (the source branch with `e96a5078` merged):
@@ -194,3 +212,4 @@ The source delta from `3b80d68f5431585f3f628bdc376aa7f86fba840d` to `d08d3d0c2fb
   files, and the type-checking build passed.
 
 - #1705 final source `d08d3d0c2fb2eedf0da13de21bd5048f6b797fe6`: [CI](https://github.com/ChronoAIProject/NyxID/actions/runs/36716172518), [CodeQL](https://github.com/ChronoAIProject/NyxID/actions/runs/36716172473) and [Release](https://github.com/ChronoAIProject/NyxID/actions/runs/36716172450) passed, including backend tests/coverage, baseline coverage comparison, workspace Clippy, KMS builds, frontend/CLI tests and coverage, wizard freshness, image inputs, billing smoke and all CodeQL analyses. The PR has no open code-scanning alerts. Local integration checks passed 134 focused frontend tests, 25 Playwright browser cases, targeted ESLint, the production build and the regenerated wizard freshness test. Earlier focused validation passed 19 bot-link backend tests, 180 compatibility regressions, 92 CLI tests and 18 documentation tests; the backend groups overlap by one test.
+- #1706 final source `a42bf8a892a214412aeb6ee71a5bac438f48cdde`: [CI](https://github.com/ChronoAIProject/NyxID/actions/runs/36721265535) passed on the latest rollup base, including backend tests, both backend coverage jobs, frontend tests and coverage, Clippy, Rust feature builds, billing smoke, image inputs, and the pipeline gate. CodeQL also passed. Local focused verification passed 159 frontend tests, TypeScript, ESLint, and Rust formatting. The source and landed patches have the same stable patch ID; the landed tree matches `git merge-tree` exactly.
