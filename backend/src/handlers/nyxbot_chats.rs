@@ -181,23 +181,28 @@ fn without_owner_mark(text: &str) -> String {
 /// A group message as its thread stores it: the sender's name first, marked
 /// `(owner)` for the owner. Names cannot carry the mark and a guest's text is
 /// kept on one line, so no one can pass for the owner.
+/// A person's name as shared threads show it: one line, without the marks
+/// NyxID uses for attribution (`(owner)`, `Name:`).
+fn plain_name(name: &str) -> Option<String> {
+    let name = name
+        .chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '(' | ')' | '[' | ']' | ':') {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!name.is_empty()).then_some(name)
+}
+
 pub(super) fn attributed(name: Option<&str>, text: &str, guest: bool) -> String {
     let name = name
-        .map(|name| {
-            name.chars()
-                .map(|c| {
-                    if c.is_control() || matches!(c, '(' | ')' | '[' | ']' | ':') {
-                        ' '
-                    } else {
-                        c
-                    }
-                })
-                .collect::<String>()
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
-        })
-        .filter(|name| !name.is_empty())
+        .and_then(plain_name)
         .map(|name| name.chars().take(60).collect::<String>());
     if guest {
         let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -290,18 +295,65 @@ pub(super) fn private_title(row: &NyxbotChannel, sender_id: &str, name: Option<&
     match name.and_then(clean_title) {
         Some(name) if name.eq_ignore_ascii_case("you") => format!("{name} (guest)"),
         Some(name) => name,
-        None => {
-            let tail: String = sender_id
-                .chars()
-                .rev()
-                .take(4)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect();
-            format!("{} user …{tail}", super::platform_name(&row.platform))
+        None => unnamed_sender(&row.platform, sender_id),
+    }
+}
+
+/// A sender whose platform sends no name (Lark, Feishu): the platform and the
+/// end of their ID, so people in a shared thread can be told apart.
+pub(super) fn unnamed_sender(platform: &str, sender_id: &str) -> String {
+    let tail: String = sender_id
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("{} user …{tail}", super::platform_name(platform))
+}
+
+/// Lark and Feishu write each mention into the text as a key (`@_user_1`);
+/// the event lists who it names. Put the names in (in one pass, longest key
+/// first), so the agent reads who was addressed. Other payloads are left as
+/// they are.
+pub(super) fn named_mentions(text: &str, raw: &Value) -> String {
+    let Some(mentions) = raw["event"]["message"]["mentions"].as_array() else {
+        return text.to_owned();
+    };
+    let mut named: Vec<(&str, String)> = mentions
+        .iter()
+        .filter_map(|mention| {
+            let key = mention["key"]
+                .as_str()
+                .filter(|key| key.starts_with("@_"))?;
+            let name = plain_name(mention["name"].as_str()?)?;
+            Some((key, name.chars().take(60).collect()))
+        })
+        .collect();
+    if named.is_empty() {
+        return text.to_owned();
+    }
+    named.sort_by_key(|(key, _)| std::cmp::Reverse(key.len()));
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("@_") {
+        out.push_str(&rest[..at]);
+        rest = &rest[at..];
+        match named.iter().find(|(key, _)| rest.starts_with(key)) {
+            Some((key, name)) => {
+                out.push('@');
+                out.push_str(name);
+                rest = &rest[key.len()..];
+            }
+            None => {
+                out.push_str("@_");
+                rest = &rest[2..];
+            }
         }
     }
+    out.push_str(rest);
+    out
 }
 
 async fn fetch_title(state: &AppState, bot_id: &str, chat_id: &str) -> AppResult<Option<String>> {

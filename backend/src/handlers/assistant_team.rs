@@ -811,13 +811,26 @@ async fn dispatch(
         }
         "grant_subagent" | "revoke_subagent" => {
             let agent = team::live_specialist(db, owner, text_arg(args, "subagent")).await?;
-            let targets = team::resolve_targets(
-                db,
-                state.node_ws_manager.as_ref(),
-                owner,
-                &string_list(args, "services"),
-            )
-            .await?;
+            let requested = string_list(args, "services");
+            let (targets, refused) =
+                team::resolve_each_target(db, state.node_ws_manager.as_ref(), owner, &requested)
+                    .await?;
+            let unchanged = if name == "grant_subagent" {
+                "not_granted"
+            } else {
+                "not_revoked"
+            };
+            // Nothing usable was asked for: say why instead of changing nothing.
+            if !refused.is_empty()
+                && targets.service_ids.is_empty()
+                && targets.platform_service_ids.is_empty()
+                && args.get("account_read").is_none()
+            {
+                return Ok((
+                    json!({"error": unchanged, "subagent": agent.name, unchanged: refused}),
+                    true,
+                ));
+            }
             let targets = AgentGrants {
                 service_ids: targets.service_ids,
                 platform_service_ids: targets.platform_service_ids,
@@ -833,12 +846,13 @@ async fn dispatch(
                 .await?
                 .into_iter()
                 .find(|summary| summary.id == agent.id);
-            (
-                json!({"subagent": agent.name,
-                    "services": summary.as_ref().map(|s| s.services.clone()),
-                    "account_read": agent.grants.account_read}),
-                false,
-            )
+            let mut result = json!({"subagent": agent.name,
+                "services": summary.as_ref().map(|s| s.services.clone()),
+                "account_read": agent.grants.account_read});
+            if !refused.is_empty() {
+                result[unchanged] = json!(refused);
+            }
+            (result, false)
         }
         "update_subagent" => {
             // "nyxbot" updates your own display name and description. Your own

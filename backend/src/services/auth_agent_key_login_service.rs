@@ -309,6 +309,10 @@ fn key_is_eligible(key: &ApiKey) -> bool {
     key.is_active
         && key.purpose == ApiKeyPurpose::General
         && key.expires_at.is_none_or(|expiry| expiry > Utc::now())
+        // An assistant conversation's key belongs to that chat (and reaches
+        // model services through the proxy); it never backs a CLI login.
+        && key.platform.as_deref()
+            != Some(crate::services::assistant_agent_credential_service::ASSISTANT_PLATFORM)
 }
 
 pub async fn key_summary(db: &Database, key: &ApiKey, created_now: bool) -> AppResult<KeySummary> {

@@ -2715,8 +2715,11 @@ async fn start_chat_turn(
     let message = if private {
         excerpt(text, engine::MAX_MESSAGE_CHARS - 16)
     } else {
+        // Some platforms send no names: guests are still told apart.
+        let unnamed = (guest && sender.display_name.is_none())
+            .then(|| chats::unnamed_sender(&row.platform, sender.id));
         excerpt(
-            &chats::attributed(sender.display_name, text, guest),
+            &chats::attributed(sender.display_name.or(unnamed.as_deref()), text, guest),
             engine::MAX_MESSAGE_CHARS - 16,
         )
     };
@@ -3809,6 +3812,7 @@ pub async fn relay_callback(
         .as_str()
         .map(str::to_owned);
     let raw = payload["raw_platform_data"].clone();
+    let text = chats::named_mentions(&text, &raw);
     let raw_title = ["message", "edited_message", "channel_post"]
         .iter()
         .find_map(|key| raw.get(*key))
