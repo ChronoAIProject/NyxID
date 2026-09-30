@@ -845,7 +845,7 @@ describe("AddKeyDialog — IFTTT OAuth", () => {
 
 describe("AddKeyDialog — reconnect path", () => {
   it.each(["api-google-gmail", "api-google-workspace"])(
-    "adds required send permission when reconnecting %s with an old read-only grant",
+    "keeps send optional when reconnecting %s with a read-only grant",
     async (slug) => {
       const read = "https://www.googleapis.com/auth/gmail.readonly";
       const send = "https://www.googleapis.com/auth/gmail.send";
@@ -860,7 +860,7 @@ describe("AddKeyDialog — reconnect path", () => {
               scope: send,
               label: "Gmail (send)",
               description: "Send email.",
-              required: true,
+              required: false,
             },
           ],
         },
@@ -877,16 +877,14 @@ describe("AddKeyDialog — reconnect path", () => {
           })}
         />,
       );
-      expect(
-        screen.getByRole("button", { name: /Gmail \(send\)/ }),
-      ).toBeDisabled();
+      expect(screen.getByRole("button", { name: /Gmail \(send\)/ })).toBeEnabled();
       await user.click(
         screen.getByRole("button", { name: /Connect with Google mail/ }),
       );
       await waitFor(() =>
         expect(initiateOAuthMutateAsync).toHaveBeenCalledWith(
           expect.objectContaining({
-            scopeOverride: ["openid", read, send],
+            scopeOverride: ["openid", read],
           }),
         ),
       );

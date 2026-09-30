@@ -231,6 +231,39 @@ beforeEach(() => {
   mockCopyToClipboard.mockResolvedValue(undefined);
 });
 
+describe("KeyDetailPage — Google permissions", () => {
+  it("shows the reported partial Workspace grant and refreshes saved evidence", async () => {
+    hooks.key.data = makeKey({
+      credential_type: "oauth2",
+      catalog_service_slug: "api-google-workspace",
+      granted_scopes: ["openid", "email", "https://www.googleapis.com/auth/calendar.readonly"],
+      last_authorized_at: "2026-09-30T09:00:00Z",
+    });
+    render(<KeyDetailPage />);
+
+    expect(within(screen.getByText("Drive, Docs, Sheets, Slides").parentElement!).getByText("Not granted")).toBeVisible();
+    expect(within(screen.getByText("Calendar").parentElement!).getByText("Read only")).toBeVisible();
+    expect(within(screen.getByText("Gmail send").parentElement!).getByText("Not granted")).toBeVisible();
+    await userEvent.setup().click(screen.getByText("Reported OAuth scopes"));
+    expect(screen.getByText("https://www.googleapis.com/auth/calendar.readonly")).toBeVisible();
+    await userEvent.setup().click(screen.getByRole("button", { name: "Refresh saved permissions" }));
+    expect(hooks.key.refetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows unknown permissions when Google did not report scopes", () => {
+    hooks.key.data = makeKey({
+      credential_type: "oauth2",
+      catalog_service_slug: "api-google-gmail",
+      granted_scopes: null,
+    });
+    render(<KeyDetailPage />);
+
+    expect(within(screen.getByText("Gmail read").parentElement!).getByText("Unknown")).toBeVisible();
+    expect(within(screen.getByText("Gmail send").parentElement!).getByText("Unknown")).toBeVisible();
+    expect(screen.queryByText("Reported OAuth scopes")).not.toBeInTheDocument();
+  });
+});
+
 describe("KeyDetailPage — load states", () => {
   it.each([
     new TypeError("Failed to fetch"),

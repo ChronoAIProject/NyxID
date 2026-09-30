@@ -1971,13 +1971,6 @@ pub async fn handle_oauth_callback(
     let expires_in = token_payload["expires_in"].as_i64();
     let scope = token_payload["scope"].as_str();
 
-    if let Some(product) =
-        google_product_for_connection(db, user_id, &provider, oauth_state.connection_id.as_deref())
-            .await?
-    {
-        product.validate_required_scopes(scope)?;
-    }
-
     let access_enc = encryption_keys.encrypt(access_token.as_bytes()).await?;
     let refresh_enc = match refresh_token {
         Some(rt) => Some(encryption_keys.encrypt(rt.as_bytes()).await?),
@@ -5339,7 +5332,7 @@ mod tests {
             }
             if matches!(product, GoogleProduct::Workspace | GoogleProduct::Gmail) {
                 for scopes in [vec![], vec![GMAIL_READONLY.to_string()]] {
-                    let error = super::initiate_oauth_connect(
+                    let result = super::initiate_oauth_connect(
                         &db,
                         &enc,
                         "http://localhost:3001",
@@ -5354,9 +5347,13 @@ mod tests {
                         None,
                     )
                     .await
-                    .unwrap_err();
-                    assert!(matches!(error, AppError::ValidationError(_)));
-                    assert!(error.to_string().contains("Gmail send permission"));
+                    .unwrap();
+                    let url = url::Url::parse(&result.authorization_url).unwrap();
+                    let requested = url
+                        .query_pairs()
+                        .find(|(name, _)| name == "scope")
+                        .map(|(_, value)| value.into_owned());
+                    assert_eq!(requested, (!scopes.is_empty()).then(|| scopes.join(" ")));
                 }
             }
             let forbidden = match product {
@@ -5402,7 +5399,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn google_mail_callback_requires_send_grant_before_storing_tokens() {
+    async fn google_mail_callback_accepts_partial_grants() {
         use crate::models::downstream_service::{COLLECTION_NAME as SERVICES, DownstreamService};
         use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
         use crate::services::google_workspace::{GMAIL_READONLY, GMAIL_SEND};
@@ -5450,7 +5447,12 @@ mod tests {
                 .await
                 .unwrap();
             let granted = format!("openid {GMAIL_READONLY} {GMAIL_SEND}");
-            for scope in [None, Some(GMAIL_READONLY), Some(granted.as_str())] {
+            for scope in [
+                None,
+                Some("openid email"),
+                Some(GMAIL_READONLY),
+                Some(granted.as_str()),
+            ] {
                 server.reset().await;
                 let mut response = serde_json::json!({"access_token": "google-access", "refresh_token": "google-refresh", "expires_in": 3600});
                 if let Some(scope) = scope {
@@ -5499,16 +5501,10 @@ mod tests {
                     .await
                     .unwrap()
                     .unwrap();
-                if scope == Some(granted.as_str()) {
-                    result.unwrap();
-                    assert_eq!(saved.status, "active");
-                    assert_eq!(saved.token_scopes.as_deref(), scope);
-                } else {
-                    assert!(matches!(result, Err(AppError::ValidationError(_))));
-                    assert_eq!(saved.status, key.status);
-                    assert_eq!(saved.access_token_encrypted, key.access_token_encrypted);
-                    assert_eq!(saved.token_scopes, key.token_scopes);
-                }
+                result.unwrap();
+                assert_eq!(saved.status, "active");
+                assert!(saved.access_token_encrypted.is_some());
+                assert_eq!(saved.token_scopes.as_deref(), scope);
             }
         }
     }

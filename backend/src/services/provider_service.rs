@@ -2978,23 +2978,7 @@ fn is_lark_family_slug(slug: &str) -> bool {
 const LARK_FAMILY_REQUIRED_PERMISSIONS: &[&str] = &["bitable:app:readonly"];
 
 fn seed_required_permissions(slug: &str) -> Option<&'static [&'static str]> {
-    match slug {
-        "api-google-workspace" => Some(&[
-            super::google_workspace::DRIVE,
-            super::google_workspace::CALENDAR,
-            super::google_workspace::GMAIL_READONLY,
-            super::google_workspace::GMAIL_SEND,
-        ]),
-        "api-google-calendar" => Some(&[super::google_workspace::CALENDAR]),
-        "api-google-drive" | "api-google-docs" | "api-google-sheets" | "api-google-slides" => {
-            Some(&[super::google_workspace::DRIVE])
-        }
-        "api-google-gmail" => Some(&[
-            super::google_workspace::GMAIL_READONLY,
-            super::google_workspace::GMAIL_SEND,
-        ]),
-        _ => is_lark_family_slug(slug).then_some(LARK_FAMILY_REQUIRED_PERMISSIONS),
-    }
+    is_lark_family_slug(slug).then_some(LARK_FAMILY_REQUIRED_PERMISSIONS)
 }
 
 struct DefaultServiceSeed {
@@ -3626,7 +3610,7 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         requires_user_credential: true,
         homepage_url: Some("https://workspace.google.com"),
         auth_notes: Some(
-            "Connect a Google account using the NyxID managed app or your own OAuth client. Requests full Drive and Calendar access plus Gmail read and send access. Gmail sending permission (gmail.send) is required; existing connections need renewed consent.",
+            "Connect a Google account using the NyxID managed app or your own OAuth client. Requests full Drive and Calendar access plus Gmail read and send access by default. You can choose narrower permissions; only operations covered by the granted scopes will work.",
         ),
         known_limitations: Some(
             "Workspace bundles Drive, Calendar, Gmail read/send, Docs, Sheets, and Slides through the published HTTP operations. Gmail deletion, trash, mailbox changes, draft management, Workspace administration, WebSockets for editor targets, and redirect following for editor targets are not supported. Google may revoke sibling connections using the same account and client together.",
@@ -3693,7 +3677,7 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         requires_user_credential: true,
         homepage_url: Some("https://mail.google.com"),
         auth_notes: Some(
-            "Connect using NyxID's existing managed Google app or your own OAuth client. Requests gmail.readonly and gmail.send by default. Gmail sending permission is required; existing connections need renewed consent.",
+            "Connect using NyxID's existing managed Google app or your own OAuth client. Requests gmail.readonly and gmail.send by default. You can choose read-only or send-only access; only operations covered by the granted scopes will work.",
         ),
         known_limitations: Some(
             "Only published message list, read, and send operations are available. No deletion, trash, mailbox changes, or draft management. Replies require threadId and matching Subject, In-Reply-To, and References MIME headers. Google may revoke sibling connections using the same account and client together.",
@@ -4441,8 +4425,7 @@ async fn backfill_missing_service_provider_requirements(
             service_id: service.id.clone(),
             provider_config_id: provider_id,
             required: true,
-            scopes: super::google_workspace::GoogleProduct::from_slug(seed.service_slug)
-                .map(|product| product.default_scopes()),
+            scopes: None,
             injection_method: seed.injection_method.to_string(),
             injection_key: Some(seed.injection_key.to_string()),
             created_at: now,
@@ -4787,13 +4770,13 @@ async fn reconcile_firecrawl_seed_metadata(
 }
 
 /// Upgrade the original Workspace preset without broadening an admin's policy
-/// or replacing customized metadata/scopes. Existing Google tokens still require
-/// user consent before the newly published Gmail operations can succeed.
+/// or replacing customized metadata. Existing Google tokens still require user
+/// consent before the newly published Gmail operations can succeed.
 async fn reconcile_google_workspace_seed(
     db: &mongodb::Database,
     now: chrono::DateTime<Utc>,
 ) -> AppResult<()> {
-    use super::google_workspace::{CALENDAR, DRIVE, GoogleProduct};
+    use super::google_workspace::GoogleProduct;
     use crate::models::downstream_service::ProxyOperationPolicy;
 
     let services = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
@@ -4850,11 +4833,6 @@ async fn reconcile_google_workspace_seed(
         doc! { "$set": { "proxy_operation_policy": new_policy, "updated_at": bson::DateTime::from_chrono(now) } },
     ).await?;
 
-    db.collection::<ServiceProviderRequirement>(REQUIREMENTS).update_many(
-        doc! { "service_id": &service.id, "provider_config_id": &service.provider_config_id,
-            "scopes": ["openid", "email", "profile", DRIVE, CALENDAR] },
-        doc! { "$set": { "scopes": GoogleProduct::Workspace.default_scopes(), "updated_at": bson::DateTime::from_chrono(now) } },
-    ).await?;
     Ok(())
 }
 
@@ -4891,13 +4869,69 @@ async fn reconcile_google_mail_send_seed(
             doc! { "_id": &service.id, "description": "Read and search Gmail messages; optionally send messages and replies." },
             doc! { "$set": { "description": seed.description, "updated_at": bson::DateTime::from_chrono(now) } },
         ).await?;
-        db.collection::<ServiceProviderRequirement>(REQUIREMENTS).update_many(
+    }
+    Ok(())
+}
+
+async fn reconcile_google_optional_mail_scopes_seed(
+    db: &mongodb::Database,
+    now: chrono::DateTime<Utc>,
+) -> AppResult<()> {
+    let services = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
+    for (slug, old_notes) in [
+        (
+            "api-google-workspace",
+            "Connect a Google account using the NyxID managed app or your own OAuth client. Requests full Drive and Calendar access plus Gmail read and send access. Gmail sending permission (gmail.send) is required; existing connections need renewed consent.",
+        ),
+        (
+            "api-google-gmail",
+            "Connect using NyxID's existing managed Google app or your own OAuth client. Requests gmail.readonly and gmail.send by default. Gmail sending permission is required; existing connections need renewed consent.",
+        ),
+    ] {
+        let Some(service) = services
+            .find_one(doc! { "slug": slug, "created_by": "system" })
+            .await?
+        else {
+            continue;
+        };
+        let seed = DEFAULT_SERVICE_SEEDS
+            .iter()
+            .find(|seed| seed.service_slug == slug)
+            .expect("Google mail seed");
+        services.update_one(
+            doc! { "_id": &service.id, "auth_notes": old_notes },
+            doc! { "$set": { "auth_notes": seed.auth_notes, "updated_at": bson::DateTime::from_chrono(now) } },
+        ).await?;
+    }
+    Ok(())
+}
+
+async fn reconcile_google_optional_scope_requirements(
+    db: &mongodb::Database,
+    now: chrono::DateTime<Utc>,
+) -> AppResult<()> {
+    let services = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
+    let requirements = db.collection::<ServiceProviderRequirement>(REQUIREMENTS);
+    for seed in DEFAULT_SERVICE_SEEDS {
+        let Some(product) = super::google_workspace::GoogleProduct::from_slug(seed.service_slug)
+        else {
+            continue;
+        };
+        let Some(service) = services
+            .find_one(doc! { "slug": seed.service_slug, "created_by": "system" })
+            .await?
+        else {
+            continue;
+        };
+        let default_scopes = product.default_scopes();
+        services.update_one(
+            doc! { "_id": &service.id, "required_permissions": { "$in": &default_scopes } },
+            doc! { "$pull": { "required_permissions": { "$in": &default_scopes } }, "$set": { "updated_at": bson::DateTime::from_chrono(now) } },
+        ).await?;
+        requirements.update_many(
             doc! { "service_id": &service.id, "provider_config_id": &service.provider_config_id,
-                "scopes": { "$ne": super::google_workspace::GMAIL_SEND } },
-            vec![doc! { "$set": {
-                "scopes": { "$concatArrays": [{ "$ifNull": ["$scopes", []] }, [super::google_workspace::GMAIL_SEND]] },
-                "updated_at": bson::DateTime::from_chrono(now),
-            } }],
+                "scopes": { "$in": &default_scopes } },
+            doc! { "$pull": { "scopes": { "$in": &default_scopes } }, "$set": { "updated_at": bson::DateTime::from_chrono(now) } },
         ).await?;
     }
     Ok(())
@@ -5307,8 +5341,7 @@ pub async fn seed_default_services(
                 service_id: service_id.clone(),
                 provider_config_id: provider.id.clone(),
                 required: true,
-                scopes: super::google_workspace::GoogleProduct::from_slug(seed.service_slug)
-                    .map(|product| product.default_scopes()),
+                scopes: None,
                 injection_method: seed.injection_method.to_string(),
                 injection_key: Some(seed.injection_key.to_string()),
                 created_at: now,
@@ -5337,6 +5370,8 @@ pub async fn seed_default_services(
     reconcile_firecrawl_seed_metadata(&service_col, now).await?;
     reconcile_google_workspace_seed(db, now).await?;
     reconcile_google_mail_send_seed(db, now).await?;
+    reconcile_google_optional_mail_scopes_seed(db, now).await?;
+    reconcile_google_optional_scope_requirements(db, now).await?;
     reconcile_workspace_destinations(db, now).await?;
 
     // Replace only the incorrect metadata shipped by the initial Notion seed.
@@ -10475,9 +10510,7 @@ mod tests {
                     assert_eq!(updated.description.as_deref(), Some(description));
                     assert_eq!(updated.auth_notes.as_deref(), Some(notes));
                     assert_eq!(updated.known_limitations.as_deref(), Some(limitations));
-                    let mut expected_scopes = scopes.clone();
-                    expected_scopes.push(crate::services::google_workspace::GMAIL_SEND);
-                    assert_eq!(req.scopes.unwrap(), expected_scopes);
+                    assert_eq!(req.scopes, Some(vec![]));
                 } else {
                     assert_eq!(
                         updated.destination_targets,
@@ -10491,15 +10524,15 @@ mod tests {
                             .unwrap()
                             .contains("Gmail deletion")
                     );
-                    assert_eq!(req.scopes, Some(GoogleProduct::Workspace.default_scopes()));
+                    assert_eq!(req.scopes, Some(vec![]));
                 }
             }
         }
     }
 
     #[tokio::test]
-    async fn google_mail_send_migration_upgrades_existing_requirements_once() {
-        use crate::services::google_workspace::{GMAIL_READONLY, GMAIL_SEND};
+    async fn google_mail_seed_preserves_custom_requirements_once() {
+        use crate::services::google_workspace::GMAIL_READONLY;
         let db = connect_test_database("google_mail_send_seed")
             .await
             .expect("local MongoDB");
@@ -10519,7 +10552,7 @@ mod tests {
                     doc! {"_id": &service.id},
                     doc! {"$set": {
                         "auth_notes": "Custom Google setup notes",
-                        "required_permissions": [GMAIL_READONLY],
+                        "required_permissions": ["custom.permission", GMAIL_READONLY],
                     }},
                 )
                 .await
@@ -10528,7 +10561,7 @@ mod tests {
                 .update_one(
                     doc! {"service_id": &service.id},
                     doc! {"$set": {
-                        "scopes": ["openid", GMAIL_READONLY],
+                        "scopes": ["openid", "custom.scope", GMAIL_READONLY],
                     }},
                 )
                 .await
@@ -10546,18 +10579,134 @@ mod tests {
                     service.auth_notes.as_deref(),
                     Some("Custom Google setup notes")
                 );
-                assert!(
-                    service
-                        .required_permissions
-                        .unwrap()
-                        .contains(&GMAIL_SEND.to_string())
+                assert_eq!(
+                    service.required_permissions,
+                    Some(vec!["custom.permission".to_string()])
                 );
                 let req = requirements
                     .find_one(doc! {"service_id": &service.id})
                     .await
                     .unwrap()
                     .unwrap();
-                assert_eq!(req.scopes.unwrap(), ["openid", GMAIL_READONLY, GMAIL_SEND]);
+                assert_eq!(req.scopes, Some(vec!["custom.scope".to_string()]));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn google_mail_optional_policy_clears_only_old_seeded_requirements() {
+        use crate::services::google_workspace::{CALENDAR, DRIVE, GMAIL_READONLY, GMAIL_SEND};
+        let db = connect_test_database("google_mail_optional_seed")
+            .await
+            .expect("local MongoDB");
+        let enc = test_encryption_keys();
+        super::seed_default_providers(&db, &enc).await.unwrap();
+        super::seed_default_services(&db, &enc).await.unwrap();
+        let services = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
+        for (slug, old_notes, old_permissions) in [
+            (
+                "api-google-workspace",
+                "Connect a Google account using the NyxID managed app or your own OAuth client. Requests full Drive and Calendar access plus Gmail read and send access. Gmail sending permission (gmail.send) is required; existing connections need renewed consent.",
+                vec![DRIVE, CALENDAR, GMAIL_READONLY, GMAIL_SEND],
+            ),
+            (
+                "api-google-gmail",
+                "Connect using NyxID's existing managed Google app or your own OAuth client. Requests gmail.readonly and gmail.send by default. Gmail sending permission is required; existing connections need renewed consent.",
+                vec![GMAIL_READONLY, GMAIL_SEND],
+            ),
+        ] {
+            let service = services
+                .find_one(doc! { "slug": slug })
+                .await
+                .unwrap()
+                .unwrap();
+            services.update_one(
+                doc! { "_id": &service.id },
+                doc! { "$set": { "auth_notes": old_notes, "required_permissions": old_permissions } },
+            ).await.unwrap();
+            for _ in 0..2 {
+                super::seed_default_services(&db, &enc).await.unwrap();
+                let updated = services
+                    .find_one(doc! { "_id": &service.id })
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(updated.auth_notes.unwrap().contains("You can choose"));
+                assert_eq!(updated.required_permissions, Some(vec![]));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn google_seed_migrates_required_scopes_for_every_product() {
+        use crate::services::google_workspace::GoogleProduct;
+        let db = connect_test_database("google_optional_scope_requirements")
+            .await
+            .expect("local MongoDB");
+        let enc = test_encryption_keys();
+        super::seed_default_providers(&db, &enc).await.unwrap();
+        super::seed_default_services(&db, &enc).await.unwrap();
+        let services = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
+        let requirements = db.collection::<ServiceProviderRequirement>(REQUIREMENTS);
+
+        for slug in [
+            "api-google-workspace",
+            "api-google-calendar",
+            "api-google-drive",
+            "api-google-gmail",
+            "api-google-docs",
+            "api-google-sheets",
+            "api-google-slides",
+        ] {
+            let service = services
+                .find_one(doc! { "slug": slug })
+                .await
+                .unwrap()
+                .unwrap();
+            let mut scopes = GoogleProduct::from_slug(slug).unwrap().default_scopes();
+            scopes.push("custom.scope".to_string());
+            services
+                .update_one(
+                    doc! { "_id": &service.id },
+                    doc! { "$set": { "required_permissions": &scopes } },
+                )
+                .await
+                .unwrap();
+            requirements
+                .update_one(
+                    doc! { "service_id": &service.id },
+                    doc! { "$set": { "scopes": &scopes } },
+                )
+                .await
+                .unwrap();
+        }
+
+        for _ in 0..2 {
+            super::seed_default_services(&db, &enc).await.unwrap();
+            for slug in [
+                "api-google-workspace",
+                "api-google-calendar",
+                "api-google-drive",
+                "api-google-gmail",
+                "api-google-docs",
+                "api-google-sheets",
+                "api-google-slides",
+            ] {
+                let service = services
+                    .find_one(doc! { "slug": slug })
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    service.required_permissions,
+                    Some(vec!["custom.scope".to_string()])
+                );
+                let requirement = requirements
+                    .find_one(doc! { "service_id": &service.id })
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(requirement.scopes, Some(vec!["custom.scope".to_string()]));
             }
         }
     }
@@ -10661,7 +10810,7 @@ mod tests {
                     .filter(|scope| scope.required)
                     .map(|scope| scope.scope.as_str())
                     .collect();
-                assert_eq!(required, product.required_scopes());
+                assert!(required.is_empty());
                 assert_eq!(
                     entry.platform_scope_allowlist,
                     Some(product.allowed_scopes())
@@ -10687,7 +10836,8 @@ mod tests {
                     .await
                     .unwrap()
                     .unwrap();
-                assert_eq!(req.scopes, Some(product.default_scopes()));
+                assert_eq!(req.scopes, None);
+                assert!(svc.required_permissions.is_none());
             }
         }
         let stored = providers
