@@ -12,7 +12,12 @@ import type { ReactNode } from "react";
 import type { KeyInfo } from "@/types/keys";
 import type { ServiceInsight } from "@/schemas/service-insights";
 import type { ServiceInsightsState } from "@/hooks/use-service-insights";
-import { billingAccountLabel, summarizeBilling } from "@/lib/service-insights";
+import {
+  billingAccountLabel,
+  billingModelLabel,
+  summarizeBilling,
+  summarizeBillingModel,
+} from "@/lib/service-insights";
 import { configuredBilling } from "@/lib/service-insights-compat";
 import { api } from "@/lib/api-client";
 import { ServiceConnectionTable } from "./service-connection-table";
@@ -197,9 +202,7 @@ describe("service card billing and caller details", () => {
         },
       },
     });
-    expect(
-      screen.getByText("Organization · ChronoAI · openai-team"),
-    ).toBeVisible();
+    expect(screen.getByTitle(/^Organization · ChronoAI · /)).toBeVisible();
     expect(screen.getByText(/Codex CI · Release app/)).toBeVisible();
     expect(screen.getByText("Personal account")).toBeVisible();
   });
@@ -233,7 +236,7 @@ describe("service card billing and caller details", () => {
         },
       },
     });
-    expect(screen.getByText("Platform · openai-team")).toBeVisible();
+    expect(screen.getByTitle(/^Platform · /)).toBeVisible();
     expect(screen.getByText(/Codex CI · Release app/)).toBeVisible();
   });
   it("leaves legacy request layers unknown even when the current binding is platform", () => {
@@ -247,10 +250,8 @@ describe("service card billing and caller details", () => {
         },
       },
     });
-    expect(screen.getByText("Layer not recorded · openai-team")).toBeVisible();
-    expect(
-      screen.queryByText("Platform · openai-team"),
-    ).not.toBeInTheDocument();
+    expect(screen.getByTitle(/^Layer not recorded · /)).toBeVisible();
+    expect(screen.queryByTitle(/^Platform · /)).not.toBeInTheDocument();
   });
   it("does not infer the last used layer from credential timestamps or rejected requests", () => {
     mount({
@@ -303,8 +304,7 @@ describe("service card billing and caller details", () => {
         },
       },
     });
-    expect(screen.getByText(/Codex CI/)).toBeVisible();
-    expect(screen.getByText("Configured scope")).toBeVisible();
+    expect(screen.getByTitle(/Configured scope[\s\S]*Codex CI/)).toBeVisible();
     expect(screen.getByText("Acting user's personal account")).toBeVisible();
     expect(screen.queryByText(/No recorded requests/)).not.toBeInTheDocument();
     await user.click(
@@ -334,16 +334,16 @@ describe("service card billing and caller details", () => {
     mount();
     expect(screen.getByRole("columnheader", { name: "Billing" })).toBeVisible();
     expect(screen.getByText("Personal account")).toBeVisible();
-    expect(screen.getByText("NyxID credential")).toBeVisible();
+    expect(screen.getByText(/NyxID credential/)).toBeVisible();
     expect(
       within(
         screen.getByRole("button", { name: "Recent requests for Team OpenAI" }),
       ).getByText(/Codex CI/),
     ).toBeVisible();
-    expect(screen.getByText("0.25 credits / request")).toBeVisible();
-    expect(
-      screen.getByText(/Your keys with access · 1 overrides/),
-    ).toBeVisible();
+    expect(screen.getByText("NyxID-managed")).toBeVisible();
+    expect(screen.getByText("NyxID fee: 0.25 credits / request")).toBeVisible();
+    expect(screen.getByText(/· 1 override$/)).toBeVisible();
+    expect(screen.getByTitle(/^Your keys with access/)).toBeVisible();
     expect(screen.queryByText("Provisioning app")).not.toBeInTheDocument();
     expect(
       screen.queryByText("https://private.example.test"),
@@ -358,7 +358,11 @@ describe("service card billing and caller details", () => {
     expect(
       screen.getByRole("table", { name: "Applicable NyxID rates" }),
     ).toBeVisible();
-    expect(screen.getByText(/NyxID supplies this credential/)).toBeVisible();
+    expect(
+      screen.getByText(
+        /NyxID supplies the credential and handles provider billing/,
+      ),
+    ).toBeVisible();
     await user.click(
       screen.getByRole("button", { name: "Agent key access for Team OpenAI" }),
     );
@@ -489,8 +493,9 @@ describe("service card billing and caller details", () => {
       },
     });
     expect(
-      screen.getByText("No dispatched request in available history · 30d"),
+      screen.getByTitle(/No recorded use with exact connection attribution/),
     ).toBeVisible();
+    expect(screen.getByText("Not recorded")).toBeVisible();
     expect(screen.queryByText("Activity not reported")).not.toBeInTheDocument();
   });
   it("does not merge different payer accounts or hide a restricted connection in the group summary", () => {
@@ -519,5 +524,77 @@ describe("service card billing and caller details", () => {
     expect(
       billingAccountLabel({ ...insight.billing!, status: "unavailable" }),
     ).toBe("Billing unavailable");
+  });
+
+  it("shows BYOK with separate NyxID fees even when the payer is personal", async () => {
+    const user = userEvent.setup();
+    mount({
+      ...insight,
+      billing: {
+        ...insight.billing!,
+        provider_billing: "separate_provider_account",
+      },
+    });
+    const cell = within(
+      screen.getByRole("button", { name: "Billing for Team OpenAI" }),
+    );
+    expect(cell.getByText("BYOK")).toBeVisible();
+    expect(cell.getByText("Personal account")).toBeVisible();
+    expect(cell.getByText("NyxID fee: 0.25 credits / request")).toBeVisible();
+    await user.click(
+      screen.getByRole("button", { name: "Billing for Team OpenAI" }),
+    );
+    expect(
+      within(
+        screen.getByRole("region", { name: "Billing for Team OpenAI" }),
+      ).getByText(/Any NyxID service fees are additional/),
+    ).toBeVisible();
+  });
+
+  it("keeps the NyxID-managed model when the service has no NyxID charge", () => {
+    mount({
+      ...insight,
+      billing: { ...insight.billing!, charge_status: "not_charged", rates: [] },
+    });
+    const cell = within(
+      screen.getByRole("button", { name: "Billing for Team OpenAI" }),
+    );
+    expect(cell.getByText("NyxID-managed")).toBeVisible();
+    expect(cell.getByText("No NyxID charge")).toBeVisible();
+    expect(cell.queryByText("BYOK")).not.toBeInTheDocument();
+  });
+
+  it("keeps unknown, restricted, and missing models explicit in group summaries", () => {
+    const byok = {
+      ...insight,
+      billing: {
+        ...insight.billing!,
+        provider_billing: "separate_provider_account" as const,
+      },
+    };
+    expect(summarizeBillingModel("ready", [insight, byok])).toBe(
+      "BYOK + NyxID",
+    );
+    expect(summarizeBillingModel("ready", [byok, undefined])).toBe(
+      "Billing partly reported",
+    );
+    expect(summarizeBillingModel("restricted", [byok])).toBe(
+      "Billing restricted",
+    );
+    expect(
+      billingModelLabel({ ...insight.billing!, provider_billing: "unknown" }),
+    ).toBe("Billing model unknown");
+    expect(
+      billingModelLabel({ ...insight.billing!, status: "restricted" }),
+    ).toBe("Billing restricted");
+    expect(
+      billingModelLabel({ ...insight.billing!, status: "unavailable" }),
+    ).toBe("Billing unavailable");
+    expect(
+      billingModelLabel({
+        ...insight.billing!,
+        provider_billing: "no_credential",
+      }),
+    ).toBe("No provider account");
   });
 });

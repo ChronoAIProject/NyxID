@@ -7,12 +7,13 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
-import { ChevronRight, CreditCard, UsersRound } from "lucide-react";
+import { ChevronRight, UsersRound } from "lucide-react";
 import { useServiceView } from "@/hooks/use-service-view";
 import { useServiceCardTransition } from "@/hooks/use-service-card-transition";
 import { ServiceViewToolbar } from "./service-view-toolbar";
 import { ServiceConnectionTable } from "./service-connection-table";
-import { ServiceOwnerAvatar } from "./service-owner-avatar";
+import { ServiceAvatarStack } from "./service-avatar-stack";
+import { ServiceBillingSummary } from "./service-billing-summary";
 import {
   connectionSourceLabel as sourceLabel,
   connectionSource,
@@ -21,7 +22,7 @@ import {
 import { ServiceIcon } from "@/components/service-icon";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { cn } from "@/lib/utils";
+import { cn, formatRelativeTime } from "@/lib/utils";
 import {
   groupServiceConnections,
   type ServiceConnectionGroup,
@@ -31,12 +32,10 @@ import {
   type ServiceInsightsState,
 } from "@/hooks/use-service-insights";
 import {
-  summarizeBilling,
-  summarizeBillingDetail,
+  callerLabel,
   latestRecordedUse,
-  insightStatusLabel,
+  outcomeLabel,
 } from "@/lib/service-insights";
-import { ServiceUseSummary } from "./service-use-summary";
 import type { CatalogEntry, KeyInfo } from "@/types/keys";
 
 function GroupCard({
@@ -120,7 +119,12 @@ function GroupCard({
           key.credential_source?.type === "org" ? key.credential_source : null;
         return [
           type === "org" ? org!.org_id : type,
-          { type, name: sourceLabel(key), avatarUrl: org?.avatar_url },
+          {
+            id: type === "org" ? org!.org_id : type,
+            type,
+            name: sourceLabel(key),
+            avatarUrl: org?.avatar_url,
+          },
         ] as const;
       }),
     ).values(),
@@ -129,21 +133,6 @@ function GroupCard({
   const connectionInsights = connections.map((key) =>
     insights.connections.get(key.id),
   );
-  const billingSummary =
-    insights.status !== "ready"
-      ? insightStatusLabel(insights.status, "Billing")
-      : summarizeBilling(
-          connections
-            .filter((key) => key.is_active)
-            .map((key) => insights.connections.get(key.id)),
-        );
-  const activeInsights = connections
-    .filter((key) => key.is_active)
-    .map((key) => insights.connections.get(key.id));
-  const billingDetail =
-    insights.status === "ready"
-      ? summarizeBillingDetail(activeInsights)
-      : "Rates unavailable";
   const access = connectionInsights.map((item) => item?.usage?.access);
   const configuredKeys = [
     ...new Map(
@@ -159,12 +148,61 @@ function GroupCard({
       item.truncated ||
       item.visibility === "unavailable",
   );
-  const accessSummary = configuredKeys.length
-    ? `${configuredKeys.slice(0, 2).join(" · ")}${configuredKeys.length > 2 ? ` +${configuredKeys.length - 2}` : ""}`
+  const latestUse = connectionInsights
+    .map((item) => latestRecordedUse(item?.usage))
+    .filter((request) => request !== undefined)
+    .sort((a, b) => b.occurred_at.localeCompare(a.occurred_at))[0];
+  const useTracked = connectionInsights.every((item) => {
+    const activity = item?.usage?.activity;
+    return (
+      activity &&
+      activity.tracking !== "unavailable" &&
+      activity.visibility !== "unavailable"
+    );
+  });
+  const ownUseOnly = connectionInsights.every(
+    (item) => item?.usage?.activity.visibility === "own_requests",
+  );
+  const keysText = configuredKeys.length
+    ? `${configuredKeys.length} ${configuredKeys.length === 1 ? "key" : "keys"}`
     : accessIncomplete
-      ? "Key access incomplete"
-      : "No matching keys";
-  const openSummary = (view: "billing" | "requests" | "access") => {
+      ? "keys —"
+      : "no keys";
+  const useText = latestUse
+    ? `${callerLabel(latestUse.caller)} · ${formatRelativeTime(latestUse.occurred_at)}`
+    : "use not recorded";
+  const agents =
+    insights.status === "loading"
+      ? { text: "Loading…", title: "Loading agent keys and use" }
+      : insights.status === "restricted"
+        ? { text: "Restricted", title: "Agent key access is restricted" }
+        : insights.status !== "ready"
+          ? {
+              text: "—",
+              title:
+                insights.status === "unavailable"
+                  ? "Agent keys and use are not reported by this server"
+                  : "Agent keys and use couldn't load",
+            }
+          : {
+              text: `${keysText} · ${useText}`,
+              title: [
+                configuredKeys.length
+                  ? `Keys with access: ${configuredKeys.join(", ")}`
+                  : accessIncomplete
+                    ? "Key access incomplete"
+                    : "No agent keys with access",
+                latestUse
+                  ? `${ownUseOnly ? "Your last use" : "Last use"}: ${callerLabel(latestUse.caller)}${latestUse.caller.app_name ? ` · ${latestUse.caller.app_name}` : ""} · ${outcomeLabel(latestUse.outcome)} · ${latestUse.occurred_at}`
+                  : useTracked
+                    ? "No recorded use with exact connection attribution in the last 30 days"
+                    : "Use is not reported by this server",
+              ].join("\n"),
+            };
+  const openSummary = (
+    view: "billing" | "requests" | "access",
+    connectionId?: string,
+  ) => {
     if (!expanded) {
       onToggle(cardRef.current);
       return;
@@ -189,8 +227,10 @@ function GroupCard({
       ) ?? []),
     ];
     const button =
-      buttons.find((item) => item.dataset.connectionId === lastConnection) ??
-      buttons[0];
+      buttons.find(
+        (item) =>
+          item.dataset.connectionId === (connectionId ?? lastConnection),
+      ) ?? buttons[0];
     button?.click();
     button?.focus({ preventScroll: true });
   };
@@ -204,7 +244,9 @@ function GroupCard({
       }}
       className={cn(
         "min-w-0 scroll-mt-[calc(var(--service-filters-height,0px)+32px)] rounded-xl border border-border bg-card shadow-sm",
-        expanded ? "sm:col-span-2 xl:col-span-3" : "overflow-hidden",
+        expanded
+          ? "sm:col-span-2 xl:col-span-3"
+          : "relative focus-within:z-10 hover:z-10",
       )}
     >
       <div
@@ -220,10 +262,10 @@ function GroupCard({
         <div
           className={cn(
             "relative flex flex-col rounded-t-xl bg-card",
-            expanded ? "shadow-sm" : "min-h-80",
+            expanded ? "shadow-sm" : "h-64",
           )}
         >
-          <div className="flex flex-1 flex-col gap-3 p-5">
+          <div className="flex min-h-0 flex-1 flex-col gap-2 p-4">
             <div className="flex items-start gap-3">
               <div className="flex size-10 shrink-0 items-center justify-center rounded-lg border border-border bg-background/50">
                 <ServiceIcon
@@ -259,100 +301,61 @@ function GroupCard({
               )}
             </div>
             {!expanded && (
-              <p className="line-clamp-2 min-h-8 text-xs leading-4 text-muted-foreground">
-                {group.description}
+              <p className="line-clamp-2 h-8 shrink-0 text-xs leading-4 text-muted-foreground">
+                {search.trim()
+                  ? `Matches: ${connections.map((key) => key.label).join(" · ")}`
+                  : group.description}
               </p>
             )}
             <div
               className={cn(
                 "mt-auto text-xs",
-                expanded ? "grid gap-4 md:grid-cols-3" : "space-y-3",
+                expanded
+                  ? "grid gap-x-6 gap-y-2 md:grid-cols-2"
+                  : "space-y-1.5",
               )}
             >
               {!expanded && (
-                <p
-                  className="flex min-w-0 items-center gap-2 overflow-hidden text-muted-foreground"
-                  title={sources.map((source) => source.name).join(" · ")}
-                >
-                  <span className="w-24 shrink-0">Sources</span>
-                  {sources.map((source, index) => (
-                    <span
-                      key={index}
-                      className="inline-flex min-w-0 items-center gap-1.5 text-foreground"
-                    >
-                      <ServiceOwnerAvatar {...source} />
-                      <span className="truncate">{source.name}</span>
-                    </span>
-                  ))}
-                </p>
+                <div className="flex h-6 min-w-0 items-center gap-2">
+                  <span className="w-16 shrink-0 text-muted-foreground">
+                    Sources
+                  </span>
+                  <ServiceAvatarStack
+                    items={sources}
+                    label={`Show sources for ${group.name}`}
+                  />
+                </div>
               )}
               <button
                 type="button"
                 onClick={() => {
-                  openSummary("billing");
+                  openSummary(latestUse ? "requests" : "access");
                 }}
                 aria-expanded={expanded}
                 aria-controls={contentId}
-                aria-label={`Expand ${group.name} to compare billing`}
-                className="grid w-full grid-cols-[6rem_minmax(0,1fr)] items-start gap-2 rounded-sm text-left focus-visible:outline-2 focus-visible:outline-ring"
+                aria-label={`Show agent keys and use for ${group.name}`}
+                className="flex h-6 w-full min-w-0 items-center gap-2 rounded-sm text-left focus-visible:outline-2 focus-visible:outline-ring"
               >
-                <span className="pt-0.5 text-muted-foreground">Billing</span>
-                <span className="min-w-0">
-                  <span className="flex min-h-5 min-w-0 items-center gap-1.5 font-medium">
-                    <CreditCard className="size-3.5 shrink-0 text-muted-foreground" />
-                    <span className="truncate" title={billingSummary}>
-                      {billingSummary}
-                    </span>
-                  </span>
-                  <span
-                    className="mt-1 block min-h-8 text-[11px] leading-4 text-muted-foreground line-clamp-2"
-                    title={billingDetail}
-                  >
-                    {billingDetail}
-                  </span>
+                <span className="w-16 shrink-0 text-muted-foreground">
+                  Agents
+                </span>
+                <UsersRound
+                  className="size-3.5 shrink-0 text-muted-foreground"
+                  aria-hidden="true"
+                />
+                <span className="truncate" title={agents.title}>
+                  {agents.text}
                 </span>
               </button>
-              <ServiceUseSummary
+              <ServiceBillingSummary
                 connections={connections}
                 insights={insights}
-                onClick={() => {
-                  openSummary("requests");
-                }}
-                expanded={expanded}
-                controls={contentId}
+                serviceName={group.name}
+                onOpen={(id) => openSummary("billing", id)}
               />
-              <button
-                type="button"
-                onClick={() => {
-                  openSummary("access");
-                }}
-                aria-expanded={expanded}
-                aria-controls={contentId}
-                aria-label={`Expand ${group.name} to compare agent key scope`}
-                className="grid w-full grid-cols-[6rem_minmax(0,1fr)] items-start gap-2 rounded-sm text-left focus-visible:outline-2 focus-visible:outline-ring"
-              >
-                <span className="pt-0.5 text-muted-foreground">Agent keys</span>
-                <span className="flex min-h-5 min-w-0 items-center gap-1.5">
-                  <UsersRound className="size-3.5 shrink-0 text-muted-foreground" />
-                  <span
-                    className="truncate"
-                    title={`Configured scope: ${accessSummary}`}
-                  >
-                    {accessSummary}
-                  </span>
-                </span>
-              </button>
-              {search.trim() && (
-                <p
-                  className="truncate text-[11px] text-muted-foreground"
-                  title={connections.map((key) => key.label).join(" · ")}
-                >
-                  Matches: {connections.map((key) => key.label).join(" · ")}
-                </p>
-              )}
             </div>
           </div>
-          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border/70 px-4 py-3">
+          <div className="flex h-12 shrink-0 items-center justify-between gap-2 border-t border-border/70 px-4">
             <Button
               variant="ghost"
               size="sm"
@@ -498,6 +501,7 @@ export function GroupedServiceCards({
         keys={keys}
         groups={groups}
         stuck={filtersStuck}
+        actions={actions}
       >
         <span className="text-xs text-muted-foreground" aria-live="polite">
           {visible.length} {visible.length === 1 ? "service" : "services"} ·{" "}
@@ -513,7 +517,6 @@ export function GroupedServiceCards({
             Collapse
           </Button>
         )}
-        <div className="ml-auto">{actions}</div>
       </ServiceViewToolbar>
       {visible.length ? (
         renderTable ? (
@@ -548,7 +551,7 @@ export function GroupedServiceCards({
         <p className="py-10 text-center text-sm text-muted-foreground">
           {keys.length
             ? filters.source === "personal"
-              ? "No personal services match this view. Choose All services to include organization and platform connections."
+              ? "No services with a personal connection match this view. Choose All services to include services available only through an organization or the platform."
               : "No services match these filters. Clear filters to see all services."
             : "No connected services."}
         </p>

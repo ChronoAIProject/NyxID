@@ -39,6 +39,7 @@ export function ServiceViewToolbar({
   keys,
   groups,
   children,
+  actions,
   ref,
   stuck = false,
 }: {
@@ -46,6 +47,9 @@ export function ServiceViewToolbar({
   readonly keys: readonly KeyInfo[];
   readonly groups: readonly ServiceConnectionGroup[];
   readonly children?: ReactNode;
+  /** Primary actions (Add, refresh) kept in the filter row so they stay
+   *  reachable while the toolbar is stuck. */
+  readonly actions?: ReactNode;
   readonly ref?: Ref<HTMLDivElement>;
   readonly stuck?: boolean;
 }) {
@@ -182,7 +186,11 @@ export function ServiceViewToolbar({
       variant="outline"
       className="shrink-0 rounded-full"
       aria-label={`Service view: ${filters.source === "personal" ? "Personal" : "All services"}`}
-      title={`Switch to ${filters.source === "personal" ? "All services" : "Personal"}`}
+      title={
+        filters.source === "personal"
+          ? "Services with a personal connection, including their organization and platform counterparts. Switch to All services."
+          : "Switch to services with a personal connection, including their organization and platform counterparts."
+      }
       onClick={() =>
         setFilters({
           ...filters,
@@ -222,7 +230,7 @@ export function ServiceViewToolbar({
         )}
       >
         {!stuck && (
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/50 px-4 py-3">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/50 px-3 py-2">
             <ServiceSavedViews
               view={view}
               onRestore={() => {
@@ -235,19 +243,22 @@ export function ServiceViewToolbar({
         )}
         <DataTableControls
           singleRow={stuck}
-          className={stuck ? "border-b-0" : undefined}
+          className={cn("service-filter-controls p-2", stuck && "border-b-0")}
           status={stuck ? sourceToggle : undefined}
           search={
             <>
               <div
                 className={cn(
-                  "flex gap-2",
+                  "flex gap-1.5",
                   stuck ? "shrink-0 flex-nowrap" : "w-full flex-wrap sm:w-auto",
                 )}
               >
                 <ServiceFilterMultiselect
                   label="Organization"
-                  className={stuck ? "w-56 shrink-0 sm:w-56" : undefined}
+                  className={cn(
+                    "grid-cols-[auto_minmax(0,1fr)_auto] gap-1.5 px-2.5 sm:w-44 md:h-8",
+                    stuck && "w-44 shrink-0",
+                  )}
                   plural="organizations"
                   options={organizations}
                   selected={filters.organization_ids}
@@ -264,7 +275,10 @@ export function ServiceViewToolbar({
                 />
                 <ServiceFilterMultiselect
                   label="Service"
-                  className={stuck ? "w-56 shrink-0 sm:w-56" : undefined}
+                  className={cn(
+                    "grid-cols-[auto_minmax(0,1fr)_auto] gap-1.5 px-2.5 sm:w-40 md:h-8",
+                    stuck && "w-40 shrink-0",
+                  )}
                   plural="services"
                   options={services}
                   selected={filters.service_group_ids}
@@ -294,27 +308,34 @@ export function ServiceViewToolbar({
             </>
           }
           filter={
-            <DataTableFilterPopover
-              fields={fields}
-              values={values}
-              open={open}
-              selectedKey={selectedKey}
-              activeCount={applied.length + Number(Boolean(filters.search))}
-              onOpenChange={setOpen}
-              onSelectField={setSelectedKey}
-              onApply={(selections) =>
-                setFilters(
-                  serviceViewSchema.parse({
-                    ...filters,
-                    source: selections.source?.[0] ?? "all",
-                    state: selections.state?.[0] ?? "all",
-                    service_type: selections.service_type?.[0] ?? "all",
-                    show_auto_connected:
-                      selections.show_auto_connected?.[0] !== "false",
-                  }),
-                )
-              }
-            />
+            <>
+              <DataTableFilterPopover
+                fields={fields}
+                values={values}
+                open={open}
+                selectedKey={selectedKey}
+                activeCount={applied.length + Number(Boolean(filters.search))}
+                onOpenChange={setOpen}
+                onSelectField={setSelectedKey}
+                onApply={(selections) =>
+                  setFilters(
+                    serviceViewSchema.parse({
+                      ...filters,
+                      source: selections.source?.[0] ?? "all",
+                      state: selections.state?.[0] ?? "all",
+                      service_type: selections.service_type?.[0] ?? "all",
+                      show_auto_connected:
+                        selections.show_auto_connected?.[0] !== "false",
+                    }),
+                  )
+                }
+              />
+              {actions && (
+                <div className="ml-1 flex shrink-0 items-center gap-1.5">
+                  {actions}
+                </div>
+              )}
+            </>
           }
           chips={
             Boolean(selections.length || filters.search || applied.length) && (
@@ -398,7 +419,7 @@ export function ServiceViewToolbar({
         />
 
         {!stuck && (
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 px-3 py-2">
             {children}
           </div>
         )}

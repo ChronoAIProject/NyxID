@@ -173,7 +173,109 @@ afterEach(() => {
 });
 
 describe("live grouped services", () => {
-  it("shows configured agent associations and expected billing on the collapsed card", () => {
+  it("keeps mixed-source billing separate in Personal view and opens the selected source", async () => {
+    records.push({
+      ...records[0]!,
+      id: "platform",
+      slug: "openai-platform",
+      label: "Platform account",
+      credential_binding: "platform",
+      auto_connected: true,
+    });
+    records.push({
+      ...records[2]!,
+      id: "platform-only",
+      catalog_service_id: "other-id",
+      catalog_service_name: "Platform-only service",
+      catalog_service_slug: "other",
+    });
+    for (const connection of records) {
+      insightConnections.set(connection.id, {
+        service_id: connection.id,
+        billing: configuredBilling(connection),
+        usage: null,
+      });
+    }
+    const user = userEvent.setup();
+    render(preview());
+    expect(
+      screen.queryByRole("region", { name: "Platform-only service" }),
+    ).not.toBeInTheDocument();
+    const card = screen.getByRole("region", { name: "OpenAI" });
+    expect(within(card).getByText("3 connections")).toBeVisible();
+    expect(within(card).getByText("BYOK + NyxID")).toBeVisible();
+    expect(screen.queryByText("Your personal account")).not.toBeInTheDocument();
+    await user.hover(
+      screen.getByRole("button", { name: "Show Personal billing for OpenAI" }),
+    );
+    expect(
+      within(await screen.findByRole("tooltip")).getByText(
+        /Your personal account/,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      within(screen.getByRole("tooltip")).getByText("BYOK"),
+    ).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    await user.hover(
+      screen.getByRole("button", { name: "Show Chrono billing for OpenAI" }),
+    );
+    expect(
+      within(
+        await screen.findByRole("tooltip", { name: /Chrono · organization/ }),
+      ).getByText(/Chrono · organization/),
+    ).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    await user.hover(
+      screen.getByRole("button", { name: "Show Platform billing for OpenAI" }),
+    );
+    expect(
+      within(
+        await screen.findByRole("tooltip", {
+          name: /Acting user's personal account/,
+        }),
+      ).getByText(/Acting user's personal account/),
+    ).toBeInTheDocument();
+    expect(
+      within(screen.getByRole("tooltip")).getByText("NyxID-managed"),
+    ).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    await user.click(
+      within(card).getByRole("button", { name: "Expand OpenAI connections" }),
+    );
+    expect(within(card).getByText("openai-platform")).toBeVisible();
+    expect(within(card).getByText("openai-team")).toBeVisible();
+    await user.click(
+      screen.getByRole("button", {
+        name: "Show Platform billing for OpenAI",
+      }),
+    );
+    expect(
+      within(card).getByRole("region", {
+        name: "Billing for Platform account",
+      }),
+    ).toBeVisible();
+    expect(
+      within(card).getByText(/If a request fails, NyxID does not retry/),
+    ).toBeVisible();
+    expect(
+      within(card).getByText(
+        /Eligible allowances → Credit grants → Wallet credits/,
+      ),
+    ).toBeVisible();
+    expect(
+      within(card).queryByRole("region", {
+        name: "Billing for Personal account",
+      }),
+    ).not.toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "Service view: Personal" }),
+    );
+    expect(
+      screen.getByRole("region", { name: "Platform-only service" }),
+    ).toBeVisible();
+  });
+  it("shows configured agent associations and reveals expected billing on hover", async () => {
     insightConnections.set("mine", {
       service_id: "mine",
       billing: configuredBilling(records[0]!),
@@ -204,12 +306,19 @@ describe("live grouped services", () => {
       },
     });
     render(preview());
-    expect(screen.getByText("Agent keys")).toBeVisible();
-    expect(screen.getByText("Codex CI")).toBeVisible();
-    expect(screen.getByText("Expected: Your personal account")).toBeVisible();
-    expect(screen.getByText("Last used")).toBeVisible();
-    expect(screen.getByText("Not recorded")).toBeVisible();
-    expect(screen.getByText(/Provider billed separately/)).toBeVisible();
+    expect(screen.getByText("Agents")).toBeVisible();
+    expect(screen.getByText(/1 key · use not recorded/)).toBeVisible();
+    expect(screen.getByTitle(/Keys with access: Codex CI/)).toBeVisible();
+    await userEvent.hover(
+      screen.getByRole("button", { name: "Show Personal billing for OpenAI" }),
+    );
+    const tooltip = within(await screen.findByRole("tooltip"));
+    expect(tooltip.getByText("BYOK")).toBeInTheDocument();
+    expect(tooltip.getByText(/Your personal account/)).toBeInTheDocument();
+    expect(tooltip.getByText(/Provider billed separately/)).toBeInTheDocument();
+    expect(
+      tooltip.getByText(/NyxID fee: Rate not reported/),
+    ).toBeInTheDocument();
     expect(screen.queryByText("Latest request")).not.toBeInTheDocument();
     expect(screen.queryByText(/No recorded requests/)).not.toBeInTheDocument();
   });
@@ -247,23 +356,26 @@ describe("live grouped services", () => {
       },
     });
     render(preview());
-    expect(screen.getByText("Platform · openai-personal")).toBeVisible();
-    expect(screen.getByText(/Codex worker · Release app/)).toBeVisible();
+    expect(screen.getByText(/keys — · Codex worker/)).toBeVisible();
+    expect(
+      screen.getByTitle(/Last use: Codex worker · Release app/),
+    ).toBeVisible();
     await user.click(
       screen.getByRole("button", { name: "Expand OpenAI connections" }),
     );
     const summary = screen.getByRole("button", {
-      name: "View last used connection",
+      name: "Show agent keys and use for OpenAI",
     });
-    expect(
-      within(summary).getByText("Platform · openai-personal"),
-    ).toBeVisible();
+    expect(within(summary).getByText(/Codex worker/)).toBeVisible();
     await user.click(summary);
     expect(
       screen.getByRole("table", { name: "Recent connection requests" }),
     ).toBeVisible();
+    await user.hover(
+      screen.getByRole("button", { name: "Show Personal billing for OpenAI" }),
+    );
     await user.click(
-      screen.getByRole("button", { name: "Expand OpenAI to compare billing" }),
+      screen.getByRole("button", { name: "Show Personal billing for OpenAI" }),
     );
     expect(
       screen.getByRole("region", { name: "Billing for Personal account" }),
@@ -415,8 +527,8 @@ describe("live grouped services", () => {
     const rows = [
       ...card.querySelectorAll<HTMLElement>("[data-service-connection-row]"),
     ];
-    expect(rows).toHaveLength(5);
-    const rowTops = [452, 572, 752, 842, 992];
+    expect(rows).toHaveLength(6);
+    const rowTops = [452, 572, 672, 752, 842, 992];
     rows.forEach((row, index) => {
       row.getBoundingClientRect = () =>
         new DOMRect(0, rowTops[index]! - main.scrollTop, 800, 100);
@@ -428,7 +540,7 @@ describe("live grouped services", () => {
     fireEvent.scroll(main);
     expect(header.style.translate).toBe("0 -50px");
     expect(header.getBoundingClientRect().bottom).toBe(
-      rows[2]!.getBoundingClientRect().top,
+      rows[3]!.getBoundingClientRect().top,
     );
     main.scrollTop = 600;
     fireEvent.scroll(main);
@@ -468,9 +580,10 @@ describe("live grouped services", () => {
     expect(
       screen.queryByRole("button", { name: "Save as default" }),
     ).not.toBeInTheDocument();
+    // Primary actions stay reachable in the stuck filter row.
     expect(
-      screen.queryByRole("button", { name: "Refresh metadata" }),
-    ).not.toBeInTheDocument();
+      screen.getByRole("button", { name: "Refresh metadata" }),
+    ).toBeVisible();
     expect(
       screen.queryByRole("button", { name: "Collapse" }),
     ).not.toBeInTheDocument();
@@ -512,6 +625,7 @@ describe("live grouped services", () => {
       id: "platform",
       auto_connected: true,
       label: "Platform connection",
+      slug: "openai-platform",
     });
     const user = userEvent.setup();
     render(preview());
@@ -520,7 +634,7 @@ describe("live grouped services", () => {
       within(filters).getByRole("button", { name: "Service view: Personal" }),
     ).toBeVisible();
     expect(
-      within(filters).getByText("1 service · 1 matching connection"),
+      within(filters).getByText("1 service · 3 matching connections"),
     ).toBeVisible();
     expect(
       within(filters).getByRole("button", { name: "Refresh metadata" }),
@@ -542,8 +656,8 @@ describe("live grouped services", () => {
     await user.click(
       screen.getByRole("button", { name: "Expand OpenAI connections" }),
     );
-    expect(screen.queryByText("openai-team")).not.toBeInTheDocument();
-    expect(screen.queryByText("Platform connection")).not.toBeInTheDocument();
+    expect(screen.getByText("openai-team")).toBeVisible();
+    expect(screen.getByText("Platform connection")).toBeVisible();
     await user.click(
       within(filters).getByRole("button", { name: "Service view: Personal" }),
     );
@@ -951,7 +1065,7 @@ describe("live grouped services", () => {
     ).toBeVisible();
     expect(within(table).getByText("No access")).toBeVisible();
     expect(within(table).getByText("Credential missing")).toBeVisible();
-    expect(within(table).getByText("Changed by Build agent")).toBeVisible();
+    expect(within(table).getByText(/Changed .*· Build agent/)).toBeVisible();
     expect(
       within(table).queryByText(/Ready|Provisioning app/),
     ).not.toBeInTheDocument();
@@ -983,9 +1097,7 @@ describe("live grouped services", () => {
     );
     expect(screen.queryByText(/NyxID platform/)).not.toBeInTheDocument();
     expect(screen.getAllByText("Not verified")).toHaveLength(2);
-    expect(
-      screen.queryByText(/Ready via|Would use|Automatic/),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/Ready via|Would use/)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Organization" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Service" })).toBeVisible();
   });

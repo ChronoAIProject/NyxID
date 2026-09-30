@@ -25,6 +25,7 @@ import {
 import {
   accessReasonLabel,
   billingAccountLabel,
+  billingModelLabel,
   callerKindLabel,
   callerLabel,
   credentialLabel,
@@ -120,6 +121,20 @@ function ConnectionBillingPanel({
       </div>
       {bill ? (
         <>
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <Badge variant="secondary">{billingModelLabel(bill)}</Badge>
+            {bill.status !== "restricted" && bill.status !== "unavailable" && (
+              <span className="text-muted-foreground">
+                {bill.provider_billing === "separate_provider_account"
+                  ? "Your connected provider account handles provider charges. Any NyxID service fees are additional."
+                  : bill.provider_billing === "nyxid_credential"
+                    ? "NyxID supplies the credential and handles provider billing. Applicable NyxID charges are shown below."
+                    : bill.provider_billing === "no_credential"
+                      ? "No provider account is connected. Applicable NyxID charges are shown below."
+                      : "This connection's billing model has not been reported."}
+              </span>
+            )}
+          </div>
           <dl className="grid items-center gap-3 text-xs sm:grid-cols-[1fr_auto_1fr_auto_1fr]">
             <div className="self-stretch rounded-lg border border-border/60 bg-muted/20 p-3">
               <dt className="text-muted-foreground">Credential</dt>
@@ -156,6 +171,25 @@ function ConnectionBillingPanel({
               </dd>
             </div>
           </dl>
+          {bill.status !== "restricted" &&
+            bill.status !== "unavailable" &&
+            (bill.charge_status === "usage_based" ||
+              bill.charge_status === "conditional") && (
+              <div className="text-xs">
+                <p>
+                  <span className="text-muted-foreground">Funding order: </span>
+                  Eligible allowances → Credit grants → Wallet credits
+                </p>
+                <p className="mt-1 text-[11px] text-muted-foreground">
+                  Applied within the selected billing account. Amounts depend on
+                  available benefits and usage.
+                </p>
+                <p className="mt-1 text-[11px] text-muted-foreground">
+                  If a request fails, NyxID does not retry the other connections
+                  in this service.
+                </p>
+              </div>
+            )}
           {!!bill.rates.length && (
             <div className="overflow-x-auto rounded-lg border border-border/60">
               <table
@@ -212,19 +246,6 @@ function ConnectionBillingPanel({
               </table>
             </div>
           )}
-          {bill.provider_billing === "separate_provider_account" && (
-            <p className="text-xs text-muted-foreground">
-              Your provider may charge its own account separately. Provider
-              charges are not included in these NyxID rates.
-            </p>
-          )}
-          {bill.provider_billing === "nyxid_credential" &&
-            bill.context !== "configuration" && (
-              <p className="text-xs text-muted-foreground">
-                NyxID supplies this credential. The billing account above pays
-                the applicable NyxID charges.
-              </p>
-            )}
           {bill.notes.map((note) => (
             <p key={note} className="text-xs text-muted-foreground">
               {note}

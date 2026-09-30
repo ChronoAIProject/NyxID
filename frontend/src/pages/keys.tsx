@@ -389,6 +389,7 @@ function ExternalServicesTab({
       credential_source: keyInfo.credential_source ?? sourceById.get(keyInfo.id),
     }))}
     catalog={catalog}
+    actions={<AddCtaButton label="Connect Service" onClick={onAdd} />}
     renderTable={viewMode === "table" ? (filteredKeys) => (
       <div className="overflow-hidden rounded-xl border border-border bg-card">
         <ServiceConnectionTable connections={filteredKeys} serviceName="All services" renderActions={(key) => <ConnectionReconnect connection={key} onReconnect={onReconnect} />} />
@@ -500,6 +501,8 @@ export function KeysPage() {
   const [initialSetupServiceId, setInitialSetupServiceId] = useState<string | null>(null);
   const [servicesViewMode, setServicesViewMode] = useViewMode("keys-services");
   const [agentKeysViewMode, setAgentKeysViewMode] = useViewMode("keys-agent");
+  // Shared query with ExternalServicesTab; only decides header CTA placement.
+  const { data: pageKeys } = useKeys();
   const [pendingPrefillSlug, setPendingPrefillSlug] = useState<string | null>(null);
   const [reconnectKey, setReconnectKey] = useState<KeyInfo | null>(null);
   const appliedSlugRef = useRef<string | null>(null);
@@ -598,7 +601,9 @@ export function KeysPage() {
                 onViewModeChange={tab === "services" ? setServicesViewMode : setAgentKeysViewMode}
               />
             )}
-            {!(previewActive && tab === "pools") && <AddButton
+            {/* Services keep Connect Service inside the sticky filter toolbar;
+                the empty state has no toolbar, so the header button stays. */}
+            {(tab !== "services" || !pageKeys?.length) && !(previewActive && tab === "pools") && <AddButton
               tab={tab}
               onAddService={() => setAddServiceOpen(true)}
               onCreatePool={() => setCreatePoolOpen(true)}
@@ -611,12 +616,14 @@ export function KeysPage() {
           <CodexConnectionSection />
           {previewActive && RoutingPreview ? (
             <Suspense fallback={<Skeleton className="h-96 w-full" />}>
-              <RoutingPreview renderConnectionActions={(connection) => (
-                <ConnectionReconnect connection={connection} onReconnect={(keyInfo) => {
-                  setReconnectKey(keyInfo);
-                  setAddServiceOpen(true);
-                }} />
-              )} />
+              <RoutingPreview
+                actions={<AddCtaButton label="Connect Service" onClick={() => setAddServiceOpen(true)} />}
+                renderConnectionActions={(connection) => (
+                  <ConnectionReconnect connection={connection} onReconnect={(keyInfo) => {
+                    setReconnectKey(keyInfo);
+                    setAddServiceOpen(true);
+                  }} />
+                )} />
             </Suspense>
           ) : <ExternalServicesTab
             onAdd={() => setAddServiceOpen(true)}

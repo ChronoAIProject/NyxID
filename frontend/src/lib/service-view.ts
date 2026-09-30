@@ -31,6 +31,11 @@ export function matchingConnections(
     !filters.service_group_ids.includes(group.id)
   )
     return [];
+  if (
+    filters.source === "personal" &&
+    !group.connections.some((key) => connectionSource(key) === "personal")
+  )
+    return [];
   const needle = filters.search.trim().toLowerCase();
   const groupMatches = [group.name, group.slug ?? ""].some((value) =>
     value.toLowerCase().includes(needle),
@@ -40,7 +45,9 @@ export function matchingConnections(
       (!filters.organization_ids.length ||
         (key.credential_source?.type === "org" &&
           filters.organization_ids.includes(key.credential_source.org_id))) &&
-      (filters.source === "all" || connectionSource(key) === filters.source) &&
+      (filters.source === "all" ||
+        filters.source === "personal" ||
+        connectionSource(key) === filters.source) &&
       (filters.state === "all" ||
         (filters.state === "enabled" ? key.is_active : !key.is_active)) &&
       (filters.service_type === "all" ||

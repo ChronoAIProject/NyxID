@@ -71,8 +71,11 @@ export function ConnectionCard({
 
 export default function ServiceRoutingPreview({
   renderConnectionActions,
+  actions,
 }: {
   readonly renderConnectionActions?: (key: KeyInfo) => ReactNode;
+  /** Page-level primary action (Connect Service) shown in the sticky toolbar. */
+  readonly actions?: ReactNode;
 }) {
   const keys = useKeys();
   const catalog = useCatalog();
@@ -106,18 +109,21 @@ export default function ServiceRoutingPreview({
       catalog={catalog.data}
       renderConnectionActions={renderConnectionActions}
       actions={
-        <Button
-          size="icon"
-          variant="ghost"
-          aria-label="Refresh metadata"
-          onClick={() => {
-            void keys.refetch();
-            void catalog.refetch();
-            void services.refetch();
-          }}
-        >
-          <RefreshCw className="size-4" />
-        </Button>
+        <>
+          <Button
+            size="icon"
+            variant="ghost"
+            aria-label="Refresh metadata"
+            onClick={() => {
+              void keys.refetch();
+              void catalog.refetch();
+              void services.refetch();
+            }}
+          >
+            <RefreshCw className="size-4" />
+          </Button>
+          {actions}
+        </>
       }
     />
   );

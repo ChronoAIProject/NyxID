@@ -819,8 +819,16 @@ html.theme-dark .assistant-halo--visible {
 }
 
 @media (min-width: 768px) {
+  .service-filter-controls > div:first-child {
+    gap: 6px;
+  }
+  .service-filter-controls form > div,
+  .service-filter-controls > div:first-child > div button,
+  .service-filter-controls > div:first-child > button {
+    height: 2rem;
+  }
   .service-filter-pills {
-    --service-filter-pill-height: 2.25rem;
+    --service-filter-pill-height: 1.75rem;
   }
 }
 

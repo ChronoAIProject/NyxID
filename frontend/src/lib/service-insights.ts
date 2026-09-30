@@ -162,6 +162,8 @@ export function recordedSourceLabel(
 export function providerBillingLabel(
   billing?: ServiceBillingExplanation | null,
 ): string {
+  if (billing?.status === "restricted") return "Provider billing restricted";
+  if (billing?.status === "unavailable") return "Provider billing unavailable";
   if (billing?.provider_billing === "separate_provider_account")
     return "Provider billed separately";
   if (billing?.provider_billing === "nyxid_credential")
@@ -171,19 +173,65 @@ export function providerBillingLabel(
   return "Provider billing not reported";
 }
 
+export function billingModelLabel(
+  billing?: ServiceBillingExplanation | null,
+): string {
+  if (!billing) return "Billing not reported";
+  if (billing.status === "restricted") return "Billing restricted";
+  if (billing.status === "unavailable") return "Billing unavailable";
+  switch (billing.provider_billing) {
+    case "separate_provider_account":
+      return "BYOK";
+    case "nyxid_credential":
+      return "NyxID-managed";
+    case "no_credential":
+      return "No provider account";
+    default:
+      return "Billing model unknown";
+  }
+}
+
+export function summarizeBillingModel(
+  status: ServiceInsightsState["status"],
+  insights: readonly (ServiceInsight | undefined)[],
+): string {
+  if (status !== "ready") return insightStatusLabel(status, "Billing");
+  const models = new Set(
+    insights.map((item) => billingModelLabel(item?.billing)),
+  );
+  if (!models.size) return "Billing not reported";
+  if (models.size === 1) return [...models][0]!;
+  if ([...models].some((model) => model.startsWith("Billing")))
+    return "Billing partly reported";
+  if (models.size === 2 && models.has("BYOK") && models.has("NyxID-managed"))
+    return "BYOK + NyxID";
+  return "Multiple billing models";
+}
+
+export function nyxidChargeLabel(billing: ServiceBillingExplanation): string {
+  if (billing.status === "restricted") return "NyxID fees restricted";
+  if (billing.status === "unavailable") return "NyxID fees unavailable";
+  if (billing.charge_status === "not_charged") return "No NyxID charge";
+  return `NyxID fee: ${rateLabel(billing)}`;
+}
+
 export function summarizeBillingDetail(
   insights: readonly (ServiceInsight | undefined)[],
 ): string {
   const bills = insights.map((item) => item?.billing);
   if (!bills.length || bills.some((bill) => !bill)) return "Rates unavailable";
+  if (bills.some((bill) => bill?.status === "restricted"))
+    return "Billing details restricted";
+  if (bills.some((bill) => bill?.status === "unavailable"))
+    return "Billing details unavailable";
   const first = bills[0]!;
   const rates = bills.every(
     (bill) =>
       JSON.stringify(bill!.rates) === JSON.stringify(first.rates) &&
       bill!.charge_status === first.charge_status,
   )
-    ? rateLabel(first)
-    : "Rates vary by connection";
+    ? nyxidChargeLabel(first)
+    : "NyxID fees vary by connection";
   const providers = bills.every(
     (bill) => bill!.provider_billing === first.provider_billing,
   )

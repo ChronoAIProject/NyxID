@@ -49,10 +49,42 @@ const group: ServiceConnectionGroup = {
 };
 
 describe("service view matching", () => {
-  it("shows only personal connections by default", () => {
+  it("keeps organization and platform counterparts for services with a personal connection", () => {
     expect(
       matchingConnections(group, DEFAULT_SERVICE_FILTERS).map((key) => key.id),
-    ).toEqual(["personal"]);
+    ).toEqual(["personal", "org", "platform"]);
+    expect(
+      matchingConnections(
+        { ...group, connections: group.connections.slice(1) },
+        DEFAULT_SERVICE_FILTERS,
+      ),
+    ).toEqual([]);
+  });
+  it("applies explicit filters to counterparts without requiring them to match the personal row", () => {
+    expect(
+      matchingConnections(group, {
+        ...DEFAULT_SERVICE_FILTERS,
+        organization_ids: ["org-1"],
+      }).map((key) => key.id),
+    ).toEqual(["org"]);
+    expect(
+      matchingConnections(group, {
+        ...DEFAULT_SERVICE_FILTERS,
+        show_auto_connected: false,
+      }).map((key) => key.id),
+    ).toEqual(["personal", "org"]);
+    expect(
+      matchingConnections(group, {
+        ...DEFAULT_SERVICE_FILTERS,
+        search: "platform",
+      }).map((key) => key.id),
+    ).toEqual(["platform"]);
+    expect(
+      matchingConnections(group, {
+        ...DEFAULT_SERVICE_FILTERS,
+        source: "platform",
+      }).map((key) => key.id),
+    ).toEqual(["platform"]);
   });
   it("combines filters on the same connection and uses service state, not credential status", () => {
     expect(
@@ -75,7 +107,7 @@ describe("service view matching", () => {
         source: "personal",
         state: "enabled",
       }).map((key) => key.id),
-    ).toEqual(["personal"]);
+    ).toEqual(["personal", "platform"]);
   });
   it("searches both service and connection identity without modifying the group", () => {
     expect(

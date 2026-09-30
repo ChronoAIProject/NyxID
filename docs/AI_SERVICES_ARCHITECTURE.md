@@ -12,7 +12,7 @@ NyxID's AI Services system lets users manage external API credentials, SSH servi
 
 The External Services grid groups catalog-backed connections by `catalog_service_id`.
 Custom connections remain separate by ID. Each group starts collapsed with a
-256px minimum summary height; expanding a group keeps its connection comparison
+256px fixed collapsed height; expanding a group keeps its connection comparison
 table inside the parent. Connection details and history remain on their existing detail pages.
 
 The expanded table shows Classification (personal, named organization with role,
@@ -47,13 +47,39 @@ cleared together. Search applies on submit or blur. These controls apply to both
 the grid and table. Filters include
 source (`all`, `personal`, `org`, `platform`), service state (`all`, `enabled`,
 `disabled`), type (`all`, `http`, `ssh`), and whether to include auto-connected
-services. All sources/states/types and auto-connected services are included by
-default. Source options come from the current connection list. Enabled/disabled
+services. Personal is the default service scope: a group is included when it has
+a personal connection, and its accessible organization and platform counterparts
+remain visible. Groups with no personal connection are available in All services.
+All states/types and auto-connected services are included by default.
+Source options come from the current connection list. Enabled/disabled
 uses `UserService.is_active`; it does not assert credential health or readiness.
-All criteria must match the same connection. Expanded tables show only matching
+Personal scope selects groups; the other criteria filter individual connections.
+Organization/platform source filters still match only those connection classes.
+Expanded tables show only matching
 rows and the parent displays the matching count against the group total. With no
 filters all siblings are visible. The full service page always contains every
 accessible connection in the group, independent of list filters.
+
+Sources and Billing use stationary overlapping avatar circles. Hovering or focusing
+a circle brings it to the front and shows its full details in a tooltip. Circles do
+not move or resize, and tooltips do not animate. Extra sources remain reachable
+through the overflow count.
+Billing also has an always-visible model label: **BYOK**, **NyxID-managed**, or
+**BYOK + NyxID** for a group with both. Each connection row repeats its own model,
+NyxID payer, and explicitly labeled NyxID fee. Models come from `provider_billing`,
+not ownership or payer identity. BYOK includes connected provider accounts such as
+OAuth and node-held credentials; provider charges are separate from any NyxID
+service fees. No-credential, unknown, restricted, and partly reported models remain
+distinct; missing rates never imply free usage.
+Card billing summaries keep each source separate even when the expected payer is
+the same. Personal credentials normally use the personal account, organization
+credentials use the owning organization's account, and a platform key uses the
+acting person's personal account. Each source opens its own inline billing panel.
+These groups do not configure execution order or credential-failure fallback;
+billing panels explain that a failed request does not retry another connection. Within a selected
+billing account, eligible allowances fund usage before credit grants and then wallet
+credits. That funding priority is shown in the billing panel and does not select
+another connection or payer.
 
 **Save as default** writes the current filters to the authenticated user's
 `users.profile_config.services_view` embedded blob. Search text is included.
