@@ -794,34 +794,22 @@ html.theme-dark .assistant-halo--visible {
   flex-wrap: wrap;
   align-items: center;
   gap: 6px;
-  max-height: calc(2 * var(--service-filter-pill-height) + 6px);
+  padding: 2px;
+  max-height: calc(2 * var(--service-filter-pill-height) + 10px);
   overflow-y: auto;
   overscroll-behavior-y: contain;
   scroll-snap-type: y mandatory;
+  scroll-padding-block: 2px;
 }
 
-.service-filter-extra-pills {
-  display: contents;
-}
-
-.service-filter-pills > *,
-.service-filter-extra-pills > * {
+.service-filter-pills > * {
   height: var(--service-filter-pill-height);
   min-height: var(--service-filter-pill-height);
   flex-shrink: 0;
   scroll-snap-align: start;
 }
 
-.service-filter-extra-pills > div > button:first-child {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 @media (min-width: 768px) {
-  .service-filter-controls > div:first-child {
-    gap: 6px;
-  }
   .service-filter-controls form > div,
   .service-filter-controls > div:first-child > div button,
   .service-filter-controls > div:first-child > button {

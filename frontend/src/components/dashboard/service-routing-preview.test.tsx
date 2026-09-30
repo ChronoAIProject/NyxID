@@ -15,6 +15,8 @@ import type { KeyInfo } from "@/types/keys";
 import type { ServicePool } from "@/schemas/pools";
 import type { ServiceInsight } from "@/schemas/service-insights";
 import { configuredBilling } from "@/lib/service-insights-compat";
+import { DEFAULT_SERVICE_FILTERS } from "@/schemas/service-view";
+import { AddCtaButton } from "@/components/shared/add-cta-button";
 
 function render(ui: ReactNode) {
   const client = new QueryClient({
@@ -557,7 +559,20 @@ describe("live grouped services", () => {
 
   it("shows only filters and active pills while stuck, then restores saved views and the footer", async () => {
     const user = userEvent.setup();
-    render(<main>{preview()}</main>);
+    const connect = vi.fn();
+    render(
+      <main>
+        <ServiceRoutingPreview
+          actions={(compact) => (
+            <AddCtaButton
+              compact={compact}
+              label="Connect Service"
+              onClick={connect}
+            />
+          )}
+        />
+      </main>,
+    );
     const main = screen.getByRole("main");
     const filters = screen.getByRole("region", { name: "Service filters" });
     const container = filters.parentElement!;
@@ -571,6 +586,9 @@ describe("live grouped services", () => {
     expect(screen.getByRole("button", { name: "Collapse" })).toBeVisible();
     await user.click(screen.getByRole("button", { name: "Saved views" }));
     expect(screen.getByText(/No saved view yet/)).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Connect Service" }),
+    ).toHaveTextContent("Connect Service");
     main.scrollTop = 120;
     fireEvent.scroll(main);
     expect(
@@ -579,6 +597,18 @@ describe("live grouped services", () => {
     expect(screen.queryByText(/No saved view yet/)).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Save as default" }),
+    ).not.toBeInTheDocument();
+    const compactConnect = screen.getByRole("button", {
+      name: "Connect Service",
+    });
+    expect(compactConnect).toHaveTextContent(/^$/);
+    expect(
+      screen.getByRole("button", { name: "Service view: Personal" }),
+    ).toHaveTextContent(/^$/);
+    await user.click(compactConnect);
+    expect(connect).toHaveBeenCalledOnce();
+    expect(
+      screen.queryByRole("button", { name: "Filters" }),
     ).not.toBeInTheDocument();
     // Primary actions stay reachable in the stuck filter row.
     expect(
@@ -605,6 +635,12 @@ describe("live grouped services", () => {
     ).toBeVisible();
     main.scrollTop = 0;
     fireEvent.scroll(main);
+    expect(
+      screen.getByRole("button", { name: "Connect Service" }),
+    ).toHaveTextContent("Connect Service");
+    expect(
+      screen.getByRole("button", { name: "Service view: All services" }),
+    ).toHaveTextContent("All services");
     expect(screen.getByRole("button", { name: "Saved views" })).toBeVisible();
     expect(
       screen.getByRole("button", { name: "Save as default" }),
@@ -832,56 +868,37 @@ describe("live grouped services", () => {
     expect(screen.getByText("openai-team")).toBeVisible();
   });
 
-  it("filters by actual sources and hides nonmatching connection rows", async () => {
+  it("filters by actual organizations without the extra Filters menu", async () => {
     const user = userEvent.setup();
     render(preview());
-    fireEvent.click(
-      screen.getByRole("button", { name: "Service view: Personal" }),
-    );
-    await user.click(screen.getByRole("button", { name: "Filters" }));
     expect(
-      screen.queryByRole("button", { name: "NyxID platform" }),
+      screen.queryByRole("button", { name: "Filters" }),
     ).not.toBeInTheDocument();
-    await user.click(
-      within(screen.getByRole("dialog")).getByRole("button", {
-        name: "Organization",
-      }),
-    );
-    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+    await user.click(screen.getByRole("button", { name: "Organization" }));
+    await user.click(screen.getByRole("checkbox", { name: "Chrono" }));
+    await user.click(screen.getByRole("button", { name: "Done" }));
     expect(screen.getByText("1 of 2 match")).toBeVisible();
     await user.click(
       screen.getByRole("button", { name: "Expand OpenAI connections" }),
     );
     expect(screen.queryByText("openai-personal")).not.toBeInTheDocument();
     expect(screen.getByText("openai-team")).toBeVisible();
-    expect(
-      screen.getByRole("button", { name: "Save as default" }),
-    ).toBeDisabled();
   });
 
-  it("uses the audit log Apply, Cancel and editable filter chip flow", async () => {
+  it("keeps criteria from older saved views visible and removable", async () => {
+    useServiceCardView.setState({
+      accountId: account.id,
+      filters: { ...DEFAULT_SERVICE_FILTERS, state: "disabled" },
+    });
     const user = userEvent.setup();
     render(preview());
-    fireEvent.click(
-      screen.getByRole("button", { name: "Service view: Personal" }),
-    );
-    await user.click(screen.getByRole("button", { name: "Filters" }));
-    await user.click(screen.getByRole("button", { name: "Service state" }));
-    await user.click(screen.getByRole("button", { name: "Disabled" }));
-    expect(screen.getByRole("region", { name: "OpenAI" })).toBeVisible();
-    await user.click(screen.getByRole("button", { name: "Cancel" }));
-    expect(screen.getByRole("button", { name: "Filters" })).toBeVisible();
-    await user.click(screen.getByRole("button", { name: "Filters" }));
-    await user.click(screen.getByRole("button", { name: "Disabled" }));
-    await user.click(screen.getByRole("button", { name: "Apply filters" }));
-    await user.click(
-      screen.getByRole("button", { name: /Edit Service state/ }),
-    );
-    expect(screen.getByRole("button", { name: "Disabled" })).toHaveAttribute(
-      "aria-pressed",
-      "true",
-    );
-    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(
+      screen.queryByRole("button", { name: "Filters" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("Disabled")).toBeVisible();
+    expect(
+      screen.queryByRole("region", { name: "OpenAI" }),
+    ).not.toBeInTheDocument();
     await user.click(
       screen.getByRole("button", { name: "Remove Service state filter" }),
     );
@@ -1074,13 +1091,13 @@ describe("live grouped services", () => {
   it("lets the user clear an empty filter result", async () => {
     const user = userEvent.setup();
     render(preview());
-    fireEvent.click(
+    await user.click(
       screen.getByRole("button", { name: "Service view: Personal" }),
     );
-    await user.click(screen.getByRole("button", { name: "Filters" }));
-    await user.click(screen.getByRole("button", { name: "Service state" }));
-    await user.click(screen.getByRole("button", { name: "Disabled" }));
-    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+    await user.type(
+      screen.getByRole("textbox", { name: "Search services and connections" }),
+      "no-matching-service{Enter}",
+    );
     expect(screen.getByText(/No services match these filters/)).toBeVisible();
     await user.click(screen.getByRole("button", { name: "Clear filters" }));
     expect(screen.getByRole("region", { name: "OpenAI" })).toBeVisible();

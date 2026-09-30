@@ -40,14 +40,16 @@ included in account defaults. Organization ownership uses a small circular org
 avatar with the existing initials fallback on cards, table rows, filter choices
 and pills. Platform sources use the NyxID icon.
 
-The search and Filters controls use the same `DataTableControls`,
-`DataTableFilterPopover` and `DataTableFilterChips` as the audit log. The filter
-panel uses Apply/Cancel; applied chips can be edited, removed individually, or
-cleared together. Search applies on submit or blur. These controls apply to both
-the grid and table. Filters include
-source (`all`, `personal`, `org`, `platform`), service state (`all`, `enabled`,
-`disabled`), type (`all`, `http`, `ssh`), and whether to include auto-connected
-services. Personal is the default service scope: a group is included when it has
+The toolbar keeps Organization, Service, and search as its filtering controls;
+the additional Filters menu has been removed. Search applies on submit or blur.
+Older saved source, service-state, type, and auto-connected criteria remain visible
+as removable pills so they cannot silently hide connections. Active criteria can
+also be cleared together. In sticky mode Connect Service becomes a plus icon and
+Personal/All services becomes its active view icon, with accessible labels and
+hover titles. Returning to the normal position restores their text. Explicit
+12px toolbar padding and a 10px gap separate controls from the selected pills;
+pills retain their own 6px gaps and fit within two rows before scrolling.
+These controls apply to both the grid and table. Personal is the default service scope: a group is included when it has
 a personal connection, and its accessible organization and platform counterparts
 remain visible. Groups with no personal connection are available in All services.
 All states/types and auto-connected services are included by default.

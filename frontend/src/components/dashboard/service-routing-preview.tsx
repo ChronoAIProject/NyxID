@@ -75,7 +75,7 @@ export default function ServiceRoutingPreview({
 }: {
   readonly renderConnectionActions?: (key: KeyInfo) => ReactNode;
   /** Page-level primary action (Connect Service) shown in the sticky toolbar. */
-  readonly actions?: ReactNode;
+  readonly actions?: ReactNode | ((compact: boolean) => ReactNode);
 }) {
   const keys = useKeys();
   const catalog = useCatalog();
@@ -108,7 +108,7 @@ export default function ServiceRoutingPreview({
       }))}
       catalog={catalog.data}
       renderConnectionActions={renderConnectionActions}
-      actions={
+      actions={(compact) => (
         <>
           <Button
             size="icon"
@@ -122,9 +122,9 @@ export default function ServiceRoutingPreview({
           >
             <RefreshCw className="size-4" />
           </Button>
-          {actions}
+          {typeof actions === "function" ? actions(compact) : actions}
         </>
-      }
+      )}
     />
   );
 }

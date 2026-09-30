@@ -7,27 +7,12 @@ import {
 } from "./service-filter-multiselect";
 import { ServiceOwnerAvatar } from "./service-owner-avatar";
 import { ServiceSavedViews } from "./service-saved-views";
-import {
-  DataTableControls,
-  DataTableSearch,
-  DataTableFilterPopover,
-  DataTableFilterChips,
-} from "@/components/data-table/data-table-controls";
-import {
-  DEFAULT_SERVICE_FILTERS,
-  serviceViewSchema,
-} from "@/schemas/service-view";
-import { connectionSource } from "@/lib/service-view";
+import { DataTableSearch } from "@/components/data-table/data-table-controls";
+import { DEFAULT_SERVICE_FILTERS } from "@/schemas/service-view";
 import { cn } from "@/lib/utils";
 import type { ServiceConnectionGroup } from "@/lib/service-groups";
 import type { useServiceView } from "@/hooks/use-service-view";
 import type { KeyInfo } from "@/types/keys";
-import type {
-  DataTableFilterField,
-  DataTableFilterSelections,
-} from "@/types/data-table";
-
-type FilterKey = "source" | "state" | "service_type" | "show_auto_connected";
 const SOURCE_LABELS = {
   personal: "Personal",
   org: "Organization",
@@ -49,16 +34,13 @@ export function ServiceViewToolbar({
   readonly children?: ReactNode;
   /** Primary actions (Add, refresh) kept in the filter row so they stay
    *  reachable while the toolbar is stuck. */
-  readonly actions?: ReactNode;
+  readonly actions?: ReactNode | ((compact: boolean) => ReactNode);
   readonly ref?: Ref<HTMLDivElement>;
   readonly stuck?: boolean;
 }) {
   const { filters, setFilters } = view;
   const inputRef = useRef<HTMLInputElement>(null);
   const [draft, setDraft] = useState<string | null>(null);
-  const [open, setOpen] = useState(false);
-  const [selectedKey, setSelectedKey] = useState<FilterKey>("source");
-  const sources = new Set(keys.map(connectionSource));
   const organizations: ServiceFilterOption[] = [
     ...new Map(
       keys.flatMap((key) => {
@@ -103,73 +85,44 @@ export function ServiceViewToolbar({
       icon: undefined,
     })),
   ];
-  const hasStandaloneFilters = selections.length > 0;
-  const fields: readonly DataTableFilterField<FilterKey>[] = [
-    {
-      key: "source",
-      label: "Source",
-      value_type: "enum",
-      operator: "is",
-      options: (Object.keys(SOURCE_LABELS) as (keyof typeof SOURCE_LABELS)[])
-        .filter((source) => sources.has(source))
-        .map((value) => ({ value, label: SOURCE_LABELS[value] })),
-    },
-    {
-      key: "state",
-      label: "Service state",
-      value_type: "enum",
-      operator: "is",
-      options: [
-        { value: "enabled", label: "Enabled" },
-        { value: "disabled", label: "Disabled" },
-      ],
-    },
-    {
-      key: "service_type",
-      label: "Type",
-      value_type: "enum",
-      operator: "is",
-      options: [
-        { value: "http", label: "HTTP" },
-        { value: "ssh", label: "SSH" },
-      ],
-    },
-    {
-      key: "show_auto_connected",
-      label: "Auto-connected",
-      value_type: "boolean",
-      operator: "is",
-      options: [
-        { value: "false", label: "Hidden" },
-        { value: "true", label: "Included" },
-      ],
-    },
-  ];
-  const values: DataTableFilterSelections<FilterKey> = {
-    source: filters.source === "all" ? [] : [filters.source],
-    state: filters.state === "all" ? [] : [filters.state],
-    service_type: filters.service_type === "all" ? [] : [filters.service_type],
-    show_auto_connected: filters.show_auto_connected ? [] : ["false"],
-  };
-  const applied = fields.flatMap((field) => {
-    const selected = values[field.key] ?? [];
-    return selected.length &&
-      !(field.key === "source" && filters.source === "personal")
+  const applied = [
+    ...(filters.source === "org" || filters.source === "platform"
       ? [
           {
-            field,
-            values: selected,
-            valueLabels: selected.map(
-              (value) =>
-                field.options.find((option) => option.value === value)?.label ??
-                (field.key === "source"
-                  ? SOURCE_LABELS[value as keyof typeof SOURCE_LABELS]
-                  : value),
-            ),
+            key: "source" as const,
+            label: "Source",
+            value: SOURCE_LABELS[filters.source],
           },
         ]
-      : [];
-  });
+      : []),
+    ...(filters.state !== "all"
+      ? [
+          {
+            key: "state" as const,
+            label: "Service state",
+            value: filters.state === "enabled" ? "Enabled" : "Disabled",
+          },
+        ]
+      : []),
+    ...(filters.service_type !== "all"
+      ? [
+          {
+            key: "service_type" as const,
+            label: "Type",
+            value: filters.service_type.toUpperCase(),
+          },
+        ]
+      : []),
+    ...(!filters.show_auto_connected
+      ? [
+          {
+            key: "show_auto_connected" as const,
+            label: "Auto-connected",
+            value: "Hidden",
+          },
+        ]
+      : []),
+  ];
   const editSearch = () => {
     setDraft(filters.search);
     inputRef.current?.focus();
@@ -184,6 +137,7 @@ export function ServiceViewToolbar({
   const sourceToggle = (
     <Button
       variant="outline"
+      size={stuck ? "icon" : "default"}
       className="shrink-0 rounded-full"
       aria-label={`Service view: ${filters.source === "personal" ? "Personal" : "All services"}`}
       title={
@@ -205,11 +159,15 @@ export function ServiceViewToolbar({
       ) : (
         <Layers className="size-3.5" aria-hidden="true" />
       )}
-      {filters.source === "personal" ? "Personal" : "All services"}
-      <ArrowLeftRight
-        className="ml-1 size-3 text-muted-foreground"
-        aria-hidden="true"
-      />
+      {!stuck && (
+        <>
+          {filters.source === "personal" ? "Personal" : "All services"}
+          <ArrowLeftRight
+            className="ml-1 size-3 text-muted-foreground"
+            aria-hidden="true"
+          />
+        </>
+      )}
     </Button>
   );
 
@@ -241,182 +199,185 @@ export function ServiceViewToolbar({
             {sourceToggle}
           </div>
         )}
-        <DataTableControls
-          singleRow={stuck}
-          className={cn("service-filter-controls p-2", stuck && "border-b-0")}
-          status={stuck ? sourceToggle : undefined}
-          search={
-            <>
-              <div
+        <div
+          className={cn(
+            "service-filter-controls flex flex-col gap-2.5 border-b border-border/60 p-3",
+            stuck && "border-b-0",
+          )}
+        >
+          <div
+            className={cn(
+              "flex items-center gap-2 p-0.5",
+              stuck
+                ? "flex-nowrap overflow-x-auto overscroll-x-contain [&>form]:min-w-48 [&>form]:w-auto"
+                : "flex-wrap",
+            )}
+          >
+            <div
+              className={cn(
+                "flex gap-1.5",
+                stuck ? "shrink-0 flex-nowrap" : "w-full flex-wrap sm:w-auto",
+              )}
+            >
+              <ServiceFilterMultiselect
+                label="Organization"
                 className={cn(
-                  "flex gap-1.5",
-                  stuck ? "shrink-0 flex-nowrap" : "w-full flex-wrap sm:w-auto",
+                  "grid-cols-[auto_minmax(0,1fr)_auto] gap-1.5 px-2.5 sm:w-44 md:h-8",
+                  stuck && "w-44 shrink-0",
                 )}
-              >
-                <ServiceFilterMultiselect
-                  label="Organization"
-                  className={cn(
-                    "grid-cols-[auto_minmax(0,1fr)_auto] gap-1.5 px-2.5 sm:w-44 md:h-8",
-                    stuck && "w-44 shrink-0",
-                  )}
-                  plural="organizations"
-                  options={organizations}
-                  selected={filters.organization_ids}
-                  onChange={(organization_ids) =>
-                    setFilters({
-                      ...filters,
-                      organization_ids,
-                      source:
-                        organization_ids.length && filters.source === "personal"
-                          ? "all"
-                          : filters.source,
-                    })
-                  }
-                />
-                <ServiceFilterMultiselect
-                  label="Service"
-                  className={cn(
-                    "grid-cols-[auto_minmax(0,1fr)_auto] gap-1.5 px-2.5 sm:w-40 md:h-8",
-                    stuck && "w-40 shrink-0",
-                  )}
-                  plural="services"
-                  options={services}
-                  selected={filters.service_group_ids}
-                  onChange={(service_group_ids) =>
-                    setFilters({ ...filters, service_group_ids })
-                  }
-                />
-              </div>
-              <DataTableSearch
-                fields={[]}
-                selectedField={null}
-                inputRef={inputRef}
-                value={draft ?? filters.search}
-                ariaLabel="Search services and connections"
-                maxLength={200}
-                onFieldChange={() => undefined}
-                onValueChange={setDraft}
-                onApply={() => {
+                plural="organizations"
+                options={organizations}
+                selected={filters.organization_ids}
+                onChange={(organization_ids) =>
                   setFilters({
                     ...filters,
-                    search: (draft ?? filters.search).trim(),
-                  });
-                  setDraft(null);
-                }}
-                onCancel={() => setDraft("")}
-              />
-            </>
-          }
-          filter={
-            <>
-              <DataTableFilterPopover
-                fields={fields}
-                values={values}
-                open={open}
-                selectedKey={selectedKey}
-                activeCount={applied.length + Number(Boolean(filters.search))}
-                onOpenChange={setOpen}
-                onSelectField={setSelectedKey}
-                onApply={(selections) =>
-                  setFilters(
-                    serviceViewSchema.parse({
-                      ...filters,
-                      source: selections.source?.[0] ?? "all",
-                      state: selections.state?.[0] ?? "all",
-                      service_type: selections.service_type?.[0] ?? "all",
-                      show_auto_connected:
-                        selections.show_auto_connected?.[0] !== "false",
-                    }),
-                  )
+                    organization_ids,
+                    source:
+                      organization_ids.length && filters.source === "personal"
+                        ? "all"
+                        : filters.source,
+                  })
                 }
               />
-              {actions && (
-                <div className="ml-1 flex shrink-0 items-center gap-1.5">
-                  {actions}
+              <ServiceFilterMultiselect
+                label="Service"
+                className={cn(
+                  "grid-cols-[auto_minmax(0,1fr)_auto] gap-1.5 px-2.5 sm:w-40 md:h-8",
+                  stuck && "w-40 shrink-0",
+                )}
+                plural="services"
+                options={services}
+                selected={filters.service_group_ids}
+                onChange={(service_group_ids) =>
+                  setFilters({ ...filters, service_group_ids })
+                }
+              />
+            </div>
+            <DataTableSearch
+              fields={[]}
+              selectedField={null}
+              inputRef={inputRef}
+              value={draft ?? filters.search}
+              ariaLabel="Search services and connections"
+              maxLength={200}
+              onFieldChange={() => undefined}
+              onValueChange={setDraft}
+              onApply={() => {
+                setFilters({
+                  ...filters,
+                  search: (draft ?? filters.search).trim(),
+                });
+                setDraft(null);
+              }}
+              onCancel={() => setDraft("")}
+            />
+            {actions && (
+              <div className="ml-auto flex shrink-0 items-center gap-2">
+                {typeof actions === "function" ? actions(stuck) : actions}
+              </div>
+            )}
+            {stuck && sourceToggle}
+          </div>
+          {Boolean(selections.length || filters.search || applied.length) && (
+            <div
+              className="service-filter-pills"
+              aria-label="Active service filters"
+            >
+              {selections.map((selection) => (
+                <div
+                  key={`${selection.field}:${selection.id}`}
+                  className="flex max-w-full items-center gap-1.5 rounded-md border border-border/80 bg-muted/25 pl-2 text-xs"
+                >
+                  {selection.icon}
+                  <span
+                    className="min-w-0 truncate"
+                    title={`${selection.prefix}: ${selection.label}`}
+                  >
+                    <span className="text-muted-foreground">
+                      {selection.prefix}:
+                    </span>{" "}
+                    {selection.label}
+                  </span>
+                  <button
+                    type="button"
+                    aria-label={`Remove ${selection.prefix}: ${selection.label}`}
+                    className="flex h-full w-11 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring md:w-7"
+                    onClick={() =>
+                      setFilters({
+                        ...filters,
+                        [selection.field]: filters[selection.field].filter(
+                          (id) => id !== selection.id,
+                        ),
+                      })
+                    }
+                  >
+                    <X className="size-3" aria-hidden="true" />
+                  </button>
+                </div>
+              ))}
+              {filters.search && (
+                <div className="flex max-w-full items-center rounded-md border border-border/80 bg-muted/25 text-xs">
+                  <button
+                    type="button"
+                    className="min-w-0 truncate px-2"
+                    onClick={editSearch}
+                    aria-label="Edit search"
+                    title={filters.search}
+                  >
+                    <span className="text-muted-foreground">Search:</span>{" "}
+                    {filters.search}
+                  </button>
+                  <button
+                    type="button"
+                    className="flex h-full w-11 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-accent focus-visible:outline-2 focus-visible:outline-ring md:w-7"
+                    aria-label="Remove search"
+                    onClick={() => {
+                      setDraft(null);
+                      setFilters({ ...filters, search: "" });
+                    }}
+                  >
+                    <X className="size-3" aria-hidden="true" />
+                  </button>
                 </div>
               )}
-            </>
-          }
-          chips={
-            Boolean(selections.length || filters.search || applied.length) && (
-              <div
-                className="service-filter-pills"
-                aria-label="Active service filters"
-              >
-                {selections.map((selection) => (
-                  <div
-                    key={`${selection.field}:${selection.id}`}
-                    className="flex max-w-full items-center gap-1.5 rounded-md border border-border/80 bg-muted/25 pl-2 text-xs"
+              {applied.map(({ key, label, value }) => (
+                <div
+                  key={key}
+                  className="flex max-w-full items-center gap-1.5 rounded-md border border-border/80 bg-muted/25 pl-2 text-xs"
+                >
+                  <span className="truncate">
+                    <span className="text-muted-foreground">{label}:</span>{" "}
+                    {value}
+                  </span>
+                  <button
+                    type="button"
+                    className="flex h-full w-11 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-accent focus-visible:outline-2 focus-visible:outline-ring md:w-7"
+                    aria-label={`Remove ${label} filter`}
+                    onClick={() =>
+                      setFilters({
+                        ...filters,
+                        [key]:
+                          key === "source"
+                            ? "all"
+                            : DEFAULT_SERVICE_FILTERS[key],
+                      })
+                    }
                   >
-                    {selection.icon}
-                    <span
-                      className="min-w-0 truncate"
-                      title={`${selection.prefix}: ${selection.label}`}
-                    >
-                      <span className="text-muted-foreground">
-                        {selection.prefix}:
-                      </span>{" "}
-                      {selection.label}
-                    </span>
-                    <button
-                      type="button"
-                      aria-label={`Remove ${selection.prefix}: ${selection.label}`}
-                      className="flex h-full w-11 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring md:w-7"
-                      onClick={() =>
-                        setFilters({
-                          ...filters,
-                          [selection.field]: filters[selection.field].filter(
-                            (id) => id !== selection.id,
-                          ),
-                        })
-                      }
-                    >
-                      <X className="size-3" aria-hidden="true" />
-                    </button>
-                  </div>
-                ))}
-                <DataTableFilterChips
-                  className="service-filter-extra-pills"
-                  search={filters.search}
-                  searchFields={[]}
-                  searchFilters={[]}
-                  filters={applied}
-                  onEditSearch={editSearch}
-                  onRemoveSearch={() => {
-                    setDraft(null);
-                    setFilters({ ...filters, search: "" });
-                  }}
-                  onEditSearchValue={editSearch}
-                  onRemoveSearchValue={() => undefined}
-                  onEdit={(key) => {
-                    setSelectedKey(key);
-                    setOpen(true);
-                  }}
-                  onRemove={(key) =>
-                    setFilters({
-                      ...filters,
-                      [key]:
-                        key === "source" ? "all" : DEFAULT_SERVICE_FILTERS[key],
-                    })
-                  }
-                  onClear={clear}
-                />
-                {hasStandaloneFilters &&
-                  !filters.search &&
-                  applied.length === 0 && (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="text-muted-foreground"
-                      onClick={clear}
-                    >
-                      Clear filters
-                    </Button>
-                  )}
-              </div>
-            )
-          }
-        />
+                    <X className="size-3" aria-hidden="true" />
+                  </button>
+                </div>
+              ))}
+              <Button
+                variant="ghost"
+                size="sm"
+                className="text-muted-foreground"
+                onClick={clear}
+              >
+                Clear filters
+              </Button>
+            </div>
+          )}
+        </div>
 
         {!stuck && (
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 px-3 py-2">

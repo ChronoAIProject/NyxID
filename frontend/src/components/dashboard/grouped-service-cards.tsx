@@ -422,7 +422,7 @@ export function GroupedServiceCards({
   readonly keys: readonly KeyInfo[];
   readonly catalog?: readonly CatalogEntry[];
   readonly renderConnectionActions?: (key: KeyInfo) => ReactNode;
-  readonly actions?: ReactNode;
+  readonly actions?: ReactNode | ((compact: boolean) => ReactNode);
   readonly renderTable?: (keys: readonly KeyInfo[]) => ReactNode;
 }) {
   const view = useServiceView();

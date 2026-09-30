@@ -5,6 +5,7 @@ interface AddCtaButtonProps {
   readonly label: string;
   readonly onClick: () => void;
   readonly disabled?: boolean;
+  readonly compact?: boolean;
   readonly icon?: React.ComponentType<{ className?: string }>;
   /**
    * "primary" (default) → the goal-completing CTA on this page. Renders
@@ -24,6 +25,7 @@ export function AddCtaButton({
   label,
   onClick,
   disabled = false,
+  compact = false,
   icon: Icon = Plus,
   variant = "primary",
 }: AddCtaButtonProps) {
@@ -31,14 +33,22 @@ export function AddCtaButton({
     return (
       <Button
         variant="primary"
-        size="lg"
+        size={compact ? "icon" : "lg"}
+        aria-label={label}
+        title={compact ? label : undefined}
         onClick={onClick}
         disabled={disabled}
       >
-        <ButtonIcon variant="primary">
-          <Icon className="h-3.5 w-3.5" />
-        </ButtonIcon>
-        {label}
+        {compact ? (
+          <Icon className="size-3.5" aria-hidden="true" />
+        ) : (
+          <>
+            <ButtonIcon variant="primary">
+              <Icon className="h-3.5 w-3.5" />
+            </ButtonIcon>
+            {label}
+          </>
+        )}
       </Button>
     );
   }
