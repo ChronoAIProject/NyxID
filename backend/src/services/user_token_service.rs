@@ -5504,7 +5504,10 @@ mod tests {
                 result.unwrap();
                 assert_eq!(saved.status, "active");
                 assert!(saved.access_token_encrypted.is_some());
-                assert_eq!(saved.token_scopes.as_deref(), scope);
+                assert_eq!(
+                    saved.token_scopes.as_deref(),
+                    scope.or(key.token_scopes.as_deref())
+                );
             }
         }
     }
