@@ -261,8 +261,8 @@ function GroupCard({
       >
         <div
           className={cn(
-            "relative flex flex-col rounded-t-xl bg-card",
-            expanded ? "shadow-sm" : "h-64",
+            "relative flex flex-col bg-card",
+            expanded ? "rounded-t-xl shadow-sm" : "h-64 rounded-xl",
           )}
         >
           <div className="flex min-h-0 flex-1 flex-col gap-2 p-4">
