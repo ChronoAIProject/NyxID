@@ -118,15 +118,23 @@ def run(label, command, interval=30, cancellation_grace=10):
 
     child = None
     received_signal = None
+    signal_errors = []
+
+    def signal_child_group(signum):
+        try:
+            os.killpg(child.pid, signum)
+        except ProcessLookupError:
+            pass
+        except OSError as error:
+            # A reparented descendant can be outside our signal permissions.
+            # Record this after wait; cancellation still returns a failure.
+            signal_errors.append({"signal": signum, "errno": error.errno})
 
     def forward(signum, _frame):
         nonlocal received_signal
         received_signal = signum
         if child is not None:
-            try:
-                os.killpg(child.pid, signum)
-            except ProcessLookupError:
-                pass
+            signal_child_group(signum)
 
     previous_handlers = {sig: signal.signal(sig, forward) for sig in (signal.SIGINT, signal.SIGTERM)}
     sampler = threading.Thread(target=monitor, daemon=True)
@@ -156,10 +164,7 @@ def run(label, command, interval=30, cancellation_grace=10):
                     try:
                         code = child.wait(timeout=cancellation_grace)
                     except subprocess.TimeoutExpired:
-                        try:
-                            os.killpg(child.pid, signal.SIGKILL)
-                        except ProcessLookupError:
-                            pass
+                        signal_child_group(signal.SIGKILL)
                         try:
                             code = child.wait(timeout=5)
                         except subprocess.TimeoutExpired:
@@ -167,11 +172,10 @@ def run(label, command, interval=30, cancellation_grace=10):
                     break
         # Clean up descendants even if Cargo exits before its subprocesses do.
         if received_signal is not None or code < 0:
-            try:
-                os.killpg(child.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            signal_child_group(signal.SIGKILL)
             code = 128 + received_signal if received_signal is not None else 128 - code
+        if signal_errors:
+            emit("signal_delivery_errors", errors=signal_errors)
         usage = resource.getrusage(resource.RUSAGE_CHILDREN)
         emit("exit", exit_code=code, child_user_seconds=usage.ru_utime,
              child_system_seconds=usage.ru_stime,

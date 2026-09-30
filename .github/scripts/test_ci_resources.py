@@ -53,6 +53,17 @@ class ResourceWrapperTests(unittest.TestCase):
         result = self.invoke("import os,signal; os.kill(os.getpid(), signal.SIGTERM)")
         self.assertEqual(result.returncode, 143, result.stderr)
 
+    def test_cleanup_permission_error_preserves_signal_failure(self):
+        output = io.StringIO()
+        with patch.dict(os.environ, self.environment, clear=True), \
+             patch.object(ci_resources, "metadata", return_value={}), \
+             patch.object(ci_resources.os, "killpg", side_effect=PermissionError(1, "denied")), \
+             contextlib.redirect_stdout(output):
+            code = ci_resources.run("permission", [sys.executable, "-c",
+                "import os,signal; os.kill(os.getpid(), signal.SIGTERM)"])
+        self.assertEqual(code, 143)
+        self.assertIn('"event": "signal_delivery_errors"', output.getvalue())
+
     def test_unavailable_telemetry_and_artifact_preserve_failure(self):
         blocked = self.root / "not a directory"
         blocked.write_text("blocked")
@@ -63,10 +74,27 @@ class ResourceWrapperTests(unittest.TestCase):
             self.assertEqual(ci_resources.run("test", [sys.executable, "-c", "raise SystemExit(23)"]), 23)
 
     def test_periodic_samples_are_written_while_command_runs(self):
+        sampled = self.root / "sampled"
+        count = 0
+
+        def record_sample():
+            nonlocal count
+            count += 1
+            if count >= 3:
+                sampled.touch()
+            return {}
+
+        source = (
+            "import sys,time; from pathlib import Path\n"
+            "deadline=time.monotonic()+10\n"
+            "while not Path(sys.argv[1]).exists() and time.monotonic()<deadline: time.sleep(.01)\n"
+            "sys.exit(0 if Path(sys.argv[1]).exists() else 1)"
+        )
         with patch.dict(os.environ, self.environment, clear=True), \
              patch.object(ci_resources, "metadata", return_value={}), \
+             patch.object(ci_resources, "snapshot", side_effect=record_sample), \
              contextlib.redirect_stdout(io.StringIO()):
-            code = ci_resources.run("periodic", [sys.executable, "-c", "import time; time.sleep(.12)"], .02)
+            code = ci_resources.run("periodic", [sys.executable, "-c", source, str(sampled)], .02)
         self.assertEqual(code, 0)
         events = [json.loads(line) for line in
                   (self.root / "nyxid-ci-resources/periodic.jsonl").read_text().splitlines()]
