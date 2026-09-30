@@ -3314,45 +3314,55 @@ impl PreparedProxyCall {
     }
 
     /// Whether this call looks like it deletes something, judged on what it
-    /// sends: a DELETE (or a method override asking for one), and for changes
-    /// also its decoded path and query, its operation's name, and the keys
-    /// and operation-like fields of its body (a GraphQL query, an `action`,
-    /// Drive's `trashed`, Docs' `deleteContentRange`). Descriptions are not
-    /// read: they mention deleting in passing ("rename, move, or move to
-    /// trash"), and the body says whether this call does. Deliberately broad
-    /// and best effort: it guards what people other than the owner may run,
-    /// and a refusal only sends them to the owner.
+    /// sends: a DELETE (or a method override asking for one, in a header, the
+    /// query or the body), or a deleting word in its operation (the path of a
+    /// generic proxy call, a curated operation's name and path template), the
+    /// keys of its query and body, or the fields of its body that name an
+    /// operation or carry code (`action`, `command`, `sql`, a GraphQL
+    /// mutation, Drive's `trashed`, Docs' `deleteContentRange`). Reads (GET,
+    /// HEAD, OPTIONS) are checked too, since some APIs delete through a GET
+    /// (Telegram's `deleteMessage`, Slack's `chat.delete`), with only the
+    /// words that never name what is read (`files/deleted` and `/trash` are
+    /// reads). Not read: descriptions, which mention deleting in passing, a
+    /// curated operation's path values and query values, and the data fields
+    /// of a body (`fields`, `properties`, `values`, `records`), which are what
+    /// the person wrote. A JSON body that does not parse is read as text.
+    /// Deliberately broad and best effort: it guards what people other than
+    /// the owner may run, and a refusal only sends them to the owner.
     pub fn looks_like_deleting(&self, endpoint: &McpToolEndpoint) -> bool {
         if self.method == reqwest::Method::DELETE {
             return true;
         }
-        let query = percent_decoded(self.query.as_deref().unwrap_or_default());
-        let overrides = self
-            .parameter_headers
-            .iter()
-            .filter(|(name, _)| name.to_ascii_lowercase().contains("method"))
-            .map(|(_, value)| value.as_str())
-            .chain(
-                query
-                    .split('&')
-                    .filter_map(|pair| pair.split_once('='))
-                    .filter(|(key, _)| key.to_ascii_lowercase().contains("method"))
-                    .map(|(_, value)| value),
-            )
-            .any(|value| value.trim().eq_ignore_ascii_case("delete"));
-        if overrides {
-            return true;
-        }
-        if matches!(
+        let read = matches!(
             self.method,
             reqwest::Method::GET | reqwest::Method::HEAD | reqwest::Method::OPTIONS
-        ) {
-            return false;
-        }
-        names_deleting(&percent_decoded(&self.path))
-            || names_deleting(&query)
-            || names_deleting(&endpoint.name)
-            || self.body.as_deref().is_some_and(body_names_deleting)
+        );
+        let words = if read {
+            READING_SAFE_WORDS
+        } else {
+            DELETING_WORDS
+        };
+        let query: Vec<(String, String)> =
+            url::form_urlencoded::parse(self.query.as_deref().unwrap_or_default().as_bytes())
+                .into_owned()
+                .collect();
+        let path = if self.is_generic_proxy_endpoint {
+            fully_percent_decoded(&self.path)
+        } else {
+            endpoint.path.clone()
+        };
+        self.parameter_headers
+            .iter()
+            .any(|(name, value)| overrides_to_delete(name, value))
+            || query
+                .iter()
+                .any(|(key, value)| pair_names_deleting(key, value, words))
+            || names_deleting(&path, words)
+            || names_deleting(&endpoint.name, words)
+            || self
+                .body
+                .as_deref()
+                .is_some_and(|body| body_names_deleting(body, endpoint, words))
     }
 }
 
@@ -3381,71 +3391,171 @@ const DELETING_WORDS: &[&str] = &[
     "clear",
     "unlink",
     "del",
+    "rm",
+    "rmdir",
+    "rmtree",
     "archive",
     "archived",
 ];
 
-fn names_deleting(text: &str) -> bool {
-    let mut word = String::new();
-    let mut after_lower = false;
-    let mut found = false;
-    let mut check = |word: &mut String| {
-        if !word.is_empty() && DELETING_WORDS.contains(&word.as_str()) {
-            found = true;
-        }
-        word.clear();
-    };
-    for c in text.chars() {
-        if c.is_ascii_alphanumeric() {
-            if c.is_ascii_uppercase() && after_lower {
-                check(&mut word);
-            }
-            after_lower = c.is_ascii_lowercase() || c.is_ascii_digit();
-            word.push(c.to_ascii_lowercase());
-        } else {
-            check(&mut word);
-            after_lower = false;
-        }
-    }
-    check(&mut word);
-    found
+/// The deleting words that never name what a read reads (a read of
+/// `files/deleted`, `/trash` or `/archive` is a read).
+const READING_SAFE_WORDS: &[&str] = &[
+    "delete",
+    "remove",
+    "destroy",
+    "purge",
+    "erase",
+    "wipe",
+    "revoke",
+    "uninstall",
+    "truncate",
+    "drop",
+    "flush",
+    "flushall",
+    "flushdb",
+    "clear",
+    "unlink",
+    "del",
+    "rm",
+    "rmdir",
+    "rmtree",
+];
+
+/// Body and query fields whose value names the operation or carries code to
+/// run, so a deleting word there is a delete (`{"action": "delete"}`,
+/// `{"sql": "DELETE FROM …"}`). `query` counts only for a GraphQL mutation:
+/// elsewhere it is what someone searches for.
+const OPERATION_FIELDS: &[&str] = &[
+    "action",
+    "operation",
+    "op",
+    "method",
+    "command",
+    "cmd",
+    "mutation",
+    "sql",
+    "statement",
+    "script",
+    "code",
+    "shell",
+];
+
+/// Body fields that hold the person's data (column and property names).
+const DATA_FIELDS: &[&str] = &["fields", "properties", "values", "records"];
+
+/// A method override asking for DELETE (`X-HTTP-Method-Override`, `_method`).
+fn overrides_to_delete(name: &str, value: &str) -> bool {
+    name.to_ascii_lowercase().contains("method") && value.trim().eq_ignore_ascii_case("delete")
 }
 
-/// A body's keys, and the values of fields that name an operation, since a
-/// delete can hide there (`{"query": "mutation { deleteItem }"}`,
-/// `{"action": "delete"}`); other values are what the person wrote.
-fn body_names_deleting(body: &[u8]) -> bool {
-    const OPERATION_FIELDS: &[&str] = &[
-        "query",
-        "mutation",
-        "action",
-        "operation",
-        "op",
-        "method",
-        "command",
-        "cmd",
-    ];
-    fn walk(value: &serde_json::Value) -> bool {
+/// A query or form pair: a method override, a deleting key, or an operation
+/// field naming a delete.
+fn pair_names_deleting(key: &str, value: &str, words: &[&str]) -> bool {
+    overrides_to_delete(key, value)
+        || names_deleting(key, words)
+        || (operation_field(key, value) && names_deleting(value, words))
+}
+
+fn operation_field(key: &str, value: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    OPERATION_FIELDS.contains(&key.as_str())
+        || (key == "query" && names_deleting(value, &["mutation"]))
+}
+
+fn names_deleting(text: &str, words: &[&str]) -> bool {
+    words_of(text).any(|word| words.contains(&word.as_str()))
+}
+
+/// Lowercase words of `text`, split on anything not a letter or digit and on
+/// camelCase, acronyms included (`XMLDelete` is `xml`, `delete`).
+fn words_of(text: &str) -> impl Iterator<Item = String> + '_ {
+    let chars: Vec<char> = text.chars().collect();
+    let mut words = Vec::new();
+    let mut word = String::new();
+    for (at, &c) in chars.iter().enumerate() {
+        if !c.is_ascii_alphanumeric() {
+            if !word.is_empty() {
+                words.push(std::mem::take(&mut word));
+            }
+            continue;
+        }
+        let previous = at.checked_sub(1).map(|at| chars[at]);
+        let next = chars.get(at + 1).copied();
+        let boundary = c.is_ascii_uppercase()
+            && previous.is_some_and(|previous| {
+                previous.is_ascii_lowercase()
+                    || previous.is_ascii_digit()
+                    || (previous.is_ascii_uppercase()
+                        && next.is_some_and(|next| next.is_ascii_lowercase()))
+            });
+        if boundary && !word.is_empty() {
+            words.push(std::mem::take(&mut word));
+        }
+        word.push(c.to_ascii_lowercase());
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    words.into_iter()
+}
+
+/// A body's keys, method overrides and operation fields. JSON bodies are
+/// walked (data fields skipped); form bodies are read as pairs; any other
+/// text, including JSON that does not parse, is read whole; binary uploads
+/// are data.
+fn body_names_deleting(body: &[u8], endpoint: &McpToolEndpoint, words: &[&str]) -> bool {
+    fn strings(value: &serde_json::Value, words: &[&str]) -> bool {
         match value {
-            serde_json::Value::Object(fields) => fields.iter().any(|(key, value)| {
-                names_deleting(key)
-                    || (OPERATION_FIELDS.contains(&key.to_ascii_lowercase().as_str())
-                        && value.as_str().is_some_and(names_deleting))
-                    || walk(value)
-            }),
-            serde_json::Value::Array(items) => items.iter().any(walk),
+            serde_json::Value::String(text) => names_deleting(text, words),
+            serde_json::Value::Array(items) => items.iter().any(|item| strings(item, words)),
+            serde_json::Value::Object(fields) => fields.values().any(|item| strings(item, words)),
             _ => false,
         }
     }
-    match serde_json::from_slice::<serde_json::Value>(body) {
-        Ok(value) => walk(&value),
-        // A form body: its keys and operation-like fields the same way.
-        Err(_) => url::form_urlencoded::parse(body).any(|(key, value)| {
-            names_deleting(&key)
-                || (OPERATION_FIELDS.contains(&key.to_ascii_lowercase().as_str())
-                    && names_deleting(&value))
-        }),
+    fn walk(value: &serde_json::Value, words: &[&str]) -> bool {
+        match value {
+            serde_json::Value::Object(fields) => fields.iter().any(|(key, value)| {
+                if DATA_FIELDS.contains(&key.to_ascii_lowercase().as_str()) {
+                    return false;
+                }
+                let text = value.as_str().unwrap_or_default();
+                overrides_to_delete(key, text)
+                    || names_deleting(key, words)
+                    || (operation_field(key, text) && strings(value, words))
+                    || walk(value, words)
+            }),
+            serde_json::Value::Array(items) => items.iter().any(|item| walk(item, words)),
+            _ => false,
+        }
     }
+    let content_type = request_content_type_or_default(endpoint).to_ascii_lowercase();
+    match request_body_mode(endpoint) {
+        RequestBodyMode::Binary | RequestBodyMode::Multipart => false,
+        RequestBodyMode::Raw if content_type.contains("x-www-form-urlencoded") => {
+            url::form_urlencoded::parse(body)
+                .any(|(key, value)| pair_names_deleting(&key, &value, words))
+        }
+        RequestBodyMode::Json => match serde_json::from_slice::<serde_json::Value>(body) {
+            Ok(value) => walk(&value, words),
+            Err(_) => names_deleting(&String::from_utf8_lossy(body), words),
+        },
+        RequestBodyMode::Raw => names_deleting(&String::from_utf8_lossy(body), words),
+    }
+}
+
+/// `%XX` sequences decoded until none are left (at most three rounds), so a
+/// double-encoded word is seen too; invalid ones stay literal.
+fn fully_percent_decoded(text: &str) -> String {
+    let mut text = text.to_string();
+    for _ in 0..3 {
+        let decoded = percent_decoded(&text);
+        if decoded == text {
+            break;
+        }
+        text = decoded;
+    }
+    text
 }
 
 /// `%XX` sequences decoded (`+` is left as is); invalid ones stay literal.
@@ -7042,38 +7152,65 @@ mod tests {
         };
         for args in [
             serde_json::json!({"method": "DELETE", "path": "items/1"}),
+            // Method overrides, in the query and in the body.
             serde_json::json!({"method": "POST", "path": "items/5?_method=DELETE"}),
             serde_json::json!({"method": "POST", "path": "items/5", "query": "x-http-method=delete"}),
+            serde_json::json!({"method": "POST", "path": "items/5", "body": {"_method": "delete"}}),
+            // Deleting names, however written.
             serde_json::json!({"method": "POST", "path": "bucket", "query": "delete"}),
             serde_json::json!({"method": "POST", "path": "api/%64elete/5"}),
+            serde_json::json!({"method": "POST", "path": "api/%2564elete/5"}),
             serde_json::json!({"method": "POST", "path": "bot1/deleteMessage"}),
+            serde_json::json!({"method": "POST", "path": "s3/XMLDeleteObjects"}),
             serde_json::json!({"method": "PUT", "path": "users/1/remove"}),
+            // Some APIs delete through a GET.
+            serde_json::json!({"method": "GET", "path": "bot1/deleteMessage", "query": "chat_id=1"}),
+            serde_json::json!({"method": "GET", "path": "api/chat.delete"}),
+            serde_json::json!({"method": "GET", "path": "api", "query": "action=remove&id=1"}),
+            // Operation and code fields of the body.
             serde_json::json!({"method": "POST", "path": "graphql",
                 "body": {"query": "mutation { deleteItem(id: 1) }"}}),
             serde_json::json!({"method": "POST", "path": "rpc", "body": {"action": "delete"}}),
-            serde_json::json!({"method": "POST", "path": "redis", "body": {"command": "FLUSHALL"}}),
+            serde_json::json!({"method": "POST", "path": "rpc", "body": {"method": "chat.delete"}}),
+            serde_json::json!({"method": "POST", "path": "redis", "body": {"command": ["FLUSHALL"]}}),
+            serde_json::json!({"method": "POST", "path": "db", "body": {"sql": "DELETE FROM users"}}),
+            serde_json::json!({"method": "POST", "path": "run", "body": {"code": "import os; os.remove('a')"}}),
+            // Deleting keys.
             serde_json::json!({"method": "PATCH", "path": "drive/v3/files/1", "body": {"trashed": true}}),
             serde_json::json!({"method": "PATCH", "path": "v1/pages/1", "body": {"archived": true}}),
             serde_json::json!({"method": "POST", "path": "v1/documents/1:batchUpdate",
                 "body": {"requests": [{"deleteContentRange": {"range": {}}}]}}),
-            serde_json::json!({"method": "POST", "path": "form", "body": "op=delete&id=1"}),
+            // JSON that does not parse is read as text.
+            serde_json::json!({"method": "POST", "path": "rpc", "body": "{\"action\": \"delete\",}"}),
         ] {
             assert!(deleting(&args), "{args}");
         }
         for args in [
+            // Reads of deleted things are reads.
             serde_json::json!({"method": "GET", "path": "files/deleted"}),
-            serde_json::json!({"method": "GET", "path": "repos/x/contents/uninstall.sh"}),
+            serde_json::json!({"method": "GET", "path": "v1/trash"}),
+            serde_json::json!({"method": "GET", "path": "repos/x/archive/main.zip"}),
+            serde_json::json!({"method": "GET", "path": "search", "query": "q=remove+weeds"}),
             serde_json::json!({"method": "POST", "path": "api/services/light/turn_on",
                 "body": {"entity_id": "light.back"}}),
+            // What people write is not an operation.
             serde_json::json!({"method": "POST", "path": "chat.postMessage",
                 "body": {"text": "please remove the old sign"}}),
+            serde_json::json!({"method": "POST", "path": "v1/search",
+                "body": {"query": "how do I delete a label"}}),
+            serde_json::json!({"method": "POST", "path": "graphql",
+                "body": {"query": "query { deletedItems { id } }"}}),
+            serde_json::json!({"method": "POST", "path": "bitable/records",
+                "body": {"fields": {"Removed": true, "Archive date": "2026-09-30"}}}),
+            serde_json::json!({"method": "POST", "path": "notes", "query": "title=clear+skies"}),
             serde_json::json!({"method": "POST", "path": "swipe/eraser"}),
             serde_json::json!({"method": "POST", "path": "v1.0/removebg"}),
             serde_json::json!({"method": "PATCH", "path": "drive/v3/files/1", "body": {"name": "Plan"}}),
         ] {
             assert!(!deleting(&args), "{args}");
         }
-        // A curated operation is judged by its name, not its description.
+        // A curated operation is judged by its name and path template, not
+        // its description or the values filled into its path.
         let mut update = make_endpoint(
             "drive_update_file",
             "Update file metadata, rename, move, or move a file to trash.",
@@ -7081,14 +7218,41 @@ mod tests {
         update.method = "PATCH".into();
         let mut delete = make_endpoint("chat_delete", "Removes a message.");
         delete.method = "POST".into();
-        let drive = make_service("svc-d", "Drive", "drive", vec![update, delete]);
-        let prepared = |endpoint: &McpToolEndpoint| {
-            prepare_proxy_tool_call(&drive, endpoint, &serde_json::json!({}))
+        let put_file = McpToolEndpoint {
+            method: "PUT".to_string(),
+            path: "/repos/{path}".to_string(),
+            parameters: Some(serde_json::json!([{"name": "path", "in": "path", "required": true}])),
+            ..make_endpoint("put_file", "Create or update a file")
+        };
+        let form = McpToolEndpoint {
+            method: "POST".to_string(),
+            path: "/Messages.json".to_string(),
+            request_content_type: Some("application/x-www-form-urlencoded".to_string()),
+            ..make_endpoint("send_sms", "Send a message")
+        };
+        let drive = make_service(
+            "svc-d",
+            "Drive",
+            "drive",
+            vec![update, delete, put_file, form],
+        );
+        let prepared = |at: usize, args: serde_json::Value| {
+            let endpoint = &drive.endpoints[at];
+            prepare_proxy_tool_call(&drive, endpoint, &args)
                 .unwrap()
                 .looks_like_deleting(endpoint)
         };
-        assert!(!prepared(&drive.endpoints[0]));
-        assert!(prepared(&drive.endpoints[1]));
+        assert!(!prepared(0, serde_json::json!({})));
+        assert!(prepared(1, serde_json::json!({})));
+        assert!(!prepared(2, serde_json::json!({"path": "clear-cache.md"})));
+        assert!(!prepared(
+            3,
+            serde_json::json!({"body": "Body=please+remove+the+sign&To=1"})
+        ));
+        assert!(prepared(
+            3,
+            serde_json::json!({"body": "Action=Delete&Sid=1"})
+        ));
     }
 
     #[test]

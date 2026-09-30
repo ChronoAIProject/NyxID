@@ -1545,6 +1545,7 @@ async fn dispatch_tools_call(
             Some(serde_json::json!({
                 "conversation_id": chat.conversation_id,
                 "agent_role": chat.role,
+                "guest": chat.guest,
                 "tool_name": if known_meta_tool || known_account_tool {
                     tool_name
                 } else {
@@ -1895,6 +1896,11 @@ async fn authorize_mcp_operation(
     })?;
 
     let pending = match approval_outcome {
+        // An approval the owner granted for their own requests is theirs: a
+        // guest in the same chat shares the chat's key, not the approval.
+        approval_service::ApprovalOutcome::Allowed { required: true } if guest_turn(auth) => {
+            return Err(guest_refused(request_id));
+        }
         approval_service::ApprovalOutcome::Allowed { .. } => return Ok(()),
         approval_service::ApprovalOutcome::Denied => {
             return Err(tool_result(
@@ -2088,7 +2094,8 @@ fn guest_tool_refusal(
 /// holds only the services it was granted. An HTTP DELETE and SSH (a shell
 /// can delete anything) stay the owner's; service tool calls are also checked
 /// on everything they send (`PreparedProxyCall::looks_like_deleting`), and
-/// anything that needs the owner's approval is refused rather than asked.
+/// anything behind the owner's approval is refused, never asked and never
+/// run on an approval the owner granted.
 fn guest_may_run(operation: &operation_descriptor::OperationDescriptor) -> bool {
     use crate::models::service_approval_config::ApprovalVerb;
     operation.protocol != operation_descriptor::Protocol::Ssh

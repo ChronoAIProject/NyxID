@@ -1114,7 +1114,10 @@ async fn own_user_id(state: &AppState, bot: &ChannelBot) -> Option<String> {
     }
     let found = bot_user_id(state, bot).await;
     if found.is_none() {
-        tracing::debug!(platform = %bot.platform, "NyxBot could not look up the bot's own ID; any mention counts");
+        tracing::warn!(
+            platform = %bot.platform,
+            "NyxBot could not look up the bot's own ID; any mention counts for five minutes"
+        );
     }
     if let Ok(mut ids) = OWN_USER_IDS.lock() {
         ids.insert(key, (found.clone(), std::time::Instant::now()));

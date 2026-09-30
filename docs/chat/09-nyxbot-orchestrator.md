@@ -466,8 +466,11 @@ or a reply to one of the bot's sent messages (NyxID records the platform
 message an inbound message replies to). Directly relayed Telegram messages are
 judged from the update (an @username or text mention, a reply to the bot); Lark
 and Feishu count only a mention of the bot itself, by its `open_id` (looked up
-once and kept as `gateway_bot_id`; apps granted every group message also get
-mentions of other people), or any mention while that lookup fails; Slack counts `app_mention` events and
+through the adapter's `bot_user_id` when a message mentions someone and cached
+in memory per bot and app for an hour; apps granted every group message also
+get mentions of other people, and `@all` is not a mention of the bot), or any
+mention for five minutes after a failed lookup (logged as a warning); Slack
+counts `app_mention` events and
 Discord its `mentions` and replied-to author; a reply to one of the bot's sent
 messages counts everywhere, and Discord slash commands always do. When a
 platform cannot tell, only the owner's messages count as addressed. Telegram bots see every group message only with privacy mode off or
@@ -485,24 +488,35 @@ turn so late tool calls stay restricted):
   updating), including through the generic proxy tool, but never delete. A call
   is refused with `owner_only` before it is sent when it looks like deleting
   (`PreparedProxyCall::looks_like_deleting`): an HTTP DELETE or a method override
-  asking for one, or a change whose decoded path or query, operation name, body
-  keys or operation-like body fields (`query`, `action`, `command`, …) name a
-  deleting word as a whole word (`delete`, `remove`, `destroy`, `purge`, `erase`,
+  asking for one (header, query or body `_method`), or a deleting word, as a
+  whole word split on punctuation and camelCase, in the operation (a generic
+  proxy call's decoded path, a curated operation's name and path template), the
+  keys of the query and body, or the body and query fields that name an
+  operation or carry code (`action`, `command`, `method`, `sql`, `script`,
+  `code`, a GraphQL mutation): `delete`, `remove`, `destroy`, `purge`, `erase`,
   `wipe`, `revoke`, `uninstall`, `trash`, `truncate`, `drop`, `flush`, `clear`,
-  `unlink`, `archive`, …; `deleteMessage`, a GraphQL `deleteItem`, Drive's
-  `trashed`, Docs' `deleteContentRange`). Descriptions are not read, since they
-  mention deleting in passing ("rename, move, or move a file to trash"), and
-  text a guest writes in a message field is not either. SSH (a shell can delete
+  `unlink`, `rm`, `archive`, … (`deleteMessage`, a GraphQL `deleteItem`, Drive's
+  `trashed`, Docs' `deleteContentRange`). Reads are checked too, since some APIs
+  delete through a GET (Telegram's `deleteMessage`, Slack's `chat.delete`), but
+  only with verbs, so reading `files/deleted`, `/trash` or `/archive` works. A
+  JSON body that does not parse is read whole. Not read: descriptions, which
+  mention deleting in passing ("rename, move, or move a file to trash"), the
+  values filled into a curated path, other query values, search text, the data
+  fields of a body (`fields`, `properties`, `values`, `records`), and
+  text a guest writes in a message field. SSH (a shell can delete
   anything) is refused too, as are `nyxid__` account, team, memory and posting
   tools and connection and Oracle tools (the user's decision: "anyone in the
   group can talk to the bot … dangerous command should only be allowed by the
   owner", with the agent's key scoped to its granted services). The check is
-  best effort: an API that deletes under an unrelated name is not recognised,
-  so a specialist given to a group should hold only services its members may
-  use;
+  best effort: an API that deletes under an unrelated name, or code run over
+  HTTP that deletes without saying so, is not recognised, so a specialist given
+  to a group should hold only services its members may use;
 - an ungranted service, and an operation the owner put behind approval, are
-  refused without a permission or approval request, so a guest never widens
-  what a specialist may use or asks the owner in their name;
+  refused without a permission or approval request, and an approval the owner
+  granted for their own requests does not let a guest in (the chat's key is
+  shared, the approval is not), so a guest never widens what a specialist may
+  use or acts in the owner's name; audit rows of chat tool calls record
+  `guest`;
 - guests' messages are never queued as the owner's work: a busy agent asks them
   to try again (only if they spoke to the bot), a guest turn leaves the owner's
   queued events alone, and guest turns never reset the owner's event-turn loop

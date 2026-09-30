@@ -1327,6 +1327,83 @@ async fn specialist_guests_use_a_granted_service_but_never_delete_through_it() {
             .unwrap(),
         0
     );
+    // An approval the owner granted for their own requests lets the owner in,
+    // never a guest sharing the chat's key.
+    f.state
+        .db
+        .collection::<mongodb::bson::Document>(
+            crate::models::service_approval_config::COLLECTION_NAME,
+        )
+        .update_one(
+            doc! {"service_id": &service},
+            doc! {"$set": {"approval_mode": "grant"}},
+        )
+        .await
+        .unwrap();
+    let now = chrono::Utc::now();
+    f.state
+        .db
+        .collection::<crate::models::approval_grant::ApprovalGrant>(
+            crate::models::approval_grant::COLLECTION_NAME,
+        )
+        .insert_one(crate::models::approval_grant::ApprovalGrant {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: f.owner.clone(),
+            service_id: service.clone(),
+            service_name: "home".into(),
+            requester_type: guest.approval_requester_type().unwrap().to_string(),
+            requester_id: guest.approval_requester_id(),
+            requester_label: None,
+            approval_request_id: uuid::Uuid::new_v4().to_string(),
+            scope: None,
+            granted_at: now,
+            expires_at: now + chrono::Duration::days(1),
+            revoked: false,
+            org_scoped: false,
+        })
+        .await
+        .unwrap();
+    let refused = result(
+        call(
+            &f,
+            &guest,
+            &name,
+            json!({"method": "GET", "path": "/api/states"}),
+        )
+        .await,
+        true,
+    )
+    .await;
+    assert_eq!(refused["error"], "owner_only");
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+    mark_guest(&f, false).await;
+    let owner = authenticate(&f).await;
+    let used = result(
+        call(
+            &f,
+            &owner,
+            &name,
+            json!({"method": "GET", "path": "/api/states"}),
+        )
+        .await,
+        false,
+    )
+    .await;
+    assert_eq!(used["ok"], true);
+    assert_eq!(hits.load(Ordering::SeqCst), 3);
+    // Audit rows say whose turn it was.
+    let guests = f
+        .state
+        .db
+        .collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+        .count_documents(doc! {
+            "event_type": "assistant_mcp_tool_call",
+            "event_data.conversation_id": &f.row.id,
+            "event_data.guest": true,
+        })
+        .await
+        .unwrap();
+    assert!(guests >= 7, "{guests}");
     server.abort();
 }
 
