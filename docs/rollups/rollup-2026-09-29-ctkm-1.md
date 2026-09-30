@@ -4,16 +4,19 @@ This rollup was created from `main` commit
 `cf02492bbf2ecd70099f3f9afec7013d9f2f8598` and fast-forwarded to `main` at
 `e96a50782a97cfe6fe46d357019325de0cc36867` before the change below landed, so
 it can merge into `main` without reverting later work. It makes signup
-invitation codes an operator choice now that billing is in place.
+invitation codes an operator choice now that billing is in place, and
+redesigns the OAuth consent screen to match the connection flows.
 
 ## Included changes and provenance
 
-The source PR remains the authoritative implementation discussion and merge
-record.
+Each source PR remains the authoritative implementation discussion and merge
+record. For both, the source and squash deltas share a stable patch ID and
+`git merge-tree` reproduces the landed tree exactly.
 
 | Source PR | Reviewed source head | Landed squash | Intended behavior / scope |
 | --- | --- | --- | --- |
 | [#1690](https://github.com/ChronoAIProject/NyxID/pull/1690) | `dc5fb1b4be000995027c90412701d66c97766588` | `e7691afe605770e67128376bf87b610c5e8f37a8` | Gate the signup invitation-code requirement behind the global, default-on `auth:invitation-code` feature flag, replacing the `INVITE_CODE_REQUIRED` environment variable. Invitation-code management is retained. |
+| [#1701](https://github.com/ChronoAIProject/NyxID/pull/1701) | `fbf21ac1e7dbed35656b777f64526d8d5bf0f867` | `68ad6d8146460ebd721158522c9fabea4256140e` | Redesign `/oauth-consent` to match the connect-link and channel-bot screens: plain-language permissions, collapsed app details, no client-side risk badges, catalog service descriptions, and scrollable service lists. `GET /api/v1/user-services` list rows add optional `catalog_service_description`. The decision form posted to `/oauth/authorize/decision` is unchanged. |
 
 The six `main` commits between the rollup base and `e96a5078` (#1694–#1699,
 NyxBot channel/gateway work and service-account catalog skill assignment) are
