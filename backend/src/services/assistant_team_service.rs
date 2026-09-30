@@ -15,7 +15,7 @@ use mongodb::{
     options::ReturnDocument,
 };
 use serde::Serialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use uuid::Uuid;
 
 use crate::{
@@ -24,7 +24,7 @@ use crate::{
     models::{
         assistant_acknowledgement::{AssistantAcknowledgement, COLLECTION_NAME as ACKS},
         assistant_agent::{
-            AgentGrants, AgentKind, AssistantAgent, COLLECTION_NAME as AGENTS,
+            AgentGrants, AgentKind, AssistantAgent, COLLECTION_NAME as AGENTS, GuestAccess,
             MAX_DISPLAY_NAME_CHARS, MAX_MEMORY_NOTE_CHARS, MAX_MEMORY_NOTES, MAX_PERSONA_CHARS,
             MemoryNote,
         },
@@ -410,6 +410,8 @@ pub struct GrantTargets {
     pub service_ids: Vec<String>,
     pub platform_service_ids: Vec<String>,
     pub slugs: Vec<String>,
+    /// The service ID each requested name or ID resolved to.
+    pub ids_by_request: HashMap<String, String>,
 }
 
 pub async fn resolve_targets(
@@ -503,6 +505,9 @@ pub async fn resolve_each_target(
                 (&mut resolved.service_ids, service.service_id.clone())
             }
         };
+        resolved
+            .ids_by_request
+            .insert(target.to_string(), id.clone());
         if !list.contains(&id) {
             list.push(id);
             resolved.slugs.push(service.service_slug.clone());
@@ -601,6 +606,7 @@ pub async fn create_specialist(
             service_ids: request.targets.service_ids.clone(),
             platform_service_ids: request.targets.platform_service_ids.clone(),
             account_read: request.account_read,
+            guest_access: BTreeMap::new(),
         },
         created_by: request.created_by.into(),
         model,
@@ -801,22 +807,34 @@ pub async fn update_agent(
 }
 
 /// A change to a specialist's grants. Merged inside the transaction against
-/// the grants it reads, so concurrent changes never undo each other.
+/// the grants it reads, so concurrent changes never undo each other. Guest
+/// access entries given with a change are laid over the current ones; every
+/// change keeps entries only for granted services, and none for the default
+/// level.
 #[derive(Clone, Debug)]
 pub enum GrantChange {
-    /// The owner's full replacement.
+    /// The owner's full replacement of services and account access.
     Replace(AgentGrants),
     /// Add these targets, and account access when `account_read` is set.
     Add(AgentGrants),
     /// Remove these targets, and account access when `account_read` is set.
     Remove(AgentGrants),
+    /// Set what guests may do with these granted services.
+    Guests(BTreeMap<String, GuestAccess>),
 }
 
 impl GrantChange {
     pub fn apply(&self, current: &AgentGrants) -> AgentGrants {
         let mut grants = current.clone();
+        let mut guests = BTreeMap::new();
         match self {
-            Self::Replace(replacement) => grants = replacement.clone(),
+            Self::Replace(replacement) => {
+                grants = AgentGrants {
+                    guest_access: current.guest_access.clone(),
+                    ..replacement.clone()
+                };
+                guests = replacement.guest_access.clone();
+            }
             Self::Add(add) => {
                 for (list, ids) in [
                     (&mut grants.service_ids, &add.service_ids),
@@ -829,6 +847,7 @@ impl GrantChange {
                     }
                 }
                 grants.account_read |= add.account_read;
+                guests = add.guest_access.clone();
             }
             Self::Remove(remove) => {
                 grants
@@ -839,7 +858,20 @@ impl GrantChange {
                     .retain(|id| !remove.platform_service_ids.contains(id));
                 grants.account_read &= !remove.account_read;
             }
+            Self::Guests(levels) => guests = levels.clone(),
         }
+        grants.guest_access.extend(guests);
+        let granted: HashSet<&String> = grants
+            .service_ids
+            .iter()
+            .chain(&grants.platform_service_ids)
+            .collect();
+        grants.guest_access = grants
+            .guest_access
+            .iter()
+            .filter(|(id, level)| granted.contains(id) && **level != GuestAccess::Use)
+            .map(|(id, level)| (id.clone(), *level))
+            .collect();
         grants
     }
 }
@@ -975,6 +1007,7 @@ pub async fn set_grants(
             "service_ids": &agent.grants.service_ids,
             "platform_service_ids": &agent.grants.platform_service_ids,
             "account_read": agent.grants.account_read,
+            "guest_access": &agent.grants.guest_access,
         }),
     )
     .await;
@@ -1288,6 +1321,9 @@ pub struct AgentSummary {
     pub status: &'static str,
     pub services: Vec<String>,
     pub account_read: bool,
+    /// What guests may do with each granted service, by the name in
+    /// `services`: `read`, `use` or `all`.
+    pub guest_access: BTreeMap<String, &'static str>,
     pub pending_requests: Vec<RequestSummary>,
     pub last_reply: Option<ReplySummary>,
     pub home_conversation_id: Option<String>,
@@ -1500,6 +1536,22 @@ pub async fn summaries(
                 .map(|id| names.get(id).cloned().unwrap_or_else(|| id.clone()))
                 .collect(),
             account_read: agent.grants.account_read,
+            guest_access: agent
+                .grants
+                .service_ids
+                .iter()
+                .chain(&agent.grants.platform_service_ids)
+                .map(|id| {
+                    let name = names.get(id).cloned().unwrap_or_else(|| id.clone());
+                    let level = agent
+                        .grants
+                        .guest_access
+                        .get(id)
+                        .copied()
+                        .unwrap_or_default();
+                    (name, level.as_str())
+                })
+                .collect(),
             pending_requests: requests
                 .iter()
                 .filter(|request| {

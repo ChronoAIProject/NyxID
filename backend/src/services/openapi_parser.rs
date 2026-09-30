@@ -21,6 +21,8 @@ pub struct ParsedEndpoint {
     pub request_body_required: bool,
     pub response: OperationResponseContract,
     pub risk: Option<EndpointRisk>,
+    /// `x-aevatar-tool.destructive`: the operation deletes or overwrites.
+    pub destructive: bool,
     pub supports_idempotency_key: bool,
 }
 
@@ -152,6 +154,11 @@ fn parse_endpoints_from_spec(
                         EndpointRisk::Write
                     }
                 });
+            let destructive = operation
+                .get("x-aevatar-tool")
+                .and_then(|value| value.get("destructive"))
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
             let supports_idempotency_key = operation
                 .get("x-nyxid-idempotency-key")
                 .and_then(|value| value.as_bool())
@@ -193,6 +200,7 @@ fn parse_endpoints_from_spec(
                 request_body_required: request_body.required,
                 response,
                 risk,
+                destructive,
                 supports_idempotency_key,
             });
         }
@@ -343,7 +351,7 @@ fn generate_name(method: &str, path: &str) -> String {
 }
 
 /// Sanitize a string into a valid MCP tool name: ^[a-z][a-z0-9_]*$
-fn sanitize_name(raw: &str) -> String {
+pub(crate) fn sanitize_name(raw: &str) -> String {
     let cleaned: String = raw
         .chars()
         .map(|c| {

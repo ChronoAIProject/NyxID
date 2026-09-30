@@ -14,7 +14,7 @@
 //! surface is identical (e.g. `api-github` / `api-github-pat`, or the
 //! Lark / Feishu domain pairs).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
 
 const SPEC_PATH_PREFIX: &str = "/api/v1/catalog-specs/";
@@ -264,6 +264,41 @@ static PARSED_SPECS: LazyLock<HashMap<&'static str, Arc<serde_json::Value>>> = L
     },
 );
 
+/// Operations each overlay marks `x-aevatar-tool.destructive`, by spec key:
+/// their endpoint names (sanitized operation IDs) and `METHOD path` routes.
+static DESTRUCTIVE_OPERATIONS: LazyLock<HashMap<&'static str, HashSet<String>>> =
+    LazyLock::new(|| {
+        PARSED_SPECS
+            .iter()
+            .map(|(key, spec)| {
+                let mut operations = HashSet::new();
+                for (path, item) in spec["paths"].as_object().into_iter().flatten() {
+                    for (method, operation) in item.as_object().into_iter().flatten() {
+                        if operation["x-aevatar-tool"]["destructive"].as_bool() != Some(true) {
+                            continue;
+                        }
+                        operations.insert(format!("{} {path}", method.to_ascii_uppercase()));
+                        if let Some(id) = operation["operationId"].as_str() {
+                            operations.insert(super::openapi_parser::sanitize_name(id));
+                        }
+                    }
+                }
+                (*key, operations)
+            })
+            .collect()
+    });
+
+/// Whether the hosted overlay of a catalog service marks this operation
+/// destructive (`x-aevatar-tool.destructive`), matched by name or route.
+pub fn marks_destructive(slug: &str, method: &str, path: &str, name: &str) -> bool {
+    spec_key_for_slug(slug)
+        .and_then(|key| DESTRUCTIVE_OPERATIONS.get(key))
+        .is_some_and(|operations| {
+            operations.contains(name)
+                || operations.contains(&format!("{} {path}", method.to_ascii_uppercase()))
+        })
+}
+
 /// Parsed overlay document for a spec key (the `{spec_key}` URL segment).
 pub fn spec_for_key(spec_key: &str) -> Option<Arc<serde_json::Value>> {
     PARSED_SPECS.get(spec_key).cloned()
@@ -313,6 +348,42 @@ pub fn hydrated_slugs() -> impl Iterator<Item = &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Guests' default access refuses what an overlay marks destructive,
+    /// matched by endpoint name or route.
+    #[test]
+    fn overlays_say_which_operations_are_destructive() {
+        assert!(marks_destructive(
+            "api-telegram-bot",
+            "POST",
+            "/deleteMessage",
+            "delete_message"
+        ));
+        assert!(marks_destructive(
+            "api-telegram-bot",
+            "post",
+            "/deleteMessage",
+            "renamed"
+        ));
+        assert!(!marks_destructive(
+            "api-telegram-bot",
+            "POST",
+            "/sendMessage",
+            "send_message"
+        ));
+        assert!(marks_destructive(
+            "api-google-sheets",
+            "POST",
+            "/v4/spreadsheets/{spreadsheetId}/values/{range}:clear",
+            "sheets_clear_values"
+        ));
+        assert!(!marks_destructive(
+            "custom-service",
+            "DELETE",
+            "/x",
+            "delete_x"
+        ));
+    }
 
     /// Frozen from 28fd2c44, including the original eight api-google operations.
     /// Six Drive contracts were deliberately corrected for automatic activation;

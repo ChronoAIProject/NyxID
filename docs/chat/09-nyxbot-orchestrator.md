@@ -116,7 +116,8 @@ NyxBot only: `spawn_subagent` (name, description, services, account_read,
 specialty, optional task), `message_subagent` (runs in the specialist's home
 thread; returns started, busy or pool_full), `wait_for_subagents` (≤ 120 s),
 `list_subagents`, `read_subagent`, `grant_subagent`, `revoke_subagent`,
-`update_subagent`, `decide_permission`, `destroy_subagent`,
+`set_guest_access` (what guests may do with a specialist's services: `read`,
+`use` or `all`), `update_subagent`, `decide_permission`, `destroy_subagent`,
 `create_group`, `list_groups`, `post_to_group`, `update_group`, `delete_group`,
 `settings_link` (the exact NyxID page for configuration the tools do not cover,
 such as creating an agent key, security, profile, billing, organizations or
@@ -483,40 +484,38 @@ turn so late tool calls stay restricted):
 - NyxBot holds every service of the owner, so its guest turns call no tools at
   all and answer from the conversation; to let a chat's members use a service,
   the owner gives the chat a specialist with just that service;
-- a specialist's guest turns use its granted services: they discover tools and
-  run operations that read or change things (turning a light on, creating or
-  updating), including through the generic proxy tool, but never delete. A call
-  is refused with `owner_only` before it is sent when it looks like deleting
-  (`PreparedProxyCall::looks_like_deleting`): an HTTP DELETE or a method override
-  asking for one (header, query or body `_method`), or a deleting word, as a
-  whole word split on punctuation and camelCase, in the operation (a generic
-  proxy call's decoded path, a curated operation's name and path template), the
-  keys of the query and body, or the body and query fields that name an
-  operation or carry code (`action`, `command`, `method`, `sql`, `script`,
-  `code`, a GraphQL mutation): `delete`, `remove`, `destroy`, `purge`, `erase`,
-  `wipe`, `revoke`, `uninstall`, `trash`, `truncate`, `drop`, `flush`, `clear`,
-  `unlink`, `rm`, `archive`, … (`deleteMessage`, a GraphQL `deleteItem`, Drive's
-  `trashed`, Docs' `deleteContentRange`). Reads are checked too, since some APIs
-  delete through a GET (Telegram's `deleteMessage`, Slack's `chat.delete`), but
-  only with verbs, so reading `files/deleted`, `/trash` or `/archive` works. A
-  JSON body that does not parse is read whole. Not read: descriptions, which
-  mention deleting in passing ("rename, move, or move a file to trash"), the
-  values filled into a curated path, other query values, search text, the data
-  fields of a body (`fields`, `properties`, `values`, `records`), and
-  text a guest writes in a message field. SSH (a shell can delete
-  anything) is refused too, as are `nyxid__` account, team, memory and posting
-  tools and connection and Oracle tools (the user's decision: "anyone in the
-  group can talk to the bot … dangerous command should only be allowed by the
-  owner", with the agent's key scoped to its granted services). The check is
-  best effort: an API that deletes under an unrelated name, or code run over
-  HTTP that deletes without saying so, is not recognised, so a specialist given
-  to a group should hold only services its members may use;
+- a specialist's guest turns use its granted services as far as the owner lets
+  guests use each one (`AgentGrants::guest_access`, per specialist and service,
+  the user's decision: guests "can use them" but not delete, and sometimes the
+  owner wants them to edit sheets, docs or pages too). Levels:
+  - `read`: reads only (GET, HEAD, OPTIONS);
+  - `use`, the default: reads and changes, but never an HTTP DELETE (or a
+    method override asking for one: an `X-HTTP-Method-Override`-style header or
+    a `_method` query or body field) or an operation its spec marks
+    destructive (`x-aevatar-tool.destructive`: the catalog overlays mark
+    deletes and overwrites, such as Telegram's `deleteMessage`, Sheets'
+    `values:clear` and `values` updates, Docs' `batchUpdate` and Notion's page
+    update; read from the overlay compiled into NyxID, so no stored endpoint
+    changes, or from a mounted instance spec);
+  - `all`: everything the specialist may do with the service.
+  Nothing is judged from names or words: a service without typed operations
+  (the generic proxy) is judged by its HTTP method alone. The owner sets levels
+  on the agent's Grants (a select per service) or by asking NyxBot
+  (`nyxid__set_guest_access`, "let the group edit the office sheet");
+  `nyxid__list_subagents` and the agent summary show them (`guest_access`).
+  Levels are kept across other grant changes and dropped with the service.
+  Calls beyond the level are refused with `owner_only` (naming the service and
+  its level) before anything is sent. SSH (a shell can do anything) stays the
+  owner's, as do `nyxid__` account, team, memory and posting tools and
+  connection and Oracle tools (the user's decision: "anyone in the group can
+  talk to the bot … dangerous command should only be allowed by the owner",
+  with the agent's key scoped to its granted services);
 - an ungranted service, and an operation the owner put behind approval, are
-  refused without a permission or approval request, and an approval the owner
-  granted for their own requests does not let a guest in (the chat's key is
-  shared, the approval is not), so a guest never widens what a specialist may
-  use or acts in the owner's name; audit rows of chat tool calls record
-  `guest`;
+  refused without a permission or approval request at every level, and an
+  approval the owner granted for their own requests does not let a guest in
+  (the chat's key is shared, the approval is not), so a guest never widens
+  what a specialist may use or acts in the owner's name; audit rows of chat
+  tool calls record `guest`;
 - guests' messages are never queued as the owner's work: a busy agent asks them
   to try again (only if they spoke to the bot), a guest turn leaves the owner's
   queued events alone, and guest turns never reset the owner's event-turn loop

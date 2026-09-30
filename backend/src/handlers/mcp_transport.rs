@@ -1745,7 +1745,16 @@ async fn dispatch_tools_call(
             );
         }
     };
-    if let Some(refused) = guest_deleting_refusal(auth, &prepared, endpoint, request.id.clone()) {
+    if let Some(refused) = guest_service_refusal(
+        state,
+        auth,
+        service,
+        endpoint,
+        &prepared,
+        request.id.clone(),
+    )
+    .await
+    {
         return refused;
     }
     let operation = prepared.operation_descriptor();
@@ -1870,8 +1879,9 @@ async fn authorize_mcp_operation(
     operation: &operation_descriptor::OperationDescriptor,
     request_id: Option<serde_json::Value>,
 ) -> Result<(), Response> {
-    // A guest turn uses the chat agent's services, but never deletes.
-    if guest_turn(auth) && !guest_may_run(operation) {
+    // A shell can do anything: SSH stays the owner's. Service calls were
+    // checked against the owner's guest access before this point.
+    if guest_turn(auth) && operation.protocol == operation_descriptor::Protocol::Ssh {
         return Err(guest_refused(request_id));
     }
     let approval_owner_user_id = auth.effective_approval_owner_user_id();
@@ -2089,27 +2099,61 @@ fn guest_tool_refusal(
     (!guest_tool_allowed(tool_name)).then(|| guest_refused(request_id))
 }
 
-/// What a guest (someone in the chat other than the owner) may run with the
-/// chat agent's services: anything but deleting. The agent's key already
-/// holds only the services it was granted. An HTTP DELETE and SSH (a shell
-/// can delete anything) stay the owner's; service tool calls are also checked
-/// on everything they send (`PreparedProxyCall::looks_like_deleting`), and
-/// anything behind the owner's approval is refused, never asked and never
-/// run on an approval the owner granted.
-fn guest_may_run(operation: &operation_descriptor::OperationDescriptor) -> bool {
-    use crate::models::service_approval_config::ApprovalVerb;
-    operation.protocol != operation_descriptor::Protocol::Ssh
-        && operation.verb != ApprovalVerb::Destructive
-}
-
-/// A guest's service tool call that looks like it deletes something.
-fn guest_deleting_refusal(
+/// Refuse a guest's service call beyond what the owner lets guests do with
+/// that service on this specialist (`AgentGrants::guest_access`): `read`
+/// runs only reads, `use` (the default) anything but an HTTP DELETE (or a
+/// method override asking for one) or an operation its spec marks
+/// destructive, `all` everything the specialist may. The agent's key already
+/// holds only its granted services, and operations behind the owner's
+/// approval are refused later (`authorize_mcp_operation`) at every level.
+async fn guest_service_refusal(
+    state: &AppState,
     auth: &McpAuthContext,
-    prepared: &mcp_service::PreparedProxyCall,
+    service: &mcp_service::McpToolService,
     endpoint: &mcp_service::McpToolEndpoint,
+    prepared: &mcp_service::PreparedProxyCall,
     request_id: Option<serde_json::Value>,
 ) -> Option<Response> {
-    (guest_turn(auth) && prepared.looks_like_deleting(endpoint)).then(|| guest_refused(request_id))
+    use crate::models::assistant_agent::GuestAccess;
+    let chat = auth.chat.as_ref().filter(|chat| chat.guest)?;
+    let Ok(agent) =
+        crate::services::assistant_team_service::agent(&state.db, &chat.user_id, &chat.agent_id)
+            .await
+    else {
+        return Some(guest_refused(request_id));
+    };
+    let access = agent
+        .grants
+        .guest_access
+        .get(&service.service_id)
+        .copied()
+        .unwrap_or_default();
+    let destructive = service
+        .durable_endpoint_metadata
+        .get(&endpoint.endpoint_id)
+        .is_some_and(|metadata| metadata.destructive);
+    let method = prepared.effective_method();
+    let allowed = match access {
+        GuestAccess::All => true,
+        GuestAccess::Use => method != reqwest::Method::DELETE && !destructive,
+        GuestAccess::Read => {
+            matches!(
+                method,
+                reqwest::Method::GET | reqwest::Method::HEAD | reqwest::Method::OPTIONS
+            ) && !destructive
+        }
+    };
+    (!allowed).then(|| {
+        tool_result(
+            request_id,
+            &crate::services::assistant_acknowledgement_service::guest_service_refusal(
+                &service.service_slug,
+                access,
+            )
+            .to_string(),
+            true,
+        )
+    })
 }
 
 /// A channel chat member who is not the owner asked for this turn.
@@ -2118,7 +2162,7 @@ fn guest_turn(auth: &McpAuthContext) -> bool {
 }
 
 /// Guest turns may discover tools and use services (each call is checked by
-/// `guest_deleting_refusal` and `authorize_mcp_tool_operation`). Account,
+/// `guest_service_refusal` and `authorize_mcp_tool_operation`). Account,
 /// team, memory, connection, SSH and Oracle tools act for the owner and are
 /// refused.
 fn guest_tool_allowed(tool_name: &str) -> bool {
@@ -2315,7 +2359,16 @@ async fn handle_meta_call_tool(
             return tool_result(request_id, &format!("Invalid tool arguments: {e}"), true);
         }
     };
-    if let Some(refused) = guest_deleting_refusal(auth, &prepared, endpoint, request_id.clone()) {
+    if let Some(refused) = guest_service_refusal(
+        state,
+        auth,
+        service,
+        endpoint,
+        &prepared,
+        request_id.clone(),
+    )
+    .await
+    {
         return refused;
     }
     let operation = prepared.operation_descriptor();

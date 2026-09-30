@@ -1,4 +1,5 @@
 use super::*;
+use crate::models::assistant_agent::GuestAccess;
 use crate::services::{
     assistant_acknowledgement_service as acks, assistant_agent_credential_service as credentials,
     assistant_authority_tests::{
@@ -1178,8 +1179,9 @@ async fn specialist_guest_turns_use_services_but_never_delete() {
         .await
         .unwrap();
     assert!(!String::from_utf8_lossy(&bytes).contains("owner_only"));
-    // Operations: an HTTP DELETE and SSH (a shell can delete anything) are
-    // the owner's; reads and changes pass on to the usual checks.
+    // SSH (a shell can do anything) is the owner's; HTTP operations pass on
+    // to the usual checks (what guests may do with a service is decided
+    // before, from the owner's guest access).
     let target = crate::services::mcp_approval::McpApprovalTarget {
         service_id: uuid::Uuid::new_v4().to_string(),
         service_name: "Example".into(),
@@ -1192,13 +1194,13 @@ async fn specialist_guest_turns_use_services_but_never_delete() {
         operation_descriptor::SshOperationKind::Exec,
         Some("ls"),
     );
-    for operation in [&delete, &ssh] {
-        let refused =
-            authorize_mcp_operation(&f.state, &auth, target.clone(), operation, Some(json!(1)))
-                .await
-                .unwrap_err();
-        assert_eq!(result(refused, true).await["error"], "owner_only");
-    }
+    let refused = authorize_mcp_operation(&f.state, &auth, target.clone(), &ssh, Some(json!(1)))
+        .await
+        .unwrap_err();
+    assert_eq!(result(refused, true).await["error"], "owner_only");
+    authorize_mcp_operation(&f.state, &auth, target.clone(), &delete, Some(json!(1)))
+        .await
+        .unwrap_or_else(|_| panic!("DELETE"));
     for method in ["GET", "POST", "PUT", "PATCH"] {
         let operation =
             operation_descriptor::build_mcp_descriptor(method, "/api/services/light/turn_on", None);
@@ -1208,11 +1210,12 @@ async fn specialist_guest_turns_use_services_but_never_delete() {
     }
 }
 
-/// A specialist's guest turns use its granted services end to end, are
-/// refused anything that looks like deleting before it is sent, and never
-/// ask the owner to approve: a guest's request would look like the owner's.
+/// A specialist's guest turns use its granted services as far as the owner
+/// lets guests (read, use without deleting, or all), refused before anything
+/// is sent, and never ask the owner to approve or run on the owner's
+/// approvals: a guest's request would look like the owner's.
 #[tokio::test]
-async fn specialist_guests_use_a_granted_service_but_never_delete_through_it() {
+async fn specialist_guests_use_a_granted_service_as_far_as_the_owner_lets_them() {
     let f = fixture("chat_mcp_guest_calls").await;
     let hits = Arc::new(AtomicUsize::new(0));
     let count = hits.clone();
@@ -1259,26 +1262,136 @@ async fn specialist_guests_use_a_granted_service_but_never_delete_through_it() {
     .unwrap();
     mark_guest(&f, true).await;
     let guest = authenticate(&f).await;
+    let set_access = |access: GuestAccess| {
+        let state = f.state.clone();
+        let owner = f.owner.clone();
+        let agent = f.chat.agent_id.clone();
+        let service = service.clone();
+        async move {
+            crate::services::assistant_team_service::set_grants(
+                &state.db,
+                &owner,
+                &agent,
+                crate::services::assistant_team_service::GrantChange::Guests(
+                    [(service, access)].into(),
+                ),
+            )
+            .await
+            .unwrap();
+        }
+    };
+    // By default guests use the service but never delete: an HTTP DELETE,
+    // or a method override asking for one, whatever the path says.
     for args in [
         json!({"method": "DELETE", "path": "/items/1"}),
-        json!({"method": "POST", "path": "/bot1/deleteMessage"}),
         json!({"method": "POST", "path": "/items/1?_method=DELETE"}),
-        json!({"method": "POST", "path": "/graphql",
-            "body": {"query": "mutation { removeUser(id: 1) }"}}),
+        json!({"method": "POST", "path": "/items/1", "body": {"_method": "delete"}}),
     ] {
         let refused = result(call(&f, &guest, &name, args.clone()).await, true).await;
         assert_eq!(refused["error"], "owner_only", "{args}");
+        assert_eq!(refused["guest_access"], "use", "{args}");
     }
     assert_eq!(hits.load(Ordering::SeqCst), 0);
     for args in [
         json!({"method": "GET", "path": "/api/states"}),
         json!({"method": "POST", "path": "/api/services/light/turn_on",
             "body": {"entity_id": "light.office"}}),
+        json!({"method": "PUT", "path": "/notes/clear-the-gutters"}),
     ] {
         let used = result(call(&f, &guest, &name, args.clone()).await, false).await;
         assert_eq!(used["ok"], true, "{args}");
     }
-    assert_eq!(hits.load(Ordering::SeqCst), 2);
+    assert_eq!(hits.load(Ordering::SeqCst), 3);
+    // The owner lets guests only look things up...
+    set_access(GuestAccess::Read).await;
+    let refused = result(
+        call(
+            &f,
+            &guest,
+            &name,
+            json!({"method": "POST", "path": "/api/services/light/turn_on"}),
+        )
+        .await,
+        true,
+    )
+    .await;
+    assert_eq!(refused["guest_access"], "read");
+    let used = result(
+        call(
+            &f,
+            &guest,
+            &name,
+            json!({"method": "GET", "path": "/api/states"}),
+        )
+        .await,
+        false,
+    )
+    .await;
+    assert_eq!(used["ok"], true);
+    assert_eq!(hits.load(Ordering::SeqCst), 4);
+    // ...or do everything the specialist may.
+    set_access(GuestAccess::All).await;
+    let used = result(
+        call(
+            &f,
+            &guest,
+            &name,
+            json!({"method": "DELETE", "path": "/items/1"}),
+        )
+        .await,
+        false,
+    )
+    .await;
+    assert_eq!(used["ok"], true);
+    assert_eq!(hits.load(Ordering::SeqCst), 5);
+    // An operation its spec marks destructive (deletes or overwrites) is
+    // beyond "use" too, whatever its method.
+    let mut services = load_all_services_for_meta_tools(&f.state, &guest)
+        .await
+        .unwrap();
+    let marked = services
+        .iter_mut()
+        .find(|candidate| candidate.service_id == service)
+        .unwrap();
+    let endpoint_id = marked.endpoints[0].endpoint_id.clone();
+    marked
+        .durable_endpoint_metadata
+        .entry(endpoint_id)
+        .or_default()
+        .destructive = true;
+    let marked = services
+        .iter()
+        .find(|candidate| candidate.service_id == service)
+        .unwrap();
+    let endpoint = &marked.endpoints[0];
+    let prepared = mcp_service::prepare_proxy_tool_call(
+        marked,
+        endpoint,
+        &json!({"method": "POST", "path": "/sheet/values"}),
+    )
+    .unwrap();
+    assert!(
+        guest_service_refusal(&f.state, &guest, marked, endpoint, &prepared, None)
+            .await
+            .is_none()
+    );
+    set_access(GuestAccess::Use).await;
+    assert!(
+        guest_service_refusal(&f.state, &guest, marked, endpoint, &prepared, None)
+            .await
+            .is_some()
+    );
+    // The owner's own turns are never limited by guest access.
+    mark_guest(&f, false).await;
+    let owner = authenticate(&f).await;
+    assert!(
+        guest_service_refusal(&f.state, &owner, marked, endpoint, &prepared, None)
+            .await
+            .is_none()
+    );
+    mark_guest(&f, true).await;
+    // Approvals stay the owner's at every level.
+    set_access(GuestAccess::All).await;
     // A service the owner has put behind approval: the guest is refused and
     // no approval request reaches the owner.
     let now = chrono::Utc::now();
@@ -1315,7 +1428,7 @@ async fn specialist_guests_use_a_granted_service_but_never_delete_through_it() {
     )
     .await;
     assert_eq!(refused["error"], "owner_only");
-    assert_eq!(hits.load(Ordering::SeqCst), 2);
+    assert_eq!(hits.load(Ordering::SeqCst), 5);
     assert_eq!(
         f.state
             .db
@@ -1375,7 +1488,7 @@ async fn specialist_guests_use_a_granted_service_but_never_delete_through_it() {
     )
     .await;
     assert_eq!(refused["error"], "owner_only");
-    assert_eq!(hits.load(Ordering::SeqCst), 2);
+    assert_eq!(hits.load(Ordering::SeqCst), 5);
     mark_guest(&f, false).await;
     let owner = authenticate(&f).await;
     let used = result(
@@ -1390,7 +1503,7 @@ async fn specialist_guests_use_a_granted_service_but_never_delete_through_it() {
     )
     .await;
     assert_eq!(used["ok"], true);
-    assert_eq!(hits.load(Ordering::SeqCst), 3);
+    assert_eq!(hits.load(Ordering::SeqCst), 6);
     // Audit rows say whose turn it was.
     let guests = f
         .state

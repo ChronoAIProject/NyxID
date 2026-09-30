@@ -2402,6 +2402,11 @@ async fn group_chats_share_one_thread_and_members_talk_as_guests() {
 async fn direct_group_messages_need_a_mention_or_a_reply_to_the_bot() {
     let (state, calls, server) = setup("nyxbot_direct_groups").await;
     let (row, _) = channel(&state, "direct").await;
+    // The bot's own Lark open_id, as its app reports it.
+    TEST_BOT_USER_IDS
+        .lock()
+        .unwrap()
+        .insert(row.channel_bot_id.clone(), "ou_bot".into());
     let mut bot = bot_doc("lark", "Helper bot");
     bot.insert("_id", &row.channel_bot_id);
     state
@@ -2540,6 +2545,15 @@ async fn direct_group_messages_need_a_mention_or_a_reply_to_the_bot() {
         ("ou_bob", "Bob"),
         "@_user_1 what is on the menu?",
         mention(),
+    )
+    .await;
+    assert_eq!(turns(2).await, 2);
+    // Mentioning someone else is not talking to the bot.
+    post(
+        "msg-6",
+        ("ou_bob", "Bob"),
+        "@_user_1 can you check?",
+        json!([{"key": "@_user_1", "id": {"open_id": "ou_carol"}, "name": "Carol"}]),
     )
     .await;
     assert_eq!(turns(2).await, 2);
@@ -4237,6 +4251,7 @@ async fn org_group_bots_moved_to_a_specialist_keep_answering() {
                 service_ids: vec![office.clone()],
                 platform_service_ids: Vec::new(),
                 slugs: vec!["home-assistant-office".into()],
+                ids_by_request: Default::default(),
             },
             account_read: false,
             specialty: None,

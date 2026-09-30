@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -32,6 +34,46 @@ pub struct AgentGrants {
     /// Read-only NyxID account tools.
     #[serde(default)]
     pub account_read: bool,
+    /// What people other than the owner (guests in the chats the specialist
+    /// answers) may do with each granted service, by service ID. A service
+    /// without an entry uses [`GuestAccess::Use`]; entries exist only for
+    /// granted services.
+    #[serde(default)]
+    pub guest_access: BTreeMap<String, GuestAccess>,
+}
+
+/// What guests may do with one of a specialist's services. Operations the
+/// owner put behind approval stay the owner's at every level.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GuestAccess {
+    /// Reads only (GET, HEAD, OPTIONS).
+    Read,
+    /// Reads and changes, never an HTTP DELETE or an operation its catalog
+    /// marks destructive.
+    #[default]
+    Use,
+    /// Everything the specialist may do with the service.
+    All,
+}
+
+impl GuestAccess {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Use => "use",
+            Self::All => "all",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "read" => Some(Self::Read),
+            "use" => Some(Self::Use),
+            "all" => Some(Self::All),
+            _ => None,
+        }
+    }
 }
 
 /// One thing the agent chose to remember. Agent-authored, bounded, never

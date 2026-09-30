@@ -14,6 +14,7 @@ use crate::{
     models::{
         api_key::{ApiKey, COLLECTION_NAME as KEYS},
         assistant_acknowledgement::{AssistantAcknowledgement, COLLECTION_NAME as ACKS},
+        assistant_agent::GuestAccess,
         assistant_agent_credential::COLLECTION_NAME as CREDENTIALS,
         assistant_conversation::{
             AgentRole, AssistantConversation, COLLECTION_NAME as CONVERSATIONS,
@@ -37,7 +38,8 @@ pub struct ChatAuthority {
     pub agent_id: String,
     pub agent_name: String,
     /// The thread's newest turn acts for a channel chat guest (not the
-    /// owner): read-only service calls only; see `guest_refusal`.
+    /// owner): service calls only as far as the owner lets guests use each
+    /// service (`AgentGrants::guest_access`); see `guest_refusal`.
     pub guest: bool,
 }
 impl ChatAuthority {
@@ -66,8 +68,22 @@ pub fn orchestrator_guest_refusal() -> Value {
 pub fn guest_refusal() -> Value {
     json!({"error": "owner_only", "instructions": "You are answering someone other than the \
         owner. Only the owner can ask for account actions, new connections, more access, \
-        anything that needs their approval or deleting anything. Help with your services \
-        otherwise, and say that only the bot's owner can ask for that."})
+        anything that needs their approval, or more than the owner lets guests do with a \
+        service. Help with your services otherwise, and say that only the bot's owner can \
+        ask for that."})
+}
+
+/// What a guest turn is told when a service call goes beyond what the owner
+/// lets guests do with that service.
+pub fn guest_service_refusal(service: &str, access: GuestAccess) -> Value {
+    let allowed = match access {
+        GuestAccess::Read => "only look things up with",
+        GuestAccess::Use | GuestAccess::All => "use, but not delete or overwrite with,",
+    };
+    json!({"error": "owner_only", "service": service, "guest_access": access.as_str(),
+        "instructions": format!("You are answering someone other than the owner, who may \
+        {allowed} {service}. Help within that, and say that only the bot's owner can ask for \
+        more; the owner can change it by asking NyxBot.")})
 }
 
 pub async fn for_key(
