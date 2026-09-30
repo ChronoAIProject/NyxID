@@ -68,6 +68,7 @@ def metadata():
         "checkout_commit_and_tree": command_output(["git", "rev-parse", "HEAD", "HEAD^{tree}"]),
         "rust": command_output(["rustc", "-Vv"]),
         "coverage_tool": command_output(["cargo", "llvm-cov", "--version"]),
+        "test_runner": command_output(["cargo", "nextest", "--version"]),
     }
 
 

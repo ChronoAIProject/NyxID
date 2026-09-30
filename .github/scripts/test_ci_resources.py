@@ -125,8 +125,13 @@ class ResourceWrapperTests(unittest.TestCase):
             child.send_signal(signal.SIGTERM)
             _, stderr = child.communicate(timeout=5)
             self.assertEqual(child.returncode, 143, stderr)
-            state = subprocess.run(["ps", "-o", "stat=", "-p", ready.read_text()],
-                                   capture_output=True, text=True).stdout.strip()
+            deadline = time.monotonic() + 2
+            while True:
+                state = subprocess.run(["ps", "-o", "stat=", "-p", ready.read_text()],
+                                       capture_output=True, text=True).stdout.strip()
+                if not state or state.startswith("Z") or time.monotonic() >= deadline:
+                    break
+                time.sleep(.02)
             self.assertTrue(not state or state.startswith("Z"), f"descendant survived: {state}")
         finally:
             if child.poll() is None:

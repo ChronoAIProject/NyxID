@@ -267,7 +267,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: backend
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.146
 
       - name: Check RCI backend boundary
         run: bash scripts/check-rci-backend-boundary.sh
@@ -370,7 +372,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: cli
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.146
 
       - name: Build CLI
         run: cargo build -p nyxid-cli

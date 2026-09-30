@@ -11,7 +11,8 @@ at the user's request for the broader CI reliability fix.
 
 - Apply the rollup-tested line-table profile to main for backend tests, smoke
   and both coverage jobs; retain existing compiler/test concurrency. Pin
-  Rust to 1.98.1, cargo-llvm-cov to 0.9.1 and the MongoDB 8 image to the digest
+  Rust to 1.98.1, cargo-nextest to 0.9.146, cargo-llvm-cov to 0.9.1
+  and the MongoDB 8 image to the digest
   from the passing September 30 coverage run. These inputs can be upgraded
   deliberately with full CI instead of changing between identical revisions.
 - Wrap backend tests, standalone billing smoke and head/base backend coverage
@@ -44,7 +45,7 @@ Correlate these with `MemAvailable`, process counts and timestamps. Exit 143
 alone is still not an OOM diagnosis. Tool/debug settings are whitelisted; the
 recorder does not dump the environment or process command lines.
 
-To update pinned inputs, change the Rust action refs, coverage tool versions
+To update pinned inputs, change the Rust action refs, test/coverage tool versions
 and/or Mongo image digest in the workflow/setup script together with their
 validation evidence. The recipe fingerprint changes automatically. A runner
 image rollout also causes a safe fresh base measurement. Observe future runs
