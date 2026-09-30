@@ -88,6 +88,7 @@ pub mod service_approval_config;
 pub mod service_billing;
 pub mod service_endpoint;
 pub mod service_pool;
+pub mod service_pool_member_health;
 pub mod service_provider_requirement;
 pub mod session;
 pub mod ssh_auth_mode;
@@ -133,3 +134,5 @@ pub mod channel_activity;
 pub mod credits;
 
 pub mod billing_lago_carry;
+
+pub mod pool_recovery_diagnostic;

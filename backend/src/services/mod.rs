@@ -134,6 +134,7 @@ mod ownership_transfer_tests;
 pub mod par_service;
 pub mod platform_credential_service;
 pub mod platform_settings_service;
+pub mod pool_failover;
 pub mod provider_service;
 pub mod provider_token_exchange_service;
 pub mod proxy_authorization;
@@ -147,6 +148,7 @@ pub mod scope_catalog;
 pub mod service_account_key_read_service;
 pub mod service_account_service;
 pub mod service_endpoint_service;
+pub mod service_pool_health_service;
 pub mod service_pool_service;
 pub mod social_auth_service;
 pub mod social_token_exchange_service;
@@ -210,3 +212,14 @@ pub mod catalog_editor_service;
 
 pub mod channel_activity_callback_service;
 pub mod channel_activity_service;
+
+#[cfg(test)]
+mod service_pool_health_tests;
+
+pub mod pool_ai_service;
+
+pub mod service_pool_inspection;
+
+pub mod service_pool_contract;
+
+pub mod service_pool_routing;

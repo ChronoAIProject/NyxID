@@ -220,6 +220,112 @@ pub async fn llm_status(
     Ok(Json(status))
 }
 
+#[derive(serde::Deserialize, utoipa::IntoParams)]
+pub struct PoolAliasesQuery {
+    pub offset: Option<u64>,
+    pub limit: Option<u32>,
+}
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct PoolAlias {
+    pub id: String,
+    pub pool_id: String,
+    pub name: String,
+    pub owner_id: String,
+    pub slug_route: String,
+    pub available: bool,
+}
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct PoolAliasesResponse {
+    pub pools: Vec<PoolAlias>,
+    pub next_offset: Option<u64>,
+}
+
+#[utoipa::path(get,path="/api/v1/llm/pools",params(PoolAliasesQuery),responses((status=200,body=PoolAliasesResponse)),tag="LLM Gateway")]
+pub async fn pool_aliases(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    axum::extract::Query(query): axum::extract::Query<PoolAliasesQuery>,
+) -> AppResult<Json<PoolAliasesResponse>> {
+    use crate::models::service_pool::{PoolMemberContract, PoolStrategy, ServicePool};
+    use futures::TryStreamExt;
+    auth.ensure_llm_proxy_access()?;
+    let actor = auth.proxy_resolution_user_id();
+    let mut owners = vec![actor.clone()];
+    owners.extend(
+        crate::services::org_service::find_active_memberships_with_timeout(&state.db, &actor)
+            .await?
+            .into_iter()
+            .filter(|m| m.role.can_proxy())
+            .map(|m| m.org_user_id),
+    );
+    let offset = query.offset.unwrap_or(0);
+    if offset > 1_000_000 {
+        return Err(AppError::BadRequest("Invalid alias offset".into()));
+    }
+    let limit = query.limit.unwrap_or(50).clamp(1, 100) as usize;
+    let mut rows:Vec<ServicePool>=state.db.collection("service_pools").find(doc! {"user_id":{"$in":owners},"is_active":true,"strategy":"priority","member_contract":"ai_chat"}).sort(doc! {"slug":1,"_id":1}).skip(offset).limit((limit+1) as i64).await?.try_collect().await?;
+    let next_offset = (rows.len() > limit).then_some(offset + limit as u64);
+    rows.truncate(limit);
+    let allowed =
+        (!auth.allow_all_services).then(|| auth.allowed_service_ids.iter().cloned().collect());
+    let nodes = (!auth.allow_all_nodes).then(|| auth.allowed_node_ids.iter().cloned().collect());
+    let mut pools = Vec::new();
+    for row in rows {
+        let selected =
+            match super::proxy::find_pool_for_proxy_actor(&state, &auth, &actor, &row.slug).await {
+                Ok(Some(pool)) => pool,
+                Ok(None) => continue,
+                Err(error) if crate::services::service_pool_service::member_unavailable(&error) => {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+        if selected.id != row.id
+            || selected.strategy != PoolStrategy::Priority
+            || selected.member_contract != PoolMemberContract::AiChat
+        {
+            continue;
+        }
+        let plan = crate::services::service_pool_service::plan_candidates_with_allowlist(
+            &state.db,
+            &state.encryption_keys,
+            &actor,
+            auth.api_key_id.as_deref(),
+            &row.user_id,
+            &row.slug,
+            &Method::POST,
+            Some("chat/completions"),
+            0,
+            Some(br#"{"messages":[{"role":"user","content":""}]}"#),
+            allowed.as_ref(),
+            nodes.as_ref(),
+        )
+        .await;
+        let available = match plan {
+            Ok(plan) => !plan.candidates.is_empty(),
+            Err(
+                AppError::ServicePoolNoViableMember(_)
+                | AppError::ServicePoolMemberInvalid(_)
+                | AppError::BadRequest(_),
+            ) => continue,
+            Err(error) => return Err(error),
+        };
+        pools.push(PoolAlias {
+            id: format!("pool:{}", row.slug),
+            pool_id: row.id,
+            name: row.name,
+            owner_id: row.user_id,
+            slug_route: format!(
+                "{}/api/v1/proxy/s/{}/chat/completions",
+                state.config.base_url.trim_end_matches('/'),
+                row.slug
+            ),
+            available,
+        });
+    }
+    Ok(Json(PoolAliasesResponse { pools, next_offset }))
+}
+
 /// ANY /api/v1/llm/{provider_slug}/v1/{*path}
 ///
 /// Forward the request to the provider's API using the user's stored credential.
@@ -572,12 +678,24 @@ pub async fn llm_proxy_request(
 /// OpenAI-compatible gateway. Accepts OpenAI-format requests, routes to the
 /// correct provider based on the `model` field, translates request/response
 /// formats as needed.
-pub async fn gateway_request(
+pub fn gateway_request(
+    state: State<AppState>,
+    auth_user: AuthUser,
+    path: Path<String>,
+    request: Request<Body>,
+) -> futures::future::BoxFuture<'static, AppResult<Response>> {
+    Box::pin(gateway_request_inner(state, auth_user, path, request))
+}
+
+async fn gateway_request_inner(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Path(path): Path<String>,
     request: Request<Body>,
 ) -> AppResult<Response> {
+    let gateway_started_at = std::time::Instant::now();
+    let gateway_uri = request.uri().clone();
+    let gateway_extensions = request.extensions().clone();
     auth_user.ensure_llm_proxy_access()?;
     let billing_egress_permit = enforce_llm_billing_classification(
         &request,
@@ -586,8 +704,6 @@ pub async fn gateway_request(
 
     // Per-agent rate limit check
     crate::mw::rate_limit::check_agent_rate_limit(&state.per_agent_limiter, &auth_user).await?;
-
-    let user_id_str = auth_user.user_id.to_string();
 
     let method = request.method().clone();
     let query = request.uri().query().map(String::from);
@@ -602,7 +718,7 @@ pub async fn gateway_request(
     .await?;
 
     // Parse body as JSON to extract model
-    let mut body_json: serde_json::Value = if body_bytes.is_empty() {
+    let body_json: serde_json::Value = if body_bytes.is_empty() {
         return Err(AppError::ValidationError(
             "Request body is required with a 'model' field".to_string(),
         ));
@@ -621,6 +737,69 @@ pub async fn gateway_request(
             AppError::ValidationError("'model' field is required in request body".to_string())
         })?;
 
+    if let Some(pool_slug) = model.strip_prefix("pool:") {
+        if pool_slug.is_empty() || pool_slug.contains('/') {
+            return Err(AppError::BadRequest("Invalid pool model alias".into()));
+        }
+        let mut pool_request = Request::builder()
+            .method(method)
+            .uri(gateway_uri)
+            .body(Body::from(body_bytes))
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        *pool_request.headers_mut() = headers;
+        *pool_request.extensions_mut() = gateway_extensions;
+        pool_request
+            .extensions_mut()
+            .insert(super::proxy::PoolGatewayIngress);
+        pool_request
+            .extensions_mut()
+            .insert(super::proxy::PoolIngressAdmitted);
+        pool_request
+            .extensions_mut()
+            .insert(super::proxy::ProxyExchangeStartedAt(gateway_started_at));
+        return Box::pin(super::proxy::proxy_request_by_slug(
+            State(state),
+            auth_user,
+            crate::telemetry::TelemetryContext::default(),
+            Path((pool_slug.to_owned(), path)),
+            pool_request,
+        ))
+        .await;
+    }
+
+    Box::pin(gateway_provider_request(
+        state,
+        auth_user,
+        path,
+        method,
+        query,
+        headers,
+        body_bytes,
+        body_json,
+        model,
+        is_streaming,
+        billing_egress_permit,
+    ))
+    .await
+}
+
+// Provider-specific resolution and translation is outside the pool entrance's
+// poll frame. A pool never constructs or polls this larger state machine.
+#[allow(clippy::too_many_arguments)]
+async fn gateway_provider_request(
+    state: AppState,
+    auth_user: AuthUser,
+    path: String,
+    method: Method,
+    query: Option<String>,
+    headers: axum::http::HeaderMap,
+    body_bytes: bytes::Bytes,
+    mut body_json: serde_json::Value,
+    model: String,
+    is_streaming: bool,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+) -> AppResult<Response> {
+    let user_id_str = auth_user.user_id.to_string();
     // Resolve provider slug from model name
     let primary_slug =
         llm_gateway_service::resolve_provider_for_model(&model).ok_or_else(|| {

@@ -64,6 +64,8 @@ it("keeps the dashboard and list on one route with a shared saved time range", a
     </QueryClientProvider>,
   );
   await act(() => router.load());
+  // router.load() does not await the page's React.lazy import.
+  await act(() => vi.dynamicImportSettled());
   expect(
     await screen.findByRole("combobox", { name: "Time range" }),
   ).toHaveTextContent("Last 7 days");

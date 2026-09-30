@@ -1,99 +1,116 @@
-# Service Pool Routing Proof
+# Service pool routing architecture
 
-Status: design proof and implementation plan for NyxID#974. This document is
-not a user-visible feature spec and does not introduce a `ServicePool` API.
+`ServicePool` extends the existing UserService routing boundary. It stores an
+owner, stable slug, embedded member IDs and configuration; credentials and
+endpoints remain in their established stores. Node routing selects transport for
+a concrete member and does not replace pool selection. Oracle is unrelated.
+See [Service pools](SERVICE_POOLS.md) for the management and request contract.
 
-## Governing Practice
+## Request boundary
 
-The established pattern for service discovery and load balancing is a single
-authoritative routing control plane: a logical service name resolves to a
-bounded set of concrete targets, a policy chooses one target, health/failover
-filters unsafe targets, and the proxy data plane consumes the chosen target.
-Routing truth must not be split across competing registries.
+The slug entrance preserves personal service, personal pool, legacy and ordered
+organization precedence. Organization pools with no caller-eligible member do not
+hide a later authorized organization. Gateway `pool:<slug>` enters the same small
+pool boundary with trusted LLM admission metadata; REST scopes are not broadened.
 
-NyxID's current authoritative boundary is the proxy target resolver:
+Priority ingress checks agent admission once and captures one pool ID/revision.
+The body is read once within ingress limits. Candidate planning reloads live
+metadata and must match that snapshot, preventing old retry policy from executing
+a changed or recreated pool. Candidate filtering applies owner/platform grant,
+service and node scopes, operation policy, transport capability and request
+compatibility before the attempt cap. Planning never decrypts a credential.
 
-- `proxy_service::resolve_proxy_target_from_user_service()` resolves a logical
-  service slug or catalog service id to one concrete `UserServiceResolution`.
-- `finish_resolution()` turns that `UserService` into one `ProxyTarget`,
-  including the endpoint URL, credential, identity propagation settings,
-  default headers, WebSocket frame injection rules, and optional `node_id`.
-- `node_routing_service::resolve_node_route()` runs below that boundary. It
-  chooses a node route for an already selected catalog service; it does not
-  choose among endpoint/credential/service members.
+The executor reserves a visited tier's counter, then carries the exact member
+through read-only native operation and approval gates. It materializes only after
+those gates and compares execution authority again before dispatch. Approval
+waits therefore fence endpoint/key/configuration drift. Legacy strategies reserve
+one selection once and use the same exact-member boundary, without priority
+cooldown or retries. Legacy generic resolution rejects priority pools rather than
+silently choosing round robin.
 
-## Insufficiency Proof
+The direct and node transports share typed dispatch evidence. Priority direct
+requests do not automatically follow redirects, so a failed redirect connection
+cannot masquerade as a proven unsent original request. One absolute overall
+deadline and one attempt deadline include preparation, dispatch, first-data gating
+and drain. Node correlation guards remove pending work and send `proxy_cancel`
+on cancellation, timeout, overflow or consumer loss; owner relay fencing remains
+in force. The CLI tracks request tasks and aborts actual HTTP work on cancellation.
 
-The existing `resolve_node_route()` / `fallback_node_ids` contract cannot model
-identical `UserService` instance balancing by itself.
+The first nonempty response data item, or clean EOF, is the commitment boundary.
+Empty frames do not commit. Before commitment, known rejection status and
+Retry-After survive a broken body. After commitment, errors remain body errors.
+No handler starts a backup after caller cancellation or appends backup output to
+a partially delivered stream. Unsupported execution entrances fail before effects.
 
-1. `user_services` has an active unique index on `("user_id", "slug")`.
-   A stable user-facing slug can name exactly one active `UserService` for an
-   owner, so multiple active members cannot share the same slug.
-2. `UserService` stores exactly one `endpoint_id` and at most one `api_key_id`.
-   It has no member set, strategy, weight, capacity signal, or pool-level
-   health state.
-3. `NodeServiceBinding` stores `node_id`, `user_id`, `service_id`, and
-   `priority`. It can order node candidates for one catalog service, but it
-   cannot represent different endpoint URLs, credentials, per-member weights,
-   or direct HTTP members.
-4. `resolve_node_route()` is intentionally node-specific. It filters `Node`
-   records by DB status, WebSocket connectivity, and node metrics, then returns
-   `NodeRoute { node_id, fallback_node_ids }`. Direct services without a node
-   never enter that health model.
-5. `resolve_proxy_target_from_user_service()` relies on one selected
-   `UserService` to preserve personal-before-legacy-before-org precedence,
-   approval ownership, API-key service scope, and org membership scope. Simply
-   relaxing the slug uniqueness constraint would make those semantics
-   ambiguous instead of adding a safe balancing policy.
+## Contract and authority
 
-Conclusion: the existing routing layer is the correct control-plane boundary,
-but its node-only failover contract is insufficient for balancing multiple
-identical service instances. A future `ServicePool` model is justified only as
-an extension of the proxy target resolver, not as a parallel routing system.
+`service_pool_contract` validates saved merged configuration and live candidates.
+Same API declarations cannot override known protocol mismatch. AI models use
+catalog inference and catalog provider hints, with the resolved UserEndpoint URL
+preserved. `pool_ai_service` validates request features, selects the native path
+and transforms request/response data once for both entrances. The bounded SSE
+parser handles incremental UTF-8, LF/CRLF/CR framing, provider errors and missing
+completion. Native bytes feed accounting before conversion.
 
-## Implementation Plan
+Response ownership retains normal default/header forwarding, asynchronous
+continuations, destination diagnostics, connection attribution and usage audits.
+Async Location values use the chosen member slug plus the existing authorized
+`_nyxid_via` selector, so following a job URL does not rebalance it.
 
-When the product surface is approved separately, implement pools at the proxy
-target-resolution boundary and keep `UserService` as the concrete member type.
+## Durable health
 
-1. Add a backend `ServicePool` model:
-   - `id`, `user_id`, `slug`, `strategy`, `is_active`, `created_at`,
-     `updated_at`.
-   - The pool owns the stable slug. Active pool slugs and active
-     `UserService.slug` values must be mutually exclusive per owner.
-   - Strategies should start with `round_robin` and `weighted_round_robin`.
-2. Add a backend `ServicePoolMember` model:
-   - `id`, `pool_id`, `user_service_id`, `weight`, `is_active`,
-     `created_at`, `updated_at`.
-   - The member points at an existing `UserService`, preserving endpoint,
-     credential, node, identity propagation, and header behavior.
-   - Member ownership must match the pool owner.
-3. Extend `resolve_proxy_target_from_user_service()`:
-   - Keep the existing personal, legacy, and org precedence order.
-   - For each owner scope, look up a direct `UserService` and a `ServicePool`
-     by the same slug space. Reject conflicting active rows during writes.
-   - If a pool matches, select a member and call the existing
-     `finish_resolution()` on that member. This keeps credential decryption,
-     approval hints, node routing, and audit metadata on the established path.
-4. Use MongoDB for policy state:
-   - `round_robin` and weighted selection must be safe across multiple NyxID
-     API instances, so the cursor/counter cannot live only in process memory.
-   - The selection attempt count must be bounded by the active member count.
-5. Reuse node health underneath selected members:
-   - If a member is node-routed, call the existing node viability checks and
-     fall back to another member when no viable node route exists.
-   - If a member is direct HTTP, start with passive health from proxy outcomes
-     before adding active probes or a standardized status endpoint.
-6. Add management surfaces only after the model and resolver are implemented:
-   - Backend REST handlers.
-   - `nyxid pool` CLI commands.
-   - Frontend pool management UI.
-   - NyxID skill documentation.
+`service_pool_member_health` has a unique immutable scope including pool/member,
+configuration revision, credential identity/epoch, destination and operation/model,
+plus pool/member reset generations. Issuing a ticket creates health only within
+that scope. Outcome writes do not upsert. Reset updates only durable generation
+state; old rows expire through TTL and old tickets cannot roll back the fence.
 
-## Non-Goals For This Proof
+Each ticket has a separate expiring typed observation row. Terminal observation
+and health mutation commit in one MongoDB transaction, so retries/interleavings
+cannot double-count and cancellation cannot leave a claimed-but-unapplied result.
+The hot health document has no unbounded observation ID list. Sequence fencing
+prevents an older success from clearing a newer failure. Active provider
+Retry-After minima cannot be shortened by a concurrent weaker failure.
 
-- No quota, usage counting, or metering across pool members.
-- No sticky routing or session affinity.
-- No new error-code allocation.
-- No CLI, frontend, or skill surface before the backend contract is approved.
+## Billing and stream ownership
+
+A dispatched attempt owns an independent meter/request identity and durable lease.
+Pool admission atomically opens meter rows and reserves exact funding. Before
+fallback, the executor awaits acknowledged known settlement or unknown cleanup;
+a spawned settlement task alone is not that acknowledgment. Reported usage is
+cached before settlement awaits and uses the existing durable intent/finalization
+pipeline, including components and resale. Known intent wins over release.
+
+Unknown cleanup atomically releases wallet holds and marks all request rows,
+including the coordinator, so intent and release cannot write-skew. Existing
+benefit recovery completes allowance/grant release idempotently. Recovery pages
+at most 100 indexed expired rows using a durable keyset cursor, rechecks captured
+expiry in the release transaction, and advances past known quantities/intents.
+Ordinary historical forwarded rows are not eligible for this recovery.
+
+A lifecycle-owned heartbeat renews leases independently of stream polling,
+bounds its database work by authoritative expiry, distinguishes unmetered traffic
+from a lost lease, and closes provider transport on loss. Dropping the client or
+stream cancels owned work without recursively spawning cleanup guards.
+
+## Configuration and observability
+
+Merged edits compare `config_revision` and commit settings/members together.
+Inspection is owner-scoped, read-only and paginated without leaking excluded IDs
+in cursors. Health reads saved members directly rather than sampling an inventory
+page. Draft strategy/contract/declarations apply only to candidate inspection.
+A deleted connection remains removable/resettable; Disable does not require stale
+metadata to become executable again.
+
+One attempt audit owner emits once across preparation, transport, body, timeout
+and cancellation. Events use the standard tamper-evident audit path. Public
+exhaustion summaries contain only ordered safe status/reason information. Secret
+credential identity and API key references are never exposed through Debug or
+inspection.
+
+The implementation has real MongoDB/HTTP acceptance tests in
+`handlers/service_pool_{proxy,runtime,billing,ai}_tests.rs`, configuration tests in
+`handlers/service_pools_tests.rs`, transactional health and recovery tests, node
+manager/dispatch and CLI cancellation tests, and CLI/UI request construction tests.
+Execution results belong to the run logs; this architecture document does not
+claim a particular unexecuted build is green.

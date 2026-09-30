@@ -1061,6 +1061,7 @@ mod no_auth_strict_push_tests {
             "node-1",
             &NodeCapabilitiesMsg {
                 http_signature_v2: false,
+                http_cancellation: false,
                 credential_ack_correlation: true,
                 remote_credential_crypto_v1: false,
                 proxy_max_body_size: None,
