@@ -1371,22 +1371,9 @@ async fn load_user_tools_with_grants(
         } else {
             (generic_proxy_endpoints(endpoint_label), true, false)
         };
-        // An instance-mounted spec of a catalog service keeps the catalog
-        // overlay's destructive markers for the operations they share.
         let mut published = published;
         if let Some(catalog) = catalog_policy {
-            for endpoint in &published.endpoints {
-                if super::catalog_spec_registry::marks_destructive(
-                    &catalog.slug,
-                    &endpoint.method,
-                    &endpoint.path,
-                    &endpoint.name,
-                ) && let Some(metadata) =
-                    published.durable_metadata.get_mut(&endpoint.endpoint_id)
-                {
-                    metadata.destructive = true;
-                }
-            }
+            mark_catalog_destructive(&mut published, &catalog.slug);
         }
 
         let recommended_skills = user_endpoint
@@ -1522,6 +1509,23 @@ fn service_endpoint_durable_metadata(
             )
         })
         .collect()
+}
+
+/// An instance-mounted spec of a catalog service keeps the catalog
+/// overlay's destructive markers for the operations they share, matched
+/// literally by endpoint name or `METHOD path`.
+fn mark_catalog_destructive(published: &mut ParsedMcpEndpoints, catalog_slug: &str) {
+    for endpoint in &published.endpoints {
+        if super::catalog_spec_registry::marks_destructive(
+            catalog_slug,
+            &endpoint.method,
+            &endpoint.path,
+            &endpoint.name,
+        ) && let Some(metadata) = published.durable_metadata.get_mut(&endpoint.endpoint_id)
+        {
+            metadata.destructive = true;
+        }
+    }
 }
 
 struct ParsedMcpEndpoints {
@@ -3348,44 +3352,52 @@ impl PreparedProxyCall {
         )
     }
 
-    /// Every method this call may act as, uppercase: the method it is sent
-    /// with, and each one a method override asks for (an
-    /// `X-HTTP-Method-Override`-style header, or a `_method` query or body
-    /// field, as Rails and Laravel honour). A check must accept all of them:
-    /// the downstream may honour either.
-    pub fn requested_methods(&self) -> Vec<String> {
-        let mut methods = vec![self.method.as_str().to_ascii_uppercase()];
-        let mut add = |value: &str| methods.push(value.trim().to_ascii_uppercase());
-        for (name, value) in &self.parameter_headers {
-            let name = name.to_ascii_lowercase();
-            if name.contains("method-override") || name == "x-http-method" {
-                add(value);
-            }
+    /// The HTTP method this call is sent with.
+    pub fn method(&self) -> &reqwest::Method {
+        &self.method
+    }
+
+    /// Whether this call carries a method override: an
+    /// `X-HTTP-Method-Override`-style header, or a `_method` field in its
+    /// query or body, which a downstream framework may honour in place of
+    /// the method the call is sent with. Keys are compared as PHP and Rails
+    /// read them (`.` and spaces become `_`, `_method[]` is `_method`, any
+    /// case); a body is read both as JSON (after a byte-order mark or
+    /// whitespace) and as a form, since a server may read it either way.
+    pub fn carries_method_override(&self) -> bool {
+        fn override_key(key: &str) -> bool {
+            let name = key.split('[').next().unwrap_or_default().trim();
+            let name: String = name
+                .chars()
+                .map(|c| if c == '.' || c == ' ' { '_' } else { c })
+                .collect();
+            name.eq_ignore_ascii_case("_method")
         }
-        for (key, value) in
-            url::form_urlencoded::parse(self.query.as_deref().unwrap_or_default().as_bytes())
-        {
-            if key == "_method" {
-                add(&value);
-            }
+        fn override_header(name: &str) -> bool {
+            let name = name.to_ascii_lowercase().replace('_', "-");
+            matches!(
+                name.as_str(),
+                "x-http-method-override" | "x-http-method" | "x-method-override"
+            )
         }
-        if let Some(body) = self.body.as_deref() {
-            match serde_json::from_slice::<serde_json::Value>(body) {
-                Ok(value) => {
-                    if let Some(method) = value.get("_method") {
-                        add(method.as_str().unwrap_or("?"));
-                    }
-                }
-                Err(_) => {
-                    for (key, value) in url::form_urlencoded::parse(body) {
-                        if key == "_method" {
-                            add(&value);
-                        }
-                    }
-                }
-            }
-        }
-        methods
+        let form =
+            |bytes: &[u8]| url::form_urlencoded::parse(bytes).any(|(key, _)| override_key(&key));
+        self.parameter_headers
+            .iter()
+            .any(|(name, _)| override_header(name))
+            || self
+                .query
+                .as_deref()
+                .is_some_and(|query| form(query.as_bytes()))
+            || self.body.as_deref().is_some_and(|body| {
+                let text = String::from_utf8_lossy(body);
+                let json = text.trim_start_matches('\u{feff}').trim_start();
+                serde_json::from_str::<serde_json::Value>(json).is_ok_and(|value| {
+                    value
+                        .as_object()
+                        .is_some_and(|fields| fields.keys().any(|key| override_key(key)))
+                }) || form(body)
+            })
     }
 }
 
@@ -6940,6 +6952,96 @@ mod tests {
         assert!(
             matches!(error, AppError::BadRequest(msg) if msg.contains("Unsupported HTTP method: DESTROY"))
         );
+    }
+
+    /// Guests never send method overrides, however a server would read one.
+    #[test]
+    fn method_overrides_are_recognised_as_servers_read_them() {
+        let mut generic = make_service(
+            "svc-g",
+            "Generic",
+            "generic",
+            vec![build_generic_proxy_endpoint("Generic")],
+        );
+        generic.is_generic_proxy = true;
+        let overrides = |args: serde_json::Value| {
+            let endpoint = &generic.endpoints[0];
+            prepare_proxy_tool_call(&generic, endpoint, &args)
+                .unwrap()
+                .carries_method_override()
+        };
+        for args in [
+            serde_json::json!({"method": "POST", "path": "posts/5?_method=DELETE"}),
+            serde_json::json!({"method": "POST", "path": "posts/5", "query": ".method=DELETE"}),
+            serde_json::json!({"method": "POST", "path": "posts/5", "query": "_METHOD=delete"}),
+            serde_json::json!({"method": "POST", "path": "posts/5", "query": "_method[]=DELETE"}),
+            serde_json::json!({"method": "POST", "path": "posts/5", "body": {"_method": ["DELETE"]}}),
+            serde_json::json!({"method": "POST", "path": "posts/5", "body": "\u{feff}{\"_method\": \"DELETE\"}"}),
+            serde_json::json!({"method": "POST", "path": "posts/5", "body": "a=1&_method=DELETE"}),
+            // JSON to one parser, a form to another.
+            serde_json::json!({"method": "POST", "path": "posts/5",
+                "body": {"a": "x", "b": "&_method=DELETE&"}}),
+        ] {
+            assert!(overrides(args.clone()), "{args}");
+        }
+        for args in [
+            serde_json::json!({"method": "DELETE", "path": "posts/5"}),
+            serde_json::json!({"method": "POST", "path": "charges",
+                "body": {"payment_method": "pm_1", "method": "card"}}),
+            serde_json::json!({"method": "POST", "path": "notes", "body": {"text": "_method"}}),
+            serde_json::json!({"method": "GET", "path": "search", "query": "q=_method"}),
+        ] {
+            assert!(!overrides(args.clone()), "{args}");
+        }
+        let header = McpToolEndpoint {
+            method: "POST".to_string(),
+            path: "/posts/{id}".to_string(),
+            parameters: Some(serde_json::json!([
+                {"name": "id", "in": "path", "required": true},
+                {"name": "X_HTTP_Method_Override", "in": "header"}
+            ])),
+            ..make_endpoint("update_post", "Update a post")
+        };
+        let service = make_service("svc-h", "Posts", "posts", vec![]);
+        assert!(
+            prepare_proxy_tool_call(
+                &service,
+                &header,
+                &serde_json::json!({"id": "5", "X_HTTP_Method_Override": "DELETE"}),
+            )
+            .unwrap()
+            .carries_method_override()
+        );
+    }
+
+    /// An instance-mounted spec of a catalog service keeps the overlay's
+    /// destructive markers where its operations match.
+    #[test]
+    fn mounted_specs_of_catalog_services_keep_overlay_markers() {
+        let endpoint = |name: &str, path: &str| McpToolEndpoint {
+            method: "POST".to_string(),
+            path: path.to_string(),
+            ..make_endpoint(name, name)
+        };
+        let mut published = ParsedMcpEndpoints {
+            endpoints: vec![
+                endpoint("delete_message", "/deleteMessage"),
+                endpoint("send_message", "/sendMessage"),
+            ],
+            durable_metadata: HashMap::from([
+                (
+                    "endpoint-delete_message".to_string(),
+                    McpDurableEndpointMetadata::default(),
+                ),
+                (
+                    "endpoint-send_message".to_string(),
+                    McpDurableEndpointMetadata::default(),
+                ),
+            ]),
+        };
+        mark_catalog_destructive(&mut published, "api-telegram-bot");
+        assert!(published.durable_metadata["endpoint-delete_message"].destructive);
+        assert!(!published.durable_metadata["endpoint-send_message"].destructive);
     }
 
     /// Catalog rows take the destructive marker from the service's hosted

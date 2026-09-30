@@ -1264,7 +1264,7 @@
           "name": "calendar_update_event",
           "description": "Update an event on the selected calendar.",
           "readOnly": false,
-          "destructive": false,
+          "destructive": true,
           "requiresApproval": true
         },
         "parameters": [

@@ -1088,11 +1088,9 @@ pub(crate) static TEST_BOT_USER_IDS: std::sync::LazyLock<
 /// Bots' own user IDs by bot and app, kept an hour (a failed lookup five
 /// minutes). Keyed by app too, so a bot switched to another Lark app is
 /// looked up again. A cache only: the platform is the source.
-static OWN_USER_IDS: std::sync::LazyLock<
-    std::sync::Mutex<
-        std::collections::HashMap<(String, String), (Option<String>, std::time::Instant)>,
-    >,
-> = std::sync::LazyLock::new(Default::default);
+type OwnUserIds = std::collections::HashMap<(String, String), (Option<String>, std::time::Instant)>;
+static OWN_USER_IDS: std::sync::LazyLock<std::sync::Mutex<OwnUserIds>> =
+    std::sync::LazyLock::new(Default::default);
 
 /// The bot's own user ID on Lark / Feishu (its `open_id`), so group messages
 /// that mention someone else are not taken as addressed to the bot. `None`

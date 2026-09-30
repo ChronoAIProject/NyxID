@@ -715,6 +715,26 @@ async fn owners_create_specialists_within_limits_and_grants_resolve_only_visible
     )
     .await;
     assert!(error, "{value}");
+    // A writer that predates levels rewrites only `grants`: levels survive.
+    state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_one(
+            doc! {"name": "coder", "user_id": OWNER},
+            doc! {"$set": {"grants": {"service_ids": [&github], "platform_service_ids": [],
+            "account_read": true}}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        team::specialist(&state.db, OWNER, "coder")
+            .await
+            .unwrap()
+            .guest_access
+            .get(&github)
+            .copied(),
+        Some(GuestAccess::Read)
+    );
     // The owner's grants form: levels it leaves out are kept, named ones set,
     // "use" resets, and only granted services take a level.
     let coder = team::specialist(&state.db, OWNER, "coder").await.unwrap();
@@ -1049,11 +1069,19 @@ fn grant_changes_merge_against_the_current_grants() {
         levels(&[("a", GuestAccess::All), ("c", GuestAccess::Read)])
     );
     let (_, reset) = team::GrantChange::Replace {
-        grants: replaced,
+        grants: replaced.clone(),
         guests: levels(&[("a", GuestAccess::Use)]),
     }
-    .apply(&current, &kept);
+    .apply(&replaced, &kept);
     assert_eq!(reset, levels(&[("c", GuestAccess::Read)]));
+    // A level left behind for a service no longer granted (a writer that
+    // predates levels revoked it) does not come back with a new grant.
+    let (_, regranted) = team::GrantChange::Add(AgentGrants {
+        service_ids: ids(&["z"]),
+        ..Default::default()
+    })
+    .apply(&current, &levels(&[("z", GuestAccess::All)]));
+    assert_eq!(regranted, none);
 }
 
 async fn event_budget_used(state: &AppState) -> i64 {

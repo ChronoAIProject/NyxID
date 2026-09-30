@@ -52,7 +52,7 @@
       "operation_id": "calendar_update_event",
       "method": "PATCH",
       "path": "/calendar/v3/calendars/{calendarId}/events/{eventId}",
-      "operation_sha256": "feb648e42ec6bcdfe3e9084f707081530beb20e66760e9c4f7d67aedb51dba2d"
+      "operation_sha256": "df5638dc83c6974032adc011662ab5d58c864be0559f207240bfc1fe97383117"
     },
     {
       "operation_id": "calendar_free_busy",
@@ -106,7 +106,7 @@
       "operation_id": "drive_update_file",
       "method": "PATCH",
       "path": "/drive/v3/files/{fileId}",
-      "operation_sha256": "4c1f120ebcf1ef5cd63764f99679b61b3612b9a4371e99435464329b6f4657f2"
+      "operation_sha256": "8a9b30f6b5db961e63fedc9be8f1da0246e651629a66068270d242bbe0ddd29f"
     },
     {
       "operation_id": "drive_copy_file",
@@ -154,7 +154,7 @@
       "operation_id": "drive_upload_file_content",
       "method": "PATCH",
       "path": "/upload/drive/v3/files/{fileId}",
-      "operation_sha256": "1c0392b33b4591c3073e0510bd5ebf9743ec20bf5f8cbda3e2ee1bc448ec5a47"
+      "operation_sha256": "f0180d1d50911a63e677c4da651a61b41d019d9e1177814d51b7d91777ad1467"
     }
   ],
   "api-google-drive": [
@@ -186,7 +186,7 @@
       "operation_id": "drive_update_file",
       "method": "PATCH",
       "path": "/drive/v3/files/{fileId}",
-      "operation_sha256": "ac616a5a21b32f52cb8ba3342f29832384e61947ab74a2a960cd1399979725b9"
+      "operation_sha256": "44060cab0581bab16bacb5a5189db2df8b46cc929bce0ebbdf09762a8855a216"
     },
     {
       "operation_id": "drive_copy_file",
@@ -210,7 +210,7 @@
       "operation_id": "drive_upload_file_content",
       "method": "PATCH",
       "path": "/upload/drive/v3/files/{fileId}",
-      "operation_sha256": "180c2e6308458995ed8df7f6879625603de1f69bc1dfa70db61c15b60ef8d9a7"
+      "operation_sha256": "af116d752d806d2bd9c14bda35d42871ef2077598b42576be7e48e26cd6441c3"
     }
   ],
   "api-google-calendar": [
@@ -266,7 +266,7 @@
       "operation_id": "calendar_update_event",
       "method": "PATCH",
       "path": "/calendar/v3/calendars/{calendarId}/events/{eventId}",
-      "operation_sha256": "feb648e42ec6bcdfe3e9084f707081530beb20e66760e9c4f7d67aedb51dba2d"
+      "operation_sha256": "df5638dc83c6974032adc011662ab5d58c864be0559f207240bfc1fe97383117"
     },
     {
       "operation_id": "calendar_free_busy",
@@ -366,7 +366,7 @@
       "operation_id": "calendar_update_event",
       "method": "PATCH",
       "path": "/calendar/v3/calendars/{calendarId}/events/{eventId}",
-      "operation_sha256": "feb648e42ec6bcdfe3e9084f707081530beb20e66760e9c4f7d67aedb51dba2d"
+      "operation_sha256": "df5638dc83c6974032adc011662ab5d58c864be0559f207240bfc1fe97383117"
     },
     {
       "operation_id": "calendar_free_busy",
@@ -420,7 +420,7 @@
       "operation_id": "drive_update_file",
       "method": "PATCH",
       "path": "/drive/v3/files/{fileId}",
-      "operation_sha256": "ac616a5a21b32f52cb8ba3342f29832384e61947ab74a2a960cd1399979725b9"
+      "operation_sha256": "44060cab0581bab16bacb5a5189db2df8b46cc929bce0ebbdf09762a8855a216"
     },
     {
       "operation_id": "drive_copy_file",
@@ -462,7 +462,7 @@
       "operation_id": "drive_upload_file_content",
       "method": "PATCH",
       "path": "/upload/drive/v3/files/{fileId}",
-      "operation_sha256": "180c2e6308458995ed8df7f6879625603de1f69bc1dfa70db61c15b60ef8d9a7"
+      "operation_sha256": "af116d752d806d2bd9c14bda35d42871ef2077598b42576be7e48e26cd6441c3"
     }
   ]
 }

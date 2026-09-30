@@ -2104,8 +2104,7 @@ fn guest_tool_refusal(
 /// runs only reads (an operation its spec marks read-only, else GET, HEAD or
 /// OPTIONS), `use` (the default) anything but an HTTP DELETE or an
 /// operation its spec marks destructive, `all` everything the specialist
-/// may. Method overrides count as the call's method too, so none hides a
-/// DELETE or passes a change off as a read. The agent's key already
+/// may. A guest call never carries a method override. The agent's key already
 /// holds only its granted services, and operations behind the owner's
 /// approval are refused later (`authorize_mcp_operation`) at every level.
 async fn guest_service_refusal(
@@ -2134,21 +2133,36 @@ async fn guest_service_refusal(
         .get(&endpoint.endpoint_id)
         .copied()
         .unwrap_or_default();
-    // The call is judged on every method it may act as: the one it is sent
-    // with and any a method override asks for.
-    let methods = prepared.requested_methods();
-    let deletes = methods.iter().any(|method| method == "DELETE");
-    let overrides_read = methods
-        .iter()
-        .skip(1)
-        .all(|method| matches!(method.as_str(), "GET" | "HEAD" | "OPTIONS"));
-    // An operation its spec marks read-only reads, whatever its method (a
-    // POST search); otherwise the method decides.
+    // A method override may be honoured in place of the method the call is
+    // sent with, and approvals see only the latter: guests never send one.
+    if prepared.carries_method_override() {
+        return Some(tool_result(
+            request_id,
+            &crate::services::assistant_acknowledgement_service::guest_service_refusal(
+                &service.service_slug,
+                access,
+            )
+            .to_string(),
+            true,
+        ));
+    }
+    let method = prepared.method();
+    let deletes = *method == reqwest::Method::DELETE;
+    let safe = matches!(
+        *method,
+        reqwest::Method::GET | reqwest::Method::HEAD | reqwest::Method::OPTIONS
+    );
+    // An operation its spec marks read-only reads, even as a POST (a
+    // search), when NyxID holds that spec (a catalog overlay or row, not a
+    // remote instance spec, which may only narrow); otherwise the method
+    // decides.
     let reads = match metadata.risk {
-        Some(crate::models::service_endpoint::EndpointRisk::Read) => true,
+        Some(crate::models::service_endpoint::EndpointRisk::Read) => {
+            safe || metadata.operation_generation > 0
+        }
         Some(crate::models::service_endpoint::EndpointRisk::Write) => false,
-        None => matches!(methods[0].as_str(), "GET" | "HEAD" | "OPTIONS"),
-    } && overrides_read;
+        None => safe,
+    };
     let allowed = match access {
         GuestAccess::All => true,
         GuestAccess::Use => !deletes && !metadata.destructive,

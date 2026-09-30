@@ -480,7 +480,7 @@ function GuestAccessList({
   return (
     <div className="space-y-2 rounded-lg border border-border p-4">
       <div className="space-y-1">
-        <p id="guest-access-title" className="text-[12px] font-medium text-foreground">
+        <p className="text-[12px] font-medium text-foreground">
           What others in its chats may do
         </p>
         <p className="text-[12px] text-muted-foreground">

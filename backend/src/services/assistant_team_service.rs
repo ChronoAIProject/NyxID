@@ -868,6 +868,19 @@ impl GrantChange {
             }
             Self::Guests(levels) => guests.extend(levels.clone()),
         }
+        // A service granted anew starts at the default level, whatever an
+        // earlier grant of it left behind (a writer that predates levels
+        // may have revoked it without dropping its level).
+        let before: HashSet<&String> = current
+            .service_ids
+            .iter()
+            .chain(&current.platform_service_ids)
+            .collect();
+        let named: HashSet<&String> = match self {
+            Self::Replace { guests: levels, .. } | Self::Guests(levels) => levels.keys().collect(),
+            Self::Add(_) | Self::Remove(_) => HashSet::new(),
+        };
+        guests.retain(|id, _| before.contains(id) || named.contains(id));
         let granted: HashSet<&String> = grants
             .service_ids
             .iter()

@@ -383,6 +383,19 @@ mod tests {
             "/x",
             "delete_x"
         ));
+        // Updates that can cancel an event or replace a record's data.
+        assert!(marks_destructive(
+            "api-google",
+            "PATCH",
+            "/nowhere",
+            "calendar_update_event"
+        ));
+        assert!(marks_destructive(
+            "api-lark-bot",
+            "PUT",
+            "/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/{record_id}",
+            "bitable_record_update"
+        ));
     }
 
     /// Frozen from 28fd2c44, including the original eight api-google operations.

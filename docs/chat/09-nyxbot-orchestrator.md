@@ -489,31 +489,36 @@ turn so late tool calls stay restricted):
   service, stored beside `grants` so writers of `grants` that predate it never
   erase it; the user's decision: guests "can use them" but not delete, and
   sometimes the owner wants them to edit sheets, docs or pages too). Levels:
-  - `read`: reads only: an operation its spec marks read-only
-    (`x-aevatar-tool.readOnly`, so a POST search counts), else GET, HEAD or
-    OPTIONS;
+  - `read`: reads only: an operation NyxID's copy of its spec (a catalog
+    overlay or row, not a remote instance spec, which may only narrow) marks
+    read-only (`x-aevatar-tool.readOnly`, so a POST search counts), else GET,
+    HEAD or OPTIONS;
   - `use`, the default: reads and changes, but never an HTTP DELETE or an
     operation its spec marks destructive (`x-aevatar-tool.destructive`: the
-    catalog overlays mark deletes and overwrites, such as Telegram's
-    `deleteMessage`, Drive's update (it can trash) and content upload (it
-    replaces a document), Sheets' `values:clear` and `values` updates, Docs'
-    `batchUpdate` and Notion's page update);
+    catalog overlays mark operations that delete or replace the owner's data,
+    such as Telegram's `deleteMessage`, Drive's update (it can trash) and
+    content upload (it replaces a document), Calendar's event update (it can
+    cancel an event), Sheets' `values:clear` and `values` updates, Bitable's
+    record update, Docs' `batchUpdate` and Notion's page update; edits of the
+    bot's own messages and drafts are not);
   - `all`: everything the specialist may do with the service.
-  A call is judged on every method it may act as: the one it is sent with and
-  any a method override asks for (an `X-HTTP-Method-Override`-style header or
-  a `_method` query or body field), so an override neither hides a DELETE nor
-  passes a change off as a read. Markers come from the overlay compiled into
-  NyxID for catalog services (matched by endpoint name or `METHOD path`; no
-  stored endpoint changes, so `operation_generation` is untouched), including
-  a catalog service's instance-mounted spec, and from a mounted spec's own
-  markers. Catalog services outside NyxID's overlays, and services without
-  typed operations (the generic proxy), are judged by the HTTP method alone.
+  A guest call never carries a method override (an
+  `X-HTTP-Method-Override`-style header, or a `_method` query or body field,
+  compared as PHP and Rails read keys, the body read both as JSON and as a
+  form): a server may honour one in place of the method the call is sent with,
+  and approvals see only the latter. Markers come from the overlay compiled
+  into NyxID for catalog services (matched literally by endpoint name or
+  `METHOD path`; no stored endpoint changes, so `operation_generation` is
+  untouched), including a catalog service's instance-mounted spec where its
+  operations match, and from a mounted spec's own markers. Catalog services
+  outside NyxID's overlays, and services without typed operations (the generic
+  proxy), have no destructive markers: `use` refuses only an HTTP DELETE there.
   Nothing is judged from names or words. The owner sets levels on the agent's
   Grants (a select per service; the page sends only changed levels) or by
   asking NyxBot (`nyxid__set_guest_access`, "let the group edit the office
   sheet"; `all` must name its services); `nyxid__list_subagents` and the agent
   summary show them (`guest_access`). Levels are kept across other grant
-  changes and dropped with the service. Calls beyond the level are refused with
+  changes and dropped with the service; a service granted anew starts at `use`. Calls beyond the level are refused with
   `owner_only` (naming the service and its level) before anything is sent. SSH
   (a shell can do anything) stays the owner's, as do `nyxid__` account, team,
   memory and posting tools and connection and Oracle tools (the user's
