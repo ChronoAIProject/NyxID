@@ -1,10 +1,9 @@
-import { compareCredits } from "./credits";
 import type { BillingUsageRow } from "@/schemas/billing";
 import { billingMetricLabel } from "@/lib/billing-units";
 import {
+  knownTotal,
   number,
   serviceName,
-  total,
   type BillingCatalog,
 } from "./billing-display";
 
@@ -51,13 +50,12 @@ export function groupRows(
     group.rows.push(row);
     groups.set(key, group);
   }
-  return [...groups.values()].sort(
-    (a, b) =>
-      compareCredits(
-        total(b.rows, "estimated_credits_micros"),
-        total(a.rows, "estimated_credits_micros"),
-      ) || a.name.localeCompare(b.name),
-  );
+  // Unpriced rows add nothing, so a partly unpriced group ranks by its lower bound.
+  return [...groups.values()].sort((a, b) => {
+    const left = knownTotal(a.rows, "estimated_credits_micros").sum;
+    const right = knownTotal(b.rows, "estimated_credits_micros").sum;
+    return right > left ? 1 : right < left ? -1 : a.name.localeCompare(b.name);
+  });
 }
 export function layerName(layer: string) {
   return layer === "platform"

@@ -183,6 +183,13 @@ export const OAuthConsentPage = lazy(() =>
     default: m.OAuthConsentPage,
   })),
 );
+export const OAuthConsentPreviewPage = import.meta.env.DEV
+  ? lazy(() =>
+      import("@/pages/oauth-consent-preview").then((m) => ({
+        default: m.OAuthConsentPreviewPage,
+      })),
+    )
+  : () => null;
 export const OAuthErrorPage = lazy(() =>
   import("@/pages/oauth-error").then((m) => ({ default: m.OAuthErrorPage })),
 );

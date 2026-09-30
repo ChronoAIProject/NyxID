@@ -1014,7 +1014,7 @@ const MOCK_PUBLIC_CONFIG = {
   node_ws_url: "ws://localhost:3001/api/v1/nodes/ws",
   version: "0.1.0-mock",
   social_providers: ["github"],
-  invite_code_required: false,
+  invite_code_required: true,
   email_auth_enabled: true,
 };
 

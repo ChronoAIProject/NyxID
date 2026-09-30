@@ -6,7 +6,7 @@ use crate::crypto::jwks::JwksCache;
 use crate::crypto::jwt::{self, JwtKeys};
 use crate::errors::{AppError, AppResult};
 use crate::services::{
-    audit_service, oauth_service, social_auth_service,
+    audit_service, feature_flag_service, oauth_service, social_auth_service,
     social_auth_service::{SocialProfile, SocialProvider},
     token_service,
 };
@@ -157,7 +157,7 @@ async fn exchange_social_token_inner(
 
     // Step 4: Find or create user. First-time social sign-ups are blocked
     // when the invite-code gate is enabled.
-    let allow_new_users = !config.invite_code_required;
+    let allow_new_users = !feature_flag_service::invitation_code_required(db).await?;
     let user = social_auth_service::find_or_create_user(db, &profile, allow_new_users)
         .await?
         .user;

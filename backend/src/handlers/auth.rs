@@ -16,7 +16,8 @@ use crate::errors::{AppError, AppResult};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::{ACCESS_TOKEN_COOKIE_NAME, AuthUser, SESSION_COOKIE_NAME};
 use crate::services::{
-    audit_service, auth_service, invite_code_service, role_service, token_service,
+    audit_service, auth_service, feature_flag_service, invite_code_service, role_service,
+    token_service,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event, hash_short_id};
 
@@ -32,9 +33,7 @@ pub struct RegisterRequest {
         message = "Password must be between 8 and 128 characters"
     ))]
     pub password: String,
-    /// Invite code. Required when `AppConfig::invite_code_required` is true
-    /// (the default). When the gate is disabled for public launch the
-    /// handler accepts a missing or empty invite code.
+    /// Required when the invitation-code feature flag is enabled.
     #[serde(default)]
     pub invite_code: Option<String>,
     pub display_name: Option<String>,
@@ -359,7 +358,7 @@ pub async fn register(
     // we reserve one slot up front. When it is disabled (public launch),
     // any invite code the client sent is ignored and registration proceeds
     // without reserving anything.
-    let invite_code_id = if state.config.invite_code_required {
+    let invite_code_id = if feature_flag_service::invitation_code_required(&state.db).await? {
         let raw_code = body
             .invite_code
             .as_deref()
@@ -491,9 +490,6 @@ pub async fn register(
         let source = if invite_code_id.is_some() {
             "invite_code".to_string()
         } else {
-            // Reached only when `INVITE_CODE_REQUIRED=false`. Once the
-            // public-launch flag is flipped, all email signups have a
-            // code and `invite_code` is the only `source` we emit.
             "direct".to_string()
         };
         emit_event(
