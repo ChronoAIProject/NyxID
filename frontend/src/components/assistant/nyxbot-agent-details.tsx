@@ -359,11 +359,11 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
         .map((slug) => [slug, values.guest_access[slug] ?? "use"] as const)
         .filter(([slug, level]) => level !== (agent.guest_access[slug] ?? "use")),
     );
-    const { guest_access: _levels, ...body } = values;
     try {
       await grants.mutateAsync({
         id: agent.id,
-        ...body,
+        services: values.services,
+        account_read: values.account_read,
         ...(Object.keys(changed).length ? { guest_access: changed } : {}),
       });
       form.reset(values);
