@@ -229,9 +229,7 @@ async fn sync_lane_price(
         if lago.remove_standard_charge(plan_code, code).await.is_err() {
             return Ok(false);
         }
-        db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
-            .delete_many(doc! { "lago_metric_code": code })
-            .await?;
+        retire_rate(db, code).await?;
         // A concurrent re-add must be synchronized again after this removal.
         collection
             .update_one(
@@ -308,6 +306,7 @@ async fn sync_lane_component(
                     credits_per_unit_micros: pico / 1_000_000,
                     credits_per_unit_pico: Some(pico),
                     synced_at: Utc::now(),
+                    retired_at: None,
                 },
             )
             .upsert(true)
@@ -368,9 +367,7 @@ async fn cleanup_components(
         if lago.remove_standard_charge(plan_code, code).await.is_err() {
             continue;
         }
-        db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
-            .delete_many(doc! { "lago_metric_code": code })
-            .await?;
+        retire_rate(db, code).await?;
         mark_live_price_pending(db, &service.id, code).await?;
         db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
             .update_one(
@@ -469,6 +466,7 @@ async fn sync_legacy_price(
                         credits_per_unit_micros: pico / 1_000_000,
                         credits_per_unit_pico: Some(pico),
                         synced_at: Utc::now(),
+                        retired_at: None,
                     },
                 )
                 .upsert(true)
@@ -503,12 +501,10 @@ async fn complete_price_removal(
     service_id: &str,
     metric_code: &str,
 ) -> AppResult<()> {
-    // Keep the cleanup marker until after the cache delete. A crash between
-    // these writes makes reconciliation repeat an idempotent Lago removal and
-    // cache delete instead of permanently orphaning the local rate.
-    db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
-        .delete_many(doc! { "lago_metric_code": metric_code })
-        .await?;
+    // Keep the cleanup marker until the rate is retired. A crash between these
+    // writes makes reconciliation repeat the idempotent Lago removal and
+    // re-mark the rate retired instead of leaving the removed price reservable.
+    retire_rate(db, metric_code).await?;
     db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
         .update_one(
             doc! {
@@ -518,6 +514,19 @@ async fn complete_price_removal(
             doc! { "$unset": {
                 "billing.platform_pricing_cleanup_metric_code": "",
             } },
+        )
+        .await?;
+    Ok(())
+}
+
+/// Removed prices keep their cached rate so historical usage stays priceable;
+/// `retired_at` makes new reservations refuse it. A later sync of the same code
+/// replaces the whole row, which clears the mark.
+async fn retire_rate(db: &mongodb::Database, code: &str) -> AppResult<()> {
+    db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
+        .update_many(
+            doc! { "lago_metric_code": code },
+            doc! { "$set": { "retired_at": bson::DateTime::from_chrono(Utc::now()) } },
         )
         .await?;
     Ok(())
@@ -675,7 +684,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn completed_price_removal_deletes_rate_and_cleanup_marker() {
+    async fn completed_price_removal_retires_rate_and_clears_cleanup_marker() {
         let Some(db) = connect_test_database("service_price_cleanup").await else {
             return;
         };
@@ -697,9 +706,10 @@ mod tests {
                 credits_per_unit_micros: 125_000,
                 credits_per_unit_pico: None,
                 synced_at: Utc::now(),
+                retired_at: None,
             })
             .await
-            .expect("insert stale service rate");
+            .expect("insert service rate");
 
         complete_price_removal(&db, "service-1", metric_code)
             .await
@@ -718,12 +728,13 @@ mod tests {
                 .get("platform_pricing_cleanup_metric_code")
                 .is_none()
         );
-        assert_eq!(
-            db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME,)
-                .count_documents(doc! { "lago_metric_code": metric_code })
-                .await
-                .expect("count rates"),
-            0
-        );
+        let rate = db
+            .collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
+            .find_one(doc! { "lago_metric_code": metric_code })
+            .await
+            .expect("find rate")
+            .expect("retired rate is retained for historical usage");
+        assert!(rate.retired_at.is_some());
+        assert_eq!(rate.credits_per_unit_micros, 125_000);
     }
 }

@@ -257,6 +257,27 @@ pub async fn get_usage(
                 "as": "allocation", "in": "$$allocation.quantity",
             } } },
         } },
+        // The rate each historical meter reserved at, in exact Decimal128 pico.
+        // Null when the row recorded none.
+        doc! { "$set": {
+            "reservation_rate_pico": { "$switch": {
+                "branches": [
+                    { "case": "$exact_cost", "then": null },
+                    {
+                        "case": { "$ne": [{ "$ifNull": ["$funding.credits_per_unit_pico", null] }, null] },
+                        "then": { "$toDecimal": "$funding.credits_per_unit_pico" },
+                    },
+                    // `credits_per_unit_micros` is serde-defaulted, so 0 without pico is
+                    // indistinguishable from a row written before rates were recorded;
+                    // unknown is safer than a fabricated free price.
+                    {
+                        "case": { "$gt": ["$funding.credits_per_unit_micros", 0] },
+                        "then": { "$multiply": [{ "$toDecimal": "$funding.credits_per_unit_micros" }, 1_000_000_i64] },
+                    },
+                ],
+                "default": null,
+            } },
+        } },
         doc! {
             "$group": {
                 "_id": {
@@ -288,6 +309,24 @@ pub async fn get_usage(
                     "$funding.allowance_funded_quantity", "$consumed_allowance_quantity",
                 ] } },
                 "legacy_quantity": { "$sum": { "$cond": ["$exact_cost", 0, "$quantity"] } },
+                "legacy_rows": { "$sum": { "$cond": ["$exact_cost", 0, 1] } },
+                "legacy_grant_only_rows": { "$sum": { "$cond": [
+                    { "$and": [
+                        { "$not": ["$exact_cost"] },
+                        { "$eq": ["$funding.settled", true] },
+                        // Numeric equality: a legacy Int64 whole-credit zero and
+                        // a Decimal128 zero both match.
+                        { "$eq": ["$funding.wallet_charge_credits", 0] },
+                        { "$eq": ["$consumed_allowance_quantity", 0] },
+                    ] }, 1, 0,
+                ] } },
+                "legacy_reservation_rows": { "$sum": { "$cond": [
+                    { "$eq": [{ "$ifNull": ["$reservation_rate_pico", null] }, null] }, 0, 1,
+                ] } },
+                "legacy_reservation_gross": { "$sum": reservation_cost("$quantity") },
+                // Exact cost is linear in quantity, so settlement's allowance
+                // share cost(q) - cost(q - a) is exactly rate x a.
+                "legacy_reservation_allowance": { "$sum": reservation_cost("$consumed_allowance_quantity") },
                 "legacy_grant_micros": { "$sum": { "$cond": ["$exact_cost", 0, "$consumed_grant_micros"] } },
                 "legacy_allowance_quantity": { "$sum": { "$cond": ["$exact_cost", 0, "$consumed_allowance_quantity"] } },
                 "events": { "$sum": 1 },
@@ -321,20 +360,13 @@ pub async fn get_usage(
         let lago_metric_code = id_doc.get_str("lago_metric_code").unwrap_or("").to_string();
         let billable = id_doc.get_bool("billable").unwrap_or(false);
         let model = id_doc.get_str("model").ok().map(ToString::to_string);
-        let legacy_quantity = doc_i64(&doc, "legacy_quantity").unwrap_or(0);
-        let rate = if billable && legacy_quantity > 0 {
-            find_rate(&state.db, &lago_metric_code, model.as_deref())
-                .await?
-                .map(|rate| {
-                    crate::services::billing::amounts::rate_pico(
-                        rate.credits_per_unit_pico,
-                        rate.credits_per_unit_micros,
-                    )
-                })
-        } else {
-            Some(0)
-        };
-        let costs = usage_costs(&doc, billable, rate)?;
+        let pricing = legacy_pricing(
+            &doc,
+            billable,
+            find_rate(&state.db, &lago_metric_code, model.as_deref()),
+        )
+        .await?;
+        let costs = usage_costs(&doc, billable, pricing)?;
         rows.push(BillingUsageRow {
             service_slug: id_doc.get_str("service_slug").ok().map(ToString::to_string),
             service_id: id_doc.get_str("service_id").ok().map(ToString::to_string),
@@ -918,8 +950,61 @@ fn doc_i64(doc: &Document, key: &str) -> Option<i64> {
     }
 }
 
+/// Exact per-meter credits for `quantity` at the meter's reservation rate, the
+/// same `rate x quantity` exact settlement computes, with no rounding. A null
+/// rate yields null, which `$sum` ignores.
+fn reservation_cost(quantity: &str) -> Document {
+    doc! { "$divide": [
+        { "$multiply": [{ "$toDecimal": quantity }, "$reservation_rate_pico"] },
+        crate::services::billing::amounts::PICO_PER_CREDIT as i64,
+    ] }
+}
+
+/// How a group's historical meters (no exact settled cost) are valued, most
+/// certain first. A grant-only settlement has an exact gross: the grant covered
+/// all of it. Otherwise follow settlement's own rate order: the cached rate,
+/// then the reservation rate every funded meter records. Codes whose price was
+/// removed before retired rates were kept have no cache row, so the per-row
+/// rate is the only surviving record.
+enum LegacyPricing {
+    NoUsage,
+    GrantSettled,
+    CachedRate(i128),
+    Reservation,
+    Unknown,
+}
+
+/// `cached_rate` is lazy; it is awaited only when no exact derivation applies.
+async fn legacy_pricing(
+    doc: &Document,
+    billable: bool,
+    cached_rate: impl Future<Output = AppResult<Option<BillingRateCache>>>,
+) -> AppResult<LegacyPricing> {
+    let count = |key| doc_i64(doc, key).unwrap_or(0);
+    let rows = count("legacy_rows");
+    if !billable || count("legacy_quantity") <= 0 {
+        return Ok(LegacyPricing::NoUsage);
+    }
+    if rows > 0 && rows == count("legacy_grant_only_rows") {
+        return Ok(LegacyPricing::GrantSettled);
+    }
+    if let Some(rate) = cached_rate.await? {
+        return Ok(LegacyPricing::CachedRate(
+            crate::services::billing::amounts::rate_pico(
+                rate.credits_per_unit_pico,
+                rate.credits_per_unit_micros,
+            ),
+        ));
+    }
+    Ok(if rows == count("legacy_reservation_rows") {
+        LegacyPricing::Reservation
+    } else {
+        LegacyPricing::Unknown
+    })
+}
+
 /// Exact settlements remain readable without a cached rate. Historical rows
-/// use the current model rate; unknown historical costs retain null semantics.
+/// are valued per `LegacyPricing`; unknown costs stay null.
 struct UsageCosts {
     total: Option<Credits>,
     wallet: Option<Credits>,
@@ -927,7 +1012,7 @@ struct UsageCosts {
     allowance: Option<Credits>,
 }
 
-fn usage_costs(doc: &Document, billable: bool, rate: Option<i128>) -> AppResult<UsageCosts> {
+fn usage_costs(doc: &Document, billable: bool, pricing: LegacyPricing) -> AppResult<UsageCosts> {
     if !billable {
         return Ok(UsageCosts {
             total: Some(Credits::ZERO),
@@ -941,41 +1026,37 @@ fn usage_costs(doc: &Document, billable: bool, rate: Option<i128>) -> AppResult<
         |key| Credits::from_bson(doc.get(key).cloned().unwrap_or(Bson::Int64(0)), 1_000_000);
     let legacy_grant = money("legacy_grant_micros")?;
     let grant = Some(money("grant_funded")?.checked_add(legacy_grant)?);
-    if quantity("legacy_quantity") > 0 && rate.is_none() {
-        return Ok(UsageCosts {
-            total: None,
-            wallet: None,
-            grant,
-            allowance: None,
-        });
-    }
-    let legacy_cost = rate
-        .map(|rate| crate::services::billing::amounts::cost(rate, quantity("legacy_quantity")))
-        .transpose()?;
-    let legacy_allowance = if quantity("legacy_allowance_quantity") == 0 {
-        Some(Credits::ZERO)
-    } else {
-        rate.map(|rate| {
-            crate::services::billing::amounts::cost(rate, quantity("legacy_allowance_quantity"))
-        })
-        .transpose()?
+    let (legacy_cost, legacy_allowance) = match pricing {
+        LegacyPricing::NoUsage => (Credits::ZERO, Credits::ZERO),
+        LegacyPricing::GrantSettled => (legacy_grant, Credits::ZERO),
+        LegacyPricing::CachedRate(rate) => (
+            crate::services::billing::amounts::cost(rate, quantity("legacy_quantity"))?,
+            crate::services::billing::amounts::cost(rate, quantity("legacy_allowance_quantity"))?,
+        ),
+        LegacyPricing::Reservation => (
+            money("legacy_reservation_gross")?,
+            money("legacy_reservation_allowance")?,
+        ),
+        LegacyPricing::Unknown => {
+            return Ok(UsageCosts {
+                total: None,
+                wallet: None,
+                grant,
+                allowance: None,
+            });
+        }
     };
     let legacy_wallet = legacy_cost
-        .zip(legacy_allowance)
-        .map(|(total, allowance)| {
-            total
-                .checked_sub(allowance)?
-                .checked_sub(legacy_grant)
-                .map(|amount| amount.max(Credits::ZERO))
-        })
-        .transpose()?;
+        .checked_sub(legacy_allowance)?
+        .checked_sub(legacy_grant)?
+        .max(Credits::ZERO);
     let combine = |key, legacy| -> AppResult<Option<Credits>> {
         sum_optional(
             [
                 (quantity("exact_rows") > 0)
                     .then(|| money(key))
                     .transpose()?,
-                legacy,
+                Some(legacy),
             ]
             .into_iter(),
         )

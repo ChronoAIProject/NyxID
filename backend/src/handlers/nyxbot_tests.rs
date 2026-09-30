@@ -3214,6 +3214,26 @@ async fn the_owners_private_chats_share_the_agents_own_thread() {
     server.abort();
 }
 
+/// Reads the home thread once `ready` holds. A relayed message is accepted
+/// (202) before it is recorded, and an instrumented coverage build can take
+/// longer than any fixed sleep to record it.
+async fn home_thread_once(
+    state: &AppState,
+    home: &str,
+    ready: impl Fn(&crate::models::assistant_conversation::AssistantConversation) -> bool,
+) -> crate::models::assistant_conversation::AssistantConversation {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let thread = crate::services::assistant_nyxagent::get(&state.db, OWNER, home)
+            .await
+            .unwrap();
+        if ready(&thread) || tokio::time::Instant::now() >= deadline {
+            return thread;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
 /// A question already being answered, or already queued, is not worked on
 /// again: a repeat from the same chat is told so, and one from another chat
 /// also gets the answer when it is ready.
@@ -3310,10 +3330,13 @@ async fn the_same_question_is_not_worked_on_twice() {
         direct_private(&state, &lark, "msg-q3", "ou_alice", question).await,
         StatusCode::ACCEPTED
     );
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    let thread = crate::services::assistant_nyxagent::get(&state.db, OWNER, &home)
-        .await
-        .unwrap();
+    let thread = home_thread_once(&state, &home, |thread| {
+        thread
+            .active_turn
+            .as_ref()
+            .is_some_and(|turn| !turn.also_deliver.is_empty())
+    })
+    .await;
     let turn = thread.active_turn.as_ref().unwrap();
     assert_eq!(turn.also_deliver.len(), 1);
     assert_eq!(turn.also_deliver[0].nyxbot_channel_id, lark.id);
@@ -3331,10 +3354,13 @@ async fn the_same_question_is_not_worked_on_twice() {
         direct_private(&state, &lark, "msg-q6", "ou_alice", other).await,
         StatusCode::ACCEPTED
     );
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    let thread = crate::services::assistant_nyxagent::get(&state.db, OWNER, &home)
-        .await
-        .unwrap();
+    let thread = home_thread_once(&state, &home, |thread| {
+        thread
+            .pending_events
+            .first()
+            .is_some_and(|event| event.reply_to.len() > 1)
+    })
+    .await;
     assert_eq!(thread.pending_events.len(), 1);
     let waiting: Vec<&str> = thread.pending_events[0]
         .reply_to

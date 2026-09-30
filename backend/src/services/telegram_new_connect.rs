@@ -191,6 +191,11 @@ impl TelegramNewService<'_> {
             }
         }
         self.finish_request(id).await?;
+        // Tracked requests reserve their completion notification even when the
+        // browser has gone away. The bot-link sweep recovers any transient error.
+        if let Err(error) = super::channel_connect_link_service::complete(self.db, id).await {
+            tracing::warn!(channel_connect_link_id = id, %error, "Channel setup completion remains pending");
+        }
         super::channel_bot_service::get_bot(self.db, id).await
     }
 

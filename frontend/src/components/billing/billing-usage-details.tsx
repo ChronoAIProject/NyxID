@@ -2,11 +2,10 @@ import { ChevronDown, ChevronRight } from "lucide-react";
 import { billingMetricLabel } from "@/lib/billing-units";
 import type { BillingUsageRow, BillingUsageTotals } from "@/schemas/billing";
 import {
-  credits,
+  creditsLabel,
   number,
   serviceName,
   serviceCategory,
-  total,
   type BillingCatalog,
 } from "@/lib/billing-display";
 import {
@@ -21,37 +20,55 @@ import {
 } from "@/lib/billing-usage";
 
 export function FundingDetails({ rows }: { rows: BillingUsageRow[] }) {
+  const estimated = creditsLabel(rows, "estimated_credits_micros");
+  const grants = creditsLabel(rows, "grant_credits_micros");
+  const allowances = creditsLabel(rows, "allowance_credits_micros");
+  const wallet = creditsLabel(rows, "wallet_credits_micros");
+  const unpriced = Math.max(
+    estimated.unknown,
+    grants.unknown,
+    allowances.unknown,
+    wallet.unknown,
+  );
+  const [records, were, their] =
+    unpriced === 1 ? ["record", "was", "its"] : ["records", "were", "their"];
   return (
     <dl className="split-facts funding-facts">
       <div>
         <dt>Estimated cost</dt>
-        <dd>{credits(total(rows, "estimated_credits_micros"))} credits</dd>
+        <dd>{estimated.text} credits</dd>
       </div>
       <div>
         <dt>Funded by credit grants</dt>
-        <dd>{credits(total(rows, "grant_credits_micros"))} credits</dd>
+        <dd>{grants.text} credits</dd>
       </div>
       <div>
         <dt>Funded by allowances</dt>
-        <dd>{credits(total(rows, "allowance_credits_micros"))} credits</dd>
+        <dd>{allowances.text} credits</dd>
       </div>
       <div>
         <dt>Wallet-funded cost</dt>
-        <dd>{credits(total(rows, "wallet_credits_micros"))} credits</dd>
+        <dd>{wallet.text} credits</dd>
       </div>
-      {rows.some((row) =>
-        [
-          row.estimated_credits_micros,
-          row.wallet_credits_micros,
-          row.grant_credits_micros,
-          row.allowance_credits_micros,
-        ].some((value) => value == null),
-      ) && (
+      {unpriced > 0 && (
         <div>
           <dt>Incomplete reporting</dt>
           <dd>
-            Some records have no cost or funding data. Expand the records for
-            known values.
+            {rows.length === 1 ? (
+              <>
+                This charged record was metered under a price that is no longer
+                available, so its gross, wallet and allowance costs cannot be
+                estimated. Credit-grant funding is still exact.
+              </>
+            ) : (
+              <>
+                {unpriced} charged {records} {were} metered under a price that
+                is no longer available, so {their} gross, wallet and allowance
+                costs cannot be estimated. Amounts marked ≥ are lower bounds.
+                Credit-grant funding is still exact. Expand the records to see
+                which values are available.
+              </>
+            )}
           </dd>
         </div>
       )}
@@ -334,7 +351,7 @@ export function ExpandableUsage({
                 "—"
               ) : (
                 <>
-                  {credits(total(group.rows, "estimated_credits_micros"))}{" "}
+                  {creditsLabel(group.rows, "estimated_credits_micros").text}{" "}
                   <small>credits</small>
                 </>
               )}

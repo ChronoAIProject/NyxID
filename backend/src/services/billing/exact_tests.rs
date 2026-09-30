@@ -784,6 +784,7 @@ async fn mixed_grant_wallet_fraction_and_legacy_unfunded_row_recovery() {
         credits_per_unit_micros: 0,
         credits_per_unit_pico: Some(800_000),
         synced_at: Utc::now(),
+        retired_at: None,
     };
     db.collection::<crate::models::billing_rate_cache::BillingRateCache>("billing_rate_cache")
         .insert_one(rate)
