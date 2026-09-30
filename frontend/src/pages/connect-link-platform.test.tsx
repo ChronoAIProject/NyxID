@@ -9,6 +9,7 @@ import {
 import userEvent from "@testing-library/user-event";
 import { beforeEach, afterEach, expect, it, vi } from "vitest";
 import { ConnectLinkPage } from "./connect-link";
+import { ConnectLinkContent } from "@/components/connect-link/connect-link-content";
 import type { CompleteConnectLinkResponse } from "@/schemas/connect-links";
 
 const mocks = vi.hoisted(() => ({
@@ -107,6 +108,44 @@ it("defaults to platform and completes without any secret", async () => {
     token: "hosted-token",
     values: { use_platform_key: true },
   });
+});
+
+it("keeps embedded OAuth authorization in a provider popup", async () => {
+  const popup = {
+    location: { href: "", assign: vi.fn() },
+    close: vi.fn(),
+  } as unknown as Window;
+  const open = vi.spyOn(window, "open").mockReturnValue(popup);
+  mocks.complete.mockResolvedValueOnce({
+    status: "oauth_required",
+    id: "connect-link-1",
+    authorization_url: "https://provider.example/authorize",
+  });
+
+  render(
+    <ConnectLinkContent
+      token="hosted-token"
+      embedded
+      redirectOnTerminal={false}
+    />,
+  );
+  await userEvent.click(
+    screen.getByRole("button", { name: "Approve connection" }),
+  );
+
+  await waitFor(() =>
+    expect(open).toHaveBeenCalledWith(
+      "about:blank",
+      "nyxid-connect-authorization",
+      expect.stringContaining("popup"),
+    ),
+  );
+  expect(popup.location.assign).toHaveBeenCalledWith(
+    "https://provider.example/authorize",
+  );
+  expect(
+    screen.getByText(/Finish authorization in the provider window/),
+  ).toBeInTheDocument();
 });
 
 it("previews once under React StrictMode", async () => {
