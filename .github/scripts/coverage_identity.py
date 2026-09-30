@@ -13,6 +13,7 @@ INPUTS = (
     ".github/scripts/ci_resources.py",
     ".github/scripts/start-test-mongodb.sh",
     ".github/scripts/prepare-backend-runner.sh",
+    ".github/scripts/install-linux-build-deps.sh",
 )
 
 

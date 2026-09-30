@@ -22,6 +22,13 @@ at the user's request for the broader CI reliability fix.
   swap while just one rustc process remained. The reserve adds margin for
   memory peaks without reducing compiler/test concurrency or changing
   swappiness. Failure to establish the reserve fails the setup step explicitly.
+- Bound Linux build dependency installation to five minutes per step, with
+  noninteractive apt, 20-second HTTP/HTTPS acquisition timeouts and two download
+  retries. Failed index updates and installations fail the job. A September 30
+  hosted billing job stalled in Ubuntu mirror index acquisition for almost
+  24 minutes before a manual diagnostic cancellation; it never reached tests.
+  The shared helper is part of the coverage recipe identity. This retries only
+  dependency acquisition, never test execution or assertions.
 - Wrap backend tests, standalone billing smoke and head/base backend coverage
   with `ci_resources.py`. It preserves arguments, environment, working
   directory, streamed output and command failures. SIGINT/SIGTERM reach the
