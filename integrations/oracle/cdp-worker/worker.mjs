@@ -85,6 +85,14 @@ const MAX_WAIT_MS = Number(process.env.NYXID_MAX_WAIT_MS || 2 * 60 * 60 * 1000);
 // instead of spinning to MAX_WAIT_MS. Mirrors the userscript's
 // NO_OUTPUT_IDLE_TIMEOUT (420s).
 const NO_OUTPUT_IDLE_MS = Number(process.env.NYXID_NO_OUTPUT_IDLE_MS || 7 * 60 * 1000);
+// The 2026-09 layout can leave the conversation unrendered after a send:
+// the user turn is there, nothing is generating, and the finished answer
+// only appears when a client-side stream gives up ten minutes later, or at
+// once on a reload (observed 2026-09-30: "Worked for 15s" shown at 601s;
+// a reload at 75s showed the answer immediately). Reload a blank
+// conversation after BLANK_RELOAD_MS instead of idling to NO_OUTPUT_IDLE_MS.
+const BLANK_RELOAD_MS = Number(process.env.NYXID_BLANK_RELOAD_MS || 60 * 1000);
+const MAX_BLANK_RELOADS = Number(process.env.NYXID_MAX_BLANK_RELOADS || 4);
 export function usageCooldownConfig(value) {
   if (value === undefined) return { milliseconds: 900000, invalid: false };
   const seconds = Number(value);
@@ -634,7 +642,7 @@ async function assertPublicTarget(rawUrl) {
 // Ported from the proven userscript extractors: KaTeX/MathJax → LaTeX, the
 // Pro-reasoning "still generating" probe, latest-answer + full-transcript
 // extraction. Installed on window.__nyx and re-installed after navigation.
-export const DOM_CORE_VERSION = 6;
+export const DOM_CORE_VERSION = 8;
 const DOM_CORE = `
 window.__nyx = (function () {
   const artifactFileId = ${artifactFileId.toString()};
@@ -649,7 +657,7 @@ window.__nyx = (function () {
     // Screen-reader-only labels ("You said:", "ChatGPT said:") share a line
     // with the first words of the message in the 2026-09 layout, so a
     // line-based filter cannot drop them. They are never message content.
-    for (const sr of Array.from(clone.querySelectorAll(".sr-only"))) sr.remove();
+    for (const sr of Array.from(clone.querySelectorAll('.sr-only, .ProseMirror-widget, [contenteditable="false"][aria-hidden="true"]'))) sr.remove();
     for (const ann of Array.from(clone.querySelectorAll('annotation[encoding="application/x-tex"]'))) {
       const latex = (ann.textContent || "").trim();
       if (!latex) continue;
@@ -793,6 +801,23 @@ window.__nyx = (function () {
     return turnNodes().filter((turn) => turn.role === 'assistant').length;
   }
 
+  // The 2026-09 composer turns every URL into a rich link node carrying an
+  // icon widget (contenteditable=false, aria-hidden). Those widgets add a
+  // phantom space to innerText in front of each link, so a prompt with 54
+  // links read back 54 characters longer than it was typed and failed the
+  // read-back on every worker (observed 2026-09-30, ~100 failures per worker
+  // in six hours, each forcing a Chrome relaunch). Hide the widgets while
+  // reading; innerText on a detached clone would lose block boundaries.
+  function composerText(el) {
+    if (!el) return "";
+    if (typeof el.value === "string") return el.value;
+    const widgets = [...el.querySelectorAll('.ProseMirror-widget, [contenteditable="false"][aria-hidden="true"]')];
+    const previous = widgets.map((w) => w.style.display);
+    widgets.forEach((w) => { w.style.display = "none"; });
+    try { return el.innerText; }
+    finally { widgets.forEach((w, i) => { w.style.display = previous[i]; }); }
+  }
+
   // Structure only, never content: what the page looked like when a task
   // failed. Lengths and roles stand in for text; test ids and ARIA state
   // stand in for labels. The composer draft is reported by length alone.
@@ -859,9 +884,16 @@ window.__nyx = (function () {
   function extractResponse() {
     const scope = latestAssistantTurn();
     if (!scope) return "";
+    // latestAssistantTurn only returns an assistant turn. In the classic
+    // markup the scope is the conversation-turn wrapper, so narrow it to the
+    // assistant message inside; in the new layout the scope is the turn node
+    // itself (a search unit, or the parent of the "ChatGPT said:" heading,
+    // which carries no role attribute of its own). Re-deriving the role from
+    // that parent returned null and left a finished answer unread until the
+    // idle window expired (no_assistant_output, observed 2026-09-30).
     const assistant = scope.matches("[data-message-author-role='assistant']") ? scope
-      : (scope.querySelector("[data-message-author-role='assistant']") || (turnRole(scope) === 'assistant' ? scope : null));
-    return assistant ? cleanText(extractTextWithMath(assistant)) : "";
+      : (scope.querySelector("[data-message-author-role='assistant']") || scope);
+    return cleanText(extractTextWithMath(assistant));
   }
 
   // Image URLs in the LATEST assistant turn (generated images). An image-gen
@@ -999,7 +1031,7 @@ window.__nyx = (function () {
     return item && (item.innerText || item.textContent || "").trim() === text ? item : null;
   }
 
-  return { version: ${DOM_CORE_VERSION}, discoverControls, structuralProbe, diagnosticSummary, errorCode, isStillGenerating, assistantCount, extractResponse, extractImages, extractFiles, extractTranscript, extractTranscriptKeys, scrollContainer, extractTextWithMath, cleanText,
+  return { version: ${DOM_CORE_VERSION}, discoverControls, structuralProbe, diagnosticSummary, composerText, errorCode, isStillGenerating, assistantCount, extractResponse, extractImages, extractFiles, extractTranscript, extractTranscriptKeys, scrollContainer, extractTextWithMath, cleanText,
     beginModelPicker, finishNestedModelPicker, modelPickerMenus, modelPickerItems, modelPickerTrigger, modelPickerItem, compactModelLabel };
 })();
 `;
@@ -3173,7 +3205,7 @@ async function handlePrompt(runtime, page, task, recovering) {
   await ensureComposerUnobstructed(page);
   await input.click({ timeout: PRE_SEND_ACTION_MS });
   await input.fill(task.prompt, { timeout: promptFillTimeout(task.prompt?.length) });
-  const typed = await input.evaluate(el => el.value ?? el.innerText);
+  const typed = await input.evaluate(el => window.__nyx?.composerText(el) ?? (el.value ?? el.innerText));
   if (normalizePromptText(typed) !== normalizePromptText(task.prompt)) throw Object.assign(new Error('composer_readback_failed'), { code: 'composer_readback_failed' });
   await installDomCore(page);
   const before = await boundedRead(interactionBudget(PRE_SEND_ACTION_MS), (timeout) =>
@@ -3277,6 +3309,8 @@ async function waitForResponse(runtime, page, task, beforeCount, rejection = nul
   let lastHeartbeat = start;
   let lastKey = "";
   let stable = 0;
+  let blankReloads = 0;
+  let lastBlankReloadAt = start;
   while (Date.now() - start < MAX_WAIT_MS) {
     await sleep(STABLE_INTERVAL_MS);
     if (rejection?.code) throw new TaskFailure(rejection.code);
@@ -3314,6 +3348,16 @@ async function waitForResponse(runtime, page, task, beforeCount, rejection = nul
     // so artifacts carry that case through. Until text or an artifact appears
     // there's no new answer yet — wedge guard bails if ChatGPT has stopped.
     if (count <= beforeCount && !hasImages && !hasFiles) {
+      if (!generating && blankReloads < MAX_BLANK_RELOADS && Date.now() - lastBlankReloadAt >= BLANK_RELOAD_MS) {
+        blankReloads += 1;
+        lastBlankReloadAt = Date.now();
+        log(`no answer rendered ${Math.round((Date.now() - start) / 1000)}s after send: reloading (${blankReloads}/${MAX_BLANK_RELOADS})`);
+        await page.reload({ waitUntil: "domcontentloaded", timeout: 60000 });
+        await installDomCore(page);
+        await waitForComposer(page, 15000);
+        await settleDom(page, { quietMs: 250, maxMs: 2500 });
+        continue;
+      }
       if (!generating && Date.now() - start >= NO_OUTPUT_IDLE_MS) {
         return recoverContentFailure(runtime, page, task, beforeCount, "no_assistant_output", rejection);
       }
