@@ -3408,8 +3408,9 @@ impl PreparedProxyCall {
     /// spaces dropped, `.`, `-` and spaces as `_`, `_method[]` as `_method`,
     /// any case); anything starting `_method` counts; `;` separates fields as
     /// `&` does. The body is read by the content type it is sent with: a JSON
-    /// body by its top-level fields, and one that does not parse counts (a
-    /// server's parser may read it); any other body as a form too.
+    /// body by its top-level fields, one that does not parse counting (a
+    /// server's parser may read it); a form body as a form (and JSON); text
+    /// and binary bodies not at all. An empty body carries nothing.
     pub fn carries_method_override(&self) -> bool {
         fn normalized(key: &str) -> String {
             key.split(|c: char| c.is_control() || c == '[')
@@ -3456,10 +3457,11 @@ impl PreparedProxyCall {
                 })
             })
         };
-        let sent_as_json = self
-            .body_content_type
-            .as_deref()
-            .is_some_and(|content_type| super::content_type::is_json_content_type(content_type));
+        let content_type = self.body_content_type.as_deref().unwrap_or_default();
+        let sent_as_json = super::content_type::is_json_content_type(content_type);
+        let sent_as_form = content_type
+            .to_ascii_lowercase()
+            .contains("application/x-www-form-urlencoded");
         self.parameter_headers
             .iter()
             .any(|(name, _)| override_header(name))
@@ -3468,10 +3470,17 @@ impl PreparedProxyCall {
                 .as_deref()
                 .is_some_and(|query| form(query.as_bytes()))
             || self.body.as_deref().is_some_and(|body| {
-                if sent_as_json {
+                // An empty body carries nothing.
+                if body.iter().all(u8::is_ascii_whitespace) {
+                    false
+                } else if sent_as_json {
                     json_fields(body).unwrap_or(true)
-                } else {
+                } else if sent_as_form {
                     form(body) || json_fields(body).unwrap_or(false)
+                } else {
+                    // Text and binary bodies: servers read `_method` only
+                    // from forms (and JSON).
+                    false
                 }
             })
     }
@@ -7088,6 +7097,8 @@ mod tests {
             serde_json::json!({"method": "GET", "path": "12345", "query": "method=get"}),
             serde_json::json!({"method": "POST", "path": "hooks", "body": {"method": "POST"}}),
             serde_json::json!({"method": "POST", "path": "Calls.json", "query": "Method=POST"}),
+            // An empty body, as models send with a GET.
+            serde_json::json!({"method": "GET", "path": "items", "body": ""}),
         ] {
             assert!(!overrides(args.clone()), "{args}");
         }

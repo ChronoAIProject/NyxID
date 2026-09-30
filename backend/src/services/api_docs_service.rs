@@ -874,7 +874,6 @@ async fn fetch_json_spec_internal(
         if let Some(cached) = get_cached_spec(&cache_key) {
             return Ok(cached);
         }
-        let spec = Arc::new(spec);
         cache_spec(&cache_key, spec.clone());
         return Ok(spec);
     }
@@ -942,16 +941,17 @@ async fn fetch_json_spec_internal(
     Ok(spec)
 }
 
-pub(crate) fn hosted_catalog_spec_for_url(url: &str) -> AppResult<Option<serde_json::Value>> {
+/// The compiled overlay a hosted catalog spec URL names, on any host: such
+/// URLs are always served from NyxID's own copy, never fetched.
+pub(crate) fn hosted_catalog_spec_for_url(url: &str) -> AppResult<Option<Arc<serde_json::Value>>> {
     let parsed = url::Url::parse(url)
         .map_err(|_| AppError::BadRequest("Spec URL is invalid".to_string()))?;
     if !matches!(parsed.scheme(), "http" | "https") {
         return Ok(None);
     }
-    Ok(
-        crate::services::catalog_spec_registry::spec_for_url_path(parsed.path())
-            .map(|spec| spec.as_ref().clone()),
-    )
+    Ok(crate::services::catalog_spec_registry::spec_for_url_path(
+        parsed.path(),
+    ))
 }
 
 fn detect_streaming_from_openapi(spec: &serde_json::Value) -> bool {

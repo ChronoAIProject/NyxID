@@ -504,7 +504,10 @@ turn so late tool calls stay restricted):
     `editMessageText`, Aurinko's `send_draft`), `false` for a PUT that only
     acts (Spotify's play and pause, Discord's add reaction). `true` may come
     from any spec and wins; `false` widens, so only a catalog contract says
-    it (an overlay by exact route, not by name). A DELETE, and an operation
+    it (an overlay by exact route, not by name; a catalog service that mounts
+    a remote spec instead of the overlay loses it, failing closed). An owner
+    who mounts a hosted overlay on another API applies that overlay's marks
+    to it. A DELETE, and an operation
     Aevatar's `x-aevatar-tool.destructive` marks (Telegram's `deleteMessage`,
     Sheets' `values:clear` and `values:append`, Docs' `batchUpdate`, IFTTT's
     triggers and tool calls), never. NyxID adds its own marker rather than
@@ -530,8 +533,11 @@ turn so late tool calls stay restricted):
   services without typed operations (the generic proxy) have none: they are
   judged by the method alone, so a POST that deletes there (an RPC-style API)
   is within `use`, and a GET that deletes (Telegram's Bot API accepts GET) is
-  within `read`: do not give such a service to a specialist that answers
-  guests unless they may do anything with it.
+  within `read`, as are batch envelopes (a `requests` array naming methods):
+  do not give such a service to a specialist that answers guests unless they
+  may do anything with it. Override checks read a JSON body by its top-level
+  fields and a form body as a form; text and binary bodies (uploads) and empty
+  bodies carry no override.
   Nothing is judged from names or words. The owner sets levels on the agent's
   Grants (a select per service; the page sends only changed levels) or by
   asking NyxBot (`nyxid__set_guest_access`, "let the group edit the office
