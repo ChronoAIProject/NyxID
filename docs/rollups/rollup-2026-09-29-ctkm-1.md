@@ -116,6 +116,15 @@ known from the rows' own consumption records. Credit grants were not the cause.
   submit had not reached the register call within the default 1 s `waitFor`.
   It passed in the other three runs on the same head and on rerun. Its wait is
   now 5 s, matching existing `waitFor` timeouts in the frontend tests.
+- `Backend Test` and `Backend Billing Smoke` on head `7304e0a7` died five times
+  out of seven attempts with exit 143 ("The runner has received a shutdown
+  signal") four to five minutes into compiling the `nyxid` test binary, before
+  any test ran; the same job passed on the pull_request run of that head and
+  the 04:17 pull_request run had hit the identical failure. The runner's memory
+  is exhausted while the full-DWARF test binary is codegen'd and linked. Both
+  jobs now build with `CARGO_PROFILE_TEST_DEBUG=line-tables-only`, which keeps
+  panic locations and backtraces and changes nothing for local development or
+  the coverage jobs. CI-only; should also land on `main`.
 
 ## Verification
 
