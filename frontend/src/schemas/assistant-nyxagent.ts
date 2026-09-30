@@ -31,8 +31,9 @@ export const assistantAgentStatusSchema = z.enum(["running", "idle", "destroyed"
 
 /**
  * What guests (members of the agent's chats other than you) may do with one
- * of a specialist's services: look things up only, use it but never delete or
- * overwrite (the default), or everything the specialist may.
+ * of a specialist's services: look things up only, use it (look up, create and
+ * act, but never change or delete what exists; the default), or everything the
+ * specialist may.
  */
 export const assistantGuestAccessSchema = z.enum(["read", "use", "all"]);
 export type AssistantGuestAccess = z.infer<typeof assistantGuestAccessSchema>;

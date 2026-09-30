@@ -457,7 +457,7 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
 
 const GUEST_ACCESS_LABEL: Record<AssistantGuestAccess, string> = {
   read: "Look things up only",
-  use: "Use, but not delete",
+  use: "Use, but not change or delete",
   all: "Everything this agent can do",
 };
 
@@ -485,8 +485,9 @@ function GuestAccessList({
         </p>
         <p className="text-[12px] text-muted-foreground">
           For people other than you in the agent&apos;s group and shared chats. &ldquo;Use&rdquo;
-          lets them read and change, but not delete or run what a service marks destructive.
-          Anything behind your approval stays yours. You can also ask NyxBot to change this.
+          lets them look things up, create and act (send a message, turn a light on), but not
+          change or delete what already exists. Anything behind your approval stays yours. You
+          can also ask NyxBot to change this.
         </p>
       </div>
       <ul aria-label="Guest access" className="space-y-1.5">

@@ -21,7 +21,8 @@ pub struct ParsedEndpoint {
     pub request_body_required: bool,
     pub response: OperationResponseContract,
     pub risk: Option<EndpointRisk>,
-    /// `x-aevatar-tool.destructive`: the operation deletes or overwrites.
+    /// The operation deletes or replaces data: `x-aevatar-tool.destructive`,
+    /// or NyxID's `x-nyxid-changes-existing` (a POST that edits).
     pub destructive: bool,
     pub supports_idempotency_key: bool,
 }
@@ -158,7 +159,11 @@ fn parse_endpoints_from_spec(
                 .get("x-aevatar-tool")
                 .and_then(|value| value.get("destructive"))
                 .and_then(|value| value.as_bool())
-                .unwrap_or(false);
+                .unwrap_or(false)
+                || operation
+                    .get("x-nyxid-changes-existing")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false);
             let supports_idempotency_key = operation
                 .get("x-nyxid-idempotency-key")
                 .and_then(|value| value.as_bool())
@@ -2633,6 +2638,13 @@ mod tests {
                         "responses": { "200": {} }
                     },
                     "get": { "operationId": "getItem", "responses": { "200": {} } }
+                },
+                "/items/{id}/edit": {
+                    "post": {
+                        "operationId": "editItem",
+                        "x-nyxid-changes-existing": true,
+                        "responses": { "200": {} }
+                    }
                 }
             }
         });
@@ -2645,6 +2657,7 @@ mod tests {
                 .destructive
         };
         assert!(destructive("updateitem"));
+        assert!(destructive("edititem"));
         assert!(!destructive("getitem"));
     }
 

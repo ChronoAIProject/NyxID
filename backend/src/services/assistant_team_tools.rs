@@ -175,9 +175,10 @@ pub fn schema(name: &str) -> Value {
                     of them (read or use only)"},
                 "access": {"type": "string", "enum": ["read", "use", "all"],
                     "description": "read: guests only look things up; use (the default): \
-                    guests read and change, but never delete or run what the service marks \
-                    destructive (deletes and overwrites); all: guests may do everything the \
-                    specialist may, deleting included"}}),
+                    guests look things up, create and act (send, turn on), but never change or \
+                    delete what exists (edit a sheet, doc, page or event, delete a file); all: \
+                    guests may do everything the specialist may, editing and deleting \
+                    included"}}),
             vec!["subagent", "access"],
         ),
         "decide_permission" => (
@@ -351,8 +352,9 @@ fn description(name: &str) -> &'static str {
             "Set what people other than the user (guests: other members of a group or shared \
             chat the specialist answers) may do with its services, when the user asks, e.g. \
             \"let the group edit the office sheet\" (all) or \"guests may only look things up\" \
-            (read). The default, use, lets guests read and change, but never delete or run \
-            what the service marks destructive. all is set service by service. Operations the \
+            (read). The default, use, lets guests look things up, create and act, but never \
+            change or delete what exists; all (edit and delete too) is set service by \
+            service. Operations the \
             user put behind approval stay the user's at every level. Only services granted to \
             the specialist; the rest come back in not_set."
         }
@@ -431,9 +433,9 @@ fn description(name: &str) -> &'static str {
             talk to the agent (default once the user has talked to the bot there); allow \
             posting there; or give the chat its own agent. Guests never act for the user: you \
             answer them without tools, and a specialist given the chat uses only its own \
-            services, as far as nyxid__set_guest_access lets guests (by default reading and \
-            changing, never deleting), so give a chat a specialist when its members need a \
-            service."
+            services, as far as nyxid__set_guest_access lets guests (by default looking up, \
+            creating and acting, never changing or deleting what exists), so give a chat a \
+            specialist when its members need a service."
         }
         "update_channel_access" => {
             "Set who may talk to the agent in private chats with a channel bot: only the user \

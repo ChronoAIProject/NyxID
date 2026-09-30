@@ -264,8 +264,11 @@ static PARSED_SPECS: LazyLock<HashMap<&'static str, Arc<serde_json::Value>>> = L
     },
 );
 
-/// Operations each overlay marks `x-aevatar-tool.destructive`, by spec key:
-/// their endpoint names (sanitized operation IDs) and `METHOD path` routes.
+/// Operations each overlay marks as deleting or replacing data, by spec key:
+/// `x-aevatar-tool.destructive`, or NyxID's own `x-nyxid-changes-existing`
+/// for a POST that edits what exists (Aevatar's marker is Aevatar's
+/// contract; NyxID adds its own rather than change it). Recorded as endpoint
+/// names (sanitized operation IDs) and `METHOD path` routes.
 static DESTRUCTIVE_OPERATIONS: LazyLock<HashMap<&'static str, HashSet<String>>> =
     LazyLock::new(|| {
         PARSED_SPECS
@@ -274,7 +277,9 @@ static DESTRUCTIVE_OPERATIONS: LazyLock<HashMap<&'static str, HashSet<String>>> 
                 let mut operations = HashSet::new();
                 for (path, item) in spec["paths"].as_object().into_iter().flatten() {
                     for (method, operation) in item.as_object().into_iter().flatten() {
-                        if operation["x-aevatar-tool"]["destructive"].as_bool() != Some(true) {
+                        if operation["x-aevatar-tool"]["destructive"].as_bool() != Some(true)
+                            && operation["x-nyxid-changes-existing"].as_bool() != Some(true)
+                        {
                             continue;
                         }
                         operations.insert(format!("{} {path}", method.to_ascii_uppercase()));
@@ -288,8 +293,9 @@ static DESTRUCTIVE_OPERATIONS: LazyLock<HashMap<&'static str, HashSet<String>>> 
             .collect()
     });
 
-/// Whether the hosted overlay of a catalog service marks this operation
-/// destructive (`x-aevatar-tool.destructive`), matched by name or route.
+/// Whether the hosted overlay of a catalog service marks this operation as
+/// deleting or replacing data (`x-aevatar-tool.destructive` or
+/// `x-nyxid-changes-existing`), matched by name or route.
 pub fn marks_destructive(slug: &str, method: &str, path: &str, name: &str) -> bool {
     spec_key_for_slug(slug)
         .and_then(|key| DESTRUCTIVE_OPERATIONS.get(key))
@@ -383,18 +389,21 @@ mod tests {
             "/x",
             "delete_x"
         ));
-        // Updates that can cancel an event or replace a record's data.
+        // NyxID's own marker for a POST that edits what exists.
+        assert!(marks_destructive("api-slack", "POST", "/chat.update", "x"));
         assert!(marks_destructive(
+            "api-telegram-bot",
+            "POST",
+            "/editMessageText",
+            "edit_message_text"
+        ));
+        // Aevatar's markers are left as they are: a PATCH update is beyond
+        // guests' default by its method, not by a marker.
+        assert!(!marks_destructive(
             "api-google",
             "PATCH",
             "/nowhere",
             "calendar_update_event"
-        ));
-        assert!(marks_destructive(
-            "api-lark-bot",
-            "PUT",
-            "/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/{record_id}",
-            "bitable_record_update"
         ));
     }
 

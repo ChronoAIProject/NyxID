@@ -78,12 +78,20 @@ pub fn guest_refusal() -> Value {
 pub fn guest_service_refusal(service: &str, access: GuestAccess) -> Value {
     let allowed = match access {
         GuestAccess::Read => "only look things up with",
-        _ => "use, but not delete with (nor run what it marks destructive),",
+        _ => "look things up, create and act with, but not change or delete anything in,",
     };
     json!({"error": "owner_only", "service": service, "guest_access": access.as_str(),
         "instructions": format!("You are answering someone other than the owner, who may \
         {allowed} {service}. Help within that, and say that only the bot's owner can ask for \
         more; the owner can change it by asking NyxBot.")})
+}
+
+/// What a guest turn is told when a service call carries a method override.
+pub fn guest_method_override_refusal(service: &str) -> Value {
+    json!({"error": "owner_only", "service": service,
+        "instructions": format!("You are answering someone other than the owner: calls to \
+        {service} for them use the operation's own HTTP method, never a method override \
+        (an X-HTTP-Method-Override header or a _method field). Call it without one.")})
 }
 
 pub async fn for_key(

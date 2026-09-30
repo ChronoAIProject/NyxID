@@ -43,7 +43,8 @@ async fn result(response: Response, error: bool) -> Value {
 }
 
 async fn direct_call(f: &Fixture, auth: &McpAuthContext, name: &str, args: Value) -> Response {
-    handle_tools_call(
+    // Boxed: the handler's future is large, and long tests await it often.
+    Box::pin(handle_tools_call(
         &f.state,
         auth,
         None,
@@ -55,7 +56,7 @@ async fn direct_call(f: &Fixture, auth: &McpAuthContext, name: &str, args: Value
         },
         false,
         crate::services::billing::route_inventory::internal_node_dispatch_permit(),
-    )
+    ))
     .await
 }
 
@@ -1262,26 +1263,40 @@ async fn specialist_guests_use_a_granted_service_as_far_as_the_owner_lets_them()
     .unwrap();
     mark_guest(&f, true).await;
     let guest = authenticate(&f).await;
-    // By default guests use the service but never delete: an HTTP DELETE,
-    // or a method override asking for one, whatever the path says.
+    // By default guests look things up, create and act, but never change or
+    // remove what exists (PUT, PATCH, DELETE), whatever the path says.
     for args in [
         json!({"method": "DELETE", "path": "/items/1"}),
-        json!({"method": "POST", "path": "/items/1?_method=DELETE"}),
-        json!({"method": "POST", "path": "/items/1", "body": {"_method": "delete"}}),
-        // An override never hides the method the call is sent with.
-        json!({"method": "DELETE", "path": "/items/1", "query": "_method=GET"}),
-        json!({"method": "DELETE", "path": "/items/1", "body": {"_method": "PATCH"}}),
+        json!({"method": "PUT", "path": "/items/1", "body": {"name": "x"}}),
+        json!({"method": "PATCH", "path": "/items/1", "body": {"name": "x"}}),
     ] {
         let refused = result(call(&f, &guest, &name, args.clone()).await, true).await;
         assert_eq!(refused["error"], "owner_only", "{args}");
         assert_eq!(refused["guest_access"], "use", "{args}");
+    }
+    // And never send a method override, whichever way it points.
+    for args in [
+        json!({"method": "POST", "path": "/items/1?_method=DELETE"}),
+        json!({"method": "POST", "path": "/items/1", "body": {"_method": "delete"}}),
+        json!({"method": "DELETE", "path": "/items/1", "query": "_method=GET"}),
+        json!({"method": "POST", "path": "/items/1", "query": ".method=DELETE"}),
+    ] {
+        let refused = result(call(&f, &guest, &name, args.clone()).await, true).await;
+        assert_eq!(refused["error"], "owner_only", "{args}");
+        assert!(
+            refused["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("method override"),
+            "{args}"
+        );
     }
     assert_eq!(hits.load(Ordering::SeqCst), 0);
     for args in [
         json!({"method": "GET", "path": "/api/states"}),
         json!({"method": "POST", "path": "/api/services/light/turn_on",
             "body": {"entity_id": "light.office"}}),
-        json!({"method": "PUT", "path": "/notes/clear-the-gutters"}),
+        json!({"method": "POST", "path": "/api/services/remove_note/run"}),
     ] {
         let used = result(call(&f, &guest, &name, args.clone()).await, false).await;
         assert_eq!(used["ok"], true, "{args}");
@@ -1301,7 +1316,7 @@ async fn specialist_guests_use_a_granted_service_as_far_as_the_owner_lets_them()
     )
     .await;
     assert_eq!(refused["guest_access"], "read");
-    // Nor passes a change off as a read.
+    // Nor passes a change off as a read with an override.
     let refused = result(
         call(
             &f,
@@ -1314,7 +1329,7 @@ async fn specialist_guests_use_a_granted_service_as_far_as_the_owner_lets_them()
         true,
     )
     .await;
-    assert_eq!(refused["guest_access"], "read");
+    assert_eq!(refused["error"], "owner_only");
     let used = result(
         call(
             &f,
@@ -1486,9 +1501,10 @@ async fn set_guest_access(f: &Fixture, service: &str, access: GuestAccess) {
     .unwrap();
 }
 
-/// Guest access is judged from the operation's spec: what it marks
-/// destructive is beyond "use", what it marks read-only is a read even as a
-/// POST, and a method override counts as the call's method.
+/// Guest access is judged from the operation's spec: what it marks as
+/// deleting or replacing data is beyond "use", and what its stored catalog
+/// contract marks read-only is a read even as a POST (a remote spec may only
+/// narrow); a method override is never sent.
 #[tokio::test]
 async fn guest_access_follows_spec_markers() {
     let f = fixture("chat_mcp_guest_markers").await;
@@ -1566,11 +1582,13 @@ async fn guest_access_follows_spec_markers() {
         .find(|candidate| candidate.service_id == service)
         .unwrap();
     let endpoint_id = search.endpoints[0].endpoint_id.clone();
-    search
+    let metadata = search
         .durable_endpoint_metadata
-        .entry(endpoint_id)
-        .or_default()
-        .risk = Some(crate::models::service_endpoint::EndpointRisk::Read);
+        .entry(endpoint_id.clone())
+        .or_default();
+    metadata.risk = Some(crate::models::service_endpoint::EndpointRisk::Read);
+    // As a stored catalog contract says.
+    metadata.catalog_contract = true;
     let search = services
         .iter()
         .find(|candidate| candidate.service_id == service)
@@ -1596,6 +1614,32 @@ async fn guest_access_follows_spec_markers() {
             "{args}"
         );
     }
+    // A remote spec read at call time may say read-only too, but only narrows.
+    let mut remote = services;
+    remote
+        .iter_mut()
+        .find(|candidate| candidate.service_id == service)
+        .unwrap()
+        .durable_endpoint_metadata
+        .get_mut(&endpoint_id)
+        .unwrap()
+        .catalog_contract = false;
+    let search = remote
+        .iter()
+        .find(|candidate| candidate.service_id == service)
+        .unwrap();
+    let endpoint = &search.endpoints[0];
+    let prepared = mcp_service::prepare_proxy_tool_call(
+        search,
+        endpoint,
+        &json!({"method": "POST", "path": "/search", "body": {"q": "lights"}}),
+    )
+    .unwrap();
+    assert!(
+        guest_service_refusal(&f.state, &guest, search, endpoint, &prepared, None)
+            .await
+            .is_some()
+    );
 }
 
 /// A guest never widens what a specialist may use: an ungranted service is

@@ -41,11 +41,12 @@ pub struct AgentGrants {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum GuestAccess {
-    /// Reads only: an operation NyxID's copy of its spec marks read-only,
-    /// else GET, HEAD or OPTIONS.
+    /// Reads only: an operation its stored catalog contract marks
+    /// read-only, else GET, HEAD or OPTIONS.
     Read,
-    /// Reads and changes, never an HTTP DELETE (or an override asking for
-    /// one) or an operation its spec marks destructive.
+    /// Reads, creates and acts (GET, HEAD, OPTIONS, POST), never changes or
+    /// removes what exists (PUT, PATCH, DELETE, or an operation its spec
+    /// marks as deleting or replacing data).
     #[default]
     Use,
     /// Everything the specialist may do with the service.

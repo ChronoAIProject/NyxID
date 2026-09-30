@@ -446,8 +446,8 @@ fn guest_note(specialist: bool) -> &'static str {
     if specialist {
         "\n\nThis turn answers someone other than the owner (a member of a chat your channel \
         bot is in). Help them with your services as far as the owner lets guests use each \
-        one (by default look things up, turn things on or off and create, but not delete \
-        or replace the owner's data). Only the owner can ask for account actions, new connections, more access or \
+        one (by default look things up, turn things on or off, send and create, but not \
+        change or delete what exists). Only the owner can ask for account actions, new connections, more access or \
         more than that: NyxID refuses those, so say that only the bot's owner can ask for \
         that. Never reveal the owner's private information (their account, other \
         chats, memory or credentials)."

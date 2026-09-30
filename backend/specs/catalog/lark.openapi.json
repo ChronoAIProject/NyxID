@@ -593,7 +593,7 @@
           "name": "bitable_record_update",
           "description": "Update a record in a Lark/Feishu Bitable table.",
           "readOnly": false,
-          "destructive": true,
+          "destructive": false,
           "requiresApproval": true
         },
         "parameters": [

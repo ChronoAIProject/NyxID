@@ -489,36 +489,41 @@ turn so late tool calls stay restricted):
   service, stored beside `grants` so writers of `grants` that predate it never
   erase it; the user's decision: guests "can use them" but not delete, and
   sometimes the owner wants them to edit sheets, docs or pages too). Levels:
-  - `read`: reads only: an operation NyxID's copy of its spec (a catalog
-    overlay or row, not a remote instance spec, which may only narrow) marks
-    read-only (`x-aevatar-tool.readOnly`, so a POST search counts), else GET,
-    HEAD or OPTIONS;
-  - `use`, the default: reads and changes, but never an HTTP DELETE or an
-    operation its spec marks destructive (`x-aevatar-tool.destructive`: the
-    catalog overlays mark operations that delete or replace the owner's data,
-    such as Telegram's `deleteMessage`, Drive's update (it can trash) and
-    content upload (it replaces a document), Calendar's event update (it can
-    cancel an event), Sheets' `values:clear` and `values` updates, Bitable's
-    record update, Docs' `batchUpdate` and Notion's page update; edits of the
-    bot's own messages and drafts are not);
+  - `read`: reads only: an operation its stored catalog contract (a
+    `ServiceEndpoint` row created by an admin or NyxID's overlays, not a remote
+    spec read at call time, which may only narrow) marks read-only
+    (`x-aevatar-tool.readOnly`, so a POST search counts), else GET, HEAD or
+    OPTIONS;
+  - `use`, the default: reads, creates and acts (GET, HEAD, OPTIONS and POST:
+    look things up, send, create, turn a light on), but never changes or
+    removes what exists: no PUT, PATCH or DELETE, and no operation its spec
+    marks as deleting or replacing data (`x-aevatar-tool.destructive`, such as
+    Telegram's `deleteMessage`, Sheets' `values:clear` and Docs'
+    `batchUpdate`, or NyxID's own `x-nyxid-changes-existing` for a POST that
+    edits, Slack's `chat.update` and Telegram's `editMessageText`; NyxID adds
+    its own marker rather than change Aevatar's, which Aevatar's approvals
+    read). So editing a sheet, doc, Notion page or calendar event, or trashing
+    a Drive file, is beyond `use`;
   - `all`: everything the specialist may do with the service.
-  A guest call never carries a method override (an
-  `X-HTTP-Method-Override`-style header, or a `_method` query or body field,
-  compared as PHP and Rails read keys, the body read both as JSON and as a
-  form): a server may honour one in place of the method the call is sent with,
-  and approvals see only the latter. Markers come from the overlay compiled
-  into NyxID for catalog services (matched literally by endpoint name or
-  `METHOD path`; no stored endpoint changes, so `operation_generation` is
-  untouched), including a catalog service's instance-mounted spec where its
-  operations match, and from a mounted spec's own markers. Catalog services
-  outside NyxID's overlays, and services without typed operations (the generic
-  proxy), have no destructive markers: `use` refuses only an HTTP DELETE there.
+  A guest call never carries a method override (a header like
+  `X-HTTP-Method-Override`, or a `_method` or `_HttpMethod` query or body
+  field, keys read as PHP reads them): a server may honour one in place of the
+  method the call is sent with, and approvals see only the latter. Markers come
+  from the overlay compiled into NyxID for catalog services (matched literally
+  by endpoint name or `METHOD path`; no stored endpoint changes, so
+  `operation_generation` is untouched), including a catalog service's
+  instance-mounted spec where its operations match, and from a mounted spec's
+  own markers. Catalog services outside NyxID's overlays, and services without
+  typed operations (the generic proxy), are judged by the method alone, so a
+  POST that deletes there (an RPC-style API) is within `use`: give such a
+  service `read` if its guests must not act.
   Nothing is judged from names or words. The owner sets levels on the agent's
   Grants (a select per service; the page sends only changed levels) or by
   asking NyxBot (`nyxid__set_guest_access`, "let the group edit the office
   sheet"; `all` must name its services); `nyxid__list_subagents` and the agent
   summary show them (`guest_access`). Levels are kept across other grant
-  changes and dropped with the service; a service granted anew starts at `use`. Calls beyond the level are refused with
+  changes and dropped with the service; a service granted anew starts at
+  `use`. Calls beyond the level are refused with
   `owner_only` (naming the service and its level) before anything is sent. SSH
   (a shell can do anything) stays the owner's, as do `nyxid__` account, team,
   memory and posting tools and connection and Oracle tools (the user's

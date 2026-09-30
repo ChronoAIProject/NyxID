@@ -209,9 +209,15 @@ pub struct McpToolService {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct McpDurableEndpointMetadata {
     pub risk: Option<EndpointRisk>,
-    /// The operation's spec marks it destructive (deletes or overwrites):
-    /// `x-aevatar-tool.destructive` in the catalog overlay or mounted spec.
+    /// The operation's spec marks it as deleting or replacing data
+    /// (`x-aevatar-tool.destructive`, or `x-nyxid-changes-existing` for a
+    /// POST that edits), in the catalog overlay or mounted spec.
     pub destructive: bool,
+    /// The operation comes from a stored catalog contract (a
+    /// `ServiceEndpoint` row an admin or NyxID's overlays created), not from
+    /// a remote spec read at call time; only such a contract's `readOnly`
+    /// may count a POST as a read for guests.
+    pub catalog_contract: bool,
     pub supports_idempotency_key: bool,
     /// Producer-owned operation revision. Zero means the operation came from a
     /// dynamic instance spec and has no durable producer-generation referent.
@@ -1495,6 +1501,7 @@ fn service_endpoint_durable_metadata(
                 endpoint.id.clone(),
                 McpDurableEndpointMetadata {
                     risk: endpoint.risk,
+                    catalog_contract: true,
                     destructive: catalog_slug.is_some_and(|slug| {
                         super::catalog_spec_registry::marks_destructive(
                             slug,
@@ -1540,6 +1547,7 @@ fn generic_proxy_endpoints(service_label: &str) -> ParsedMcpEndpoints {
         McpDurableEndpointMetadata {
             risk: None,
             destructive: false,
+            catalog_contract: false,
             supports_idempotency_key: false,
             // The generic proxy is a NyxID-owned protocol operation. Its
             // generation is bumped only when those protocol semantics change;
@@ -1613,6 +1621,7 @@ fn parsed_endpoints_to_mcp(parsed: Vec<openapi_parser::ParsedEndpoint>) -> Parse
             McpDurableEndpointMetadata {
                 risk: parsed_endpoint.risk,
                 destructive: parsed_endpoint.destructive,
+                catalog_contract: false,
                 supports_idempotency_key: parsed_endpoint.supports_idempotency_key,
                 // Remote instance specs have no durable producer revision.
                 // Their endpoint-contract digest remains the exact approval
@@ -3357,28 +3366,37 @@ impl PreparedProxyCall {
         &self.method
     }
 
-    /// Whether this call carries a method override: an
-    /// `X-HTTP-Method-Override`-style header, or a `_method` field in its
-    /// query or body, which a downstream framework may honour in place of
-    /// the method the call is sent with. Keys are compared as PHP and Rails
-    /// read them (`.` and spaces become `_`, `_method[]` is `_method`, any
-    /// case); a body is read both as JSON (after a byte-order mark or
-    /// whitespace) and as a form, since a server may read it either way.
+    /// Whether this call carries a method override: a header like
+    /// `X-HTTP-Method-Override`, or a `_method` (or Salesforce-style
+    /// `_HttpMethod`) field in its query or body, which a downstream
+    /// framework may honour in place of the method the call is sent with.
+    /// Keys are read as PHP reads them (cut at a NUL or control byte,
+    /// leading spaces dropped, `.` and spaces as `_`, `_method[]` as
+    /// `_method`) and compared in any case; anything starting `_method`
+    /// counts. A JSON body is read by its keys; any other body also as a
+    /// form.
     pub fn carries_method_override(&self) -> bool {
         fn override_key(key: &str) -> bool {
-            let name = key.split('[').next().unwrap_or_default().trim();
+            let name = key
+                .split(|c: char| c.is_control() || c == '[')
+                .next()
+                .unwrap_or_default()
+                .trim_start_matches(' ');
             let name: String = name
                 .chars()
-                .map(|c| if c == '.' || c == ' ' { '_' } else { c })
+                .map(|c| {
+                    if c == '.' || c == ' ' {
+                        '_'
+                    } else {
+                        c.to_ascii_lowercase()
+                    }
+                })
                 .collect();
-            name.eq_ignore_ascii_case("_method")
+            name.starts_with("_method") || name == "_httpmethod"
         }
         fn override_header(name: &str) -> bool {
             let name = name.to_ascii_lowercase().replace('_', "-");
-            matches!(
-                name.as_str(),
-                "x-http-method-override" | "x-http-method" | "x-method-override"
-            )
+            name.contains("method-override") || name.contains("http-method") || name == "x-method"
         }
         let form =
             |bytes: &[u8]| url::form_urlencoded::parse(bytes).any(|(key, _)| override_key(&key));
@@ -3392,11 +3410,12 @@ impl PreparedProxyCall {
             || self.body.as_deref().is_some_and(|body| {
                 let text = String::from_utf8_lossy(body);
                 let json = text.trim_start_matches('\u{feff}').trim_start();
-                serde_json::from_str::<serde_json::Value>(json).is_ok_and(|value| {
-                    value
+                match serde_json::from_str::<serde_json::Value>(json) {
+                    Ok(value) => value
                         .as_object()
-                        .is_some_and(|fields| fields.keys().any(|key| override_key(key)))
-                }) || form(body)
+                        .is_some_and(|fields| fields.keys().any(|key| override_key(key))),
+                    Err(_) => form(body),
+                }
             })
     }
 }
@@ -6129,6 +6148,7 @@ mod tests {
                     McpDurableEndpointMetadata {
                         risk: None,
                         destructive: false,
+                        catalog_contract: true,
                         supports_idempotency_key: false,
                         operation_generation: 1,
                     },
@@ -6978,9 +6998,10 @@ mod tests {
             serde_json::json!({"method": "POST", "path": "posts/5", "body": {"_method": ["DELETE"]}}),
             serde_json::json!({"method": "POST", "path": "posts/5", "body": "\u{feff}{\"_method\": \"DELETE\"}"}),
             serde_json::json!({"method": "POST", "path": "posts/5", "body": "a=1&_method=DELETE"}),
-            // JSON to one parser, a form to another.
-            serde_json::json!({"method": "POST", "path": "posts/5",
-                "body": {"a": "x", "b": "&_method=DELETE&"}}),
+            // Read as PHP reads keys: cut at a NUL, `_method…`, Salesforce's.
+            serde_json::json!({"method": "POST", "path": "posts/5", "query": "_method%00x=DELETE"}),
+            serde_json::json!({"method": "POST", "path": "posts/5", "query": "%20_method=DELETE"}),
+            serde_json::json!({"method": "POST", "path": "posts/5", "query": "_HttpMethod=DELETE"}),
         ] {
             assert!(overrides(args.clone()), "{args}");
         }
@@ -6990,6 +7011,9 @@ mod tests {
                 "body": {"payment_method": "pm_1", "method": "card"}}),
             serde_json::json!({"method": "POST", "path": "notes", "body": {"text": "_method"}}),
             serde_json::json!({"method": "GET", "path": "search", "query": "q=_method"}),
+            // A JSON body is read by its keys, not as a form.
+            serde_json::json!({"method": "POST", "path": "notes",
+                "body": {"text": "see https://x.test/?a=1&_method=DELETE"}}),
         ] {
             assert!(!overrides(args.clone()), "{args}");
         }
@@ -7077,11 +7101,11 @@ mod tests {
         assert!(!marked["ep-send_message"].destructive);
         let unmarked = service_endpoint_durable_metadata(&rows, None);
         assert!(!unmarked["ep-delete_message"].destructive);
-        let drive = row("drive_update_file", "PATCH", "/drive/v3/files/{fileId}");
-        assert!(
-            service_endpoint_durable_metadata(&[&drive], Some("api-google"))["ep-drive_update_file"]
-                .destructive
-        );
+        let edit = row("chat_update", "POST", "/chat.update");
+        let edited = service_endpoint_durable_metadata(&[&edit], Some("api-slack"));
+        assert!(edited["ep-chat_update"].destructive);
+        // Stored rows are catalog contracts; only theirs may widen reads.
+        assert!(edited["ep-chat_update"].catalog_contract);
     }
 
     #[test]
