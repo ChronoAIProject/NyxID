@@ -63,7 +63,10 @@ it("keeps the dashboard and list on one route with a shared saved time range", a
       <RouterProvider router={router} />
     </QueryClientProvider>,
   );
-  await act(() => router.load());
+  await act(async () => {
+    await router.load();
+    await vi.dynamicImportSettled();
+  });
   expect(
     await screen.findByRole("combobox", { name: "Time range" }),
   ).toHaveTextContent("Last 7 days");

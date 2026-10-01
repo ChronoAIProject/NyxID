@@ -128,3 +128,10 @@ pub mod options;
 pub mod service_history;
 
 pub mod channel_activities;
+pub mod machine_tools;
+pub mod saved_logins;
+
+pub mod machine_desktop;
+pub mod machine_gateway;
+
+pub mod machine_setup;

@@ -672,6 +672,8 @@ async fn relinking_a_bot_to_a_specialist_starts_that_agents_own_thread() {
         &state.encryption_keys,
         OWNER,
         crate::services::assistant_team_service::CreateRequest {
+            machines: None,
+            logins: None,
             name: "support".into(),
             description: "Answer questions from the support chat".into(),
             display_name: None,
@@ -2758,6 +2760,8 @@ async fn chat_posting_is_opt_in_and_chat_agents_survive_relinks() {
         .await
         .unwrap();
     let specialist = |name: &str| crate::services::assistant_team_service::CreateRequest {
+        machines: None,
+        logins: None,
         name: name.into(),
         description: "Help the team".into(),
         display_name: None,
@@ -4269,6 +4273,8 @@ async fn org_group_bots_moved_to_a_specialist_keep_answering() {
         &state.encryption_keys,
         OWNER,
         crate::services::assistant_team_service::CreateRequest {
+            machines: None,
+            logins: None,
             name: "chronoai-office-agent".into(),
             description: "Office assistant for the ChronoAI Lark group".into(),
             display_name: Some("ChronoAI Office Agent".into()),

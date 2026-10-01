@@ -235,7 +235,11 @@ async fn assert_parity(state: &AppState, headers: &HeaderMap, rest: &Value) {
             chat,
         ));
     }
-    let expected: Vec<Value> = mcp_service::generate_tool_definitions(&services, None)
+    let mut definitions = mcp_service::generate_tool_definitions(&services, None);
+    if auth.chat.as_ref().is_some_and(|chat| !chat.guest) {
+        definitions.extend(crate::services::machine_tools::definitions());
+    }
+    let expected: Vec<Value> = definitions
         .iter()
         .filter(|t| !(super::is_scoped_api_key(&auth) && super::SSH_META_TOOL_NAMES.contains(&t.name.as_str())))
         .map(|t| json!({"name": t.name, "description": t.description, "inputSchema": t.input_schema}))

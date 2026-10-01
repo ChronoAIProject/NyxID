@@ -745,6 +745,8 @@ mod tests {
             &state.encryption_keys,
             &owner,
             crate::services::assistant_team_service::CreateRequest {
+                machines: None,
+                logins: None,
                 name: "reader".into(),
                 description: "Read things".into(),
                 display_name: None,

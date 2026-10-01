@@ -1,0 +1,114 @@
+[
+  {
+    "name": "click",
+    "read_only": false
+  },
+  {
+    "name": "clipboard_read",
+    "read_only": true
+  },
+  {
+    "name": "clipboard_write",
+    "read_only": false
+  },
+  {
+    "name": "drag",
+    "read_only": false
+  },
+  {
+    "name": "end_session",
+    "read_only": false
+  },
+  {
+    "name": "escalate_session",
+    "read_only": false
+  },
+  {
+    "name": "get_agent_cursor_state",
+    "read_only": true
+  },
+  {
+    "name": "get_cursor_position",
+    "read_only": true
+  },
+  {
+    "name": "get_desktop_state",
+    "read_only": true
+  },
+  {
+    "name": "get_screen_size",
+    "read_only": true
+  },
+  {
+    "name": "get_session",
+    "read_only": true
+  },
+  {
+    "name": "get_session_state",
+    "read_only": true
+  },
+  {
+    "name": "get_window_state",
+    "read_only": true
+  },
+  {
+    "name": "hotkey",
+    "read_only": false
+  },
+  {
+    "name": "invoke_menu",
+    "read_only": false
+  },
+  {
+    "name": "list_apps",
+    "read_only": true
+  },
+  {
+    "name": "list_sessions",
+    "read_only": true
+  },
+  {
+    "name": "list_windows",
+    "read_only": true
+  },
+  {
+    "name": "move_cursor",
+    "read_only": false
+  },
+  {
+    "name": "press_key",
+    "read_only": false
+  },
+  {
+    "name": "scroll",
+    "read_only": false
+  },
+  {
+    "name": "set_agent_cursor_enabled",
+    "read_only": false
+  },
+  {
+    "name": "set_agent_cursor_motion",
+    "read_only": false
+  },
+  {
+    "name": "set_agent_cursor_theme",
+    "read_only": false
+  },
+  {
+    "name": "set_window_frame",
+    "read_only": false
+  },
+  {
+    "name": "start_session",
+    "read_only": false
+  },
+  {
+    "name": "type_text",
+    "read_only": false
+  },
+  {
+    "name": "verify_state",
+    "read_only": true
+  }
+]

@@ -52,6 +52,7 @@ export const MAIN_NAV = [
   { to: "/billing", icon: WalletCards, label: "Billing & Usage" },
   { to: "/orgs", icon: Building2, label: "Organizations" },
   { to: "/nodes", icon: HardDrive, label: "Nodes" },
+  { to: "/saved-logins", icon: KeyRound, label: "Saved logins" },
   { to: "/devices/onboard", icon: QrCode, label: "Device Onboard" },
   { to: "/channel-bots", icon: Radio, label: "Channel Bots" },
   { to: "/settings", icon: Settings, label: "Settings" },

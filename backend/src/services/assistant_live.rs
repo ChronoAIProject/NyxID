@@ -31,6 +31,9 @@ use crate::models::{
     connect_link::COLLECTION_NAME as CONNECT_LINKS,
 };
 
+const MACHINES: &str = crate::models::node::COLLECTION_NAME;
+const MACHINE_DESKTOPS: &str = crate::models::machine_desktop::COLLECTION_NAME;
+const MACHINE_SETUPS: &str = crate::models::machine_setup::COLLECTION_NAME;
 const CAPACITY: usize = 1024;
 /// Per-owner buffer for browser streams.
 const OWNER_CAPACITY: usize = 64;
@@ -54,7 +57,10 @@ pub enum LiveEvent {
         messages: i64,
     },
     /// A group or its transcript changed.
-    Group { id: String, user_id: String },
+    Group {
+        id: String,
+        user_id: String,
+    },
     /// A connect link was written; `status` is its current status.
     ConnectLink {
         id: String,
@@ -66,6 +72,19 @@ pub enum LiveEvent {
         id: String,
         user_id: String,
         active: bool,
+    },
+    /// Metadata-only machine capability/setup change.
+    Machine {
+        id: String,
+        user_id: String,
+    },
+    MachineDesktop {
+        id: String,
+        user_id: String,
+    },
+    MachineSetup {
+        id: String,
+        user_id: String,
     },
     /// Changes may have been missed (the stream restarted or a receiver
     /// fell behind): re-read state instead of trusting the event history.
@@ -79,7 +98,10 @@ impl LiveEvent {
             Self::Conversation { user_id, .. }
             | Self::Group { user_id, .. }
             | Self::ConnectLink { user_id, .. }
-            | Self::ChannelBot { user_id, .. } => Some(user_id),
+            | Self::ChannelBot { user_id, .. }
+            | Self::Machine { user_id, .. }
+            | Self::MachineSetup { user_id, .. }
+            | Self::MachineDesktop { user_id, .. } => Some(user_id),
             Self::Resync => None,
         }
     }
@@ -276,10 +298,11 @@ fn pipeline() -> Vec<Document> {
                 {"ns.coll": {"$in": [CONVERSATIONS, GROUPS, GROUP_MESSAGES]}},
                 // Links and bots matter only when created or when their
                 // status or activation changes, not on every bookkeeping write.
-                {"ns.coll": {"$in": [CONNECT_LINKS, CHANNEL_BOTS]}, "$or": [
+                {"ns.coll": {"$in": [CONNECT_LINKS, CHANNEL_BOTS, MACHINE_SETUPS, MACHINES, MACHINE_DESKTOPS]}, "$or": [
                     {"operationType": {"$in": ["insert", "replace"]}},
                     {"updateDescription.updatedFields.status": {"$exists": true}},
                     {"updateDescription.updatedFields.is_active": {"$exists": true}},
+                    {"updateDescription.updatedFields.machine": {"$exists": true}},
                 ]},
             ],
         }},
@@ -328,6 +351,9 @@ fn decode(change: &ChangeStreamEvent<Document>) -> Option<LiveEvent> {
             id: full.get_str("group_id").ok()?.to_owned(),
             user_id,
         },
+        MACHINES => LiveEvent::Machine { id: key, user_id },
+        MACHINE_DESKTOPS => LiveEvent::MachineDesktop { id: key, user_id },
+        MACHINE_SETUPS => LiveEvent::MachineSetup { id: key, user_id },
         CONNECT_LINKS => LiveEvent::ConnectLink {
             id: key,
             user_id,

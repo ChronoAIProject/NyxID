@@ -1,3 +1,4 @@
+import { MachineGrantPicker } from "./machine-grant-picker";
 import { useState, type ReactNode } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useQueryClient } from "@tanstack/react-query";
@@ -343,6 +344,8 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
     resolver: zodResolver(assistantAgentGrantsSchema),
     defaultValues: {
       services: agent.services,
+      machines: agent.machines ?? [],
+      logins: agent.logins ?? [],
       account_read: agent.account_read,
       guest_access: agent.guest_access,
     },
@@ -363,6 +366,8 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
       await grants.mutateAsync({
         id: agent.id,
         services: values.services,
+        ...(form.getFieldState("machines").isDirty ? { machines: values.machines } : {}),
+        ...(form.getFieldState("logins").isDirty ? { logins: values.logins } : {}),
         account_read: values.account_read,
         ...(Object.keys(changed).length ? { guest_access: changed } : {}),
       });
@@ -392,6 +397,7 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
               </FormItem>
             )}
           />
+          {(["machines", "logins"] as const).map((kind) => <FormField key={kind} control={form.control} name={kind} render={({ field }) => <FormItem><MachineGrantPicker kind={kind} value={field.value ?? []} onChange={field.onChange} disabled={readOnly} /></FormItem>} />)}
           {services.length ? (
             <FormField
               control={form.control}

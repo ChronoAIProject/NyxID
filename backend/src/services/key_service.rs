@@ -702,6 +702,11 @@ pub async fn effective_allowed_service_ids(
     key: &ApiKey,
 ) -> AppResult<Vec<String>> {
     let mut ids = key.allowed_service_ids.clone();
+    if !key.allowed_platform_service_ids.is_empty() {
+        ids.extend(key.allowed_platform_service_ids.iter().cloned());
+        ids.sort();
+        ids.dedup();
+    }
     if key.allow_auto_connected_services && !key.allow_all_services {
         ids.extend(active_auto_connected_service_ids(db, &key.user_id).await?);
         ids.sort();
@@ -1643,6 +1648,9 @@ mod tests {
     fn test_node(owner_id: &str, name: &str) -> Node {
         let now = Utc::now();
         Node {
+            machine: None,
+            machine_confirm: Default::default(),
+            allow_single_user_saved_logins: false,
             id: Uuid::new_v4().to_string(),
             user_id: owner_id.to_string(),
             name: name.to_string(),

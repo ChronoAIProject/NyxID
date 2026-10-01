@@ -537,6 +537,8 @@ fn delegated_read_denied_path(path: &str) -> bool {
                 | "connect-links"
                 | "channel-connect-links"
                 | "catalog-curation"
+                | "saved-logins"
+                | "machines"
         )
     ) {
         return true;
@@ -681,6 +683,55 @@ fn validate_mtls_bound_access(
     Ok(())
 }
 
+/// Construct identical execution authority for HTTP API keys and server-bound
+/// machine jobs. Callers authenticate the credential or durable job first.
+pub(crate) async fn api_key_auth_user(
+    db: &mongodb::Database,
+    key: &crate::models::api_key::ApiKey,
+    credential_id: Option<String>,
+    ip_address: Option<String>,
+    user_agent: Option<String>,
+) -> Result<AuthUser, AppError> {
+    if !key.is_active || key.expires_at.is_some_and(|at| at <= chrono::Utc::now()) {
+        return Err(AppError::Unauthorized(
+            "API key is inactive or expired".into(),
+        ));
+    }
+    let user_id = Uuid::parse_str(&key.user_id)
+        .map_err(|_| AppError::Internal("Invalid user_id in API key".into()))?;
+    let user = db
+        .collection::<User>(USERS)
+        .find_one(doc! { "_id": &key.user_id })
+        .await?;
+    if !user.is_some_and(|user| user.is_active) {
+        return Err(AppError::Unauthorized("User account is inactive".into()));
+    }
+    Ok(AuthUser {
+        user_id,
+        session_id: None,
+        scope: key.scopes.clone(),
+        acting_client_id: None,
+        oauth_client_id: None,
+        token_jti: None,
+        approval_owner_user_id: None,
+        auth_method: AuthMethod::ApiKey,
+        allow_all_services: key.allow_all_services,
+        allow_all_nodes: key.allow_all_nodes,
+        allowed_service_ids: crate::services::key_service::effective_allowed_service_ids(db, key)
+            .await?,
+        resource_uris: None,
+        allowed_node_ids: key.allowed_node_ids.clone(),
+        api_key_id: Some(key.id.clone()),
+        api_key_name: Some(key.name.clone()),
+        api_key_credential_id: credential_id,
+        api_key_purpose: key.purpose,
+        rate_limit_per_second: key.rate_limit_per_second,
+        rate_limit_burst: key.rate_limit_burst,
+        ip_address,
+        user_agent,
+    })
+}
+
 impl FromRequestParts<AppState> for AuthUser {
     type Rejection = AppError;
 
@@ -723,56 +774,12 @@ impl FromRequestParts<AppState> for AuthUser {
                             match crate::services::key_service::validate_api_key(&state.db, token)
                                 .await
                             {
-                                Ok((api_user_id_str, api_key, credential_id)) => {
+                                Ok((_api_user_id_str, api_key, credential_id)) => {
                                     ensure_api_key_purpose_route(&api_key, parts.uri.path())?;
-                                    let user_id =
-                                        Uuid::parse_str(&api_user_id_str).map_err(|_| {
-                                            AppError::Internal(
-                                                "Invalid user_id in API key".to_string(),
-                                            )
-                                        })?;
-
-                                    let user_model = state
-                                        .db
-                                        .collection::<User>(USERS)
-                                        .find_one(doc! { "_id": &api_user_id_str })
-                                        .await
-                                        .map_err(|e| {
-                                            AppError::Internal(format!("User lookup failed: {e}"))
-                                        })?;
-
-                                    match user_model {
-                                        Some(u) if u.is_active => {}
-                                        _ => {
-                                            return Err(AppError::Unauthorized(
-                                                "User account is inactive".to_string(),
-                                            ));
-                                        }
-                                    }
-
-                                    let auth_user = AuthUser {
-                                        user_id,
-                                        session_id: None,
-                                        scope: api_key.scopes.clone(),
-                                        acting_client_id: None,
-                                        oauth_client_id: None,
-                                        token_jti: None,
-                                        approval_owner_user_id: None,
-                                        auth_method: AuthMethod::ApiKey,
-                                        allow_all_services: api_key.allow_all_services,
-                                        allow_all_nodes: api_key.allow_all_nodes,
-                                        allowed_service_ids: crate::services::key_service::effective_allowed_service_ids(&state.db, &api_key).await?,
-                                        resource_uris: None,
-                                        allowed_node_ids: api_key.allowed_node_ids.clone(),
-                                        api_key_id: Some(api_key.id.clone()),
-                                        api_key_name: Some(api_key.name.clone()),
-                                        api_key_credential_id: credential_id,
-                                        api_key_purpose: api_key.purpose,
-                                        rate_limit_per_second: api_key.rate_limit_per_second,
-                                        rate_limit_burst: api_key.rate_limit_burst,
-                                        ip_address: request_ip.clone(),
-                                        user_agent: request_ua.clone(),
-                                    };
+                                    let auth_user = api_key_auth_user(
+                                        &state.db, &api_key, credential_id,
+                                        request_ip.clone(), request_ua.clone(),
+                                    ).await?;
                                     auth_user.ensure_management_write_scope(
                                         &parts.method,
                                         parts.uri.path(),
@@ -1147,55 +1154,13 @@ impl FromRequestParts<AppState> for AuthUser {
                     .to_str()
                     .map_err(|_| AppError::Unauthorized("Invalid API key header".to_string()))?;
 
-                let (user_id_str, key, credential_id) =
+                let (_user_id_str, key, credential_id) =
                     crate::services::key_service::validate_api_key(&state.db, api_key).await?;
                 ensure_api_key_purpose_route(&key, parts.uri.path())?;
 
-                let user_id = Uuid::parse_str(&user_id_str)
-                    .map_err(|_| AppError::Internal("Invalid user_id in API key".to_string()))?;
-
-                // Verify the user account is still active
-                let user_model = state
-                    .db
-                    .collection::<User>(USERS)
-                    .find_one(doc! { "_id": &user_id_str })
-                    .await
-                    .map_err(|e| AppError::Internal(format!("User lookup failed: {e}")))?;
-
-                match user_model {
-                    Some(u) if u.is_active => {}
-                    _ => {
-                        return Err(AppError::Unauthorized(
-                            "User account is inactive".to_string(),
-                        ));
-                    }
-                }
-
-                let auth_user = AuthUser {
-                    user_id,
-                    session_id: None,
-                    scope: key.scopes.clone(),
-                    acting_client_id: None,
-                    oauth_client_id: None,
-                    token_jti: None,
-                    approval_owner_user_id: None,
-                    auth_method: AuthMethod::ApiKey,
-                    allow_all_services: key.allow_all_services,
-                    allow_all_nodes: key.allow_all_nodes,
-                    allowed_service_ids:
-                        crate::services::key_service::effective_allowed_service_ids(&state.db, &key)
-                            .await?,
-                    resource_uris: None,
-                    allowed_node_ids: key.allowed_node_ids.clone(),
-                    api_key_id: Some(key.id.clone()),
-                    api_key_name: Some(key.name.clone()),
-                    api_key_credential_id: credential_id,
-                    api_key_purpose: key.purpose,
-                    rate_limit_per_second: key.rate_limit_per_second,
-                    rate_limit_burst: key.rate_limit_burst,
-                    ip_address: request_ip,
-                    user_agent: request_ua,
-                };
+                let auth_user = api_key_auth_user(
+                    &state.db, &key, credential_id, request_ip, request_ua,
+                ).await?;
                 auth_user.ensure_management_write_scope(&parts.method, parts.uri.path())?;
                 return Ok(auth_user);
             }
@@ -1720,6 +1685,9 @@ mod tests {
             "/api/v1/ssh/service-id/terminal",
             "/api/v1/assistant/conversations/nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae/state",
             "/api/v1/assistant/wire-logs/7d6f176c-45c6-4efa-95b2-12dc58a7341f",
+            "/api/v1/assistant/nyxagent/machines/node-id/desktop",
+            "/api/v1/machines/setups/setup-id",
+            "/api/v1/saved-logins/login-id",
             "/api/v1/auth/social/github",
             "/api/v1/devices/code/poll",
             "/api/v1/cli-pairings/pairing-id/poll",
@@ -2319,6 +2287,9 @@ mod tests {
         signing_hash: &str,
     ) -> crate::models::node::Node {
         crate::models::node::Node {
+            machine: None,
+            machine_confirm: Default::default(),
+            allow_single_user_saved_logins: false,
             id: id.to_string(),
             user_id: user_id.to_string(),
             name: "Delegated read fixture node".to_string(),

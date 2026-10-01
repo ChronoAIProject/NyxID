@@ -355,6 +355,7 @@ impl fmt::Debug for NodeRequestSignature {
 #[derive(Clone, Debug)]
 pub(crate) enum NodeOutboundMessage {
     Text(String),
+    Binary(Vec<u8>),
     Close { code: u16, reason: String },
 }
 
@@ -377,6 +378,8 @@ struct NodeConnection {
     web_terminals: Arc<DashMap<String, PendingWebTerminal>>,
     /// Pending SSH exec requests keyed by request_id
     ssh_exec_requests: Arc<DashMap<String, PendingSshExec>>,
+    machine_requests: Arc<DashMap<String, oneshot::Sender<nyxid_machine::Response>>>,
+    machine_profile: Arc<std::sync::Mutex<Option<nyxid_machine::MachineProfile>>>,
     /// Accumulated node-key SSH exec chunks keyed by request_id
     ssh_node_exec_streams: Arc<DashMap<String, PendingSshNodeExecStream>>,
     /// Pending and active WS proxy sessions keyed by session_id
@@ -419,6 +422,7 @@ struct NodeConnection {
 #[derive(Debug, Clone, Copy, Default, Serialize)]
 pub struct NodeCapabilitiesFlags {
     pub http_signature_v2: bool,
+    pub proxy_upload_v1: bool,
     pub credential_ack_correlation: bool,
     pub remote_credential_crypto_v1: bool,
     pub proxy_max_body_size: Option<usize>,
@@ -449,6 +453,7 @@ pub(crate) type NodeConnectionRegistration = (
 
 /// In-memory WebSocket connection manager for credential nodes.
 pub struct NodeWsManager {
+    desktop_streams: DashMap<String, tokio::sync::broadcast::Sender<Arc<Vec<u8>>>>,
     /// Active connections: node_id -> NodeConnection
     connections: DashMap<String, NodeConnection>,
     /// Serialize MongoDB claim + local publication for the same node. Weak
@@ -1031,7 +1036,11 @@ pub enum CredentialAckOutcome {
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct NodeCapabilitiesMsg {
     #[serde(default)]
+    pub machine: Option<nyxid_machine::MachineProfile>,
+    #[serde(default)]
     pub http_signature_v2: bool,
+    #[serde(default)]
+    pub proxy_upload_v1: bool,
     /// Node echoes the `request_id` from a `credential_update` /
     /// `credential_remove` frame back in the resulting
     /// `credential_update_ack`. Required for strict ack-wait on the
@@ -1482,6 +1491,7 @@ impl NodeWsManager {
 
     pub fn new(proxy_timeout_secs: u64, max_connections: usize) -> Self {
         Self {
+            desktop_streams: DashMap::new(),
             connections: DashMap::new(),
             connection_setup_locks: std::sync::Mutex::new(std::collections::HashMap::new()),
             proxy_timeout_secs,
@@ -1590,6 +1600,8 @@ impl NodeWsManager {
                 ssh_tunnels,
                 web_terminals,
                 ssh_exec_requests,
+                machine_requests: Arc::new(DashMap::new()),
+                machine_profile: Arc::new(std::sync::Mutex::new(None)),
                 ssh_node_exec_streams,
                 ws_proxies,
                 credential_acks: Arc::new(DashMap::new()),
@@ -1643,6 +1655,7 @@ impl NodeWsManager {
         conn.ssh_tunnels.clear();
         conn.web_terminals.clear();
         conn.ssh_exec_requests.clear();
+        conn.machine_requests.clear();
         conn.ssh_node_exec_streams.clear();
         conn.ws_proxies.clear();
         // Dropping the senders makes strict credential writers fail
@@ -2016,6 +2029,146 @@ impl NodeWsManager {
                 }
                 Err(NodeProxyFailure::after_dispatch(AppError::NodeProxyTimeout))
             }
+        }
+    }
+
+    /// Signed opening metadata followed by bounded binary upload frames. Unlike
+    /// buffered requests, a dispatched upload is never replayed on a fallback.
+    pub(crate) async fn proxy_upload(
+        self: &Arc<Self>,
+        request: nyxid_machine::Request,
+        body: axum::body::Body,
+        expected_connection_id: Option<&str>,
+    ) -> Result<ProxyResponseType, NodeProxyFailure> {
+        use futures::StreamExt;
+        let header_timeout = if request.operation == nyxid_machine::Operation::ProxyUpload
+            && request.parameters["git"] == true
+        {
+            nyxid_machine::GIT_UPLOAD_TIMEOUT_SECS
+        } else {
+            self.proxy_timeout_secs
+        };
+        let node_id = request.node_id.clone();
+        let request_id = request.request_id.clone();
+        let id = uuid::Uuid::parse_str(&request_id).map_err(|_| {
+            NodeProxyFailure::before_dispatch(AppError::ValidationError("Invalid upload ID".into()))
+        })?;
+        let conn = self
+            .connection_for(&node_id, expected_connection_id)
+            .map_err(NodeProxyFailure::before_dispatch)?;
+        if !conn.capabilities.lock().is_ok_and(|c| c.proxy_upload_v1) {
+            return Err(NodeProxyFailure::before_dispatch(AppError::NodeOffline(
+                "Upgrade the credential node to stream machine uploads".into(),
+            )));
+        }
+        if matches!(
+            request.operation,
+            nyxid_machine::Operation::SaveAttachment | nyxid_machine::Operation::ShareFile
+        ) && !conn
+            .machine_profile
+            .lock()
+            .is_ok_and(|p| p.as_ref().is_some_and(|p| request.operation.allowed(p)))
+        {
+            return Err(NodeProxyFailure::before_dispatch(
+                AppError::MachineCapabilityDisabled,
+            ));
+        }
+        let mut value = serde_json::to_value(request).map_err(|_| {
+            NodeProxyFailure::before_dispatch(AppError::Internal(
+                "Upload metadata encoding failed".into(),
+            ))
+        })?;
+        value["type"] = serde_json::json!("proxy_upload");
+        let (response_tx, response_rx) = oneshot::channel();
+        conn.pending
+            .insert(request_id.clone(), PendingRequest::Awaiting(response_tx));
+        let sender = conn.tx.clone();
+        if sender
+            .try_send(NodeOutboundMessage::Text(value.to_string()))
+            .is_err()
+        {
+            conn.pending.remove(&request_id);
+            return Err(NodeProxyFailure::before_dispatch(AppError::NodeOffline(
+                "Node upload write buffer unavailable".into(),
+            )));
+        }
+        drop(conn);
+        let task = tokio::spawn(async move {
+            let mut stream = body.into_data_stream();
+            let mut sequence = 0;
+            let mut aborted = false;
+            while let Some(chunk) = stream.next().await {
+                let Ok(bytes) = chunk else {
+                    aborted = true;
+                    break;
+                };
+                for bytes in bytes.chunks(nyxid_machine::STREAM_CHUNK_BYTES) {
+                    let frame = nyxid_machine::binary::Frame {
+                        kind: nyxid_machine::binary::Kind::ProxyUpload,
+                        id,
+                        sequence,
+                        end: false,
+                        bytes,
+                    }
+                    .encode();
+                    let Ok(frame) = frame else {
+                        return;
+                    };
+                    if sender
+                        .send(NodeOutboundMessage::Binary(frame))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    sequence += 1;
+                }
+            }
+            if let Ok(frame) = (nyxid_machine::binary::Frame {
+                kind: if aborted {
+                    nyxid_machine::binary::Kind::ProxyUploadAbort
+                } else {
+                    nyxid_machine::binary::Kind::ProxyUpload
+                },
+                id,
+                sequence,
+                end: true,
+                bytes: &[],
+            })
+            .encode()
+            {
+                let _ = sender.send(NodeOutboundMessage::Binary(frame)).await;
+            }
+        });
+        let guard = ProxyUploadTask {
+            manager: self.clone(),
+            node_id,
+            request_id,
+            task,
+        };
+        let outcome =
+            tokio::time::timeout(std::time::Duration::from_secs(header_timeout), response_rx).await;
+        match outcome {
+            Ok(Ok(NodeProxyOutcome::Response(ProxyResponseType::Streaming(mut source)))) => {
+                let (sender, receiver) = mpsc::channel(16);
+                tokio::spawn(async move {
+                    let _guard = guard;
+                    loop {
+                        tokio::select! {
+                            _=sender.closed()=>break,
+                            chunk=source.recv()=>{let Some(chunk)=chunk else{break;};let done=matches!(chunk,StreamChunk::End|StreamChunk::Error(_));if sender.send(chunk).await.is_err() || done {break;}}
+                        }
+                    }
+                });
+                Ok(ProxyResponseType::Streaming(receiver))
+            }
+            Ok(Ok(NodeProxyOutcome::Response(response))) => Ok(response),
+            Ok(Ok(NodeProxyOutcome::RetryableFailure { message, reason })) => {
+                Err(NodeProxyFailure::after_dispatch(
+                    map_retryable_node_failure(message, reason.as_deref()),
+                ))
+            }
+            _ => Err(NodeProxyFailure::after_dispatch(AppError::NodeProxyTimeout)),
         }
     }
 
@@ -2691,10 +2844,17 @@ impl NodeWsManager {
     /// status_update; stays a no-op for nodes that omit the field
     /// (old agents → `None`).
     pub fn record_capabilities(&self, node_id: &str, caps: &NodeCapabilitiesMsg) {
+        if let Some(conn) = self.connections.get(node_id) {
+            *conn
+                .machine_profile
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = caps.machine.clone().filter(|p| p.enabled());
+        }
         if let Some(conn) = self.connections.get(node_id)
             && let Ok(mut flags) = conn.capabilities.lock()
         {
             flags.http_signature_v2 = caps.http_signature_v2;
+            flags.proxy_upload_v1 = caps.proxy_upload_v1;
             flags.credential_ack_correlation = caps.credential_ack_correlation;
             flags.remote_credential_crypto_v1 = caps.remote_credential_crypto_v1;
             flags.proxy_max_body_size = caps.proxy_max_body_size;
@@ -3416,6 +3576,130 @@ impl NodeWsManager {
         }
     }
 
+    pub async fn machine_request(
+        &self,
+        request: nyxid_machine::Request,
+        expected_connection_id: Option<&str>,
+    ) -> AppResult<nyxid_machine::Response> {
+        let conn = self.connection_for(&request.node_id, expected_connection_id)?;
+        if !conn
+            .machine_profile
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .is_some_and(|p| request.operation.allowed(p))
+        {
+            return Err(AppError::Forbidden(
+                "Machine capability not advertised".into(),
+            ));
+        }
+        let (tx, rx) = oneshot::channel();
+        let id = request.request_id.clone();
+        let timeout = request.parameters["timeout_secs"]
+            .as_u64()
+            .unwrap_or(120)
+            .min(86400)
+            + 15;
+        let mut message = serde_json::to_value(&request)
+            .map_err(|_| AppError::Internal("Machine request encoding failed".into()))?;
+        message["type"] = serde_json::json!("machine_request");
+        let pending = conn.machine_requests.clone();
+        pending.insert(id.clone(), tx);
+        struct Guard {
+            pending: Arc<DashMap<String, oneshot::Sender<nyxid_machine::Response>>>,
+            id: String,
+        }
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                self.pending.remove(&self.id);
+            }
+        }
+        let _guard = Guard { pending, id };
+        conn.tx
+            .try_send(NodeOutboundMessage::Text(message.to_string()))
+            .map_err(|_| AppError::NodeOffline("Machine write buffer unavailable".into()))?;
+        drop(conn);
+        tokio::time::timeout(std::time::Duration::from_secs(timeout), rx)
+            .await
+            .map_err(|_| AppError::NodeProxyTimeout)?
+            .map_err(|_| AppError::NodeOffline("Machine disconnected".into()))
+    }
+
+    pub fn desktop_stream(
+        &self,
+        node: &str,
+        session: &str,
+        fence: Option<&str>,
+    ) -> AppResult<mpsc::Receiver<Arc<Vec<u8>>>> {
+        let conn = self.connection_for(node, fence)?;
+        if !conn
+            .machine_profile
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .is_some_and(|p| p.computer)
+        {
+            return Err(AppError::MachineCapabilityDisabled);
+        }
+        let key = format!("{node}:{session}");
+        let mut incoming = self
+            .desktop_streams
+            .entry(key)
+            .or_insert_with(|| tokio::sync::broadcast::channel(2).0)
+            .subscribe();
+        let (tx, rx) = mpsc::channel(2);
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _=tx.closed()=>break,
+                    event=incoming.recv()=>match event {
+                        Ok(bytes)=> { let _=tx.try_send(bytes); },
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_))=>{},
+                        Err(_)=>break,
+                    }
+                }
+            }
+        });
+        Ok(rx)
+    }
+
+    pub fn deliver_desktop_frame(
+        &self,
+        node: &str,
+        frame: &nyxid_machine::binary::Frame<'_>,
+        bytes: &[u8],
+    ) {
+        let key = format!("{node}:{}", frame.id);
+        if let Some(sender) = self.desktop_streams.get(&key) {
+            let _ = sender.send(Arc::new(bytes.to_vec()));
+        }
+        self.desktop_streams
+            .remove_if(&key, |_, sender| sender.receiver_count() == 0);
+    }
+
+    pub fn send_machine_frame(
+        &self,
+        node: &str,
+        bytes: Vec<u8>,
+        fence: Option<&str>,
+    ) -> AppResult<()> {
+        self.connection_for(node, fence)?
+            .tx
+            .try_send(NodeOutboundMessage::Binary(bytes))
+            .map_err(|_| AppError::NodeOffline("Machine writer unavailable".into()))
+    }
+
+    pub fn deliver_machine_result(&self, node_id: &str, result: nyxid_machine::Response) {
+        if result.result.to_string().len() > 12 * 1024 * 1024 {
+            return;
+        }
+        if let Some(conn) = self.connections.get(node_id)
+            && let Some((_, sender)) = conn.machine_requests.remove(&result.request_id)
+        {
+            let _ = sender.send(result);
+        }
+    }
+
     /// Deliver an ssh_exec_result from a node. Called by the WS reader task.
     pub fn deliver_ssh_exec_result(&self, node_id: &str, result: NodeSshExecResult) {
         if let Some(conn) = self.connections.get(node_id)
@@ -4115,6 +4399,33 @@ pub fn sign_ws_proxy_request(secret: &[u8], request: &NodeWsProxyRequest) -> Nod
     }
 }
 
+struct ProxyUploadTask {
+    manager: Arc<NodeWsManager>,
+    node_id: String,
+    request_id: String,
+    task: tokio::task::JoinHandle<()>,
+}
+impl Drop for ProxyUploadTask {
+    fn drop(&mut self) {
+        self.task.abort();
+        self.manager
+            .cancel_proxy_request(&self.node_id, &self.request_id);
+        if let Ok(id) = uuid::Uuid::parse_str(&self.request_id)
+            && let Ok(frame) = (nyxid_machine::binary::Frame {
+                kind: nyxid_machine::binary::Kind::ProxyUploadAbort,
+                id,
+                sequence: 0,
+                end: true,
+                bytes: &[],
+            })
+            .encode()
+            && let Some(conn) = self.manager.connections.get(&self.node_id)
+        {
+            let _ = conn.tx.try_send(NodeOutboundMessage::Binary(frame));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4227,7 +4538,9 @@ mod tests {
         mgr.record_capabilities(
             "node-small",
             &NodeCapabilitiesMsg {
+                machine: None,
                 http_signature_v2: false,
+                proxy_upload_v1: false,
                 proxy_max_body_size: Some(4),
                 ..NodeCapabilitiesMsg::default()
             },
@@ -5386,7 +5699,9 @@ mod tests {
         mgr.record_capabilities(
             "node-cap",
             &NodeCapabilitiesMsg {
+                machine: None,
                 http_signature_v2: false,
+                proxy_upload_v1: false,
                 credential_ack_correlation: true,
                 remote_credential_crypto_v1: true,
                 proxy_max_body_size: None,
@@ -5412,7 +5727,9 @@ mod tests {
         mgr.record_capabilities(
             "node-rci",
             &NodeCapabilitiesMsg {
+                machine: None,
                 http_signature_v2: false,
+                proxy_upload_v1: false,
                 remote_credential_crypto_v1: true,
                 ..NodeCapabilitiesMsg::default()
             },

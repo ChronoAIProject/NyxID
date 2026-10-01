@@ -22,6 +22,7 @@ node-proxy-test = []
 dist = true
 
 [dependencies]
+async-stream = "0.3"
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -47,6 +48,9 @@ plist = "1"
 shlex = "1"
 tar = "0.4"
 flate2 = "1"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+globset = "0.4"
+jpeg-encoder = { version = "0.7", features = ["simd"] }
 
 # SSH subcommand + node agent WebSocket
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-native-roots"] }
@@ -59,7 +63,7 @@ sha2 = "0.10"
 hmac = "0.12"
 hkdf = "0.12"
 aes-gcm = "0.10"
-zeroize = { version = "1", features = ["derive"] }
+zeroize = { version = "1", features = ["derive", "serde"] }
 
 # Telemetry (first-run consent TTY detection)
 is-terminal = "0.4"
@@ -89,6 +93,7 @@ x509-cert = "0.2"
 nyxid-cloud-auth = { path = "../cloud-auth" }
 nyxid-service-adapters = { path = "../service-adapters" }
 nyxid-crypto = { path = "../nyxid-crypto", features = ["decrypt"] }
+nyxid-machine = { path = "../machine" }
 
 # Wizard v2 (CLI-served local browser UI). See docs/CLI_WIZARD_V2.md
 axum = { workspace = true }
@@ -106,3 +111,9 @@ tempfile = "3"
 # ApiClient (via AuthArgs.base_url) at a MockServer and assert on the
 # requests commands issue. Test-only; never ships in the release binary.
 wiremock = "0.6"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = { version = "0.14", features = ["xtest", "xfixes"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+screencapturekit = "11"

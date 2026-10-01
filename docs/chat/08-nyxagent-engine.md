@@ -459,6 +459,13 @@ upstream list available immediately. No new NyxID environment variable is introd
 
 ## Tool images
 
+Machine screenshots and shared images use this same owner-only attachment
+pipeline. Machine tool text stays within the 10,000-character result budget;
+desktop streams and owner input use a separate human-only socket and never
+enter tool results. Owner takeover ends the active turn; a durable machine watch
+wakes the conversation on hand-back. See [machine nodes](../MACHINE_NODES.md)
+and [NyxBot machines](09-nyxbot-orchestrator.md#machine-nodes-and-saved-logins).
+
 Tool execution used to decode every downstream body as lossy UTF-8, so a camera
 snapshot reached NyxAgent as garbled text it could neither see nor show.
 `mcp_service::execute_tool_response` now returns `ToolResponse {status, text,
@@ -683,3 +690,23 @@ refusals in both modes, and discovery audit suppression. The stale channel e2e
 specs were aligned to the descriptor-driven UI (`frontend/src/lib/channel-platforms.ts`)
 and shared fixture (`frontend/src/test/fixtures/channel-platforms.ts`), so their
 label changes preserve the UI contract rather than weaken assertions.
+
+Machine exec requests explicitly declare `services` (connected service slugs or
+IDs); omitted/empty declarations grant none. The declaration is job-bound and
+rechecked against live key authority, appears on confirmation cards and audit,
+and controls the catalog-derived SDK/git environment. Declare `api-github`
+(or the connected GitHub PAT service) before plain git clone/fetch/pull/push.
+Gateway response compression is preserved end to end. Discovery shares the
+proxy/MCP ACL resolver and gateway calls use the middleware's API-key identity.
+
+Recommend the container or `--separate-users`: a non-isolated shell can read
+the node token, signing secret and locally stored credentials. Explain the
+Nodes warning without refusing the owner's choice. The generated Docker
+command supplies NyxID's seccomp profile so Chromium remains sandboxed.
+
+Owner desktops use native capture (X11 on Linux, ScreenCaptureKit on macOS),
+JPEG dirty rectangles at up to 30 Hz and independent owner input. Agent actions
+and observations still use cua. Takeover cancels active agent cua/command/file
+work immediately; late results are discarded. Pixel/input data never enters
+agent tools or transcripts during owner control. Frame-rate, latency and
+bandwidth measurements are in [MACHINE_NODES_VALIDATION.md](../MACHINE_NODES_VALIDATION.md).

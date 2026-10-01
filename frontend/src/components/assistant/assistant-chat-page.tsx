@@ -1,3 +1,4 @@
+import { ConversationMachineDesktops } from "./machine-desktop-panel";
 import { NyxAgentAcknowledgementCard } from "./nyxagent-acknowledgement-card";
 import { NyxBotEventNotice, NyxBotOrchestratorMessage } from "./nyxbot-messages";
 import { NyxBotSettingsButton } from "./nyxbot-settings-dialog";
@@ -702,6 +703,7 @@ function NyxAgentThreadPage() {
           </div>
         ) : (
           <AssistantLinkModalHost>
+            {chat.session.conversationId ? <ConversationMachineDesktops conversationId={chat.session.conversationId} /> : null}
             <ChatMessageList
               session={chat.session}
               renderMessage={(message) => {

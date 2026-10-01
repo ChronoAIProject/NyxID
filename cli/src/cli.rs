@@ -2058,6 +2058,28 @@ pub enum OrgRoleScopeCommands {
 
 #[derive(Subcommand)]
 pub enum NodeCommands {
+    /// Register, enable machine access and start its daemon in one step.
+    Setup(crate::node::machine::setup::Setup),
+    #[command(hide = true)]
+    MachineBrowserInstall {
+        #[arg(long)]
+        port: u16,
+    },
+    /// Manage this node's opt-in machine capabilities.
+    Machine {
+        #[command(subcommand)]
+        command: crate::node::machine::commands::Commands,
+        #[arg(long)]
+        config: Option<String>,
+        #[arg(long, env = "NYXID_PROFILE")]
+        profile: Option<String>,
+    },
+    #[command(hide = true)]
+    MachineWorker,
+    #[command(hide = true)]
+    MachineTransferWorker,
+    #[command(hide = true)]
+    MachineNativeHost { origin: String },
     // --- User-side commands (API calls) ---
     /// List user's nodes
     List {
@@ -2453,6 +2475,9 @@ pub enum DeviceCommands {
 
 #[derive(Args, Clone)]
 pub struct NodeDockerArgs {
+    /// Use the machine image with a persistent isolated desktop and workspace.
+    #[arg(long)]
+    pub machine: bool,
     /// Agent profile name (each profile runs as a separate container)
     #[arg(long, env = "NYXID_PROFILE")]
     pub profile: Option<String>,
@@ -2460,8 +2485,11 @@ pub struct NodeDockerArgs {
 
 #[derive(Subcommand)]
 pub enum NodeDockerCommands {
-    /// Build the node agent Docker image
-    Build,
+    /// Build the node agent or machine Docker image
+    Build {
+        #[arg(long)]
+        machine: bool,
+    },
     /// Start a node agent container (mounts the profile's config directory)
     Start {
         #[command(flatten)]

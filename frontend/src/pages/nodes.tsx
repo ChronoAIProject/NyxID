@@ -335,11 +335,12 @@ export function NodesPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title="Credential Nodes"
-        description="Manage your credential nodes for self-hosted proxy routing."
+        title="Nodes"
+        description="Manage credential routing and machines your agents may use."
         actions={
           <div className="flex items-center gap-3">
             <ViewToggle viewMode={viewMode} onViewModeChange={setViewMode} />
+            <AddCtaButton label="Add a machine" onClick={() => void navigate({ to: "/machines/new", search: { setup: undefined } })} />
             <RegisterNodeDialog onRegistered={handleRegistered} />
           </div>
         }
@@ -413,6 +414,7 @@ export function NodesPage() {
                 <div className="mt-2 flex flex-wrap gap-1.5">
                   <NodeStatusBadge status={node.status} isConnected={node.is_connected} />
                   <Badge variant="secondary">{nodeOwnerLabel(node.owner, currentUserId)}</Badge>
+                  {node.machine?.shell && !node.machine.browser_isolated ? <Badge variant="warning">Not isolated</Badge> : null}
                 </div>
                 <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
                   <span>{formatRelativeTime(node.last_heartbeat_at) ?? "No heartbeat"}</span>
@@ -458,6 +460,7 @@ export function NodesPage() {
                   <div className="mt-2 flex flex-wrap gap-1.5">
                     <NodeStatusBadge status={node.status} isConnected={node.is_connected} />
                     <Badge variant="secondary">{nodeOwnerLabel(node.owner, currentUserId)}</Badge>
+                  {node.machine?.shell && !node.machine.browser_isolated ? <Badge variant="warning">Not isolated</Badge> : null}
                   </div>
                   <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
                     <span>{formatRelativeTime(node.last_heartbeat_at) ?? "No heartbeat"}</span>
@@ -511,6 +514,7 @@ export function NodesPage() {
                           status={node.status}
                           isConnected={node.is_connected}
                         />
+                        {node.machine?.shell && !node.machine.browser_isolated ? <Badge variant="warning">Not isolated</Badge> : null}
                       </TableCell>
                       <TableCell className="text-muted-foreground">
                         {formatRelativeTime(node.last_heartbeat_at) ?? "Never"}

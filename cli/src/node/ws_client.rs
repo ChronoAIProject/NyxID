@@ -794,6 +794,20 @@ async fn run_connection_loop(
     shutdown: watch::Receiver<bool>,
 ) {
     let mut backoff = ReconnectBackoff::new();
+    let proxy_uploads = Arc::new(super::proxy_upload::Uploads::default());
+    let machine = if config.machine.shell || config.machine.files || config.machine.computer {
+        match super::machine::Runtime::new(&config.machine, &config.node.id, config_dir) {
+            Ok(runtime) => Some(runtime),
+            Err(_) => {
+                tracing::error!(
+                    "Machine configuration refused; credential proxy remains available"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     loop {
         if shutdown_requested(&shutdown) {
@@ -811,8 +825,11 @@ async fn run_connection_loop(
             credential_sender,
             in_flight.clone(),
             shutdown.clone(),
+            machine.clone(),
+            proxy_uploads.clone(),
         )
         .await;
+        proxy_uploads.disconnect().await;
         if shutdown_requested(&shutdown) {
             break;
         }
@@ -834,6 +851,9 @@ async fn run_connection_loop(
             _ = wait_for_shutdown(&mut shutdown_wait) => break,
         }
     }
+    if let Some(machine) = machine {
+        machine.shutdown().await;
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -849,11 +869,18 @@ async fn connect_and_serve(
     credential_sender: &Arc<SharedCredentialsSender>,
     in_flight: Arc<AtomicUsize>,
     mut shutdown: watch::Receiver<bool>,
+    machine: Option<Arc<super::machine::Runtime>>,
+    proxy_uploads: Arc<super::proxy_upload::Uploads>,
 ) -> Result<Option<Duration>> {
     // 1. Connect
     let ws_config = node_control_ws_config(config.server.proxy_max_body_size);
-    let connect =
-        tokio_tungstenite::connect_async_with_config(&config.server.url, Some(ws_config), false);
+    // Interactive machine results and desktop input must not wait behind
+    // Nagle's algorithm after a preceding job/output frame.
+    let connect = tokio_tungstenite::connect_async_with_config(
+        &config.server.url,
+        Some(ws_config),
+        machine.is_some(),
+    );
     tokio::pin!(connect);
     let (ws_stream, _) = tokio::select! {
         result = &mut connect => {
@@ -972,6 +999,7 @@ async fn connect_and_serve(
     // is full we'll retry on the next status_update / reconnect.
     let mut capabilities = serde_json::Map::new();
     capabilities.insert("http_signature_v2".to_string(), true.into());
+    capabilities.insert("proxy_upload_v1".to_string(), true.into());
     capabilities.insert("credential_ack_correlation".to_string(), true.into());
     capabilities.insert(
         rci_crypto::REMOTE_CREDENTIAL_CRYPTO_CAPABILITY.to_string(),
@@ -981,6 +1009,18 @@ async fn connect_and_serve(
         "proxy_max_body_size".to_string(),
         config.server.proxy_max_body_size.into(),
     );
+    if let Some(machine) = &machine {
+        capabilities.insert(
+            "machine".into(),
+            serde_json::to_value(machine.profile().await)?,
+        );
+    }
+    if let (Some(machine), Some(secret)) = (&machine, &signing_secret) {
+        let bytes = zeroize::Zeroizing::new(hex::decode(secret.as_str()).unwrap_or_default());
+        if machine.connect(tx.clone(), &bytes).await.is_err() {
+            tracing::warn!("Machine gateway could not start");
+        }
+    }
     let caps_msg = serde_json::json!({
         "type": "status_update",
         "agent_version": env!("CARGO_PKG_VERSION"),
@@ -1033,6 +1073,20 @@ async fn connect_and_serve(
             break false;
         };
         let text = match msg {
+            Ok(Message::Binary(bytes)) if nyxid_machine::binary::is_machine(&bytes) => {
+                if let Ok(frame) = nyxid_machine::binary::Frame::decode(&bytes)
+                    && matches!(
+                        frame.kind,
+                        nyxid_machine::binary::Kind::ProxyUpload
+                            | nyxid_machine::binary::Kind::ProxyUploadAbort
+                    )
+                {
+                    proxy_uploads.frame(frame).await;
+                } else if let Some(machine) = &machine {
+                    machine.binary(&bytes).await;
+                }
+                continue;
+            }
             Ok(Message::Text(t)) => t.to_string(),
             Ok(Message::Close(frame)) => {
                 tracing::info!(?frame, "Server closed node WebSocket");
@@ -1062,6 +1116,83 @@ async fn connect_and_serve(
                 });
                 if !send_ws_message(&tx, pong.to_string()).await {
                     break false;
+                }
+            }
+            Some("machine_service_response") => {
+                if let Some(machine) = &machine {
+                    machine
+                        .gateway_response(
+                            parsed["request_id"].as_str().unwrap_or_default(),
+                            parsed.clone(),
+                        )
+                        .await;
+                }
+            }
+            Some("machine_job_finished_ack") => {
+                if let Some(machine) = &machine {
+                    machine
+                        .job_finished_ack(parsed["request_id"].as_str().unwrap_or_default())
+                        .await;
+                }
+            }
+            Some("machine_request") => {
+                if let (Some(machine), Some(secret)) = (machine.clone(), signing_secret.clone())
+                    && let Ok(request) =
+                        serde_json::from_value::<nyxid_machine::Request>(parsed.clone())
+                {
+                    let tx = tx.clone();
+                    tokio::spawn(async move {
+                        let request_id = request.request_id.clone();
+                        let operation = request.operation;
+                        let revision = machine.control_revision();
+                        let signing_bytes = zeroize::Zeroizing::new(
+                            hex::decode(secret.as_str()).unwrap_or_default(),
+                        );
+                        let result = machine.handle(request, &signing_bytes).await;
+                        machine
+                            .send_result(&tx, &request_id, operation, revision, result)
+                            .await;
+                    });
+                }
+            }
+            Some("proxy_upload") => {
+                let request_id = parsed["request_id"].as_str().unwrap_or_default().to_owned();
+                let verified = if let Some(secret) = signing_secret.as_ref() {
+                    proxy_uploads
+                        .begin(parsed, &config.node.id, secret.as_str())
+                        .await
+                } else {
+                    Err(anyhow::anyhow!("upload signature missing"))
+                };
+                match verified {
+                    Ok((metadata, upload)) => {
+                        if upload.operation() != nyxid_machine::Operation::ProxyUpload {
+                            let machine = machine.clone();
+                            let tx = tx.clone();
+                            tokio::spawn(async move {
+                                super::machine::transfer::execute(machine, metadata, upload, tx)
+                                    .await;
+                            });
+                            continue;
+                        }
+                        let tx = tx.clone();
+                        let creds = credentials.snapshot();
+                        let replay = replay_guard.clone();
+                        let metrics = metrics.clone();
+                        let client = proxy_http_client.clone();
+                        let in_flight = in_flight.clone();
+                        in_flight.fetch_add(1, Ordering::Relaxed);
+                        tokio::spawn(async move {
+                            proxy_executor::execute_proxy_upload(
+                                &metadata, &creds, &replay, &metrics, &tx, &client, upload,
+                            )
+                            .await;
+                            in_flight.fetch_sub(1, Ordering::Relaxed);
+                        });
+                    }
+                    Err(_) => {
+                        let _=send_ws_message(&tx,serde_json::json!({"type":"proxy_response","request_id":request_id,"status":403,"headers":{},"body":"","error":"Upload authorization refused"}).to_string()).await;
+                    }
                 }
             }
             Some("proxy_request") => {
@@ -1324,6 +1455,10 @@ async fn connect_and_serve(
     cancel_active_ssh_execs(&active_ssh_execs).await;
     drain_active_web_terminals(&active_web_terminals).await;
     drain_active_ws_proxies(&active_ws_proxies).await;
+    proxy_uploads.disconnect().await;
+    if let Some(machine) = &machine {
+        machine.disconnect().await;
+    }
     writer_task.abort();
     Ok(Some(served_for))
 }

@@ -372,6 +372,11 @@ pub(crate) async fn permission_requested(
             "service {}",
             identifier(request.service_slug.as_deref().unwrap_or_default())
         ),
+        "machine" | "saved_login" => format!(
+            "{} {}",
+            request.kind,
+            identifier(request.service_name.as_deref().unwrap_or_default())
+        ),
         _ => "read-only account access".into(),
     };
     let note = format!(
@@ -532,6 +537,10 @@ pub(crate) async fn turn_notes(
     }
     if let Some(agent) = agent {
         notes.push_str(&team::memory_note(agent));
+        if !agent.machine_node_ids.is_empty() {
+            notes.push_str("\n\n");
+            notes.push_str(crate::services::machine_tools::USE_INSTRUCTIONS);
+        }
         // Only the agent's own threads hear about its other chats.
         if row.channel.is_none() {
             notes.push_str(&in_progress_note(state, row, agent).await);
@@ -544,6 +553,8 @@ pub(crate) async fn turn_notes(
     if row.is_subagent() {
         return notes;
     }
+    notes.push_str("\n\n");
+    notes.push_str(crate::services::machine_tools::SETUP_INSTRUCTIONS);
     let owner = row.user_id.as_str();
     notes.push_str(
         &team::roster_note(&state.db, owner)
@@ -742,6 +753,8 @@ async fn dispatch(
             )
             .await?;
             let request = team::CreateRequest {
+                machines: args.get("machines").map(|_| string_list(args, "machines")),
+                logins: args.get("logins").map(|_| string_list(args, "logins")),
                 name: text_arg(args, "name").to_owned(),
                 description: text_arg(args, "description").to_owned(),
                 display_name: args["display_name"].as_str().map(str::to_owned),
@@ -772,7 +785,7 @@ async fn dispatch(
                     };
                     (
                         json!({"subagent": {"id": agent.id, "name": agent.name,
-                            "services": targets.slugs, "account_read": agent.grants.account_read},
+                            "services": targets.slugs, "machines": agent.machine_node_ids, "logins": agent.saved_login_ids, "account_read": agent.grants.account_read},
                             "task": task}),
                         false,
                     )
@@ -843,6 +856,19 @@ async fn dispatch(
             } else {
                 team::GrantChange::Remove(targets)
             };
+            let change = crate::services::machine_service::resolve_grant_change(
+                db,
+                owner,
+                args.get("machines").map(|_| string_list(args, "machines")),
+                args.get("logins").map(|_| string_list(args, "logins")),
+                change,
+                if name == "grant_subagent" {
+                    team::MachineGrantMode::Add
+                } else {
+                    team::MachineGrantMode::Remove
+                },
+            )
+            .await?;
             let agent = team::set_grants(db, owner, &agent.id, change).await?;
             let summary = team::summaries(db, owner, false, false, 0)
                 .await?
@@ -850,7 +876,7 @@ async fn dispatch(
                 .find(|summary| summary.id == agent.id);
             let mut result = json!({"subagent": agent.name,
                 "services": summary.as_ref().map(|s| s.services.clone()),
-                "account_read": agent.grants.account_read});
+                "account_read": agent.grants.account_read, "machines": agent.machine_node_ids, "logins": agent.saved_login_ids});
             if !refused.is_empty() {
                 result[unchanged] = json!(refused);
             }
@@ -1120,6 +1146,8 @@ async fn dispatch(
                 false,
             )
         }
+        "machine_setup_link" => super::machine_setup::link_tool(state, chat, args).await?,
+        "machine_pair" => super::machine_setup::pair_tool(state, chat, args).await?,
         "channel_bot_setup_link" => {
             let agent = target_agent(state, owner, args["agent"].as_str()).await?;
             super::nyxbot::setup_link_tool(
@@ -1376,6 +1404,10 @@ pub async fn list_agents(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateAgentRequest {
+    #[serde(default)]
+    machines: Option<Vec<String>>,
+    #[serde(default)]
+    logins: Option<Vec<String>>,
     name: String,
     description: String,
     #[serde(default)]
@@ -1404,6 +1436,8 @@ pub async fn create_agent(
     )
     .await?;
     let request = team::CreateRequest {
+        machines: body.machines,
+        logins: body.logins,
         name: body.name,
         description: body.description,
         display_name: body.display_name,
@@ -1516,6 +1550,10 @@ pub async fn update_agent(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GrantsRequest {
+    #[serde(default)]
+    machines: Option<Vec<String>>,
+    #[serde(default)]
+    logins: Option<Vec<String>>,
     services: Vec<String>,
     account_read: bool,
     /// What guests may do with each of `services` (by the same name or ID);
@@ -1551,10 +1589,11 @@ pub async fn set_agent_grants(
         })?;
         guest_access.insert(id.clone(), *level);
     }
-    let agent = team::set_grants(
+    let change = crate::services::machine_service::resolve_grant_change(
         &state.db,
         &owner,
-        &id,
+        body.machines,
+        body.logins,
         team::GrantChange::Replace {
             grants: AgentGrants {
                 service_ids: targets.service_ids,
@@ -1563,8 +1602,10 @@ pub async fn set_agent_grants(
             },
             guests: guest_access,
         },
+        team::MachineGrantMode::Replace,
     )
     .await?;
+    let agent = team::set_grants(&state.db, &owner, &id, change).await?;
     Ok(Json(json!({"id": agent.id, "services": targets.slugs,
         "account_read": agent.grants.account_read})))
 }

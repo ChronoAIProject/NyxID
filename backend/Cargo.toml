@@ -77,6 +77,7 @@ tokio-tungstenite = { version = "0.29.0", features = ["rustls-tls-webpki-roots"]
 deunicode = "1.6"
 nyxid-cloud-auth = { path = "../cloud-auth" }
 nyxid-service-adapters = { path = "../service-adapters" }
+nyxid-machine = { path = "../machine" }
 http = "1.4"
 http-body-util = "0.1"
 # Direct rustls dep so we can install a default CryptoProvider at startup.
@@ -96,6 +97,7 @@ tempfile = "3.27.0"
 axum-extra = { version = "0.12.6", features = ["form", "query"] }
 
 [dev-dependencies]
+flate2 = "1"
 # TLS echo proxy for multi-origin routing and redirect acceptance tests.
 rcgen = "0.14"
 tokio-rustls = "0.26"

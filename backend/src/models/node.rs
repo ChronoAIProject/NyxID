@@ -74,6 +74,8 @@ pub struct NodeMetrics {
 pub struct NodeConnectionOwner {
     #[serde(default, skip_serializing_if = "is_false")]
     pub http_signature_v2: bool,
+    #[serde(default)]
+    pub proxy_upload_v1: bool,
     pub instance_name: String,
     pub generation_id: String,
     pub connection_id: String,
@@ -155,6 +157,12 @@ pub struct Node {
     pub metrics: NodeMetrics,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection_owner: Option<NodeConnectionOwner>,
+    #[serde(default)]
+    pub machine: Option<nyxid_machine::MachineProfile>,
+    #[serde(default)]
+    pub machine_confirm: nyxid_machine::Confirmation,
+    #[serde(default)]
+    pub allow_single_user_saved_logins: bool,
     pub is_active: bool,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
@@ -173,6 +181,9 @@ mod tests {
 
     fn make_node() -> Node {
         Node {
+            machine: None,
+            machine_confirm: Default::default(),
+            allow_single_user_saved_logins: false,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             name: "test-node".to_string(),
@@ -291,6 +302,7 @@ mod tests {
         let now = Utc::now();
         let owner = NodeConnectionOwner {
             http_signature_v2: false,
+            proxy_upload_v1: false,
             instance_name: "backend-0".to_string(),
             generation_id: uuid::Uuid::new_v4().to_string(),
             connection_id: uuid::Uuid::new_v4().to_string(),

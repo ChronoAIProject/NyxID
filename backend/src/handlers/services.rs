@@ -1446,6 +1446,7 @@ async fn create_service_inner(
         proxy_operation_policy.as_ref(),
     )?;
     let new_service = DownstreamService {
+        git_http: None,
         destination_targets,
         owner_user_id: None,
         recommended_skill_refs: None,

@@ -16,6 +16,9 @@ vi.mock("@/hooks/use-keys", () => ({
   }),
 }));
 
+vi.mock("@/hooks/use-nodes", () => ({ useNodes: () => ({ data: [{ id: "machine-1", name: "Workspace VM", machine: { shell: true } }] }) }));
+vi.mock("@/hooks/use-saved-logins", () => ({ useSavedLogins: () => ({ data: [{ id: "login-1", label: "GitHub website" }] }) }));
+
 const home = `nyxa-${"d".repeat(32)}`;
 let posts: unknown[];
 let respond: () => Response;
@@ -140,4 +143,15 @@ it("rejects an invalid name before calling the server and shows server refusals"
     "A live agent already uses that name",
   );
   expect(onCreated).not.toHaveBeenCalled();
+});
+
+it("includes selected machines and saved logins when creating the specialist", async () => {
+  const { onCreated, user } = renderDialog();
+  await user.type(screen.getByRole("textbox", { name: "Name" }), "developer");
+  await user.type(screen.getByRole("textbox", { name: "Role" }), "Fixes code");
+  await user.click(screen.getByRole("checkbox", { name: "Workspace VM" }));
+  await user.click(screen.getByRole("checkbox", { name: "GitHub website" }));
+  await user.click(screen.getByRole("button", { name: "Create agent" }));
+  await waitFor(() => expect(onCreated).toHaveBeenCalled());
+  expect(posts[0]).toMatchObject({ machines: ["machine-1"], logins: ["login-1"] });
 });

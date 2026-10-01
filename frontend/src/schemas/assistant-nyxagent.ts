@@ -287,6 +287,8 @@ export const assistantAgentSchema = z.object({
   status: assistantAgentStatusSchema,
   /** Granted service slugs (specialists). */
   services: z.array(z.string()).default([]),
+  machines: z.array(z.string()).optional(),
+  logins: z.array(z.string()).optional(),
   account_read: z.boolean().default(false),
   /** What guests (other members of the agent's chats) may do with each service. */
   guest_access: z.record(z.string(), assistantGuestAccessSchema.catch("use")).default({}),
@@ -393,6 +395,8 @@ export const assistantAgentCreateSchema = z.object({
   display_name: agentDisplayName.optional(),
   description: agentDescription,
   persona: agentPersona.optional(),
+  machines: z.array(z.string()).max(64).optional(),
+  logins: z.array(z.string()).max(64).optional(),
   services: z.array(z.string()),
   account_read: z.boolean(),
 });
@@ -422,6 +426,8 @@ export type AssistantAgentProfile = {
 };
 
 export const assistantAgentGrantsSchema = z.object({
+  machines: z.array(z.string()).optional(),
+  logins: z.array(z.string()).optional(),
   services: z.array(z.string()),
   account_read: z.boolean(),
   /** Guest access by service slug; services left out keep their level. */
@@ -429,6 +435,8 @@ export const assistantAgentGrantsSchema = z.object({
 });
 /** What the grants endpoint takes: levels only for services whose level changed. */
 export const assistantAgentGrantsRequestSchema = z.object({
+  machines: z.array(z.string()).optional(),
+  logins: z.array(z.string()).optional(),
   services: z.array(z.string()),
   account_read: z.boolean(),
   guest_access: z.record(z.string(), assistantGuestAccessSchema).optional(),

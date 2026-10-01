@@ -64,6 +64,7 @@ jobs:
     outputs:
       backend: ${{ steps.filter.outputs.backend }}
       cli: ${{ steps.filter.outputs.cli }}
+      machine: ${{ steps.filter.outputs.machine }}
       rust: ${{ steps.filter.outputs.rust }}
       frontend: ${{ steps.filter.outputs.frontend }}
       mobile: ${{ steps.filter.outputs.mobile }}
@@ -88,8 +89,22 @@ jobs:
           # YAML anchors aren't used here -- aliased sequences expand to
           # nested lists in js-yaml, which paths-filter does not flatten.
           filters: |
+            machine:
+              - 'frontend/public/machine-seccomp.json'
+              - 'machine/**'
+              - 'cli/src/node/machine/**'
+              - 'cli/resources/machine-browser/**'
+              - 'cli/resources/machine-container/**'
+              - 'cli/container/**'
+              - 'cli/Dockerfile.machine'
+              - 'cli/tests/machine*'
+              - 'cli/tests/Dockerfile.machine'
+              - 'cli/Cargo.toml'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
             backend:
               - 'backend/**'
+              - 'machine/**'
               - 'integrations/oracle/cdp-worker/worker.mjs'
               - 'cloud-auth/**'
               - 'service-adapters/**'
@@ -105,6 +120,7 @@ jobs:
               - '.config/nextest.toml'
             cli:
               - 'cli/**'
+              - 'machine/**'
               - 'cloud-auth/**'
               - 'service-adapters/**'
               - 'nyxid-crypto/**'
@@ -122,6 +138,7 @@ jobs:
               - 'backend/**'
               - 'integrations/oracle/cdp-worker/worker.mjs'
               - 'cli/**'
+              - 'machine/**'
               - 'cloud-auth/**'
               - 'service-adapters/**'
               - 'nyxid-crypto/**'
@@ -340,6 +357,34 @@ jobs:
   # ---------------------------------------------------------------------------
   # Rust: CLI / node-agent build + test (no DB required)
   # ---------------------------------------------------------------------------
+  machine-container:
+    name: Machine Container E2E
+    needs: changes
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.machine == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: docker/setup-buildx-action@v4
+      - name: Build machine image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: cli/Dockerfile.machine
+          load: true
+          tags: nyxid-node-machine:ci
+          cache-from: type=gha,scope=machine-pr
+          cache-to: type=gha,mode=max,scope=machine-pr
+      - name: Verify sandbox, isolation, saved logins, takeover and live desktop
+        run: |
+          docker build --build-arg MACHINE_IMAGE=nyxid-node-machine:ci -f cli/tests/Dockerfile.machine -t nyxid-machine-e2e:ci .
+          docker run --rm --shm-size=256m --security-opt seccomp=cli/resources/machine-container/seccomp.json nyxid-machine-e2e:ci
+      - name: Remove test images and build cache
+        if: always()
+        run: |
+          docker image rm -f nyxid-machine-e2e:ci nyxid-node-machine:ci || true
+          docker builder prune -f
+
   cli-test:
     name: CLI Test
     needs: changes
@@ -358,8 +403,14 @@ jobs:
       - name: Build CLI
         run: cargo build -p nyxid-cli
 
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+      - name: Test saved-login extension and signed package freshness
+        run: node --test cli/tests/machine_filler.test.mjs
+
       - name: Run CLI tests
-        run: cargo nextest run -p nyxid-cli --profile ci
+        run: cargo nextest run -p nyxid-cli -p nyxid-machine --profile ci
 
       - name: Publish test summary
         if: always()
@@ -956,6 +1007,7 @@ jobs:
       - backend-billing-smoke
       - backend-image-inputs
       - cli-test
+      - machine-container
       - rust-features
       - frontend
       - wizard-bundle-freshness
@@ -981,6 +1033,7 @@ jobs:
             backend-billing-smoke=${{ needs.backend-billing-smoke.result }}
             backend-image-inputs=${{ needs.backend-image-inputs.result }}
             cli-test=${{ needs.cli-test.result }}
+            machine-container=${{ needs.machine-container.result }}
             rust-features=${{ needs.rust-features.result }}
             frontend=${{ needs.frontend.result }}
             wizard-bundle-freshness=${{ needs.wizard-bundle-freshness.result }}

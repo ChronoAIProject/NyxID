@@ -80,6 +80,10 @@ import {
   ApprovalHistoryPage,
   ApprovalGrantsPage,
   NodesPage,
+  MachineSetupPage,
+  MachineDesktopPage,
+  MachinePairPage,
+  SavedLoginsPage,
   NodeDetailPage,
   AdminNodesPage,
   AdminAuditLogPage,
@@ -706,6 +710,41 @@ const nodesRoute = createRoute({
   component: NodesPage,
 });
 
+const machineDesktopRoute = createRoute({
+  path: "/machines/$nodeId/desktop",
+  getParentRoute: () => rootRoute,
+  beforeLoad: standaloneAuthBeforeLoad,
+  component: MachineDesktopPage,
+  validateSearch: (search: Record<string, unknown>) => ({
+    conversation_id:
+      typeof search.conversation_id === "string"
+        ? search.conversation_id
+        : undefined,
+  }),
+});
+
+const machineSetupRoute = createRoute({
+  path: "/machines/new",
+  getParentRoute: () => dashboardLayout,
+  component: MachineSetupPage,
+  validateSearch: (search: Record<string, unknown>) => ({
+    setup: typeof search.setup === "string" ? search.setup : undefined,
+  }),
+});
+const machinePairRoute = createRoute({
+  path: "/machines/pair",
+  getParentRoute: () => dashboardLayout,
+  component: MachinePairPage,
+  validateSearch: (search: Record<string, unknown>) => ({
+    code: typeof search.code === "string" ? search.code : undefined,
+  }),
+});
+const savedLoginsRoute = createRoute({
+  path: "/saved-logins",
+  getParentRoute: () => dashboardLayout,
+  component: SavedLoginsPage,
+});
+
 const nodeDetailRoute = createRoute({
   path: "/nodes/$nodeId",
   getParentRoute: () => dashboardLayout,
@@ -743,7 +782,8 @@ const keysRoute = createRoute({
 const billingRoute = createRoute({
   path: "/billing",
   getParentRoute: () => dashboardLayout,
-  validateSearch: (search: Record<string, unknown>) => billingSearchSchema.parse(search),
+  validateSearch: (search: Record<string, unknown>) =>
+    billingSearchSchema.parse(search),
   beforeLoad: () => {
     const { isLoading, user } = useAuthStore.getState();
     if (shouldRedirectFromBilling({ isLoading, user })) {
@@ -771,9 +811,20 @@ const apiKeyDetailRoute = createRoute({
 
 const channelBotsRoute = createRoute({
   path: "/channel-bots",
-  validateSearch: (search: Record<string, unknown>): { connect?: ReturnType<typeof managedConnectPlatform>; label?: string; target_org_id?: string; request_id?: string; claim_entry?: boolean } => ({
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): {
+    connect?: ReturnType<typeof managedConnectPlatform>;
+    label?: string;
+    target_org_id?: string;
+    request_id?: string;
+    claim_entry?: boolean;
+  } => ({
     connect: managedConnectPlatform(search.connect),
-    claim_entry: search.claim_entry === true || search.claim_entry === "true" ? true : undefined,
+    claim_entry:
+      search.claim_entry === true || search.claim_entry === "true"
+        ? true
+        : undefined,
     ...parseChannelBotSetupSearch(search),
   }),
   getParentRoute: () => dashboardLayout,
@@ -944,10 +995,12 @@ const adminAnalyticsRoute = createRoute({
   validateSearch: (search: Record<string, unknown>) => usagePageSearch(search),
 });
 
-function usagePageSearch(search: Record<string, unknown>): Partial<Pick<
-  ReturnType<typeof normalizeAdminUsageSearch>,
-  "sort" | "metric" | "page" | "per_page"
->> & {
+function usagePageSearch(search: Record<string, unknown>): Partial<
+  Pick<
+    ReturnType<typeof normalizeAdminUsageSearch>,
+    "sort" | "metric" | "page" | "per_page"
+  >
+> & {
   tab?: "dashboard" | "list";
   sample?: "overview" | "operations" | "explorer";
   mock?: string;
@@ -975,7 +1028,9 @@ const adminUsageRoute = createRoute({
   validateSearch: usagePageSearch,
   beforeLoad: ({ search, location }) => {
     const params = new URLSearchParams(location.searchStr);
-    if (["period", "from", "to", "user", "service"].some((key) => params.has(key))) {
+    if (
+      ["period", "from", "to", "user", "service"].some((key) => params.has(key))
+    ) {
       throw redirect({
         to: "/admin/usage",
         search: usagePageSearch(search),
@@ -1050,6 +1105,7 @@ const routeTree = rootRoute.addChildren([
   channelConnectLinkRoute,
   connectLinkReturnRoute,
   sshTerminalRoute,
+  machineDesktopRoute,
   assistantRoute,
   assistantPluginsRoute,
   assistantApprovalsRoute,
@@ -1090,6 +1146,9 @@ const routeTree = rootRoute.addChildren([
     keyDetailRoute,
     apiKeyDetailRoute,
     nodesRoute,
+    machineSetupRoute,
+    machinePairRoute,
+    savedLoginsRoute,
     nodeDetailRoute,
     channelBotsRoute,
     channelBotSetupLinksRoute,

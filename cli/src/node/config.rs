@@ -17,6 +17,8 @@ pub struct NodeConfig {
     pub signing: SigningConfig,
     #[serde(default)]
     pub ssh: SshConfig,
+    #[serde(default)]
+    pub machine: nyxid_machine::config::Config,
     /// "file" (default, AES-GCM encrypted) or "keychain" (OS keychain)
     #[serde(default = "default_storage_backend")]
     pub storage_backend: String,
@@ -429,6 +431,7 @@ impl NodeConfig {
             },
             signing: SigningConfig::default(),
             ssh: SshConfig::default(),
+            machine: Default::default(),
             storage_backend,
             credentials: BTreeMap::new(),
             ssh_keys: Vec::new(),

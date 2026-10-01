@@ -30,6 +30,8 @@ pub const ACTION_SECONDS: i64 = 10 * 60;
 
 #[derive(Clone)]
 pub struct ChatAuthority {
+    pub machine_node_ids: Vec<String>,
+    pub saved_login_ids: Vec<String>,
     pub conversation_id: String,
     pub user_id: String,
     pub api_key_id: String,
@@ -117,6 +119,8 @@ pub async fn for_key(
         return Err(not_found());
     }
     Ok(Some(ChatAuthority {
+        machine_node_ids: agent.machine_node_ids.clone(),
+        saved_login_ids: agent.saved_login_ids.clone(),
         user_id: user.into(),
         api_key_id: key.into(),
         conversation_id: conversation_id.into(),
@@ -742,6 +746,8 @@ pub async fn decide_as(
                     .await?
                     .ok_or_else(not_found)?;
                 let chat = ChatAuthority {
+                    machine_node_ids: Vec::new(),
+                    saved_login_ids: Vec::new(),
                     user_id: user.clone(),
                     conversation_id: row.conversation_id.clone(),
                     api_key_id: row.api_key_id.clone(),
@@ -782,6 +788,21 @@ pub async fn decide_as(
                             AppError::ValidationError(_) => not_found(),
                             error => error,
                         })?;
+                    }
+                }
+                if matches!(row.kind.as_str(), "machine" | "saved_login") {
+                    let id = row.service_id.as_deref().ok_or_else(not_found)?;
+                    if row.kind == "machine" {
+                        let node = super::node_service::get_node_by_id(&db, id).await?.ok_or_else(not_found)?;
+                        if !node.is_active || !super::org_service::resolve_owner_access(&db, &user, &node.user_id).await?.can_write() { return Err(not_found()); }
+                    } else { super::saved_login_service::get(&db, &user, id).await?; }
+                    if allow && subagent {
+                        let field = if row.kind == "machine" { "machine_node_ids" } else { "saved_login_ids" };
+                        let mut add = doc! {}; add.insert(field, id);
+                        let result = db.collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+                            .update_one(doc! {"_id": target.agent_id.as_deref().ok_or_else(not_found)?, "user_id": &user, "kind":"specialist", "destroyed_at": bson::Bson::Null}, doc! {"$addToSet":add,"$set":{"updated_at":bson::DateTime::now()}})
+                            .session(&mut *session).await?;
+                        if result.matched_count != 1 { return Err(not_found()); }
                     }
                 }
                 if allow && subagent {

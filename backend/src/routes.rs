@@ -1182,6 +1182,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .route("/{node_id}", get(handlers::node_admin::get_node))
         .route(
+            "/{node_id}/machine-settings",
+            axum::routing::put(handlers::node_admin::machine_settings),
+        )
+        .route(
             "/{node_id}/authorization",
             get(handlers::node_admin::get_node_authorization),
         )
@@ -1699,6 +1703,11 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route("/{id}/deny", post(handlers::login_approval::deny));
 
     let api_v1_public = Router::new()
+        .route(
+            "/machines/pair/request",
+            post(handlers::machine_setup::request_pair),
+        )
+        .route("/machines/pair/poll", post(handlers::machine_setup::poll))
         .nest("/auth/approval", login_approval_routes)
         .route(
             "/auth/agent-key/request",
@@ -1922,6 +1931,11 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         ),
     ));
     let assistant_routes = Router::new()
+        .route("/nyxagent/machines", get(handlers::machine_desktop::list))
+        .route(
+            "/nyxagent/machines/{node_id}/desktop",
+            get(handlers::machine_desktop::upgrade),
+        )
         .route("/nyxagent/live", get(handlers::assistant_nyxagent::live))
         .route(
             "/nyxagent/conversations",
@@ -2054,6 +2068,29 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
 
     // Routes that BLOCK service account tokens (human-only endpoints)
     let api_v1_human_only = Router::new()
+        .route("/machines/setups", post(handlers::machine_setup::create))
+        .route("/machines/setups/{id}", get(handlers::machine_setup::get))
+        .route(
+            "/machines/setups/{id}/token",
+            post(handlers::machine_setup::mint),
+        )
+        .route(
+            "/machines/pair/preview",
+            post(handlers::machine_setup::preview),
+        )
+        .route(
+            "/machines/pair/decide",
+            post(handlers::machine_setup::decide),
+        )
+        .route(
+            "/saved-logins",
+            get(handlers::saved_logins::list).post(handlers::saved_logins::create),
+        )
+        .route(
+            "/saved-logins/{id}",
+            axum::routing::put(handlers::saved_logins::replace)
+                .delete(handlers::saved_logins::delete),
+        )
         .route("/options/{option_set}", get(handlers::options::get_options))
         .route(
             "/channel-bots/telegram-new/claims/preview",

@@ -4326,7 +4326,7 @@ fn tool_image_type(content_type: Option<&str>) -> Option<&'static str> {
         .find(|allowed| *allowed == normalized)
 }
 
-fn image_magic_matches(content_type: &str, bytes: &[u8]) -> bool {
+pub(crate) fn image_magic_matches(content_type: &str, bytes: &[u8]) -> bool {
     match content_type {
         "image/png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
         "image/jpeg" => bytes.starts_with(&[0xFF, 0xD8, 0xFF]),
@@ -11715,6 +11715,7 @@ mod tests {
                 issues_url: None,
                 capabilities: None,
                 inference: None,
+                git_http: None,
                 inference_admin_modified: false,
                 billing: None,
                 auth_notes: None,

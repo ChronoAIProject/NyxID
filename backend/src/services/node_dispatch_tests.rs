@@ -132,6 +132,9 @@ async fn two_replica_fixture_with_limit(
 fn test_node(id: &str) -> Node {
     let now = Utc::now();
     Node {
+        machine: None,
+        machine_confirm: Default::default(),
+        allow_single_user_saved_logins: false,
         id: id.to_string(),
         user_id: uuid::Uuid::new_v4().to_string(),
         name: "two-replica-node".to_string(),
@@ -171,6 +174,7 @@ async fn next_outbound(outbound: &mut mpsc::Receiver<NodeOutboundMessage>) -> St
         .expect("node outbound timeout")
         .expect("node outbound channel closed");
     match message {
+        NodeOutboundMessage::Binary(_) => panic!("expected text frame"),
         NodeOutboundMessage::Text(text) => text,
         NodeOutboundMessage::Close { code, reason } => {
             panic!("unexpected close frame {code}: {reason}")
@@ -200,6 +204,7 @@ async fn local_session_info_prefers_exact_socket_capabilities() {
         &node_id,
         &crate::services::node_ws_manager::NodeCapabilitiesMsg {
             http_signature_v2: false,
+            proxy_upload_v1: false,
             remote_credential_crypto_v1: true,
             ..Default::default()
         },
@@ -841,6 +846,7 @@ async fn workspace_remote_node_dispatch_gates_persisted_capability_and_preserves
         &fixture.node_id,
         &NodeCapabilitiesMsg {
             http_signature_v2: true,
+            proxy_upload_v1: true,
             ..Default::default()
         },
     );
@@ -849,9 +855,11 @@ async fn workspace_remote_node_dispatch_gates_persisted_capability_and_preserves
         &fence,
         NodeCapabilitiesFlags {
             http_signature_v2: true,
+            proxy_upload_v1: true,
             ..Default::default()
         },
         true,
+        None,
     )
     .await
     .unwrap();
@@ -899,4 +907,189 @@ async fn workspace_remote_node_dispatch_gates_persisted_capability_and_preserves
         },
     );
     assert!(task.await.unwrap().is_ok());
+}
+
+#[tokio::test]
+async fn machine_gateway_upload_streams_across_replicas_without_buffering() {
+    let mut fixture = two_replica_fixture("machine_gateway_upload_replicas")
+        .await
+        .expect("MongoDB required");
+    fixture.owner_manager.record_capabilities(
+        &fixture.node_id,
+        &crate::services::node_ws_manager::NodeCapabilitiesMsg {
+            proxy_upload_v1: true,
+            ..Default::default()
+        },
+    );
+    let id = uuid::Uuid::new_v4();
+    let mut request = nyxid_machine::Request {
+        request_id: id.to_string(),
+        node_id: fixture.node_id.clone(),
+        operation: nyxid_machine::Operation::ProxyUpload,
+        parameters: serde_json::json!({"method":"POST","base_url":"https://github.com","service_slug":"api-github","git":true,"headers":{},"max_bytes":8*1024*1024}),
+        timestamp: Utc::now().timestamp(),
+        nonce: uuid::Uuid::new_v4().to_string(),
+        signature: String::new(),
+    };
+    request.signature = nyxid_machine::signing::sign(&request, &[42; 32]);
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let ready = gate.clone();
+    let body = axum::body::Body::from_stream(async_stream::stream! {
+        ready.notified().await;
+        for _ in 0..64 {yield Ok::<_,std::io::Error>(bytes::Bytes::from(vec![0x5a;65536]));}
+    });
+    let dispatch = fixture.caller_dispatch.clone();
+    let calling = tokio::spawn(async move { dispatch.proxy_upload(request, body).await });
+    let metadata = tokio::time::timeout(Duration::from_secs(5), fixture.outbound.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let NodeOutboundMessage::Text(metadata) = metadata else {
+        panic!("signed opening metadata must precede upload bytes");
+    };
+    let request: nyxid_machine::Request = serde_json::from_str(&metadata).unwrap();
+    nyxid_machine::signing::ReplayGuard::default()
+        .verify(
+            &request,
+            &fixture.node_id,
+            &[42; 32],
+            Utc::now().timestamp(),
+        )
+        .unwrap();
+    assert_eq!(request.operation, nyxid_machine::Operation::ProxyUpload);
+    assert!(request.parameters.get("body").is_none());
+    gate.notify_one();
+    let mut total = 0;
+    let mut sequence = 0;
+    loop {
+        let message = tokio::time::timeout(Duration::from_secs(10), fixture.outbound.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let NodeOutboundMessage::Binary(bytes) = message else {
+            panic!("upload must be binary");
+        };
+        let frame = nyxid_machine::binary::Frame::decode(&bytes).unwrap();
+        assert_eq!(frame.kind, nyxid_machine::binary::Kind::ProxyUpload);
+        assert_eq!(frame.id, id);
+        assert_eq!(frame.sequence, sequence);
+        assert!(frame.bytes.len() <= 65536);
+        total += frame.bytes.len();
+        sequence += 1;
+        if frame.end {
+            break;
+        }
+    }
+    assert_eq!(total, 4 * 1024 * 1024);
+    // Receive-pack replies only after receiving/processing the pack. It must
+    // outlive the fixture's ordinary five-second proxy header timeout.
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    assert!(!calling.is_finished());
+    assert!(fixture.owner_manager.deliver_stream_start(
+        &fixture.node_id,
+        &id.to_string(),
+        200,
+        vec![]
+    ));
+    fixture.owner_manager.deliver_stream_chunk(
+        &fixture.node_id,
+        &id.to_string(),
+        b"complete".to_vec(),
+    );
+    fixture
+        .owner_manager
+        .deliver_stream_end(&fixture.node_id, &id.to_string());
+    let ProxyResponseType::Streaming(mut response) = calling
+        .await
+        .unwrap()
+        .map_err(|failure| failure.error)
+        .unwrap()
+    else {
+        panic!("streaming response");
+    };
+    assert!(matches!(
+        response.recv().await,
+        Some(StreamChunk::Start { status: 200, .. })
+    ));
+    assert!(matches!(response.recv().await,Some(StreamChunk::Data(bytes)) if bytes==b"complete"));
+    assert!(matches!(response.recv().await, Some(StreamChunk::End)));
+    fixture.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn machine_desktop_cross_replica_binary_relay_is_session_scoped() {
+    use nyxid_machine::{
+        MachineProfile,
+        binary::{Frame, Kind},
+    };
+    let mut fixture = two_replica_fixture("machine_desktop_replicas")
+        .await
+        .unwrap();
+    let profile = MachineProfile {
+        version: nyxid_machine::PROTOCOL_VERSION,
+        computer: true,
+        ..Default::default()
+    };
+    let capabilities = serde_json::from_value(serde_json::json!({"machine":profile})).unwrap();
+    fixture
+        .owner_manager
+        .record_capabilities(&fixture.node_id, &capabilities);
+    let session = uuid::Uuid::new_v4();
+    let viewer = uuid::Uuid::new_v4().to_string();
+    let mut stream = fixture
+        .caller_dispatch
+        .open_machine_desktop(&fixture.node_id, &session.to_string(), &viewer)
+        .await
+        .unwrap();
+    let image = vec![93; 128 * 1024];
+    let unrelated = Frame {
+        kind: Kind::Desktop,
+        end: false,
+        id: uuid::Uuid::new_v4(),
+        sequence: 1,
+        bytes: &image,
+    };
+    fixture.owner_manager.deliver_desktop_frame(
+        &fixture.node_id,
+        &unrelated,
+        &unrelated.encode().unwrap(),
+    );
+    let frame = Frame {
+        id: session,
+        ..unrelated
+    };
+    let encoded = frame.encode().unwrap();
+    fixture
+        .owner_manager
+        .deliver_desktop_frame(&fixture.node_id, &frame, &encoded);
+    let received = tokio::time::timeout(Duration::from_secs(3), stream.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(received.as_ref(), &encoded);
+    assert!(stream.try_recv().is_err());
+    let input = Frame {
+        kind: Kind::Input,
+        end: false,
+        id: session,
+        sequence: 2,
+        bytes: b"signed-human-input",
+    }
+    .encode()
+    .unwrap();
+    fixture
+        .caller_dispatch
+        .machine_desktop_input(&fixture.node_id, &viewer, input.clone())
+        .unwrap();
+    let NodeOutboundMessage::Binary(received) =
+        tokio::time::timeout(Duration::from_secs(3), fixture.outbound.recv())
+            .await
+            .unwrap()
+            .unwrap()
+    else {
+        panic!("desktop input must stay binary");
+    };
+    assert_eq!(received, input);
+    drop(stream);
+    fixture.db.drop().await.unwrap();
 }

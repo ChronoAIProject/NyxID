@@ -104,6 +104,7 @@ impl NodeDispatch {
             capabilities_resolved: owner.capabilities_resolved,
             capabilities: crate::services::node_ws_manager::NodeCapabilitiesFlags {
                 http_signature_v2: owner.http_signature_v2,
+                proxy_upload_v1: owner.proxy_upload_v1,
                 credential_ack_correlation: owner.credential_ack_correlation,
                 remote_credential_crypto_v1: owner.remote_credential_crypto_v1,
                 proxy_max_body_size: owner.proxy_max_body_size,
@@ -132,7 +133,12 @@ impl NodeDispatch {
             .find_one(mongodb::bson::doc! { "_id": node_id })
             .await?
             .ok_or_else(|| AppError::NodeNotFound("Node not found".to_string()))?;
-        let owner = crate::services::node_owner_service::live_owner(&node, chrono::Utc::now())
+        self.owner_target_snapshot(&node)
+    }
+
+    fn owner_target_snapshot(&self, node: &Node) -> AppResult<OwnerTarget> {
+        let node_id = node.id.as_str();
+        let owner = crate::services::node_owner_service::live_owner(node, chrono::Utc::now())
             .cloned()
             .ok_or_else(|| AppError::NodeOffline("Node is not connected".to_string()))?;
         let fence = NodeOwnerFence::from_owner(node_id, &owner);
@@ -255,6 +261,13 @@ impl NodeDispatch {
         if !response.status().is_success() {
             return Err(decode_proxy_failure(response).await);
         }
+        Self::decode_proxy_response(response, request_id).await
+    }
+
+    async fn decode_proxy_response(
+        response: reqwest::Response,
+        request_id: String,
+    ) -> Result<ProxyResponseType, NodeProxyFailure> {
         let kind = response
             .headers()
             .get(INTERNAL_PROXY_KIND)
@@ -327,6 +340,111 @@ impl NodeDispatch {
             }
         });
         Ok(ProxyResponseType::Streaming(rx))
+    }
+
+    pub(crate) async fn proxy_upload(
+        &self,
+        request: nyxid_machine::Request,
+        body: Body,
+    ) -> Result<ProxyResponseType, NodeProxyFailure> {
+        let node_id = request.node_id.clone();
+        let request_id = request.request_id.clone();
+        match self
+            .owner_target(&node_id)
+            .await
+            .map_err(NodeProxyFailure::before_dispatch)?
+        {
+            OwnerTarget::Local { fence } => {
+                self.manager
+                    .proxy_upload(request, body, Some(&fence.connection_id))
+                    .await
+            }
+            OwnerTarget::Remote { fence, base_url } => {
+                let path = internal_path(&node_id, "proxy-upload");
+                let envelope =
+                    serde_json::to_vec(&MachineEnvelope { fence, request }).map_err(|_| {
+                        NodeProxyFailure::before_dispatch(AppError::Internal(
+                            "Upload envelope encoding failed".into(),
+                        ))
+                    })?;
+                let url = join_internal_url(&base_url, &path)
+                    .map_err(NodeProxyFailure::before_dispatch)?;
+                let response = self
+                    .http_client
+                    .post(url)
+                    .headers(self.auth.signed_headers("POST", &path, &envelope))
+                    .header(
+                        "x-nyxid-upload-open",
+                        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&envelope),
+                    )
+                    .body(reqwest::Body::wrap_stream(body.into_data_stream()))
+                    .send()
+                    .await
+                    .map_err(|_| {
+                        NodeProxyFailure::after_dispatch(AppError::NodeOffline(
+                            "Credential node replica unavailable".into(),
+                        ))
+                    })?;
+                if !response.status().is_success() {
+                    return Err(decode_proxy_failure(response).await);
+                }
+                Self::decode_proxy_response(response, request_id).await
+            }
+        }
+    }
+
+    pub async fn machine_request(
+        &self,
+        request: nyxid_machine::Request,
+    ) -> AppResult<nyxid_machine::Response> {
+        let node_id = request.node_id.clone();
+        let target = self.owner_target(&node_id).await?;
+        self.machine_request_to_owner(request, target).await
+    }
+
+    /// Reuse the live node snapshot loaded by this machine tool call. The
+    /// connection fence is still checked at dispatch on the owning replica.
+    pub(crate) async fn machine_request_with_node(
+        &self,
+        request: nyxid_machine::Request,
+        node: &Node,
+    ) -> AppResult<nyxid_machine::Response> {
+        if request.node_id != node.id {
+            return Err(AppError::MachineNotAllowed);
+        }
+        self.machine_request_to_owner(request, self.owner_target_snapshot(node)?)
+            .await
+    }
+
+    async fn machine_request_to_owner(
+        &self,
+        request: nyxid_machine::Request,
+        target: OwnerTarget,
+    ) -> AppResult<nyxid_machine::Response> {
+        let node_id = request.node_id.clone();
+        match target {
+            OwnerTarget::Local { fence } => {
+                self.manager
+                    .machine_request(request, Some(&fence.connection_id))
+                    .await
+            }
+            OwnerTarget::Remote { fence, base_url } => {
+                let path = internal_path(&node_id, "machine");
+                let body = serde_json::to_vec(&MachineEnvelope { fence, request })
+                    .map_err(|_| AppError::Internal("Machine request encoding failed".into()))?;
+                let response = self
+                    .http_client
+                    .post(join_internal_url(&base_url, &path)?)
+                    .headers(self.auth.signed_headers("POST", &path, &body))
+                    .body(body)
+                    .send()
+                    .await
+                    .map_err(|_| {
+                        AppError::NodeOffline("Machine owner replica unavailable".into())
+                    })?;
+                decode_json_response(response).await
+            }
+        }
     }
 
     pub(crate) async fn exec_ssh_command(
@@ -725,6 +843,7 @@ impl NodeDispatch {
         mpsc::Receiver<DuplexServerFrame>,
         Option<String>,
     )> {
+        let machine_desktop = matches!(&operation, DuplexOpen::MachineDesktop { .. });
         let path = internal_path(node_id, "duplex");
         let body = serde_json::to_vec(&DuplexEnvelope { fence, operation }).map_err(|error| {
             AppError::Internal(format!("Failed to encode node duplex request: {error}"))
@@ -778,8 +897,10 @@ impl NodeDispatch {
                 ));
             }
         };
-        let (outgoing_tx, mut outgoing_rx) = mpsc::channel::<DuplexClientFrame>(256);
-        let (incoming_tx, incoming_rx) = mpsc::channel::<DuplexServerFrame>(512);
+        let (outgoing_tx, mut outgoing_rx) =
+            mpsc::channel::<DuplexClientFrame>(if machine_desktop { 8 } else { 256 });
+        let (incoming_tx, incoming_rx) =
+            mpsc::channel::<DuplexServerFrame>(if machine_desktop { 2 } else { 512 });
         let (mut sink, mut stream) = socket.split();
         tokio::spawn(async move {
             loop {
@@ -787,6 +908,10 @@ impl NodeDispatch {
                     _ = incoming_tx.closed() => break,
                     frame = outgoing_rx.recv() => match frame {
                         Some(frame) => {
+                            if machine_desktop && let DuplexClientFrame::Data { data } = frame {
+                                if sink.send(TungsteniteMessage::Binary(data.into())).await.is_err() { break; }
+                                continue;
+                            }
                             let Ok(json) = serde_json::to_string(&frame) else { break; };
                             if sink.send(TungsteniteMessage::Text(json.into())).await.is_err() { break; }
                         }
@@ -794,6 +919,10 @@ impl NodeDispatch {
                     },
                     frame = stream.next() => match frame {
                         Some(Ok(message)) => {
+                            if machine_desktop && let TungsteniteMessage::Binary(data) = message {
+                                let _ = incoming_tx.try_send(DuplexServerFrame::Data { data:data.to_vec() });
+                                continue;
+                            }
                             let Some(frame) = tungstenite_json(message) else { break; };
                             if incoming_tx.send(frame).await.is_err() { break; }
                         }
@@ -1049,6 +1178,12 @@ struct ProxyEnvelope {
 }
 
 #[derive(Serialize, Deserialize)]
+struct MachineEnvelope {
+    fence: NodeOwnerFence,
+    request: nyxid_machine::Request,
+}
+
+#[derive(Serialize, Deserialize)]
 struct ExecEnvelope {
     fence: NodeOwnerFence,
     request: ExecRequest,
@@ -1126,6 +1261,9 @@ struct DuplexEnvelope {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum DuplexOpen {
+    MachineDesktop {
+        session_id: String,
+    },
     SshTunnel {
         request: NodeSshTunnelRequest,
         signature: Option<NodeRequestSignature>,
@@ -1225,10 +1363,18 @@ pub fn internal_router(
     Router::new()
         .route("/internal/v1/nodes/{node_id}/proxy", post(internal_proxy))
         .route(
+            "/internal/v1/nodes/{node_id}/proxy-upload",
+            post(internal_proxy_upload),
+        )
+        .route(
             "/internal/v1/nodes/{node_id}/proxy-cancel",
             post(internal_proxy_cancel),
         )
         .route("/internal/v1/nodes/{node_id}/exec", post(internal_exec))
+        .route(
+            "/internal/v1/nodes/{node_id}/machine",
+            post(internal_machine),
+        )
         .route(
             "/internal/v1/nodes/{node_id}/command",
             post(internal_command),
@@ -1301,6 +1447,45 @@ async fn serve_internal_duplex(
     }
     let expected_connection_id = envelope.fence.connection_id;
     match envelope.operation {
+        DuplexOpen::MachineDesktop { session_id } => {
+            if uuid::Uuid::parse_str(&session_id).is_err() {
+                return;
+            }
+            let Ok(mut receiver) = dispatch.manager.desktop_stream(
+                &node_id,
+                &session_id,
+                Some(&expected_connection_id),
+            ) else {
+                return;
+            };
+            if !send_axum_json(
+                &mut socket,
+                &DuplexServerFrame::Opened {
+                    selected_protocol: None,
+                },
+            )
+            .await
+            {
+                return;
+            }
+            loop {
+                tokio::select! {
+                    frame=receiver.recv()=>match frame {
+                        Some(bytes)=>if socket.send(AxumWsMessage::Binary(bytes.as_ref().clone().into())).await.is_err() {break;},
+                        None=>break,
+                    },
+                    frame=socket.next()=>match frame {
+                        Some(Ok(AxumWsMessage::Binary(bytes)))=>{
+                            let Ok(frame)=nyxid_machine::binary::Frame::decode(&bytes) else {break;};
+                            if frame.kind != nyxid_machine::binary::Kind::Input || frame.id.to_string()!=session_id {break;}
+                            if dispatch.manager.send_machine_frame(&node_id,bytes.to_vec(),Some(&expected_connection_id)).is_err(){break;}
+                        },
+                        Some(Ok(AxumWsMessage::Ping(_)))=>{},
+                        _=>break,
+                    }
+                }
+            }
+        }
         DuplexOpen::SshTunnel { request, signature } => {
             let session_id = request.session_id.clone();
             match dispatch
@@ -1625,6 +1810,71 @@ async fn internal_proxy(
             crate::services::billing::route_inventory::internal_node_dispatch_permit(),
         )
         .await;
+    proxy_result_response(dispatch, node_id, request_id, result).await
+}
+
+async fn internal_proxy_upload(
+    State(dispatch): State<Arc<NodeDispatch>>,
+    Path(node_id): Path<String>,
+    request: axum::http::Request<Body>,
+) -> Response {
+    let encoded = request
+        .headers()
+        .get("x-nyxid-upload-open")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    if encoded.len() > 64 * 1024 {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let Ok(envelope) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(encoded) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let path = internal_path(&node_id, "proxy-upload");
+    if !dispatch
+        .auth
+        .authenticate(request.headers(), "POST", &path, &envelope)
+        .await
+    {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let Ok(envelope) = serde_json::from_slice::<MachineEnvelope>(&envelope) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    if envelope.request.node_id != node_id
+        || !matches!(
+            envelope.request.operation,
+            nyxid_machine::Operation::ProxyUpload
+                | nyxid_machine::Operation::SaveAttachment
+                | nyxid_machine::Operation::ShareFile
+        )
+        || !authorize_live_local_fence(&dispatch, &node_id, &envelope.fence).await
+    {
+        return StatusCode::CONFLICT.into_response();
+    }
+    let limit = envelope.request.parameters["max_bytes"]
+        .as_u64()
+        .unwrap_or(0)
+        .min(crate::services::machine_gateway_service::GIT_MAX_BYTES as u64)
+        as usize;
+    let (body, _meter) =
+        match crate::services::machine_gateway_service::stream_upload(request, limit) {
+            Ok(upload) => upload,
+            Err(error) => return error.into_response(),
+        };
+    let request_id = envelope.request.request_id.clone();
+    let result = dispatch
+        .manager
+        .proxy_upload(envelope.request, body, Some(&envelope.fence.connection_id))
+        .await;
+    proxy_result_response(dispatch, node_id, request_id, result).await
+}
+
+async fn proxy_result_response(
+    dispatch: Arc<NodeDispatch>,
+    node_id: String,
+    request_id: String,
+    result: Result<ProxyResponseType, NodeProxyFailure>,
+) -> Response {
     match result {
         Ok(ProxyResponseType::Complete(response)) => proxy_response(
             "complete",
@@ -1700,6 +1950,36 @@ async fn internal_proxy_cancel(
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(_) => StatusCode::CONFLICT.into_response(),
     }
+}
+
+async fn internal_machine(
+    State(dispatch): State<Arc<NodeDispatch>>,
+    Path(node_id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let path = internal_path(&node_id, "machine");
+    if !dispatch
+        .auth
+        .authenticate(&headers, "POST", &path, &body)
+        .await
+    {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let Ok(envelope) = serde_json::from_slice::<MachineEnvelope>(&body) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    if envelope.request.node_id != node_id
+        || !authorize_live_local_fence(&dispatch, &node_id, &envelope.fence).await
+    {
+        return StatusCode::CONFLICT.into_response();
+    }
+    json_result(
+        dispatch
+            .manager
+            .machine_request(envelope.request, Some(&envelope.fence.connection_id))
+            .await,
+    )
 }
 
 async fn internal_exec(
@@ -2146,6 +2426,66 @@ pub fn route_for_owner(
     }
 }
 
+impl NodeDispatch {
+    /// Uses the same signed, fenced owner-replica handshake as browser SSH.
+    pub async fn open_machine_desktop(
+        &self,
+        node: &str,
+        session: &str,
+        viewer: &str,
+    ) -> AppResult<mpsc::Receiver<Arc<Vec<u8>>>> {
+        match self.owner_target(node).await? {
+            OwnerTarget::Local { fence } => {
+                self.manager
+                    .desktop_stream(node, session, Some(&fence.connection_id))
+            }
+            OwnerTarget::Remote { fence, base_url } => {
+                let (sender, mut incoming, _) = self
+                    .open_remote_duplex(
+                        base_url,
+                        node,
+                        DuplexOpen::MachineDesktop {
+                            session_id: session.into(),
+                        },
+                        fence,
+                    )
+                    .await?;
+                let key = duplex_key("desktop", node, viewer);
+                self.remote_duplex.insert(key.clone(), sender.clone());
+                let sessions = self.remote_duplex.clone();
+                let (tx, rx) = mpsc::channel(2);
+                tokio::spawn(async move {
+                    loop {
+                        tokio::select! {
+                            _=tx.closed()=>break,
+                            frame=incoming.recv()=>match frame {
+                                Some(DuplexServerFrame::Data{data})=>{let _=tx.try_send(Arc::new(data));},
+                                _=>break,
+                            }
+                        }
+                    }
+                    sessions.remove(&key);
+                    let _ = sender.try_send(DuplexClientFrame::Close {
+                        code: None,
+                        reason: None,
+                    });
+                });
+                Ok(rx)
+            }
+        }
+    }
+
+    pub fn machine_desktop_input(&self, node: &str, viewer: &str, data: Vec<u8>) -> AppResult<()> {
+        if let Some(sender) = self.remote_duplex.get(&duplex_key("desktop", node, viewer)) {
+            sender
+                .try_send(DuplexClientFrame::Data { data })
+                .map_err(|_| AppError::NodeOffline("Desktop relay unavailable".into()))
+        } else {
+            self.manager.send_machine_frame(node, data, None)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2156,6 +2496,7 @@ mod tests {
         let now = Utc::now();
         NodeConnectionOwner {
             http_signature_v2: false,
+            proxy_upload_v1: false,
             instance_name: instance_name.to_string(),
             generation_id: generation_id.to_string(),
             connection_id: "connection-a".to_string(),

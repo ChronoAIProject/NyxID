@@ -566,3 +566,28 @@ pre-v2 servers/reconcilers first. The acknowledgement and
 migration completion are durable; new replicas/restarts resume without the flag.
 Fresh databases need no acknowledgement. Do not restart old writers after
 cutover. See [Exact accounting](BILLING_EXACT_ACCOUNTING.md#d5-cutover-and-operations).
+
+### Machine node process environments
+
+Machine support adds no backend deployment environment variables. The machine
+container reads `NYXID_NODE_TOKEN` only during first registration (omit it for
+pairing), and `NYXID_NODE_URL` selects the existing node WebSocket endpoint.
+The entrypoint removes the registration token before starting the daemon.
+`NYXID_PROFILE` keeps the existing CLI profile convention.
+
+The supervisor sets `CUA_DRIVER_RS_TELEMETRY_ENABLED=false` for every cua child.
+`DISPLAY`/`XAUTHORITY` are passed only to browser/cua children, never command
+children. `NYXID_BROWSER_SOCKET` identifies the protected native-messaging
+socket inside the managed browser process; it contains no credential and is
+not inherited by agent commands.
+
+Every machine command receives a fresh local `NYXID_GATEWAY_TOKEN` and
+`NYXID_GATEWAY_URL=http://127.0.0.1:<ephemeral-port>`. The token is job-bound,
+redacted from output, and expires at completion. Granted SDK services also get
+`OPENAI_BASE_URL`/`OPENAI_API_KEY`, `ANTHROPIC_BASE_URL`/`ANTHROPIC_API_KEY`, or
+`XAI_BASE_URL`/`XAI_API_KEY`, with the local token in place of a provider key.
+Git receives gateway URL rewrites and headers through process-only
+`GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_n`, `GIT_CONFIG_VALUE_n`. Nothing writes
+these settings to a global or repository config. No NyxID or provider
+credential is inherited or copied to the command environment. See
+[MACHINE_NODES.md](MACHINE_NODES.md).

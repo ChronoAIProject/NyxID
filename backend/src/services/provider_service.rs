@@ -5172,6 +5172,11 @@ pub async fn seed_default_services(
     // users on a generic app page with no actionable permission selected.
     ensure_seeded_required_permissions(&service_col, now).await?;
 
+    // Existing installations receive the same additive catalog metadata.
+    service_col.update_many(
+        doc! { "slug": { "$in": ["api-github", "api-github-pat"] }, "git_http": { "$exists": false } },
+        doc! { "$set": { "git_http": { "origin": "https://github.com", "username": "x-access-token" } } },
+    ).await?;
     for seed in DEFAULT_SERVICE_SEEDS {
         // Find the provider by slug
         let provider = match provider_col
@@ -5297,6 +5302,12 @@ pub async fn seed_default_services(
             capabilities,
             billing: None,
             inference: None,
+            git_http: matches!(seed.service_slug, "api-github" | "api-github-pat").then(|| {
+                crate::models::downstream_service::GitHttp {
+                    origin: "https://github.com".into(),
+                    username: "x-access-token".into(),
+                }
+            }),
             inference_admin_modified: false,
             auth_notes: seed.auth_notes.map(String::from),
             known_limitations: seed.known_limitations.map(String::from),

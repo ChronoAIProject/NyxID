@@ -1,3 +1,4 @@
+import { MachineSettings } from "@/components/shared/machine-settings";
 import { useState } from "react";
 import { useParams, useNavigate } from "@tanstack/react-router";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -305,6 +306,7 @@ export function NodeDetailPage() {
         }
       />
 
+      {node.machine ? <MachineSettings key={node.id} node={node} canManage={canManage} /> : null}
       {/* Node Info */}
       <DetailSection title="Node Information">
         <DetailRow
