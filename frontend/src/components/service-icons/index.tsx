@@ -18,6 +18,7 @@ import { Globe } from "lucide-react";
 
 import LlmOpenaiIcon from "./llm-openai";
 import LlmOpenaiCodexIcon from "./llm-openai-codex";
+import LlmXaiIcon from "./llm-xai";
 import LlmAnthropicIcon from "./llm-anthropic";
 import LlmGoogleAiIcon from "./llm-google-ai";
 import LlmMistralIcon from "./llm-mistral";
@@ -55,6 +56,7 @@ import ApiLarkBotIcon from "./api-lark-bot";
 import ApiFeishuIcon from "./api-feishu";
 import ApiFeishuBotIcon from "./api-feishu-bot";
 import ApiTelegramBotIcon from "./api-telegram-bot";
+import ApiWhatsappBusinessIcon from "./api-whatsapp-business";
 import ApiSupabaseIcon from "./api-supabase";
 import ApiElevenLabsIcon from "./api-elevenlabs";
 import ApiTelnyxIcon from "./api-telnyx";
@@ -68,6 +70,7 @@ import AevatarIcon from "./aevatar";
 import CmaIcon from "./cma";
 import AgentEventGatewayIcon from "./cmaeg";
 import CmaTriggerGithubObserverStagingIcon from "./cma-trigger-github-observer-staging";
+import ChronoLlmIcon from "./chrono-llm";
 import ChronoLlmPublicIcon from "./chrono-llm-public";
 import ChronoSandboxIcon from "./chrono-sandbox";
 import ChronoStorageServiceIcon from "./chrono-storage-service";
@@ -82,6 +85,7 @@ export type IconComponent = ComponentType<ServiceIconProps>;
 // The slugs seeded in `backend/src/services/provider_service.rs`
 // (`DEFAULT_SERVICE_SEEDS`) — authoritative the test setup asserts against.
 export const SPEC_CATALOG_SLUGS = [
+  "llm-xai",
   "llm-openai",
   "llm-openai-codex",
   "llm-anthropic",
@@ -121,6 +125,7 @@ export const SPEC_CATALOG_SLUGS = [
   "api-feishu",
   "api-feishu-bot",
   "api-telegram-bot",
+  "api-whatsapp-business",
   "api-supabase",
   "api-elevenlabs",
   "api-telnyx",
@@ -133,19 +138,23 @@ export const SPEC_CATALOG_SLUGS = [
 ] as const;
 
 type Slug = (typeof SPEC_CATALOG_SLUGS)[number];
-type CustomSlug =
-  | "aevatar"
-  | "cma"
-  | "cmaeg"
-  | "cma-trigger-github-observer-staging"
-  | "chrono-llm-public"
-  | "chrono-sandbox"
-  | "chrono-storage-service"
-  | "llm-nyx"
-  | "ornn-api"
-  | "talos";
+export const CUSTOM_SERVICE_SLUGS = [
+  "aevatar",
+  "cma",
+  "cmaeg",
+  "cma-trigger-github-observer-staging",
+  "chrono-llm",
+  "chrono-llm-public",
+  "chrono-sandbox",
+  "chrono-storage-service",
+  "llm-nyx",
+  "ornn-api",
+  "talos",
+] as const;
+type CustomSlug = (typeof CUSTOM_SERVICE_SLUGS)[number];
 
 export const SERVICE_ICONS: Readonly<Record<string, IconComponent>> = {
+  "llm-xai": LlmXaiIcon,
   "llm-openai": LlmOpenaiIcon,
   "llm-openai-codex": LlmOpenaiCodexIcon,
   "llm-anthropic": LlmAnthropicIcon,
@@ -185,6 +194,7 @@ export const SERVICE_ICONS: Readonly<Record<string, IconComponent>> = {
   "api-feishu": ApiFeishuIcon,
   "api-feishu-bot": ApiFeishuBotIcon,
   "api-telegram-bot": ApiTelegramBotIcon,
+  "api-whatsapp-business": ApiWhatsappBusinessIcon,
   "api-supabase": ApiSupabaseIcon,
   "api-elevenlabs": ApiElevenLabsIcon,
   "api-telnyx": ApiTelnyxIcon,
@@ -201,6 +211,7 @@ export const SERVICE_ICONS: Readonly<Record<string, IconComponent>> = {
   cma: CmaIcon,
   cmaeg: AgentEventGatewayIcon,
   "cma-trigger-github-observer-staging": CmaTriggerGithubObserverStagingIcon,
+  "chrono-llm": ChronoLlmIcon,
   "chrono-llm-public": ChronoLlmPublicIcon,
   "chrono-sandbox": ChronoSandboxIcon,
   "chrono-storage-service": ChronoStorageServiceIcon,

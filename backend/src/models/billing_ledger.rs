@@ -11,6 +11,8 @@ pub const COLLECTION_NAME: &str = "billing_ledger";
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum BillingLedgerEventType {
+    /// Versioned exact transaction; old binaries fail closed on this variant.
+    AccountingV2,
     /// A usage charge was applied to a wallet (settlement first-apply).
     UsageSettled,
     /// A top-up checkout session was created for an owner.
@@ -43,6 +45,10 @@ pub struct BillingLedgerEntry {
     pub prev_hash: String,
     pub entry_hash: String,
     pub event_type: BillingLedgerEventType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub movement: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub postings: Vec<BillingPosting>,
     pub owner_id: String,
     /// Usage meter row id, top-up session id, or Lago customer id,
     /// depending on `event_type`.
@@ -83,6 +89,7 @@ pub struct BillingLedgerEntry {
 impl BillingLedgerEventType {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::AccountingV2 => "accounting_v2",
             Self::UsageSettled => "usage_settled",
             Self::TopupCreated => "topup_created",
             Self::WalletCredited => "wallet_credited",
@@ -104,4 +111,19 @@ impl BillingLedgerEventType {
                 | Self::TopupExpired
         )
     }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PostingSide {
+    Debit,
+    Credit,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct BillingPosting {
+    pub account: String,
+    pub side: PostingSide,
+    #[serde(with = "crate::models::credits::whole")]
+    pub amount: crate::models::credits::Credits,
 }

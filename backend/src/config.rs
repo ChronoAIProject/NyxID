@@ -337,6 +337,8 @@ pub struct AppConfig {
     /// hash chaining. Same derivation fallback as the audit chain, with a
     /// distinct `billing-ledger` domain label.
     pub billing_ledger_hmac_key: Option<String>,
+    /// One-time operator acknowledgement that pre-v2 billing writers drained.
+    pub billing_exact_cutover_drained: bool,
 
     /// Interval for the automatic hash-chain verification sweep (audit log
     /// and billing ledger, rolling chunks). 0 disables. Default: 3600.
@@ -586,13 +588,6 @@ pub struct AppConfig {
     /// Enables the dormant catalog resale layer. Default false keeps NyxID
     /// platform-only even if legacy catalog records carry resale metadata.
     pub billing_resale_enabled: bool,
-
-    // Registration gate
-    /// When `true` (default), new-user registration requires a valid invite
-    /// code and first-time social sign-ups are rejected. Set
-    /// `INVITE_CODE_REQUIRED=false` to open public registration — used once
-    /// the product launches publicly. See issue #179.
-    pub invite_code_required: bool,
 
     /// When `true`, email/password auth UI is shown on `/login` and
     /// `/register`, and `POST /api/v1/auth/register` accepts new accounts.
@@ -1009,20 +1004,6 @@ fn parse_ip_ranges(setting: &str, raw: Option<String>) -> Vec<TrustedProxyRange>
     ips
 }
 
-/// Parse the `INVITE_CODE_REQUIRED` env var.
-///
-/// Defaults to `true` (invite codes required) when the variable is unset or
-/// empty. Accepts the usual boolean-ish spellings case-insensitively.
-fn parse_invite_code_required(raw: Option<String>) -> bool {
-    match raw.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        None => true,
-        Some(v) => !matches!(
-            v.to_ascii_lowercase().as_str(),
-            "false" | "0" | "no" | "off"
-        ),
-    }
-}
-
 impl AppConfig {
     /// Load configuration from environment variables.
     /// Panics on missing required variables to fail fast at startup.
@@ -1185,6 +1166,7 @@ impl AppConfig {
             billing_ledger_hmac_key: env::var("BILLING_LEDGER_HMAC_KEY")
                 .ok()
                 .filter(|s| !s.trim().is_empty()),
+            billing_exact_cutover_drained: env::var("BILLING_EXACT_CUTOVER_DRAINED").is_ok_and(|v| v == "true"),
             chain_verify_interval_secs: env::var("CHAIN_VERIFY_INTERVAL_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -1535,7 +1517,6 @@ impl AppConfig {
             billing_fail_closed: parse_bool_env("BILLING_FAIL_CLOSED", false),
             billing_resale_enabled: parse_bool_env("BILLING_RESALE_ENABLED", false),
 
-            invite_code_required: parse_invite_code_required(env::var("INVITE_CODE_REQUIRED").ok()),
             email_auth_enabled: parse_bool_env("EMAIL_AUTH_ENABLED", false),
             auto_verify_email: parse_bool_env("AUTO_VERIFY_EMAIL", false),
         }
@@ -1954,6 +1935,7 @@ mod tests {
             cli_pairing_hmac_key: None,
             audit_chain_hmac_key: None,
             billing_ledger_hmac_key: None,
+            billing_exact_cutover_drained: false,
             chain_verify_interval_secs: 3600,
             sa_token_ttl_secs: 3600,
             telemetry_dsn: None,
@@ -2053,7 +2035,6 @@ mod tests {
             billing_default_overdraft_cap_credits: 0,
             billing_fail_closed: false,
             billing_resale_enabled: false,
-            invite_code_required: true,
             email_auth_enabled: false,
             auto_verify_email: false,
         }
@@ -2347,33 +2328,6 @@ mod tests {
                 .to_string(),
         ));
         assert_eq!(parsed, vec!["10.0.0.0/8".parse().unwrap()]);
-    }
-
-    #[test]
-    fn invite_code_required_defaults_to_true_when_unset() {
-        assert!(parse_invite_code_required(None));
-        assert!(parse_invite_code_required(Some(String::new())));
-        assert!(parse_invite_code_required(Some("   ".to_string())));
-    }
-
-    #[test]
-    fn invite_code_required_false_for_falsy_values() {
-        for v in ["false", "FALSE", "False", "0", "no", "NO", "off", "OFF"] {
-            assert!(
-                !parse_invite_code_required(Some(v.to_string())),
-                "{v} should disable the gate"
-            );
-        }
-    }
-
-    #[test]
-    fn invite_code_required_true_for_truthy_values() {
-        for v in ["true", "TRUE", "1", "yes", "on", "anything-else"] {
-            assert!(
-                parse_invite_code_required(Some(v.to_string())),
-                "{v} should leave the gate enabled"
-            );
-        }
     }
 
     #[test]

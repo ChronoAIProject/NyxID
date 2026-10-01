@@ -1,21 +1,14 @@
-import { useEffect, useMemo, useState } from "react";
+import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useWatch } from "react-hook-form";
-import { firstNestedErrorMessage } from "@/lib/form-errors";
+import { MoreVertical } from "lucide-react";
 import { toast } from "sonner";
-import {
-  CheckCircle2,
-  Edit3,
-  MoreVertical,
-  Trash2,
-} from "lucide-react";
 import { ApiError } from "@/lib/api-client";
-import { formatRelativeTime } from "@/lib/utils";
+import { firstNestedErrorMessage } from "@/lib/form-errors";
 import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { ErrorBanner } from "@/components/shared/error-banner";
-import { HierarchyIcon } from "@/components/icons/empty-state";
 import { Badge } from "@/components/ui/badge";
-import { Button, ButtonIcon } from "@/components/ui/button";
+import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
@@ -48,8 +41,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
   TableBody,
@@ -61,741 +54,816 @@ import {
 import {
   useCreateServicePool,
   useDeleteServicePool,
+  usePoolCandidates,
+  usePoolHealth,
+  useResetPoolHealth,
   useServicePools,
-  useSetServicePoolMembers,
   useUpdateServicePool,
 } from "@/hooks/use-pools";
-import { useUserServices } from "@/hooks/use-user-services";
+import { useOrgs } from "@/hooks/use-orgs";
 import {
   createServicePoolSchema,
+  defaultFailoverPolicy,
+  retryTriggers,
   type CreateServicePoolInput,
-  type PoolStrategy,
+  type FailoverPolicy,
+  type PoolCandidate,
   type ServicePool,
   type ServicePoolMember,
 } from "@/schemas/pools";
-import type { UserServiceResponse } from "@/schemas/keys";
 
 interface ServicePoolsTabProps {
   readonly createOpen: boolean;
   readonly onCreateOpenChange: (open: boolean) => void;
 }
-
-type PoolFormValues = CreateServicePoolInput;
-
-function strategyLabel(strategy: PoolStrategy): string {
-  return strategy === "weighted" ? "Weighted" : "Round Robin";
+const strategyLabels = {
+  priority: "Priority",
+  round_robin: "Round Robin",
+  weighted: "Weighted",
+};
+const reasonLabels: Record<string, string> = {
+  unavailable: "Connection unavailable",
+  inactive: "Service disabled",
+  disabled: "Member disabled",
+  cooldown: "Cooling down",
+  incompatible_protocol: "Protocol is incompatible with this pool",
+  compatibility_declaration_required:
+    "Confirm compatibility for every affected member",
+  inference_protocol_required:
+    "Catalog inference metadata or a supported chat operation is required",
+  operation_unsupported: "Operation is not permitted",
+  node_upgrade_required: "Upgrade the node for HTTP cancellation support",
+  node_offline: "Node is offline",
+  unsupported_transport: "Transport is not supported",
+};
+function reason(candidate: PoolCandidate) {
+  return candidate.reason
+    ? (reasonLabels[candidate.reason] ?? candidate.reason.replaceAll("_", " "))
+    : "Eligible";
+}
+function message(error: unknown) {
+  return error instanceof ApiError || error instanceof Error
+    ? error.message
+    : "Unable to save pool";
+}
+function newMember(id: string): ServicePoolMember {
+  return {
+    user_service_id: id,
+    weight: 1,
+    enabled: true,
+    priority: 0,
+    model: null,
+    same_api_compatible: false,
+  };
 }
 
-function serviceLabel(service: UserServiceResponse): string {
-  return service.slug;
-}
-
-function memberSummary(pool: ServicePool): string {
-  const enabled = pool.members.filter((member) => member.enabled).length;
-  return `${String(pool.members.length)} member${pool.members.length === 1 ? "" : "s"} / ${String(enabled)} enabled`;
-}
-
-function descriptionValue(value: string | null | undefined): string {
-  return value?.trim() ?? "";
-}
-
-function toMemberMap(members: readonly ServicePoolMember[]) {
-  return new Map(members.map((member) => [member.user_service_id, member]));
-}
-
-function normalizeDescription(value: string | undefined): string | undefined {
-  const trimmed = value?.trim() ?? "";
-  return trimmed ? trimmed : undefined;
-}
-
-function selectableServices(
-  services: readonly UserServiceResponse[] | undefined,
-): readonly UserServiceResponse[] {
-  return services ?? [];
-}
-
-function CreatePoolDialog({
-  open,
-  onOpenChange,
-  services,
+function Choice({
+  label,
+  value,
+  onChange,
+  options,
+  disabled,
 }: {
-  readonly open: boolean;
-  readonly onOpenChange: (open: boolean) => void;
-  readonly services: readonly UserServiceResponse[];
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  options: readonly [string, string][];
+  disabled?: boolean;
 }) {
-  const createMutation = useCreateServicePool();
-  const form = useAppForm<PoolFormValues>({
-    resolver: zodResolver(createServicePoolSchema),
-    mode: "onChange",
-    defaultValues: {
-      slug: "",
-      name: "",
-      description: "",
-      strategy: "round_robin",
-      members: [],
-      is_active: true,
-    },
-  });
-  const selectedMembers =
-    useWatch({ control: form.control, name: "members" }) ?? [];
-  const selectedIds = new Set(selectedMembers.map((member) => member.user_service_id));
-
-  useEffect(() => {
-    if (!open) {
-      form.reset({
-        slug: "",
-        name: "",
-        description: "",
-        strategy: "round_robin",
-        members: [],
-        is_active: true,
-      });
-    }
-  }, [form, open]);
-
-  function toggleMember(serviceId: string, checked: boolean) {
-    const current = form.getValues("members");
-    const next = checked
-      ? [...current, { user_service_id: serviceId, weight: 1, enabled: true }]
-      : current.filter((member) => member.user_service_id !== serviceId);
-    form.setValue("members", next);
-  }
-
-  async function onSubmit(values: PoolFormValues) {
-    try {
-      await createMutation.mutateAsync({
-        ...values,
-        slug: values.slug.trim(),
-        name: values.name.trim(),
-        description: normalizeDescription(values.description),
-        is_active: values.is_active ?? true,
-      });
-      toast.success("Service pool created");
-      onOpenChange(false);
-    } catch (error) {
-      if (error instanceof ApiError) {
-        form.setError("root", { message: error.message });
-      } else {
-        toast.error("Failed to create service pool");
-      }
-    }
-  }
-
-  const canSubmit =
-    form.formState.isValid &&
-    form.formState.isDirty &&
-    !createMutation.isPending;
-  // Member errors live at nested paths (members.{i}.weight) with no
-  // FormField render site; surface the first one or the isValid gate
-  // disables Save with zero feedback.
-  const membersError = firstNestedErrorMessage(form.formState.errors.members);
-
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="md:max-w-2xl">
-        <DialogHeader>
-          <DialogTitle>Create Service Pool</DialogTitle>
-          <DialogDescription>
-            Group interchangeable AI services behind one proxy slug.
-          </DialogDescription>
-        </DialogHeader>
-        <Form {...form}>
-          <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
-            {form.formState.errors.root && (
-              <div className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive">
-                {form.formState.errors.root.message}
-              </div>
-            )}
-            <div className="grid gap-4 sm:grid-cols-2">
-              <FormField
-                control={form.control}
-                name="name"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Name</FormLabel>
-                    <FormControl>
-                      <Input placeholder="Primary LLM Pool" {...field} />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
+    <label className="space-y-1 text-[12px]">
+      <span>{label}</span>
+      <Select value={value} onValueChange={onChange} disabled={disabled}>
+        <SelectTrigger aria-label={label}>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {options.map(([id, text]) => (
+            <SelectItem key={id} value={id}>
+              {text}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </label>
+  );
+}
+function NumberInput({
+  label,
+  value,
+  onChange,
+  min = 0,
+  max,
+}: {
+  label: string;
+  value: number;
+  onChange: (value: number) => void;
+  min?: number;
+  max?: number;
+}) {
+  return (
+    <label className="space-y-1 text-[12px]">
+      <span>{label}</span>
+      <Input
+        aria-label={label}
+        type="number"
+        min={min}
+        max={max}
+        value={value}
+        onChange={(e) => onChange(e.target.valueAsNumber)}
+      />
+    </label>
+  );
+}
+function Toggle({
+  label,
+  checked,
+  onChange,
+}: {
+  label: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <label className="flex items-center justify-between gap-3 text-[12px]">
+      <span>{label}</span>
+      <Switch aria-label={label} checked={checked} onCheckedChange={onChange} />
+    </label>
+  );
+}
+function PolicyEditor({
+  policy,
+  onChange,
+}: {
+  policy: FailoverPolicy;
+  onChange: (policy: FailoverPolicy) => void;
+}) {
+  const set = <K extends keyof FailoverPolicy>(
+    key: K,
+    value: FailoverPolicy[K],
+  ) => onChange({ ...policy, [key]: value });
+  return (
+    <div className="space-y-4 rounded-xl border border-border/50 p-4">
+      <div className="grid gap-3 sm:grid-cols-2">
+        <NumberInput
+          label="Maximum attempts"
+          min={1}
+          max={5}
+          value={policy.max_attempts}
+          onChange={(v) => set("max_attempts", v)}
+        />
+        <NumberInput
+          label="Replay body limit (bytes)"
+          min={1}
+          value={policy.max_replay_body_bytes}
+          onChange={(v) => set("max_replay_body_bytes", v)}
+        />
+        <NumberInput
+          label="Attempt timeout (ms)"
+          min={1000}
+          max={300000}
+          value={policy.per_attempt_timeout_ms}
+          onChange={(v) => set("per_attempt_timeout_ms", v)}
+        />
+        <NumberInput
+          label="Overall deadline (ms)"
+          min={1000}
+          max={600000}
+          value={policy.overall_deadline_ms}
+          onChange={(v) => set("overall_deadline_ms", v)}
+        />
+        <NumberInput
+          label="Base cooldown (ms)"
+          min={1}
+          value={policy.cooldown.base_ms}
+          onChange={(v) => set("cooldown", { ...policy.cooldown, base_ms: v })}
+        />
+        <NumberInput
+          label="Maximum cooldown (ms)"
+          min={1}
+          max={3600000}
+          value={policy.cooldown.max_ms}
+          onChange={(v) => set("cooldown", { ...policy.cooldown, max_ms: v })}
+        />
+        <NumberInput
+          label="Failures before cooldown"
+          min={1}
+          value={policy.cooldown.failures_to_open}
+          onChange={(v) =>
+            set("cooldown", { ...policy.cooldown, failures_to_open: v })
+          }
+        />
+      </div>
+      <Toggle
+        label="Honor provider Retry-After"
+        checked={policy.cooldown.honor_retry_after}
+        onChange={(v) =>
+          set("cooldown", { ...policy.cooldown, honor_retry_after: v })
+        }
+      />
+      <fieldset className="space-y-2">
+        <legend className="text-[12px] font-medium">Retry causes</legend>
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+          {retryTriggers.map((trigger) => (
+            <label
+              key={trigger}
+              className="flex items-center gap-2 text-[12px]"
+            >
+              <Checkbox
+                checked={policy.retry_on.includes(trigger)}
+                onCheckedChange={(v) =>
+                  set(
+                    "retry_on",
+                    v === true
+                      ? [...policy.retry_on, trigger]
+                      : policy.retry_on.filter((t) => t !== trigger),
+                  )
+                }
               />
-              <FormField
-                control={form.control}
-                name="slug"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Proxy Slug</FormLabel>
-                    <FormControl>
-                      <Input placeholder="llm-pool" {...field} />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-            </div>
-            <FormField
-              control={form.control}
-              name="description"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Description</FormLabel>
-                  <FormControl>
-                    <textarea
-                      className="min-h-20 w-full rounded-lg border border-input bg-transparent px-3 py-2 text-[12px] text-foreground placeholder:text-text-tertiary focus:outline-none focus:border-white/[0.15]"
-                      placeholder="Optional notes for this pool"
-                      {...field}
-                    />
-                  </FormControl>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-            <div className="grid gap-4 sm:grid-cols-2">
-              <FormField
-                control={form.control}
-                name="strategy"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Strategy</FormLabel>
-                    <Select value={field.value} onValueChange={field.onChange}>
-                      <FormControl>
-                        <SelectTrigger>
-                          <SelectValue />
-                        </SelectTrigger>
-                      </FormControl>
-                      <SelectContent>
-                        <SelectItem value="round_robin">Round Robin</SelectItem>
-                        <SelectItem value="weighted">Weighted</SelectItem>
-                      </SelectContent>
-                    </Select>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={form.control}
-                name="is_active"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Active</FormLabel>
-                    <div className="flex h-8 items-center gap-2 rounded-lg border border-border px-3">
-                      <FormControl>
-                        <Switch
-                          checked={field.value ?? true}
-                          onCheckedChange={field.onChange}
-                        />
-                      </FormControl>
-                      <span className="text-[12px] text-muted-foreground">
-                        Accept proxy traffic
-                      </span>
-                    </div>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-            </div>
-            <div className="space-y-2">
-              <p className="text-[12px] font-medium text-foreground">
-                Member Services
-              </p>
-              {services.length === 0 ? (
-                <div className="rounded-lg bg-white/[0.03] px-4 py-3 text-[12px] text-muted-foreground">
-                  Add a service first, then include it in a pool.
-                </div>
-              ) : (
-                <div className="max-h-60 space-y-2 overflow-y-auto rounded-xl border border-border/50 p-2">
-                  {services.map((service) => (
-                    <label
-                      key={service.id}
-                      className="flex items-center gap-3 rounded-lg px-2 py-2 hover:bg-white/[0.03]"
-                    >
-                      <Checkbox
-                        checked={selectedIds.has(service.id)}
-                        onCheckedChange={(checked) =>
-                          toggleMember(service.id, checked === true)
-                        }
-                      />
-                      <span className="min-w-0 flex-1">
-                        <span className="block truncate text-[12px] font-medium text-foreground">
-                          {serviceLabel(service)}
-                        </span>
-                        <span className="block truncate font-mono text-[11px] text-text-tertiary">
-                          /proxy/s/{service.slug}
-                        </span>
-                      </span>
-                    </label>
-                  ))}
-                </div>
-              )}
-              {membersError && (
-                <p className="text-xs text-destructive">{membersError}</p>
-              )}
-            </div>
-            <DialogFooter>
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => onOpenChange(false)}
-              >
-                Cancel
-              </Button>
-              <Button
-                variant="primary"
-                type="submit"
-                isLoading={createMutation.isPending}
-                disabled={!canSubmit}
-              >
-                Create Pool
-              </Button>
-            </DialogFooter>
-          </form>
-        </Form>
-      </DialogContent>
-    </Dialog>
+              {trigger.replaceAll("_", " ")}
+            </label>
+          ))}
+        </div>
+      </fieldset>
+      <Toggle
+        label="Allow replay after an ambiguous dispatch"
+        checked={policy.retry_ambiguous_dispatch}
+        onChange={(v) => set("retry_ambiguous_dispatch", v)}
+      />
+      <p className="text-[12px] text-muted-foreground">
+        A timeout or 5xx may follow completed work. Enabling replay for POST can
+        duplicate provider work and charges. A provider 429 rejection can fall
+        back without this option. Set maximum attempts to 1 to disable fallback.
+      </p>
+    </div>
   );
 }
 
-function PoolEditorDialog({
+export function PoolEditor({
   pool,
-  services,
-  open,
-  onOpenChange,
+  orgId,
+  onClose,
 }: {
-  readonly pool: ServicePool | null;
-  readonly services: readonly UserServiceResponse[];
-  readonly open: boolean;
-  readonly onOpenChange: (open: boolean) => void;
+  pool?: ServicePool;
+  orgId?: string;
+  onClose: () => void;
 }) {
-  const updateMutation = useUpdateServicePool();
-  const setMembersMutation = useSetServicePoolMembers();
-  const form = useAppForm<PoolFormValues>({
+  const create = useCreateServicePool();
+  const update = useUpdateServicePool();
+  const form = useAppForm<CreateServicePoolInput>({
     resolver: zodResolver(createServicePoolSchema),
     mode: "onChange",
     defaultValues: {
-      slug: "",
-      name: "",
-      description: "",
-      strategy: "round_robin",
-      members: [],
-      is_active: true,
+      slug: pool?.slug ?? "",
+      name: pool?.name ?? "",
+      description: pool?.description ?? "",
+      strategy: pool?.strategy ?? "priority",
+      tier_balance: pool?.tier_balance ?? "round_robin",
+      member_contract: pool?.member_contract ?? "same_api",
+      failover: pool?.failover ?? null,
+      members: pool?.members ?? [],
+      is_active: pool?.is_active ?? true,
     },
   });
-  const members = useWatch({ control: form.control, name: "members" }) ?? [];
-  const memberById = toMemberMap(members);
-
-  useEffect(() => {
-    if (!pool || !open) return;
-    form.reset({
-      slug: pool.slug,
-      name: pool.name,
-      description: descriptionValue(pool.description),
-      strategy: pool.strategy,
-      members: pool.members.map((member) => ({ ...member })),
-      is_active: pool.is_active,
-    });
-  }, [form, open, pool]);
-
-  const serviceOptions = useMemo(() => {
-    if (!pool) return services;
-    const known = new Set(services.map((service) => service.id));
-    const missing = pool.members
-      .filter((member) => !known.has(member.user_service_id))
-      .map((member) => ({
-        id: member.user_service_id,
-        slug: member.user_service_id.slice(0, 8),
-        resource_uri: `https://unavailable.invalid/api/v1/proxy/s/${member.user_service_id.slice(0, 8)}`,
-        endpoint_id: "",
-        api_key_id: null,
-        auth_method: "",
-        auth_key_name: "",
-        catalog_service_id: null,
-        node_id: null,
-        node_priority: 0,
-        is_active: false,
-        admin_only: false,
-        identity_propagation_mode: "none",
-        identity_include_user_id: false,
-        identity_include_email: false,
-        identity_include_name: false,
-        identity_jwt_audience: null,
-        forward_access_token: false,
-        inject_delegation_token: false,
-        delegation_token_scope: "",
-        ws_frame_injections: [],
-        created_at: "",
-        updated_at: "",
-        credential_source: { type: "personal" as const },
-      }));
-    return [...services, ...missing];
-  }, [pool, services]);
-
-  function setMember(serviceId: string, checked: boolean) {
-    const current = form.getValues("members");
-    const next = checked
-      ? [...current, { user_service_id: serviceId, weight: 1, enabled: true }]
-      : current.filter((member) => member.user_service_id !== serviceId);
-    form.setValue("members", next);
-  }
-
-  function updateMember(
-    serviceId: string,
-    patch: Partial<Pick<ServicePoolMember, "weight" | "enabled">>,
-  ) {
-    const next = form.getValues("members").map((member) =>
-      member.user_service_id === serviceId ? { ...member, ...patch } : member,
+  const values = useWatch({ control: form.control });
+  const members = values.members ?? [];
+  const priority = values.strategy === "priority";
+  const [search, setSearch] = useState("");
+  const [candidateMethod, setCandidateMethod] = useState("POST");
+  const [candidatePath, setCandidatePath] = useState("/");
+  const candidates = usePoolCandidates({
+    poolId: pool?.id,
+    orgId,
+    contract: values.member_contract,
+    search,
+    strategy: values.strategy,
+    method: values.member_contract === "ai_chat" ? "POST" : candidateMethod,
+    path:
+      values.member_contract === "ai_chat" ? "chat/completions" : candidatePath,
+    declaredPeerIds: members
+      .filter((m) => m.same_api_compatible)
+      .map((m) => m.user_service_id!),
+    peerIds: members.map((m) => m.user_service_id!).filter(Boolean),
+  });
+  const rows = candidates.data?.pages.flatMap((page) => page.candidates) ?? [];
+  const selectedRows = new Map(rows.map((row) => [row.user_service_id, row]));
+  const [selectedLabels, setSelectedLabels] = useState<Record<string, string>>(
+    {},
+  );
+  // Health fetches saved IDs directly, independently of candidate pagination.
+  const savedMembers = usePoolHealth({
+    poolId: pool?.id,
+    contract: pool?.member_contract,
+  });
+  const savedLabels = new Map(
+    savedMembers.data?.candidates.map((row) => [
+      row.user_service_id,
+      row.slug,
+    ]) ?? [],
+  );
+  function setMember(id: string, patch: Partial<ServicePoolMember>) {
+    form.setValue(
+      "members",
+      form
+        .getValues("members")
+        .map((m) => (m.user_service_id === id ? { ...m, ...patch } : m)),
     );
-    form.setValue("members", next);
   }
-
-  async function onSubmit(values: PoolFormValues) {
-    if (!pool) return;
-    try {
-      await updateMutation.mutateAsync({
-        poolId: pool.id,
-        slug: values.slug.trim(),
-        name: values.name.trim(),
-        description: normalizeDescription(values.description),
-        strategy: values.strategy,
-        is_active: values.is_active,
-      });
-      await setMembersMutation.mutateAsync({
-        poolId: pool.id,
-        members: values.members,
-      });
-      toast.success("Service pool updated");
-      onOpenChange(false);
-    } catch (error) {
-      if (error instanceof ApiError) {
-        form.setError("root", { message: error.message });
-      } else {
-        toast.error("Failed to update service pool");
-      }
-    }
-  }
-
-  const isPending = updateMutation.isPending || setMembersMutation.isPending;
-  const canSubmit =
-    form.formState.isValid &&
-    form.formState.isDirty &&
-    !isPending;
-  const membersError = firstNestedErrorMessage(form.formState.errors.members);
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="md:max-w-3xl">
-        <DialogHeader>
-          <DialogTitle>Edit Service Pool</DialogTitle>
-          <DialogDescription>
-            Change routing strategy and member weights for this pool.
-          </DialogDescription>
-        </DialogHeader>
-        <Form {...form}>
-          <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
-            {form.formState.errors.root && (
-              <div className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive">
-                {form.formState.errors.root.message}
-              </div>
-            )}
-            <div className="grid gap-4 sm:grid-cols-2">
-              <FormField
-                control={form.control}
-                name="name"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Name</FormLabel>
-                    <FormControl>
-                      <Input {...field} />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={form.control}
-                name="slug"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Proxy Slug</FormLabel>
-                    <FormControl>
-                      <Input {...field} />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-            </div>
-            <FormField
-              control={form.control}
-              name="description"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Description</FormLabel>
-                  <FormControl>
-                    <textarea
-                      className="min-h-20 w-full rounded-lg border border-input bg-transparent px-3 py-2 text-[12px] text-foreground placeholder:text-text-tertiary focus:outline-none focus:border-white/[0.15]"
-                      {...field}
-                    />
-                  </FormControl>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-            <div className="grid gap-4 sm:grid-cols-2">
-              <FormField
-                control={form.control}
-                name="strategy"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Strategy</FormLabel>
-                    <Select value={field.value} onValueChange={field.onChange}>
-                      <FormControl>
-                        <SelectTrigger>
-                          <SelectValue />
-                        </SelectTrigger>
-                      </FormControl>
-                      <SelectContent>
-                        <SelectItem value="round_robin">Round Robin</SelectItem>
-                        <SelectItem value="weighted">Weighted</SelectItem>
-                      </SelectContent>
-                    </Select>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={form.control}
-                name="is_active"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Active</FormLabel>
-                    <div className="flex h-8 items-center gap-2 rounded-lg border border-border px-3">
-                      <FormControl>
-                        <Switch
-                          checked={field.value ?? true}
-                          onCheckedChange={field.onChange}
-                        />
-                      </FormControl>
-                      <span className="text-[12px] text-muted-foreground">
-                        Accept proxy traffic
-                      </span>
-                    </div>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-            </div>
-            <div className="space-y-2">
-              <p className="text-[12px] font-medium text-foreground">
-                Member Services
-              </p>
-              <div className="max-h-[22rem] space-y-2 overflow-y-auto rounded-xl border border-border/50 p-2">
-                {serviceOptions.map((service) => {
-                  const member = memberById.get(service.id);
-                  const checked = Boolean(member);
-                  return (
-                    <div
-                      key={service.id}
-                      className="grid gap-3 rounded-lg px-2 py-2 hover:bg-white/[0.03] sm:grid-cols-[minmax(0,1fr)_88px_72px]"
-                    >
-                      <label className="flex min-w-0 items-center gap-3">
-                        <Checkbox
-                          checked={checked}
-                          onCheckedChange={(next) =>
-                            setMember(service.id, next === true)
-                          }
-                        />
-                        <span className="min-w-0 flex-1">
-                          <span className="block truncate text-[12px] font-medium text-foreground">
-                            {serviceLabel(service)}
-                          </span>
-                          <span className="block truncate font-mono text-[11px] text-text-tertiary">
-                            {service.is_active ? `/proxy/s/${service.slug}` : "Unavailable"}
-                          </span>
-                        </span>
-                      </label>
-                      <Input
-                        type="number"
-                        min={1}
-                        max={1000}
-                        value={member?.weight ?? 1}
-                        disabled={!checked}
-                        onChange={(event) =>
-                          updateMember(service.id, {
-                            // Clamp to the schema range (int 1-1000) so typed
-                            // values can't silently disable the isValid gate.
-                            weight: Math.min(
-                              1000,
-                              Math.max(
-                                1,
-                                Math.round(Number(event.target.value) || 1),
-                              ),
-                            ),
-                          })
-                        }
-                        aria-label={`Weight for ${service.slug}`}
-                      />
-                      <div className="flex items-center gap-2">
-                        <Switch
-                          checked={member?.enabled ?? true}
-                          disabled={!checked}
-                          onCheckedChange={(enabled) =>
-                            updateMember(service.id, { enabled })
-                          }
-                          aria-label={`Enable ${service.slug}`}
-                        />
-                        <span className="text-[11px] text-muted-foreground">
-                          Enabled
-                        </span>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-              {membersError && (
-                <p className="text-xs text-destructive">{membersError}</p>
-              )}
-            </div>
-            <DialogFooter>
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => onOpenChange(false)}
-              >
-                Cancel
-              </Button>
-              <Button
-                variant="primary"
-                type="submit"
-                isLoading={isPending}
-                disabled={!canSubmit}
-              >
-                Save Changes
-              </Button>
-            </DialogFooter>
-          </form>
-        </Form>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-function PoolActions({
-  pool,
-  onEdit,
-  onDelete,
-}: {
-  readonly pool: ServicePool;
-  readonly onEdit: (pool: ServicePool) => void;
-  readonly onDelete: (pool: ServicePool) => void;
-}) {
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="icon" className="h-7 w-7">
-          <MoreVertical className="h-3.5 w-3.5" aria-hidden="true" />
-          <span className="sr-only">Actions for {pool.name}</span>
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end">
-        <DropdownMenuItem onClick={() => onEdit(pool)}>
-          <Edit3 className="mr-2 h-4 w-4" aria-hidden="true" />
-          Edit
-        </DropdownMenuItem>
-        <DropdownMenuItem
-          onClick={() => onDelete(pool)}
-          className="text-destructive focus:text-destructive"
-        >
-          <Trash2 className="mr-2 h-4 w-4 text-destructive" aria-hidden="true" />
-          Delete
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
-  );
-}
-
-function PoolActiveSwitch({ pool }: { readonly pool: ServicePool }) {
-  const updateMutation = useUpdateServicePool();
-
-  async function handleChange(isActive: boolean) {
-    try {
-      await updateMutation.mutateAsync({
-        poolId: pool.id,
-        is_active: isActive,
-      });
-      toast.success(isActive ? "Service pool activated" : "Service pool disabled");
-    } catch (error) {
-      toast.error(
-        error instanceof ApiError
-          ? error.message
-          : "Failed to update service pool",
+  function setStrategy(value: string) {
+    const strategy = value as CreateServicePoolInput["strategy"];
+    form.setValue("strategy", strategy);
+    if (strategy !== "priority") {
+      form.setValue("member_contract", "same_api");
+      form.setValue("tier_balance", "round_robin");
+      form.setValue("failover", null);
+      form.setValue(
+        "members",
+        form.getValues("members").map((m) => ({
+          ...m,
+          priority: 0,
+          model: null,
+          same_api_compatible: false,
+        })),
       );
     }
   }
-
+  async function save(input: CreateServicePoolInput) {
+    try {
+      const normalized = {
+        ...input,
+        members: input.members.map((m) => ({
+          ...m,
+          model: m.model?.trim() || null,
+        })),
+      };
+      if (pool)
+        await update.mutateAsync({
+          ...normalized,
+          poolId: pool.id,
+          expected_revision: pool.config_revision ?? 0,
+          description: input.description?.trim() || null,
+        });
+      else
+        await create.mutateAsync({
+          ...normalized,
+          description: input.description?.trim() || undefined,
+          org_id: orgId,
+        });
+      toast.success(pool ? "Service pool saved" : "Service pool created");
+      onClose();
+    } catch (error) {
+      form.setError("root", { message: message(error) });
+    }
+  }
+  const rootError =
+    form.formState.errors.root?.message ??
+    firstNestedErrorMessage(form.formState.errors);
   return (
-    <div className="flex items-center gap-2">
-      <Switch
-        checked={pool.is_active}
-        disabled={updateMutation.isPending}
-        onCheckedChange={(checked) => void handleChange(checked)}
-        aria-label={`Toggle ${pool.name}`}
-      />
-      <span className="text-[11px] text-muted-foreground">
-        {pool.is_active ? "Active" : "Inactive"}
-      </span>
-    </div>
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) onClose();
+      }}
+    >
+      <DialogContent className="max-h-[90dvh] overflow-y-auto md:max-w-3xl">
+        <DialogHeader>
+          <DialogTitle>
+            {pool ? "Edit service pool" : "Create service pool"}
+          </DialogTitle>
+          <DialogDescription>
+            One route across compatible connections. Lower priority numbers run
+            first. Ownership is{" "}
+            {orgId ? "the selected organization" : "personal"}.
+          </DialogDescription>
+        </DialogHeader>
+        <Form {...form}>
+          <form onSubmit={form.handleSubmit(save)} className="space-y-4">
+            <div className="grid gap-3 sm:grid-cols-2">
+              {(["name", "slug"] as const).map((name) => (
+                <FormField
+                  key={name}
+                  control={form.control}
+                  name={name}
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>{name === "name" ? "Name" : "Slug"}</FormLabel>
+                      <FormControl>
+                        <Input {...field} />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+              ))}
+            </div>
+            <FormField
+              control={form.control}
+              name="description"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Description</FormLabel>
+                  <FormControl>
+                    <Input {...field} value={field.value ?? ""} />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <div className="grid gap-3 sm:grid-cols-3">
+              <Choice
+                label="Strategy"
+                value={values.strategy ?? "priority"}
+                options={Object.entries(strategyLabels)}
+                onChange={setStrategy}
+              />
+              {priority && (
+                <>
+                  <Choice
+                    label="Request contract"
+                    value={values.member_contract ?? "same_api"}
+                    options={[
+                      ["same_api", "Same API"],
+                      ["ai_chat", "AI chat"],
+                    ]}
+                    onChange={(v) => {
+                      form.setValue(
+                        "member_contract",
+                        v as "same_api" | "ai_chat",
+                      );
+                      if (v === "same_api")
+                        form.setValue(
+                          "members",
+                          form
+                            .getValues("members")
+                            .map((m) => ({ ...m, model: null })),
+                        );
+                      void form.trigger();
+                    }}
+                  />
+                  <Choice
+                    label="Balance within a tier"
+                    value={values.tier_balance ?? "round_robin"}
+                    options={[
+                      ["round_robin", "Round Robin"],
+                      ["weighted", "Weighted"],
+                    ]}
+                    onChange={(v) =>
+                      form.setValue(
+                        "tier_balance",
+                        v as "round_robin" | "weighted",
+                      )
+                    }
+                  />
+                </>
+              )}
+            </div>
+            <Toggle
+              label="Pool enabled"
+              checked={values.is_active ?? true}
+              onChange={(v) => form.setValue("is_active", v)}
+            />
+            <section className="space-y-3">
+              <h3 className="text-[13px] font-semibold">Members</h3>
+              {members.map((member, index) => {
+                const id = member.user_service_id!;
+                const candidate = selectedRows.get(id);
+                return (
+                  <div
+                    key={id}
+                    className="space-y-3 rounded-xl border border-border/50 p-3"
+                  >
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <p className="text-[12px] font-medium">
+                          {candidate?.slug ??
+                            selectedLabels[id] ??
+                            savedLabels.get(id) ??
+                            id}
+                        </p>
+                        <p className="text-[11px] text-muted-foreground">
+                          {candidate
+                            ? `${candidate.credential_binding} · ${candidate.protocol ?? "Same API"} · ${reason(candidate)}`
+                            : "Select the candidate operation to inspect availability"}
+                        </p>
+                      </div>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        onClick={() =>
+                          form.setValue(
+                            "members",
+                            form
+                              .getValues("members")
+                              .filter((m) => m.user_service_id !== id),
+                          )
+                        }
+                      >
+                        Remove
+                      </Button>
+                    </div>
+                    <div className="grid gap-3 sm:grid-cols-3">
+                      {priority && (
+                        <NumberInput
+                          label={`Priority for member ${index + 1}`}
+                          value={member.priority ?? 0}
+                          onChange={(priority) => setMember(id, { priority })}
+                        />
+                      )}
+                      <NumberInput
+                        label={`Weight for member ${index + 1}`}
+                        min={1}
+                        max={1000}
+                        value={member.weight ?? 1}
+                        onChange={(weight) => setMember(id, { weight })}
+                      />
+                      {priority && values.member_contract === "ai_chat" && (
+                        <label className="space-y-1 text-[12px]">
+                          <span>
+                            Model{" "}
+                            {values.member_contract === "ai_chat"
+                              ? "(required)"
+                              : "(optional)"}
+                          </span>
+                          <Input
+                            aria-label={`Model for member ${index + 1}`}
+                            value={member.model ?? ""}
+                            onChange={(e) =>
+                              setMember(id, { model: e.target.value || null })
+                            }
+                          />
+                        </label>
+                      )}
+                    </div>
+                    <Toggle
+                      label={`Member ${index + 1} enabled`}
+                      checked={member.enabled ?? true}
+                      onChange={(enabled) => setMember(id, { enabled })}
+                    />
+                    {priority && values.member_contract !== "ai_chat" && (
+                      <label className="flex items-start gap-2 text-[12px]">
+                        <Checkbox
+                          aria-label={`Confirm API compatibility for member ${index + 1}`}
+                          checked={member.same_api_compatible ?? false}
+                          onCheckedChange={(v) =>
+                            setMember(id, { same_api_compatible: v === true })
+                          }
+                        />
+                        I confirm this connection accepts the same operations
+                        and wire format as the other members.
+                      </label>
+                    )}
+                  </div>
+                );
+              })}
+              {values.member_contract !== "ai_chat" && (
+                <div className="grid grid-cols-[100px_1fr] gap-3">
+                  <Choice
+                    label="Candidate method"
+                    value={candidateMethod}
+                    onChange={setCandidateMethod}
+                    options={[
+                      "GET",
+                      "POST",
+                      "PUT",
+                      "PATCH",
+                      "DELETE",
+                      "HEAD",
+                    ].map((m) => [m, m])}
+                  />
+                  <label className="space-y-1 text-[12px]">
+                    <span>Candidate operation path</span>
+                    <Input
+                      aria-label="Candidate operation path"
+                      value={candidatePath}
+                      onChange={(e) => setCandidatePath(e.target.value)}
+                    />
+                  </label>
+                </div>
+              )}
+              <Input
+                aria-label="Search candidate services"
+                placeholder="Search connections to add"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+              />
+              {candidates.isError && (
+                <ErrorBanner
+                  message={message(candidates.error)}
+                  onRetry={() => {
+                    void candidates.refetch();
+                  }}
+                />
+              )}
+              {candidates.isLoading && <Skeleton className="h-12" />}
+              <div className="max-h-48 space-y-1 overflow-y-auto">
+                {rows
+                  .filter(
+                    (row) =>
+                      !members.some(
+                        (m) => m.user_service_id === row.user_service_id,
+                      ),
+                  )
+                  .map((row) => (
+                    <div
+                      key={row.user_service_id}
+                      className="flex items-center justify-between gap-3 rounded-lg p-2 hover:bg-white/[0.03]"
+                    >
+                      <div>
+                        <p className="text-[12px]">{row.slug}</p>
+                        <p className="text-[11px] text-muted-foreground">
+                          {row.credential_binding} ·{" "}
+                          {row.protocol ?? "Same API"} · {reason(row)}
+                        </p>
+                      </div>
+                      <Button
+                        type="button"
+                        disabled={
+                          !row.eligible &&
+                          row.reason !== "compatibility_declaration_required"
+                        }
+                        onClick={() => {
+                          setSelectedLabels((labels) => ({
+                            ...labels,
+                            [row.user_service_id]: row.slug,
+                          }));
+                          form.setValue("members", [
+                            ...form.getValues("members"),
+                            newMember(row.user_service_id),
+                          ]);
+                        }}
+                      >
+                        Add
+                      </Button>
+                    </div>
+                  ))}
+              </div>
+              {candidates.hasNextPage && (
+                <Button
+                  type="button"
+                  isLoading={candidates.isFetchingNextPage}
+                  onClick={() => {
+                    void candidates.fetchNextPage();
+                  }}
+                >
+                  Load more candidates
+                </Button>
+              )}
+            </section>
+            {priority && (
+              <section className="space-y-3">
+                <Toggle
+                  label="Customize failover policy"
+                  checked={values.failover != null}
+                  onChange={(v) =>
+                    form.setValue(
+                      "failover",
+                      v ? structuredClone(defaultFailoverPolicy) : null,
+                    )
+                  }
+                />
+                {values.failover ? (
+                  <PolicyEditor
+                    policy={values.failover as FailoverPolicy}
+                    onChange={(v) => form.setValue("failover", v)}
+                  />
+                ) : (
+                  <p className="text-[12px] text-muted-foreground">
+                    Defaults: up to 3 attempts, 60 seconds per attempt, 120
+                    seconds overall, and 5–300 second cooldown. Ambiguous POST
+                    replay is off.
+                  </p>
+                )}
+              </section>
+            )}
+            {rootError && <ErrorBanner message={rootError} />}
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={onClose}>
+                Cancel
+              </Button>
+              <Button
+                type="submit"
+                variant="primary"
+                isLoading={create.isPending || update.isPending}
+                disabled={!form.formState.isDirty || !form.formState.isValid}
+              >
+                Save
+              </Button>
+            </DialogFooter>
+          </form>
+        </Form>
+      </DialogContent>
+    </Dialog>
   );
 }
 
-function PoolMobileCard({
+export function PoolHealthDialog({
   pool,
-  onEdit,
-  onDelete,
+  onClose,
 }: {
-  readonly pool: ServicePool;
-  readonly onEdit: (pool: ServicePool) => void;
-  readonly onDelete: (pool: ServicePool) => void;
+  pool: ServicePool;
+  onClose: () => void;
 }) {
-  return (
-    <div className="relative rounded-xl border border-border/50 bg-card p-4">
-      <div className="absolute right-3 top-3">
-        <PoolActions pool={pool} onEdit={onEdit} onDelete={onDelete} />
-      </div>
-      <p className="pr-10 text-[13px] font-semibold text-foreground truncate">
-        {pool.name}
-      </p>
-      <p className="mt-0.5 truncate font-mono text-[11px] text-text-tertiary">
-        /proxy/s/{pool.slug}
-      </p>
-      <div className="mt-2 flex flex-wrap gap-1.5">
-        <Badge variant="secondary">{strategyLabel(pool.strategy)}</Badge>
-      </div>
-      <div className="mt-3">
-        <PoolActiveSwitch pool={pool} />
-      </div>
-      <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
-        <span>{memberSummary(pool)}</span>
-        <span>Updated {formatRelativeTime(pool.updated_at)}</span>
-      </div>
-    </div>
+  const [method, setMethod] = useState("POST");
+  const [path, setPath] = useState(
+    pool.member_contract === "ai_chat" ? "chat/completions" : "/",
   );
-}
-
-function PoolsEmptyState({ onAdd }: { readonly onAdd: () => void }) {
+  const health = usePoolHealth({
+    poolId: pool.id,
+    method,
+    path,
+    contract: pool.member_contract,
+  });
+  const reset = useResetPoolHealth();
+  async function clear(userServiceId?: string) {
+    try {
+      await reset.mutateAsync({ poolId: pool.id, userServiceId });
+      toast.success("Cooldown reset");
+    } catch (error) {
+      toast.error(message(error));
+    }
+  }
   return (
-    <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
-      <HierarchyIcon className="h-64 w-64 text-muted-foreground/30" />
-      <div className="space-y-1">
-        <p className="text-[12px] font-medium text-muted-foreground/30">
-          No service pools yet
-        </p>
-        <p className="text-xs text-muted-foreground/30">
-          Create a pool when multiple service credentials can serve the same job.
-        </p>
-      </div>
-      <AddCtaButton label="Create Pool" onClick={onAdd} />
-    </div>
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) onClose();
+      }}
+    >
+      <DialogContent className="md:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>{pool.name} health</DialogTitle>
+          <DialogDescription>
+            Health belongs to the effective credential, destination, model and
+            operation. Reset permits the next normal attempt.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="grid grid-cols-[100px_1fr] gap-3">
+          <Choice
+            label="Method"
+            value={method}
+            options={["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"].map(
+              (m) => [m, m],
+            )}
+            onChange={setMethod}
+          />
+          <label className="space-y-1 text-[12px]">
+            <span>Operation path</span>
+            <Input
+              aria-label="Operation path"
+              value={path}
+              onChange={(e) => setPath(e.target.value)}
+            />
+          </label>
+        </div>
+        {health.isError && <ErrorBanner message={message(health.error)} />}
+        {health.isLoading && <Skeleton className="h-16" />}
+        <div className="space-y-2">
+          {health.data?.candidates.map((row) => (
+            <div
+              key={row.user_service_id}
+              className="flex items-center justify-between gap-3 rounded-xl border border-border/50 p-3"
+            >
+              <div>
+                <p className="text-[12px] font-medium">
+                  {row.slug}{" "}
+                  <Badge variant={row.eligible ? "success" : "warning"}>
+                    {reason(row)}
+                  </Badge>
+                </p>
+                <p className="text-[11px] text-muted-foreground">
+                  {row.credential_binding} · {row.consecutive_failures} failures
+                  {row.last_status ? ` · HTTP ${row.last_status}` : ""}
+                  {row.cooldown_until
+                    ? ` · Retry after ${new Date(row.cooldown_until).toLocaleString()}`
+                    : ""}
+                </p>
+              </div>
+              <Button
+                onClick={() => {
+                  void clear(row.user_service_id);
+                }}
+                disabled={reset.isPending}
+              >
+                Reset
+              </Button>
+            </div>
+          ))}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>
+            Close
+          </Button>
+          <Button
+            onClick={() => {
+              void clear();
+            }}
+            isLoading={reset.isPending}
+          >
+            Reset all cooldowns
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -803,165 +871,214 @@ export function ServicePoolsTab({
   createOpen,
   onCreateOpenChange,
 }: ServicePoolsTabProps) {
-  const { data: pools, isLoading, error, refetch } = useServicePools();
-  const { data: userServices } = useUserServices();
-  const deleteMutation = useDeleteServicePool();
-  const services = useMemo(() => selectableServices(userServices), [userServices]);
-  const [editPool, setEditPool] = useState<ServicePool | null>(null);
-  const [deleteTarget, setDeleteTarget] = useState<ServicePool | null>(null);
-
-  async function handleDelete() {
-    if (!deleteTarget) return;
+  const [owner, setOwner] = useState("personal");
+  const orgId = owner === "personal" ? undefined : owner;
+  const { data: orgs } = useOrgs();
+  const pools = useServicePools(orgId);
+  const update = useUpdateServicePool();
+  const remove = useDeleteServicePool();
+  const [editing, setEditing] = useState<ServicePool | null>(null);
+  const [health, setHealth] = useState<ServicePool | null>(null);
+  const [deleting, setDeleting] = useState<ServicePool | null>(null);
+  async function toggle(pool: ServicePool) {
     try {
-      await deleteMutation.mutateAsync(deleteTarget.id);
-      toast.success("Service pool deleted");
-      setDeleteTarget(null);
+      await update.mutateAsync({
+        poolId: pool.id,
+        expected_revision: pool.config_revision ?? 0,
+        is_active: !pool.is_active,
+      });
+      toast.success(pool.is_active ? "Pool disabled" : "Pool enabled");
     } catch (error) {
-      toast.error(
-        error instanceof ApiError ? error.message : "Failed to delete service pool",
-      );
+      toast.error(message(error));
     }
   }
-
-  if (isLoading) {
-    return (
-      <div className="space-y-3">
-        {Array.from({ length: 3 }).map((_, i) => (
-          <Skeleton key={`pool-skel-${String(i)}`} className="h-16 w-full" />
-        ))}
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <ErrorBanner
-        message="Failed to load service pools. Please try again."
-        onRetry={refetch}
-      />
-    );
-  }
-
-  const poolList = pools ?? [];
-
+  const actions = (pool: ServicePool) => (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label={`Actions for ${pool.name}`}
+        >
+          <MoreVertical className="size-4" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        <DropdownMenuItem onSelect={() => setEditing(pool)}>
+          Edit
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => setHealth(pool)}>
+          Health
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          onSelect={() => {
+            void toggle(pool);
+          }}
+        >
+          {pool.is_active ? "Disable" : "Enable"}
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          className="text-destructive"
+          onSelect={() => setDeleting(pool)}
+        >
+          Delete
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
   return (
-    <>
-      {poolList.length === 0 ? (
-        <PoolsEmptyState onAdd={() => onCreateOpenChange(true)} />
-      ) : (
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-end justify-between gap-4">
+        <div className="min-w-52">
+          <Choice
+            label="Pool owner"
+            value={owner}
+            onChange={setOwner}
+            options={[
+              ["personal", "Personal"],
+              ...(orgs ?? [])
+                .filter((o) => ["owner", "admin"].includes(o.your_role))
+                .map(
+                  (o) => [o.id, o.display_name ?? o.slug] as [string, string],
+                ),
+            ]}
+          />
+        </div>
+        <AddCtaButton
+          label="Create pool"
+          onClick={() => onCreateOpenChange(true)}
+        />
+      </div>
+      <p className="text-[12px] text-muted-foreground">
+        Route through <code>/api/v1/proxy/s/&lt;slug&gt;</code>. AI chat pools
+        also accept <code>model: pool:&lt;slug&gt;</code> at the LLM gateway.
+      </p>
+      {pools.isError && (
+        <ErrorBanner
+          message={message(pools.error)}
+          onRetry={() => {
+            void pools.refetch();
+          }}
+        />
+      )}
+      {pools.isLoading && <Skeleton className="h-24" />}
+      {pools.data?.length === 0 && (
+        <div className="rounded-xl border border-border/50 bg-card p-6 text-center text-[12px] text-muted-foreground">
+          No service pools for this owner. Create a pool to group compatible
+          connections.
+        </div>
+      )}
+      {(pools.data?.length ?? 0) > 0 && (
         <>
-          <div className="flex flex-col gap-3 md:hidden">
-            {poolList.map((pool) => (
-              <PoolMobileCard
-                key={pool.id}
-                pool={pool}
-                onEdit={setEditPool}
-                onDelete={setDeleteTarget}
-              />
-            ))}
-          </div>
-          <div className="hidden md:block rounded-xl border border-border/50 bg-card overflow-hidden">
+          <div className="hidden overflow-hidden rounded-xl border border-border/50 bg-card md:block">
             <Table>
               <TableHeader>
-                <TableRow className="border-border/50 hover:bg-transparent">
-                  <TableHead className="w-[26%]">Name</TableHead>
-                  <TableHead className="w-[22%]">Proxy Slug</TableHead>
-                  <TableHead className="w-[14%]">Strategy</TableHead>
-                  <TableHead className="w-[16%]">Members</TableHead>
-                  <TableHead className="w-[12%]">Status</TableHead>
-                  <TableHead className="w-[10%]">Actions</TableHead>
+                <TableRow>
+                  <TableHead>Name</TableHead>
+                  <TableHead>Route</TableHead>
+                  <TableHead>Strategy / contract</TableHead>
+                  <TableHead>Members</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {poolList.map((pool) => (
-                  <TableRow key={pool.id} className="border-border/30">
+                {pools.data?.map((pool) => (
+                  <TableRow key={pool.id}>
+                    <TableCell>{pool.name}</TableCell>
+                    <TableCell className="font-mono">{pool.slug}</TableCell>
                     <TableCell>
-                      <p className="truncate font-medium text-foreground">
-                        {pool.name}
-                      </p>
-                      <p className="truncate text-[11px] text-text-tertiary mt-0.5">
-                        {pool.description ?? "No description"}
-                      </p>
-                    </TableCell>
-                    <TableCell>
-                      <code className="font-mono text-[11px] text-muted-foreground">
-                        /proxy/s/{pool.slug}
-                      </code>
+                      {strategyLabels[pool.strategy]} /{" "}
+                      {pool.member_contract === "ai_chat"
+                        ? "AI chat"
+                        : "Same API"}
                     </TableCell>
                     <TableCell>
-                      <Badge variant="secondary">{strategyLabel(pool.strategy)}</Badge>
-                    </TableCell>
-                    <TableCell className="text-muted-foreground">
-                      {memberSummary(pool)}
+                      {pool.members.filter((m) => m.enabled).length} /{" "}
+                      {pool.members.length} enabled
                     </TableCell>
                     <TableCell>
-                      <div className="flex flex-wrap items-center gap-2">
-                        <PoolActiveSwitch pool={pool} />
-                        {pool.members.some((member) => member.enabled) && (
-                          <CheckCircle2 className="h-3.5 w-3.5 text-success" />
-                        )}
-                      </div>
+                      <Badge variant={pool.is_active ? "success" : "secondary"}>
+                        {pool.is_active ? "Enabled" : "Disabled"}
+                      </Badge>
                     </TableCell>
-                    <TableCell>
-                      <PoolActions
-                        pool={pool}
-                        onEdit={setEditPool}
-                        onDelete={setDeleteTarget}
-                      />
-                    </TableCell>
+                    <TableCell>{actions(pool)}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>
             </Table>
           </div>
+          <div className="space-y-3 md:hidden">
+            {pools.data?.map((pool) => (
+              <div
+                key={pool.id}
+                className="flex items-center justify-between rounded-xl border border-border/50 bg-card p-4"
+              >
+                <div>
+                  <p className="text-[13px] font-medium">{pool.name}</p>
+                  <p className="text-[12px] text-muted-foreground">
+                    {pool.slug} · {strategyLabels[pool.strategy]} ·{" "}
+                    {pool.is_active ? "Enabled" : "Disabled"}
+                  </p>
+                </div>
+                {actions(pool)}
+              </div>
+            ))}
+          </div>
         </>
       )}
-
-      <CreatePoolDialog
-        open={createOpen}
-        onOpenChange={onCreateOpenChange}
-        services={services}
-      />
-      <PoolEditorDialog
-        pool={editPool}
-        open={editPool !== null}
-        onOpenChange={(open) => {
-          if (!open) setEditPool(null);
-        }}
-        services={services}
-      />
-
-      <Dialog
-        open={deleteTarget !== null}
-        onOpenChange={(open) => {
-          if (!open) setDeleteTarget(null);
-        }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Delete Service Pool</DialogTitle>
-            <DialogDescription>
-              Delete &quot;{deleteTarget?.name ?? ""}&quot;? Requests to its pool
-              slug will stop resolving through this pool.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setDeleteTarget(null)}>
-              Cancel
-            </Button>
-            <Button
-              variant="destructive"
-              onClick={() => void handleDelete()}
-              isLoading={deleteMutation.isPending}
-            >
-              <ButtonIcon variant="destructive">
-                <Trash2 className="h-3 w-3" />
-              </ButtonIcon>
-              Delete
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </>
+      {createOpen && (
+        <PoolEditor orgId={orgId} onClose={() => onCreateOpenChange(false)} />
+      )}
+      {editing && (
+        <PoolEditor
+          key={editing.id}
+          pool={editing}
+          orgId={orgId}
+          onClose={() => setEditing(null)}
+        />
+      )}
+      {health && (
+        <PoolHealthDialog pool={health} onClose={() => setHealth(null)} />
+      )}
+      {deleting && (
+        <Dialog
+          open
+          onOpenChange={(open) => {
+            if (!open) setDeleting(null);
+          }}
+        >
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Delete {deleting.name}?</DialogTitle>
+              <DialogDescription>
+                The pool route will stop working. Member connections stay
+                available.
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setDeleting(null)}>
+                Cancel
+              </Button>
+              <Button
+                variant="destructive"
+                isLoading={remove.isPending}
+                onClick={() => {
+                  void remove
+                    .mutateAsync(deleting.id)
+                    .then(() => {
+                      setDeleting(null);
+                      toast.success("Pool deleted");
+                    })
+                    .catch((error) => toast.error(message(error)));
+                }}
+              >
+                Delete
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
+    </div>
   );
 }

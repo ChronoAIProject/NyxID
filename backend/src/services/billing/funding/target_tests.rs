@@ -7,6 +7,7 @@ use crate::models::usage_allowance::{
 };
 use crate::models::usage_meter::{CredentialClass, UsageStatus};
 use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+use crate::services::billing::grants::CREDIT_MICROS;
 use crate::test_utils::{connect_transaction_test_database, test_membership, test_user};
 
 #[tokio::test]
@@ -123,7 +124,7 @@ async fn member_removal_blocks_new_funding_but_preserves_admitted_reservations()
             credential_class: CredentialClass::UserOwned,
             model: None,
             token_breakdown: None,
-            reserved_credits: 0,
+            reserved_credits: crate::models::credits::Credits::from_whole(0),
             funding: Some(UsageFunding {
                 credits_per_unit_micros: CREDIT_MICROS,
                 allowance_reservations: allocations.clone(),
@@ -132,6 +133,7 @@ async fn member_removal_blocks_new_funding_but_preserves_admitted_reservations()
             quantity: Some(30),
             pending_resale_quantity: None,
             pending_platform_usage: None,
+            pool_attempt: None,
             status: UsageStatus::Finalized,
             forwarded: true,
             released: false,
@@ -150,7 +152,10 @@ async fn member_removal_blocks_new_funding_but_preserves_admitted_reservations()
             .await
             .unwrap();
         let result = settle_usage_funding(&db, &row).await.unwrap();
-        assert_eq!(result.wallet_charge_credits, 10);
+        assert_eq!(
+            result.wallet_charge_credits,
+            crate::models::credits::Credits::from_whole(10)
+        );
         assert_eq!(result.lago_billable_quantity_micros, 10_000_000);
         let period = db
             .collection::<UsageAllowancePeriod>(USAGE_ALLOWANCE_PERIODS)

@@ -1,3 +1,4 @@
+import { formatExactCredits, legacyCredits, hasCredits } from "@/lib/credits";
 import { useState, type ReactNode } from "react";
 import {
   ChevronDown,
@@ -142,7 +143,7 @@ export function BillingWalletCard({
               )}
             </div>
             <div className="mt-1 truncate text-[28px] font-semibold leading-tight">
-              {formatCredits(wallet.available_credits)}
+              {formatCredits(wallet.available ?? wallet.available_credits)}
             </div>
             <div className="mt-1 text-[11px] text-muted-foreground">
               Updated {formatRelativeTime(wallet.balance_synced_at)}
@@ -180,30 +181,43 @@ export function BillingWalletCard({
               <BreakdownRow
                 label="Balance"
                 hint="Last provider-synced balance"
-                value={formatCredits(wallet.balance_credits)}
+                value={formatCredits(wallet.balance ?? wallet.balance_credits)}
               />
               <BreakdownRow
                 label="Reserved"
                 hint="Held for requests in flight"
-                value={formatCredits(wallet.reserved_credits)}
+                value={formatCredits(
+                  wallet.reserved ?? wallet.reserved_credits,
+                )}
               />
               <BreakdownRow
                 label="Pending"
                 hint="Charged, awaiting provider sync"
-                value={formatCredits(wallet.pending_lago_debits)}
+                value={formatCredits(
+                  wallet.pending_debits ?? wallet.pending_lago_debits,
+                )}
               />
-              {wallet.pending_topup_expiry_credits > 0 && (
+              {hasCredits(
+                wallet.pending_expiry ?? wallet.pending_topup_expiry_credits,
+              ) && (
                 <BreakdownRow
                   label="Expiring"
                   hint="Held while expired purchases are removed"
-                  value={formatCredits(wallet.pending_topup_expiry_credits)}
+                  value={formatCredits(
+                    wallet.pending_expiry ??
+                      wallet.pending_topup_expiry_credits,
+                  )}
                 />
               )}
-              {wallet.overdraft_cap_credits > 0 && (
+              {hasCredits(
+                wallet.overdraft_cap ?? wallet.overdraft_cap_credits,
+              ) && (
                 <BreakdownRow
                   label="Overdraft"
                   hint="Extra capacity beyond your balance"
-                  value={formatCredits(wallet.overdraft_cap_credits)}
+                  value={formatCredits(
+                    wallet.overdraft_cap ?? wallet.overdraft_cap_credits,
+                  )}
                 />
               )}
             </div>
@@ -366,8 +380,8 @@ function BreakdownRow({
   );
 }
 
-function formatCredits(value: number): string {
-  return `${new Intl.NumberFormat().format(value)} credits`;
+function formatCredits(value: string | number): string {
+  return `${formatExactCredits(typeof value === "string" ? value : legacyCredits(value, "whole"))} credits`;
 }
 
 function formatNumber(value: number): string {

@@ -1,5 +1,6 @@
 use super::*;
-use crate::handlers::billing::{self, BillingUsageResponse, UsageQuery};
+use crate::handlers::billing::{self, BillingUsageResponse, BillingUsageRow, UsageQuery};
+use crate::models::credits::Credits;
 use crate::models::usage_meter::{BillingLayer, UsageFunding};
 use crate::test_utils::test_auth_user;
 use axum::extract::{Query, State};
@@ -26,11 +27,12 @@ fn meter(owner: &str, quantity: i64) -> UsageMeterRow {
         credential_class: CredentialClass::NyxidManagedMaster,
         model: Some("test-model".into()),
         token_breakdown: None,
-        reserved_credits: 0,
+        reserved_credits: crate::models::credits::Credits::from_whole(0),
         funding: None,
         quantity: Some(quantity),
         pending_resale_quantity: None,
         pending_platform_usage: None,
+        pool_attempt: None,
         status: UsageStatus::Finalized,
         forwarded: true,
         released: false,
@@ -66,6 +68,7 @@ async fn rate(db: &mongodb::Database, model: Option<&str>, micros: i64) {
             credits_per_unit_micros: micros,
             credits_per_unit_pico: None,
             synced_at: Utc::now(),
+            retired_at: None,
         })
         .await
         .unwrap();
@@ -177,9 +180,9 @@ async fn exact_funding_costs_survive_retries_repricing_and_missing_rates() {
                     target_org_ids: Vec::new(),
                     target_group_ids: Vec::new(),
                     amount_credits: 1,
-                    amount_micros: grant_micros,
-                    remaining_micros: grant_micros,
-                    reserved_micros: 0,
+                    amount: crate::models::credits::Credits::from_micros(grant_micros),
+                    remaining: crate::models::credits::Credits::from_micros(grant_micros),
+                    reserved: crate::models::credits::Credits::from_micros(0),
                     scope: BillingServiceScope {
                         all_services: true,
                         service_ids: vec![],
@@ -191,7 +194,7 @@ async fn exact_funding_costs_survive_retries_repricing_and_missing_rates() {
                     status: CreditGrantStatus::Active,
                     issued_ledgered_at: Some(now),
                     terminal_ledgered_at: None,
-                    terminal_amount_micros: 0,
+                    terminal_amount: crate::models::credits::Credits::from_micros(0),
                     active_settlement: None,
                     created_at: now,
                     updated_at: now,
@@ -215,7 +218,8 @@ async fn exact_funding_costs_survive_retries_repricing_and_missing_rates() {
         let settlement = settle_usage_funding(&db, &row).await.unwrap();
         assert_eq!(
             settlement.wallet_charge_credits,
-            i64::from(wallet_micros > 0),
+            // Exact wallet shares replace the former whole-credit ceiling (issue #1672).
+            crate::models::credits::Credits::from_micros(wallet_micros),
             "{name}"
         );
         assert_eq!(
@@ -230,11 +234,26 @@ async fn exact_funding_costs_survive_retries_repricing_and_missing_rates() {
             .unwrap()
             .unwrap();
         let funding = saved.funding.as_ref().unwrap();
-        assert_eq!(funding.total_charge_micros, Some(2440), "{name}");
+        assert_eq!(
+            funding.total_charge,
+            Some(crate::models::credits::Credits::from_micros(2440)),
+            "{name}"
+        );
         assert_eq!(funding.allowance_funded_quantity, Some(allowance_units));
-        assert_eq!(funding.allowance_funded_micros, Some(allowance_units));
-        assert_eq!(funding.grant_funded_micros, Some(grant_micros));
-        assert_eq!(funding.wallet_funded_micros, Some(wallet_micros));
+        assert_eq!(
+            funding.allowance_funded,
+            Some(crate::models::credits::Credits::from_micros(
+                allowance_units
+            ))
+        );
+        assert_eq!(
+            funding.grant_funded,
+            Some(crate::models::credits::Credits::from_micros(grant_micros))
+        );
+        assert_eq!(
+            funding.wallet_funded,
+            Some(crate::models::credits::Credits::from_micros(wallet_micros))
+        );
         db.collection::<BillingRateCache>(BILLING_RATE_CACHE)
             .update_many(
                 doc! {},
@@ -305,7 +324,7 @@ async fn historical_funding_uses_model_rate_and_sums_with_exact_and_free_rows() 
     let mut old = meter(&owner, 100);
     old.funding = Some(UsageFunding {
         settled: true,
-        wallet_charge_credits: Some(1),
+        wallet_charge_credits: Some(crate::models::credits::Credits::from_whole(1)),
         allowance_consumptions: vec![AllowanceConsumptionAllocation {
             operation_id: "a".into(),
             allowance_id: "a".into(),
@@ -315,23 +334,33 @@ async fn historical_funding_uses_model_rate_and_sums_with_exact_and_free_rows() 
         grant_consumptions: vec![GrantConsumptionAllocation {
             operation_id: "g".into(),
             grant_id: "g".into(),
-            amount_micros: 50,
+            amount: crate::models::credits::Credits::from_micros(50),
         }],
         ..Default::default()
     });
     let legacy = meter(&owner, 10);
+    // Exact carry assignment is durable, so the recovery fixture must be
+    // persisted before settlement, just as the production meter path does.
+    db.collection::<UsageMeterRow>(USAGE_METER)
+        .insert_one(&legacy)
+        .await
+        .unwrap();
     let legacy_settlement = crate::services::billing::funding::settle_usage_funding(&db, &legacy)
         .await
         .unwrap();
-    assert_eq!(legacy_settlement.wallet_charge_credits, 1);
+    assert_eq!(
+        legacy_settlement.wallet_charge_credits,
+        // #1672: the previous one-credit expectation encoded the ceiling bug.
+        crate::models::credits::Credits::from_micros(20)
+    );
     assert_eq!(legacy_settlement.lago_billable_quantity_micros, 10_000_000);
     let mut exact = meter(&owner, 30);
     exact.funding = Some(UsageFunding {
         settled: true,
-        total_charge_micros: Some(30),
-        wallet_funded_micros: Some(20),
-        grant_funded_micros: Some(10),
-        allowance_funded_micros: Some(0),
+        total_charge: Some(crate::models::credits::Credits::from_micros(30)),
+        wallet_funded: Some(crate::models::credits::Credits::from_micros(20)),
+        grant_funded: Some(crate::models::credits::Credits::from_micros(10)),
+        allowance_funded: Some(crate::models::credits::Credits::from_micros(0)),
         allowance_funded_quantity: Some(0),
         ..Default::default()
     });
@@ -346,15 +375,7 @@ async fn historical_funding_uses_model_rate_and_sums_with_exact_and_free_rows() 
     mixed_historical.lago_metric_code = mixed_exact.lago_metric_code.clone();
     mixed_historical.funding = old.funding.clone();
     db.collection::<UsageMeterRow>(USAGE_METER)
-        .insert_many([
-            old,
-            legacy,
-            exact,
-            free,
-            unknown,
-            mixed_exact,
-            mixed_historical,
-        ])
+        .insert_many([old, exact, free, unknown, mixed_exact, mixed_historical])
         .await
         .unwrap();
     let result = read_usage(&state, &owner).await;
@@ -401,6 +422,298 @@ async fn historical_funding_uses_model_rate_and_sums_with_exact_and_free_rows() 
     assert_eq!(result.totals.grant_credits_micros, Some(120));
     assert_eq!(result.totals.allowance_credits_micros, Some(40));
     assert_eq!(result.totals.allowance_quantity, 40);
+    db.drop().await.unwrap();
+}
+
+fn reservation_priced(quantity: i64, pico: Option<i64>, micros: i64, owner: &str) -> UsageMeterRow {
+    let mut row = meter(owner, quantity);
+    row.funding = Some(UsageFunding {
+        credits_per_unit_pico: pico,
+        credits_per_unit_micros: micros,
+        ..Default::default()
+    });
+    row
+}
+
+fn grant_consumption(amount: Credits) -> crate::models::usage_meter::GrantConsumptionAllocation {
+    crate::models::usage_meter::GrantConsumptionAllocation {
+        operation_id: Uuid::new_v4().to_string(),
+        grant_id: Uuid::new_v4().to_string(),
+        amount,
+    }
+}
+
+/// Exact (estimated, wallet, grant, allowance) costs of a usage row, after
+/// checking that each bounded micro display is the truncation of its exact value.
+fn costs(row: &BillingUsageRow) -> [Option<Credits>; 4] {
+    let exact = [
+        row.estimated_credits,
+        row.wallet_credits,
+        row.grant_credits,
+        row.allowance_credits,
+    ];
+    assert_eq!(
+        [
+            row.estimated_credits_micros,
+            row.wallet_credits_micros,
+            row.grant_credits_micros,
+            row.allowance_credits_micros,
+        ],
+        exact.map(|value| value.map(Credits::display_micros)),
+    );
+    exact
+}
+
+#[tokio::test]
+async fn historical_usage_is_priced_per_row_from_reservation_rates() {
+    use crate::models::usage_meter::AllowanceConsumptionAllocation;
+    let Some(db) = connect_test_database("billing_usage_reservation_rate").await else {
+        return;
+    };
+    let owner = insert_owner(&db).await;
+    let state = billing_route_state(db.clone(), Arc::new(FakeLago::default()), 0);
+    // No cache row: each meter is valued at its own reservation rate.
+    // 2_000_000 x 0.000000250001 + 2_000_000 x 0.0000005 + 10 x 0.00009
+    // = 0.500002 + 1 + 0.0009 credits.
+    db.collection::<UsageMeterRow>(USAGE_METER)
+        .insert_many([
+            reservation_priced(2_000_000, Some(250_001), 0, &owner),
+            reservation_priced(2_000_000, Some(500_000), 0, &owner),
+            reservation_priced(10, None, 90, &owner),
+        ])
+        .await
+        .unwrap();
+
+    let result = read_usage(&state, &owner).await;
+    assert_eq!(result.rows.len(), 1);
+    let row = &result.rows[0];
+    assert_eq!(row.events, 3);
+    let gross = Credits::from_micros(1_500_902);
+    assert_eq!(
+        costs(row),
+        [
+            Some(gross),
+            Some(gross),
+            Some(Credits::ZERO),
+            Some(Credits::ZERO)
+        ]
+    );
+    assert_eq!(row.estimated_credits_micros, Some(1_500_902));
+    assert_eq!(result.totals.estimated_credits, Some(gross));
+    assert_eq!(result.totals.estimated_credits_micros, Some(1_500_902));
+    assert_eq!(result.totals.wallet_credits, Some(gross));
+    assert_eq!(result.totals.wallet_credits_micros, Some(1_500_902));
+
+    // One meter without any recorded rate leaves the group's cost unknown.
+    db.collection::<UsageMeterRow>(USAGE_METER)
+        .insert_one(meter(&owner, 5))
+        .await
+        .unwrap();
+    let result = read_usage(&state, &owner).await;
+    assert_eq!(result.rows.len(), 1);
+    let row = &result.rows[0];
+    assert_eq!(row.events, 4);
+    assert_eq!(costs(row), [None, None, Some(Credits::ZERO), None]);
+    assert_eq!(result.totals.estimated_credits, None);
+    assert_eq!(result.totals.estimated_credits_micros, None);
+
+    // Each row is priced exactly, rate x quantity, as exact settlement does:
+    // 1001 x 0.0000015 = 0.0015015 and two 1-unit rows at 0.0000015, so the
+    // gross is 0.0015045 credits (1504.5 micros, displayed as 1504). Allowance
+    // units cost rate x units: 400 x 0.0000015 = 0.0006. The wallet share is
+    // 0.0015045 - 0.0006 - 0.0005 = 0.0004045.
+    let funded_owner = insert_owner(&db).await;
+    let mut funded = reservation_priced(1001, Some(1_500_000), 0, &funded_owner);
+    let funding = funded.funding.as_mut().unwrap();
+    funding.settled = true;
+    funding.wallet_charge_credits = Some(Credits::from_whole(1));
+    funding.allowance_consumptions = vec![AllowanceConsumptionAllocation {
+        operation_id: "a".into(),
+        allowance_id: "a".into(),
+        period_id: "a".into(),
+        quantity: 400,
+    }];
+    funding.grant_consumptions = vec![grant_consumption(Credits::from_micros(500))];
+    db.collection::<UsageMeterRow>(USAGE_METER)
+        .insert_many([
+            funded,
+            reservation_priced(1, Some(1_500_000), 0, &funded_owner),
+            reservation_priced(1, Some(1_500_000), 0, &funded_owner),
+        ])
+        .await
+        .unwrap();
+    let result = read_usage(&state, &funded_owner).await;
+    assert_eq!(result.rows.len(), 1);
+    let row = &result.rows[0];
+    assert_eq!(row.events, 3);
+    assert_eq!(
+        costs(row),
+        [
+            Some(Credits::from_pico(1_504_500_000).unwrap()),
+            Some(Credits::from_pico(404_500_000).unwrap()),
+            Some(Credits::from_micros(500)),
+            Some(Credits::from_micros(600)),
+        ]
+    );
+    assert_eq!(row.estimated_credits_micros, Some(1504));
+    assert_eq!(row.wallet_credits_micros, Some(404));
+    assert_eq!(row.grant_credits_micros, Some(500));
+    assert_eq!(row.allowance_credits_micros, Some(600));
+    assert_eq!(row.allowance_quantity, 400);
+
+    // A settled row's allowance units are valued at the same exact rate:
+    // 2 x 0.0000015 gross, 1 x 0.0000015 allowance, the rest from the wallet.
+    let allowance_owner = insert_owner(&db).await;
+    let mut covered = reservation_priced(2, Some(1_500_000), 0, &allowance_owner);
+    let funding = covered.funding.as_mut().unwrap();
+    funding.settled = true;
+    funding.wallet_charge_credits = Some(Credits::from_whole(1));
+    funding.allowance_consumptions = vec![AllowanceConsumptionAllocation {
+        operation_id: "b".into(),
+        allowance_id: "b".into(),
+        period_id: "b".into(),
+        quantity: 1,
+    }];
+    db.collection::<UsageMeterRow>(USAGE_METER)
+        .insert_one(covered)
+        .await
+        .unwrap();
+    let result = read_usage(&state, &allowance_owner).await;
+    assert_eq!(result.rows.len(), 1);
+    let row = &result.rows[0];
+    assert_eq!(
+        costs(row),
+        [
+            Some(Credits::from_pico(3_000_000).unwrap()),
+            Some(Credits::from_pico(1_500_000).unwrap()),
+            Some(Credits::ZERO),
+            Some(Credits::from_pico(1_500_000).unwrap()),
+        ]
+    );
+    assert_eq!(row.estimated_credits_micros, Some(3));
+    assert_eq!(row.wallet_credits_micros, Some(1));
+    assert_eq!(row.allowance_credits_micros, Some(1));
+    assert_eq!(row.allowance_quantity, 1);
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn grant_settled_history_derives_gross_from_grant_consumption() {
+    let Some(db) = connect_test_database("billing_usage_grant_settled").await else {
+        return;
+    };
+    let owner = insert_owner(&db).await;
+    let state = billing_route_state(db.clone(), Arc::new(FakeLago::default()), 0);
+    let grant_settled = |owner: &str, wallet_charge_credits| {
+        let mut row = meter(owner, 100);
+        row.funding = Some(UsageFunding {
+            settled: true,
+            wallet_charge_credits: Some(wallet_charge_credits),
+            grant_consumptions: vec![grant_consumption(Credits::from_micros(1234))],
+            ..Default::default()
+        });
+        row
+    };
+    db.collection::<UsageMeterRow>(USAGE_METER)
+        .insert_one(grant_settled(&owner, Credits::ZERO))
+        .await
+        .unwrap();
+
+    let grant = Credits::from_micros(1234);
+    let assert_grant_settled = |result: &BillingUsageResponse| {
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(
+            costs(&result.rows[0]),
+            [
+                Some(grant),
+                Some(Credits::ZERO),
+                Some(grant),
+                Some(Credits::ZERO)
+            ]
+        );
+        assert_eq!(result.rows[0].estimated_credits_micros, Some(1234));
+        assert_eq!(result.totals.estimated_credits, Some(grant));
+        assert_eq!(result.totals.estimated_credits_micros, Some(1234));
+        assert_eq!(result.totals.wallet_credits, Some(Credits::ZERO));
+        assert_eq!(result.totals.grant_credits, Some(grant));
+        assert_eq!(result.totals.allowance_credits, Some(Credits::ZERO));
+    };
+    assert_grant_settled(&read_usage(&state, &owner).await);
+    // The exact derivation wins over any cached estimate (90 x 100 = 9000).
+    rate(&db, None, 90).await;
+    assert_grant_settled(&read_usage(&state, &owner).await);
+
+    // A pre-cutover row stores an Int64 whole-credit wallet debit and legacy
+    // `amount_micros` grant keys; the derivation reads it identically.
+    let legacy_owner = insert_owner(&db).await;
+    let mut legacy = bson::to_document(&meter(&legacy_owner, 100)).unwrap();
+    legacy.insert(
+        "funding",
+        doc! {
+            "settled": true,
+            "wallet_charge_credits": 0_i64,
+            "grant_consumptions": [
+                { "operation_id": "x", "grant_id": "g", "amount_micros": 1234_i64 },
+            ],
+        },
+    );
+    db.collection::<bson::Document>(USAGE_METER)
+        .insert_one(legacy)
+        .await
+        .unwrap();
+    assert_grant_settled(&read_usage(&state, &legacy_owner).await);
+
+    // A wallet debit means the grant did not cover the gross; without a rate
+    // the cost stays unknown while the grant-funded part remains visible.
+    let charged_owner = insert_owner(&db).await;
+    let mut charged = grant_settled(&charged_owner, Credits::from_whole(1));
+    charged.lago_metric_code = "platform_svc_removed".into();
+    db.collection::<UsageMeterRow>(USAGE_METER)
+        .insert_one(charged)
+        .await
+        .unwrap();
+    let result = read_usage(&state, &charged_owner).await;
+    assert_eq!(costs(&result.rows[0]), [None, None, Some(grant), None]);
+    assert_eq!(result.rows[0].grant_credits_micros, Some(1234));
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn retired_rate_still_prices_historical_usage() {
+    let Some(db) = connect_test_database("billing_usage_retired_rate").await else {
+        return;
+    };
+    let owner = insert_owner(&db).await;
+    let state = billing_route_state(db.clone(), Arc::new(FakeLago::default()), 0);
+    db.collection::<BillingRateCache>(BILLING_RATE_CACHE)
+        .insert_one(BillingRateCache {
+            id: BillingRateCache::cache_id("platform_tokens", None),
+            lago_metric_code: "platform_tokens".into(),
+            model: None,
+            credits_per_unit_micros: 3,
+            credits_per_unit_pico: None,
+            synced_at: Utc::now(),
+            retired_at: Some(Utc::now()),
+        })
+        .await
+        .unwrap();
+    db.collection::<UsageMeterRow>(USAGE_METER)
+        .insert_one(meter(&owner, 100))
+        .await
+        .unwrap();
+
+    let result = read_usage(&state, &owner).await;
+    let gross = Credits::from_micros(300);
+    assert_eq!(
+        costs(&result.rows[0]),
+        [
+            Some(gross),
+            Some(gross),
+            Some(Credits::ZERO),
+            Some(Credits::ZERO)
+        ]
+    );
+    assert_eq!(result.rows[0].estimated_credits_micros, Some(300));
     db.drop().await.unwrap();
 }
 
@@ -572,7 +885,10 @@ async fn org_credential_request(platform_key: bool) {
     );
     assert_eq!(row.quantity, Some(5));
     assert!(row.wallet_id.is_some());
-    assert_eq!(wallet(&db, payer).await.pending_lago_debits, 5);
+    assert_eq!(
+        wallet(&db, payer).await.pending_lago_debits,
+        crate::models::credits::Credits::from_whole(5)
+    );
     assert!(state.billing.get_wallet(other).await.unwrap().is_none());
     let personal_usage = read_usage(&state, &actor).await;
     assert_eq!(personal_usage.rows.len(), usize::from(platform_key));

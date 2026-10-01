@@ -55,7 +55,7 @@ nyxid login --base-url https://nyx-api.chrono-ai.fun
 
 The CLI stores tokens at `~/.nyxid/` and auto-refreshes them. The base URL is saved on login -- all subsequent commands use it automatically.
 
-> **Registration may require an invite code.** NyxID instances can gate new accounts behind invite codes (controlled by the backend `INVITE_CODE_REQUIRED` env var, default `true`). When enabled, users need a code from an admin and can register via the web UI or the CLI:
+> **Registration may require an invite code.** The global `auth:invitation-code` feature flag defaults to enabled and can be toggled by a platform admin. When enabled, users need a code from an admin and can register via the web UI or the CLI:
 >
 > ```bash
 > nyxid register --base-url https://nyx-api.chrono-ai.fun \
@@ -165,7 +165,7 @@ Proxy to a pool by its slug exactly like a normal service slug:
 nyxid proxy request <pool_slug> /v1/path -m POST -d '<body>'
 ```
 
-Raw HTTP clients use the same slug route: `/api/v1/proxy/s/{pool_slug}/{path}`. For the shipped proxy behavior and current documentation bounds, load `references/service-pools.md`.
+Raw HTTP clients use the same slug route: `/api/v1/proxy/s/{pool_slug}/{path}`. For priority/failover, AI aliases, owner-aware CLI management and health, load `references/service-pools.md`.
 
 ## External Endpoints
 

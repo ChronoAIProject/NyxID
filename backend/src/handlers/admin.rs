@@ -1322,6 +1322,7 @@ pub struct ChainVerifyStatusItem {
 #[derive(Debug, Serialize)]
 pub struct ChainVerificationResponse {
     pub chains: Vec<ChainVerifyStatusItem>,
+    pub accounts: Option<ChainVerifyStatusItem>,
     pub startup_diagnostics: Vec<StartupDiagnosticItem>,
 }
 
@@ -1346,7 +1347,7 @@ async fn active_startup_diagnostics(
         .await?
         .try_collect()
         .await?;
-    Ok(diagnostics
+    let mut items: Vec<_> = diagnostics
         .into_iter()
         .map(|diagnostic| StartupDiagnosticItem {
             code: diagnostic.code,
@@ -1355,7 +1356,29 @@ async fn active_startup_diagnostics(
             remediation: diagnostic.remediation,
             detected_at: diagnostic.detected_at,
         })
-        .collect())
+        .collect();
+    let billing_items = crate::services::billing::startup_diagnostics(db).await?;
+    items.extend(
+        billing_items
+            .into_iter()
+            .map(|diagnostic| StartupDiagnosticItem {
+                code: diagnostic.code,
+                summary: diagnostic.summary,
+                detail: diagnostic.detail,
+                remediation: diagnostic.remediation,
+                detected_at: diagnostic.detected_at,
+            }),
+    );
+    Ok(items)
+}
+
+async fn account_status(db: &mongodb::Database) -> AppResult<Option<ChainVerifyStatusItem>> {
+    Ok(chain_verify_service::load_status(
+        db,
+        crate::services::billing::account_reconciliation::CHECK_ID,
+    )
+    .await?
+    .map(chain_status_item))
 }
 
 fn chain_status_item(
@@ -1401,6 +1424,7 @@ pub async fn get_chain_verification(
     }
     Ok(Json(ChainVerificationResponse {
         chains: items,
+        accounts: account_status(&state.db).await?,
         startup_diagnostics: active_startup_diagnostics(&state.db).await?,
     }))
 }
@@ -1421,11 +1445,16 @@ pub async fn run_chain_verification(
         state.billing_ledger_hmac_key.as_slice(),
     )
     .await?;
+    let chains = vec![
+        chain_status_item(report.audit),
+        chain_status_item(report.billing_ledger),
+    ];
+    if crate::services::billing::exact_migration::ready(&state.db).await? {
+        crate::services::billing::account_reconciliation::run_once(&state.db).await?;
+    }
     Ok(Json(ChainVerificationResponse {
-        chains: vec![
-            chain_status_item(report.audit),
-            chain_status_item(report.billing_ledger),
-        ],
+        chains,
+        accounts: account_status(&state.db).await?,
         startup_diagnostics: active_startup_diagnostics(&state.db).await?,
     }))
 }
@@ -3228,6 +3257,7 @@ mod operator_route_tests {
         let now = chrono::Utc::now();
         db.collection::<AuthorizationCode>(AUTH_CODES)
             .insert_one(AuthorizationCode {
+                incremental_consent: None,
                 id: "pending-auth-code".to_string(),
                 code_hash: "pending-auth-code-hash".to_string(),
                 client_id: client_id.to_string(),

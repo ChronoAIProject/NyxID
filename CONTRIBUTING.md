@@ -327,6 +327,14 @@ A change under `Cargo.toml` / `Cargo.lock` re-runs both `Backend Test` and `CLI 
 
 Wait for a green `CI Pipeline` before merging. If a check fails, fix the issue locally and push -- the workflow re-runs automatically.
 
+Backend test and coverage jobs use `CARGO_PROFILE_TEST_DEBUG=line-tables-only`
+to keep the large test binary within hosted-runner memory. Use the same setting
+for head and base coverage measurements. This preserves line locations and LLVM
+coverage instrumentation; keep the full test selection and coverage thresholds.
+When a runner exits with code 143 during compilation, inspect the last completed
+step before treating it as a test failure. Repeated shutdowns at the same compile
+stage need a build-resource correction rather than repeated full-workflow retries.
+
 ### Rollup Health Triage
 
 Rollup-health watchdog issues are incident-routing records, not a second source
@@ -354,6 +362,8 @@ check evidence:
 - At least one approval is required before merge
 - All CI checks must pass (see above)
 - Security-sensitive changes require explicit security review
+- Merge branch-sync PRs with **Create a merge commit**. Squashing drops the
+  merged branch's ancestry, so GitHub can still report the same conflicts.
 
 ---
 

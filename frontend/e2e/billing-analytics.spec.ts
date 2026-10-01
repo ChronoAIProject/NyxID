@@ -165,6 +165,130 @@ test("Operations adds and restores more than twelve panels and loads charts as t
   ).toHaveAttribute("aria-pressed", "true");
 });
 
+test("Operations drag resizing persists and exposes twenty chart colors", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1600, height: 900 });
+  await page.goto("/admin/usage?mock=1&sample=operations");
+  const panel = page.locator(".analytics-grid-item").first();
+  const grip = page.getByRole("button", { name: "Resize Request traffic" });
+  await expect(grip).toBeVisible();
+  await grip.scrollIntoViewIfNeeded();
+  await expect(grip).toHaveCSS("opacity", "0");
+  const width = (await panel.boundingBox())!.width;
+  const box = (await grip.boundingBox())!;
+  await page.mouse.move(box.x - 12, box.y + box.height / 2);
+  await expect(grip).toHaveCSS("opacity", "1");
+  expect(
+    await page.evaluate(
+      ({ x, y }) =>
+        document
+          .elementFromPoint(x, y)
+          ?.closest("button")
+          ?.getAttribute("aria-label"),
+      { x: box.x + box.width / 2, y: box.y + box.height / 2 },
+    ),
+  ).toBe("Resize Request traffic");
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await expect(panel).toHaveAttribute("data-resizing", "true");
+  await page.mouse.move(
+    box.x + box.width / 2 + width + 12,
+    box.y + box.height / 2 + 80,
+    {
+      steps: 8,
+    },
+  );
+  await expect(panel).toHaveAttribute("data-span", "2");
+  await page.mouse.up();
+  await expect(panel.locator(".analytics-plot")).toHaveCSS("height", "280px");
+  await expect(
+    page.getByRole("status", { name: "Workspace save status" }),
+  ).toContainText("Saved in this browser");
+  await page.reload();
+  await expect(page.locator(".analytics-grid-item").first()).toHaveAttribute(
+    "data-span",
+    "2",
+  );
+  await expect(
+    page.locator(".analytics-grid-item").first().locator(".analytics-plot"),
+  ).toHaveCSS("height", "280px");
+
+  await page.getByRole("button", { name: "Configure Request traffic" }).click();
+  await select(page, "Show", "Top 20 + Other");
+  await page.evaluate(() => {
+    document.documentElement.classList.remove("theme-light");
+    document.documentElement.classList.add("theme-dark");
+  });
+  const colors = await page
+    .locator(".analytics-chart")
+    .first()
+    .evaluate((chart) => {
+      const style = getComputedStyle(chart);
+      return Array.from({ length: 20 }, (_, index) =>
+        style.getPropertyValue(`--analytics-series-${index + 1}`).trim(),
+      );
+    });
+  expect(colors.every(Boolean)).toBe(true);
+  expect(new Set(colors).size).toBe(20);
+  const appliedColors = await page
+    .locator(".analytics-grid-item")
+    .first()
+    .locator(".analytics-chart span.rounded-full")
+    .evaluateAll((dots) =>
+      dots.map((dot) => getComputedStyle(dot).backgroundColor),
+    );
+  expect(new Set(appliedColors).size).toBeGreaterThan(1);
+  const lightColors = await page
+    .locator(".analytics-chart")
+    .first()
+    .evaluate((chart) => {
+      document.documentElement.classList.remove("theme-dark");
+      document.documentElement.classList.add("theme-light");
+      const style = getComputedStyle(chart);
+      return Array.from({ length: 20 }, (_, index) =>
+        style.getPropertyValue(`--analytics-series-${index + 1}`).trim(),
+      );
+    });
+  expect(new Set(lightColors).size).toBe(20);
+  expect(lightColors).not.toEqual(colors);
+});
+
+test("panel handles and options show action tooltips", async ({ page }) => {
+  await page.goto("/admin/usage?mock=1&sample=operations");
+  const drag = page.getByRole("button", { name: "Drag Request traffic" });
+  await drag.scrollIntoViewIfNeeded();
+  await expect(drag).toHaveCSS("opacity", "0");
+  const dragBox = (await drag.boundingBox())!;
+  await page.mouse.move(dragBox.x - 12, dragBox.y + dragBox.height / 2);
+  await expect(drag).toHaveCSS("opacity", "1");
+  await drag.hover();
+  await expect(page.getByRole("tooltip")).toHaveText("Drag to reorder");
+  await page.mouse.move(0, 0, { steps: 10 });
+  await expect(page.getByRole("tooltip")).toHaveCount(0);
+
+  const resize = page.getByRole("button", { name: "Resize Request traffic" });
+  await resize.scrollIntoViewIfNeeded();
+  const resizeBox = (await resize.boundingBox())!;
+  await page.mouse.move(resizeBox.x - 12, resizeBox.y + resizeBox.height / 2);
+  await expect(resize).toHaveCSS("opacity", "1");
+  await expect(resize.locator("svg")).toHaveClass(/lucide-move-diagonal-2/);
+  await resize.hover();
+  await expect(page.getByRole("tooltip")).toHaveText("Drag to resize");
+  await page.mouse.move(0, 0, { steps: 10 });
+  await expect(page.getByRole("tooltip")).toHaveCount(0);
+
+  const options = page.getByRole("button", {
+    name: "Configure Request traffic",
+  });
+  await options.hover();
+  await expect(page.getByRole("tooltip")).toHaveText("Panel options");
+  await options.click();
+  await expect(
+    page.getByRole("combobox", { name: "Panel width" }),
+  ).toBeVisible();
+});
+
 for (const choice of ["Use saved view", "Restore recovered draft"] as const) {
   test(`an incomplete recovered draft keeps charts visible until ${choice}`, async ({
     page,
@@ -662,3 +786,204 @@ test("chart tooltip values and axis labels have readable contrast in both themes
     await expect(tooltip).not.toHaveText(/undefined|NaN/);
   }
 });
+
+for (const chart of ["bar", "line", "combo", "pie"] as const) {
+  test(`${chart} keeps exact credit labels and tooltips with twenty colors and resizing`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1600, height: 1000 });
+    let workspace: WorkspaceResponse = {
+      revision: 0,
+      config: {
+        version: 1,
+        saved_views: [],
+        draft: {
+          id: "00000000-0000-4000-8000-000000000101",
+          name: "Exact accounting",
+          layout: "operations",
+          filters: {
+            period: "24h",
+            from: null,
+            to: null,
+            services: [],
+            actors: [],
+            owners: [],
+          },
+          panels: [
+            {
+              id: "00000000-0000-4000-8000-000000000102",
+              title: "Exact credits",
+              chart,
+              measure: "cost",
+              metric: "requests",
+              breakdown: "service",
+              top: 20,
+              wide: false,
+              span: 1,
+              height: "compact",
+            },
+          ],
+        },
+      },
+    };
+    await page.route("**/api/v1/admin/usage/workspace", async (route) => {
+      if (route.request().method() === "PUT") {
+        workspace = {
+          revision: workspace.revision + 1,
+          config: route.request().postDataJSON().config,
+        };
+      }
+      await route.fulfill({ json: workspace });
+    });
+    const points = Array.from({ length: 21 }, (_, index) => ({
+      bucket: "2026-09-23T00:00:00Z",
+      // Deliberately stale compatibility amounts must never override exact fields.
+      value: 1,
+      exact_value:
+        index === 0
+          ? "9007199254.740993"
+          : index === 1
+            ? null
+            : "0.000000000001",
+      requests: 1,
+      unknown_cost_events: index === 1 ? 1 : 0,
+    }));
+    await page.route("**/api/v1/admin/usage/analytics?**", (route) =>
+      route.fulfill({
+        json: {
+          window: {
+            from: "2026-09-23T00:00:00Z",
+            to: "2026-09-24T00:00:00Z",
+            period: "24h",
+          },
+          freshness: {
+            rolled_up_through: "2026-09-23T00:00:00Z",
+            tail_rows: 0,
+            validated: true,
+          },
+          granularity: "hour",
+          unit: "microcredits",
+          total: 21,
+          exact_total: null,
+          totals: {
+            requests: 21,
+            events: 21,
+            quantities: {},
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            cached_tokens: 0,
+            cache_creation_tokens: 0,
+            total_tokens: 0,
+            gross_cost_micros: 21,
+            wallet_cost_micros: 21,
+            grant_cost_micros: 0,
+            allowance_cost_micros: 0,
+            gross_cost: null,
+            wallet_cost: null,
+            grant_cost: "0",
+            allowance_cost: "0",
+            exact_cost_events: 20,
+            legacy_cost_events: 0,
+            unknown_cost_events: 1,
+            unique_users: 1,
+            unique_services: 21,
+          },
+          points: [
+            {
+              ...points[0],
+              value: 21,
+              exact_value: null,
+              requests: 21,
+              unknown_cost_events: 1,
+            },
+          ],
+          series: points.map((point, index) => ({
+            label: `Service ${index}`,
+            is_other: index === 20,
+            points: [point],
+          })),
+          slices: points.map((point, index) => ({
+            ...point,
+            id: null,
+            label: `Service ${index}`,
+            is_other: index === 20,
+          })),
+        },
+      }),
+    );
+    await page.goto("/admin/usage?mock=1");
+    const panel = page.getByRole("article", {
+      name: "Exact credits",
+      exact: true,
+    });
+    await expect(
+      panel.locator('[title="Service 0: 9,007,199,254.740993 credits"]'),
+    ).toBeVisible();
+    await expect(
+      panel.locator('[title="Service 1: Unknown credits"]'),
+    ).toBeVisible();
+    await expect(
+      panel.locator('[title="Service 2: <0.000001 credits"]'),
+    ).toBeVisible();
+    const colors = await panel
+      .locator(".analytics-chart span.rounded-full")
+      .evaluateAll((dots) =>
+        dots.map((dot) => getComputedStyle(dot).backgroundColor),
+      );
+    expect(new Set(colors).size).toBe(21);
+    const target = panel
+      .locator(
+        chart === "pie"
+          ? ".recharts-pie-sector"
+          : chart === "line"
+            ? ".recharts-area-dot"
+            : ".recharts-bar-rectangle",
+      )
+      .first();
+    if (chart === "pie") {
+      // Find a painted point: the donut center and the padding gaps are empty.
+      const point = await target.evaluate((sector) => {
+        const box = sector.getBoundingClientRect();
+        for (const dx of [0.04, 0.2, 0.5, 0.8, 0.96]) {
+          for (const dy of [0.04, 0.2, 0.5, 0.8, 0.96]) {
+            const x = box.x + box.width * dx,
+              y = box.y + box.height * dy;
+            if (sector.contains(document.elementFromPoint(x, y)))
+              return { x, y };
+          }
+        }
+        throw new Error("The first donut slice has no painted hover target");
+      });
+      await page.mouse.move(point.x, point.y);
+    } else {
+      await target.hover();
+    }
+    await expect(panel.locator(".recharts-tooltip-wrapper")).toContainText(
+      "9,007,199,254.740993 credits",
+    );
+    await page.mouse.move(0, 0);
+    const resize = page.getByRole("button", { name: "Resize Exact credits" });
+    await resize.focus();
+    await page.keyboard.press("ArrowRight");
+    await page.keyboard.press("ArrowDown");
+    await expect(panel.locator(".analytics-plot")).toHaveCSS("height", "280px");
+    await expect(
+      page.getByRole("status", { name: "Workspace save status" }),
+    ).toHaveText("All changes saved");
+    await page.reload();
+    await expect(page.locator(".analytics-grid-item")).toHaveAttribute(
+      "data-span",
+      "2",
+    );
+    await expect(panel.locator(".analytics-plot")).toHaveCSS("height", "280px");
+    await expect(
+      panel.locator('[title="Service 0: 9,007,199,254.740993 credits"]'),
+    ).toBeVisible();
+    await panel.getByText("View data table", { exact: true }).click();
+    await expect(panel.getByRole("table")).toContainText(
+      "9,007,199,254.740993",
+    );
+    await expect(panel.getByRole("table")).toContainText("Unknown");
+    await expect(panel.getByRole("table")).toContainText("<0.000001");
+  });
+}

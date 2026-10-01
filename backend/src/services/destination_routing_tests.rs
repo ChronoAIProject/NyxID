@@ -848,6 +848,7 @@ async fn workspace_node_v2_reaches_target_and_refuses_legacy_capability() {
         "node",
         &NodeCapabilitiesMsg {
             http_signature_v2: true,
+            http_cancellation: false,
             ..Default::default()
         },
     );

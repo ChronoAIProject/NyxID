@@ -104,6 +104,7 @@ impl NodeDispatch {
             capabilities_resolved: owner.capabilities_resolved,
             capabilities: crate::services::node_ws_manager::NodeCapabilitiesFlags {
                 http_signature_v2: owner.http_signature_v2,
+                http_cancellation: owner.http_cancellation,
                 credential_ack_correlation: owner.credential_ack_correlation,
                 remote_credential_crypto_v1: owner.remote_credential_crypto_v1,
                 proxy_max_body_size: owner.proxy_max_body_size,
@@ -326,7 +327,7 @@ impl NodeDispatch {
                 }
             }
         });
-        Ok(ProxyResponseType::Streaming(rx))
+        Ok(ProxyResponseType::Streaming(rx.into()))
     }
 
     pub(crate) async fn exec_ssh_command(
@@ -2156,6 +2157,7 @@ mod tests {
         let now = Utc::now();
         NodeConnectionOwner {
             http_signature_v2: false,
+            http_cancellation: false,
             instance_name: instance_name.to_string(),
             generation_id: generation_id.to_string(),
             connection_id: "connection-a".to_string(),

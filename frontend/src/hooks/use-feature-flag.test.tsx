@@ -111,11 +111,19 @@ describe("feature flag catalog", () => {
   // failing. Pinning the literals makes a rename a deliberate two-sided edit.
   it("pins the backend registry key literals", () => {
     expect(FEATURE_FLAG).toEqual({
+      INVITATION_CODE: "auth:invitation-code",
       AI_ASSISTANT: "experimental:ai-assistant",
       NYXAGENT_ENGINE: "assistant:nyxagent-engine",
       BILLING: "experimental:billing",
       AEVATAR_CHAT_WIRE_LOG: "experimental:aevatar-chat-wire-log",
       DIRECT_CHAT_ENGINE: "experimental:direct-chat-engine",
+      NYXBOT_GATEWAY_LARK: "nyxbot:gateway-lark",
+      NYXBOT_GATEWAY_FEISHU: "nyxbot:gateway-feishu",
+      NYXBOT_GATEWAY_DISCORD: "nyxbot:gateway-discord",
+      NYXBOT_GATEWAY_SLACK: "nyxbot:gateway-slack",
+      NYXBOT_GATEWAY_WHATSAPP: "nyxbot:gateway-whatsapp",
+      NYXBOT_GATEWAY_X: "nyxbot:gateway-x",
+      NYXBOT_GATEWAY_AURINKO: "nyxbot:gateway-aurinko",
     });
   });
 });

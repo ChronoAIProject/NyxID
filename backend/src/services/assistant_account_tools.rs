@@ -48,6 +48,23 @@ pub const TOOL_NAMES: &[&str] = &[
 const MAX_ITEMS: usize = 100;
 const MAX_RESULT_BYTES: usize = 64 * 1024;
 
+/// Read-only tools a subagent may use with an `account_read` grant.
+pub fn read_only(name: &str) -> bool {
+    matches!(
+        name,
+        "list_agent_keys"
+            | "get_agent_key"
+            | "list_agent_key_bindings"
+            | "list_channel_bots"
+            | "get_channel_bot"
+            | "list_channel_routes"
+            | "list_my_services"
+            | "list_nodes"
+            | "list_approval_configs"
+            | "list_pending_approvals"
+    )
+}
+
 pub fn destructive(name: &str) -> bool {
     matches!(
         name,
@@ -162,7 +179,7 @@ pub fn schema(name: &str) -> Value {
         }
         _ => {}
     }
-    if destructive(name) {
+    if !read_only(name) {
         add("acknowledgement_id", string, false);
     }
     json!({"type": "object", "properties": props, "required": required, "additionalProperties": false})
@@ -183,13 +200,19 @@ fn description(name: &str) -> String {
                 service. Never enter a raw credential."
         }
         "unbind_agent_key_credential" => "Delete an agent credential binding.",
-        "list_channel_bots" => "List channel bots without credentials or tokens.",
+        "list_channel_bots" => {
+            "List the user's channel bots and those of organizations they administer (owner: \
+            personal or the org), without credentials or tokens."
+        }
         "get_channel_bot" => "Inspect a channel bot's non-secret settings.",
         "update_channel_bot" => {
             "Update a channel bot label or public app id. Enter credentials in the UI."
         }
         "delete_channel_bot" => "Delete a channel bot and its routes.",
-        "list_channel_routes" => "List conversation-to-agent channel routes.",
+        "list_channel_routes" => {
+            "List conversation-to-agent channel routes of the user's bots and their \
+            administered organizations' bots (or of one bot)."
+        }
         "set_channel_route" => {
             "Create or update a bot conversation's agent route and \
                 default/agent-initiated settings. Assistant chat keys cannot be \
@@ -209,26 +232,49 @@ fn description(name: &str) -> String {
         _ => "Unknown account tool.",
     };
     format!(
-        "{purpose} {} In Ask mode, requires this chat's account acknowledgement. Key \
-                creation/rotation, credentials, approval decisions, org \
+        "{purpose} {} Key creation/rotation, credentials, approval decisions, org \
                 administration and billing are available only in the UI.",
         if destructive(name) {
-            "Destructive: Ask mode also requires a single-use action acknowledgement."
+            "Destructive: unless the user turned confirmations off, NyxID first shows \
+            the user a single-use confirmation card; retry with its acknowledgement_id."
         } else {
             "Non-destructive."
         }
     )
 }
 
-pub fn virtual_service() -> McpToolService {
+/// The native `nyxid` service for one thread key. NyxBot gets every account
+/// tool plus the team tools; specialists get read-only account tools. Every
+/// agent gets its memory tools.
+pub fn virtual_service(chat: &acks::ChatAuthority) -> McpToolService {
+    let mut service = account_service();
+    if chat.is_orchestrator() {
+        service
+            .endpoints
+            .extend(super::assistant_team_tools::endpoints());
+    } else {
+        service
+            .endpoints
+            .retain(|endpoint| read_only(&endpoint.name));
+        service.description = Some(
+            "Read the user's NyxID account (specialist: read-only, with NyxBot's grant) and \
+            manage your memory."
+                .into(),
+        );
+    }
+    service
+        .endpoints
+        .extend(super::assistant_team_tools::agent_endpoints());
+    service
+}
+
+fn account_service() -> McpToolService {
     McpToolService {
         workspace_destinations_pending: false,
         service_id: "nyxid".into(),
         service_name: "NyxID account".into(),
         service_slug: "nyxid".into(),
-        description: Some(
-            "Manage your NyxID account with this chat's human acknowledgement.".into(),
-        ),
+        description: Some("Manage your NyxID account and your NyxBot team.".into()),
         service_category: "internal".into(),
         source: McpToolSource::Internal,
         executable: true,
@@ -337,6 +383,9 @@ pub struct AccountTools<'a> {
 pub struct ToolResult {
     pub value: Value,
     pub is_error: bool,
+    /// A new permission request routed to the orchestrator, for notification.
+    pub permission_request:
+        Option<crate::models::assistant_acknowledgement::AssistantAcknowledgement>,
 }
 impl std::fmt::Debug for ToolResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -350,9 +399,16 @@ pub fn error_result(error: AppError) -> ToolResult {
         AppError::NotFound(_) | AppError::NodeNotFound(_) | AppError::ChannelBotNotFound(_) => {
             "Resource not found."
         }
-        AppError::ValidationError(_) => {
-            "Invalid account tool arguments or target. Assistant chat keys \
-                cannot be modified or used as route agents."
+        // Validation messages are written for the caller: the agent needs
+        // them to fix its request or tell the user what cannot be done.
+        AppError::ValidationError(message) => {
+            let message: String = message.chars().take(300).collect();
+            return ToolResult {
+                permission_request: None,
+                is_error: true,
+                value: json!({"error": body.error, "error_code": body.error_code,
+                    "message": message}),
+            };
         }
         AppError::Forbidden(_) | AppError::Unauthorized(_) => {
             "This operation requires a conversation key and human acknowledgement."
@@ -363,6 +419,7 @@ pub fn error_result(error: AppError) -> ToolResult {
         _ => "The account operation could not be completed. Review it in the NyxID UI.",
     };
     ToolResult {
+        permission_request: None,
         is_error: true,
         value: json!({"error": body.error, "error_code": body.error_code, "message": message}),
     }
@@ -397,6 +454,20 @@ fn bot_view(bot: &ChannelBot) -> Value {
     json!({"id": bot.id, "label": short(&bot.label), "platform": bot.platform,
         "is_active": bot.is_active, "status": bot.status, "webhook_registered": bot.webhook_registered})
 }
+/// A bot with who owns it: `personal`, or the organization's id and name.
+fn owned_bot_view(
+    bot: &ChannelBot,
+    user: &str,
+    orgs: &std::collections::HashMap<String, String>,
+) -> Value {
+    let mut view = bot_view(bot);
+    view["owner"] = if bot.user_id == user {
+        json!({"type": "personal"})
+    } else {
+        json!({"type": "org", "org_id": bot.user_id, "org_name": orgs.get(&bot.user_id)})
+    };
+    view
+}
 fn route_view(row: &ChannelConversation) -> Value {
     json!({"id": row.id, "channel_bot_id": row.channel_bot_id,
         "platform": row.platform, "platform_conversation_id": short(&row.platform_conversation_id),
@@ -412,11 +483,11 @@ impl AccountTools<'_> {
         } else {
             Ok(None)
         };
-        let access_mode = chat
+        let role = chat
             .as_ref()
             .ok()
             .and_then(|chat| chat.as_ref())
-            .map(|chat| chat.access_mode);
+            .map(|chat| chat.role);
         let conversation_id = chat
             .as_ref()
             .ok()
@@ -449,7 +520,7 @@ impl AccountTools<'_> {
                 } else {
                     "unknown"
                 },
-                "access_mode": access_mode,
+                "role": role,
                 "target_id": target,
                 "outcome": if result.is_error {"refused"} else {"success"},
                 "acknowledgement_id": acknowledgement}),
@@ -469,20 +540,52 @@ impl AccountTools<'_> {
         let name = tool_name.strip_prefix("nyxid__").unwrap_or_default();
         validate_arguments(name, args)?;
         super::assistant_nyxagent::require_enabled(self.db, &chat.user_id).await?;
-        if let Some(refusal) = acks::account_gate(self.db, chat).await? {
+        if !chat.is_orchestrator() && !read_only(name) {
             return Ok(ToolResult {
+                permission_request: None,
+                is_error: true,
+                value: json!({
+                    "error": "orchestrator_only",
+                    "instructions": "Only the orchestrator can change or delete account \
+                        resources. Report what should change in your reply instead.",
+                }),
+            });
+        }
+        if let Some((refusal, request)) = acks::account_gate(self.db, chat).await? {
+            return Ok(ToolResult {
+                value: refusal,
+                is_error: true,
+                permission_request: request,
+            });
+        }
+        if let Some(refusal) = acks::webhook_action_gate(
+            self.db,
+            chat,
+            tool_name,
+            args,
+            read_only(name),
+            destructive(name),
+        )
+        .await?
+        {
+            return Ok(ToolResult {
+                permission_request: None,
                 value: refusal,
                 is_error: true,
             });
         }
         if destructive(name)
-            && chat.access_mode != crate::models::assistant_conversation::AccessMode::Full
+            && chat.confirmation_policy.is_none()
+            && !super::assistant_settings_service::get(self.db, &chat.user_id)
+                .await?
+                .skip_destructive_confirmation
         {
             // Resolve ownership and a human-readable summary before requesting authority.
             let summary = self.action_summary(&chat.user_id, name, args).await?;
             if let Some(id) = args["acknowledgement_id"].as_str() {
                 if !acks::consume_action(self.db, chat, id, tool_name, args).await? {
                     return Ok(ToolResult {
+                        permission_request: None,
                         is_error: true,
                         value: json!({
                             "error": "acknowledgement_invalid", "kind": "action",
@@ -507,6 +610,7 @@ impl AccountTools<'_> {
                 )
                 .await?;
                 return Ok(ToolResult {
+                    permission_request: None,
                     value: acks::refusal(&row),
                     is_error: true,
                 });
@@ -514,6 +618,7 @@ impl AccountTools<'_> {
         }
         let value = Box::pin(self.dispatch(&chat.user_id, auth, name, args)).await?;
         Ok(ToolResult {
+            permission_request: None,
             value,
             is_error: false,
         })
@@ -537,6 +642,92 @@ impl AccountTools<'_> {
             .find_one(doc! {"_id": id, "user_id": user, "is_active": true})
             .await?
             .ok_or_else(|| AppError::NotFound("Channel route not found".into()))
+    }
+
+    /// Whether `user` manages resources of `owner`: themselves, or an
+    /// organization they administer (the rule for managing org channel bots).
+    async fn manages(&self, user: &str, owner: &str) -> AppResult<bool> {
+        if user == owner {
+            return Ok(true);
+        }
+        Ok(matches!(
+            crate::services::org_service::resolve_owner_access(self.db, user, owner).await?,
+            crate::services::org_service::OwnerAccess::AsOrgAdmin { .. }
+        ))
+    }
+
+    /// A channel bot the user manages: theirs or an administered org's.
+    async fn managed_bot(&self, user: &str, id: &str) -> AppResult<ChannelBot> {
+        let bot = channel_bot_service::get_bot(self.db, id).await?;
+        if self.manages(user, &bot.user_id).await? {
+            Ok(bot)
+        } else {
+            Err(AppError::ChannelBotNotFound(id.to_string()))
+        }
+    }
+
+    /// An active route the user manages: theirs or an administered org's.
+    async fn managed_route(&self, user: &str, id: &str) -> AppResult<ChannelConversation> {
+        let route = self
+            .db
+            .collection::<ChannelConversation>(crate::models::channel_conversation::COLLECTION_NAME)
+            .find_one(doc! {"_id": id, "is_active": true})
+            .await?
+            .ok_or_else(|| AppError::NotFound("Channel route not found".into()))?;
+        if self.manages(user, &route.user_id).await? {
+            Ok(route)
+        } else {
+            Err(AppError::NotFound("Channel route not found".into()))
+        }
+    }
+
+    /// "organization X's " for an org-owned resource, else nothing: a
+    /// confirmation card must say when it touches a shared org resource.
+    async fn org_prefix(&self, user: &str, owner: &str) -> AppResult<String> {
+        if owner == user {
+            return Ok(String::new());
+        }
+        let names = self.org_names(user, [owner.to_owned()]).await?;
+        Ok(format!(
+            "organization '{}' ",
+            names.get(owner).cloned().unwrap_or_else(|| short(owner))
+        ))
+    }
+
+    /// Names of the organizations among `owner_ids` (other than `user`).
+    async fn org_names(
+        &self,
+        user: &str,
+        owner_ids: impl IntoIterator<Item = String>,
+    ) -> AppResult<std::collections::HashMap<String, String>> {
+        use futures::TryStreamExt;
+        let ids: Vec<String> = owner_ids
+            .into_iter()
+            .filter(|id| id != user)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        if ids.is_empty() {
+            return Ok(Default::default());
+        }
+        let orgs: Vec<crate::models::user::User> = self
+            .db
+            .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .find(doc! {"_id": {"$in": ids}, "user_type": "org"})
+            .await?
+            .try_collect()
+            .await?;
+        Ok(orgs
+            .into_iter()
+            .map(|org| {
+                let name = org
+                    .display_name
+                    .clone()
+                    .or(org.slug.clone())
+                    .unwrap_or_else(|| org.id.clone());
+                (org.id, short(&name))
+            })
+            .collect())
     }
 
     async fn action_summary(&self, user: &str, name: &str, args: &Value) -> AppResult<String> {
@@ -564,15 +755,18 @@ impl AccountTools<'_> {
                 )
             }
             "delete_channel_bot" => {
-                let bot =
-                    channel_bot_service::get_bot_for_user(self.db, text(args, "bot_id"), user)
-                        .await?;
-                format!("Delete channel bot '{}'", short(&bot.label))
+                let bot = self.managed_bot(user, text(args, "bot_id")).await?;
+                format!(
+                    "Delete {}channel bot '{}' and all its routes",
+                    self.org_prefix(user, &bot.user_id).await?,
+                    short(&bot.label)
+                )
             }
             "delete_channel_route" => {
-                let route = self.own_route(user, text(args, "route_id")).await?;
+                let route = self.managed_route(user, text(args, "route_id")).await?;
                 format!(
-                    "Delete channel route '{}'",
+                    "Delete {}channel route '{}'",
+                    self.org_prefix(user, &route.user_id).await?,
                     short(&route.platform_conversation_id)
                 )
             }
@@ -710,20 +904,27 @@ impl AccountTools<'_> {
                 .await?;
                 Ok(json!({"deleted": true}))
             }
-            "list_channel_bots" => Ok(bounded_list(
-                channel_bot_service::list_bots(self.db, user)
-                    .await?
-                    .iter()
-                    .map(bot_view)
-                    .collect(),
-            )),
-            "get_channel_bot" => Ok(bot_view(
-                &channel_bot_service::get_bot_for_user(self.db, text(args, "bot_id"), user).await?,
-            )),
+            "list_channel_bots" => {
+                // The user's own bots and those of organizations they administer.
+                let bots = channel_bot_service::list_all_bots(self.db, user).await?;
+                let orgs = self
+                    .org_names(user, bots.iter().map(|bot| bot.user_id.clone()))
+                    .await?;
+                Ok(bounded_list(
+                    bots.iter()
+                        .map(|bot| owned_bot_view(bot, user, &orgs))
+                        .collect(),
+                ))
+            }
+            "get_channel_bot" => {
+                let bot = self.managed_bot(user, text(args, "bot_id")).await?;
+                let orgs = self.org_names(user, [bot.user_id.clone()]).await?;
+                Ok(owned_bot_view(&bot, user, &orgs))
+            }
             "update_channel_bot" | "delete_channel_bot" => {
-                let bot =
-                    channel_bot_service::get_bot_for_user(self.db, text(args, "bot_id"), user)
-                        .await?;
+                let bot = self.managed_bot(user, text(args, "bot_id")).await?;
+                // Org bots are managed as their org, like in the UI.
+                let user = bot.user_id.as_str();
                 let adapter =
                     channel_adapters::resolve_adapter(&bot.platform, self.token_exchange_cache)?;
                 if name == "delete_channel_bot" {
@@ -761,20 +962,24 @@ impl AccountTools<'_> {
                 }
             }
             "list_channel_routes" => {
-                if let Some(bot) = args["bot_id"].as_str() {
-                    channel_bot_service::get_bot_for_user(self.db, bot, user).await?;
+                // One bot's routes (under its owner), or every route the user
+                // manages: theirs and their administered orgs'.
+                let owners: Vec<String> = match args["bot_id"].as_str() {
+                    Some(bot) => vec![self.managed_bot(user, bot).await?.user_id],
+                    None => channel_bot_service::managed_owner_ids(self.db, user).await?,
+                };
+                let mut routes = Vec::new();
+                for owner in &owners {
+                    routes.extend(
+                        channel_routing_service::list_conversations(
+                            self.db,
+                            owner,
+                            args["bot_id"].as_str(),
+                        )
+                        .await?,
+                    );
                 }
-                Ok(bounded_list(
-                    channel_routing_service::list_conversations(
-                        self.db,
-                        user,
-                        args["bot_id"].as_str(),
-                    )
-                    .await?
-                    .iter()
-                    .map(route_view)
-                    .collect(),
-                ))
+                Ok(bounded_list(routes.iter().map(route_view).collect()))
             }
             "set_channel_route" => {
                 let key = self
@@ -822,8 +1027,8 @@ impl AccountTools<'_> {
                 Ok(route_view(&row))
             }
             "delete_channel_route" => {
-                self.own_route(user, text(args, "route_id")).await?;
-                channel_routing_service::delete_conversation(self.db, text(args, "route_id"), user)
+                let route = self.managed_route(user, text(args, "route_id")).await?;
+                channel_routing_service::delete_conversation(self.db, &route.id, &route.user_id)
                     .await?;
                 Ok(json!({"deleted": true}))
             }
@@ -972,5 +1177,43 @@ struct UuidSafe;
 impl UuidSafe {
     fn valid(id: &str) -> bool {
         uuid::Uuid::parse_str(id).is_ok()
+    }
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    /// NyxBot finds its own tools through search. A request to create an
+    /// agent for a connected service must surface agent creation first,
+    /// ahead of that service's many operations (the native service is listed
+    /// last, as in production).
+    #[test]
+    fn asking_for_an_agent_finds_agent_creation_first() {
+        let mut nyxid = account_service();
+        nyxid
+            .endpoints
+            .extend(super::super::assistant_team_tools::endpoints());
+        let mut home = account_service();
+        home.service_id = "home".into();
+        home.service_slug = "home-assistant-office".into();
+        home.service_name = "Home Assistant at office".into();
+        home.endpoints = (0..40)
+            .map(|i| McpToolEndpoint {
+                endpoint_id: format!("home{i}"),
+                name: format!("get_states_{i}"),
+                description: Some("Home Assistant REST API: read entity states".into()),
+                ..Default::default()
+            })
+            .collect();
+        let services = vec![home, nyxid];
+        for query in [
+            "create agent home assistant",
+            "create an agent",
+            "create agent only allowed to use one service",
+        ] {
+            let found = crate::services::mcp_service::search_all_tools(&services, query);
+            assert_eq!(found.matches[0].name, "nyxid__spawn_subagent", "{query}");
+        }
     }
 }

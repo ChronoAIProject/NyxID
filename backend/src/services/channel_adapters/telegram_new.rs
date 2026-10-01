@@ -135,6 +135,17 @@ impl PlatformAdapter for TelegramNewAdapter {
             .await
     }
 
+    async fn chat_title(
+        &self,
+        http: &reqwest::Client,
+        credentials: &BotCredentials<'_>,
+        conversation_id: &str,
+    ) -> AppResult<Option<String>> {
+        self.transport
+            .chat_title(http, credentials, conversation_id)
+            .await
+    }
+
     async fn send_reply(
         &self,
         http: &reqwest::Client,

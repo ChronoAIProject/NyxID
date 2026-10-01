@@ -944,6 +944,61 @@ impl PlatformAdapter for LarkFamilyAdapter {
         }
     }
 
+    async fn bot_user_id(
+        &self,
+        http: &reqwest::Client,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
+    ) -> AppResult<Option<String>> {
+        let Some((app_id, app_secret)) = credentials.token.split_once(':') else {
+            return Ok(None);
+        };
+        let token = zeroize::Zeroizing::new(
+            self.get_tenant_access_token(http, app_id, app_secret)
+                .await?,
+        );
+        let response = media::response_json(
+            http.get(format!("{}/open-apis/bot/v3/info", self.base_url))
+                .bearer_auth(token.as_str()),
+        )
+        .await?;
+        Ok(response["bot"]["open_id"]
+            .as_str()
+            .filter(|id| !id.is_empty() && id.len() <= 128)
+            .map(str::to_owned))
+    }
+
+    async fn chat_title(
+        &self,
+        http: &reqwest::Client,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
+        conversation_id: &str,
+    ) -> AppResult<Option<String>> {
+        if conversation_id.is_empty()
+            || conversation_id.len() > 128
+            || !conversation_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        {
+            return Ok(None);
+        }
+        let Some((app_id, app_secret)) = credentials.token.split_once(':') else {
+            return Ok(None);
+        };
+        let token = zeroize::Zeroizing::new(
+            self.get_tenant_access_token(http, app_id, app_secret)
+                .await?,
+        );
+        let response = media::response_json(
+            http.get(format!(
+                "{}/open-apis/im/v1/chats/{conversation_id}",
+                self.base_url
+            ))
+            .bearer_auth(token.as_str()),
+        )
+        .await?;
+        Ok(response["data"]["name"].as_str().map(str::to_owned))
+    }
+
     async fn fetch_attachment(
         &self,
         http: &reqwest::Client,

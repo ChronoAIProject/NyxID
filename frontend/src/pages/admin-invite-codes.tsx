@@ -16,6 +16,7 @@ import { ApiError } from "@/lib/api-client";
 import { cn, copyToClipboard, formatDate } from "@/lib/utils";
 import { canAdminWrite } from "@/types/api";
 import { useAuthStore } from "@/stores/auth-store";
+import { usePublicConfig } from "@/hooks/use-public-config";
 import { PageHeader } from "@/components/shared/page-header";
 import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -82,6 +83,7 @@ import { flattenRedemptions } from "./admin-invite-codes.helpers";
 const DEFAULT_MAX_USES = 10;
 
 export function AdminInviteCodesPage() {
+  const { data: publicConfig } = usePublicConfig();
   const currentUser = useAuthStore((s) => s.user);
   const canWrite = canAdminWrite(currentUser);
   const { data, isLoading, error } = useAdminInviteCodes();
@@ -272,9 +274,15 @@ export function AdminInviteCodesPage() {
       {noteReview.dialog}
       <PageHeader
         title="Invite Codes"
-        description="Create and manage invite codes that gate new user registration. Each code can grant a bounded number of registrations and can be deactivated at any time."
+        description="Create and manage invite codes for new user registration. Each code can grant a bounded number of registrations and can be deactivated at any time."
         actions={null}
       />
+      {publicConfig?.invite_code_required === false && (
+        <p role="status" className="text-sm text-muted-foreground">
+          Invitation codes are currently not required for signup. Enable the
+          invitation-code feature flag to require them again.
+        </p>
+      )}
 
       <Tabs value={view} onValueChange={setView}>
         <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between sm:gap-4">

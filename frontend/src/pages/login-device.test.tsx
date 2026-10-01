@@ -135,6 +135,33 @@ async function scope(flow: "device" | "agent-key" = "device") {
 const approvals = () =>
   mocks.post.mock.calls.filter(([path]) => String(path).includes("/approve"));
 describe("three-step device approval", () => {
+  it.each([
+    ["ABCD-EFGH", "ABCDEFGH", 8],
+    ["2ABC-DEFG", "2ABCDEFG", 9],
+    ["2-ABCD-EFGH", "2ABCDEFGH", 9],
+  ])(
+    "accepts a pasted %s code in segmented fields",
+    async (pasted, normalized, count) => {
+      mocks.query = "";
+      mount();
+      const group = screen.getByRole("group", { name: "User code" });
+      expect(within(group).getAllByRole("textbox")).toHaveLength(8);
+      await act(async () => {
+        fireEvent.paste(within(group).getAllByRole("textbox")[0]!, {
+          clipboardData: { getData: () => pasted },
+        });
+      });
+      expect(within(group).getAllByRole("textbox")).toHaveLength(count);
+      await click("Continue");
+      expect(mocks.preview).toHaveBeenCalledWith("/auth/device/preview", {
+        method: "POST",
+        body: { user_code: normalized },
+        credentials: "omit",
+        preserveSessionOn401: true,
+      });
+    },
+  );
+
   it("preserves collapsed details through step navigation and expands them on Review request", async () => {
     mocks.query += "&show_details=true";
     mount();

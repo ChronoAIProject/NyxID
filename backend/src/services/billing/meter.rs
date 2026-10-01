@@ -313,7 +313,7 @@ pub(super) async fn persist_settlement_intent(
     Ok(finalized_rows)
 }
 
-async fn materialize_component_intent(
+pub(super) async fn materialize_component_intent(
     db: &mongodb::Database,
     coordinator: &UsageMeterRow,
 ) -> AppResult<Vec<UsageMeterRow>> {
@@ -464,15 +464,14 @@ pub async fn fail(
     Ok(())
 }
 
-async fn insert_reserved_row(
-    db: &mongodb::Database,
+pub(super) fn reserved_row(
     ctx: &BillingRouteContext,
     layer: BillingLayer,
     metric: BillingMetric,
     lago_metric_code: String,
     reservation: Option<&BillingReservation>,
     flush_seq: Option<i64>,
-) -> AppResult<Option<String>> {
+) -> UsageMeterRow {
     let now = Utc::now();
     let transaction_id = if layer == BillingLayer::Platform {
         platform_transaction_id(ctx, &lago_metric_code, flush_seq)
@@ -487,7 +486,7 @@ async fn insert_reserved_row(
     let wallet_id = layer_reservation.and_then(|_| reservation.map(|r| r.wallet_id.clone()));
     let reserved_credits = layer_reservation
         .map(|item| item.reserved_credits)
-        .unwrap_or(0);
+        .unwrap_or(crate::models::credits::Credits::ZERO);
     let funding = layer_reservation.map(|item| {
         let layer = Some(item);
         UsageFunding {
@@ -504,7 +503,7 @@ async fn insert_reserved_row(
             ..Default::default()
         }
     });
-    let row = UsageMeterRow {
+    UsageMeterRow {
         rollup_pending: true,
         id: Uuid::new_v4().to_string(),
         transaction_id,
@@ -531,6 +530,7 @@ async fn insert_reserved_row(
         quantity: None,
         pending_resale_quantity: None,
         pending_platform_usage: None,
+        pool_attempt: ctx.pool_attempt.clone(),
         status: UsageStatus::Reserved,
         forwarded: false,
         released: false,
@@ -543,7 +543,19 @@ async fn insert_reserved_row(
         finalized_at: None,
         expires_at: None,
         last_error: None,
-    };
+    }
+}
+
+async fn insert_reserved_row(
+    db: &mongodb::Database,
+    ctx: &BillingRouteContext,
+    layer: BillingLayer,
+    metric: BillingMetric,
+    lago_metric_code: String,
+    reservation: Option<&BillingReservation>,
+    flush_seq: Option<i64>,
+) -> AppResult<Option<String>> {
+    let row = reserved_row(ctx, layer, metric, lago_metric_code, reservation, flush_seq);
 
     let inserted = db
         .collection::<UsageMeterRow>(USAGE_METER)
@@ -600,9 +612,24 @@ async fn finalize_matching(
     if let Some(resale_quantity) = pending_resale_quantity {
         set.insert("pending_resale_quantity", resale_quantity);
     }
+    // Known quantity and pool outcome commit in the same claim. Recovery of
+    // component/resale intents uses this boundary too; ordinary rows retain
+    // their absent/null pool metadata.
+    let mut literal_set = bson::Document::new();
+    for (key, value) in set {
+        literal_set.insert(key, doc! {"$literal":value});
+    }
+    literal_set.insert(
+        "pool_attempt",
+        doc! {"$cond":[
+            {"$eq":[{"$type":"$pool_attempt"},"object"]},
+            {"$mergeObjects":["$pool_attempt",{"outcome":"reported"}]},
+            "$pool_attempt"
+        ]},
+    );
     let collection = db.collection::<UsageMeterRow>(USAGE_METER);
     let claimed = collection
-        .find_one_and_update(filter, doc! { "$set": set })
+        .find_one_and_update(filter, vec![doc! { "$set": literal_set }])
         .with_options(
             mongodb::options::FindOneAndUpdateOptions::builder()
                 .return_document(mongodb::options::ReturnDocument::After)
@@ -617,7 +644,7 @@ async fn finalize_matching(
     Ok(Some(claimed))
 }
 
-async fn materialize_pending_resale_intent(
+pub(super) async fn materialize_pending_resale_intent(
     db: &mongodb::Database,
     coordinator: &UsageMeterRow,
 ) -> AppResult<Option<UsageMeterRow>> {
@@ -815,14 +842,18 @@ mod tests {
                 let platform_billable = ctx.service_platform_billable;
                 let ctx = ctx.with_platform_metering(platform_billable);
                 let reservation = if should_charge {
-                    crate::services::billing::reservation::try_reserve_prepaid(&db, &id, 5)
-                        .await
-                        .unwrap()
-                        .expect("reserved");
+                    crate::services::billing::reservation::try_reserve_prepaid(
+                        &db,
+                        &id,
+                        crate::models::credits::Credits::from_whole(5),
+                    )
+                    .await
+                    .unwrap()
+                    .expect("reserved");
                     Some(BillingReservation {
                         owner_id: id.clone(),
                         wallet_id: format!("wallet-{id}"),
-                        total_reserved_credits: 5,
+                        total_reserved_credits: crate::models::credits::Credits::from_whole(5),
                         layers: vec![crate::services::billing::reservation::LayerReservation {
                             metric: ctx.platform_metric,
                             lago_metric_code: ctx.platform_lago_metric_code.clone(),
@@ -830,7 +861,7 @@ mod tests {
                             estimated_quantity: 1,
                             credits_per_unit_micros: 5_000_000,
                             credits_per_unit_pico: None,
-                            reserved_credits: 5,
+                            reserved_credits: crate::models::credits::Credits::from_whole(5),
                             allowance_reservations: Vec::new(),
                             grant_reservations: Vec::new(),
                         }],
@@ -876,10 +907,13 @@ mod tests {
                     .await
                     .unwrap()
                     .unwrap();
-                assert_eq!(wallet.reserved_credits, 0);
+                assert_eq!(
+                    wallet.reserved_credits,
+                    crate::models::credits::Credits::from_whole(0)
+                );
                 assert_eq!(
                     wallet.pending_lago_debits,
-                    if should_charge { 5 } else { 0 }
+                    crate::models::credits::Credits::from_whole(if should_charge { 5 } else { 0 })
                 );
             }
         }
@@ -1061,7 +1095,7 @@ mod tests {
         let reservation = BillingReservation {
             owner_id: owner_id.to_string(),
             wallet_id: "wallet-owner-wallet-settle".to_string(),
-            total_reserved_credits: 5,
+            total_reserved_credits: crate::models::credits::Credits::from_whole(5),
             layers: vec![crate::services::billing::reservation::LayerReservation {
                 metric: ctx.platform_metric,
                 lago_metric_code: ctx.platform_lago_metric_code.clone(),
@@ -1069,15 +1103,19 @@ mod tests {
                 estimated_quantity: 1,
                 credits_per_unit_micros: 5_000_000,
                 credits_per_unit_pico: None,
-                reserved_credits: 5,
+                reserved_credits: crate::models::credits::Credits::from_whole(5),
                 allowance_reservations: Vec::new(),
                 grant_reservations: Vec::new(),
             }],
         };
-        crate::services::billing::reservation::try_reserve_prepaid(&db, owner_id, 5)
-            .await
-            .expect("reserve")
-            .expect("reserved");
+        crate::services::billing::reservation::try_reserve_prepaid(
+            &db,
+            owner_id,
+            crate::models::credits::Credits::from_whole(5),
+        )
+        .await
+        .expect("reserve")
+        .expect("reserved");
 
         let metered = open(&db, &ctx, Some(&reservation)).await.expect("open");
         mark_forwarded(&db, &metered).await.expect("mark forwarded");
@@ -1094,14 +1132,26 @@ mod tests {
             .await
             .expect("find wallet")
             .expect("wallet exists");
-        assert_eq!(wallet.reserved_credits, 0);
-        assert_eq!(wallet.pending_lago_debits, 5);
-        assert_eq!(wallet.available_credits(), 5);
+        assert_eq!(
+            wallet.reserved_credits,
+            crate::models::credits::Credits::from_whole(0)
+        );
+        assert_eq!(
+            wallet.pending_lago_debits,
+            crate::models::credits::Credits::from_whole(5)
+        );
+        assert_eq!(
+            wallet.available_credits().unwrap(),
+            crate::models::credits::Credits::from_whole(5)
+        );
 
-        let second_reservation =
-            crate::services::billing::reservation::try_reserve_prepaid(&db, owner_id, 6)
-                .await
-                .expect("second reserve query");
+        let second_reservation = crate::services::billing::reservation::try_reserve_prepaid(
+            &db,
+            owner_id,
+            crate::models::credits::Credits::from_whole(6),
+        )
+        .await
+        .expect("second reserve query");
         assert!(
             second_reservation.is_none(),
             "pending_lago_debits must reduce availability before Lago sync"
@@ -1116,16 +1166,20 @@ mod tests {
         create_usage_transaction_index(&db).await;
         let owner_id = "owner-pre-detachment-intent";
         insert_wallet(&db, owner_id, 10, 0).await;
-        crate::services::billing::reservation::try_reserve_prepaid(&db, owner_id, 5)
-            .await
-            .expect("reserve")
-            .expect("reserved");
+        crate::services::billing::reservation::try_reserve_prepaid(
+            &db,
+            owner_id,
+            crate::models::credits::Credits::from_whole(5),
+        )
+        .await
+        .expect("reserve")
+        .expect("reserved");
 
         let ctx = platform_context("billing-pre-detachment-intent", owner_id);
         let reservation = BillingReservation {
             owner_id: owner_id.to_string(),
             wallet_id: format!("wallet-{owner_id}"),
-            total_reserved_credits: 5,
+            total_reserved_credits: crate::models::credits::Credits::from_whole(5),
             layers: vec![crate::services::billing::reservation::LayerReservation {
                 metric: ctx.platform_metric,
                 lago_metric_code: ctx.platform_lago_metric_code.clone(),
@@ -1133,7 +1187,7 @@ mod tests {
                 estimated_quantity: 1,
                 credits_per_unit_micros: 5_000_000,
                 credits_per_unit_pico: None,
-                reserved_credits: 5,
+                reserved_credits: crate::models::credits::Credits::from_whole(5),
                 allowance_reservations: Vec::new(),
                 grant_reservations: Vec::new(),
             }],
@@ -1177,8 +1231,14 @@ mod tests {
             .await
             .expect("find wallet")
             .expect("wallet exists");
-        assert_eq!(wallet.reserved_credits, 0);
-        assert_eq!(wallet.pending_lago_debits, 5);
+        assert_eq!(
+            wallet.reserved_credits,
+            crate::models::credits::Credits::from_whole(0)
+        );
+        assert_eq!(
+            wallet.pending_lago_debits,
+            crate::models::credits::Credits::from_whole(5)
+        );
     }
 
     #[tokio::test]
@@ -1296,7 +1356,7 @@ mod tests {
         let reservation = BillingReservation {
             owner_id: owner_id.to_string(),
             wallet_id: "wallet-owner-wallet-recovery".to_string(),
-            total_reserved_credits: 5,
+            total_reserved_credits: crate::models::credits::Credits::from_whole(5),
             layers: vec![crate::services::billing::reservation::LayerReservation {
                 metric: ctx.platform_metric,
                 lago_metric_code: ctx.platform_lago_metric_code.clone(),
@@ -1304,15 +1364,19 @@ mod tests {
                 estimated_quantity: 1,
                 credits_per_unit_micros: 5_000_000,
                 credits_per_unit_pico: None,
-                reserved_credits: 5,
+                reserved_credits: crate::models::credits::Credits::from_whole(5),
                 allowance_reservations: Vec::new(),
                 grant_reservations: Vec::new(),
             }],
         };
-        crate::services::billing::reservation::try_reserve_prepaid(&db, owner_id, 5)
-            .await
-            .expect("reserve")
-            .expect("reserved");
+        crate::services::billing::reservation::try_reserve_prepaid(
+            &db,
+            owner_id,
+            crate::models::credits::Credits::from_whole(5),
+        )
+        .await
+        .expect("reserve")
+        .expect("reserved");
 
         let metered = open(&db, &ctx, Some(&reservation)).await.expect("open");
         mark_forwarded(&db, &metered).await.expect("mark forwarded");
@@ -1384,8 +1448,14 @@ mod tests {
             .expect("find row")
             .expect("row exists");
 
-        assert_eq!(wallet.reserved_credits, 0);
-        assert_eq!(wallet.pending_lago_debits, 5);
+        assert_eq!(
+            wallet.reserved_credits,
+            crate::models::credits::Credits::from_whole(0)
+        );
+        assert_eq!(
+            wallet.pending_lago_debits,
+            crate::models::credits::Credits::from_whole(5)
+        );
         assert!(!wallet_doc.contains_key("active_settlement"));
         assert!(!wallet_doc.contains_key("settled_usage_row_ids"));
         assert!(row.released);
@@ -1404,7 +1474,7 @@ mod tests {
         let reservation = BillingReservation {
             owner_id: owner_id.to_string(),
             wallet_id: "wallet-owner-fail-release".to_string(),
-            total_reserved_credits: 4,
+            total_reserved_credits: crate::models::credits::Credits::from_whole(4),
             layers: vec![crate::services::billing::reservation::LayerReservation {
                 metric: ctx.platform_metric,
                 lago_metric_code: ctx.platform_lago_metric_code.clone(),
@@ -1412,15 +1482,19 @@ mod tests {
                 estimated_quantity: 1,
                 credits_per_unit_micros: 4_000_000,
                 credits_per_unit_pico: None,
-                reserved_credits: 4,
+                reserved_credits: crate::models::credits::Credits::from_whole(4),
                 allowance_reservations: Vec::new(),
                 grant_reservations: Vec::new(),
             }],
         };
-        crate::services::billing::reservation::try_reserve_prepaid(&db, owner_id, 4)
-            .await
-            .expect("reserve")
-            .expect("reserved");
+        crate::services::billing::reservation::try_reserve_prepaid(
+            &db,
+            owner_id,
+            crate::models::credits::Credits::from_whole(4),
+        )
+        .await
+        .expect("reserve")
+        .expect("reserved");
 
         let metered = open(&db, &ctx, Some(&reservation)).await.expect("open");
         super::fail(&db, &metered, "before send")
@@ -1440,8 +1514,14 @@ mod tests {
             .expect("find row")
             .expect("row exists");
 
-        assert_eq!(wallet.reserved_credits, 0);
-        assert_eq!(wallet.pending_lago_debits, 0);
+        assert_eq!(
+            wallet.reserved_credits,
+            crate::models::credits::Credits::from_whole(0)
+        );
+        assert_eq!(
+            wallet.pending_lago_debits,
+            crate::models::credits::Credits::from_whole(0)
+        );
         assert_eq!(row.status, UsageStatus::Failed);
         assert!(row.released);
     }
@@ -1476,7 +1556,7 @@ mod tests {
         let reservation = BillingReservation {
             owner_id: owner_id.to_string(),
             wallet_id: format!("wallet-{owner_id}"),
-            total_reserved_credits: 5,
+            total_reserved_credits: crate::models::credits::Credits::from_whole(5),
             layers: vec![crate::services::billing::reservation::LayerReservation {
                 metric: ctx.platform_metric,
                 lago_metric_code: ctx.platform_lago_metric_code.clone(),
@@ -1484,15 +1564,19 @@ mod tests {
                 estimated_quantity: 1,
                 credits_per_unit_micros: 5_000_000,
                 credits_per_unit_pico: None,
-                reserved_credits: 5,
+                reserved_credits: crate::models::credits::Credits::from_whole(5),
                 allowance_reservations: Vec::new(),
                 grant_reservations: Vec::new(),
             }],
         };
-        crate::services::billing::reservation::try_reserve_prepaid(&db, owner_id, 5)
-            .await
-            .expect("reserve")
-            .expect("reserved");
+        crate::services::billing::reservation::try_reserve_prepaid(
+            &db,
+            owner_id,
+            crate::models::credits::Credits::from_whole(5),
+        )
+        .await
+        .expect("reserve")
+        .expect("reserved");
 
         let metered = open(&db, &ctx, Some(&reservation)).await.expect("open");
         mark_forwarded(&db, &metered).await.expect("mark forwarded");
@@ -1583,11 +1667,13 @@ mod tests {
             .expect("find wallet")
             .expect("wallet exists");
         assert_eq!(
-            wallet.reserved_credits, 0,
+            wallet.reserved_credits,
+            crate::models::credits::Credits::from_whole(0),
             "reserved_credits must not go negative (double-debit guard)"
         );
         assert_eq!(
-            wallet.pending_lago_debits, 5,
+            wallet.pending_lago_debits,
+            crate::models::credits::Credits::from_whole(5),
             "wallet must be debited exactly once, never twice"
         );
 
@@ -1615,16 +1701,20 @@ mod tests {
         insert_rate(&db, "platform_requests", 5).await;
         let owner_id = "owner-ledger-hook";
         insert_wallet(&db, owner_id, 10, 0).await;
-        crate::services::billing::reservation::try_reserve_prepaid(&db, owner_id, 5)
-            .await
-            .expect("reserve")
-            .expect("reserved");
+        crate::services::billing::reservation::try_reserve_prepaid(
+            &db,
+            owner_id,
+            crate::models::credits::Credits::from_whole(5),
+        )
+        .await
+        .expect("reserve")
+        .expect("reserved");
 
         let ctx = platform_context("billing-ledger-hook", owner_id);
         let reservation = BillingReservation {
             owner_id: owner_id.to_string(),
             wallet_id: format!("wallet-{owner_id}"),
-            total_reserved_credits: 5,
+            total_reserved_credits: crate::models::credits::Credits::from_whole(5),
             layers: vec![crate::services::billing::reservation::LayerReservation {
                 metric: ctx.platform_metric,
                 lago_metric_code: ctx.platform_lago_metric_code.clone(),
@@ -1632,7 +1722,7 @@ mod tests {
                 estimated_quantity: 1,
                 credits_per_unit_micros: 5_000_000,
                 credits_per_unit_pico: None,
-                reserved_credits: 5,
+                reserved_credits: crate::models::credits::Credits::from_whole(5),
                 allowance_reservations: Vec::new(),
                 grant_reservations: Vec::new(),
             }],
@@ -1684,11 +1774,15 @@ mod tests {
         let entry = &entries[0];
         assert_eq!(
             entry.event_type,
-            crate::models::billing_ledger::BillingLedgerEventType::UsageSettled
+            crate::models::billing_ledger::BillingLedgerEventType::AccountingV2
         );
+        assert_eq!(entry.movement.as_deref(), Some("usage_settled"));
         assert_eq!(entry.reference_id, row.id);
         assert_eq!(entry.quantity, Some(1));
-        assert_eq!(entry.amount_credits, Some(5));
+        assert_eq!(
+            entry.postings[0].amount,
+            crate::models::credits::Credits::from_whole(5)
+        );
 
         // Free metered traffic (no wallet) settles without a ledger entry.
         let free_ctx = platform_context("billing-ledger-free", "owner-ledger-free");
@@ -1735,16 +1829,20 @@ mod tests {
         create_usage_transaction_index(&db).await;
         let owner_id = "owner-settle-outbox";
         insert_wallet(&db, owner_id, 10, 0).await;
-        crate::services::billing::reservation::try_reserve_prepaid(&db, owner_id, 5)
-            .await
-            .expect("reserve")
-            .expect("reserved");
+        crate::services::billing::reservation::try_reserve_prepaid(
+            &db,
+            owner_id,
+            crate::models::credits::Credits::from_whole(5),
+        )
+        .await
+        .expect("reserve")
+        .expect("reserved");
 
         let ctx = platform_context("billing-settle-outbox", owner_id);
         let reservation = BillingReservation {
             owner_id: owner_id.to_string(),
             wallet_id: format!("wallet-{owner_id}"),
-            total_reserved_credits: 5,
+            total_reserved_credits: crate::models::credits::Credits::from_whole(5),
             layers: vec![crate::services::billing::reservation::LayerReservation {
                 metric: ctx.platform_metric,
                 lago_metric_code: ctx.platform_lago_metric_code.clone(),
@@ -1752,7 +1850,7 @@ mod tests {
                 estimated_quantity: 1,
                 credits_per_unit_micros: 5_000_000,
                 credits_per_unit_pico: None,
-                reserved_credits: 5,
+                reserved_credits: crate::models::credits::Credits::from_whole(5),
                 allowance_reservations: Vec::new(),
                 grant_reservations: Vec::new(),
             }],
@@ -1820,8 +1918,14 @@ mod tests {
         assert_eq!(saved.status, UsageStatus::Finalized);
         assert!(saved.released);
         assert!(saved.settlement_next_retry_at.is_none());
-        assert_eq!(wallet.reserved_credits, 0);
-        assert_eq!(wallet.pending_lago_debits, 5);
+        assert_eq!(
+            wallet.reserved_credits,
+            crate::models::credits::Credits::from_whole(0)
+        );
+        assert_eq!(
+            wallet.pending_lago_debits,
+            crate::models::credits::Credits::from_whole(5)
+        );
     }
 
     #[tokio::test]
@@ -1842,14 +1946,18 @@ mod tests {
             });
         insert_rate(&db, "input", 1).await;
         insert_rate(&db, "output", 1).await;
-        crate::services::billing::reservation::try_reserve_prepaid(&db, owner, 2)
-            .await
-            .unwrap()
-            .expect("reserve both components");
+        crate::services::billing::reservation::try_reserve_prepaid(
+            &db,
+            owner,
+            crate::models::credits::Credits::from_whole(2),
+        )
+        .await
+        .unwrap()
+        .expect("reserve both components");
         let reservation = BillingReservation {
             owner_id: owner.into(),
             wallet_id: format!("wallet-{owner}"),
-            total_reserved_credits: 2,
+            total_reserved_credits: crate::models::credits::Credits::from_whole(2),
             layers: ctx
                 .platform_specs()
                 .map(
@@ -1860,7 +1968,7 @@ mod tests {
                         estimated_quantity: 1,
                         credits_per_unit_micros: 1_000_000,
                         credits_per_unit_pico: None,
-                        reserved_credits: 1,
+                        reserved_credits: crate::models::credits::Credits::from_whole(1),
                         allowance_reservations: Vec::new(),
                         grant_reservations: Vec::new(),
                     },
@@ -1936,8 +2044,14 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(wallet.pending_lago_debits, 5);
-        assert_eq!(wallet.reserved_credits, 0);
+        assert_eq!(
+            wallet.pending_lago_debits,
+            crate::models::credits::Credits::from_whole(5)
+        );
+        assert_eq!(
+            wallet.reserved_credits,
+            crate::models::credits::Credits::from_whole(0)
+        );
         assert_eq!(
             collection
                 .count_documents(doc! { "released": true })
@@ -1976,6 +2090,7 @@ mod tests {
                 credits_per_unit_micros: credits * 1_000_000,
                 credits_per_unit_pico: None,
                 synced_at: Utc::now(),
+                retired_at: None,
             })
             .await
             .expect("insert rate");
@@ -1996,12 +2111,14 @@ mod tests {
                 lago_wallet_id: Some(format!("{owner_id}:wallet")),
                 lago_subscription_id: Some(format!("{owner_id}:plan")),
                 plan_kind: PlanKind::Prepaid,
-                balance_credits,
-                reserved_credits: 0,
-                pending_lago_debits: 0,
-                pending_topup_expiry_credits: 0,
+                balance_credits: crate::models::credits::Credits::from_whole(balance_credits),
+                reserved_credits: crate::models::credits::Credits::from_whole(0),
+                pending_lago_debits: crate::models::credits::Credits::from_whole(0),
+                pending_topup_expiry_credits: crate::models::credits::Credits::from_whole(0),
                 has_payment_instrument: false,
-                overdraft_cap_credits,
+                overdraft_cap_credits: crate::models::credits::Credits::from_whole(
+                    overdraft_cap_credits,
+                ),
                 suspended: false,
                 collection_state: CollectionState::Good,
                 topup_expiry_checked_at: None,

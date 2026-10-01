@@ -5,7 +5,10 @@ use uuid::Uuid;
 
 use crate::{
     errors::{AppError, AppResult},
-    models::{catalog_skill_revision::SkillState, downstream_service::COLLECTION_NAME},
+    models::{
+        catalog_skill_revision::SkillState,
+        downstream_service::{COLLECTION_NAME, DownstreamService},
+    },
 };
 
 /// Catalog fields visible to an editor. Queries never load credentials or instance data.
@@ -22,6 +25,20 @@ pub struct CatalogMetadata {
     pub skills: SkillState,
     #[serde(default)]
     pub skills_revision: i64,
+}
+
+impl CatalogMetadata {
+    pub fn from_committed(service: DownstreamService, skills: SkillState, revision: i64) -> Self {
+        Self {
+            id: service.id,
+            slug: service.slug,
+            name: service.name,
+            service_type: service.service_type,
+            is_active: service.is_active,
+            skills,
+            skills_revision: revision,
+        }
+    }
 }
 
 fn http_service_type() -> String {

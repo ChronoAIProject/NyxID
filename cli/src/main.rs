@@ -5,12 +5,14 @@ mod cli;
 mod clipboard;
 mod commands;
 mod error_format;
+mod net_diagnostics;
 pub mod node;
 pub mod org_resolver;
 mod skill_self_heal;
 mod telemetry;
 #[cfg(test)]
 mod test_support;
+mod tls;
 mod update_check;
 mod wizard;
 
@@ -19,8 +21,26 @@ use clap::Parser;
 
 use crate::cli::{Cli, Commands};
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    // rustls-native-certs 0.8 treats empty SSL_CERT_FILE as a selected path.
+    // Normalize empty CA variables before Tokio or any other worker starts.
+    for name in ["NYXID_CA_CERT", "SSL_CERT_FILE", "SSL_CERT_DIR"] {
+        if std::env::var_os(name).is_some_and(|value| value.is_empty()) {
+            // SAFETY: this is the single-threaded process entry point, before
+            // runtime construction, tracing, TLS, or any other initialization.
+            unsafe {
+                std::env::remove_var(name);
+            }
+        }
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("create CLI runtime")
+        .block_on(run_main());
+}
+
+async fn run_main() {
     // Pick a rustls CryptoProvider explicitly. With both `aws_lc_rs` and `ring`
     // enabled via feature unification (sigstore vs quinn/etc.), rustls cannot
     // auto-select and panics on first TLS use. See issue #696.
@@ -111,6 +131,14 @@ async fn main() {
     }
 
     if let Err(e) = result {
+        if let Some(error) = e.downcast_ref::<auth::login_exchange::LoginFailure>() {
+            if json_output_from_argv {
+                println!("{}", error.json());
+            } else {
+                eprintln!("{}", error.text());
+            }
+            std::process::exit(error.kind.exit_code());
+        }
         if let Some(error) = e.downcast_ref::<auth::login_exchange::LoginError>() {
             if json_output_from_argv {
                 println!("{}", error.json());
@@ -148,11 +176,12 @@ fn install_rustls_crypto_provider() {
 fn extract_profile(command: &Commands) -> Option<String> {
     // `AuthArgs` (profile-bearing struct) is flattened into many
     // subcommands; rather than enumerate all of them we peek at the
-    // one path we care about — the login command is the primary place
-    // profile is user-supplied. This is best-effort; telemetry tags
+    // login and diagnostic paths where profile selection matters here.
+    // This is best-effort; telemetry tags
     // without profile are acceptable.
     match command {
         Commands::Login(args) => args.profile.clone(),
+        Commands::Doctor(args) => args.profile.clone(),
         _ => None,
     }
 }

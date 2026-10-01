@@ -31,6 +31,7 @@ use crate::models::node_service_binding::{
 use crate::models::oauth_broker_binding::{
     COLLECTION_NAME as OAUTH_BROKER_BINDINGS, OauthBrokerBinding,
 };
+use crate::models::oauth_consent_request::COLLECTION_NAME as OAUTH_CONSENT_REQUESTS;
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
 use crate::models::pushed_authorization_request::COLLECTION_NAME as PAR_COLLECTION;
 use crate::models::ssh_auth_mode::SshAuthMode;
@@ -120,6 +121,13 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     crate::services::service_history::relay::ensure_indexes(db).await?;
     crate::services::catalog_skill_service::ensure_indexes(db).await?;
     crate::services::assistant_nyxagent::ensure_indexes(db).await?;
+    // Best effort: a failure only leaves bad home pointers for lazy repair.
+    if let Err(error) = crate::services::assistant_nyxagent::repair_channel_homes(db).await {
+        tracing::warn!(%error, "NyxBot home repair deferred");
+    }
+    if let Err(error) = crate::services::assistant_nyxagent::reset_direct_reply_channels(db).await {
+        tracing::warn!(%error, "NyxBot reply channel reset deferred");
+    }
     crate::services::coordination_service::ensure_indexes(db).await?;
 
     // ── assistant_wire_logs ──
@@ -740,6 +748,20 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     )
     .await?;
     par.create_index(IndexModel::builder().keys(doc! { "client_id": 1 }).build())
+        .await?;
+
+    let consent_requests = db.collection::<mongodb::bson::Document>(OAUTH_CONSENT_REQUESTS);
+    consent_requests
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "expires_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(Duration::from_secs(0))
+                        .build(),
+                )
+                .build(),
+        )
         .await?;
 
     // ── service_endpoints ──
@@ -1561,6 +1583,8 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    crate::services::channel_connect_link_service::ensure_indexes(db).await?;
+
     // ── connect_links ──
     let connect_links = db.collection::<ConnectLink>(CONNECT_LINKS);
     connect_links
@@ -1596,6 +1620,7 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    crate::services::trigger_schedule::indexes(db).await?;
     // ── triggers ──
     let triggers = db.collection::<Trigger>(TRIGGERS);
     triggers
@@ -2064,6 +2089,72 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
             IndexModel::builder()
                 .keys(doc! { "user_id": 1, "slug": 1 })
                 .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+
+    // Passive ServicePool cooldown state is scoped by effective credential and
+    // destination/configuration. TTL bounds retention after a member recovers.
+    let service_pool_health =
+        db.collection::<mongodb::bson::Document>("service_pool_member_health");
+    service_pool_health
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {
+                    "pool_id": 1,
+                    "user_service_id": 1,
+                    "owner_id": 1,
+                    "pool_config_revision": 1,
+                    "pool_reset_generation": 1,
+                    "member_reset_generation": 1,
+                    "credential_identity": 1,
+                    "credential_epoch": 1,
+                    "destination_fingerprint": 1,
+                    "config_fingerprint": 1,
+                    "model": 1,
+                })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    db.collection::<mongodb::bson::Document>(
+        crate::models::pool_recovery_diagnostic::COLLECTION_NAME,
+    )
+    .create_index(
+        IndexModel::builder()
+            .keys(doc! {"name":1})
+            .options(IndexOptions::builder().unique(true).build())
+            .build(),
+    )
+    .await?;
+    db.collection::<mongodb::bson::Document>("service_pool_health_observations")
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "expires_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(Some(std::time::Duration::from_secs(0)))
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    service_pool_health
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "pool_id": 1, "user_service_id": 1 })
+                .build(),
+        )
+        .await?;
+    service_pool_health
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "expires_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(Some(std::time::Duration::from_secs(0)))
+                        .build(),
+                )
                 .build(),
         )
         .await?;
@@ -2560,8 +2651,30 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
 
     crate::services::billing::usage_rollup::ensure_indexes(db).await?;
 
+    db.collection::<Document>(crate::models::usage_meter::POOL_RECOVERY_COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "name": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+
     // ── usage_meter ──
     let usage_meter = db.collection::<Document>(crate::models::usage_meter::COLLECTION_NAME);
+    usage_meter
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "released": 1, "pool_attempt.lease_until": 1, "_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("pool_attempt_recovery_page".to_string())
+                        .partial_filter_expression(doc! { "pool_attempt": { "$type": "object" } })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
     usage_meter
         .create_index(
             IndexModel::builder()
@@ -2872,7 +2985,23 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     billing_ledger
         .create_index(
             IndexModel::builder()
+                .keys(doc! { "postings.account": 1, "seq": 1 })
+                .build(),
+        )
+        .await?;
+
+    billing_ledger
+        .create_index(
+            IndexModel::builder()
                 .keys(doc! { "owner_id": 1, "created_at": -1 })
+                .build(),
+        )
+        .await?;
+
+    db.collection::<mongodb::bson::Document>("billing_wallet_refresh_requests")
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "requested_at": 1 })
                 .build(),
         )
         .await?;

@@ -380,6 +380,18 @@ async fn ensure_catalog_editor_route(
         )
         .await;
     }
+    if *method == Method::PUT
+        && path != "/api/v1/keys"
+        && crate::services::service_account_key_read_service::is_key_metadata_path(path)
+    {
+        return catalog_editor_service::authorize(
+            db,
+            sa,
+            scope,
+            curation_grant_service::WRITE_SCOPE,
+        )
+        .await;
+    }
     if path_matches_prefix(path, "/api/v1/catalog-curation") {
         return Ok(());
     }
@@ -523,6 +535,7 @@ fn delegated_read_denied_path(path: &str) -> bool {
                 | "channel-bots"
                 | "channel-conversations"
                 | "connect-links"
+                | "channel-connect-links"
                 | "catalog-curation"
         )
     ) {
@@ -533,6 +546,7 @@ fn delegated_read_denied_path(path: &str) -> bool {
     if matches!(
         segments.as_slice(),
         ["channel-relay", "messages", _, "attachments", _]
+            | ["users", "me", "oauth-consent-requests", _]
     ) {
         return true;
     }
@@ -1422,6 +1436,39 @@ pub async fn reject_service_account_tokens(
     Ok(next.run(request).await)
 }
 
+/// OAuth applications never inherit the owner's NyxAgent authority. Like the
+/// other rejection layers this is deny-only; the handler's verified extractor
+/// still authenticates every accepted request, including session revocation.
+pub async fn reject_oauth_client_tokens(
+    request: axum::http::Request<axum::body::Body>,
+    next: Next,
+) -> Result<impl IntoResponse, AppError> {
+    if request
+        .uri()
+        .path()
+        .split('/')
+        .any(|part| part == "nyxagent")
+        && let Some(token) = request
+            .headers()
+            .get("authorization")
+            .and_then(|header| header.to_str().ok())
+            .and_then(|header| {
+                header
+                    .strip_prefix("Bearer ")
+                    .or_else(|| header.strip_prefix("DPoP "))
+            })
+        && let Some(claims) = peek_jwt_claims(token)
+        && claims
+            .get("client_id")
+            .is_some_and(|value| !value.is_null())
+    {
+        return Err(AppError::Forbidden(
+            "A first-party human account session is required".into(),
+        ));
+    }
+    Ok(next.run(request).await)
+}
+
 /// Middleware that rejects API-key credentials from human-only endpoints.
 pub async fn reject_api_key_tokens(
     request: axum::http::Request<axum::body::Body>,
@@ -2261,6 +2308,9 @@ mod tests {
         assert!(delegated_read_denied_path(
             "/api/v1/channel-relay/messages/id/attachments/0"
         ));
+        assert!(delegated_read_denied_path(
+            "/api/v1/users/me/oauth-consent-requests/id"
+        ));
         db.drop().await.unwrap();
     }
 
@@ -2407,7 +2457,8 @@ mod tests {
         };
         use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
         use crate::models::service_pool::{
-            COLLECTION_NAME as SERVICE_POOLS, PoolStrategy, ServicePool, ServicePoolMember,
+            COLLECTION_NAME as SERVICE_POOLS, PoolMemberContract, PoolStrategy, ServicePool,
+            ServicePoolMember,
         };
         use crate::models::user::{COLLECTION_NAME as USERS, UserType};
         use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
@@ -2751,12 +2802,23 @@ mod tests {
                 name: "Delegated pool fixture".to_string(),
                 description: None,
                 strategy: PoolStrategy::RoundRobin,
+                tier_balance: Default::default(),
+                member_contract: PoolMemberContract::SameApi,
+                failover: None,
                 members: vec![ServicePoolMember {
                     user_service_id: actor_service_id.clone(),
                     weight: 1,
                     enabled: true,
+                    priority: 0,
+                    model: None,
+                    same_api_compatible: false,
+                    health_reset_generation: 0,
                 }],
                 rr_counter: 0,
+                tier_counters: Default::default(),
+                config_revision: 0,
+                health_reset_generation: 0,
+                health_observation_sequence: 0,
                 is_active: true,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),

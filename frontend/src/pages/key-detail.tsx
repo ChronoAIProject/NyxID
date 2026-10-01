@@ -168,6 +168,127 @@ function LarkPermissionSetupCard({
   );
 }
 
+const GOOGLE_SCOPE_PREFIX = "https://www.googleapis.com/auth/";
+const GOOGLE_WORKSPACE_SERVICE_SLUGS = new Set([
+  "api-google-workspace",
+  "api-google-calendar",
+  "api-google-drive",
+  "api-google-gmail",
+  "api-google-docs",
+  "api-google-sheets",
+  "api-google-slides",
+]);
+
+function GooglePermissionsSection({
+  product,
+  grantedScopes,
+  lastAuthorizedAt,
+  onRefresh,
+  refreshing,
+}: {
+  readonly product: string;
+  readonly grantedScopes?: readonly string[] | null;
+  readonly lastAuthorizedAt?: string | null;
+  readonly onRefresh: () => void;
+  readonly refreshing: boolean;
+}) {
+  const granted = grantedScopes?.length ? new Set(grantedScopes) : null;
+  const has = (scope: string) => granted?.has(`${GOOGLE_SCOPE_PREFIX}${scope}`) ?? false;
+  const access = (scope: string) =>
+    granted === null ? "Unknown" : has(scope) ? "Granted" : "Not granted";
+  const driveAccess = granted === null
+    ? "Unknown"
+    : has("drive")
+      ? "Full access"
+      : has("drive.file") && has("drive.readonly")
+        ? "Read + app files"
+        : has("drive.file")
+          ? "App files"
+          : has("drive.readonly")
+            ? "Read only"
+            : "Not granted";
+  const calendarAccess = granted === null
+    ? "Unknown"
+    : has("calendar")
+      ? "Full access"
+      : has("calendar.readonly")
+        ? "Read only"
+        : "Not granted";
+  const driveLabels: Record<string, string> = {
+    "api-google-drive": "Drive, Docs, Sheets, Slides",
+    "api-google-docs": "Docs",
+    "api-google-sheets": "Sheets",
+    "api-google-slides": "Slides",
+  };
+  const rows = product === "api-google-workspace"
+    ? [
+        ["Drive, Docs, Sheets, Slides", driveAccess],
+        ["Calendar", calendarAccess],
+        ["Gmail read", access("gmail.readonly")],
+        ["Gmail send", access("gmail.send")],
+      ]
+    : product === "api-google-gmail" ? [
+        ["Gmail read", access("gmail.readonly")],
+        ["Gmail send", access("gmail.send")],
+      ] : product === "api-google-calendar" ? [
+        ["Calendar", calendarAccess],
+      ] : [[driveLabels[product] ?? "Drive", driveAccess]];
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <ShieldCheck className="h-4 w-4 text-text-tertiary" />
+            <CardTitle className="text-[15px]">Google permissions</CardTitle>
+          </div>
+          <Button
+            size="icon"
+            variant="ghost"
+            aria-label="Refresh saved permissions"
+            title="Refresh saved permissions"
+            disabled={refreshing}
+            onClick={onRefresh}
+          >
+            <RefreshCw className="h-4 w-4" />
+          </Button>
+        </div>
+        <CardDescription>
+          Last reported by Google at authorization or token refresh. Access can
+          change before the next token refresh.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <dl className="divide-y divide-border/50">
+          {rows.map(([label, value]) => (
+            <div key={label} className="flex items-center justify-between gap-3 py-2 text-[12px]">
+              <dt>{label}</dt>
+              <dd>
+                <Badge variant={value === "Not granted" ? "warning" : value === "Unknown" ? "secondary" : "success"}>
+                  {value}
+                </Badge>
+              </dd>
+            </div>
+          ))}
+        </dl>
+        {lastAuthorizedAt && (
+          <p className="text-[11px] text-muted-foreground">
+            Last authorized {new Date(lastAuthorizedAt).toLocaleString()}
+          </p>
+        )}
+        {granted && (
+          <details className="text-[11px] text-muted-foreground">
+            <summary className="cursor-pointer">Reported OAuth scopes</summary>
+            <ul className="mt-2 space-y-1 break-all font-mono">
+              {grantedScopes?.map((scope) => <li key={scope}>{scope}</li>)}
+            </ul>
+          </details>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function EndpointSection({
   endpointUrl,
   endpointId,
@@ -2302,7 +2423,7 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
     readonly provider_status?: string;
     readonly message?: string;
   };
-  const { data: keyInfo, isLoading, error, refetch } = useKey(keyId);
+  const { data: keyInfo, isLoading, isFetching, error, refetch } = useKey(keyId);
   const { data: transferAuthorization } = useOwnershipTransferAuthorization(
     "service",
     keyInfo?.catalog_service_id ?? "",
@@ -2828,6 +2949,16 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
                 readOnly={readOnly}
               />
             </div>
+
+            {GOOGLE_WORKSPACE_SERVICE_SLUGS.has(keyInfo.catalog_service_slug ?? "") && (
+              <GooglePermissionsSection
+                product={keyInfo.catalog_service_slug ?? ""}
+                grantedScopes={keyInfo.granted_scopes}
+                lastAuthorizedAt={keyInfo.last_authorized_at}
+                onRefresh={() => void refetch()}
+                refreshing={isFetching}
+              />
+            )}
 
             {!isSsh && (
               <ApiUsageSection

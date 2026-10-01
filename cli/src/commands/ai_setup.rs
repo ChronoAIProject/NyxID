@@ -86,7 +86,7 @@ fn resolve_base_url(base_url: &Option<String>) -> Result<String> {
 const MAX_RESPONSE_BYTES: u64 = 2 * 1024 * 1024;
 
 fn http_client() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
+    crate::tls::client_builder()?
         .user_agent(CLI_USER_AGENT)
         .connect_timeout(std::time::Duration::from_secs(10))
         .timeout(std::time::Duration::from_secs(30))

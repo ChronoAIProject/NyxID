@@ -481,6 +481,20 @@ impl PlatformAdapter for TelegramAdapter {
         }
     }
 
+    async fn chat_title(
+        &self,
+        http: &reqwest::Client,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
+        conversation_id: &str,
+    ) -> AppResult<Option<String>> {
+        let response = media::response_json(
+            http.get(format!("{}{}/getChat", self.base_url, credentials.token))
+                .query(&[("chat_id", conversation_id)]),
+        )
+        .await?;
+        Ok(response["result"]["title"].as_str().map(str::to_owned))
+    }
+
     async fn fetch_attachment(
         &self,
         http: &reqwest::Client,

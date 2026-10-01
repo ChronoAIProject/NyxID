@@ -1,3 +1,6 @@
+import { parseAutomationSearch } from "@/lib/automation-search";
+import { AutomationsPage } from "@/pages/automations";
+import { ChannelConnectLinkPage } from "@/pages/channel-connect-link";
 import { AdminOwnershipPage } from "@/pages/admin-ownership";
 import { normalizeAdminUsageSearch } from "@/schemas/admin-usage";
 import { preserveTelegramClaimForLogin } from "@/lib/telegram-claim-handoff";
@@ -71,6 +74,7 @@ import {
   TriggersPage,
   IntegrationGuidePage,
   OAuthConsentPage,
+  OAuthConsentPreviewPage,
   OAuthErrorPage,
   PrivacyPage,
   TermsPage,
@@ -213,6 +217,14 @@ const oauthConsentRoute = createRoute({
   component: OAuthConsentPage,
 });
 
+const oauthConsentPreviewRoute = import.meta.env.DEV
+  ? createRoute({
+      path: "/oauth-consent-preview",
+      getParentRoute: () => rootRoute,
+      component: OAuthConsentPreviewPage,
+    })
+  : null;
+
 const oauthLaunchingRoute = createRoute({
   path: "/oauth-launching",
   getParentRoute: () => rootRoute,
@@ -305,6 +317,13 @@ export const loginCodeRoute = createRoute({
   // This page mints a new login code; it has no code input to prefill.
   validateSearch: (): Record<string, never> => ({}),
   component: () => <LoginAgentKeyPage mint />,
+});
+
+const channelConnectLinkRoute = createRoute({
+  path: "/connect/bot/$token",
+  getParentRoute: () => rootRoute,
+  validateSearch: (): Record<string, never> => ({}),
+  component: ChannelConnectLinkPage,
 });
 
 const connectLinkRoute = createRoute({
@@ -631,6 +650,13 @@ const developerAppDetailRoute = createRoute({
   path: "/developer/apps/$clientId",
   getParentRoute: () => dashboardLayout,
   component: DeveloperAppDetailPage,
+});
+
+const automationsRoute = createRoute({
+  path: "/automations",
+  getParentRoute: () => dashboardLayout,
+  validateSearch: parseAutomationSearch,
+  component: AutomationsPage,
 });
 
 const triggersRoute = createRoute({
@@ -1020,6 +1046,7 @@ const routeTree = rootRoute.addChildren([
   nyxbotOnboardingRoute,
   authLayout.addChildren([loginRoute, registerRoute]),
   oauthConsentRoute,
+  ...(oauthConsentPreviewRoute ? [oauthConsentPreviewRoute] : []),
   oauthLaunchingRoute,
   oauthCompleteRoute,
   oauthErrorRoute,
@@ -1037,6 +1064,7 @@ const routeTree = rootRoute.addChildren([
   loginAgentKeyRoute,
   channelBotSetupRoute,
   connectLinkRoute,
+  channelConnectLinkRoute,
   connectLinkReturnRoute,
   sshTerminalRoute,
   assistantRoute,
@@ -1069,6 +1097,7 @@ const routeTree = rootRoute.addChildren([
     developerAppsRoute,
     developerAppDetailRoute,
     triggersRoute,
+    automationsRoute,
     integrationGuideRoute,
     aiSetupRoute,
     notificationSettingsRoute,

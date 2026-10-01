@@ -1,9 +1,11 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { vi } from "vitest";
 
 import { OAuthConsentPage } from "./oauth-consent";
+import { OAuthConsentPreviewPage } from "./oauth-consent-preview";
+import { useAuthStore } from "@/stores/auth-store";
 
 const { state } = vi.hoisted(() => ({
   state: {
@@ -12,6 +14,7 @@ const { state } = vi.hoisted(() => ({
       label: string;
       slug: string;
       catalog_service_name: string | null;
+      catalog_service_description?: string | null;
       resource_uri: string;
       auth_method: string;
       is_active: boolean;
@@ -77,12 +80,15 @@ function hiddenInputs(name: string): HTMLInputElement[] {
 
 beforeEach(() => {
   window.history.pushState({}, "", "/");
+  useAuthStore.setState({ user: null });
   state.userServices = [
     {
       id: "svc-openai",
       label: "My OpenAI",
       slug: "openai-x2",
       catalog_service_name: "OpenAI",
+      catalog_service_description:
+        "Send model requests through your OpenAI connection.",
       resource_uri: "https://nyx.example/api/v1/proxy/s/openai",
       auth_method: "bearer",
       is_active: true,
@@ -136,9 +142,71 @@ beforeEach(() => {
 
 afterEach(() => {
   window.history.pushState({}, "", "/");
+  useAuthStore.setState({ user: null });
 });
 
 describe("OAuthConsentPage", () => {
+  it("renders an inert preview using the consent interface", async () => {
+    const user = userEvent.setup();
+    render(<OAuthConsentPreviewPage />);
+
+    expect(
+      screen.getByText("Preview · Decisions disabled"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Chrono Sandbox")).toBeInTheDocument();
+    expect(screen.getByText("Chrono LLM (public)")).toBeInTheDocument();
+    expect(screen.getByText(/Explore and test AI requests/)).toHaveClass(
+      "line-clamp-2",
+    );
+
+    const allow = screen.getByRole("button", { name: "Allow access" });
+    const decline = screen.getByRole("button", { name: "Decline" });
+    expect(allow).toBeDisabled();
+    expect(decline).toBeDisabled();
+    expect(fireEvent.submit(allow.closest("form")!)).toBe(false);
+
+    await user.click(screen.getByRole("button", { name: "Customize" }));
+    expect(screen.getByLabelText("All services")).toBeInTheDocument();
+    expect(screen.queryByText("Loading services...")).not.toBeInTheDocument();
+  });
+
+  it("fades only the clipped edges of the service list", async () => {
+    const user = userEvent.setup();
+    render(<OAuthConsentPreviewPage />);
+
+    const summary = screen.getByRole("region", { name: "Service access list" });
+    Object.defineProperties(summary, {
+      clientHeight: { configurable: true, value: 200 },
+      scrollHeight: { configurable: true, value: 600 },
+      scrollTop: { configurable: true, writable: true, value: 0 },
+    });
+    const topFade = summary.parentElement!.querySelector(
+      '[data-scroll-fade="top"]',
+    );
+    const bottomFade = summary.parentElement!.querySelector(
+      '[data-scroll-fade="bottom"]',
+    );
+
+    fireEvent.scroll(summary);
+    expect(topFade).toHaveClass("opacity-0");
+    expect(bottomFade).toHaveClass("opacity-100");
+
+    summary.scrollTop = 200;
+    fireEvent.scroll(summary);
+    expect(topFade).toHaveClass("opacity-100");
+    expect(bottomFade).toHaveClass("opacity-100");
+
+    summary.scrollTop = 400;
+    fireEvent.scroll(summary);
+    expect(topFade).toHaveClass("opacity-100");
+    expect(bottomFade).toHaveClass("opacity-0");
+
+    await user.click(screen.getByRole("button", { name: "Customize" }));
+    expect(
+      screen.getByRole("region", { name: "Service access list" }),
+    ).toHaveClass("overflow-y-auto");
+  });
+
   it("renders the invalid-request card when a required param is missing", () => {
     // Drop code_challenge -> `missing` is true.
     const { code_challenge, ...rest } = VALID;
@@ -150,19 +218,63 @@ describe("OAuthConsentPage", () => {
     expect(screen.getByText("Invalid consent request")).toBeInTheDocument();
     // The consent form must not render in the missing branch.
     expect(
-      screen.queryByRole("button", { name: "Allow" }),
+      screen.queryByRole("button", { name: "Allow access" }),
     ).not.toBeInTheDocument();
   });
 
-  it("renders one scope badge per whitespace-separated scope", () => {
+  it("shows readable permissions and keeps the exact scopes in app details", () => {
     setSearch(VALID);
 
     render(<OAuthConsentPage />);
 
-    // "Requested scopes" section: each scope is a Badge.
+    expect(screen.getByText("Authenticate your identity")).toBeInTheDocument();
+    expect(screen.getByText("Long-lived access")).toBeInTheDocument();
+    const details = screen.getByText("App details").closest("details");
+    expect(details).not.toBeNull();
     for (const scope of VALID.scope.split(" ")) {
-      expect(screen.getAllByText(scope).length).toBeGreaterThan(0);
+      expect(details).toHaveTextContent(scope);
     }
+  });
+
+  it("shows the signed-in account in the connection card footer", () => {
+    useAuthStore.setState({
+      user: {
+        id: "user-1",
+        email: "alex@example.com",
+        display_name: "Alex",
+        avatar_url: null,
+        email_verified: true,
+        mfa_enabled: false,
+        is_admin: false,
+        is_active: true,
+        created_at: "2026-01-01T00:00:00Z",
+      },
+    });
+    setSearch({ ...VALID, client_name: "Atlas" });
+
+    render(<OAuthConsentPage />);
+
+    expect(screen.getByRole("img", { name: "NyxID" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("img", { name: "NyxID" }).parentElement,
+    ).toHaveClass("rounded-full");
+    expect(
+      screen.getByRole("img", { name: "NyxID" }).parentElement?.parentElement,
+    ).toHaveTextContent("NyxID");
+    expect(
+      screen.queryByRole("img", { name: "NyxID connects to Atlas" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText("alex@example.com").parentElement,
+    ).toHaveTextContent("Signed in as alex@example.com");
+    const heading = screen.getByRole("heading", {
+      name: "Authorize application",
+    });
+    const subtitle = heading.nextElementSibling;
+    expect(subtitle?.querySelector("span")).toHaveClass("text-foreground");
+    expect(subtitle).toHaveTextContent(
+      "Atlas wants to access your account via OAuth.",
+    );
   });
 
   it("renders the client name and parsed redirect host", () => {
@@ -181,6 +293,23 @@ describe("OAuthConsentPage", () => {
     ).toBeInTheDocument();
   });
 
+  it("shows catalog descriptions in the summary and service picker", async () => {
+    const user = userEvent.setup();
+    setSearch({ ...VALID, preselect_service_ids: ["svc-openai"] });
+
+    render(<OAuthConsentPage />);
+
+    const description = "Send model requests through your OpenAI connection.";
+    expect(screen.getByText(description)).toHaveClass("line-clamp-2");
+
+    await user.click(screen.getByRole("button", { name: "Customize" }));
+
+    expect(screen.getByText(description)).toHaveClass("line-clamp-2");
+    expect(
+      screen.queryByText("No description provided"),
+    ).not.toBeInTheDocument();
+  });
+
   it("falls back to client_id as the display name when client_name is absent", () => {
     setSearch(VALID);
 
@@ -190,24 +319,22 @@ describe("OAuthConsentPage", () => {
     expect(screen.getAllByText("client-abc").length).toBeGreaterThan(0);
   });
 
-  it("maps known scope risk levels and labels unknown scopes as Custom permission/Medium", () => {
+  it("explains known and custom permissions without severity ratings", () => {
     setSearch(VALID);
 
     render(<OAuthConsentPage />);
 
-    // Risk labels from scopeRiskLabel(): offline_access => High, email => Medium,
-    // openid/profile => Low. Each appears in the scope-impact list.
-    expect(screen.getAllByText("High").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("Medium").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("Low").length).toBeGreaterThan(0);
-
-    // Known scope title from OAUTH_SCOPE_META.
     expect(screen.getByText("Long-lived access")).toBeInTheDocument();
-    // Unknown scope ("custom:thing") gets the default meta.
     expect(screen.getByText("Custom permission")).toBeInTheDocument();
+    expect(
+      screen.getByText(/refresh tokens without asking/i),
+    ).toBeInTheDocument();
+    for (const rating of ["Low", "Medium", "High"]) {
+      expect(screen.queryByText(rating)).not.toBeInTheDocument();
+    }
   });
 
-  it("renders broker binding scope as a high-risk durable credential", () => {
+  it("describes broker binding as a durable credential", () => {
     setSearch({
       ...VALID,
       scope: "openid urn:nyxid:scope:broker_binding",
@@ -216,7 +343,6 @@ describe("OAuthConsentPage", () => {
     render(<OAuthConsentPage />);
 
     expect(screen.getByText("Durable broker access")).toBeInTheDocument();
-    expect(screen.getAllByText("High").length).toBeGreaterThan(0);
     expect(
       screen.getByText(/durable NyxID credential that can act as you/i),
     ).toBeInTheDocument();
@@ -227,19 +353,19 @@ describe("OAuthConsentPage", () => {
 
     render(<OAuthConsentPage />);
 
-    const allow = screen.getByRole("button", { name: "Allow" });
+    const allow = screen.getByRole("button", { name: "Allow access" });
     const form = allow.closest("form")!;
     expect(form.getAttribute("action")).toBe("/oauth/authorize/decision");
     expect(form.getAttribute("method")?.toLowerCase()).toBe("post");
   });
 
-  it("Allow and Deny are submit buttons carrying the decision value", () => {
+  it("Allow access and Decline are submit buttons carrying the decision value", () => {
     setSearch(VALID);
 
     render(<OAuthConsentPage />);
 
-    const allow = screen.getByRole("button", { name: "Allow" });
-    const deny = screen.getByRole("button", { name: "Deny" });
+    const allow = screen.getByRole("button", { name: "Allow access" });
+    const deny = screen.getByRole("button", { name: "Decline" });
 
     expect(allow).toHaveAttribute("type", "submit");
     expect(allow).toHaveAttribute("name", "decision");
@@ -373,6 +499,11 @@ describe("OAuthConsentPage", () => {
 
     await user.click(screen.getByRole("button", { name: "Customize" }));
     await user.click(screen.getByRole("checkbox", { name: /My OpenAI/i }));
+    expect(screen.getByRole("button", { name: "Done" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Save selection" }));
+    expect(
+      screen.getByRole("button", { name: "Customize" }),
+    ).toBeInTheDocument();
 
     const selected = document.querySelectorAll<HTMLInputElement>(
       'input[type="hidden"][name="allowed_service_ids"]',
@@ -380,6 +511,23 @@ describe("OAuthConsentPage", () => {
     expect(Array.from(selected).map((input) => input.value)).toEqual([
       "svc-openai",
     ]);
+  });
+
+  it("also closes customization from Done without losing selections", async () => {
+    const user = userEvent.setup();
+    setSearch(VALID);
+    render(<OAuthConsentPage />);
+
+    await user.click(screen.getByRole("button", { name: "Customize" }));
+    await user.click(screen.getByRole("checkbox", { name: /Org Service/i }));
+    await user.click(screen.getByRole("button", { name: "Done" }));
+
+    expect(
+      screen.getByRole("button", { name: "Customize" }),
+    ).toBeInTheDocument();
+    expect(
+      hiddenInputs("allowed_service_ids").map((input) => input.value),
+    ).toEqual(["svc-org"]);
   });
 
   it("renders proxyable org services with org provenance and submits their ids", async () => {

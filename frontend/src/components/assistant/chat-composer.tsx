@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useRef,
   useState,
@@ -10,6 +11,15 @@ import {
 } from "react";
 import { Send, Square } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { AgentAvatar } from "@/components/assistant/nyxbot-agent-avatar";
+import {
+  activeMention,
+  insertMention,
+  mentionCandidates,
+  type MentionQuery,
+} from "@/lib/assistant/nyxbot-mentions";
+import { cn } from "@/lib/utils";
+import type { AssistantAgentKind } from "@/schemas/assistant-nyxagent";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
 
 const DRAFT_DEBOUNCE_MS = 300;
@@ -84,6 +94,15 @@ export function ChatComposer({
   );
 }
 
+/** An agent that can be `@mentioned` from the composer (group chats). */
+export interface ComposerMention {
+  readonly id: string;
+  /** The @handle that is inserted. */
+  readonly name: string;
+  readonly kind: AssistantAgentKind;
+  readonly display_name?: string | null;
+}
+
 interface ChatComposerProps {
   readonly active: boolean;
   /** Keep the composer writable while a typed actor task accepts steering. */
@@ -102,6 +121,13 @@ interface ChatComposerProps {
    */
   readonly focusRequest?: number;
   readonly controls?: ReactNode;
+  /** Idle placeholder, e.g. "Message NyxBot". */
+  readonly placeholder?: string;
+  /**
+   * Group chats: typing `@` lists these agents; Enter or Tab inserts
+   * `@name `, arrows move, Escape dismisses.
+   */
+  readonly mentions?: readonly ComposerMention[];
   readonly onSend: (content: string) => Promise<void>;
   readonly onStop: () => Promise<void>;
 }
@@ -126,10 +152,21 @@ function DraftedChatComposer({
   draftKey,
   focusRequest = 0,
   controls,
+  placeholder,
+  mentions,
   onSend,
   onStop,
 }: ChatComposerProps) {
   const locked = active && !allowActiveInput;
+  const mentionListId = `${useId()}-mentions`;
+  const [mention, setMention] = useState<MentionQuery>();
+  const [mentionIndex, setMentionIndex] = useState(0);
+  const mentionOptions =
+    mentions && mention ? mentionCandidates(mentions, mention.query) : [];
+  const mentionOpen = mentionOptions.length > 0;
+  const selectedMention = mentionOpen
+    ? mentionOptions[Math.min(mentionIndex, mentionOptions.length - 1)]
+    : undefined;
   const [content, setContent] = useState(() =>
     readOwnedDraft(ownerUserId, draftKey),
   );
@@ -145,6 +182,16 @@ function DraftedChatComposer({
   const renderedDraftKeyRef = useRef(draftKey);
   const draftTimerRef = useRef<number | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  /** Where the caret goes once an inserted mention is committed. */
+  const pendingCaretRef = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    const element = textareaRef.current;
+    const caret = pendingCaretRef.current;
+    if (!element || caret === null) return;
+    pendingCaretRef.current = null;
+    element.focus();
+    element.setSelectionRange(caret, caret);
+  });
   const composerRef = useRef<HTMLDivElement>(null);
   const controlsRef = useRef<HTMLDivElement>(null);
   const textMeasureRef = useRef<HTMLSpanElement>(null);
@@ -482,6 +529,30 @@ function DraftedChatComposer({
     setContent(nextContent);
   }
 
+  /** Re-read the mention under the caret after typing or moving the caret. */
+  function syncMention(element: HTMLTextAreaElement) {
+    if (!mentions?.length) return;
+    const caret = element.selectionStart;
+    const next =
+      caret === element.selectionEnd ? activeMention(element.value, caret) : undefined;
+    if (next?.start === mention?.start && next?.query === mention?.query) return;
+    setMention(next);
+    setMentionIndex(0);
+  }
+
+  function chooseMention(name: string) {
+    const element = textareaRef.current;
+    if (!element || !mention) return;
+    const next = insertMention(content, mention, element.selectionStart, name);
+    // Placed right after React commits the new text (below), before any
+    // further keystroke: a frame later, fast typing would land first and
+    // the caret would jump back in front of it.
+    pendingCaretRef.current = next.caret;
+    updateContent(next.text);
+    scheduleDraftSave();
+    setMention(undefined);
+  }
+
   async function submit() {
     const message = content.trim();
     if (!message || locked || disabled || sending) return;
@@ -506,6 +577,28 @@ function DraftedChatComposer({
       composingRef.current ||
       event.nativeEvent.isComposing ||
       event.keyCode === 229;
+    if (mentionOpen && !isComposing) {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        const step = event.key === "ArrowDown" ? 1 : -1;
+        setMentionIndex(
+          (index) =>
+            (Math.min(index, mentionOptions.length - 1) + step + mentionOptions.length) %
+            mentionOptions.length,
+        );
+        return;
+      }
+      if ((event.key === "Enter" && !event.shiftKey) || event.key === "Tab") {
+        event.preventDefault();
+        if (selectedMention) chooseMention(selectedMention.name);
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setMention(undefined);
+        return;
+      }
+    }
     if (event.key === "Enter" && !event.shiftKey && !isComposing) {
       event.preventDefault();
       void submit();
@@ -518,11 +611,19 @@ function DraftedChatComposer({
 
   return (
     <div
-      className="shrink-0"
+      // Opaque: the transcript scrolls underneath the composer, so its band
+      // must hide it instead of showing text around and below the input.
+      data-composer-band
+      className="relative shrink-0 bg-background"
       style={{
         width: "calc(100% - var(--assistant-scrollbar-width, 0px))",
       }}
     >
+      <div
+        aria-hidden="true"
+        data-composer-fade
+        className="pointer-events-none absolute inset-x-0 bottom-full h-6 bg-gradient-to-t from-background to-transparent"
+      />
       <div
         className="mx-auto w-full max-w-[758px] px-4 pt-2 sm:px-6"
         style={{ paddingBottom: "max(1rem, var(--sab))" }}
@@ -534,6 +635,44 @@ function DraftedChatComposer({
             multiline ? "flex-col items-stretch" : "items-start"
           }`}
         >
+          {mentionOpen ? (
+            <ul
+              id={mentionListId}
+              role="listbox"
+              aria-label="Mention an agent"
+              className="absolute bottom-full left-0 z-20 mb-2 w-64 max-w-full space-y-0.5 rounded-xl border border-border bg-popover p-1.5 shadow-lg shadow-primary/5"
+            >
+              {mentionOptions.map((option) => {
+                const selected = option.id === selectedMention?.id;
+                return (
+                  <li
+                    key={option.id}
+                    id={`${mentionListId}-${option.id}`}
+                    role="option"
+                    aria-selected={selected}
+                    // Keep focus (and the caret) in the textarea.
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => chooseMention(option.name)}
+                    className={cn(
+                      "flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-1.5 text-[12px] text-foreground",
+                      selected ? "bg-overlay-strong" : "hover:bg-overlay",
+                    )}
+                  >
+                    <AgentAvatar agent={option} size="sm" />
+                    <span className="min-w-0 flex-1 truncate">
+                      {option.display_name?.trim() || option.name}
+                      {option.display_name?.trim() ? (
+                        <span className="ml-1.5 text-[11px] text-text-tertiary">@{option.name}</span>
+                      ) : null}
+                    </span>
+                    <span className="shrink-0 text-[10px] text-text-tertiary">
+                      {option.kind === "nyxbot" ? "Personal agent" : "Specialist"}
+                    </span>
+                  </li>
+                );
+              })}
+            </ul>
+          ) : null}
           <span
             ref={textMeasureRef}
             aria-hidden
@@ -545,10 +684,25 @@ function DraftedChatComposer({
             <textarea
               ref={textareaRef}
               value={content}
+              {...(mentions
+                ? {
+                    role: "combobox",
+                    "aria-autocomplete": "list" as const,
+                    "aria-expanded": mentionOpen,
+                    "aria-controls": mentionListId,
+                    "aria-activedescendant": selectedMention
+                      ? `${mentionListId}-${selectedMention.id}`
+                      : undefined,
+                    "aria-label": placeholder ?? "Message",
+                  }
+                : {})}
               onChange={(event) => {
                 updateContent(event.target.value);
+                syncMention(event.target);
                 if (!composingRef.current) scheduleDraftSave();
               }}
+              onSelect={(event) => syncMention(event.currentTarget)}
+              onBlur={() => setMention(undefined)}
               onKeyDown={handleKeyDown}
               onCompositionStart={() => {
                 composingRef.current = true;
@@ -570,7 +724,7 @@ function DraftedChatComposer({
                     ? "This conversation is read-only."
                     : allowActiveInput
                      ? "Steer active task..."
-                     : "Message NyxID Assistant..."
+                     : (placeholder ?? "Message NyxID Assistant...")
               }
               className="assistant-scrollbar block min-h-8 w-full resize-none overflow-hidden bg-transparent px-0 py-1 text-[13px] leading-relaxed text-foreground outline-none transition-[height] duration-150 ease-out placeholder:text-text-tertiary disabled:cursor-not-allowed disabled:opacity-50 motion-reduce:transition-none"
             />

@@ -13,6 +13,8 @@ use crate::models::{
 };
 use crate::test_utils;
 
+mod key_updates;
+
 const READ_PERMISSION: &str = "nyxid:catalog:skills:read";
 const WRITE_PERMISSION: &str = "nyxid:catalog:skills:write";
 const SCOPES: &str = "catalog:skills:read catalog:skills:write user-services:read proxy";
@@ -561,17 +563,19 @@ async fn editor_authority_tracks_live_role_scope_and_token_state() {
 }
 
 #[tokio::test]
-async fn editor_cannot_mutate_keys_or_read_unrelated_account_routes() {
+async fn editor_cannot_manage_keys_or_read_unrelated_account_routes() {
     let (f, _, bearer) = editor("catalog_editor_key_boundaries").await;
     let detail = format!("/api/v1/keys/{}", f.service.id);
-    for (method, path) in [
-        ("POST", "/api/v1/keys"),
-        ("PUT", detail.as_str()),
-        ("DELETE", detail.as_str()),
-    ] {
+    for (method, path) in [("POST", "/api/v1/keys"), ("DELETE", detail.as_str())] {
         let (status, body) = request(&f.state, method, path, &bearer, Some(json!({}))).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path}: {body}");
     }
+    assert_eq!(
+        request(&f.state, "PUT", &detail, &bearer, Some(json!({})))
+            .await
+            .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
     for path in [
         "/api/v1/user-services",
         "/api/v1/endpoints",
@@ -865,12 +869,14 @@ async fn catalog_scope_save_preserves_ornn_slug_workflow_without_operation_polic
     let (status, assigned) = request(
         &f.state,
         "PUT",
-        &format!("/api/v1/catalog-curation/services/{}/skills", f.service.id),
+        &catalog_path,
         &bearer,
         Some(json!({
-            "base_revision": detail["skills_revision"],
-            "request_id": Uuid::new_v4().to_string(),
-            "recommended_skills": ["publisher/scope-save-regression"],
+            "recommended_skill_refs": [{
+                "source": "ornn", "skill_id": "scope-save-regression",
+                "name": "publisher/scope-save-regression", "version": "1.0",
+                "sha256": "a".repeat(64), "dependencies": [],
+            }],
         })),
     )
     .await;

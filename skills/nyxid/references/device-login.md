@@ -149,3 +149,35 @@ Eight-character v2 issuance is the default; older backend replicas require the s
 [ADR-015](https://github.com/ChronoAIProject/NyxID/blob/main/docs/ADR-015-auth-device-login.md).
 Normal `/login` remains account-only. This flow is separate from `/devices/code/*`
 hardware provisioning.
+
+## Network and storage failures
+
+`login_unavailable` (exit 19) retains its message and includes an additive
+`error.diagnostic` when known: `stage`, optional `timeout`/`http_status`/numeric `server_error_code`, sanitized
+`endpoint`, bounded `causes`, and `hint`. Inspect the stage before retrying:
+`config` means invalid CA configuration; `tls` means certificate/hostname trust;
+`proxy` means CONNECT failed; `connect`/`request` means reachability or timeout;
+`response` means the API response was unusable; `validation` means an invalid
+verification URL. `login_storage_failed` (exit 21) points to the local profile
+directory. Do not expose response bodies, polling secrets, codes or tokens while
+diagnosing failures.
+
+Normal pending/denied/expired/delivered/invalid-code/rate-limited outcomes have no
+network diagnostic and retain their existing JSON shape. TLS hints distinguish
+unknown issuers, hostname mismatch and certificate validity/clock problems.
+
+Run `nyxid doctor --base-url <URL> --profile <NAME> --json` to probe the NyxID
+`/health` endpoint and inspect trust-source counts and proxy settings. The URL
+defaults to that profile's saved URL, then the CLI's default login URL. Proxy
+credentials and URL queries are stripped; `NO_PROXY` host patterns remain visible
+without control characters, bounded to 300 characters.
+`NYXID_CA_CERT=/absolute/path/ca.pem` adds trusted CA certificates. Bundled Mozilla
+roots remain enabled; `SSL_CERT_FILE`/`SSL_CERT_DIR` select system CA sources, or
+the OS store loads on certificate-validation failure when neither is set. Doctor
+forces that load for reporting. Empty CA variables mean unset; invalid nonempty
+explicit sources fail closed.
+HTTP clients honor proxy environment variables; WSS node/SSH connections are
+direct and share the CA roots. Node daemon install and auto-update enable persist only the three CA
+variables as absolute paths. Reinstall the daemon with `--force` or re-enable
+automatic updates to update/remove them; empty values are omitted.
+See [Network, proxies and TLS](https://github.com/ChronoAIProject/NyxID/blob/main/docs/site/cli/guides/network.md).

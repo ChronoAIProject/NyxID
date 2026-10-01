@@ -2840,6 +2840,7 @@ mod tests {
             Some("0.7.1-test".to_string()),
             Some(NodeCapabilitiesMsg {
                 http_signature_v2: false,
+                http_cancellation: false,
                 remote_credential_crypto_v1: true,
                 ..NodeCapabilitiesMsg::default()
             }),
@@ -2961,6 +2962,7 @@ mod tests {
             None,
             Some(NodeCapabilitiesMsg {
                 http_signature_v2: false,
+                http_cancellation: false,
                 remote_credential_crypto_v1: true,
                 ..NodeCapabilitiesMsg::default()
             }),

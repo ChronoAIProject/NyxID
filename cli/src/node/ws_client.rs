@@ -263,9 +263,16 @@ pub async fn register_node(
     ws_url: &str,
     registration_token: &str,
 ) -> Result<(String, String, Option<String>)> {
-    let (ws_stream, _) = tokio_tungstenite::connect_async(ws_url)
-        .await
-        .map_err(|e| Error::WebSocket(format!("Failed to connect: {e}")))?;
+    let (ws_stream, _) = tokio_tungstenite::connect_async_tls_with_config(
+        ws_url,
+        None,
+        false,
+        Some(tokio_tungstenite::Connector::Rustls(
+            crate::tls::shared_config()?,
+        )),
+    )
+    .await
+    .map_err(|e| Error::WebSocket(format!("Failed to connect: {e}")))?;
 
     let (mut ws_sink, mut ws_stream) = ws_stream.split();
 
@@ -438,9 +445,14 @@ async fn pending_credential_poll_loop(
     mut shutdown: watch::Receiver<bool>,
 ) {
     let api_base_url = node_agent_api_base_url_from_ws_url(&server_ws_url);
-    let Ok(client) = reqwest::Client::builder()
-        .timeout(Duration::from_secs(PENDING_CREDENTIAL_POLL_TIMEOUT_SECS))
-        .build()
+    let Ok(client) = crate::tls::client_builder()
+        .map_err(|e| e.to_string())
+        .and_then(|builder| {
+            builder
+                .timeout(Duration::from_secs(PENDING_CREDENTIAL_POLL_TIMEOUT_SECS))
+                .build()
+                .map_err(|e| e.to_string())
+        })
     else {
         tracing::debug!("Failed to create pending credential poll HTTP client");
         return;
@@ -534,9 +546,14 @@ async fn handle_pending_credentials_available(
     storage_backend: &str,
 ) {
     let api_base_url = node_agent_api_base_url_from_ws_url(server_ws_url);
-    let Ok(client) = reqwest::Client::builder()
-        .timeout(Duration::from_secs(PENDING_CREDENTIAL_POLL_TIMEOUT_SECS))
-        .build()
+    let Ok(client) = crate::tls::client_builder()
+        .map_err(|e| e.to_string())
+        .and_then(|builder| {
+            builder
+                .timeout(Duration::from_secs(PENDING_CREDENTIAL_POLL_TIMEOUT_SECS))
+                .build()
+                .map_err(|e| e.to_string())
+        })
     else {
         tracing::debug!("Failed to create pending credential nudge HTTP client");
         return;
@@ -852,8 +869,14 @@ async fn connect_and_serve(
 ) -> Result<Option<Duration>> {
     // 1. Connect
     let ws_config = node_control_ws_config(config.server.proxy_max_body_size);
-    let connect =
-        tokio_tungstenite::connect_async_with_config(&config.server.url, Some(ws_config), false);
+    let connect = tokio_tungstenite::connect_async_tls_with_config(
+        &config.server.url,
+        Some(ws_config),
+        false,
+        Some(tokio_tungstenite::Connector::Rustls(
+            crate::tls::shared_config()?,
+        )),
+    );
     tokio::pin!(connect);
     let (ws_stream, _) = tokio::select! {
         result = &mut connect => {
@@ -943,6 +966,7 @@ async fn connect_and_serve(
     let active_web_terminals: ActiveWebTerminalMap =
         Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     let active_ws_proxies: ActiveWsProxyMap = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let active_http_requests: ActiveSshExecMap = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     let active_ssh_execs: ActiveSshExecMap = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     let cert_host_key_store: SharedCertHostKeyStore =
         Arc::new(Mutex::new(CertHostKeyStore::load(config_dir).map_err(
@@ -972,6 +996,7 @@ async fn connect_and_serve(
     // is full we'll retry on the next status_update / reconnect.
     let mut capabilities = serde_json::Map::new();
     capabilities.insert("http_signature_v2".to_string(), true.into());
+    capabilities.insert("http_cancellation".to_string(), true.into());
     capabilities.insert("credential_ack_correlation".to_string(), true.into());
     capabilities.insert(
         rci_crypto::REMOTE_CREDENTIAL_CRYPTO_CAPABILITY.to_string(),
@@ -1073,22 +1098,40 @@ async fn connect_and_serve(
                 let http_client = proxy_http_client.clone();
                 let in_flight_clone = in_flight.clone();
 
+                let active_http = active_http_requests.clone();
+                let request_id = parsed["request_id"].as_str().map(str::to_owned);
+                let mut cancellation =
+                    register_active_ssh_exec(&active_http, request_id.as_deref()).await;
                 in_flight_clone.fetch_add(1, Ordering::Relaxed);
 
                 tokio::spawn(async move {
-                    proxy_executor::execute_proxy_request(
-                        &parsed,
-                        &creds,
-                        secret.as_deref().map(|secret| secret.as_str()),
-                        &replay,
-                        &metrics_clone,
-                        &tx_clone,
-                        use_binary_proxy_chunks,
-                        &http_client,
+                    run_http_proxy_until_cancel(
+                        &mut cancellation.receiver,
+                        proxy_executor::execute_proxy_request(
+                            &parsed,
+                            &creds,
+                            secret.as_deref().map(|secret| secret.as_str()),
+                            &replay,
+                            &metrics_clone,
+                            &tx_clone,
+                            use_binary_proxy_chunks,
+                            &http_client,
+                        ),
+                    )
+                    .await;
+                    finish_active_ssh_exec(
+                        &active_http,
+                        request_id.as_deref(),
+                        cancellation.generation,
                     )
                     .await;
                     in_flight_clone.fetch_sub(1, Ordering::Relaxed);
                 });
+            }
+            Some("proxy_cancel") => {
+                if let Some(id) = parsed["request_id"].as_str() {
+                    cancel_http_proxy(&active_http_requests, id).await;
+                }
             }
             Some("ssh_tunnel_open") => {
                 let tx_clone = tx.clone();
@@ -1321,6 +1364,7 @@ async fn connect_and_serve(
     } else {
         drain_active_ssh_tunnels(&active_ssh_tunnels).await;
     }
+    cancel_active_ssh_execs(&active_http_requests).await;
     cancel_active_ssh_execs(&active_ssh_execs).await;
     drain_active_web_terminals(&active_web_terminals).await;
     drain_active_ws_proxies(&active_ws_proxies).await;
@@ -1820,6 +1864,23 @@ fn normalize_target_host(host: &str) -> String {
 // ---------------------------------------------------------------------------
 // SSH exec handler
 // ---------------------------------------------------------------------------
+
+async fn run_http_proxy_until_cancel(
+    receiver: &mut watch::Receiver<bool>,
+    work: impl std::future::Future<Output = ()>,
+) {
+    tokio::select! {
+        biased;
+        () = wait_for_ssh_exec_cancel(receiver) => {},
+        () = work => {},
+    }
+}
+
+async fn cancel_http_proxy(active: &ActiveSshExecMap, request_id: &str) {
+    if let Some(entry) = active.lock().await.remove(request_id) {
+        let _ = entry.cancel_tx.send(true);
+    }
+}
 
 struct ActiveSshExecCancellation {
     generation: Option<uuid::Uuid>,
@@ -3818,9 +3879,26 @@ async fn handle_ws_proxy_open(
     let mut ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();
     ws_config.max_message_size = Some(WS_PROXY_MAX_MESSAGE_SIZE);
     ws_config.max_frame_size = Some(WS_PROXY_MAX_MESSAGE_SIZE);
+    let tls_config = match crate::tls::shared_config() {
+        Ok(config) => config,
+        Err(error) => {
+            let _ = send_ws_proxy_error(
+                &tx,
+                &session_id,
+                &format!("TLS configuration failed: {error}"),
+            )
+            .await;
+            return;
+        }
+    };
     let connect_result = tokio::time::timeout(
         Duration::from_secs(WS_PROXY_CONNECT_TIMEOUT_SECS),
-        tokio_tungstenite::connect_async_with_config(ws_request, Some(ws_config), false),
+        tokio_tungstenite::connect_async_tls_with_config(
+            ws_request,
+            Some(ws_config),
+            false,
+            Some(tokio_tungstenite::Connector::Rustls(tls_config)),
+        ),
     )
     .await;
 
@@ -4661,6 +4739,97 @@ mod tests {
         )
         .await;
         server_task.await.expect("downstream server task");
+    }
+
+    #[tokio::test]
+    async fn pool_node_http_cancellation_closes_real_provider_transport() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for streaming in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut byte = [0u8; 1];
+                while !request.ends_with(b"\r\n\r\n") {
+                    assert_eq!(socket.read(&mut byte).await.unwrap(), 1);
+                    request.push(byte[0]);
+                }
+                assert!(
+                    String::from_utf8(request)
+                        .unwrap()
+                        .contains("Bearer node-test")
+                );
+                if streaming {
+                    socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nfirst\r\n").await.unwrap();
+                }
+                started_tx.send(()).unwrap();
+                socket.read(&mut byte).await.unwrap()
+            });
+            let dir = tempfile::tempdir().unwrap();
+            let encryption = LocalEncryption::load_or_generate(dir.path()).unwrap();
+            let mut config = rci_test_config("ws://localhost:3001/api/v1/nodes/ws".into());
+            config.credentials.insert(
+                "pool-native".into(),
+                CredentialConfig::new_header(
+                    "Authorization".into(),
+                    Some(encryption.encrypt("Bearer node-test").unwrap()),
+                    Some(format!("http://{addr}")),
+                ),
+            );
+            let credentials = CredentialStore::from_config(&config, &encryption).unwrap();
+            let request = serde_json::json!({
+                "request_id": "pool-cancel", "service_slug": "pool-native", "method": "GET",
+                "path": "/run", "base_url": format!("http://{addr}"), "headers": {},
+            });
+            let active: ActiveSshExecMap = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+            let mut cancellation = register_active_ssh_exec(&active, Some("pool-cancel")).await;
+            let (tx, mut rx) = mpsc::channel(8);
+            let task_active = active.clone();
+            let task = tokio::spawn(async move {
+                run_http_proxy_until_cancel(
+                    &mut cancellation.receiver,
+                    proxy_executor::execute_proxy_request(
+                        &request,
+                        &credentials,
+                        None,
+                        &tokio::sync::Mutex::new(ReplayGuard::new()),
+                        &NodeMetrics::new(),
+                        &tx,
+                        true,
+                        &reqwest::Client::new(),
+                    ),
+                )
+                .await;
+                finish_active_ssh_exec(&task_active, Some("pool-cancel"), cancellation.generation)
+                    .await;
+            });
+            tokio::time::timeout(Duration::from_secs(2), started_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            if streaming {
+                tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }
+            cancel_http_proxy(&active, "pool-cancel").await;
+            tokio::time::timeout(Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(2), server)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                0,
+                "provider socket must close on cancellation"
+            );
+            assert!(active.lock().await.is_empty());
+        }
     }
 
     #[tokio::test]

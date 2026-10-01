@@ -56,6 +56,11 @@ macro_rules! llm_billing_routes {
                 )
             ),
             (
+                "/pools", "/api/v1/llm/pools", "handlers::llm_gateway::pool_aliases",
+                get(handlers::llm_gateway::pool_aliases),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt("AI pool alias discovery; no downstream request")
+            ),
+            (
                 "/status",
                 "/api/v1/llm/status",
                 "handlers::llm_gateway::llm_status",
@@ -543,6 +548,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .route("/me/consents", get(handlers::consent::list_my_consents))
         .route(
+            "/me/oauth-consent-requests/{handle}",
+            get(handlers::oauth::get_consent_request),
+        )
+        .route(
             "/me/consents/{client_id}/authorization",
             get(handlers::consent::get_my_consent_authorization),
         )
@@ -971,6 +980,11 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route("/audit-log", get(handlers::admin::list_audit_log))
         .route("/usage", get(handlers::admin_usage::get_usage))
         .route(
+            "/assistant/profile-routes",
+            get(handlers::assistant_team::get_profile_routes)
+                .put(handlers::assistant_team::put_profile_routes),
+        )
+        .route(
             "/usage/analytics",
             get(handlers::admin_usage::get_analytics),
         )
@@ -1068,6 +1082,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/authorize/decision",
             post(handlers::oauth::authorize_decision),
+        )
+        .route(
+            "/authorize/incremental/decision",
+            post(handlers::oauth::authorize_incremental_decision),
         )
         .route("/par", post(handlers::oauth::pushed_authorization_request))
         .route("/token", post(handlers::oauth::token))
@@ -1268,7 +1286,8 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         );
 
     // These inventory reads retain the service-account restriction. Key GETs
-    // below separately check SA scope and grants. Writes stay human-only.
+    // below separately check SA scope and grants. Writes stay human-only except
+    // for the CatalogEditor recommendation PUT in key_update_routes.
     let service_inventory_read_routes = Router::new()
         .route(
             "/keys/{key_id}/authorization",
@@ -1307,10 +1326,24 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::service_history::get_history),
         )
         .route("/", post(handlers::keys::create_key))
+        .route("/{key_id}", delete(handlers::keys::delete_key));
+
+    let key_update_routes = Router::new()
+        .route("/keys/{key_id}", put(handlers::key_updates::update_key))
+        .layer(middleware::from_fn(reject_delegated_tokens))
+        .layer(middleware::from_fn(reject_api_key_tokens))
+        .layer(middleware::from_fn(reject_relay_tokens));
+
+    let channel_connect_link_routes = Router::new()
+        .route("/", post(handlers::channel_connect_links::create))
+        .route("/{id}", get(handlers::channel_connect_links::get))
         .route(
-            "/{key_id}",
-            put(handlers::keys::update_key).delete(handlers::keys::delete_key),
-        );
+            "/{id}/cancel",
+            post(handlers::channel_connect_links::cancel),
+        )
+        .layer(middleware::from_fn(reject_delegated_tokens))
+        .layer(middleware::from_fn(reject_service_account_tokens))
+        .layer(middleware::from_fn(reject_relay_tokens));
 
     let connect_link_routes = Router::new()
         .route("/", post(handlers::connect_links::create_connect_link))
@@ -1324,6 +1357,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .layer(middleware::from_fn(reject_relay_tokens));
 
     let trigger_routes = Router::new()
+        .route("/setup/{id}", get(handlers::triggers::setup))
+        .route("/preview", post(handlers::triggers::preview))
+        .route("/{id}/runs", get(handlers::triggers::runs))
+        .route("/{id}/run", post(handlers::triggers::run_now))
         .route(
             "/",
             get(handlers::triggers::list_triggers).post(handlers::triggers::create_trigger),
@@ -1383,6 +1420,22 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         );
 
     let service_pool_routes = Router::new()
+        .route(
+            "/candidates",
+            get(handlers::service_pools_handler::candidates),
+        )
+        .route(
+            "/{pool_id}/candidates",
+            get(handlers::service_pools_handler::pool_candidates),
+        )
+        .route(
+            "/{pool_id}/health",
+            get(handlers::service_pools_handler::health),
+        )
+        .route(
+            "/{pool_id}/health/reset",
+            post(handlers::service_pools_handler::reset_health),
+        )
         .route(
             "/",
             get(handlers::service_pools_handler::list_pools)
@@ -1711,6 +1764,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             post(handlers::login_code::redeem),
         )
         .route(
+            "/channel-connect-links/preview",
+            post(handlers::channel_connect_links::preview),
+        )
+        .route(
             "/connect-links/preview",
             post(handlers::connect_links::preview_connect_link),
         )
@@ -1869,6 +1926,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .nest("/nodes", node_registration_routes)
         .nest("/oracle", oracle_consumer_routes)
         .nest("/connect-links", connect_link_routes)
+        .nest("/channel-connect-links", channel_connect_link_routes)
         .nest("/triggers", trigger_routes)
         .nest("/orgs", org_read_routes)
         .layer(middleware::from_fn(reject_delegated_tokens))
@@ -1905,6 +1963,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         ),
     ));
     let assistant_routes = Router::new()
+        .route("/nyxagent/live", get(handlers::assistant_nyxagent::live))
         .route(
             "/nyxagent/conversations",
             get(handlers::assistant_nyxagent::list),
@@ -1920,6 +1979,65 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/nyxagent/conversations/{id}/access-mode",
             patch(handlers::assistant_nyxagent::change_access_mode),
+        )
+        .route(
+            "/nyxagent/agents",
+            get(handlers::assistant_team::list_agents).post(handlers::assistant_team::create_agent),
+        )
+        .route(
+            "/nyxagent/agents/{id}",
+            get(handlers::assistant_team::get_agent)
+                .patch(handlers::assistant_team::update_agent)
+                .delete(handlers::assistant_team::delete_agent),
+        )
+        .route(
+            "/nyxagent/agents/{id}/grants",
+            axum::routing::put(handlers::assistant_team::set_agent_grants),
+        )
+        .route(
+            "/nyxagent/agents/{id}/destroy",
+            post(handlers::assistant_team::destroy_agent_route),
+        )
+        .route(
+            "/nyxagent/agents/{id}/memory/{note_id}",
+            delete(handlers::assistant_team::delete_memory),
+        )
+        .route(
+            "/nyxagent/settings",
+            get(handlers::assistant_team::get_settings)
+                .put(handlers::assistant_team::update_settings),
+        )
+        .route(
+            "/nyxagent/channels",
+            get(handlers::nyxbot::list_channels).post(handlers::nyxbot::connect_channel),
+        )
+        .route(
+            "/nyxagent/groups",
+            get(handlers::assistant_group::list_groups)
+                .post(handlers::assistant_group::create_group),
+        )
+        .route(
+            "/nyxagent/groups/{id}",
+            get(handlers::assistant_group::get_group)
+                .patch(handlers::assistant_group::update_group)
+                .delete(handlers::assistant_group::delete_group),
+        )
+        .route(
+            "/nyxagent/groups/{id}/messages",
+            get(handlers::assistant_group::list_messages)
+                .post(handlers::assistant_group::post_message),
+        )
+        .route(
+            "/nyxagent/channels/{id}",
+            delete(handlers::nyxbot::disconnect_channel).patch(handlers::nyxbot::link_channel),
+        )
+        .route(
+            "/nyxagent/channels/{id}/chats",
+            get(handlers::nyxbot::list_channel_chats),
+        )
+        .route(
+            "/nyxagent/channels/{id}/chats/{chat_id}",
+            patch(handlers::nyxbot::update_channel_chat),
         )
         .route(
             "/nyxagent/conversations/{id}/acknowledgements/{ack_id}",
@@ -1971,7 +2089,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             "/actions/org",
             handlers::assistant_action_effects_org::router(),
         )
-        .merge(assistant_proxy_routes);
+        .merge(assistant_proxy_routes)
+        .layer(middleware::from_fn(
+            crate::mw::auth::reject_oauth_client_tokens,
+        ));
 
     let ssh_billing_routes = ssh_billing_routes!(register_billing_routes, Router::new());
 
@@ -2083,6 +2204,30 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             post(handlers::auth_device::deny_auth_device),
         )
         .route(
+            "/channel-connect-links/complete",
+            post(handlers::channel_connect_links::complete),
+        )
+        .route(
+            "/channel-connect-links/decline",
+            post(handlers::channel_connect_links::decline),
+        )
+        .route(
+            "/channel-connect-links/retry",
+            post(handlers::channel_connect_links::retry),
+        )
+        .route(
+            "/channel-connect-links/managed/start",
+            post(handlers::channel_connect_links::managed_start),
+        )
+        .route(
+            "/channel-connect-links/managed/complete",
+            post(handlers::channel_connect_links::managed_complete),
+        )
+        .route(
+            "/channel-connect-links/telegram/start",
+            post(handlers::channel_connect_links::telegram_start),
+        )
+        .route(
             "/connect-links/complete",
             post(handlers::connect_links::complete_connect_link),
         )
@@ -2163,6 +2308,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .merge(api_v1_delegated)
         .merge(api_v1_shared)
         .merge(api_v1_human_only)
+        .merge(key_update_routes)
         .merge(ownership_routes);
 
     let well_known_routes = Router::new()
@@ -2277,6 +2423,32 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 )
                 .route("/pin-conv-url", post(handlers::oracle_worker::pin_conv_url))
                 .layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
+        )
+        // NyxBot as the Agent Event Gateway's `nyxbot` provider, and NyxID's
+        // direct relay receiver for NyxBot channels. Authenticated inside each
+        // handler (the channel's agent key, or NyxID's signed relay callback),
+        // NOT by the JWT middleware.
+        .nest(
+            "/api/v1/nyxbot",
+            Router::new()
+                .route("/agent-card", get(handlers::nyxbot::agent_card))
+                .route(
+                    "/bindings/{binding_id}",
+                    axum::routing::put(handlers::nyxbot::put_binding)
+                        .delete(handlers::nyxbot::delete_binding),
+                )
+                .route(
+                    "/bindings/{binding_id}/conversations/{conversation_id}",
+                    axum::routing::put(handlers::nyxbot::put_conversation)
+                        .delete(handlers::nyxbot::delete_conversation),
+                )
+                .route(
+                    "/bindings/{binding_id}/conversations/{conversation_id}/events/{event_id}",
+                    get(handlers::nyxbot::get_event_context),
+                )
+                .route("/responses", post(handlers::nyxbot::responses))
+                .route("/relay/{channel_id}", post(handlers::nyxbot::relay_callback))
+                .layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
         )
         .nest("/api/v1", api_v1)
         .merge(public_passthrough_routes)

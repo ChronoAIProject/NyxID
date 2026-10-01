@@ -124,6 +124,11 @@ pub const BILLING_ROUTE_INVENTORY: &[BillingRouteSpec] = &[
         policy: BillingRoutePolicy::Metered(BillingIngress::LlmProvider),
     },
     BillingRouteSpec {
+        handler: "handlers::llm_gateway::pool_aliases",
+        route: "/api/v1/llm/pools",
+        policy: BillingRoutePolicy::Exempt("AI pool alias discovery; no downstream request"),
+    },
+    BillingRouteSpec {
         handler: "handlers::llm_gateway::llm_status",
         route: "/api/v1/llm/status",
         policy: BillingRoutePolicy::Exempt("control-plane discovery; no downstream request"),

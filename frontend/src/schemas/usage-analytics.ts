@@ -1,3 +1,4 @@
+import { creditsSchema } from "./credits";
 import { z } from "zod";
 import { BILLING_METRICS } from "./billing-metrics";
 import { usageStatsSchema } from "./admin-usage";
@@ -61,7 +62,7 @@ export const analyticsPanelSchema = z
     measure: z.enum(ANALYTICS_MEASURES),
     metric: z.enum(BILLING_METRICS),
     breakdown: z.enum(["service", "user", "owner", "credential_class"]),
-    top: z.union([z.literal(0), z.literal(5), z.literal(10)]),
+    top: z.union([z.literal(0), z.literal(5), z.literal(10), z.literal(20)]),
     wide: z.boolean(),
     span: z.union([z.literal(1), z.literal(2), z.literal(3)]).optional(),
     height: z.enum(["compact", "standard", "tall"]).optional(),
@@ -97,6 +98,7 @@ const amount = z.number().int().nonnegative().nullable();
 const analyticsPointSchema = z.object({
   bucket: z.iso.datetime({ offset: true }),
   value: amount,
+  exact_value: creditsSchema.nullable().optional(),
   requests: z.number().nonnegative(),
   unknown_cost_events: z.number().nonnegative(),
 });
@@ -114,6 +116,7 @@ export const analyticsResponseSchema = z.object({
   granularity: z.enum(["hour", "day", "week", "month"]),
   unit: z.string(),
   total: amount,
+  exact_total: creditsSchema.nullable().optional(),
   totals: usageStatsSchema,
   points: z.array(analyticsPointSchema),
   series: z
@@ -124,12 +127,13 @@ export const analyticsResponseSchema = z.object({
         points: z.array(analyticsPointSchema),
       }),
     )
-    .max(11),
+    .max(21),
   slices: z.array(
     z.object({
       id: z.string().nullable(),
       label: z.string(),
       value: amount,
+      exact_value: creditsSchema.nullable().optional(),
       unknown_cost_events: z.number().nonnegative(),
       is_other: z.boolean(),
     }),

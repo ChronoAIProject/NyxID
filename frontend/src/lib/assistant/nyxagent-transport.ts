@@ -1,4 +1,3 @@
-import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
 import { assistantHttp, assistantJson } from "@/lib/assistant/assistant-http";
 import {
   applyDirectTurnEvent,
@@ -14,10 +13,9 @@ import {
   nyxAgentConversationSchema,
   nyxAgentHistorySchema,
   nyxAgentIndexSchema,
-  nyxAgentModelsSchema,
   nyxAgentEventSchema,
-  type NyxAgentAccessMode,
   type NyxAgentConversation,
+  type NyxAgentConversationAgent,
   type NyxAgentHistory,
   type NyxAgentTurnActivity,
   type NyxAgentAttachment,
@@ -164,10 +162,42 @@ export class NyxAgentTransport {
     }
   }
 
-  getConversations() {
-    return [...this.index.values()].sort((a, b) =>
-      b.last_message_at.localeCompare(a.last_message_at),
-    );
+  /** Known threads, newest first; only `agentId`'s when given. */
+  getConversations(agentId?: string) {
+    return [...this.index.values()]
+      .filter((row) => agentId === undefined || row.agent?.id === agentId)
+      .sort((a, b) => b.last_message_at.localeCompare(a.last_message_at));
+  }
+
+  /** The cached row for any thread, whichever agent it belongs to. */
+  getConversation(id?: string): NyxAgentConversation | undefined {
+    if (!id) return undefined;
+    return this.live.get(id)?.conversation ?? this.histories.get(id)?.conversation ?? this.index.get(id);
+  }
+
+  /**
+   * A row returned by a mutation (rename) carries neither the owning agent nor
+   * the pending-card count; keep the ones already known.
+   */
+  private withAggregates(row: NyxAgentConversation): NyxAgentConversation {
+    const known = this.histories.get(row.id)?.conversation ?? this.index.get(row.id);
+    if (!known) return row;
+    return {
+      ...row,
+      agent: row.agent ?? known.agent,
+      pending_acknowledgements: known.pending_acknowledgements,
+    };
+  }
+
+  /** Drop every cached thread of an agent that was deleted permanently. */
+  forgetAgent(agentId: string) {
+    this.mutationRevision += 1;
+    for (const row of this.getConversations(agentId)) {
+      this.rowRevisions.set(row.id, (this.rowRevisions.get(row.id) ?? 0) + 1);
+      this.index.delete(row.id);
+      this.histories.delete(row.id);
+    }
+    this.changed();
   }
 
   getHistory(id?: string) {
@@ -175,38 +205,11 @@ export class NyxAgentTransport {
   }
 
   getModel(id?: string) {
-    return (id ? this.index.get(id)?.model : this.draftModel) ?? "nyxagent/chat";
+    return (id ? this.getConversation(id)?.model : this.draftModel) ?? "nyxagent/chat";
   }
 
   setModel(model: string) {
     this.draftModel = model;
-    this.changed();
-  }
-
-  getAccessMode(id?: string): NyxAgentAccessMode {
-    if (id) return this.index.get(id)?.access_mode ?? "ask";
-    const store = useAssistantDraftStore.getState();
-    return store.ownerUserId === this.owner && store.nyxAgentAccessMode === "full" ? "full" : "ask";
-  }
-
-  async setAccessMode(id: string | undefined, accessMode: NyxAgentAccessMode) {
-    const generation = this.identity();
-    if (id) {
-      const row = nyxAgentConversationSchema.parse(
-        await assistantJson(`${path(id)}/access-mode`, {
-          method: "PATCH",
-          body: { access_mode: accessMode },
-        }),
-      );
-      this.current(generation);
-      if (row.id !== id) throw new Error("Assistant conversation mismatch.");
-      this.rowRevisions.set(id, (this.rowRevisions.get(id) ?? 0) + 1);
-      this.mutationRevision += 1;
-      this.index.set(id, row);
-      const history = this.histories.get(id);
-      if (history) this.histories.set(id, { ...history, conversation: row });
-    }
-    useAssistantDraftStore.getState().setNyxAgentAccessMode(this.owner!, accessMode);
     this.changed();
   }
 
@@ -218,23 +221,18 @@ export class NyxAgentTransport {
     );
   }
 
-  async models() {
-    const generation = this.identity();
-    const rows = nyxAgentModelsSchema.parse(await assistantJson(`${ROOT}/models`));
-    this.current(generation);
-    return rows;
-  }
-
-  async list() {
+  /** Every thread, or only one agent's threads when `agentId` is given. */
+  async list(agentId?: string) {
     const generation = this.identity();
     const mutationRevision = this.mutationRevision;
     let cursor: string | null = null;
     const seen = new Set<string>();
     const rows = new Map<string, NyxAgentConversation>();
+    const scope = agentId ? `&agent_id=${encodeURIComponent(agentId)}` : "";
     do {
       const query = cursor ? `&cursor=${encodeURIComponent(cursor)}` : "";
       const page = nyxAgentIndexSchema.parse(
-        await assistantJson(`${ROOT}/conversations?limit=100${query}`),
+        await assistantJson(`${ROOT}/conversations?limit=100${scope}${query}`),
       );
       this.current(generation);
       for (const row of page.conversations) rows.set(row.id, row);
@@ -243,13 +241,21 @@ export class NyxAgentTransport {
       if (cursor) seen.add(cursor);
       if (seen.size > 1000) throw new Error("Assistant history is too large to load.");
     } while (cursor);
-    if (mutationRevision !== this.mutationRevision) return this.getConversations();
+    if (mutationRevision !== this.mutationRevision) return this.getConversations(agentId);
     for (const [id, turn] of this.live) {
-      if (id !== "draft") rows.set(id, turn.conversation);
+      if (id !== "draft" && (!agentId || turn.conversation.agent?.id === agentId)) {
+        rows.set(id, turn.conversation);
+      }
     }
-    this.index = rows;
+    if (agentId) {
+      // Replace only this agent's threads; other agents' rows stay as they are.
+      for (const row of this.getConversations(agentId)) this.index.delete(row.id);
+      for (const [id, row] of rows) this.index.set(id, row);
+    } else {
+      this.index = rows;
+    }
     this.changed();
-    return this.getConversations();
+    return this.getConversations(agentId);
   }
 
   async history(id: string, beforeSeq?: number) {
@@ -287,9 +293,10 @@ export class NyxAgentTransport {
     if (row.id !== id) throw new Error("Assistant conversation mismatch.");
     this.mutationRevision += 1;
     this.rowRevisions.set(id, (this.rowRevisions.get(id) ?? 0) + 1);
-    this.index.set(id, row);
+    const merged = this.withAggregates(row);
+    this.index.set(id, merged);
     const history = this.histories.get(id);
-    if (history) this.histories.set(id, { ...history, conversation: row });
+    if (history) this.histories.set(id, { ...history, conversation: merged });
     this.changed();
   }
 
@@ -372,6 +379,7 @@ export class NyxAgentTransport {
         error: failed ? storedError(message.error_code) : undefined,
         ...toolCalls(message.activities),
         ...images(id, message.attachments),
+        via: message.via,
       };
     });
     // The live turn's tool activity arrives through the polled history metadata,
@@ -386,12 +394,15 @@ export class NyxAgentTransport {
       (history?.messages ?? []).map((message) => [message.id, images(id, message.attachments)]),
     );
     if (live) {
+      const settledRoles = new Map(
+        (history?.messages ?? []).map((message) => [message.id, message.role]),
+      );
       messages = live.state.messages.map((message) => {
         const streaming =
           message.role === "assistant" && message === live.state.messages.at(-1);
         return {
           id: message.id,
-          role: message.role,
+          role: settledRoles.get(message.id) ?? message.role,
           content: message.blocks.map((block) => block.text).join("\n\n"),
           timestamp: Date.parse(message.created_at),
           status: streaming ? "streaming" : "complete",
@@ -471,6 +482,8 @@ export class NyxAgentTransport {
     text: string,
     onAdopt: (id: string) => void,
     onTurnFailed?: (conversationId: string, turnId: string, code: string) => void,
+    /** New threads only: the agent to talk to (the server defaults to NyxBot). */
+    options: { readonly agent?: NyxAgentConversationAgent } = {},
   ) {
     const generation = this.identity();
     if (this.isRunning(id)) throw new Error("A turn is already active.");
@@ -486,25 +499,31 @@ export class NyxAgentTransport {
     const baseMessages = this.histories.get(key)?.messages ?? [];
     const turn: LiveTurn = {
       controller,
-      conversation: this.index.get(key) ?? {
-        id: key,
-        title: [...text.trim()].slice(0, 40).join(""),
-        model,
-        created_at: now,
-        last_message_at: now,
-        access_mode: this.getAccessMode(id),
-        message_count: 1,
-        pending_acknowledgements: 0,
-        active_turn: null,
-        context_reset_at: null,
-      },
+      conversation: this.index.get(key) ??
+        this.histories.get(key)?.conversation ?? {
+          id: key,
+          title: [...text.trim()].slice(0, 40).join(""),
+          model,
+          created_at: now,
+          last_message_at: now,
+          message_count: 1,
+          pending_acknowledgements: 0,
+          active_turn: null,
+          context_reset_at: null,
+          role: options.agent?.kind === "specialist" ? "subagent" : "orchestrator",
+          agent: options.agent ?? null,
+          pending_events: 0,
+          channel: null,
+        },
       state: {
         lastCursor: 0,
         activeTurn: null,
         messages: [
           ...baseMessages.map((message) => ({
             id: message.id,
-            role: message.role,
+            // The live stream only distinguishes the reply; session() restores
+            // orchestrator and event roles from the settled history.
+            role: message.role === "assistant" ? ("assistant" as const) : ("user" as const),
             schema_version: 1 as const,
             created_at: message.created_at,
             blocks: [{ type: "text" as const, block_id: message.id, text: message.text }],
@@ -528,7 +547,9 @@ export class NyxAgentTransport {
         assistantHttp(`${ROOT}/turns`, {
           method: "POST",
           body: {
-            ...(id ? { conversation_id: id } : { model, access_mode: this.getAccessMode() }),
+            ...(id
+              ? { conversation_id: id }
+              : { model, ...(options.agent ? { agent_id: options.agent.id } : {}) }),
             text,
           },
           headers: { Accept: "text/event-stream" },
@@ -638,7 +659,8 @@ export class NyxAgentTransport {
         this.current(generation);
         this.live.delete(key);
         this.changed();
-        await this.list().catch(() => undefined);
+        const agentId = this.getConversation(key)?.agent?.id;
+        if (agentId) await this.list(agentId).catch(() => undefined);
       }
     }
   }

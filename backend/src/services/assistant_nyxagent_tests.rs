@@ -5,6 +5,7 @@ use crate::test_utils::{connect_transaction_test_database, test_app_state, test_
 
 fn request(id: Option<&str>, text: &str) -> TurnRequest {
     TurnRequest {
+        agent_id: None,
         conversation_id: id.map(str::to_owned),
         text: text.into(),
         model: None,
@@ -38,11 +39,6 @@ fn closed_request_grammar_and_unicode_limit() {
         json!({"text":"hello","conversation_id":"chatc-123"}),
         json!({"text":"hello","model":"gpt-5"}),
         json!({"text":"hello","access_mode":"unrestricted"}),
-        json!({
-            "text": "hello",
-            "conversation_id": "nyxa-1234567890abcdef1234567890abcdef",
-            "access_mode": "full",
-        }),
         json!({"text":"hello","conversation_id":"nyxa-ABCDEF1234567890abcdef1234567890"}),
     ] {
         assert!(
@@ -275,14 +271,19 @@ fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
             created_at: Utc::now(),
             activities: Vec::new(),
             attachments: Vec::new(),
+            origin: None,
+            via: None,
         })
         .collect();
-    let prompt = instructions(&messages);
+    let row = stale_test_row(Utc::now());
+    let base = base_prompt(&row, None);
+    let prompt = instructions(&row, None, &messages);
     assert!(prompt.starts_with(SYSTEM_PROMPT));
     assert!(prompt.contains("Prior conversation history"));
     assert!(prompt.contains("marker29"));
     assert!(!prompt.contains("marker0:"));
-    assert!(prompt.len() <= SYSTEM_PROMPT.len() + 8192);
+    assert!(prompt.contains(SCHEDULE_PROMPT));
+    assert!(prompt.len() <= base.len() + 8192);
 }
 
 #[tokio::test]
@@ -329,7 +330,9 @@ async fn persistence_fences_concurrent_turns_scopes_owners_paginates_and_deletes
     for result in [
         get(&db, "other", &first.id).await,
         rename(&db, "other", &first.id, "No").await,
-        delete(&db, "other", &first.id).await,
+        delete(&db, "other", &first.id)
+            .await
+            .map(|mut rows| rows.remove(0)),
     ] {
         assert!(matches!(result, Err(AppError::NotFound(_))));
     }
@@ -396,9 +399,9 @@ async fn persistence_fences_concurrent_turns_scopes_owners_paginates_and_deletes
         rename(&db, &owner, &row.id, "Renamed").await.unwrap().title,
         "Renamed"
     );
-    assert_eq!(list(&db, &owner, 1, None).await.unwrap().len(), 1);
+    assert_eq!(list(&db, &owner, 1, None, None).await.unwrap().len(), 1);
     assert!(
-        list(&db, &owner, 1, Some(&index_cursor(&row)))
+        list(&db, &owner, 1, Some(&index_cursor(&row)), None)
             .await
             .unwrap()
             .is_empty()
@@ -479,6 +482,7 @@ fn live_turn_expires_at_the_exact_ttl_boundary() {
 
 fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
     AssistantConversation {
+        automation_thread: false,
         id: format!("nyxa-{}", Uuid::new_v4().simple()),
         user_id: "owner".into(),
         title: "Interrupted turn".into(),
@@ -489,16 +493,35 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         credential_api_key_id: "key".into(),
         message_count: 0,
         active_turn: Some(ActiveTurn {
+            trigger_run_id: None,
             activities: Vec::new(),
             attachments: Vec::new(),
             turn_id: Uuid::new_v4().to_string(),
+            origin: Default::default(),
             started_at: now - chrono::Duration::seconds(ACTIVE_TURN_TTL_SECS),
             stop_requested: false,
+            events: Vec::new(),
+            note: None,
+            question_key: None,
+            question: None,
+            asked_from: None,
+            also_deliver: Vec::new(),
         }),
         context_reset_at: None,
         context_reset_reason: None,
         created_at: now,
         updated_at: now,
+        role: Default::default(),
+        agent_id: None,
+        report_to: None,
+        pending_events: Vec::new(),
+        event_streak: 0,
+        channel: None,
+        group_id: None,
+        group_seen_seq: 0,
+        guest_turn: false,
+        reply_channel: None,
+        deliver_also: Vec::new(),
     }
 }
 

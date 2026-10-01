@@ -1,3 +1,5 @@
+use crate::models::credits::Credits;
+use crate::services::billing::amounts::credit_expr;
 use axum::{
     Json,
     body::Bytes,
@@ -67,9 +69,13 @@ pub struct BillingUsageRow {
     /// including owners outside rollout: no cost, never pushed to Lago.
     pub billable: bool,
     pub estimated_credits_micros: Option<i64>,
+    pub estimated_credits: Option<Credits>,
     pub wallet_credits_micros: Option<i64>,
+    pub wallet_credits: Option<Credits>,
     pub grant_credits_micros: Option<i64>,
+    pub grant_credits: Option<Credits>,
     pub allowance_credits_micros: Option<i64>,
+    pub allowance_credits: Option<Credits>,
     pub allowance_quantity: i64,
     /// Provider-reported token classes summed over the group (LLM traffic
     /// only). None when no row in the group carried a breakdown.
@@ -84,9 +90,13 @@ pub struct BillingUsageTotals {
     pub bytes: i64,
     pub events: i64,
     pub estimated_credits_micros: Option<i64>,
+    pub estimated_credits: Option<Credits>,
     pub wallet_credits_micros: Option<i64>,
+    pub wallet_credits: Option<Credits>,
     pub grant_credits_micros: Option<i64>,
+    pub grant_credits: Option<Credits>,
     pub allowance_credits_micros: Option<i64>,
+    pub allowance_credits: Option<Credits>,
     pub allowance_quantity: i64,
 }
 
@@ -131,6 +141,13 @@ pub struct BillingWalletResponse {
     pub created_at: chrono::DateTime<Utc>,
     pub updated_at: chrono::DateTime<Utc>,
     pub created: bool,
+    pub balance: Credits,
+    pub reserved: Credits,
+    pub pending_debits: Credits,
+    pub pending_expiry: Credits,
+    pub available: Credits,
+    pub available_with_overdraft: Credits,
+    pub overdraft_cap: Credits,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -168,6 +185,7 @@ pub struct TopUpHistoryEntry {
     pub paid_at: Option<chrono::DateTime<Utc>>,
     pub credits_expire_at: Option<chrono::DateTime<Utc>>,
     pub expired_credits_micros: i64,
+    pub expired_credits: Credits,
     pub credits_expired_at: Option<chrono::DateTime<Utc>>,
 }
 
@@ -229,15 +247,36 @@ pub async fn get_usage(
     let pipeline = vec![
         doc! { "$match": match_doc },
         doc! { "$set": {
-            "exact_cost": { "$ne": [{ "$ifNull": ["$funding.total_charge_micros", null] }, null] },
+            "exact_cost": crate::services::billing::amounts::funding_cost_present(),
             "consumed_grant_micros": { "$sum": { "$map": {
                 "input": { "$ifNull": ["$funding.grant_consumptions", []] },
-                "as": "allocation", "in": "$$allocation.amount_micros",
+                "as": "allocation", "in": credit_expr("$$allocation.amount"),
             } } },
             "consumed_allowance_quantity": { "$sum": { "$map": {
                 "input": { "$ifNull": ["$funding.allowance_consumptions", []] },
                 "as": "allocation", "in": "$$allocation.quantity",
             } } },
+        } },
+        // The rate each historical meter reserved at, in exact Decimal128 pico.
+        // Null when the row recorded none.
+        doc! { "$set": {
+            "reservation_rate_pico": { "$switch": {
+                "branches": [
+                    { "case": "$exact_cost", "then": null },
+                    {
+                        "case": { "$ne": [{ "$ifNull": ["$funding.credits_per_unit_pico", null] }, null] },
+                        "then": { "$toDecimal": "$funding.credits_per_unit_pico" },
+                    },
+                    // `credits_per_unit_micros` is serde-defaulted, so 0 without pico is
+                    // indistinguishable from a row written before rates were recorded;
+                    // unknown is safer than a fabricated free price.
+                    {
+                        "case": { "$gt": ["$funding.credits_per_unit_micros", 0] },
+                        "then": { "$multiply": [{ "$toDecimal": "$funding.credits_per_unit_micros" }, 1_000_000_i64] },
+                    },
+                ],
+                "default": null,
+            } },
         } },
         doc! {
             "$group": {
@@ -262,14 +301,32 @@ pub async fn get_usage(
                 // Keep exact settlements separate from historical estimates.
                 // Reductions happen in MongoDB, never by loading individual meters.
                 "exact_rows": { "$sum": { "$cond": ["$exact_cost", 1, 0] } },
-                "total_charge_micros": { "$sum": "$funding.total_charge_micros" },
-                "wallet_funded_micros": { "$sum": "$funding.wallet_funded_micros" },
-                "grant_funded_micros": { "$sum": "$funding.grant_funded_micros" },
-                "allowance_funded_micros": { "$sum": "$funding.allowance_funded_micros" },
+                "total_charge": { "$sum": credit_expr("$funding.total_charge") },
+                "wallet_funded": { "$sum": credit_expr("$funding.wallet_funded") },
+                "grant_funded": { "$sum": credit_expr("$funding.grant_funded") },
+                "allowance_funded": { "$sum": credit_expr("$funding.allowance_funded") },
                 "allowance_quantity": { "$sum": { "$ifNull": [
                     "$funding.allowance_funded_quantity", "$consumed_allowance_quantity",
                 ] } },
                 "legacy_quantity": { "$sum": { "$cond": ["$exact_cost", 0, "$quantity"] } },
+                "legacy_rows": { "$sum": { "$cond": ["$exact_cost", 0, 1] } },
+                "legacy_grant_only_rows": { "$sum": { "$cond": [
+                    { "$and": [
+                        { "$not": ["$exact_cost"] },
+                        { "$eq": ["$funding.settled", true] },
+                        // Numeric equality: a legacy Int64 whole-credit zero and
+                        // a Decimal128 zero both match.
+                        { "$eq": ["$funding.wallet_charge_credits", 0] },
+                        { "$eq": ["$consumed_allowance_quantity", 0] },
+                    ] }, 1, 0,
+                ] } },
+                "legacy_reservation_rows": { "$sum": { "$cond": [
+                    { "$eq": [{ "$ifNull": ["$reservation_rate_pico", null] }, null] }, 0, 1,
+                ] } },
+                "legacy_reservation_gross": { "$sum": reservation_cost("$quantity") },
+                // Exact cost is linear in quantity, so settlement's allowance
+                // share cost(q) - cost(q - a) is exactly rate x a.
+                "legacy_reservation_allowance": { "$sum": reservation_cost("$consumed_allowance_quantity") },
                 "legacy_grant_micros": { "$sum": { "$cond": ["$exact_cost", 0, "$consumed_grant_micros"] } },
                 "legacy_allowance_quantity": { "$sum": { "$cond": ["$exact_cost", 0, "$consumed_allowance_quantity"] } },
                 "events": { "$sum": 1 },
@@ -303,20 +360,13 @@ pub async fn get_usage(
         let lago_metric_code = id_doc.get_str("lago_metric_code").unwrap_or("").to_string();
         let billable = id_doc.get_bool("billable").unwrap_or(false);
         let model = id_doc.get_str("model").ok().map(ToString::to_string);
-        let legacy_quantity = doc_i64(&doc, "legacy_quantity").unwrap_or(0);
-        let rate = if billable && legacy_quantity > 0 {
-            find_rate(&state.db, &lago_metric_code, model.as_deref())
-                .await?
-                .map(|rate| {
-                    crate::services::billing::amounts::rate_pico(
-                        rate.credits_per_unit_pico,
-                        rate.credits_per_unit_micros,
-                    )
-                })
-        } else {
-            Some(0)
-        };
-        let costs = usage_costs(&doc, billable, rate);
+        let pricing = legacy_pricing(
+            &doc,
+            billable,
+            find_rate(&state.db, &lago_metric_code, model.as_deref()),
+        )
+        .await?;
+        let costs = usage_costs(&doc, billable, pricing)?;
         rows.push(BillingUsageRow {
             service_slug: id_doc.get_str("service_slug").ok().map(ToString::to_string),
             service_id: id_doc.get_str("service_id").ok().map(ToString::to_string),
@@ -340,10 +390,14 @@ pub async fn get_usage(
             events: doc_i64(&doc, "events").unwrap_or(0),
             lago_acked: id_doc.get_bool("lago_acked").unwrap_or(false),
             billable,
-            estimated_credits_micros: costs.total,
-            wallet_credits_micros: costs.wallet,
-            grant_credits_micros: costs.grant,
-            allowance_credits_micros: costs.allowance,
+            estimated_credits_micros: costs.total.map(Credits::display_micros),
+            estimated_credits: costs.total,
+            wallet_credits_micros: costs.wallet.map(Credits::display_micros),
+            wallet_credits: costs.wallet,
+            grant_credits_micros: costs.grant.map(Credits::display_micros),
+            grant_credits: costs.grant,
+            allowance_credits_micros: costs.allowance.map(Credits::display_micros),
+            allowance_credits: costs.allowance,
             allowance_quantity: if billable {
                 doc_i64(&doc, "allowance_quantity").unwrap_or(0)
             } else {
@@ -360,10 +414,18 @@ pub async fn get_usage(
         requests: rows.iter().map(|row| row.requests).sum(),
         bytes: rows.iter().map(|row| row.bytes).sum(),
         events: rows.iter().map(|row| row.events).sum(),
-        estimated_credits_micros: sum_optional(rows.iter().map(|row| row.estimated_credits_micros)),
-        wallet_credits_micros: sum_optional(rows.iter().map(|row| row.wallet_credits_micros)),
-        grant_credits_micros: sum_optional(rows.iter().map(|row| row.grant_credits_micros)),
-        allowance_credits_micros: sum_optional(rows.iter().map(|row| row.allowance_credits_micros)),
+        estimated_credits_micros: sum_optional(rows.iter().map(|row| row.estimated_credits))?
+            .map(Credits::display_micros),
+        estimated_credits: sum_optional(rows.iter().map(|row| row.estimated_credits))?,
+        wallet_credits_micros: sum_optional(rows.iter().map(|row| row.wallet_credits))?
+            .map(Credits::display_micros),
+        wallet_credits: sum_optional(rows.iter().map(|row| row.wallet_credits))?,
+        grant_credits_micros: sum_optional(rows.iter().map(|row| row.grant_credits))?
+            .map(Credits::display_micros),
+        grant_credits: sum_optional(rows.iter().map(|row| row.grant_credits))?,
+        allowance_credits_micros: sum_optional(rows.iter().map(|row| row.allowance_credits))?
+            .map(Credits::display_micros),
+        allowance_credits: sum_optional(rows.iter().map(|row| row.allowance_credits))?,
         allowance_quantity: rows.iter().map(|row| row.allowance_quantity).sum(),
     };
 
@@ -417,14 +479,14 @@ pub async fn get_wallet(
         .await?;
     ensure_billing_rollout(&state, &owner.owner_id, &auth_user.user_id.to_string()).await?;
     if let Some(wallet) = state.billing.get_wallet(&owner.owner_id).await? {
-        return Ok(Json(BillingWalletResponse::from_wallet(wallet, false)));
+        return Ok(Json(BillingWalletResponse::from_wallet(wallet, false)?));
     }
     let provisioned = state.billing.ensure_wallet(&owner.owner_id).await?;
 
     Ok(Json(BillingWalletResponse::from_wallet(
         provisioned.wallet,
         provisioned.created,
-    )))
+    )?))
 }
 
 #[utoipa::path(
@@ -454,7 +516,7 @@ pub async fn provision_wallet(
     Ok(Json(BillingWalletResponse::from_wallet(
         provisioned.wallet,
         provisioned.created,
-    )))
+    )?))
 }
 
 #[utoipa::path(
@@ -631,7 +693,8 @@ pub async fn list_topups(
                 receipt_available: status == "paid",
                 paid_at: session.paid_at,
                 credits_expire_at: session.credits_expire_at,
-                expired_credits_micros: session.expired_credits_micros,
+                expired_credits_micros: session.expired_credits.display_micros(),
+                expired_credits: session.expired_credits,
                 credits_expired_at: session.credits_expired_at,
             }
         })
@@ -887,89 +950,158 @@ fn doc_i64(doc: &Document, key: &str) -> Option<i64> {
     }
 }
 
-/// Exact settlements remain readable without a cached rate. Historical rows
-/// use the current model rate; unknown historical costs retain null semantics.
-struct UsageCosts {
-    total: Option<i64>,
-    wallet: Option<i64>,
-    grant: Option<i64>,
-    allowance: Option<i64>,
+/// Exact per-meter credits for `quantity` at the meter's reservation rate, the
+/// same `rate x quantity` exact settlement computes, with no rounding. A null
+/// rate yields null, which `$sum` ignores.
+fn reservation_cost(quantity: &str) -> Document {
+    doc! { "$divide": [
+        { "$multiply": [{ "$toDecimal": quantity }, "$reservation_rate_pico"] },
+        crate::services::billing::amounts::PICO_PER_CREDIT as i64,
+    ] }
 }
 
-fn usage_costs(doc: &Document, billable: bool, rate: Option<i128>) -> UsageCosts {
-    if !billable {
-        return UsageCosts {
-            total: Some(0),
-            wallet: Some(0),
-            grant: Some(0),
-            allowance: Some(0),
-        };
+/// How a group's historical meters (no exact settled cost) are valued, most
+/// certain first. A grant-only settlement has an exact gross: the grant covered
+/// all of it. Otherwise follow settlement's own rate order: the cached rate,
+/// then the reservation rate every funded meter records. Codes whose price was
+/// removed before retired rates were kept have no cache row, so the per-row
+/// rate is the only surviving record.
+enum LegacyPricing {
+    NoUsage,
+    GrantSettled,
+    CachedRate(i128),
+    Reservation,
+    Unknown,
+}
+
+/// `cached_rate` is lazy; it is awaited only when no exact derivation applies.
+async fn legacy_pricing(
+    doc: &Document,
+    billable: bool,
+    cached_rate: impl Future<Output = AppResult<Option<BillingRateCache>>>,
+) -> AppResult<LegacyPricing> {
+    let count = |key| doc_i64(doc, key).unwrap_or(0);
+    let rows = count("legacy_rows");
+    if !billable || count("legacy_quantity") <= 0 {
+        return Ok(LegacyPricing::NoUsage);
     }
-    let value = |key| doc_i64(doc, key).unwrap_or(0);
-    let grant = Some(value("grant_funded_micros").saturating_add(value("legacy_grant_micros")));
-    if value("legacy_quantity") > 0 && rate.is_none() {
-        return UsageCosts {
-            total: None,
-            wallet: None,
-            grant,
-            allowance: None,
-        };
+    if rows > 0 && rows == count("legacy_grant_only_rows") {
+        return Ok(LegacyPricing::GrantSettled);
     }
-    let legacy_cost = rate
-        .map(|rate| crate::services::billing::amounts::cost_micros(rate, value("legacy_quantity")));
-    let legacy_allowance = if value("legacy_allowance_quantity") == 0 {
-        Some(0)
+    if let Some(rate) = cached_rate.await? {
+        return Ok(LegacyPricing::CachedRate(
+            crate::services::billing::amounts::rate_pico(
+                rate.credits_per_unit_pico,
+                rate.credits_per_unit_micros,
+            ),
+        ));
+    }
+    Ok(if rows == count("legacy_reservation_rows") {
+        LegacyPricing::Reservation
     } else {
-        rate.map(|rate| {
-            crate::services::billing::amounts::cost_micros(rate, value("legacy_allowance_quantity"))
-        })
-    };
-    let legacy_grant = value("legacy_grant_micros");
-    let legacy_wallet = legacy_cost.zip(legacy_allowance).map(|(total, allowance)| {
-        total
-            .saturating_sub(allowance)
-            .saturating_sub(legacy_grant)
-            .max(0)
-    });
-    let combine = |key, legacy| {
-        sum_optional([(value("exact_rows") > 0).then(|| value(key)), legacy].into_iter())
-    };
-    UsageCosts {
-        total: combine("total_charge_micros", legacy_cost),
-        wallet: combine("wallet_funded_micros", legacy_wallet),
-        grant,
-        allowance: combine("allowance_funded_micros", legacy_allowance),
-    }
+        LegacyPricing::Unknown
+    })
 }
 
-fn sum_optional(values: impl Iterator<Item = Option<i64>>) -> Option<i64> {
-    let mut saw_value = false;
-    let mut total = 0_i64;
-    for value in values.flatten() {
-        saw_value = true;
-        total = total.saturating_add(value);
+/// Exact settlements remain readable without a cached rate. Historical rows
+/// are valued per `LegacyPricing`; unknown costs stay null.
+struct UsageCosts {
+    total: Option<Credits>,
+    wallet: Option<Credits>,
+    grant: Option<Credits>,
+    allowance: Option<Credits>,
+}
+
+fn usage_costs(doc: &Document, billable: bool, pricing: LegacyPricing) -> AppResult<UsageCosts> {
+    if !billable {
+        return Ok(UsageCosts {
+            total: Some(Credits::ZERO),
+            wallet: Some(Credits::ZERO),
+            grant: Some(Credits::ZERO),
+            allowance: Some(Credits::ZERO),
+        });
     }
-    saw_value.then_some(total)
+    let quantity = |key| doc_i64(doc, key).unwrap_or(0);
+    let money =
+        |key| Credits::from_bson(doc.get(key).cloned().unwrap_or(Bson::Int64(0)), 1_000_000);
+    let legacy_grant = money("legacy_grant_micros")?;
+    let grant = Some(money("grant_funded")?.checked_add(legacy_grant)?);
+    let (legacy_cost, legacy_allowance) = match pricing {
+        LegacyPricing::NoUsage => (Credits::ZERO, Credits::ZERO),
+        LegacyPricing::GrantSettled => (legacy_grant, Credits::ZERO),
+        LegacyPricing::CachedRate(rate) => (
+            crate::services::billing::amounts::cost(rate, quantity("legacy_quantity"))?,
+            crate::services::billing::amounts::cost(rate, quantity("legacy_allowance_quantity"))?,
+        ),
+        LegacyPricing::Reservation => (
+            money("legacy_reservation_gross")?,
+            money("legacy_reservation_allowance")?,
+        ),
+        LegacyPricing::Unknown => {
+            return Ok(UsageCosts {
+                total: None,
+                wallet: None,
+                grant,
+                allowance: None,
+            });
+        }
+    };
+    let legacy_wallet = legacy_cost
+        .checked_sub(legacy_allowance)?
+        .checked_sub(legacy_grant)?
+        .max(Credits::ZERO);
+    let combine = |key, legacy| -> AppResult<Option<Credits>> {
+        sum_optional(
+            [
+                (quantity("exact_rows") > 0)
+                    .then(|| money(key))
+                    .transpose()?,
+                Some(legacy),
+            ]
+            .into_iter(),
+        )
+    };
+    Ok(UsageCosts {
+        total: combine("total_charge", legacy_cost)?,
+        wallet: combine("wallet_funded", legacy_wallet)?,
+        grant,
+        allowance: combine("allowance_funded", legacy_allowance)?,
+    })
+}
+
+fn sum_optional(values: impl Iterator<Item = Option<Credits>>) -> AppResult<Option<Credits>> {
+    let mut total = None;
+    for value in values.flatten() {
+        total = Some(total.unwrap_or(Credits::ZERO).checked_add(value)?);
+    }
+    Ok(total)
 }
 
 impl BillingWalletResponse {
-    fn from_wallet(wallet: BillingWallet, created: bool) -> Self {
-        let available_credits = wallet.available_credits();
-        let available_with_overdraft_credits = wallet.available_with_overdraft_credits();
+    fn from_wallet(wallet: BillingWallet, created: bool) -> AppResult<Self> {
+        let available_credits = wallet.available_credits()?;
+        let available_with_overdraft_credits = wallet.available_with_overdraft_credits()?;
         let suspended = wallet.is_suspended();
 
-        Self {
+        Ok(Self {
+            balance: wallet.balance_credits,
+            reserved: wallet.reserved_credits,
+            pending_debits: wallet.pending_lago_debits,
+            pending_expiry: wallet.pending_topup_expiry_credits,
+            available: available_credits,
+            available_with_overdraft: available_with_overdraft_credits,
+            overdraft_cap: wallet.overdraft_cap_credits,
             owner_id: wallet.owner_id,
             plan_kind: wallet.plan_kind,
             collection_state: wallet.collection_state,
-            balance_credits: wallet.balance_credits,
-            reserved_credits: wallet.reserved_credits,
-            pending_lago_debits: wallet.pending_lago_debits,
-            pending_topup_expiry_credits: wallet.pending_topup_expiry_credits,
-            available_credits,
-            available_with_overdraft_credits,
+            balance_credits: wallet.balance_credits.display_whole(),
+            reserved_credits: wallet.reserved_credits.display_whole(),
+            pending_lago_debits: wallet.pending_lago_debits.display_whole(),
+            pending_topup_expiry_credits: wallet.pending_topup_expiry_credits.display_whole(),
+            available_credits: available_credits.display_whole(),
+            available_with_overdraft_credits: available_with_overdraft_credits.display_whole(),
             has_payment_instrument: wallet.has_payment_instrument,
-            overdraft_cap_credits: wallet.overdraft_cap_credits,
+            overdraft_cap_credits: wallet.overdraft_cap_credits.display_whole(),
             suspended,
             lago_customer_id: wallet.lago_customer_id,
             lago_subscription_id: wallet.lago_subscription_id,
@@ -978,7 +1110,7 @@ impl BillingWalletResponse {
             created_at: wallet.created_at,
             updated_at: wallet.updated_at,
             created,
-        }
+        })
     }
 }
 

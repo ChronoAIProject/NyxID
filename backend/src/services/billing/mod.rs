@@ -8,6 +8,7 @@ pub mod meter;
 pub mod metric_resolution;
 pub mod owner_resolver;
 pub mod periods;
+pub mod pool_attempt;
 pub mod pricing;
 pub mod provisioning;
 pub mod reconcile;
@@ -26,13 +27,139 @@ use crate::config::AppConfig;
 use crate::db::DbHandle;
 use crate::errors::AppResult;
 use crate::models::billing_wallet::{BillingWallet, COLLECTION_NAME as BILLING_WALLET};
+use chrono::{DateTime, Utc};
+use futures::TryStreamExt;
 use lago_client::{LagoApi, LagoClient};
-use mongodb::bson::doc;
+use mongodb::bson::{Document, doc};
 
 pub use meter::MeteredProxyContext;
 pub use owner_resolver::BillingOwnerResolver;
 pub use route_context::{BillingRouteContext, NodeIntent};
 pub use route_inventory::BillingIngress;
+
+#[derive(Clone, Debug)]
+pub struct BillingStartupDiagnostic {
+    pub code: String,
+    pub summary: String,
+    pub detail: String,
+    pub remediation: String,
+    pub detected_at: DateTime<Utc>,
+}
+
+/// Collect billing cutover and provider-rate diagnostics for the admin
+/// integrity surface. Keeping the queries here preserves handler/service
+/// layering and gives operators actionable failed-document identifiers.
+pub async fn startup_diagnostics(
+    db: &mongodb::Database,
+) -> AppResult<Vec<BillingStartupDiagnostic>> {
+    let mut items = Vec::new();
+    let migration = db
+        .collection::<Document>("billing_migrations")
+        .find_one(doc! {
+            "_id": exact_migration::BILLING_MARKER,
+            "completed_at": { "$exists": false },
+        })
+        .await?;
+    if let Some(marker) = migration {
+        let errors = db.collection::<Document>("billing_migration_errors");
+        let count = errors.count_documents(doc! {}).await?;
+        let keys: Vec<String> = errors
+            .find(doc! {})
+            .sort(doc! { "_id": 1 })
+            .limit(5)
+            .await?
+            .try_collect::<Vec<_>>()
+            .await?
+            .into_iter()
+            .filter_map(|row| row.get_str("_id").ok().map(str::to_owned))
+            .collect();
+        let detail = if count == 0 {
+            marker
+                .get_str("detail")
+                .unwrap_or("Migration is running")
+                .to_owned()
+        } else {
+            format!("{count} failed documents; first keys: {}", keys.join(", "))
+        };
+        items.push(BillingStartupDiagnostic {
+            code: "billing_exact_cutover".into(),
+            summary: "Billing cutover is pending".into(),
+            detail,
+            remediation: "Drain old billing writers and acknowledge the exact-accounting cutover"
+                .into(),
+            detected_at: marker
+                .get_datetime("updated_at")
+                .map(|value| value.to_chrono())
+                .unwrap_or_else(|_| Utc::now()),
+        });
+    }
+    let rollup = db
+        .collection::<Document>("billing_migrations")
+        .find_one(doc! {
+            "_id": exact_migration::ROLLUP_MARKER,
+            "completed_at": { "$exists": false },
+        })
+        .await?;
+    if let Some(marker) = rollup {
+        items.push(BillingStartupDiagnostic {
+            code: "billing_rollup_normalization".into(),
+            summary: "Billing analytics normalization is in progress".into(),
+            detail: marker
+                .get_str("detail")
+                .unwrap_or("Derived rollups are still being normalized")
+                .to_owned(),
+            remediation: "Analytics will continue using the legacy-tolerant reduction until normalization completes".into(),
+            detected_at: marker
+                .get_datetime("updated_at")
+                .map(|value| value.to_chrono())
+                .unwrap_or_else(|_| Utc::now()),
+        });
+    }
+    let mut rates = db
+        .collection::<Document>("billing_rate_diagnostics")
+        .find(doc! { "rejected_metrics.0": { "$exists": true } })
+        .await?;
+    while let Some(rate) = rates.try_next().await? {
+        let rejected = rate
+            .get_array("rejected_metrics")
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|value| value.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        items.push(BillingStartupDiagnostic {
+            code: "billing_invalid_rates".into(),
+            summary: "Some Lago metrics cannot be billed".into(),
+            detail: format!("Rejected metrics: {rejected}"),
+            remediation: "Correct negative, overflowing or sub-picocredit rates in the Lago plan"
+                .into(),
+            detected_at: rate
+                .get_datetime("updated_at")
+                .map(|value| value.to_chrono())
+                .unwrap_or_else(|_| Utc::now()),
+        });
+    }
+    if let Some(diagnostic) = db
+        .collection::<crate::models::pool_recovery_diagnostic::PoolRecoveryDiagnostic>(
+            crate::models::pool_recovery_diagnostic::COLLECTION_NAME,
+        )
+        .find_one(doc! {"name":"pool_recovery"})
+        .await?
+    {
+        items.push(BillingStartupDiagnostic {
+            code:"billing_pool_recovery".into(),
+            summary:"Pool recovery has observed errors".into(),
+            detail:format!("{} recovery failures; recent requests: {}", diagnostic.failures,
+                diagnostic.samples.iter().map(|failure| format!("{}: {}",failure.request_id.as_deref().unwrap_or("recovery phase"),failure.detail)).collect::<Vec<_>>().join("; ")),
+            remediation:"Inspect the affected request's meter, funding holds and settlement intent. Recovery keeps reservations intact and retries on later passes; do not fabricate balance corrections.".into(),
+            detected_at:diagnostic.updated_at,
+        });
+    }
+    Ok(items)
+}
 
 #[derive(Clone)]
 pub struct BillingService {
@@ -169,6 +296,13 @@ impl BillingService {
             return Ok(false);
         };
         pricing::sync_service_price(&self.db, lago, &self.config.lago_plan_code, service).await
+    }
+
+    pub fn spawn_refresh_worker(&self) {
+        if !self.config.billing_enabled {
+            return;
+        }
+        webhook::spawn_refresh_worker(self.db.clone(), self.lago.clone());
     }
 
     pub fn reconciler(&self) -> reconcile::BillingReconciler {
@@ -346,6 +480,11 @@ impl BillingService {
                 "Channel billing could not reserve funding".into(),
             ));
         }
+        if ctx.pool_attempt.is_some() && reservation.is_some() {
+            // Pool funding and meter rows committed together; cancellation at
+            // any later await can recover from the durable attempt lease.
+            return Ok(MeteredProxyContext::from_route(&ctx));
+        }
         match meter::open(&self.db, &ctx, reservation.as_ref()).await {
             Ok(metered) => Ok(metered),
             Err(error) => {
@@ -516,9 +655,18 @@ mod tests {
             .expect("find usage row")
             .expect("row exists");
 
-        assert_eq!(wallet.reserved_credits, 0);
-        assert_eq!(wallet.pending_lago_debits, 0);
-        assert_eq!(row.reserved_credits, 0);
+        assert_eq!(
+            wallet.reserved_credits,
+            crate::models::credits::Credits::from_whole(0)
+        );
+        assert_eq!(
+            wallet.pending_lago_debits,
+            crate::models::credits::Credits::from_whole(0)
+        );
+        assert_eq!(
+            row.reserved_credits,
+            crate::models::credits::Credits::from_whole(0)
+        );
         assert!(row.wallet_id.is_none());
     }
 
@@ -559,7 +707,10 @@ mod tests {
             .expect("row exists");
 
         assert_eq!(row.layer, BillingLayer::Platform);
-        assert_eq!(row.reserved_credits, 0);
+        assert_eq!(
+            row.reserved_credits,
+            crate::models::credits::Credits::from_whole(0)
+        );
         assert!(row.wallet_id.is_none());
     }
 
@@ -704,7 +855,10 @@ mod tests {
             .await
             .expect("count usage rows");
 
-        assert_eq!(wallet.reserved_credits, 1);
+        assert_eq!(
+            wallet.reserved_credits,
+            crate::models::credits::Credits::from_whole(1)
+        );
         assert_eq!(row_count, 1);
     }
 
@@ -781,7 +935,10 @@ mod tests {
             .await
             .expect("find usage row")
             .expect("usage row exists");
-        assert_eq!(wallet.reserved_credits, 0);
+        assert_eq!(
+            wallet.reserved_credits,
+            crate::models::credits::Credits::from_whole(0)
+        );
         assert_eq!(row.status, crate::models::usage_meter::UsageStatus::Failed);
     }
 
@@ -1100,6 +1257,8 @@ mod tests {
                 .await
                 .unwrap();
         assert!(report.break_info.is_none());
+        // Admission no longer migrates this directly inserted wallet fixture:
+        // cutover owns openings, so this chain contains only the two settlements.
         assert_eq!(report.checked_count, 2);
         let stale_snapshot = catalog.clone();
         let mut cleared = ServiceBilling::default();
@@ -1146,8 +1305,14 @@ mod tests {
             1
         );
         assert_eq!(lago.price_removals.load(Ordering::SeqCst), 4);
-        assert_eq!(db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
-            .count_documents(doc! { "lago_metric_code": { "$in": ["platform_svc_service-one_byok", "platform_svc_service-one_pk"] } }).await.unwrap(), 0);
+        // Removed lanes keep their rates for historical usage, but retired.
+        let rates =
+            db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME);
+        let lane_codes = doc! { "lago_metric_code": { "$in": ["platform_svc_service-one_byok", "platform_svc_service-one_pk"] } };
+        assert_eq!(rates.count_documents(lane_codes.clone()).await.unwrap(), 2);
+        let mut live = lane_codes;
+        live.insert("retired_at", mongodb::bson::Bson::Null);
+        assert_eq!(rates.count_documents(live).await.unwrap(), 0);
         db.drop().await.unwrap();
     }
 
@@ -1532,12 +1697,18 @@ mod tests {
         ] {
             let row = rows.iter().find(|row| row.metric == metric).unwrap();
             let funding = row.funding.as_ref().unwrap();
-            assert_eq!(funding.total_charge_micros, Some(gross));
             assert_eq!(
-                funding.allowance_funded_micros.unwrap_or(0)
-                    + funding.grant_funded_micros.unwrap_or(0)
-                    + funding.wallet_funded_micros.unwrap_or(0),
-                gross
+                funding.total_charge,
+                Some(crate::models::credits::Credits::from_micros(gross))
+            );
+            assert_eq!(
+                crate::models::credits::Credits::checked_sum([
+                    funding.allowance_funded.unwrap_or_default(),
+                    funding.grant_funded.unwrap_or_default(),
+                    funding.wallet_funded.unwrap_or_default(),
+                ])
+                .unwrap(),
+                crate::models::credits::Credits::from_micros(gross)
             );
             if metric == BillingMetric::InputTokens {
                 assert_eq!(funding.allowance_funded_quantity, Some(4_000_000));
@@ -1546,14 +1717,21 @@ mod tests {
             }
             if metric == BillingMetric::Images {
                 assert_eq!(funding.lago_billable_quantity_micros, Some(0));
-                assert_eq!(funding.wallet_charge_credits, Some(0));
+                assert_eq!(
+                    funding.wallet_charge_credits,
+                    Some(crate::models::credits::Credits::from_whole(0))
+                );
             }
         }
         assert_eq!(
             rows.iter()
-                .map(|r| r.funding.as_ref().unwrap().grant_funded_micros.unwrap_or(0))
-                .sum::<i64>(),
-            1_000_000
+                .map(|r| r.funding.as_ref().unwrap().grant_funded.unwrap_or_default())
+                .try_fold(
+                    crate::models::credits::Credits::ZERO,
+                    crate::models::credits::Credits::checked_add
+                )
+                .unwrap(),
+            crate::models::credits::Credits::from_whole(1)
         );
         let wallet = db
             .collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
@@ -1561,15 +1739,19 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(wallet.reserved_credits, 0);
-        assert_eq!(wallet.pending_lago_debits, 3);
+        assert_eq!(
+            wallet.reserved_credits,
+            crate::models::credits::Credits::from_whole(0)
+        );
+        // Issue #1672: component wallet remainders are no longer rounded up.
+        assert_eq!(wallet.pending_lago_debits.to_string(), "1.500005");
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
                 if db
                     .collection::<mongodb::bson::Document>(
                         crate::models::billing_ledger::COLLECTION_NAME,
                     )
-                    .count_documents(doc! {"event_type":"usage_settled"})
+                    .count_documents(doc! {"movement":"usage_settled"})
                     .await
                     .unwrap()
                     == 2
@@ -1583,7 +1765,7 @@ mod tests {
         .expect("component ledger entries durable");
         let entries: Vec<crate::models::billing_ledger::BillingLedgerEntry> = db
             .collection(crate::models::billing_ledger::COLLECTION_NAME)
-            .find(doc! { "event_type": "usage_settled" })
+            .find(doc! { "movement": "usage_settled" })
             .await
             .unwrap()
             .try_collect()
@@ -1596,13 +1778,13 @@ mod tests {
                 .unwrap();
             assert_eq!(entry.metric, Some(row.metric));
             assert_eq!(
-                entry.amount_credits,
+                entry.postings.first().map(|posting| posting.amount),
                 row.funding.as_ref().unwrap().wallet_charge_credits
             );
         }
         let grant_entries: Vec<crate::models::billing_ledger::BillingLedgerEntry> = db
             .collection(crate::models::billing_ledger::COLLECTION_NAME)
-            .find(doc! { "event_type": "grant_consumed" })
+            .find(doc! { "movement": "grant_consumed" })
             .await
             .unwrap()
             .try_collect()
@@ -1611,9 +1793,13 @@ mod tests {
         assert_eq!(
             grant_entries
                 .iter()
-                .map(|entry| entry.amount_micros.unwrap_or(0))
-                .sum::<i64>(),
-            1_000_000
+                .map(|entry| entry.postings[0].amount)
+                .try_fold(
+                    crate::models::credits::Credits::ZERO,
+                    crate::models::credits::Credits::checked_add
+                )
+                .unwrap(),
+            crate::models::credits::Credits::from_whole(1)
         );
         let report =
             ledger::verify_chain(&db, &ledger::TEST_BILLING_LEDGER_HMAC_KEY, None, None, None)
@@ -1639,13 +1825,116 @@ mod tests {
         pricing::retry_pending_service_prices(&db, lago.as_ref(), "standard")
             .await
             .unwrap();
+        // The primary and three component rates stay priceable, but retired.
+        let rates =
+            db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME);
+        assert_eq!(rates.count_documents(doc! {}).await.unwrap(), 4);
         assert_eq!(
-            db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
-                .count_documents(doc! {})
+            rates
+                .count_documents(doc! { "retired_at": mongodb::bson::Bson::Null })
                 .await
                 .unwrap(),
             0
         );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn removed_prices_retire_rates_until_the_same_code_syncs_again() {
+        use crate::models::downstream_service::{
+            COLLECTION_NAME as CATALOG, DownstreamService, test_helpers::dummy_service,
+        };
+        use crate::models::service_billing::{
+            LanePricing, PricingSyncStatus, ServicePlatformPricing,
+        };
+        use crate::services::billing::pricing;
+        use futures::TryStreamExt;
+
+        /// Save a legacy and a lane price (or clear both), reconcile, and
+        /// return every cached rate.
+        async fn reprice(
+            db: &mongodb::Database,
+            lago: &FakeLago,
+            catalog: &mut DownstreamService,
+            credits: Option<&str>,
+        ) -> Vec<BillingRateCache> {
+            let mut billing = ServiceBilling {
+                platform_pricing: credits.map(|credits| ServicePlatformPricing {
+                    credits_per_unit: credits.into(),
+                    lago_metric_code: String::new(),
+                    sync_status: PricingSyncStatus::Pending,
+                    sync_error: None,
+                }),
+                byok_pricing: credits.map(|credits| LanePricing {
+                    components: Vec::new(),
+                    metric: BillingMetric::Requests,
+                    credits_per_unit: credits.into(),
+                    lago_metric_code: String::new(),
+                    sync_status: PricingSyncStatus::Pending,
+                    sync_error: None,
+                }),
+                ..Default::default()
+            };
+            let current = catalog.billing.as_ref();
+            pricing::normalize_platform_pricing(&catalog.slug, current, &mut billing).unwrap();
+            pricing::normalize_lane_pricing(&catalog.slug, current, &mut billing).unwrap();
+            catalog.billing = Some(billing);
+            db.collection::<DownstreamService>(CATALOG)
+                .replace_one(doc! { "_id": &catalog.id }, &*catalog)
+                .upsert(true)
+                .await
+                .unwrap();
+            assert_eq!(
+                pricing::retry_pending_service_prices(db, lago, "standard")
+                    .await
+                    .unwrap(),
+                1
+            );
+            db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
+                .find(doc! {})
+                .sort(doc! { "_id": 1 })
+                .await
+                .unwrap()
+                .try_collect()
+                .await
+                .unwrap()
+        }
+
+        let Some(db) = connect_test_database("billing_price_retire_resync").await else {
+            return;
+        };
+        let lago = FakeLago::default();
+        let mut catalog = dummy_service();
+        catalog.id = Uuid::new_v4().to_string();
+        catalog.slug = "service-one".into();
+        let codes = ["platform_svc_service-one", "platform_svc_service-one_byok"];
+        let summary = |rates: &[BillingRateCache]| {
+            rates
+                .iter()
+                .map(|rate| {
+                    (
+                        rate.lago_metric_code.clone(),
+                        rate.credits_per_unit_micros,
+                        rate.retired_at.is_some(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let expect = |micros: i64, retired: bool| {
+            codes
+                .iter()
+                .map(|code| (code.to_string(), micros, retired))
+                .collect::<Vec<_>>()
+        };
+
+        let live = reprice(&db, &lago, &mut catalog, Some("0.5")).await;
+        assert_eq!(summary(&live), expect(500_000, false));
+        let retired = reprice(&db, &lago, &mut catalog, None).await;
+        assert_eq!(summary(&retired), expect(500_000, true));
+        assert_eq!(lago.price_removals.load(Ordering::SeqCst), 2);
+        // Re-authoring reuses the stable codes; the full-row sync un-retires.
+        let resynced = reprice(&db, &lago, &mut catalog, Some("0.75")).await;
+        assert_eq!(summary(&resynced), expect(750_000, false));
         db.drop().await.unwrap();
     }
 
@@ -1658,6 +1947,7 @@ mod tests {
                 credits_per_unit_micros: credits * 1_000_000,
                 credits_per_unit_pico: None,
                 synced_at: Utc::now(),
+                retired_at: None,
             })
             .await
             .expect("insert platform rate");
@@ -1709,7 +1999,7 @@ mod tests {
             self.wallet_creates.fetch_add(1, Ordering::SeqCst);
             Ok(LagoWallet {
                 id: format!("{customer_id}:wallet"),
-                balance_credits: 100,
+                balance_credits: crate::models::credits::Credits::from_whole(100),
             })
         }
 
@@ -1765,12 +2055,12 @@ mod tests {
                 lago_wallet_id: Some(format!("{owner_id}:wallet")),
                 lago_subscription_id: Some(format!("{owner_id}:plan")),
                 plan_kind: PlanKind::Prepaid,
-                balance_credits: 100,
-                reserved_credits: 0,
-                pending_lago_debits: 0,
-                pending_topup_expiry_credits: 0,
+                balance_credits: crate::models::credits::Credits::from_whole(100),
+                reserved_credits: crate::models::credits::Credits::from_whole(0),
+                pending_lago_debits: crate::models::credits::Credits::from_whole(0),
+                pending_topup_expiry_credits: crate::models::credits::Credits::from_whole(0),
                 has_payment_instrument: false,
-                overdraft_cap_credits: 0,
+                overdraft_cap_credits: crate::models::credits::Credits::from_whole(0),
                 suspended: false,
                 collection_state: CollectionState::Good,
                 topup_expiry_checked_at: None,
@@ -1783,3 +2073,15 @@ mod tests {
             .expect("insert wallet");
     }
 }
+
+pub mod lago_carry;
+
+pub mod exact_migration;
+
+pub mod account_reconciliation;
+
+#[cfg(test)]
+mod exact_tests;
+
+#[cfg(test)]
+mod legacy_v1_fixture;

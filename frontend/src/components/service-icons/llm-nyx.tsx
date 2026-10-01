@@ -15,7 +15,7 @@ export default function LlmNyxIcon({ className }: ServiceIconProps) {
       </svg>
       <Bot
         aria-hidden="true"
-        className="absolute bottom-[12%] right-[9%] !h-[35%] !w-[35%] text-background"
+        className="absolute bottom-[5%] right-[5%] !h-[42%] !w-[42%] text-background"
         strokeWidth={2.5}
       />
     </span>

@@ -767,12 +767,9 @@ fn run_docker_command(command: NodeDockerCommands) -> Result<()> {
 
     match command {
         NodeDockerCommands::Build => docker_build(),
-        NodeDockerCommands::Start { args } => docker_start(args.profile.as_deref()),
+        NodeDockerCommands::Start { args } => docker_start(args.profile.as_deref(), false),
         NodeDockerCommands::Stop { args } => docker_stop(args.profile.as_deref()),
-        NodeDockerCommands::Restart { args } => {
-            let _ = docker_stop(args.profile.as_deref());
-            docker_start(args.profile.as_deref())
-        }
+        NodeDockerCommands::Restart { args } => docker_start(args.profile.as_deref(), true),
         NodeDockerCommands::Status { args } => docker_status(args.profile.as_deref()),
         NodeDockerCommands::Logs { args, follow } => docker_logs(args.profile.as_deref(), follow),
     }
@@ -802,9 +799,68 @@ fn docker_build() -> Result<()> {
     Ok(())
 }
 
-fn docker_start(profile: Option<&str>) -> Result<()> {
+fn docker_run_args(
+    container: &str,
+    config_dir: &std::path::Path,
+    ca_environment: &[(&str, String)],
+) -> Result<Vec<String>> {
+    let mut args = vec![
+        "run".into(),
+        "-d".into(),
+        "--name".into(),
+        container.into(),
+        "--restart".into(),
+        "unless-stopped".into(),
+        "-v".into(),
+        format!("{}:{DOCKER_CONFIG_DIR}:rw", config_dir.display()),
+    ];
+    for (name, value) in ca_environment.iter().filter(|(_, value)| !value.is_empty()) {
+        let mounts = match *name {
+            "NYXID_CA_CERT" => vec![(value.clone(), "/etc/nyxid/tls/ca.pem".to_string())],
+            "SSL_CERT_FILE" => vec![(value.clone(), "/etc/nyxid/tls/system.pem".to_string())],
+            "SSL_CERT_DIR" => std::env::split_paths(value)
+                .filter(|path| !path.as_os_str().is_empty())
+                .enumerate()
+                .map(|(index, path)| {
+                    (
+                        path.to_string_lossy().into_owned(),
+                        format!("/etc/nyxid/tls/certs/{index}"),
+                    )
+                })
+                .collect(),
+            _ => continue,
+        };
+        for (source, target) in &mounts {
+            // Docker parses --mount as CSV. Reject ambiguous sources rather
+            // than allowing a path to inject options or change mount access.
+            if source.contains([',', '"']) || source.chars().any(char::is_control) {
+                anyhow::bail!(
+                    "{name} path {source:?} cannot be mounted by Docker: commas, double quotes and control characters are unsupported; use a path without these characters"
+                );
+            }
+            args.extend([
+                "--mount".into(),
+                format!("type=bind,source={source},target={target},readonly"),
+            ]);
+        }
+        // The image is Linux, even when the CLI runs on a Windows host.
+        let targets = mounts
+            .iter()
+            .map(|(_, target)| target.as_str())
+            .collect::<Vec<_>>()
+            .join(":");
+        args.extend(["-e".into(), format!("{name}={targets}")]);
+    }
+    args.push(DOCKER_IMAGE.into());
+    Ok(args)
+}
+
+fn docker_start(profile: Option<&str>, restart: bool) -> Result<()> {
+    crate::tls::shared_config()?;
+    let ca_environment = crate::tls::environment::ca_environment_from_env()?;
     let config_dir = docker_config_dir(profile)?;
     let container = docker_container_name(profile);
+    let run_args = docker_run_args(&container, &config_dir, &ca_environment)?;
 
     if !config_dir.join("config.toml").exists() {
         let profile_hint = match profile {
@@ -826,26 +882,17 @@ fn docker_start(profile: Option<&str>) -> Result<()> {
         docker_build()?;
     }
 
+    if restart {
+        docker_stop(profile)?;
+    }
+
     // Remove existing stopped container with the same name
     let _ = std::process::Command::new("docker")
         .args(["rm", "-f", &container])
         .output();
 
-    let config_dir_str = config_dir.to_string_lossy();
-    let volume = format!("{config_dir_str}:{DOCKER_CONFIG_DIR}:rw");
-
     let status = std::process::Command::new("docker")
-        .args([
-            "run",
-            "-d",
-            "--name",
-            &container,
-            "--restart",
-            "unless-stopped",
-            "-v",
-            &volume,
-            DOCKER_IMAGE,
-        ])
+        .args(run_args)
         .status()?;
 
     if !status.success() {
@@ -1142,6 +1189,155 @@ mod tests {
         assert_eq!(docker_container_name(None), "nyxid-node");
         assert_eq!(docker_container_name(Some("default")), "nyxid-node");
         assert_eq!(docker_container_name(Some("prod")), "nyxid-node-prod");
+    }
+
+    #[test]
+    fn docker_run_without_ca_keeps_existing_arguments() {
+        assert_eq!(
+            docker_run_args("nyxid-node-prod", std::path::Path::new("/node config"), &[]).unwrap(),
+            [
+                "run",
+                "-d",
+                "--name",
+                "nyxid-node-prod",
+                "--restart",
+                "unless-stopped",
+                "-v",
+                "/node config:/app/config:rw",
+                "nyxid-node:latest",
+            ]
+        );
+    }
+
+    #[test]
+    fn docker_run_empty_ca_values_are_unset_and_proxies_are_not_forwarded() {
+        let values = crate::tls::environment::absolute_ca_environment(|name| {
+            Some(
+                if name.ends_with("PROXY") {
+                    "secret"
+                } else {
+                    ""
+                }
+                .into(),
+            )
+        })
+        .unwrap();
+        assert!(values.is_empty());
+        let config = std::path::Path::new("/config");
+        let baseline = docker_run_args("nyxid-node", config, &[]).unwrap();
+        assert_eq!(
+            docker_run_args("nyxid-node", config, &values).unwrap(),
+            baseline
+        );
+        let values = [
+            ("NYXID_CA_CERT", String::new()),
+            ("SSL_CERT_FILE", String::new()),
+            ("SSL_CERT_DIR", String::new()),
+            ("HTTPS_PROXY", "http://user:secret@proxy".into()),
+            ("NO_PROXY", "internal.example".into()),
+        ];
+        assert_eq!(
+            docker_run_args("nyxid-node", config, &values).unwrap(),
+            baseline
+        );
+    }
+
+    #[test]
+    fn docker_run_mounts_each_ca_source_read_only_with_container_environment() {
+        for (name, target) in [
+            ("NYXID_CA_CERT", "/etc/nyxid/tls/ca.pem"),
+            ("SSL_CERT_FILE", "/etc/nyxid/tls/system.pem"),
+            ("SSL_CERT_DIR", "/etc/nyxid/tls/certs/0"),
+        ] {
+            let values = crate::tls::environment::absolute_ca_environment(|key| {
+                (key == name).then(|| "relative ca".into())
+            })
+            .unwrap();
+            assert!(std::path::Path::new(&values[0].1).is_absolute());
+            let args =
+                docker_run_args("nyxid-node", std::path::Path::new("/config"), &values).unwrap();
+            assert_eq!(
+                &args[8..],
+                [
+                    "--mount".to_string(),
+                    format!("type=bind,source={},target={target},readonly", values[0].1),
+                    "-e".into(),
+                    format!("{name}={target}"),
+                    DOCKER_IMAGE.into(),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn docker_run_mounts_multiple_system_directories_in_order() {
+        let paths = std::env::join_paths(["first certs", "second certs"]).unwrap();
+        let values = crate::tls::environment::absolute_ca_environment(|name| {
+            (name == "SSL_CERT_DIR").then(|| paths.clone())
+        })
+        .unwrap();
+        let paths: Vec<_> = std::env::split_paths(&values[0].1).collect();
+        let args = docker_run_args("nyxid-node", std::path::Path::new("/config"), &values).unwrap();
+        assert_eq!(
+            &args[8..],
+            [
+                "--mount".to_string(),
+                format!(
+                    "type=bind,source={},target=/etc/nyxid/tls/certs/0,readonly",
+                    paths[0].display()
+                ),
+                "--mount".into(),
+                format!(
+                    "type=bind,source={},target=/etc/nyxid/tls/certs/1,readonly",
+                    paths[1].display()
+                ),
+                "-e".into(),
+                "SSL_CERT_DIR=/etc/nyxid/tls/certs/0:/etc/nyxid/tls/certs/1".into(),
+                DOCKER_IMAGE.into(),
+            ]
+        );
+    }
+
+    #[test]
+    fn docker_run_ca_file_paths_preserve_spaces_and_colons() {
+        for name in ["NYXID_CA_CERT", "SSL_CERT_FILE"] {
+            let values = crate::tls::environment::absolute_ca_environment(|key| {
+                (key == name).then(|| "company ca:2026.pem".into())
+            })
+            .unwrap();
+            let args =
+                docker_run_args("nyxid-node", std::path::Path::new("/config"), &values).unwrap();
+            assert!(args[9].contains("company ca:2026.pem,target="));
+            assert!(args[9].ends_with(",readonly"));
+            assert_eq!(args[8], "--mount");
+        }
+    }
+
+    #[test]
+    fn docker_run_rejects_ambiguous_ca_mount_paths_with_named_errors() {
+        for name in ["NYXID_CA_CERT", "SSL_CERT_FILE", "SSL_CERT_DIR"] {
+            for path in [
+                "/ca,readonly=false",
+                "/ca\"file",
+                "/ca\nfile",
+                "/ca\rfile",
+                "/ca\tfile",
+            ] {
+                let error = docker_run_args(
+                    "nyxid-node",
+                    std::path::Path::new("/config"),
+                    &[(name, path.to_string())],
+                )
+                .unwrap_err()
+                .to_string();
+                assert!(error.contains(name), "{error}");
+                assert!(error.contains("cannot be mounted by Docker"), "{error}");
+                assert!(
+                    error.contains("use a path without these characters"),
+                    "{error}"
+                );
+            }
+        }
     }
 }
 

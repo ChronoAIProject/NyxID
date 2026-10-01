@@ -1376,8 +1376,10 @@ async fn handle_tools_list(
     };
 
     let mut services = catalog.services;
-    if auth.chat.is_some() {
-        services.push(crate::services::assistant_account_tools::virtual_service());
+    if let Some(chat) = auth.chat.as_ref() {
+        services.push(crate::services::assistant_account_tools::virtual_service(
+            chat,
+        ));
     }
     // Session-backed clients get meta-tools + activated service tools only.
     // Stateless (API-key) clients with no session get the full tool list up front.
@@ -1407,7 +1409,7 @@ async fn handle_tools_list(
             serde_json::json!({
                 "name": t.name,
                 "description": t.description,
-                "inputSchema": t.input_schema,
+                "inputSchema": webhook_tool_schema(auth, &t.input_schema),
             })
         })
         .collect();
@@ -1534,6 +1536,8 @@ async fn dispatch_tools_call(
         );
         let known_account_tool = tool_name.strip_prefix("nyxid__").is_some_and(|name| {
             crate::services::assistant_account_tools::TOOL_NAMES.contains(&name)
+                || crate::services::assistant_team_tools::TOOL_NAMES.contains(&name)
+                || crate::services::assistant_team_tools::AGENT_TOOL_NAMES.contains(&name)
         });
         let _ = audit_service::log_actor_event(
             state.db.clone(),
@@ -1547,7 +1551,8 @@ async fn dispatch_tools_call(
             "assistant_mcp_tool_call",
             Some(serde_json::json!({
                 "conversation_id": chat.conversation_id,
-                "access_mode": chat.access_mode,
+                "agent_role": chat.role,
+                "guest": chat.guest,
                 "tool_name": if known_meta_tool || known_account_tool {
                     tool_name
                 } else {
@@ -1559,8 +1564,52 @@ async fn dispatch_tools_call(
         .await;
     }
 
+    if let Some(refused) = guest_tool_refusal(auth, tool_name, request.id.clone()) {
+        return refused;
+    }
     if tool_name.starts_with("nyxid__") {
         return handle_account_tool(state, auth, tool_name, &arguments, request.id.clone()).await;
+    }
+    if tool_name.starts_with("nyx__")
+        && !matches!(
+            tool_name,
+            "nyx__search_tools"
+                | "nyx__discover_services"
+                | "nyx__list_connected_services"
+                | "nyx__call_tool"
+                | "nyx__wait_for_connection"
+                | "nyx__ssh_list_services"
+                | "nyx__oracle_pools"
+                | "nyx__oracle_result"
+                | "nyx__oracle_session"
+        )
+        && let Some(chat) = auth
+            .chat
+            .as_ref()
+            .filter(|chat| chat.confirmation_policy.is_some())
+    {
+        match crate::services::assistant_acknowledgement_service::webhook_action_gate(
+            &state.db,
+            chat,
+            tool_name,
+            &arguments,
+            false,
+            matches!(tool_name, "nyx__ssh_exec" | "nyx__oracle_ask"),
+        )
+        .await
+        {
+            Ok(Some(refusal)) => {
+                return tool_result(request.id.clone(), &refusal.to_string(), true);
+            }
+            Err(_) => {
+                return tool_result(
+                    request.id.clone(),
+                    "Confirmation could not be checked",
+                    true,
+                );
+            }
+            Ok(None) => {}
+        }
     }
     // -- Meta-tools --
     match tool_name {
@@ -1734,16 +1783,44 @@ async fn dispatch_tools_call(
         );
     }
 
-    let prepared = match mcp_service::prepare_proxy_tool_call(service, endpoint, &arguments) {
-        Ok(prepared) => prepared,
-        Err(e) => {
-            return tool_result(
-                request.id.clone(),
-                &format!("Invalid tool arguments: {e}"),
-                true,
-            );
-        }
-    };
+    let execution_arguments = webhook_execution_arguments(auth, &arguments);
+    let prepared =
+        match mcp_service::prepare_proxy_tool_call(service, endpoint, &execution_arguments) {
+            Ok(prepared) => prepared,
+            Err(e) => {
+                return tool_result(
+                    request.id.clone(),
+                    &format!("Invalid tool arguments: {e}"),
+                    true,
+                );
+            }
+        };
+    if let Some(refused) = guest_service_refusal(
+        state,
+        auth,
+        service,
+        endpoint,
+        &prepared,
+        request.id.clone(),
+    )
+    .await
+    {
+        return refused;
+    }
+    if let Some(refused) = webhook_service_gate(
+        state,
+        auth,
+        service,
+        endpoint,
+        &prepared,
+        tool_name,
+        &arguments,
+        request.id.clone(),
+    )
+    .await
+    {
+        return refused;
+    }
     let operation = prepared.operation_descriptor();
     if let Err(resp) =
         authorize_mcp_tool_operation(state, auth, service, &operation, request.id.clone()).await
@@ -1799,7 +1876,7 @@ async fn dispatch_tools_call(
             "tool": tool_name,
             "service_id": service.service_id,
             "response_status": response.status,
-            "access_mode": auth.chat.as_ref().map(|chat| chat.access_mode),
+            "agent_role": auth.chat.as_ref().map(|chat| chat.role),
         })),
         auth.ip_address.clone(),
         auth.user_agent.clone(),
@@ -1889,6 +1966,11 @@ async fn authorize_mcp_operation(
     operation: &operation_descriptor::OperationDescriptor,
     request_id: Option<serde_json::Value>,
 ) -> Result<(), Response> {
+    // A shell can do anything: SSH stays the owner's. Service calls were
+    // checked against the owner's guest access before this point.
+    if guest_turn(auth) && operation.protocol == operation_descriptor::Protocol::Ssh {
+        return Err(guest_refused(request_id));
+    }
     let approval_owner_user_id = auth.effective_approval_owner_user_id();
     let approval_outcome = approval_service::evaluate_and_check(
         &state.db,
@@ -1911,6 +1993,11 @@ async fn authorize_mcp_operation(
     })?;
 
     let pending = match approval_outcome {
+        // An approval the owner granted for their own requests is theirs: a
+        // guest in the same chat shares the chat's key, not the approval.
+        approval_service::ApprovalOutcome::Allowed { required: true } if guest_turn(auth) => {
+            return Err(guest_refused(request_id));
+        }
         approval_service::ApprovalOutcome::Allowed { .. } => return Ok(()),
         approval_service::ApprovalOutcome::Denied => {
             return Err(tool_result(
@@ -1918,6 +2005,11 @@ async fn authorize_mcp_operation(
                 "Operation denied by approval policy",
                 true,
             ));
+        }
+        // Nobody but the owner asks the owner to approve: a guest's request
+        // would look like the owner's own.
+        approval_service::ApprovalOutcome::NeedsApproval(_) if guest_turn(auth) => {
+            return Err(guest_refused(request_id));
         }
         approval_service::ApprovalOutcome::NeedsApproval(pending) => pending,
     };
@@ -2006,18 +2098,19 @@ async fn authorize_mcp_operation(
 /// Tells the assistant what each `chat_access` value means so it calls gated
 /// tools instead of telling the user it lacks permission.
 const CHAT_ACCESS_HINT: &str = "chat_access meanings: granted = call freely. \
-    acknowledgement_required = call the tool now; NyxID shows the user an Allow card \
-    in the chat and returns instructions to retry after approval. Never say you lack \
-    permission or send the user to settings, and never ask for Full access. \
-    source meanings: user_service = the user's own connection; platform = NyxID's \
-    shared platform credential, not the user's account. To connect the user's own \
-    account, use nyx__discover_services then nyx__connect_service and give the user \
-    the link; that works in Ask mode.";
+    acknowledgement_required (subagents only) = call the tool now; NyxID asks your \
+    orchestrator for permission and tells you to end your turn; you are resumed with \
+    the decision. source meanings: user_service = the user's own connection; \
+    platform = NyxID's shared platform credential, not the user's account. To connect \
+    the user's own account, use nyx__discover_services then nyx__connect_service and \
+    give the user the link.";
 
 fn chat_access(auth: &McpAuthContext, service: &mcp_service::McpToolService) -> &'static str {
-    let granted = if auth.chat.as_ref().is_some_and(|chat| {
-        chat.access_mode == crate::models::assistant_conversation::AccessMode::Full
-    }) {
+    let granted = if auth
+        .chat
+        .as_ref()
+        .is_some_and(|chat| chat.is_orchestrator())
+    {
         true
     } else if matches!(service.source, mcp_service::McpToolSource::Platform { .. }) {
         auth.allowed_platform_service_ids
@@ -2052,12 +2145,213 @@ async fn chat_service_gate(
     .await;
     match result {
         Ok(None) => None,
-        Ok(Some(value)) => Some(tool_result(request_id, &value.to_string(), true)),
+        Ok(Some((value, request))) => {
+            if let Some(request) = request {
+                super::assistant_team::permission_requested(state, chat, &request).await;
+            }
+            Some(tool_result(request_id, &value.to_string(), true))
+        }
         Err(error) => {
             let result = crate::services::assistant_account_tools::error_result(error);
             Some(tool_result(request_id, &result.value.to_string(), true))
         }
     }
+}
+
+fn guest_refused(request_id: Option<serde_json::Value>) -> Response {
+    tool_result(
+        request_id,
+        &crate::services::assistant_acknowledgement_service::guest_refusal().to_string(),
+        true,
+    )
+}
+
+/// Refuse a tool a guest turn may not call. NyxBot holds every service of
+/// the owner, so its guest turns call no tools at all; a specialist's guest
+/// turns may discover and read within its grants.
+fn guest_tool_refusal(
+    auth: &McpAuthContext,
+    tool_name: &str,
+    request_id: Option<serde_json::Value>,
+) -> Option<Response> {
+    let chat = auth.chat.as_ref().filter(|chat| chat.guest)?;
+    if chat.is_orchestrator() {
+        return Some(tool_result(
+            request_id,
+            &crate::services::assistant_acknowledgement_service::orchestrator_guest_refusal()
+                .to_string(),
+            true,
+        ));
+    }
+    (!guest_tool_allowed(tool_name)).then(|| guest_refused(request_id))
+}
+
+/// Refuse a guest's service call beyond what the owner lets guests do with
+/// that service on this specialist (`AssistantAgent::guest_access`): `read`
+/// runs only reads (GET, HEAD, OPTIONS, or a POST its stored catalog contract
+/// marks read-only), `use` (the default) reads, creates and acts but never
+/// changes or removes what exists (PUT, PATCH and DELETE by default, a POST
+/// or PUT as NyxID's `x-nyxid-changes-existing` says, never an operation
+/// marked `x-aevatar-tool.destructive`), `all` everything the specialist may.
+/// A guest call never carries a method override. The agent's key already
+/// holds only its granted services, and operations behind the owner's
+/// approval are refused later (`authorize_mcp_operation`) at every level.
+async fn guest_service_refusal(
+    state: &AppState,
+    auth: &McpAuthContext,
+    service: &mcp_service::McpToolService,
+    endpoint: &mcp_service::McpToolEndpoint,
+    prepared: &mcp_service::PreparedProxyCall,
+    request_id: Option<serde_json::Value>,
+) -> Option<Response> {
+    use crate::models::assistant_agent::GuestAccess;
+    let chat = auth.chat.as_ref().filter(|chat| chat.guest)?;
+    let Ok(agent) =
+        crate::services::assistant_team_service::agent(&state.db, &chat.user_id, &chat.agent_id)
+            .await
+    else {
+        return Some(guest_refused(request_id));
+    };
+    let access = agent
+        .guest_access
+        .get(&service.service_id)
+        .copied()
+        .unwrap_or_default();
+    let metadata = service
+        .durable_endpoint_metadata
+        .get(&endpoint.endpoint_id)
+        .copied()
+        .unwrap_or_default();
+    // A method override may be honoured in place of the method the call is
+    // sent with, and approvals see only the latter: guests never send one.
+    if prepared.carries_method_override() {
+        return Some(tool_result(
+            request_id,
+            &crate::services::assistant_acknowledgement_service::guest_method_override_refusal(
+                &service.service_slug,
+            )
+            .to_string(),
+            true,
+        ));
+    }
+    let effects = mcp_service::operation_effects(prepared.method(), metadata);
+    let reads = effects.reads;
+    let uses = effects.uses;
+    let allowed = match access {
+        GuestAccess::All => true,
+        GuestAccess::Use => uses,
+        GuestAccess::Read => reads && uses,
+    };
+    (!allowed).then(|| {
+        tool_result(
+            request_id,
+            &crate::services::assistant_acknowledgement_service::guest_service_refusal(
+                &service.service_slug,
+                access,
+            )
+            .to_string(),
+            true,
+        )
+    })
+}
+
+// Action-card identifiers are NyxID control metadata, never downstream body
+// fields. Preserve them in the digest/gate arguments, remove them for execution.
+fn webhook_execution_arguments(
+    auth: &McpAuthContext,
+    args: &serde_json::Value,
+) -> serde_json::Value {
+    let mut result = args.clone();
+    if auth
+        .chat
+        .as_ref()
+        .is_some_and(|chat| chat.confirmation_policy.is_some())
+        && let Some(object) = result.as_object_mut()
+    {
+        object.remove("acknowledgement_id");
+    }
+    result
+}
+
+fn webhook_tool_schema(auth: &McpAuthContext, schema: &serde_json::Value) -> serde_json::Value {
+    let mut schema = schema.clone();
+    if auth
+        .chat
+        .as_ref()
+        .is_some_and(|chat| chat.confirmation_policy.is_some())
+        && let Some(properties) = schema["properties"].as_object_mut()
+    {
+        properties.insert("acknowledgement_id".into(), serde_json::json!({
+            "type": "string",
+            "description": "Owner-approved action card ID. Retry the exact approved call with this ID once.",
+        }));
+    }
+    schema
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn webhook_service_gate(
+    state: &AppState,
+    auth: &McpAuthContext,
+    service: &mcp_service::McpToolService,
+    endpoint: &mcp_service::McpToolEndpoint,
+    prepared: &mcp_service::PreparedProxyCall,
+    tool: &str,
+    args: &serde_json::Value,
+    request_id: Option<serde_json::Value>,
+) -> Option<Response> {
+    let chat = auth
+        .chat
+        .as_ref()
+        .filter(|chat| chat.confirmation_policy.is_some())?;
+    let metadata = service
+        .durable_endpoint_metadata
+        .get(&endpoint.endpoint_id)
+        .copied()
+        .unwrap_or_default();
+    let effects = mcp_service::operation_effects(prepared.method(), metadata);
+    // Method overrides have unknown effects; they must never bypass a card.
+    let result = crate::services::assistant_acknowledgement_service::webhook_action_gate(
+        &state.db,
+        chat,
+        tool,
+        args,
+        effects.reads && !prepared.carries_method_override(),
+        effects.destructive || prepared.carries_method_override(),
+    )
+    .await;
+    match result {
+        Ok(None) => None,
+        Ok(Some(refusal)) => Some(tool_result(request_id, &refusal.to_string(), true)),
+        Err(_) => Some(tool_result(
+            request_id,
+            "Confirmation could not be checked",
+            true,
+        )),
+    }
+}
+
+/// A channel chat member who is not the owner asked for this turn.
+fn guest_turn(auth: &McpAuthContext) -> bool {
+    auth.chat.as_ref().is_some_and(|chat| chat.guest)
+}
+
+/// Guest turns may discover tools and use services (each call is checked by
+/// `guest_service_refusal` and `authorize_mcp_tool_operation`). Account,
+/// team, memory, connection, SSH and Oracle tools act for the owner and are
+/// refused.
+fn guest_tool_allowed(tool_name: &str) -> bool {
+    if tool_name.starts_with("nyxid__") {
+        return false;
+    }
+    !tool_name.starts_with("nyx__")
+        || matches!(
+            tool_name,
+            "nyx__search_tools"
+                | "nyx__discover_services"
+                | "nyx__list_connected_services"
+                | "nyx__call_tool"
+        )
 }
 
 async fn handle_account_tool(
@@ -2067,6 +2361,9 @@ async fn handle_account_tool(
     args: &serde_json::Value,
     request_id: Option<serde_json::Value>,
 ) -> Response {
+    if guest_turn(auth) {
+        return guest_refused(request_id);
+    }
     let Ok(user_id) = uuid::Uuid::parse_str(&auth.user_id) else {
         return tool_result(request_id, "{\"error\":\"unauthorized\"}", true);
     };
@@ -2107,7 +2404,21 @@ async fn handle_account_tool(
         let result = crate::services::assistant_account_tools::error_result(error);
         return tool_result(request_id, &result.value.to_string(), true);
     }
+    if crate::services::assistant_team_tools::is_team_tool(name) {
+        let Some(chat) = auth.chat.as_ref() else {
+            return tool_result(
+                request_id,
+                "{\"error\":\"conversation_key_required\"}",
+                true,
+            );
+        };
+        let (value, is_error) = super::assistant_team::execute_tool(state, chat, name, args).await;
+        return tool_result(request_id, &value.to_string(), is_error);
+    }
     let result = tools.execute(&user, name, args).await;
+    if let (Some(chat), Some(request)) = (auth.chat.as_ref(), result.permission_request.as_ref()) {
+        super::assistant_team::permission_requested(state, chat, request).await;
+    }
     tool_result(request_id, &result.value.to_string(), result.is_error)
 }
 
@@ -2217,12 +2528,40 @@ async fn handle_meta_call_tool(
         return response;
     }
 
-    let prepared = match mcp_service::prepare_proxy_tool_call(service, endpoint, &inner_args) {
-        Ok(prepared) => prepared,
-        Err(e) => {
-            return tool_result(request_id, &format!("Invalid tool arguments: {e}"), true);
-        }
-    };
+    let execution_arguments = webhook_execution_arguments(auth, &inner_args);
+    let prepared =
+        match mcp_service::prepare_proxy_tool_call(service, endpoint, &execution_arguments) {
+            Ok(prepared) => prepared,
+            Err(e) => {
+                return tool_result(request_id, &format!("Invalid tool arguments: {e}"), true);
+            }
+        };
+    if let Some(refused) = guest_service_refusal(
+        state,
+        auth,
+        service,
+        endpoint,
+        &prepared,
+        request_id.clone(),
+    )
+    .await
+    {
+        return refused;
+    }
+    if let Some(refused) = webhook_service_gate(
+        state,
+        auth,
+        service,
+        endpoint,
+        &prepared,
+        tool_name,
+        &inner_args,
+        request_id.clone(),
+    )
+    .await
+    {
+        return refused;
+    }
     let operation = prepared.operation_descriptor();
     if let Err(resp) =
         authorize_mcp_tool_operation(state, auth, service, &operation, request_id.clone()).await
@@ -2297,7 +2636,7 @@ async fn handle_meta_call_tool(
             "tool": tool_name,
             "service_id": service.service_id,
             "response_status": response.status,
-            "access_mode": auth.chat.as_ref().map(|chat| chat.access_mode),
+            "agent_role": auth.chat.as_ref().map(|chat| chat.role),
             "via": "nyx__call_tool",
         })),
         auth.ip_address.clone(),
@@ -2364,7 +2703,7 @@ async fn handle_meta_search(
             let mut value = serde_json::json!({
                 "name": t.name,
                 "description": t.description,
-                "inputSchema": t.input_schema,
+                "inputSchema": webhook_tool_schema(auth, &t.input_schema),
             });
             if auth.chat.is_some()
                 && let Some((service, _)) = mcp_service::resolve_tool_call(&t.name, &services)
@@ -2406,11 +2745,13 @@ async fn load_all_services_for_meta_tools(
         },
     )
     .await?;
-    if auth.chat.is_some() {
+    if let Some(chat) = auth.chat.as_ref() {
         let mut services = services;
         // Reserve the native namespace against a connected service shadowing it.
         services.retain(|service| service.service_slug != "nyxid");
-        services.push(crate::services::assistant_account_tools::virtual_service());
+        services.push(crate::services::assistant_account_tools::virtual_service(
+            chat,
+        ));
         Ok(services)
     } else {
         Ok(filter_services_by_scope(services, auth))
@@ -2574,8 +2915,36 @@ async fn handle_meta_connect(
     )
     .await
     {
-        Ok(result) => {
+        Ok(mut result) => {
             if result.get("status").and_then(|value| value.as_str()) == Some("pending_connection") {
+                // A chat resumes by itself when the user finishes the link.
+                if let (Some(chat), Some(link_id)) = (
+                    auth.chat.as_ref(),
+                    result
+                        .get("connect_link_id")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_owned),
+                ) {
+                    match super::nyxbot::watch_connect_link(
+                        &state.db,
+                        &chat.user_id,
+                        &chat.conversation_id,
+                        &link_id,
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            result["note"] = serde_json::json!(
+                                "Give the user the link and end your turn. Do not ask them to \
+                                reply when done: NyxID resumes this conversation as soon as \
+                                they finish."
+                            );
+                        }
+                        Err(error) => {
+                            tracing::debug!(%error, "Connect link watch not recorded");
+                        }
+                    }
+                }
                 audit_service::log_async(
                     state.db.clone(),
                     Some(auth.user_id.clone()),

@@ -31,6 +31,7 @@ import {
   Circle,
   QrCode,
   Webhook,
+  CalendarClock,
 } from "lucide-react";
 import {
   Popover,
@@ -296,6 +297,12 @@ export function Sidebar({
     <>
       <nav className="flex-1 overflow-y-auto scrollbar-none px-2 pt-2 pb-4">
         <AssistantNavEntry collapsed={isCollapsed} onClick={onNavigate} />
+        <NavItem
+          item={{ to: "/automations", icon: CalendarClock, label: "Automations" }}
+          active={currentPath === "/automations"}
+          collapsed={isCollapsed}
+          onClick={onNavigate}
+        />
         <div className="flex flex-col gap-[2px]">
           {mainNav.map((item) => (
             <NavItem

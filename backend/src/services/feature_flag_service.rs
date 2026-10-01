@@ -123,24 +123,104 @@ const NYXAGENT_ENGINE_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: true,
 };
 
+pub const INVITATION_CODE_FLAG_KEY: &str = "auth:invitation-code";
+const INVITATION_CODE_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: INVITATION_CODE_FLAG_KEY,
+    description: "Require an invitation code for new account registration (global only).",
+    default_enabled: true,
+};
+
+/// NyxBot reaches the owner's personal chat-app bots on a platform through
+/// the Agent Event Gateway (Telegram always does). One flag per NyxID channel
+/// platform, resolved for each bot's owner, so a platform can be piloted on one
+/// account or org before everyone. Turning one on moves working bots over by
+/// themselves once the gateway takes the platform (it refuses platforms it
+/// cannot verify, and those bots stay on NyxID's relay, retried daily);
+/// turning it off stops further moves (moved bots stay until reconnected).
+/// Keyed by canonical platform.
+pub const NYXBOT_GATEWAY_FLAGS: &[(&str, &str)] = &[
+    ("lark", "nyxbot:gateway-lark"),
+    ("feishu", "nyxbot:gateway-feishu"),
+    ("discord", "nyxbot:gateway-discord"),
+    ("slack", "nyxbot:gateway-slack"),
+    ("whatsapp", "nyxbot:gateway-whatsapp"),
+    ("x", "nyxbot:gateway-x"),
+    ("aurinko", "nyxbot:gateway-aurinko"),
+];
+
+const fn nyxbot_gateway_flag(key: &'static str, description: &'static str) -> FeatureFlagDef {
+    FeatureFlagDef {
+        key,
+        description,
+        default_enabled: false,
+    }
+}
+
+const NYXBOT_GATEWAY_FLAG_DEFS: [FeatureFlagDef; 7] = [
+    nyxbot_gateway_flag(
+        "nyxbot:gateway-lark",
+        "NyxBot reaches owners' Lark bots through the Agent Event Gateway once the gateway takes Lark (text only there); until then NyxID's relay.",
+    ),
+    nyxbot_gateway_flag(
+        "nyxbot:gateway-feishu",
+        "NyxBot reaches owners' Feishu bots through the Agent Event Gateway once the gateway takes Feishu (text only there); until then NyxID's relay.",
+    ),
+    nyxbot_gateway_flag(
+        "nyxbot:gateway-discord",
+        "NyxBot reaches owners' Discord bots through the Agent Event Gateway once the gateway verifies Discord; until then NyxID's relay.",
+    ),
+    nyxbot_gateway_flag(
+        "nyxbot:gateway-slack",
+        "NyxBot reaches owners' Slack bots through the Agent Event Gateway once the gateway verifies Slack; until then NyxID's relay.",
+    ),
+    nyxbot_gateway_flag(
+        "nyxbot:gateway-whatsapp",
+        "NyxBot reaches owners' WhatsApp bots through the Agent Event Gateway once the gateway verifies WhatsApp; until then NyxID's relay.",
+    ),
+    nyxbot_gateway_flag(
+        "nyxbot:gateway-x",
+        "NyxBot reaches owners' X bots through the Agent Event Gateway once the gateway supports X; until then NyxID's relay.",
+    ),
+    nyxbot_gateway_flag(
+        "nyxbot:gateway-aurinko",
+        "NyxBot reaches owners' email (Aurinko) bots through the Agent Event Gateway once the gateway supports them; until then NyxID's relay.",
+    ),
+];
+
 #[cfg(not(test))]
 pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
+    INVITATION_CODE_FLAG,
     NYXAGENT_ENGINE_FLAG,
     AI_ASSISTANT_FLAG,
     BILLING_FLAG,
     AEVATAR_CHAT_WIRE_LOG_FLAG,
     DIRECT_CHAT_ENGINE_FLAG,
+    NYXBOT_GATEWAY_FLAG_DEFS[0],
+    NYXBOT_GATEWAY_FLAG_DEFS[1],
+    NYXBOT_GATEWAY_FLAG_DEFS[2],
+    NYXBOT_GATEWAY_FLAG_DEFS[3],
+    NYXBOT_GATEWAY_FLAG_DEFS[4],
+    NYXBOT_GATEWAY_FLAG_DEFS[5],
+    NYXBOT_GATEWAY_FLAG_DEFS[6],
 ];
 
 /// Test builds carry a placeholder flag so the resolution / override pipeline
 /// can exercise multiple definitions alongside the production registry entry.
 #[cfg(test)]
 pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
+    INVITATION_CODE_FLAG,
     NYXAGENT_ENGINE_FLAG,
     AI_ASSISTANT_FLAG,
     BILLING_FLAG_TEST,
     AEVATAR_CHAT_WIRE_LOG_FLAG,
     DIRECT_CHAT_ENGINE_FLAG,
+    NYXBOT_GATEWAY_FLAG_DEFS[0],
+    NYXBOT_GATEWAY_FLAG_DEFS[1],
+    NYXBOT_GATEWAY_FLAG_DEFS[2],
+    NYXBOT_GATEWAY_FLAG_DEFS[3],
+    NYXBOT_GATEWAY_FLAG_DEFS[4],
+    NYXBOT_GATEWAY_FLAG_DEFS[5],
+    NYXBOT_GATEWAY_FLAG_DEFS[6],
     FeatureFlagDef {
         key: "example_ui",
         description: "Test-only placeholder flag.",
@@ -441,6 +521,22 @@ pub async fn resolve_personal_features(
     ))
 }
 
+/// Signup has no user or organization yet, so only the global override applies.
+pub async fn invitation_code_required(db: &mongodb::Database) -> AppResult<bool> {
+    let override_row = db
+        .collection::<FeatureFlagOverride>(COLLECTION_NAME)
+        .find_one(doc! {
+            "org_user_id": bson::Bson::Null,
+            "flag_key": INVITATION_CODE_FLAG_KEY,
+            "target_kind": FlagTargetKind::Global.as_str(),
+            "target_key": bson::Bson::Null,
+        })
+        .await?;
+    Ok(override_row
+        .map(|row| row.enabled)
+        .unwrap_or(INVITATION_CODE_FLAG.default_enabled))
+}
+
 /// Whether the billing rollout flag is enabled for a billing owner.
 ///
 /// Personal wallets use the person's active org memberships; org wallets use
@@ -496,6 +592,46 @@ pub async fn aevatar_chat_wire_log_enabled(
         .await?
         .iter()
         .any(|key| key == AEVATAR_CHAT_WIRE_LOG_FLAG_KEY))
+}
+
+/// Whether a personal-surface flag is on for a person: default, global,
+/// matching org scopes, then their own override (as on `/users/me`).
+pub async fn personal_flag_enabled(
+    db: &mongodb::Database,
+    user_id: &str,
+    flag_key: &str,
+) -> AppResult<bool> {
+    Ok(resolve_personal_features(db, user_id)
+        .await?
+        .iter()
+        .any(|key| key == flag_key))
+}
+
+/// Who a flag can be on for, so background work can skip a flag nobody has
+/// turned on and narrow one piloted on a few people: `None` when it may be on
+/// for anyone (on by default, or enabled globally or for an org), else exactly
+/// the people with a personal enabling override (empty: nobody).
+pub async fn flag_enabled_people(
+    db: &mongodb::Database,
+    flag_key: &str,
+) -> AppResult<Option<Vec<String>>> {
+    if find_flag(flag_key).is_some_and(|flag| flag.default_enabled) {
+        return Ok(None);
+    }
+    let rows: Vec<FeatureFlagOverride> = db
+        .collection::<FeatureFlagOverride>(COLLECTION_NAME)
+        .find(doc! { "flag_key": flag_key, "enabled": true })
+        .await?
+        .try_collect()
+        .await?;
+    let mut people = Vec::new();
+    for row in rows {
+        match (row.org_user_id.as_deref(), row.target_kind, row.target_key) {
+            (None, FlagTargetKind::User, Some(user_id)) => people.push(user_id),
+            _ => return Ok(None),
+        }
+    }
+    Ok(Some(people))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -649,6 +785,11 @@ pub async fn set_platform_override(
 ) -> AppResult<FeatureFlagOverride> {
     find_flag(flag_key)
         .ok_or_else(|| AppError::BadRequest(format!("unknown feature flag '{flag_key}'")))?;
+    if flag_key == INVITATION_CODE_FLAG_KEY && !matches!(target, FlagTarget::Global) {
+        return Err(AppError::BadRequest(
+            "invitation code flag supports only a global override".to_string(),
+        ));
+    }
     if matches!(target, FlagTarget::Org | FlagTarget::Role(_)) {
         return Err(AppError::BadRequest(
             "org and role targets require an org; use the org feature-flag API".to_string(),
@@ -744,6 +885,11 @@ pub async fn set_platform_org_override(
 ) -> AppResult<FeatureFlagOverride> {
     find_flag(flag_key)
         .ok_or_else(|| AppError::BadRequest(format!("unknown feature flag '{flag_key}'")))?;
+    if flag_key == INVITATION_CODE_FLAG_KEY {
+        return Err(AppError::BadRequest(
+            "invitation code flag supports only a global override".to_string(),
+        ));
+    }
     ensure_org_exists(db, org_user_id).await?;
     upsert_override_row(
         db,
@@ -1052,6 +1198,54 @@ mod tests {
         for def in FEATURE_FLAGS {
             assert!(seen.insert(def.key), "duplicate flag key {}", def.key);
         }
+    }
+
+    #[tokio::test]
+    async fn invitation_code_gate_defaults_on_and_uses_only_global_override() {
+        let Some(db) = connect_test_database("invitation_code_flag").await else {
+            eprintln!("skipping invitation code flag test: no local MongoDB available");
+            return;
+        };
+
+        assert!(invitation_code_required(&db).await.expect("default"));
+        let user_target = FlagTarget::User(Uuid::new_v4().to_string());
+        assert!(matches!(
+            set_platform_override(&db, INVITATION_CODE_FLAG_KEY, &user_target, false, "actor")
+                .await,
+            Err(AppError::BadRequest(_))
+        ));
+        assert!(matches!(
+            set_platform_org_override(
+                &db,
+                &Uuid::new_v4().to_string(),
+                INVITATION_CODE_FLAG_KEY,
+                false,
+                "actor",
+            )
+            .await,
+            Err(AppError::BadRequest(_))
+        ));
+
+        set_platform_override(
+            &db,
+            INVITATION_CODE_FLAG_KEY,
+            &FlagTarget::Global,
+            false,
+            "actor",
+        )
+        .await
+        .expect("disable");
+        assert!(!invitation_code_required(&db).await.expect("disabled"));
+        set_platform_override(
+            &db,
+            INVITATION_CODE_FLAG_KEY,
+            &FlagTarget::Global,
+            true,
+            "actor",
+        )
+        .await
+        .expect("re-enable");
+        assert!(invitation_code_required(&db).await.expect("enabled"));
     }
 
     #[test]
@@ -1535,11 +1729,19 @@ mod tests {
         assert_eq!(
             shipped,
             vec![
+                "auth:invitation-code",
                 "assistant:nyxagent-engine",
                 "experimental:ai-assistant",
                 "experimental:billing",
                 "experimental:aevatar-chat-wire-log",
                 "experimental:direct-chat-engine",
+                "nyxbot:gateway-lark",
+                "nyxbot:gateway-feishu",
+                "nyxbot:gateway-discord",
+                "nyxbot:gateway-slack",
+                "nyxbot:gateway-whatsapp",
+                "nyxbot:gateway-x",
+                "nyxbot:gateway-aurinko",
             ]
         );
         assert_eq!(

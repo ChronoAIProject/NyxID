@@ -220,8 +220,10 @@ pub(crate) fn inbound_metadata(
         thread_id: inbound.thread_id.clone(),
         agent_api_key_id: Some(agent_api_key_id.to_string()),
         callback_status: Some("pending".to_string()),
+        callback_http_status: None,
         reply_to_message_id: None,
         platform_reply_message_id: None,
+        reply_to_platform_message_id: inbound.reply_to_platform_message_id.clone(),
         created_at: Utc::now(),
         updated_at: None,
     }
@@ -265,8 +267,10 @@ pub async fn store_outbound_message(
         thread_id: None,
         agent_api_key_id: Some(agent_api_key_id.to_string()),
         callback_status: None,
+        callback_http_status: None,
         reply_to_message_id: reply_to_message_id.map(String::from),
         platform_reply_message_id: None,
+        reply_to_platform_message_id: None,
         created_at: now,
         updated_at: Some(now),
     };
@@ -332,8 +336,10 @@ pub async fn store_device_event_message(
         thread_id: inherited_thread_id,
         agent_api_key_id: Some(agent_api_key_id.to_string()),
         callback_status: Some("pending".to_string()),
+        callback_http_status: None,
         reply_to_message_id: None,
         platform_reply_message_id: None,
+        reply_to_platform_message_id: None,
         created_at: Utc::now(),
         updated_at: None,
     };
@@ -704,7 +710,14 @@ pub fn build_callback_payload(
             // Use the real platform chat ID from the inbound message, not the
             // route's configured value (which may be "*" for default routes).
             platform_id: inbound.conversation_id.clone(),
-            conversation_type: conversation.platform_conversation_type.clone(),
+            // Likewise the message's own chat type (`private`, `group`,
+            // `channel`): a default route answers every kind of chat, and its
+            // configured type says nothing about this one.
+            conversation_type: if inbound.conversation_type.is_empty() {
+                conversation.platform_conversation_type.clone()
+            } else {
+                inbound.conversation_type.clone()
+            },
         },
         sender: CallbackSender {
             platform_id: inbound.sender_platform_id.clone(),
@@ -1232,8 +1245,10 @@ mod tests {
             thread_id: None,
             agent_api_key_id: Some("key-1".to_string()),
             callback_status: Some("pending".to_string()),
+            callback_http_status: None,
             reply_to_message_id: None,
             platform_reply_message_id: None,
+            reply_to_platform_message_id: None,
             created_at: now,
             updated_at: None,
         };
@@ -1301,6 +1316,89 @@ mod tests {
         assert_eq!(attachment["file_key"], "file_v3_abcdef");
         assert!(attachment.get("image_key").is_none());
         assert_eq!(attachment["filename"], "invoice.pdf");
+    }
+
+    #[test]
+    fn callback_payload_reports_the_messages_own_chat_type() {
+        let now = Utc::now();
+        let message = inbound_metadata(
+            "bot-1",
+            "route-1",
+            "user-1",
+            "lark",
+            &InboundMessage {
+                platform_message_id: "om_group".to_string(),
+                conversation_id: "oc_group".to_string(),
+                conversation_type: "group".to_string(),
+                sender_platform_id: "ou_bob".to_string(),
+                sender_display_name: None,
+                content_type: "text".to_string(),
+                text: Some("hi".to_string()),
+                attachments: vec![],
+                reply_to_platform_message_id: None,
+                thread_id: None,
+                raw_data: serde_json::json!({}),
+            },
+            "key-1",
+            "msg-group",
+        );
+        // A default route created for private chats answers a group message.
+        let route = crate::models::channel_conversation::ChannelConversation {
+            activity_callback: None,
+            id: "route-1".to_string(),
+            user_id: "user-1".to_string(),
+            channel_bot_id: Some("bot-1".to_string()),
+            platform: "lark".to_string(),
+            platform_conversation_id: "*".to_string(),
+            platform_conversation_type: "private".to_string(),
+            platform_sender_id: None,
+            agent_api_key_id: "key-1".to_string(),
+            default_agent: true,
+            allow_agent_initiated: false,
+            is_active: true,
+            last_message_at: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let group = InboundMessage {
+            platform_message_id: "om_group".to_string(),
+            conversation_id: "oc_group".to_string(),
+            conversation_type: "group".to_string(),
+            sender_platform_id: "ou_bob".to_string(),
+            sender_display_name: None,
+            content_type: "text".to_string(),
+            text: Some("hi".to_string()),
+            attachments: vec![],
+            reply_to_platform_message_id: None,
+            thread_id: None,
+            raw_data: serde_json::json!({}),
+        };
+        let payload = build_callback_payload(
+            &message,
+            &route,
+            "key-1",
+            "agent",
+            &group,
+            None,
+            "https://nyx.example",
+        );
+        assert_eq!(payload.conversation.conversation_type, "group");
+        assert_eq!(payload.conversation.platform_id, "oc_group");
+        // An adapter that does not say keeps the route's type.
+        let unknown = InboundMessage {
+            conversation_type: String::new(),
+            ..group
+        };
+        let payload = build_callback_payload(
+            &message,
+            &route,
+            "key-1",
+            "agent",
+            &unknown,
+            None,
+            "https://nyx.example",
+        );
+        assert_eq!(payload.conversation.conversation_type, "private");
     }
 
     // ─── forward_to_agent HTTP behavior ───
@@ -1392,6 +1490,7 @@ mod tests {
             cli_pairing_hmac_key: None,
             audit_chain_hmac_key: None,
             billing_ledger_hmac_key: None,
+            billing_exact_cutover_drained: false,
             chain_verify_interval_secs: 0,
             sa_token_ttl_secs: 3600,
             telemetry_dsn: None,
@@ -1489,7 +1588,6 @@ mod tests {
             billing_default_overdraft_cap_credits: 0,
             billing_fail_closed: false,
             billing_resale_enabled: false,
-            invite_code_required: true,
             email_auth_enabled: false,
             auto_verify_email: false,
         }

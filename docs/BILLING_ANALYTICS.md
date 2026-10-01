@@ -22,13 +22,16 @@ Dashboard uses Operations, preserving panels from previously saved layouts:
 - **Overview**: GA-inspired summary metrics, prominent trend, service mix, and ranking.
 - **Operations**: Grafana-inspired compact grid with six starting panels, a connected
   summary strip and standard NyxID dashboard cards. Each panel has
-  independent metrics, chart types, breakdowns, and Top 5/10 controls. Add, duplicate,
-  remove, resize, and reorder panels. The grid adapts from one column on phones to
-  two columns, then a maximum of three columns. Drag a header handle to reorder;
-  Space, arrow keys, and Space provide the keyboard equivalent. Move up/down
-  buttons remain available. The editor offers one-, two-, or three-column widths
-  and Compact, Standard, or Tall chart heights. Order and sizes autosave with the
-  workspace and are included in named views. Legacy `wide` panels remain full width.
+  independent metrics, chart types, breakdowns, and Top 5/10/20 controls. Add,
+  duplicate, remove, resize, and reorder panels. The grid adapts from one column
+  on phones to two columns, then a maximum of three columns. Drag a header handle
+  to reorder; Space, arrow keys, and Space provide the keyboard equivalent.
+  Move up/down buttons remain available. Drag the lower-right grip to resize
+  width and chart height; arrow keys on the grip do the same. Both grips appear
+  on panel hover or keyboard focus and remain visible on touch screens. The
+  editor also offers one-, two-, or three-column widths and Compact, Standard,
+  or Tall chart heights. Order and sizes autosave with the workspace and are
+  included in named views. Legacy `wide` panels remain full width.
 - **Explorer**: PostHog-inspired query controls beside a large visualization and
   accessible data table. Turn the current exploration into an Operations panel.
 
@@ -40,8 +43,8 @@ Operations grid; the layout selector is confined to the design fixtures.
 All three layouts share the chart treatment in `visualization.css` and the Recharts
 renderer. Following the Genex and LabsAI references, the two leading trend curves
 use vertical color-to-transparent area gradients beneath crisp strokes; remaining
-series use finer lines to avoid overlapping fills obscuring the trends. The palette
-stays in violet, blue, lavender, and slate tones, with a neutral Other series.
+series use finer lines to avoid overlapping fills obscuring the trends. Twenty
+theme-aware category colors cover Top 20 views, with a neutral Other series.
 Ranking bars use a restrained horizontal gradient. Combined charts use muted tonal
 stacked bars and a lavender request line. Donuts use slim tonal segments. Grid lines
 are quiet and legends use small color dots. Hover markers and tooltips expose exact
@@ -63,7 +66,7 @@ layout fixtures. Chart styling does not change settlement or underlying values.
    configurations, and revision-based conditional writes. Autosave the working
    draft; explicitly save named views so exploring does not overwrite a saved view.
 3. Build one Recharts renderer and panel specification, then the three layouts.
-   Each panel chooses its measure, breakdown, chart, and aggregate/Top 5/Top 10 view.
+   Each panel chooses its measure, breakdown, chart, and aggregate/Top 5/Top 10/Top 20 view.
    Label credit units and UTC buckets. Unknown costs remain gaps or unavailable
    values; combined charts label each axis. Every chart has a data table.
 4. Use authenticated usage and workspace APIs for all normal previews. Keep
@@ -186,7 +189,7 @@ Totals, filters, and whole-window Top N membership are independent of the interv
 | Billing events | Metering records; one request can generate several. |
 | Total, input, output, cache-read, cache-write tokens | Provider-reported token fields on the primary record. Total is input + output; caches may overlap and are not added again. |
 | Billed units | The selected metered quantity: requests, tokens, input/output/cache tokens, bytes, or images. Billed input can differ from provider-reported input. |
-| Gross, wallet, grant, allowance cost | Existing microcredit amounts, displayed as credits. These are usage costs, not fiat revenue or wallet balances. |
+| Gross, wallet, grant, allowance cost | Exact decimal-credit strings; legacy micros are aggregate display projections. These are usage costs, not fiat revenue or wallet balances. |
 | Exact-cost, legacy, uncosted events | Cost provenance counts. Legacy and uncosted can overlap; they are not three mutually exclusive shares. |
 | Active users and services | Existing distinct whole-window totals in the summary. Do not sum distinct counts across groups or periods. |
 
@@ -295,7 +298,7 @@ Ranking uses the complete selected population. Top 5/10 plus Other keeps the sam
 groups throughout a time series. Empty buckets are zero; cost buckets or groups
 containing unpriced usage are unavailable, and line charts leave gaps. The UI
 reports unknown-cost coverage and historical cached-rate estimates. Credit values
-are converted from microcredits only for display. Duplicate display names and real
+use exact decimal strings for totals and labels; only chart coordinates convert to Number. Duplicate display names and real
 entities named Other are disambiguated in both slices and series.
 
 There is no fixed panel-count limit. The server limits each filter to 20 values,
@@ -364,3 +367,25 @@ replica set. From the repository root:
 cargo test -p nyxid --bin nyxid-server services::admin_usage_service::tests --no-default-features
 cargo test -p nyxid --bin nyxid-server usage_workspace --no-default-features
 ```
+
+Exact accounting (0.34.0): cost analytics expose `exact_value` and `exact_total` as
+additive strings. Hourly/daily buckets sum Decimal128 credits, converting legacy
+integer micro measures before each increment. Totals truncate only when producing
+legacy integer response fields. Sorting uses exact values; chart labels retain
+decimals and tiny nonzero costs remain visible. See BILLING_EXACT_ACCOUNTING.md.
+
+Exact monetary BSON keys have no `_micros` suffix and store Decimal128 credits.
+For mixed historical data, normalize each amount before summing (the backend's
+`credit_expr` helper generates the same expression). For example:
+
+```js
+{ $ifNull: ["$funding.total_charge", { $cond: [
+  { $eq: [{ $type: "$funding.total_charge" }, "missing"] },
+  { $divide: [{ $toDecimal: { $ifNull: ["$funding.total_charge_micros", 0] } }, 1000000] },
+  null,
+] }] }
+```
+
+Exact keys take precedence, including explicit null. Numeric legacy `*_micros`
+values always use microcredits, including Decimal128 query mirrors.
+Rollup `legacy_grant_cost` replaces legacy integer `legacy_grant`.

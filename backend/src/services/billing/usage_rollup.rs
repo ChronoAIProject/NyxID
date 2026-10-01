@@ -6,6 +6,8 @@
 //! sources -> advance the journal. Never retire a batch before all three writes
 //! are acknowledged. This protocol works on standalone MongoDB as well as replica
 //! sets and does not rely on leases, process clocks, or an evictable dedupe list.
+use super::amounts::credit_expr;
+use crate::models::credits::Credits;
 use std::{sync::Arc, time::Duration};
 
 use chrono::{DateTime, Timelike, Utc};
@@ -49,11 +51,11 @@ pub const MEASURES: &[&str] = &[
     "legacy_cost_events",
     "legacy_quantity",
     "legacy_allowance_quantity",
-    "legacy_grant",
-    "gross_cost_micros",
-    "wallet_cost_micros",
-    "grant_cost_micros",
-    "allowance_cost_micros",
+    "legacy_grant_cost",
+    "gross_cost",
+    "wallet_cost",
+    "grant_cost",
+    "allowance_cost",
     "prompt_tokens",
     "completion_tokens",
     "cached_tokens",
@@ -156,18 +158,55 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
             ),
         ] {
             keys.insert("single_display_key", 1);
+            let mut legacy_keys = keys.clone();
+            let mut nested_keys = keys.clone();
             for field in MEASURES.iter().filter(|field| **field != "rows_folded") {
-                keys.insert(*field, 1);
+                legacy_keys.insert(legacy_measure(field), 1);
+                if money_measure(field) {
+                    nested_keys.insert(format!("query_costs.{field}"), 1);
+                    keys.insert(format!("query_{field}"), 1);
+                } else {
+                    nested_keys.insert(*field, 1);
+                    keys.insert(*field, 1);
+                }
             }
-            db.collection::<Document>(collection)
+            // Cutover materializes every exact cost key before readers use
+            // this covering index. No legacy fallback or whole-object copy
+            // is needed in each index entry.
+            let summaries = db.collection::<Document>(collection);
+            summaries
                 .create_index(
                     IndexModel::builder()
                         .keys(keys)
-                        .options(IndexOptions::builder().name(name.to_owned()).build())
+                        .options(
+                            IndexOptions::builder()
+                                .name(format!("{name}_exact_v4"))
+                                .build(),
+                        )
                         .build(),
                 )
                 .await?;
+            let indexes: Vec<_> = summaries.list_indexes().await?.try_collect().await?;
+            for (old_name, old_keys) in [
+                (name.to_owned(), legacy_keys),
+                (format!("{name}_exact_v3"), nested_keys),
+            ] {
+                let obsolete = indexes.iter().any(|index| {
+                    index.options.as_ref().and_then(|o| o.name.as_deref()) == Some(&old_name)
+                        && index.keys == old_keys
+                });
+                if obsolete && let Err(error) = summaries.drop_index(&old_name).await {
+                    let disappeared = matches!(
+                        error.kind.as_ref(),
+                        mongodb::error::ErrorKind::Command(command) if command.code == 27
+                    );
+                    if !disappeared {
+                        return Err(error);
+                    }
+                }
+            }
         }
+
         // Most summaries contain one display partition and use the main hour
         // index. This small partial index prevents scanning them a second time
         // when expanding multi-partition (or older unaccelerated) summaries.
@@ -207,7 +246,13 @@ pub fn pending_filter(cutoff: DateTime<Utc>) -> Document {
                 // excludes unforwarded rows. Forwarded never reverts to false.
                 { "$or": [
                     { "lago_acked": true }, { "status": "dead_letter" },
-                    { "funding.total_charge_micros": { "$ne": null }, "forwarded": true },
+                    { "forwarded": true, "$or": [
+                        { "funding.total_charge": { "$ne": null } },
+                        {
+                            "funding.total_charge": { "$exists": false },
+                            "funding.total_charge_micros": { "$ne": null },
+                        },
+                    ] },
                 ] },
             ] } ] },
         ],
@@ -455,6 +500,9 @@ async fn raw_increments(
         // Mongo sums of exact micros use Decimal128. Clamp as integers before
         // persistence, never by round-tripping through floating point.
         for field in MEASURES {
+            if money_measure(field) {
+                continue;
+            }
             if let Some(Bson::Decimal128(value)) = group.get(*field) {
                 let value = value
                     .to_string()
@@ -481,11 +529,7 @@ async fn raw_increments(
         }
         group.insert("cost_partitions", partitions.clone());
         if let Some(existing) = combined.get_mut(&hash) {
-            for field in MEASURES {
-                let value =
-                    integer(existing.get(*field)).saturating_add(integer(group.get(*field)));
-                existing.insert(*field, value);
-            }
+            add_measures(existing, group)?;
             existing
                 .get_document_mut("cost_partitions")
                 .map_err(|_| AppError::Internal("Invalid usage cost partitions".into()))?
@@ -512,7 +556,7 @@ async fn publish_batch(
         ));
     }
     let mut update = doc! { "$set": {
-        "batch": bson::to_bson(&batch).map_err(|e| AppError::Internal(e.to_string()))?,
+        "batch": storage_document(&batch)?,
     } };
     if let Some(cutoff) = cutoff {
         update.insert(
@@ -528,6 +572,16 @@ async fn publish_batch(
         )
         .await?;
     Ok((result.modified_count == 1).then_some(batch))
+}
+
+// These documents go straight back to Mongo. BSON's default human-readable
+// document serializer needlessly formats and reparses every Decimal128 through
+// Extended JSON; binary mode preserves the same BSON values directly.
+fn storage_document<T: serde::Serialize>(value: &T) -> AppResult<Document> {
+    bson::to_raw_document_buf(value)
+        .map_err(|error| AppError::Internal(error.to_string()))?
+        .to_document()
+        .map_err(|error| AppError::Internal(error.to_string()))
 }
 
 fn integer(value: Option<&Bson>) -> i64 {
@@ -579,9 +633,8 @@ async fn apply(
         let increments = batch
             .increments
             .iter()
-            .map(bson::to_document)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| AppError::Internal(e.to_string()))?;
+            .map(storage_document)
+            .collect::<AppResult<Vec<_>>>()?;
         apply_increments(
             db,
             ROLLUPS,
@@ -595,9 +648,8 @@ async fn apply(
     if batch.daily {
         let increments = daily_increments(&batch.increments)?
             .iter()
-            .map(bson::to_document)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| AppError::Internal(e.to_string()))?;
+            .map(storage_document)
+            .collect::<AppResult<Vec<_>>>()?;
         apply_increments(db, DAILY, batch.sequence, increments, false, session).await?;
     }
     Ok(())
@@ -608,8 +660,7 @@ async fn apply(
 fn daily_increments(increments: &[UsageRollupHourly]) -> AppResult<Vec<UsageRollupDaily>> {
     let mut combined = std::collections::BTreeMap::<String, Document>::new();
     for increment in increments {
-        let mut source =
-            bson::to_document(increment).map_err(|e| AppError::Internal(e.to_string()))?;
+        let mut source = storage_document(increment)?;
         // Copy only accounting data. Hourly bootstrap markers, sequence fences
         // and query accelerators are not daily increment inputs; apply sets the
         // batch fence and recomputes accelerators from the resulting daily sums.
@@ -634,7 +685,7 @@ fn daily_increments(increments: &[UsageRollupHourly]) -> AppResult<Vec<UsageRoll
         ));
         group.insert("_id", &hash);
         if let Some(existing) = combined.get_mut(&hash) {
-            add_measures(existing, &group);
+            add_measures(existing, &group)?;
             let parts = group
                 .get_document("cost_partitions")
                 .map_err(|_| AppError::Internal("Invalid usage cost partitions".into()))?;
@@ -646,7 +697,7 @@ fn daily_increments(increments: &[UsageRollupHourly]) -> AppResult<Vec<UsageRoll
                     .as_document()
                     .ok_or_else(|| AppError::Internal("Invalid usage cost partition".into()))?;
                 if let Ok(existing) = existing_parts.get_document_mut(key) {
-                    add_measures(existing, value);
+                    add_measures(existing, value)?;
                 } else {
                     existing_parts.insert(key, value.clone());
                 }
@@ -661,12 +712,66 @@ fn daily_increments(increments: &[UsageRollupHourly]) -> AppResult<Vec<UsageRoll
         .collect()
 }
 
-fn add_measures(existing: &mut Document, delta: &Document) {
+fn legacy_measure(field: &str) -> String {
+    if field == "legacy_grant_cost" {
+        "legacy_grant".to_string()
+    } else if money_measure(field) {
+        format!("{field}_micros")
+    } else {
+        field.to_string()
+    }
+}
+
+fn money_measure(field: &str) -> bool {
+    matches!(
+        field,
+        "legacy_grant_cost" | "gross_cost" | "wallet_cost" | "grant_cost" | "allowance_cost"
+    )
+}
+
+fn add_measures(existing: &mut Document, delta: &Document) -> AppResult<()> {
     for field in MEASURES {
-        existing.insert(
-            *field,
-            integer(existing.get(*field)).saturating_add(integer(delta.get(*field))),
-        );
+        if money_measure(field) {
+            let current = Credits::from_bson(
+                existing
+                    .get(*field)
+                    .or_else(|| existing.get(legacy_measure(field)))
+                    .cloned()
+                    .unwrap_or(Bson::Int64(0)),
+                1_000_000,
+            )?;
+            let delta = Credits::from_bson(
+                delta
+                    .get(*field)
+                    .or_else(|| delta.get(legacy_measure(field)))
+                    .cloned()
+                    .unwrap_or(Bson::Int64(0)),
+                1_000_000,
+            )?;
+            existing.insert(*field, current.checked_add(delta)?);
+        } else {
+            existing.insert(
+                *field,
+                integer(existing.get(*field)).saturating_add(integer(delta.get(*field))),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn add_measure(field: &str, current: Bson, delta: Bson) -> Bson {
+    if money_measure(field) {
+        let current = if let Bson::Document(mut old) = current.clone() {
+            if let Ok(get) = old.get_document_mut("$getField") {
+                get.insert("field", legacy_measure(field));
+            }
+            doc! { "$ifNull": [current, credit_expr(old)] }.into()
+        } else {
+            credit_expr(current)
+        };
+        doc! { "$add": [current, credit_expr(delta)] }.into()
+    } else {
+        saturated_add(current, delta)
     }
 }
 
@@ -714,12 +819,16 @@ async fn apply_increments(
     for field in MEASURES {
         set.insert(
             *field,
-            saturated_add(format!("${field}").into(), format!("$delta.{field}").into()),
+            add_measure(
+                field,
+                format!("${field}").into(),
+                format!("$delta.{field}").into(),
+            ),
         );
     }
     let mut partition = doc! { "key": "$$this.v.key" };
     for field in MEASURES {
-        partition.insert(*field, saturated_add(
+        partition.insert(*field, add_measure(field,
             doc! { "$getField": { "field": *field, "input": { "$getField": { "field": "$$this.k", "input": { "$ifNull": ["$cost_partitions", {}] } } } } }.into(),
             format!("$$this.v.{field}").into(),
         ));
@@ -749,20 +858,26 @@ async fn apply_increments(
     }
     let mut query_costs = Document::new();
     for field in [
-        "gross_cost_micros",
-        "wallet_cost_micros",
-        "grant_cost_micros",
-        "allowance_cost_micros",
+        "gross_cost",
+        "wallet_cost",
+        "grant_cost",
+        "allowance_cost",
+        "legacy_grant_cost",
     ] {
         query_costs.insert(field, doc! { "$toDecimal": format!("${field}") });
     }
-    let accelerators = doc! {
+    let mut accelerators = doc! {
         "single_display_key": { "$let": {
             "vars": { "part": { "$arrayElemAt": [{ "$objectToArray": "$cost_partitions" }, 0] } },
             "in": { "$cond": [ { "$lte": [{ "$size": { "$objectToArray": "$cost_partitions" } }, 1] }, display_key, null ] },
         } },
-        "query_costs": query_costs,
+        "query_costs": &query_costs,
     };
+    // Flat aliases let Mongo's covered SBE group consume index slots directly.
+    // Dotted paths otherwise rebuild and traverse an object for every row.
+    for (field, value) in query_costs {
+        accelerators.insert(format!("query_{field}"), value);
+    }
     let command = doc! { "update": collection, "updates": [{
         "q": { "_id": { "$in": ids }, "last_batch": { "$lt": sequence } },
         "u": [

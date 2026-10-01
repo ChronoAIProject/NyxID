@@ -9,6 +9,24 @@ import { useCreditsDenialStore } from "@/stores/credits-denial-store";
 import type { NyxAgentHistory } from "@/schemas/assistant-nyxagent";
 
 const id = `nyxa-${"a".repeat(32)}`;
+const NYXBOT = "agent-nyxbot";
+const nyxbotRef = { id: NYXBOT, kind: "nyxbot" as const, name: "NyxBot", destroyed: false };
+function agentRow(fields: Record<string, unknown>) {
+  return {
+    id: NYXBOT, kind: "nyxbot", name: "NyxBot", description: "", specialty: null,
+    created_by: "user", status: "idle", services: [], account_read: true,
+    pending_requests: [], last_reply: null, home_conversation_id: null, memory_count: 0,
+    created_at: "2026-09-17T00:00:00Z", last_active_at: "2026-09-17T00:00:00Z",
+    destroyed_at: null, pending_acknowledgements: 0, channels: [],
+    ...fields,
+  };
+}
+const limits = {
+  skip_destructive_confirmation: false, max_live_subagents: 8,
+  max_concurrent_subagent_turns: 3, max_live_subagents_limit: 32,
+  max_concurrent_subagent_turns_limit: 8,
+};
+let agents: ReturnType<typeof agentRow>[];
 const json = (value: unknown) => new Response(JSON.stringify(value));
 let page: NyxAgentHistory;
 let requests: string[];
@@ -38,7 +56,10 @@ beforeEach(() => {
       id,
       title: "Question",
       model: "nyxagent/chat",
-    access_mode: "ask",
+      role: "orchestrator",
+      agent: nyxbotRef,
+      pending_events: 0,
+      channel: null,
       created_at: "2026-09-17T00:00:00Z",
       last_message_at: "2026-09-17T00:00:00Z",
       message_count: 1,
@@ -60,10 +81,13 @@ beforeEach(() => {
     before_seq: null,
     acknowledgements: [],
     approvals: [],
+    waiting: [],
   };
+  agents = [agentRow({})];
   globalThis.__nyxidAssistantHttpMock = ({ endpoint, init }) => {
     requests.push(`${init.method} ${endpoint}`);
     if (endpoint.endsWith("/models")) return json([{ id: "nyxagent/chat", label: "chat" }]);
+    if (endpoint.startsWith("/assistant/nyxagent/agents")) return json({ agents, limits });
     if (endpoint.includes(`/conversations/${id}`)) {
       if (init.method === "PATCH") {
         page.conversation.title = "Renamed";
@@ -84,15 +108,17 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-it("polls only selected history every two seconds and refreshes the index once on settlement",
+it("polls only selected history every two seconds and refreshes the agent's threads once on settlement",
   async () => {
     const { result, unmount } = renderHook(() => useNyxAgentAssistantChat({
       selectedConversationId: id,
       onConversationAdopted: vi.fn(),
+      threadsAgentId: NYXBOT,
     }), { wrapper });
     await waitFor(() => expect(result.current.isStreaming).toBe(true));
     const historyReads = () => requests.filter((r) => r.includes(`/conversations/${id}`)).length;
-    const indexReads = () => requests.filter((r) => r.includes("/conversations?limit=")).length;
+    const indexReads = () =>
+      requests.filter((r) => r.includes(`/conversations?limit=100&agent_id=${NYXBOT}`)).length;
     const initialIndexReads = indexReads();
     // Multiple active polls must never refetch the (potentially paginated) index.
     await waitFor(() => expect(historyReads()).toBeGreaterThanOrEqual(3), { timeout: 5000 });
@@ -119,16 +145,19 @@ it("polls only selected history every two seconds and refreshes the index once o
   }, 10_000,
 );
 
-it("refreshes profiles after a first send provisions the assistant credential", async () => {
+it("routes models server-side: no profile discovery, and a send refreshes the agents", async () => {
   page.conversation.active_turn = null;
   const send = vi.spyOn(nyxAgentTransport, "send").mockResolvedValue();
   const { result, unmount } = renderHook(() => useNyxAgentAssistantChat({
     onConversationAdopted: vi.fn(),
   }), { wrapper });
-  await waitFor(() => expect(requests.filter((r) => r.endsWith("/models"))).toHaveLength(1));
+  const agentReads = () =>
+    requests.filter((r) => r.includes("/assistant/nyxagent/agents")).length;
+  await waitFor(() => expect(agentReads()).toBe(1));
   await act(() => result.current.send("Question"));
   expect(send).toHaveBeenCalledOnce();
-  expect(requests.filter((r) => r.endsWith("/models"))).toHaveLength(2);
+  expect(agentReads()).toBe(2);
+  expect(requests.some((r) => r.endsWith("/models"))).toBe(false);
   unmount();
 });
 
@@ -164,6 +193,7 @@ it("polls pending acknowledgements after settlement, throttles decisions, and re
     page.acknowledgements = [{
       id: "12345678-1234-4123-8123-123456789012",
       kind: "account", status: "pending", summary: "Manage account",
+      decider: "user", decided_by: null, reason: null,
       service_slug: null, service_name: null, tool_name: null,
       created_at: "2026-09-17T00:00:00Z", decided_at: null,
       expires_at: "2026-09-17T00:15:00Z",
@@ -210,6 +240,7 @@ it("sends one continuation after a turn settles for cards allowed while it ran, 
     const card = (suffix: string, kind: "service" | "account") => ({
       id: `12345678-1234-4123-8123-12345678901${suffix}`,
       kind, status: "pending" as const, summary: "Card",
+      decider: "user" as const, decided_by: null, reason: null,
       service_slug: kind === "service" ? "github" : null,
       service_name: kind === "service" ? "GitHub" : null,
       tool_name: null,
@@ -277,11 +308,154 @@ it("sends one continuation after a turn settles for cards allowed while it ran, 
   }, 8000,
 );
 
+it.each(["specialist", "automation"])(
+  "leaves %s confirmation continuation to the server",
+  async (kind) => {
+    page.conversation.active_turn = null;
+    page.conversation.pending_acknowledgements = 1;
+    page.acknowledgements = [
+      {
+        id: "12345678-1234-4123-8123-123456789012",
+        kind: "service",
+        status: "pending",
+        summary: "Use GitHub",
+        decider: kind === "specialist" ? "orchestrator" : "user",
+        trigger_run_id: kind === "automation" ? "run-id" : null,
+        decided_by: null,
+        reason: null,
+        service_slug: "github",
+        service_name: "GitHub",
+        tool_name: null,
+        created_at: "2026-09-17T00:00:00Z",
+        decided_at: null,
+        expires_at: "2026-09-17T00:15:00Z",
+      },
+    ];
+    const { result, unmount } = renderHook(
+      () =>
+        useNyxAgentAssistantChat({
+          selectedConversationId: id,
+          onConversationAdopted: vi.fn(),
+        }),
+      { wrapper },
+    );
+    await waitFor(() =>
+      expect(result.current.acknowledgements).toHaveLength(1),
+    );
+    const send = vi
+      .spyOn(nyxAgentTransport, "send")
+      .mockResolvedValue(undefined);
+    vi.spyOn(nyxAgentTransport, "decide").mockImplementation(async () => {
+      page.acknowledgements[0] = {
+        ...page.acknowledgements[0]!,
+        status: "allowed",
+        decided_by: "user",
+      };
+      return page.acknowledgements[0];
+    });
+    const reads = () =>
+      requests.filter((r) =>
+        r.startsWith(`GET /assistant/nyxagent/conversations/${id}?`),
+      ).length;
+    const before = reads();
+    await act(() =>
+      result.current.decideAcknowledgement({
+        id: page.acknowledgements[0]!.id,
+        choice: "allow",
+      }),
+    );
+    // The server resumes the subagent itself; the page only refreshes history.
+    await waitFor(() => expect(reads()).toBeGreaterThan(before));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(send).not.toHaveBeenCalled();
+    unmount();
+  },
+);
+it("polls a thread whose agent NyxID set to work, without a turn of its own", async () => {
+  const specialist = `nyxa-${"b".repeat(32)}`;
+  page.conversation.active_turn = null;
+  const specialistPage = {
+    ...page,
+    conversation: {
+      ...page.conversation, id: specialist, role: "subagent" as const,
+      agent: { id: "agent-researcher", kind: "specialist" as const, name: "researcher", destroyed: false },
+    },
+  };
+  agents = [
+    agentRow({}),
+    agentRow({ id: "agent-researcher", kind: "specialist", name: "researcher", status: "running" }),
+  ];
+  const mock = globalThis.__nyxidAssistantHttpMock!;
+  globalThis.__nyxidAssistantHttpMock = (request) => {
+    if (request.endpoint.includes(`/conversations/${specialist}`)) {
+      requests.push(`GET ${request.endpoint}`);
+      return json(specialistPage);
+    }
+    return mock(request);
+  };
+  const { result, unmount } = renderHook(() => useNyxAgentAssistantChat({
+    selectedConversationId: specialist, onConversationAdopted: vi.fn(),
+  }), { wrapper });
+  await waitFor(() => expect(result.current.conversation?.agent?.name).toBe("researcher"));
+  const reads = () => requests.filter((r) => r.includes(`/conversations/${specialist}?`)).length;
+  const first = reads();
+  await waitFor(() => expect(reads()).toBeGreaterThan(first), { timeout: 3500 });
+  unmount();
+}, 8000);
+
+it("re-reads the open thread when a specialist settles, since NyxBot may have been woken", async () => {
+  page.conversation.active_turn = null;
+  agents = [
+    agentRow({}),
+    agentRow({ id: "agent-researcher", kind: "specialist", name: "researcher", status: "running" }),
+  ];
+  const { result, unmount } = renderHook(() => useNyxAgentAssistantChat({
+    selectedConversationId: id, onConversationAdopted: vi.fn(),
+  }), { wrapper });
+  await waitFor(() => expect(result.current.session.title).toBe("Question"));
+  const reads = () => requests.filter((r) => r.includes(`/conversations/${id}?`)).length;
+  const before = reads();
+  // The next agents poll finds the researcher done with a new reply.
+  agents = [
+    agentRow({}),
+    agentRow({
+      id: "agent-researcher", kind: "specialist", name: "researcher", status: "idle",
+      last_reply: { seq: 5, status: "completed", text: "Done", created_at: "2026-09-17T00:00:05Z" },
+    }),
+  ];
+  await waitFor(() => expect(reads()).toBeGreaterThan(before), { timeout: 5000 });
+  unmount();
+}, 10_000);
+
+it("names the agent only when a send starts a new thread", async () => {
+  page.conversation.active_turn = null;
+  const send = vi.spyOn(nyxAgentTransport, "send").mockResolvedValue();
+  const researcher = { id: "agent-researcher", kind: "specialist" as const, name: "researcher", destroyed: false };
+  const draft = renderHook(() => useNyxAgentAssistantChat({
+    onConversationAdopted: vi.fn(), draftAgent: researcher,
+  }), { wrapper });
+  await act(() => draft.result.current.send("Hello researcher"));
+  expect(send).toHaveBeenLastCalledWith(
+    undefined, "Hello researcher", expect.any(Function), expect.any(Function), { agent: researcher },
+  );
+  draft.unmount();
+  const existing = renderHook(() => useNyxAgentAssistantChat({
+    selectedConversationId: id, onConversationAdopted: vi.fn(), draftAgent: researcher,
+  }), { wrapper });
+  await act(() => existing.result.current.send("Continue"));
+  expect(send.mock.lastCall).toHaveLength(4);
+  expect(send.mock.lastCall?.[0]).toBe(id);
+  existing.unmount();
+});
+
 it("phrases continuation turns per acknowledgement kind", () => {
   const base = {
     id: "12345678-1234-4123-8123-123456789012",
     status: "allowed" as const,
     summary: "Delete agent key ci-bot",
+    decider: "user" as const,
+    decided_by: "user" as const,
+    reason: null,
     service_slug: null,
     service_name: null,
     tool_name: null,
@@ -447,7 +621,7 @@ it("ignores a stale index that still shows an already-failed turn as running", a
     return mock(request);
   };
   const { result, unmount } = renderHook(() => useNyxAgentAssistantChat({
-    selectedConversationId: id, onConversationAdopted: vi.fn(),
+    selectedConversationId: id, onConversationAdopted: vi.fn(), threadsAgentId: NYXBOT,
   }), { wrapper });
   await waitFor(() => expect(result.current.session.messages.at(-1)?.status).toBe("error"));
   // The slower index response lands after the idle history.

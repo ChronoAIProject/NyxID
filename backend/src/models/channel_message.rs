@@ -84,12 +84,20 @@ pub struct ChannelMessage {
     /// Callback delivery status: "pending", "delivered", "failed", "timeout"
     #[serde(default)]
     pub callback_status: Option<String>,
+    /// HTTP status the callback URL answered with when delivery failed, if
+    /// it answered at all. A status code only, never the response body.
+    #[serde(default)]
+    pub callback_http_status: Option<u16>,
     /// Internal message ID this message is a reply to
     #[serde(default)]
     pub reply_to_message_id: Option<String>,
     /// Platform message ID of the sent reply (set after outbound delivery)
     #[serde(default)]
     pub platform_reply_message_id: Option<String>,
+    /// Inbound only: the platform message ID this message replies to, when
+    /// it is a reply (routing metadata, e.g. to tell replies to the bot).
+    #[serde(default)]
+    pub reply_to_platform_message_id: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
@@ -133,8 +141,10 @@ mod tests {
             thread_id: None,
             agent_api_key_id: None,
             callback_status: None,
+            callback_http_status: None,
             reply_to_message_id: None,
             platform_reply_message_id: None,
+            reply_to_platform_message_id: None,
             created_at: Utc::now(),
             updated_at: None,
         }

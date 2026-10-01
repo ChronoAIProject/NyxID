@@ -28,6 +28,7 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
   - [External API Keys](#external-api-keys)
   - [User Services](#user-services)
   - [Third-party Connector Integration](#third-party-connector-integration)
+  - [Bot connection links](#bot-connection-links)
   - [Service Catalog](#service-catalog)
   - [Sessions](#sessions)
   - [Service Endpoints](#service-endpoints)
@@ -3451,6 +3452,8 @@ Deactivate a service binding.
 
 Registered developer apps should use connect links for browser-based connector setup instead of inferring an attempt from changes to `/user-services`.
 
+For channel bot setup, see [Bot connection links](#bot-connection-links). Bot links use the same create-link, human-setup, and signed-notification pattern through separate endpoints.
+
 1. Obtain a normal user OAuth access token through the authorization-code flow.
 2. Create a link with `POST /api/v1/connect-links`. When the access token belongs to a registered app, `callback_url` must satisfy that app's registered OAuth redirect URI matching policy. Registered custom schemes and public-client loopback redirects are supported.
 3. Open the returned `connect_url` in the user's browser. Credential submission and provider authorization remain human-session-only.
@@ -3546,6 +3549,8 @@ Content-Type: application/json
 
 Events are `connect_link.completed`, `connect_link.cancelled`, `connect_link.expired`, and `connection.expired`. Only links created by the app produce connect-link events. Connection expiry routes through the `source_app_id` recorded when that link provisions its service.
 
+Apps that also create [bot connection links](#bot-connection-links) receive `channel_connect.completed`, `channel_connect.cancelled`, and `channel_connect.expired` through this registered webhook and signing key. Existing service event names and payloads are unchanged.
+
 Abandoned app-bound links are expired by a background sweep, so `connect_link.expired` delivery does not require the app to poll or revisit the hosted page.
 
 ```json
@@ -3597,6 +3602,81 @@ Connect-link terminal events use the link document as a durable outbox. Each dis
 Connection webhook bodies are metadata-only and enforced at a maximum of 16 KiB. Delivery never rolls back a link or credential transition, and event bodies and secrets are never logged.
 
 Envelope timestamps use RFC 3339 UTC serialization. The wire-format assertion emits the example above byte-for-byte, including `2026-08-06T09:30:00.123Z`.
+
+---
+
+### Bot connection links
+
+Tracked bot setup uses `POST /api/v1/channel-connect-links` and the hosted page `/connect/bot/{token}`. Existing [service connection links](#third-party-connector-integration) retain their API and webhook contracts. Reusable `/channel-bots/connect/{platform}` pages remain available; those URLs do not create a tracked callback request.
+
+#### POST /api/v1/channel-connect-links
+
+**Auth:** Account session, user OAuth access token, or Agent Key with write access to the selected owner. Delegated, relay, and service-account tokens are rejected. Agent Keys may create, read, and cancel requests; setup completion requires a human account.
+
+**Create request for a direct webhook:**
+
+```json
+{
+	"platform": "discord",
+	"label": "Support bot",
+	"requested_by": "Support platform",
+	"webhook_url": "https://app.example.com/events/nyxid",
+	"callback_url": "https://app.example.com/setup/return?state=request-123",
+	"expires_in": 900
+}
+```
+
+| Field | Required | Contract |
+|---|---|---|
+| `platform` | Yes | Enabled platform ID from `GET /api/v1/channel-platforms`. |
+| `label` | Yes | Fixed bot name. |
+| `target_org_id` | No | Organization UUID the actor administers. Omit for personal ownership. |
+| `requested_by` | No | Display name. Verified OAuth app or Agent Key attribution takes precedence. |
+| `webhook_url` | No | Public HTTPS destination for direct callers. OAuth app callers use their registered connection webhook and cannot supply this field. |
+| `callback_url` | No | Browser return URI. OAuth app callbacks use the existing registered redirect matching policy; other callers use HTTP(S) URLs. |
+| `expires_in` | No | Seconds, default `900`, clamped to `60`–`3600`. |
+
+**Response: `200 OK`**
+
+```json
+{
+	"id": "6c02c84a-3d97-430f-8468-c96b609d9563",
+	"connect_url": "https://app.nyxid.dev/connect/bot/nyx_bcl_<opaque-secret>",
+	"expires_at": "2026-09-30T08:15:00Z",
+	"webhook_signing_secret": "nyx_bwh_<opaque-secret>",
+	"webhook_signing_key_id": "key_<opaque-id>"
+}
+```
+
+The signing fields are returned once for a direct webhook and are `null` otherwise. The hosted token is a single-use secret. Status, preview, browser callbacks, and notification events never return credentials or signing secrets. The platform, label, and owner are fixed at creation.
+
+#### Status, cancellation, and hosted setup endpoints
+
+All paths below are under `/api/v1/channel-connect-links`.
+
+| Method | Path | Access and behavior |
+|---|---|---|
+| `GET` | `/{id}` | Authorized owner writer; returns status and webhook delivery state, and reconciles saved setup. |
+| `POST` | `/{id}/cancel` | Authorized owner writer; cancels an unstarted request. Started setup returns a conflict. |
+| `POST` | `/preview` | Public, rate-limited; accepts `{ "token": "..." }`. Omits owner, bot, provider, callback, and delivery details. |
+| `POST` | `/decline` | Human account with owner write access; accepts `{ "token": "..." }` and uses the same cancellation rules. |
+| `POST` | `/complete` | Human account; accepts the token and the platform's manual registration fields. |
+| `POST` | `/managed/start` | Human account; accepts the token and starts the platform's managed OAuth authorization. |
+| `POST` | `/managed/complete` | Human account; accepts the token and managed completion fields. Supports JSON and `Accept: text/event-stream` progress. |
+| `POST` | `/telegram/start` | Human account; accepts the token and creates or resumes the linked Telegram approval request. |
+| `POST` | `/retry` | Human account; accepts the token and repairs or verifies an already saved bot. |
+
+`status` is `pending`, `completed`, `cancelled`, or `expired`. The private status response includes `bot_id`, `connection_id`, `telegram_request_id`, `last_error`, and `delivery_status`. Delivery is `pending`, `delivered`, `abandoned`, or `none` after a terminal result; before that it may be `null`. `telegram_requires_original_actor` tells another org administrator that the account which started Telegram approval must resume it. A terminal `callback_url` includes the merged `status`, `channel_connect_link_id`, and optional `bot_id` parameters.
+
+#### Bot setup notifications
+
+Events are `channel_connect.completed`, `channel_connect.cancelled`, and `channel_connect.expired`. They use the [connection lifecycle signature headers and HMAC contract](#connection-lifecycle-webhooks). The event ID, occurrence time, and result data remain stable across retries. Receivers deduplicate by `event_id` and acknowledge with a 2xx response.
+
+Bot delivery uses five-minute leases and at most five cycles of three bounded HTTP attempts. A separate worker recovers completion, expiry, and interrupted delivery without app polling. `CONNECT_LINK_EXPIRY_SWEEP_INTERVAL_SECS=0` disables both the bot worker and the existing service-link expiry sweep.
+
+For manual setup, `completed` can include `bot_status: "pending_webhook"`. `bot_status` and `webhook_registered` describe whether platform delivery is ready. The optional browser return follows explicit user continuation so the user can save a one-time platform verification secret first.
+
+The [bot-link lifecycle and webhook payload](CHANNEL_BOT_RELAY.md#tracked-bot-connection-links) describe recovery deadlines, Telegram approval expiry, and late worker completion. The [implementation map](CHANNEL_BOT_RELAY.md#bot-link-implementation-and-compatibility) identifies the storage, handler, worker, frontend, and CLI code.
 
 ---
 
@@ -4130,11 +4210,20 @@ Authorization endpoint. Validates the OAuth client and parameters, then issues a
 | `response_type`         | string | Yes      | Must be `code`                           |
 | `client_id`             | string | Yes      | UUID of the registered OAuth client      |
 | `redirect_uri`          | string | Yes      | Must match a registered redirect URI     |
-| `scope`                 | string | No       | Space-separated scopes (default: the client's configured `allowed_scopes`). Additional scopes: `roles` (include RBAC roles and permissions in tokens), `groups` (include group memberships in tokens) |
+| `scope`                 | string | No       | Space-separated scopes. Ordinary authorization defaults to the client's configured `allowed_scopes`; incremental authorization preserves the existing grant when omitted and adds only the requested scopes when supplied. Additional scopes include `roles` (RBAC claims) and `groups` (group memberships). |
 | `state`                 | string | No       | Opaque value for CSRF protection         |
 | `code_challenge`        | string | Yes      | PKCE code challenge (base64url-encoded SHA-256) |
 | `code_challenge_method` | string | No       | Must be `S256` if provided               |
 | `nonce`                 | string | No       | Value included in ID token for replay protection |
+| `include_granted_scopes` | boolean | No | `true` requests additive OAuth scopes and service access, like Google's incremental authorization option |
+| `service_access_mode`   | string | No       | `incremental` is the NyxID-specific alias for add-only consent; omission keeps ordinary authorization/review behavior unless `include_granted_scopes=true` |
+| `requested_service_ids` | repeated string | No | Exact UserService UUIDs required by an incremental request (maximum 100 entries, deduplicated); requires `include_granted_scopes=true` or `service_access_mode=incremental` |
+| `resource`              | repeated string | No | RFC 8707 resources; in incremental mode their services are also required, and they narrow the initial access token rather than the accumulated refresh/binding grant |
+| `binding_grant_id`      | string | No       | SHA-256 of an existing binding handle, to update that exact binding; external subject must match, including an absent subject in incremental mode |
+
+Incremental authorization requires a live consent for the current user and client. NyxID signs the existing grant and requested IDs, then asks the user to confirm additions. Existing A/B plus newly approved C/D produces A/B/C/D in the authorization code, refresh token, and broker binding. Existing unrestricted access stays unrestricted; a restricted grant cannot become unrestricted in this mode. Unknown, disabled, or inaccessible new service IDs are rejected. Concurrent grant changes or revocation invalidate stale decisions/codes and require restarting authorization; routine broker refresh-token rotation does not change the grant.
+
+`POST /oauth/par` accepts the same `include_granted_scopes`, `service_access_mode`, and repeated `requested_service_ids` form fields. Callers must start at the authorization/PAR endpoint, not construct a consent page URL or provide a grant snapshot themselves. See [incremental service access and the Aevatar integration contract](site/shared/concepts/oauth-oidc.md#adding-service-access-incrementally).
 
 **Response (200):**
 
@@ -4181,6 +4270,7 @@ Token endpoint. Exchanges an authorization code for access, refresh, and ID toke
 | `client_id`     | string | Yes      | UUID of the OAuth client                 |
 | `client_secret` | string | No       | Required for confidential clients        |
 | `code_verifier` | string | No       | PKCE code verifier (required if PKCE used)|
+| `resource`      | repeated string | No | Requested access-token resources within the granted authority; incremental codes default to the authorize request's resources when omitted, while refresh/binding authority retains the accumulated service grant |
 
 **Request Body (refresh_token grant):**
 

@@ -166,12 +166,22 @@ const TEST_DB_PROBE_NAME: &str = "nyxid_test_probe";
 /// runtime-independent worker. A renewable process lease, process-exit retry,
 /// and the cross-process stale sweep remain crash recovery.
 pub(crate) async fn connect_test_database(prefix: &str) -> Option<mongodb::Database> {
+    // Production initializes this before opening balances or billing admission.
+    crate::services::billing::ledger::init_billing_ledger_hmac_key(zeroize::Zeroizing::new(
+        crate::services::billing::ledger::TEST_BILLING_LEDGER_HMAC_KEY,
+    ));
     let db_name = new_test_db_name(prefix);
     let client = probe_test_mongo_client(&db_name, None).await.expect(
         "MongoDB is required for database tests; set NYXID_TEST_DATABASE_URL to a writable MongoDB URI",
     );
 
-    Some(client.database(&db_name))
+    let db = client.database(&db_name);
+    // Ordinary tests start after a fresh-install cutover. Migration tests remove
+    // this marker explicitly to exercise pending/legacy installations.
+    db.collection::<mongodb::bson::Document>("billing_migrations").insert_one(
+        mongodb::bson::doc! { "_id": "exact-v2", "completed_at": mongodb::bson::DateTime::now() },
+    ).await.expect("initialize fresh test billing readiness");
+    Some(db)
 }
 
 /// Connect to a fresh test database through a client with MongoDB command
@@ -186,7 +196,13 @@ pub(crate) async fn connect_test_database_with_command_handler(
     let client = probe_test_mongo_client(&db_name, Some(handler)).await.expect(
         "MongoDB is required for database tests; set NYXID_TEST_DATABASE_URL to a writable MongoDB URI",
     );
-    Some(client.database(&db_name))
+    let db = client.database(&db_name);
+    // Ordinary tests start after a fresh-install cutover. Migration tests remove
+    // this marker explicitly to exercise pending/legacy installations.
+    db.collection::<mongodb::bson::Document>("billing_migrations").insert_one(
+        mongodb::bson::doc! { "_id": "exact-v2", "completed_at": mongodb::bson::DateTime::now() },
+    ).await.expect("initialize fresh test billing readiness");
+    Some(db)
 }
 
 /// Connect to a fresh database and prove that it supports multi-document
@@ -1728,6 +1744,7 @@ pub(crate) fn test_app_config() -> AppConfig {
         cli_pairing_hmac_key: None,
         audit_chain_hmac_key: None,
         billing_ledger_hmac_key: None,
+        billing_exact_cutover_drained: false,
         chain_verify_interval_secs: 0,
         sa_token_ttl_secs: 3600,
         cookie_domain: None,
@@ -1822,7 +1839,6 @@ pub(crate) fn test_app_config() -> AppConfig {
         billing_default_overdraft_cap_credits: 0,
         billing_fail_closed: false,
         billing_resale_enabled: false,
-        invite_code_required: false,
         email_auth_enabled: false,
         auto_verify_email: false,
         telemetry_dsn: None,
@@ -2172,6 +2188,7 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         ),
         billing,
         audit_event_types: Arc::default(),
+        assistant_live: Arc::default(),
         telemetry: None,
     }
 }

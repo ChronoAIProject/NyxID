@@ -13,13 +13,116 @@ use crate::{
     errors::{AppError, AppResult},
     models::{
         api_key::{ApiKey, ApiKeyPurpose, COLLECTION_NAME as KEYS},
+        assistant_agent::{AgentGrants, AgentKind, AssistantAgent, COLLECTION_NAME as AGENTS},
         assistant_agent_credential::{AssistantAgentCredential, COLLECTION_NAME as CREDENTIALS},
-        assistant_conversation::{
-            AccessMode, AssistantConversation, COLLECTION_NAME as CONVERSATIONS,
-        },
+        assistant_conversation::{AssistantConversation, COLLECTION_NAME as CONVERSATIONS},
     },
+    mw::auth::ASSISTANT_ACCOUNT_SCOPE,
     services::{api_key_mutation_service as mutations, key_service},
 };
+
+/// The authority a thread key carries. NyxBot threads always run with Full
+/// access; specialist threads carry exactly their agent's grants.
+#[derive(Clone, Debug)]
+pub enum KeyAuthority {
+    Orchestrator,
+    Subagent(AgentGrants),
+}
+
+impl KeyAuthority {
+    pub fn for_agent(agent: &AssistantAgent) -> Self {
+        match agent.kind {
+            AgentKind::Nyxbot => Self::Orchestrator,
+            AgentKind::Specialist => Self::Subagent(agent.grants.clone()),
+        }
+    }
+
+    /// The key fields this authority implies. Applied at every turn start so a
+    /// rotated or hand-edited key converges back to its conversation's authority.
+    pub fn key_fields(&self) -> bson::Document {
+        match self {
+            Self::Orchestrator => doc! {
+                "allow_all_services": true,
+                "allow_all_nodes": true,
+                "allow_auto_connected_services": true,
+                "scopes": format!("{ASSISTANT_SCOPES} {ASSISTANT_ACCOUNT_SCOPE}"),
+            },
+            Self::Subagent(grants) => doc! {
+                "allow_all_services": false,
+                "allow_all_nodes": true,
+                "allow_auto_connected_services": false,
+                "allowed_service_ids": &grants.service_ids,
+                "allowed_platform_service_ids": &grants.platform_service_ids,
+                "scopes": if grants.account_read {
+                    format!("{ASSISTANT_SCOPES} {ASSISTANT_ACCOUNT_SCOPE}")
+                } else {
+                    ASSISTANT_SCOPES.to_owned()
+                },
+            },
+        }
+    }
+}
+
+/// Converge a live conversation key to its authority inside the caller's transaction.
+pub async fn apply_authority(
+    db: &Database,
+    user: &str,
+    key: &str,
+    authority: &KeyAuthority,
+    session: &mut ClientSession,
+) -> AppResult<()> {
+    let result = mutations::update_one(
+        db,
+        doc! {"_id": key, "user_id": user, "is_active": true},
+        doc! {"$set": authority.key_fields()},
+        Some(session),
+    )
+    .await?;
+    if result.matched_count != 1 {
+        return Err(AppError::NotFound("Conversation key not found".into()));
+    }
+    Ok(())
+}
+
+/// The authority of a thread, read from its agent in the caller's
+/// transaction. Rows without an agent are legacy NyxBot threads. A destroyed
+/// agent's threads cannot act.
+pub async fn authority_in_session(
+    db: &Database,
+    conversation: &AssistantConversation,
+    session: &mut ClientSession,
+) -> AppResult<KeyAuthority> {
+    let Some(agent_id) = conversation.agent_id.as_deref() else {
+        return Ok(KeyAuthority::Orchestrator);
+    };
+    let agents = db.collection::<AssistantAgent>(AGENTS);
+    let filter = doc! {"_id": agent_id, "user_id": &conversation.user_id};
+    let agent = agents
+        .find_one(filter.clone())
+        .session(&mut *session)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Agent not found".into()))?;
+    let destroyed =
+        || AppError::Conflict("This agent was destroyed; its threads are read-only".into());
+    if agent.destroyed_at.is_some() {
+        return Err(destroyed());
+    }
+    if agent.kind == AgentKind::Nyxbot {
+        return Ok(KeyAuthority::Orchestrator);
+    }
+    // Fence the specialist row: a concurrent destroy or grant change writes
+    // the same document, so one of the two transactions retries and a new or
+    // rotated key never carries authority the agent no longer has.
+    let mut live = filter;
+    live.insert("destroyed_at", bson::Bson::Null);
+    let agent = agents
+        .find_one_and_update(live, doc! {"$inc": {"thread_fence": 1}})
+        .return_document(mongodb::options::ReturnDocument::After)
+        .session(&mut *session)
+        .await?
+        .ok_or_else(destroyed)?;
+    Ok(KeyAuthority::for_agent(&agent))
+}
 
 // MCP x-api-key initialization/tools/call require REST proxy scope. `proxy`
 // also authorizes the LLM proxy (mw::auth::scope_allows_llm_proxy); llm:proxy
@@ -41,6 +144,18 @@ impl std::fmt::Debug for AssistantCredential {
 
 fn unavailable() -> AppError {
     AppError::Internal("Assistant credential storage unavailable".into())
+}
+
+/// Whether `key_id` is a live assistant conversation key of `user_id` (NyxID
+/// stores one per conversation; people cannot create these rows).
+pub async fn is_conversation_key(db: &Database, user_id: &str, key_id: &str) -> AppResult<bool> {
+    Ok(db
+        .collection::<AssistantAgentCredential>(CREDENTIALS)
+        .count_documents(doc! {"user_id": user_id, "api_key_id": key_id})
+        .limit(1)
+        .await
+        .map_err(|_| unavailable())?
+        > 0)
 }
 
 /// Used by key revocation in the same transaction when one exists.
@@ -171,7 +286,7 @@ pub async fn load_or_provision_in_session(
     keys: &EncryptionKeys,
     user_id: &str,
     conversation_id: &str,
-    access_mode: AccessMode,
+    authority: &KeyAuthority,
     session: &mut ClientSession,
 ) -> AppResult<AssistantCredential> {
     let old = db
@@ -190,11 +305,13 @@ pub async fn load_or_provision_in_session(
             .await?
             .is_some();
         if valid {
+            let mut fields = authority.key_fields();
+            fields.insert("last_used_at", bson::DateTime::now());
             mutations::update_one(
                 db,
                 doc! {"_id": &old.api_key_id, "user_id": user_id},
-                // Service consent covers its node route, including for existing keys.
-                doc! {"$set": {"last_used_at": bson::DateTime::now(), "allow_all_nodes": true}},
+                // Upgrades legacy Ask-mode keys and re-applies subagent grants.
+                doc! {"$set": fields},
                 Some(&mut *session),
             )
             .await?;
@@ -247,9 +364,9 @@ pub async fn load_or_provision_in_session(
         None,
         Some(&[]),
         Some(&[]),
-        Some(access_mode == AccessMode::Full),
+        Some(false),
         Some(true),
-        Some(true),
+        Some(false),
         None,
         None,
         Some(ASSISTANT_PLATFORM),
@@ -260,16 +377,7 @@ pub async fn load_or_provision_in_session(
         Some(&mut *session),
     )
     .await?;
-    if access_mode == AccessMode::Full {
-        super::assistant_access_mode_service::apply_key_mode(
-            db,
-            user_id,
-            &created.id,
-            access_mode,
-            session,
-        )
-        .await?;
-    }
+    apply_authority(db, user_id, &created.id, authority, session).await?;
     let raw = Zeroizing::new(created.full_key);
     let now = Utc::now();
     let row = AssistantAgentCredential {
@@ -334,12 +442,13 @@ pub async fn load_or_provision(
                     .session(&mut *session)
                     .await?
                     .ok_or_else(|| AppError::NotFound("Conversation not found".into()))?;
+                let authority = authority_in_session(&db, &conversation, session).await?;
                 load_or_provision_in_session(
                     &db,
                     &keys,
                     &user_id,
                     &conversation_id,
-                    conversation.access_mode,
+                    &authority,
                     session,
                 )
                 .await
@@ -515,6 +624,7 @@ mod tests {
             &state.db,
             owner,
             &engine::TurnRequest {
+                agent_id: None,
                 conversation_id: None,
                 text: "hello".into(),
                 model: None,
@@ -576,12 +686,11 @@ mod tests {
         assert_eq!(key.key_hash, hash_token(&a.raw_key));
         assert_eq!(key.platform.as_deref(), Some(ASSISTANT_PLATFORM));
         assert_eq!(key.name, format!("NyxID Assistant chat {}", &row.id[5..13]));
-        assert!(
-            !key.allow_all_services && key.allow_all_nodes && key.allow_auto_connected_services
-        );
+        // New chats are NyxBot orchestrators: Full access.
+        assert!(key.allow_all_services && key.allow_all_nodes && key.allow_auto_connected_services);
         assert!(key.allowed_service_ids.is_empty() && key.allowed_node_ids.is_empty());
         assert!(key.expires_at.is_none());
-        assert_eq!(key.scopes, "proxy");
+        assert_eq!(key.scopes, format!("proxy {ASSISTANT_ACCOUNT_SCOPE}"));
         assert!(crate::mw::auth::scope_allows_rest_proxy(&key.scopes));
         assert!(crate::mw::auth::scope_allows_llm_proxy(&key.scopes));
         let second = new_chat(&state, &owner).await;
@@ -609,13 +718,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn existing_conversation_key_restores_node_access_without_widening_services() {
+    async fn existing_conversation_keys_converge_to_their_role_authority() {
         let (state, owner, row) = fixture("nyxa_restore_nodes").await;
         let db = &state.db;
         db.collection::<ApiKey>(KEYS)
             .update_one(
                 doc! {"_id": &row.credential_api_key_id},
-                doc! {"$set": {"allow_all_nodes": false}},
+                doc! {"$set": {"allow_all_nodes": false, "allow_all_services": false,
+                "scopes": "proxy"}},
             )
             .await
             .unwrap();
@@ -627,8 +737,43 @@ mod tests {
         let key = key_service::get_api_key(db, &owner, &credential.api_key_id)
             .await
             .unwrap();
-        assert!(key.allow_all_nodes && !key.allow_all_services);
-        assert!(key.allowed_service_ids.is_empty());
+        assert!(key.allow_all_nodes && key.allow_all_services);
+        assert_eq!(key.scopes, format!("proxy {ASSISTANT_ACCOUNT_SCOPE}"));
+        // A subagent's key never widens beyond its recorded grants.
+        let (_, subagent) = crate::services::assistant_team_service::create_specialist(
+            db,
+            &state.encryption_keys,
+            &owner,
+            crate::services::assistant_team_service::CreateRequest {
+                name: "reader".into(),
+                description: "Read things".into(),
+                display_name: None,
+                persona: None,
+                targets: Default::default(),
+                account_read: false,
+                specialty: None,
+                created_by: "user",
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        mutations::update_one(
+            db,
+            doc! {"_id": &subagent.credential_api_key_id},
+            doc! {"$set": {"allow_all_services": true, "scopes": "proxy assistant:account"}},
+            None,
+        )
+        .await
+        .unwrap();
+        let credential = load_or_provision(db, &state.encryption_keys, &owner, &subagent.id)
+            .await
+            .unwrap();
+        let key = key_service::get_api_key(db, &owner, &credential.api_key_id)
+            .await
+            .unwrap();
+        assert!(!key.allow_all_services && !key.allow_auto_connected_services);
+        assert!(key.allow_all_nodes && key.allowed_service_ids.is_empty());
         assert_eq!(key.scopes, "proxy");
     }
 
@@ -687,8 +832,8 @@ mod tests {
                 .await
                 .unwrap();
             assert!(key.allowed_service_ids.is_empty());
-            assert!(key.allow_all_nodes && !key.allow_all_services);
-            assert_eq!(key.scopes, "proxy");
+            assert!(key.allow_all_nodes && key.allow_all_services);
+            assert_eq!(key.scopes, format!("proxy {ASSISTANT_ACCOUNT_SCOPE}"));
             assert_eq!(
                 load_for_conversation(db, &state.encryption_keys, &owner, &other.id)
                     .await
@@ -783,8 +928,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(key.key_hash, hash_token(&current.raw_key));
-        assert_eq!(key.scopes, "proxy");
-        assert!(key.allow_all_nodes && !key.allow_all_services);
+        assert_eq!(key.scopes, format!("proxy {ASSISTANT_ACCOUNT_SCOPE}"));
+        assert!(key.allow_all_nodes && key.allow_all_services);
         assert!(key.allowed_service_ids.is_empty());
         assert_eq!(
             db.collection::<ApiKey>(KEYS)

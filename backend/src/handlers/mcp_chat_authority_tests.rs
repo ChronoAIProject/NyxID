@@ -1,7 +1,10 @@
 use super::*;
+use crate::models::assistant_agent::GuestAccess;
 use crate::services::{
     assistant_acknowledgement_service as acks, assistant_agent_credential_service as credentials,
-    assistant_authority_tests::{Fixture, connected, fixture, ordinary_key},
+    assistant_authority_tests::{
+        Fixture, connected, fixture, orchestrator_fixture, ordinary_key, service_gate,
+    },
 };
 use axum::{Json, Router, routing::any};
 use futures::TryStreamExt;
@@ -13,15 +16,17 @@ use std::sync::{
 };
 
 async fn authenticate(f: &Fixture) -> McpAuthContext {
-    let key = credentials::load_for_conversation(
-        &f.state.db,
-        &f.state.encryption_keys,
-        &f.owner,
-        &f.row.id,
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    authenticate_id(f, &f.row.id).await
+}
+
+/// Authenticate as another conversation of the same owner (e.g. the team's
+/// orchestrator when the fixture is a subagent).
+async fn authenticate_id(f: &Fixture, id: &str) -> McpAuthContext {
+    let key =
+        credentials::load_for_conversation(&f.state.db, &f.state.encryption_keys, &f.owner, id)
+            .await
+            .unwrap()
+            .unwrap();
     let mut headers = HeaderMap::new();
     headers.insert("x-api-key", key.raw_key.parse().unwrap());
     authenticate_mcp(&f.state, &headers, false).await.unwrap()
@@ -38,7 +43,8 @@ async fn result(response: Response, error: bool) -> Value {
 }
 
 async fn direct_call(f: &Fixture, auth: &McpAuthContext, name: &str, args: Value) -> Response {
-    handle_tools_call(
+    // Boxed: the handler's future is large, and long tests await it often.
+    Box::pin(handle_tools_call(
         &f.state,
         auth,
         None,
@@ -50,7 +56,7 @@ async fn direct_call(f: &Fixture, auth: &McpAuthContext, name: &str, args: Value
         },
         false,
         crate::services::billing::route_inventory::internal_node_dispatch_permit(),
-    )
+    ))
     .await
 }
 
@@ -70,7 +76,7 @@ async fn mounted_chat_service_edits_record_verified_actor_and_separate_request_g
     use futures::TryStreamExt;
     use tower::ServiceExt;
 
-    let f = fixture("chat_service_history").await;
+    let f = orchestrator_fixture("chat_service_history").await;
     let service = connected(
         &f.state.db,
         &f.owner,
@@ -89,14 +95,6 @@ async fn mounted_chat_service_edits_record_verified_actor_and_separate_request_g
         )
         .await
         .unwrap();
-    crate::services::assistant_access_mode_service::change(
-        &f.state.db,
-        &f.owner,
-        &f.row.id,
-        crate::models::assistant_conversation::AccessMode::Full,
-    )
-    .await
-    .unwrap();
     let credential = credentials::load_for_conversation(
         &f.state.db,
         &f.state.encryption_keys,
@@ -199,9 +197,10 @@ async fn chat_mcp_lists_ungranted_tools_and_allow_retries_execute_without_bypass
         rows.iter().find(|r| r["service_id"] == id).unwrap()["chat_access"],
         "acknowledgement_required"
     );
+    // Subagents hold explicit grants only: auto-connected services too.
     assert_eq!(
         rows.iter().find(|r| r["service_id"] == auto).unwrap()["chat_access"],
-        "granted"
+        "acknowledgement_required"
     );
     let search = result(
         handle_meta_search(
@@ -220,17 +219,28 @@ async fn chat_mcp_lists_ungranted_tools_and_allow_retries_execute_without_bypass
     assert_eq!(tool["chat_access"], "acknowledgement_required");
     for body in [&listing, &search] {
         let hint = body["chat_access_hint"].as_str().unwrap();
-        assert!(
-            hint.contains("acknowledgement_required = call the tool now"),
-            "{hint}"
-        );
+        assert!(hint.contains("call the tool now"), "{hint}");
     }
     let name = tool["name"].as_str().unwrap();
     let args = json!({"method": "GET", "path": "/ok"});
     let refusal = result(call(&f, &auth, name, args.clone()).await, true).await;
     assert_eq!(refusal["error"], "acknowledgement_required");
     assert_eq!(refusal["kind"], "service");
+    assert_eq!(refusal["decider"], "orchestrator");
     assert_eq!(hits.load(Ordering::SeqCst), 0);
+    // The request reached the orchestrator as a wake-up event (it is busy
+    // with its own turn, so the event waits in its queue).
+    let team_id = f.nyxbot_thread.clone();
+    let orchestrator = crate::services::assistant_nyxagent::get(&f.state.db, &f.owner, &team_id)
+        .await
+        .unwrap();
+    assert!(orchestrator.pending_events.iter().any(|event| {
+        event.kind == "permission_requested"
+            && event.agent_id.as_deref() == Some(f.chat.agent_id.as_str())
+            && event
+                .text
+                .contains(refusal["acknowledgement_id"].as_str().unwrap())
+    }));
     acks::decide(
         &f.state.db,
         &f.owner,
@@ -245,7 +255,7 @@ async fn chat_mcp_lists_ungranted_tools_and_allow_retries_execute_without_bypass
     assert_eq!(success["ok"], true);
     assert_eq!(hits.load(Ordering::SeqCst), 1);
     let second = connected(&f.state.db, &f.owner, "denied", &address).await;
-    let refused = acks::service_gate(&f.state.db, &f.chat, &second, "denied", "Denied", false)
+    let refused = service_gate(&f.state.db, &f.chat, &second, "denied", "Denied", false)
         .await
         .unwrap()
         .unwrap();
@@ -270,26 +280,8 @@ async fn chat_mcp_lists_ungranted_tools_and_allow_retries_execute_without_bypass
     )
     .await;
     assert_eq!(denied["error"], "acknowledgement_denied");
-    f.state
-        .db
-        .collection::<mongodb::bson::Document>(
-            crate::models::assistant_conversation::COLLECTION_NAME,
-        )
-        .update_one(
-            doc! {"_id": &f.row.id},
-            doc! {"$set": {"active_turn": mongodb::bson::Bson::Null}},
-        )
-        .await
-        .unwrap();
-    crate::services::assistant_access_mode_service::change(
-        &f.state.db,
-        &f.owner,
-        &f.row.id,
-        crate::models::assistant_conversation::AccessMode::Full,
-    )
-    .await
-    .unwrap();
-    let full = authenticate(&f).await;
+    // The orchestrator runs with Full access: no gates, every service granted.
+    let full = authenticate_id(&f, &team_id).await;
     assert_eq!(chat_access(&full, service), "granted");
     assert!(
         chat_service_gate(&f.state, &full, service, None)
@@ -328,8 +320,8 @@ async fn chat_mcp_lists_ungranted_tools_and_allow_retries_execute_without_bypass
         .collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME)
         .find_one(doc! {
             "event_type": "assistant_mcp_tool_call",
-            "event_data.conversation_id": &f.row.id,
-            "event_data.access_mode": "full",
+            "event_data.conversation_id": &team_id,
+            "event_data.agent_role": "orchestrator",
             "event_data.tool_name": "nyx__call_tool",
         })
         .await
@@ -345,7 +337,8 @@ async fn chat_mcp_lists_ungranted_tools_and_allow_retries_execute_without_bypass
                 .state
                 .db
                 .collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME)
-                .find_one(doc! {"event_type": "mcp_tool_call", "event_data.access_mode": "full"})
+                .find_one(doc! {"event_type": "mcp_tool_call",
+                "event_data.agent_role": "orchestrator"})
                 .await
                 .unwrap()
                 .is_some();
@@ -406,8 +399,23 @@ async fn chat_mcp_native_account_and_action_refusals_are_tool_results() {
         false,
     )
     .await;
-    assert_eq!(list["total"], 1);
+    assert!(list["total"].as_u64().unwrap() >= 1);
     let target = ordinary_key(&f).await;
+    // Subagents cannot change or delete account resources at all.
+    let refused = result(
+        call(
+            &f,
+            &auth,
+            "nyxid__delete_agent_key",
+            json!({"api_key_id": target}),
+        )
+        .await,
+        true,
+    )
+    .await;
+    assert_eq!(refused["error"], "orchestrator_only");
+    // The orchestrator confirms destructive actions with the user by default.
+    let auth = authenticate_id(&f, &f.nyxbot_thread).await;
     let action = result(
         call(
             &f,
@@ -507,7 +515,7 @@ async fn chat_discovery_does_not_write_request_audits_but_execution_refusals_do(
             .unwrap()
             .unwrap();
         let data = row.get_document("event_data").unwrap();
-        assert_eq!(data.get_str("access_mode").unwrap(), "ask");
+        assert_eq!(data.get_str("agent_role").unwrap(), "subagent");
         assert_eq!(data.get_str("conversation_id").unwrap(), f.row.id);
         assert!(!data.contains_key("arguments"));
     }
@@ -515,10 +523,10 @@ async fn chat_discovery_does_not_write_request_audits_but_execution_refusals_do(
 }
 
 #[tokio::test]
-async fn platform_services_get_a_consent_card_in_ask_mode_and_execute_after_allow() {
+async fn subagents_request_platform_services_and_execute_after_allow() {
     use crate::models::{
         assistant_acknowledgement::COLLECTION_NAME as ACKS,
-        assistant_conversation::{AccessMode, COLLECTION_NAME as CONVERSATIONS},
+        assistant_conversation::COLLECTION_NAME as CONVERSATIONS,
         service_endpoint::ServiceEndpoint,
     };
     let f = fixture("chat_platform_full_required").await;
@@ -591,31 +599,20 @@ async fn platform_services_get_a_consent_card_in_ask_mode_and_execute_after_allo
             .unwrap(),
         0
     );
-    for mode in [AccessMode::Ask, AccessMode::Full] {
-        if mode == AccessMode::Full {
-            f.state
-                .db
-                .collection::<mongodb::bson::Document>(CONVERSATIONS)
-                .update_one(
-                    doc! {"_id": &f.row.id},
-                    doc! {"$set": {"active_turn": mongodb::bson::Bson::Null}},
-                )
-                .await
-                .unwrap();
-            crate::services::assistant_access_mode_service::change(
-                &f.state.db,
-                &f.owner,
-                &f.row.id,
-                mode,
-            )
-            .await
-            .unwrap();
-        }
-        let auth = authenticate(&f).await;
-        let expected = if mode == AccessMode::Ask {
-            "acknowledgement_required"
+    let _ = CONVERSATIONS;
+    let team_id = f.nyxbot_thread.clone();
+    // A subagent asks its orchestrator for the platform service; the
+    // orchestrator itself runs with Full access and uses it directly.
+    for orchestrator in [false, true] {
+        let auth = if orchestrator {
+            authenticate_id(&f, &team_id).await
         } else {
+            authenticate(&f).await
+        };
+        let expected = if orchestrator {
             "granted"
+        } else {
+            "acknowledgement_required"
         };
         let listing = result(
             direct_call(&f, &auth, "nyx__list_connected_services", json!({})).await,
@@ -644,7 +641,7 @@ async fn platform_services_get_a_consent_card_in_ask_mode_and_execute_after_allo
         let tool = &search["matches"][0];
         assert_eq!(tool["chat_access"], expected);
         let name = tool["name"].as_str().unwrap();
-        if mode == AccessMode::Ask {
+        if !orchestrator {
             // Both call shapes ask for the same card; nothing executes yet.
             let mut ids = Vec::new();
             for direct in [true, false] {
@@ -743,7 +740,7 @@ async fn platform_services_get_a_consent_card_in_ask_mode_and_execute_after_allo
                     .await
                     .unwrap(),
                 1,
-                "Full mode creates no cards"
+                "the orchestrator creates no cards"
             );
         }
     }
@@ -1086,4 +1083,835 @@ async fn chat_tool_images_become_mcp_image_content_and_owner_only_turn_attachmen
         1
     );
     server.abort();
+}
+
+async fn mark_guest(f: &Fixture, guest: bool) {
+    f.state
+        .db
+        .collection::<mongodb::bson::Document>(
+            crate::models::assistant_conversation::COLLECTION_NAME,
+        )
+        .update_one(
+            doc! {"_id": &f.row.id},
+            doc! {"$set": {"guest_turn": guest}},
+        )
+        .await
+        .unwrap();
+}
+
+/// NyxBot holds every service of the owner, so a turn for someone else
+/// calls no tools at all.
+#[tokio::test]
+async fn nyxbot_guest_turns_call_no_tools() {
+    let f = orchestrator_fixture("chat_mcp_guest_nyxbot").await;
+    mark_guest(&f, true).await;
+    let auth = authenticate(&f).await;
+    assert!(auth.chat.as_ref().unwrap().guest);
+    for (name, args) in [
+        ("nyx__search_tools", json!({"query": "mail"})),
+        ("nyx__list_connected_services", json!({})),
+        (
+            "nyx__call_tool",
+            json!({"tool_name": "github__list_repos", "arguments_json": "{}"}),
+        ),
+        ("nyxid__list_agent_keys", json!({})),
+        ("github__list_repos", json!({})),
+    ] {
+        let refused = result(direct_call(&f, &auth, name, args).await, true).await;
+        assert_eq!(refused["error"], "owner_only", "{name}: {refused}");
+        assert!(
+            refused["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("no tools"),
+            "{name}: {refused}"
+        );
+    }
+    // The owner's next turn has everything back.
+    mark_guest(&f, false).await;
+    let auth = authenticate(&f).await;
+    let listed = direct_call(&f, &auth, "nyxid__list_channel_chats", json!({})).await;
+    let bytes = axum::body::to_bytes(listed.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    assert!(!String::from_utf8_lossy(&bytes).contains("owner_only"));
+}
+
+/// A specialist's turn for someone other than the owner only discovers and
+/// reads: account, team, memory, connection and Oracle tools and every
+/// service change are refused, whichever way they are called.
+#[tokio::test]
+async fn specialist_guest_turns_never_use_owner_tools_or_ssh() {
+    let f = fixture("chat_mcp_guest").await;
+    mark_guest(&f, true).await;
+    let auth = authenticate(&f).await;
+    assert!(auth.chat.as_ref().unwrap().guest);
+    for (name, args) in [
+        ("nyxid__list_agent_keys", json!({})),
+        (
+            "nyxid__remember",
+            json!({"text": "the owner's secret plan"}),
+        ),
+        ("nyxid__post_to_chat", json!({"chat_id": "c", "text": "hi"})),
+        ("nyx__connect_service", json!({"service": "github"})),
+        ("nyx__oracle_pools", json!({})),
+    ] {
+        let refused = result(direct_call(&f, &auth, name, args).await, true).await;
+        assert_eq!(refused["error"], "owner_only", "{name}: {refused}");
+    }
+    // Through the universal proxy tool too.
+    let refused = result(
+        call(&f, &auth, "nyxid__list_agent_keys", json!({})).await,
+        true,
+    )
+    .await;
+    assert_eq!(refused["error"], "owner_only");
+    // Discovery still works.
+    let search = handle_meta_search(
+        &f.state,
+        &auth,
+        None,
+        &json!({"query": "list"}),
+        None,
+        false,
+    )
+    .await;
+    let bytes = axum::body::to_bytes(search.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    assert!(!String::from_utf8_lossy(&bytes).contains("owner_only"));
+    // SSH (a shell can do anything) is the owner's; HTTP operations pass on
+    // to the usual checks (what guests may do with a service is decided
+    // before, from the owner's guest access).
+    let target = crate::services::mcp_approval::McpApprovalTarget {
+        service_id: uuid::Uuid::new_v4().to_string(),
+        service_name: "Example".into(),
+        service_slug: "example".into(),
+        service_owner_user_id: f.owner.clone(),
+        is_auto_connected: false,
+    };
+    let delete = operation_descriptor::build_mcp_descriptor("DELETE", "/items/1", None);
+    let ssh = operation_descriptor::build_ssh_descriptor(
+        operation_descriptor::SshOperationKind::Exec,
+        Some("ls"),
+    );
+    let refused = authorize_mcp_operation(&f.state, &auth, target.clone(), &ssh, Some(json!(1)))
+        .await
+        .unwrap_err();
+    assert_eq!(result(refused, true).await["error"], "owner_only");
+    authorize_mcp_operation(&f.state, &auth, target.clone(), &delete, Some(json!(1)))
+        .await
+        .unwrap_or_else(|_| panic!("DELETE"));
+    for method in ["GET", "POST", "PUT", "PATCH"] {
+        let operation =
+            operation_descriptor::build_mcp_descriptor(method, "/api/services/light/turn_on", None);
+        authorize_mcp_operation(&f.state, &auth, target.clone(), &operation, Some(json!(1)))
+            .await
+            .unwrap_or_else(|_| panic!("{method}"));
+    }
+}
+
+/// A specialist's guest turns use its granted services as far as the owner
+/// lets guests (read, use without changing or deleting, or all), refused before anything
+/// is sent, and never ask the owner to approve or run on the owner's
+/// approvals: a guest's request would look like the owner's.
+#[tokio::test]
+async fn specialist_guests_use_a_granted_service_as_far_as_the_owner_lets_them() {
+    let f = fixture("chat_mcp_guest_calls").await;
+    let hits = Arc::new(AtomicUsize::new(0));
+    let count = hits.clone();
+    let upstream = Router::new().route(
+        "/{*path}",
+        any(move || {
+            count.fetch_add(1, Ordering::SeqCst);
+            async { Json(json!({"ok": true})) }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+    let service = connected(&f.state.db, &f.owner, "home", &address).await;
+    // The owner grants the service to the specialist.
+    let auth = authenticate(&f).await;
+    let search = result(
+        handle_meta_search(
+            &f.state,
+            &auth,
+            None,
+            &json!({"query": "home"}),
+            None,
+            false,
+        )
+        .await,
+        false,
+    )
+    .await;
+    let name = search["matches"][0]["name"].as_str().unwrap().to_string();
+    let ask = result(
+        call(&f, &auth, &name, json!({"method": "GET", "path": "/ok"})).await,
+        true,
+    )
+    .await;
+    acks::decide(
+        &f.state.db,
+        &f.owner,
+        &f.row.id,
+        ask["acknowledgement_id"].as_str().unwrap(),
+        true,
+    )
+    .await
+    .unwrap();
+    mark_guest(&f, true).await;
+    let guest = authenticate(&f).await;
+    // By default guests look things up, create and act, but never change or
+    // remove what exists (PUT, PATCH, DELETE), whatever the path says.
+    for args in [
+        json!({"method": "DELETE", "path": "/items/1"}),
+        json!({"method": "PUT", "path": "/items/1", "body": {"name": "x"}}),
+        json!({"method": "PATCH", "path": "/items/1", "body": {"name": "x"}}),
+    ] {
+        let refused = result(call(&f, &guest, &name, args.clone()).await, true).await;
+        assert_eq!(refused["error"], "owner_only", "{args}");
+        assert_eq!(refused["guest_access"], "use", "{args}");
+    }
+    // And never send a method override, whichever way it points.
+    for args in [
+        json!({"method": "POST", "path": "/items/1?_method=DELETE"}),
+        json!({"method": "POST", "path": "/items/1", "body": {"_method": "delete"}}),
+        json!({"method": "DELETE", "path": "/items/1", "query": "_method=GET"}),
+        json!({"method": "POST", "path": "/items/1", "query": ".method=DELETE"}),
+    ] {
+        let refused = result(call(&f, &guest, &name, args.clone()).await, true).await;
+        assert_eq!(refused["error"], "owner_only", "{args}");
+        assert!(
+            refused["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("method override"),
+            "{args}"
+        );
+    }
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
+    for args in [
+        json!({"method": "GET", "path": "/api/states"}),
+        json!({"method": "POST", "path": "/api/services/light/turn_on",
+            "body": {"entity_id": "light.office"}}),
+        json!({"method": "POST", "path": "/api/services/remove_note/run"}),
+    ] {
+        let used = result(call(&f, &guest, &name, args.clone()).await, false).await;
+        assert_eq!(used["ok"], true, "{args}");
+    }
+    assert_eq!(hits.load(Ordering::SeqCst), 3);
+    // The owner lets guests only look things up...
+    set_guest_access(&f, &service, GuestAccess::Read).await;
+    let refused = result(
+        call(
+            &f,
+            &guest,
+            &name,
+            json!({"method": "POST", "path": "/api/services/light/turn_on"}),
+        )
+        .await,
+        true,
+    )
+    .await;
+    assert_eq!(refused["guest_access"], "read");
+    // Nor passes a change off as a read with an override.
+    let refused = result(
+        call(
+            &f,
+            &guest,
+            &name,
+            json!({"method": "POST", "path": "/api/services/light/turn_on",
+                "body": {"_method": "GET"}}),
+        )
+        .await,
+        true,
+    )
+    .await;
+    assert_eq!(refused["error"], "owner_only");
+    let used = result(
+        call(
+            &f,
+            &guest,
+            &name,
+            json!({"method": "GET", "path": "/api/states"}),
+        )
+        .await,
+        false,
+    )
+    .await;
+    assert_eq!(used["ok"], true);
+    assert_eq!(hits.load(Ordering::SeqCst), 4);
+    // ...or do everything the specialist may.
+    set_guest_access(&f, &service, GuestAccess::All).await;
+    let used = result(
+        call(
+            &f,
+            &guest,
+            &name,
+            json!({"method": "DELETE", "path": "/items/1"}),
+        )
+        .await,
+        false,
+    )
+    .await;
+    assert_eq!(used["ok"], true);
+    assert_eq!(hits.load(Ordering::SeqCst), 5);
+    // Approvals stay the owner's at every level.
+    set_guest_access(&f, &service, GuestAccess::All).await;
+    // A service the owner has put behind approval: the guest is refused and
+    // no approval request reaches the owner.
+    let now = chrono::Utc::now();
+    f.state
+        .db
+        .collection::<crate::models::service_approval_config::ServiceApprovalConfig>(
+            crate::models::service_approval_config::COLLECTION_NAME,
+        )
+        .insert_one(
+            crate::models::service_approval_config::ServiceApprovalConfig {
+                id: uuid::Uuid::new_v4().to_string(),
+                user_id: f.owner.clone(),
+                service_id: service.clone(),
+                service_name: "home".into(),
+                approval_required: true,
+                approval_mode: Default::default(),
+                rules: Vec::new(),
+                default_effect: None,
+                created_at: now,
+                updated_at: now,
+            },
+        )
+        .await
+        .unwrap();
+    let refused = result(
+        call(
+            &f,
+            &guest,
+            &name,
+            json!({"method": "GET", "path": "/api/states"}),
+        )
+        .await,
+        true,
+    )
+    .await;
+    assert_eq!(refused["error"], "owner_only");
+    assert_eq!(hits.load(Ordering::SeqCst), 5);
+    assert_eq!(
+        f.state
+            .db
+            .collection::<mongodb::bson::Document>(
+                crate::models::approval_request::COLLECTION_NAME,
+            )
+            .count_documents(doc! {"service_id": &service})
+            .await
+            .unwrap(),
+        0
+    );
+    // An approval the owner granted for their own requests lets the owner in,
+    // never a guest sharing the chat's key.
+    f.state
+        .db
+        .collection::<mongodb::bson::Document>(
+            crate::models::service_approval_config::COLLECTION_NAME,
+        )
+        .update_one(
+            doc! {"service_id": &service},
+            doc! {"$set": {"approval_mode": "grant"}},
+        )
+        .await
+        .unwrap();
+    let now = chrono::Utc::now();
+    f.state
+        .db
+        .collection::<crate::models::approval_grant::ApprovalGrant>(
+            crate::models::approval_grant::COLLECTION_NAME,
+        )
+        .insert_one(crate::models::approval_grant::ApprovalGrant {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: f.owner.clone(),
+            service_id: service.clone(),
+            service_name: "home".into(),
+            requester_type: guest.approval_requester_type().unwrap().to_string(),
+            requester_id: guest.approval_requester_id(),
+            requester_label: None,
+            approval_request_id: uuid::Uuid::new_v4().to_string(),
+            scope: None,
+            granted_at: now,
+            expires_at: now + chrono::Duration::days(1),
+            revoked: false,
+            org_scoped: false,
+        })
+        .await
+        .unwrap();
+    let refused = result(
+        call(
+            &f,
+            &guest,
+            &name,
+            json!({"method": "GET", "path": "/api/states"}),
+        )
+        .await,
+        true,
+    )
+    .await;
+    assert_eq!(refused["error"], "owner_only");
+    assert_eq!(hits.load(Ordering::SeqCst), 5);
+    mark_guest(&f, false).await;
+    let owner = authenticate(&f).await;
+    let used = result(
+        call(
+            &f,
+            &owner,
+            &name,
+            json!({"method": "GET", "path": "/api/states"}),
+        )
+        .await,
+        false,
+    )
+    .await;
+    assert_eq!(used["ok"], true);
+    assert_eq!(hits.load(Ordering::SeqCst), 6);
+    // Audit rows say whose turn it was.
+    let guests = f
+        .state
+        .db
+        .collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+        .count_documents(doc! {
+            "event_type": "assistant_mcp_tool_call",
+            "event_data.conversation_id": &f.row.id,
+            "event_data.guest": true,
+        })
+        .await
+        .unwrap();
+    assert!(guests >= 7, "{guests}");
+    server.abort();
+}
+
+async fn set_guest_access(f: &Fixture, service: &str, access: GuestAccess) {
+    crate::services::assistant_team_service::set_grants(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        crate::services::assistant_team_service::GrantChange::Guests(
+            [(service.to_string(), access)].into(),
+        ),
+    )
+    .await
+    .unwrap();
+}
+
+/// The owner's services as a guest's key sees them, with this service's
+/// operation metadata adjusted.
+async fn services_for(
+    f: &Fixture,
+    auth: &McpAuthContext,
+    service: &str,
+    adjust: impl Fn(&mut mcp_service::McpDurableEndpointMetadata),
+) -> Vec<mcp_service::McpToolService> {
+    let mut services = load_all_services_for_meta_tools(&f.state, auth)
+        .await
+        .unwrap();
+    let target = services
+        .iter_mut()
+        .find(|candidate| candidate.service_id == service)
+        .unwrap();
+    let endpoint_id = target.endpoints[0].endpoint_id.clone();
+    adjust(
+        target
+            .durable_endpoint_metadata
+            .entry(endpoint_id)
+            .or_default(),
+    );
+    services
+}
+
+/// Guest access is judged from the operation's spec: what it marks as
+/// deleting or replacing data is beyond "use", and what its stored catalog
+/// contract marks read-only is a read even as a POST (a remote spec may only
+/// narrow); a method override is never sent.
+#[tokio::test]
+async fn guest_access_follows_spec_markers() {
+    let f = fixture("chat_mcp_guest_markers").await;
+    let service = connected(&f.state.db, &f.owner, "home", "http://127.0.0.1:9").await;
+    crate::services::assistant_team_service::set_grants(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        crate::services::assistant_team_service::GrantChange::Add(
+            crate::models::assistant_agent::AgentGrants {
+                service_ids: vec![service.clone()],
+                ..Default::default()
+            },
+        ),
+    )
+    .await
+    .unwrap();
+    set_guest_access(&f, &service, GuestAccess::All).await;
+    mark_guest(&f, true).await;
+    let guest = authenticate(&f).await;
+    // An operation its spec marks destructive (deletes or overwrites) is
+    // beyond "use" too, whatever its method.
+    let mut services = load_all_services_for_meta_tools(&f.state, &guest)
+        .await
+        .unwrap();
+    let marked = services
+        .iter_mut()
+        .find(|candidate| candidate.service_id == service)
+        .unwrap();
+    let endpoint_id = marked.endpoints[0].endpoint_id.clone();
+    marked
+        .durable_endpoint_metadata
+        .entry(endpoint_id)
+        .or_default()
+        .destructive = true;
+    let marked = services
+        .iter()
+        .find(|candidate| candidate.service_id == service)
+        .unwrap();
+    let endpoint = &marked.endpoints[0];
+    let prepared = mcp_service::prepare_proxy_tool_call(
+        marked,
+        endpoint,
+        &json!({"method": "POST", "path": "/sheet/values"}),
+    )
+    .unwrap();
+    assert!(
+        guest_service_refusal(&f.state, &guest, marked, endpoint, &prepared, None)
+            .await
+            .is_none()
+    );
+    set_guest_access(&f, &service, GuestAccess::Use).await;
+    assert!(
+        guest_service_refusal(&f.state, &guest, marked, endpoint, &prepared, None)
+            .await
+            .is_some()
+    );
+    // The owner's own turns are never limited by guest access.
+    mark_guest(&f, false).await;
+    let owner = authenticate(&f).await;
+    assert!(
+        guest_service_refusal(&f.state, &owner, marked, endpoint, &prepared, None)
+            .await
+            .is_none()
+    );
+    mark_guest(&f, true).await;
+    let guest = authenticate(&f).await;
+    // An operation its spec marks read-only is a read, even as a POST (a
+    // search); a method override still counts.
+    let mut services = load_all_services_for_meta_tools(&f.state, &guest)
+        .await
+        .unwrap();
+    let search = services
+        .iter_mut()
+        .find(|candidate| candidate.service_id == service)
+        .unwrap();
+    let endpoint_id = search.endpoints[0].endpoint_id.clone();
+    let metadata = search
+        .durable_endpoint_metadata
+        .entry(endpoint_id.clone())
+        .or_default();
+    metadata.risk = Some(crate::models::service_endpoint::EndpointRisk::Read);
+    // As a stored catalog contract says.
+    metadata.catalog_contract = true;
+    let search = services
+        .iter()
+        .find(|candidate| candidate.service_id == service)
+        .unwrap();
+    let endpoint = &search.endpoints[0];
+    set_guest_access(&f, &service, GuestAccess::Read).await;
+    for (args, refused) in [
+        (
+            json!({"method": "POST", "path": "/search", "body": {"q": "lights"}}),
+            false,
+        ),
+        (
+            json!({"method": "POST", "path": "/search", "body": {"_method": "DELETE"}}),
+            true,
+        ),
+    ] {
+        let prepared = mcp_service::prepare_proxy_tool_call(search, endpoint, &args).unwrap();
+        assert_eq!(
+            guest_service_refusal(&f.state, &guest, search, endpoint, &prepared, None)
+                .await
+                .is_some(),
+            refused,
+            "{args}"
+        );
+    }
+    // NyxID's marker says what a method does not: a PUT that only acts is
+    // use, a POST that edits is not; a DELETE never is, whatever its spec says.
+    set_guest_access(&f, &service, GuestAccess::Use).await;
+    for (method, changes, contract, refused) in [
+        ("PUT", Some(false), true, false),
+        // "Only acts" widens: a remote spec cannot say it.
+        ("PUT", Some(false), false, true),
+        ("PUT", None, true, true),
+        ("POST", Some(true), false, true),
+        ("DELETE", Some(false), true, true),
+    ] {
+        let mut marked = services_for(&f, &guest, &service, |metadata| {
+            metadata.changes_existing = changes;
+            metadata.catalog_contract = contract;
+        })
+        .await;
+        let search = marked
+            .iter_mut()
+            .find(|candidate| candidate.service_id == service)
+            .unwrap();
+        let endpoint = &search.endpoints[0];
+        let prepared = mcp_service::prepare_proxy_tool_call(
+            search,
+            endpoint,
+            &json!({"method": method, "path": "/player/play"}),
+        )
+        .unwrap();
+        assert_eq!(
+            guest_service_refusal(&f.state, &guest, search, endpoint, &prepared, None)
+                .await
+                .is_some(),
+            refused,
+            "{method} {changes:?} {contract}"
+        );
+    }
+    // A read-only DELETE row is still a DELETE.
+    set_guest_access(&f, &service, GuestAccess::Read).await;
+    let marked = services_for(&f, &guest, &service, |metadata| {
+        metadata.risk = Some(crate::models::service_endpoint::EndpointRisk::Read);
+        metadata.catalog_contract = true;
+    })
+    .await;
+    let search = marked
+        .iter()
+        .find(|candidate| candidate.service_id == service)
+        .unwrap();
+    let endpoint = &search.endpoints[0];
+    let prepared = mcp_service::prepare_proxy_tool_call(
+        search,
+        endpoint,
+        &json!({"method": "DELETE", "path": "/items/1"}),
+    )
+    .unwrap();
+    assert!(
+        guest_service_refusal(&f.state, &guest, search, endpoint, &prepared, None)
+            .await
+            .is_some()
+    );
+    // A remote spec read at call time may say read-only too, but only narrows.
+    let mut remote = services;
+    remote
+        .iter_mut()
+        .find(|candidate| candidate.service_id == service)
+        .unwrap()
+        .durable_endpoint_metadata
+        .get_mut(&endpoint_id)
+        .unwrap()
+        .catalog_contract = false;
+    let search = remote
+        .iter()
+        .find(|candidate| candidate.service_id == service)
+        .unwrap();
+    let endpoint = &search.endpoints[0];
+    let prepared = mcp_service::prepare_proxy_tool_call(
+        search,
+        endpoint,
+        &json!({"method": "POST", "path": "/search", "body": {"q": "lights"}}),
+    )
+    .unwrap();
+    assert!(
+        guest_service_refusal(&f.state, &guest, search, endpoint, &prepared, None)
+            .await
+            .is_some()
+    );
+}
+
+/// A guest never widens what a specialist may use: an ungranted service is
+/// refused without a permission request for NyxBot to grant.
+#[tokio::test]
+async fn guests_never_ask_for_more_access() {
+    let f = fixture("chat_guest_gate").await;
+    let mut chat = f.chat.clone();
+    chat.guest = true;
+    let (value, request) =
+        acks::service_gate(&f.state.db, &chat, "service-1", "example", "Example", false)
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(value["error"], "owner_only");
+    assert!(request.is_none());
+    assert_eq!(
+        f.state
+            .db
+            .collection::<mongodb::bson::Document>(
+                crate::models::assistant_acknowledgement::COLLECTION_NAME,
+            )
+            .count_documents(doc! {"conversation_id": &f.row.id})
+            .await
+            .unwrap(),
+        0
+    );
+    // The owner's own turn still asks.
+    chat.guest = false;
+    let (_, request) =
+        acks::service_gate(&f.state.db, &chat, "service-1", "example", "Example", false)
+            .await
+            .unwrap()
+            .unwrap();
+    assert!(request.is_some());
+}
+
+#[tokio::test]
+async fn webhook_calls_require_exact_action_cards_from_http_and_catalog_effects() {
+    use crate::models::trigger_schedule::ConfirmationPolicy;
+    let f = orchestrator_fixture("webhook_action_cards").await;
+    let service_id = connected(
+        &f.state.db,
+        &f.owner,
+        "webhook-target",
+        "http://127.0.0.1:9",
+    )
+    .await;
+    let mut auth = authenticate(&f).await;
+    auth.chat.as_mut().unwrap().confirmation_policy = Some(ConfirmationPolicy::Changes);
+    f.state
+        .db
+        .collection::<mongodb::bson::Document>(
+            crate::models::assistant_conversation::COLLECTION_NAME,
+        )
+        .update_one(
+            doc! {"_id": &f.row.id},
+            doc! {"$set": {"active_turn.trigger_run_id": "webhook-run"}},
+        )
+        .await
+        .unwrap();
+    let mut services = load_all_services_for_meta_tools(&f.state, &auth)
+        .await
+        .unwrap();
+    let service = services
+        .iter_mut()
+        .find(|candidate| candidate.service_id == service_id)
+        .unwrap();
+    let endpoint = service.endpoints.remove(0);
+    let tool = "webhook-target__proxy";
+    let args = json!({"method": "PATCH", "path": "/settings", "body": {"value": true}});
+    let prepared = mcp_service::prepare_proxy_tool_call(service, &endpoint, &args).unwrap();
+    let response = webhook_service_gate(
+        &f.state,
+        &auth,
+        service,
+        &endpoint,
+        &prepared,
+        tool,
+        &args,
+        Some(json!(1)),
+    )
+    .await
+    .unwrap();
+    let card = result(response, true).await;
+    assert_eq!(card["error"], "acknowledgement_required");
+    let id = card["acknowledgement_id"].as_str().unwrap();
+    let stored = acks::history(&f.state.db, &f.owner, &f.row.id)
+        .await
+        .unwrap();
+    assert_eq!(stored[0].status, "pending");
+    assert_eq!(stored[0].trigger_run_id.as_deref(), Some("webhook-run"));
+    let get = json!({"method": "GET", "path": "/settings"});
+    let prepared_get = mcp_service::prepare_proxy_tool_call(service, &endpoint, &get).unwrap();
+    assert!(
+        webhook_service_gate(
+            &f.state,
+            &auth,
+            service,
+            &endpoint,
+            &prepared_get,
+            tool,
+            &get,
+            None
+        )
+        .await
+        .is_none()
+    );
+    acks::decide(&f.state.db, &f.owner, &f.row.id, id, true)
+        .await
+        .unwrap();
+    let mut approved = args.clone();
+    approved["acknowledgement_id"] = json!(id);
+    assert_eq!(webhook_execution_arguments(&auth, &approved), args);
+    let schema = webhook_tool_schema(&auth, &json!({"type": "object", "properties": {}}));
+    assert_eq!(schema["properties"]["acknowledgement_id"]["type"], "string");
+    assert!(
+        webhook_service_gate(
+            &f.state, &auth, service, &endpoint, &prepared, tool, &approved, None
+        )
+        .await
+        .is_none()
+    );
+    assert!(
+        webhook_service_gate(
+            &f.state, &auth, service, &endpoint, &prepared, tool, &approved, None
+        )
+        .await
+        .is_some()
+    );
+    auth.chat.as_mut().unwrap().confirmation_policy = Some(ConfirmationPolicy::Destructive);
+    assert!(
+        webhook_service_gate(
+            &f.state, &auth, service, &endpoint, &prepared, tool, &args, None
+        )
+        .await
+        .is_none()
+    );
+    service
+        .durable_endpoint_metadata
+        .entry(endpoint.endpoint_id.clone())
+        .or_default()
+        .destructive = true;
+    assert!(
+        webhook_service_gate(
+            &f.state, &auth, service, &endpoint, &prepared, tool, &args, None
+        )
+        .await
+        .is_some()
+    );
+}
+
+#[tokio::test]
+async fn webhook_native_changes_require_owner_cards_even_with_skip_destructive() {
+    use crate::models::trigger_schedule::ConfirmationPolicy;
+    let f = orchestrator_fixture("webhook_native_cards").await;
+    let mut auth = authenticate(&f).await;
+    let chat = auth.chat.as_mut().unwrap();
+    chat.confirmation_policy = Some(ConfirmationPolicy::Changes);
+    crate::services::assistant_settings_service::update(
+        &f.state.db,
+        &f.owner,
+        crate::services::assistant_settings_service::Update {
+            skip_destructive_confirmation: Some(true),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let (card, refused) = crate::handlers::assistant_team::execute_tool(
+        &f.state,
+        chat,
+        "nyxid__remember",
+        &json!({"text": "Attacker supplied memory"}),
+    )
+    .await;
+    assert!(refused);
+    assert_eq!(card["error"], "acknowledgement_required");
+    let cards = acks::history(&f.state.db, &f.owner, &f.row.id)
+        .await
+        .unwrap();
+    assert_eq!(cards[0].decider, "user");
+    chat.confirmation_policy = Some(ConfirmationPolicy::Destructive);
+    let (result, refused) = crate::handlers::assistant_team::execute_tool(
+        &f.state,
+        chat,
+        "nyxid__remember",
+        &json!({"text": "Owner allowed ordinary changes"}),
+    )
+    .await;
+    assert!(!refused, "{result}");
 }

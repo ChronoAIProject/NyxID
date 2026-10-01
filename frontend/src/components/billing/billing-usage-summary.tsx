@@ -1,32 +1,36 @@
 import { Card } from "@/components/ui/card";
 import type { BillingUsageRow } from "@/schemas/billing";
-import { number, credits, total } from "@/lib/billing-display";
+import { number, creditsLabel, creditsSumLabel } from "@/lib/billing-display";
 import { metricTotals } from "@/lib/billing-usage";
 
 export function BillingUsageSummary({ rows }: { rows: BillingUsageRow[] }) {
   const metrics = new Map(metricTotals(rows));
-  const grants = total(rows, "grant_credits_micros");
-  const allowances = total(rows, "allowance_credits_micros");
-  const covered =
-    grants == null || allowances == null ? null : grants + allowances;
+  const estimated = creditsLabel(rows, "estimated_credits_micros");
+  const covered = creditsSumLabel(rows, [
+    "grant_credits_micros",
+    "allowance_credits_micros",
+  ]);
   const tokenTotal = metrics.get("tokens");
   return (
     <Card className="tab-usage-summary">
       <div className="summary-family">
         <h3>Spend</h3>
         <strong>
-          {credits(total(rows, "estimated_credits_micros"))}{" "}
-          <small>credits</small>
+          {estimated.text} <small>credits</small>
         </strong>
-        <p>Estimated usage cost</p>
+        <p>
+          Estimated usage cost
+          {estimated.partial &&
+            ` · lower bound, ${estimated.unknown} ${estimated.unknown === 1 ? "record" : "records"} unpriced`}
+        </p>
         <dl>
           <div>
             <dt>Covered by benefits</dt>
-            <dd>{credits(covered)}</dd>
+            <dd>{covered.text}</dd>
           </div>
           <div>
             <dt>Wallet-funded</dt>
-            <dd>{credits(total(rows, "wallet_credits_micros"))}</dd>
+            <dd>{creditsLabel(rows, "wallet_credits_micros").text}</dd>
           </div>
         </dl>
       </div>

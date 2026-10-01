@@ -431,7 +431,7 @@ pub(crate) fn github_client() -> Result<reqwest::Client> {
         );
     }
 
-    reqwest::Client::builder()
+    crate::tls::client_builder()?
         .default_headers(headers)
         .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(300))

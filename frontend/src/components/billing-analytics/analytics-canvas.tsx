@@ -48,6 +48,11 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { cn } from "@/lib/utils";
 import { ChartView } from "./chart-view";
@@ -182,7 +187,11 @@ function Summary({
   const stats = [
     {
       label: "Gross cost",
-      value: formatAnalyticsValue(data.total, "microcredits", true),
+      value: formatAnalyticsValue(
+        data.exact_total === undefined ? data.total : data.exact_total,
+        "microcredits",
+        true,
+      ),
       suffix: "credits",
       note: data.totals.unknown_cost_events
         ? "Some costs are unavailable"
@@ -406,7 +415,13 @@ export function AnalyticsCanvas({
             )}
           >
             {view.panels.map((panel, index) => (
-              <SortablePanel key={panel.id} panel={panel} disabled={disabled}>
+              <SortablePanel
+                key={panel.id}
+                panel={panel}
+                disabled={disabled}
+                compact={operations}
+                onResize={updatePanel}
+              >
                 {(handle) => (
                   <AnalyticsPanelCard
                     panel={panel}
@@ -417,20 +432,27 @@ export function AnalyticsCanvas({
                     <div className="flex shrink-0 items-center gap-0.5">
                       {handle}
                       <Popover>
-                        <PopoverTrigger asChild>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="size-7 shrink-0"
-                            aria-label={`Configure ${panel.title}`}
-                          >
-                            {operations ? (
-                              <Ellipsis className="size-3.5" />
-                            ) : (
-                              <Settings2 className="size-3.5" />
-                            )}
-                          </Button>
-                        </PopoverTrigger>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <PopoverTrigger asChild>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="size-7 shrink-0"
+                                aria-label={`Configure ${panel.title}`}
+                              >
+                                {operations ? (
+                                  <Ellipsis className="size-3.5" />
+                                ) : (
+                                  <Settings2 className="size-3.5" />
+                                )}
+                              </Button>
+                            </PopoverTrigger>
+                          </TooltipTrigger>
+                          <TooltipContent side="top">
+                            Panel options
+                          </TooltipContent>
+                        </Tooltip>
                         <PopoverContent
                           align="end"
                           collisionPadding={12}

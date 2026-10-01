@@ -1,3 +1,4 @@
+use crate::models::credits::Credits;
 use std::collections::BTreeSet;
 
 use chrono::{Duration, Utc};
@@ -46,7 +47,7 @@ pub struct LayerReservation {
     pub estimated_quantity: i64,
     pub credits_per_unit_micros: i64,
     pub credits_per_unit_pico: Option<i64>,
-    pub reserved_credits: i64,
+    pub reserved_credits: Credits,
     pub allowance_reservations: Vec<AllowanceReservationAllocation>,
     pub grant_reservations: Vec<GrantReservationAllocation>,
 }
@@ -55,7 +56,7 @@ pub struct LayerReservation {
 pub struct BillingReservation {
     pub owner_id: String,
     pub wallet_id: String,
-    pub total_reserved_credits: i64,
+    pub total_reserved_credits: Credits,
     pub layers: Vec<LayerReservation>,
 }
 
@@ -75,17 +76,7 @@ pub async fn gate_and_reserve(
         ));
     }
 
-    let wallet = db
-        .collection::<BillingWallet>(BILLING_WALLET)
-        .find_one(doc! { "owner_id": &ctx.billing_owner_id })
-        .await?
-        .ok_or_else(|| {
-            tracing::warn!(
-                owner_id = %ctx.billing_owner_id,
-                "Billing wallet is missing; continuing without reservation"
-            );
-        })
-        .ok();
+    let wallet = super::provisioning::get_wallet(db, &ctx.billing_owner_id).await?;
 
     let Some(wallet) = wallet else {
         return Ok(None);
@@ -105,6 +96,7 @@ pub async fn gate_and_reserve(
         tracing::warn!("Lago client is not configured; continuing without billing reservation");
         return Ok(None);
     };
+    super::exact_migration::require_ready(db).await?;
     let entitlements = lago.entitlements(subscription_id).await.map_err(|error| {
         tracing::warn!(
             owner_id = %ctx.billing_owner_id,
@@ -121,13 +113,18 @@ pub async fn gate_and_reserve(
     }
 
     let mut layers = estimate_layer_reservations(db, ctx, rate_cache_ttl_secs).await?;
+    if ctx.pool_attempt.is_some() {
+        return super::funding::reserve_and_open_pool(db, ctx, &wallet, layers)
+            .await
+            .map(Some);
+    }
     super::funding::reserve_estimated_funding(db, ctx, &mut layers).await?;
     let total_reserved_credits = layers
         .iter()
         .map(|reservation| reservation.reserved_credits)
-        .fold(0_i64, i64::saturating_add);
+        .try_fold(Credits::ZERO, Credits::checked_add)?;
 
-    if total_reserved_credits == 0 {
+    if total_reserved_credits == Credits::ZERO {
         return Ok(Some(BillingReservation {
             owner_id: wallet.owner_id,
             wallet_id: wallet.id,
@@ -136,12 +133,14 @@ pub async fn gate_and_reserve(
         }));
     }
 
-    if wallet.available_with_overdraft_credits() <= 0 && wallet.plan_kind != PlanKind::Prepaid {
+    if wallet.available_with_overdraft_credits()? <= Credits::ZERO
+        && wallet.plan_kind != PlanKind::Prepaid
+    {
         super::funding::release_layer_reservations(db, &layers).await?;
         suspend_wallet(db, &wallet.owner_id).await?;
         return Err(AppError::WalletSuspended);
     }
-    if wallet.available_credits() <= 0 && wallet.plan_kind == PlanKind::Prepaid {
+    if wallet.available_credits()? <= Credits::ZERO && wallet.plan_kind == PlanKind::Prepaid {
         super::funding::release_layer_reservations(db, &layers).await?;
         return Err(AppError::InsufficientCredits);
     }
@@ -189,9 +188,9 @@ pub async fn gate_and_reserve(
 pub async fn try_reserve_prepaid(
     db: &mongodb::Database,
     owner_id: &str,
-    credits: i64,
+    credits: Credits,
 ) -> AppResult<Option<BillingWallet>> {
-    if credits <= 0 {
+    if credits <= Credits::ZERO {
         return db
             .collection::<BillingWallet>(BILLING_WALLET)
             .find_one(doc! { "owner_id": owner_id, "suspended": false })
@@ -200,11 +199,14 @@ pub async fn try_reserve_prepaid(
     }
 
     let now = Utc::now();
+    let maximum_existing_hold =
+        Credits::from_pico(crate::models::credits::MAX_PICO)?.checked_sub(credits)?;
     db.collection::<BillingWallet>(BILLING_WALLET)
         .find_one_and_update(
             doc! {
                 "owner_id": owner_id,
                 "suspended": false,
+                "reserved_credits": { "$lte": maximum_existing_hold },
                 "$expr": {
                     "$gte": [
                         {
@@ -244,19 +246,22 @@ pub async fn try_reserve_prepaid(
 pub async fn try_reserve_overdraft(
     db: &mongodb::Database,
     owner_id: &str,
-    credits: i64,
+    credits: Credits,
 ) -> AppResult<Option<BillingWallet>> {
-    if credits <= 0 {
+    if credits <= Credits::ZERO {
         return try_reserve_prepaid(db, owner_id, credits).await;
     }
 
     let now = Utc::now();
+    let maximum_existing_hold =
+        Credits::from_pico(crate::models::credits::MAX_PICO)?.checked_sub(credits)?;
     db.collection::<BillingWallet>(BILLING_WALLET)
         .find_one_and_update(
             doc! {
                 "owner_id": owner_id,
                 "suspended": false,
                 "has_payment_instrument": true,
+                "reserved_credits": { "$lte": maximum_existing_hold },
                 "$expr": {
                     "$gte": [
                         {
@@ -301,9 +306,9 @@ pub async fn try_reserve_overdraft(
 pub async fn release_wallet_hold(
     db: &mongodb::Database,
     owner_id: &str,
-    credits: i64,
+    credits: Credits,
 ) -> AppResult<()> {
-    if credits <= 0 {
+    if credits <= Credits::ZERO {
         return Ok(());
     }
 
@@ -335,27 +340,10 @@ pub async fn release_billing_reservation(
     super::funding::release_layer_reservations(db, &reservation.layers).await
 }
 
-pub async fn actual_credits_for_row(
-    db: &mongodb::Database,
-    row: &UsageMeterRow,
-    quantity: i64,
-    model: Option<&str>,
-) -> AppResult<i64> {
-    if row.wallet_id.is_none() {
-        return Ok(0);
-    }
-
-    match estimate_credits(db, &row.lago_metric_code, model, quantity.max(0)).await {
-        Ok(credits) => Ok(credits),
-        Err(AppError::BillingNotConfigured(_)) => Ok(row.reserved_credits.max(0)),
-        Err(error) => Err(error),
-    }
-}
-
 pub async fn apply_settlement_for_row(
     db: &mongodb::Database,
     row: &UsageMeterRow,
-    actual_credits: i64,
+    actual_credits: Credits,
 ) -> AppResult<bool> {
     let usage_rows = db.collection::<UsageMeterRow>(USAGE_METER);
     if row.released {
@@ -381,11 +369,11 @@ pub async fn apply_settlement_for_row(
     if let Some(wallet_id) = row.wallet_id.as_deref() {
         let lock = WalletSettlementLock {
             row_id: row.id.clone(),
-            reserved_credits: row.reserved_credits.max(0),
-            actual_credits: actual_credits.max(0),
+            reserved_credits: row.reserved_credits.max(Credits::ZERO),
+            actual_credits: actual_credits.max(Credits::ZERO),
             applied: false,
         };
-        if lock.reserved_credits > 0 || lock.actual_credits > 0 {
+        if lock.reserved_credits > Credits::ZERO || lock.actual_credits > Credits::ZERO {
             ensure_wallet_settlement_lock(db, wallet_id, &row.billing_owner_id, &lock).await?;
             if usage_rows
                 .count_documents(doc! { "_id": &row.id, "released": false })
@@ -405,6 +393,9 @@ pub async fn apply_settlement_for_row(
         }
     }
 
+    if row.wallet_id.is_some() {
+        super::ledger::record_usage_settled(db, row, actual_credits).await?;
+    }
     let update = usage_rows
         .update_one(
             doc! {
@@ -440,13 +431,6 @@ pub async fn apply_settlement_for_row(
     if let Some(wallet_id) = row.wallet_id.as_deref() {
         clear_wallet_settlement_lock(db, wallet_id, &row.billing_owner_id, &row.id).await?;
     }
-    // This is one of the two places the `released` transition commits (the
-    // other is `complete_wallet_settlement_lock`), so the tamper-evident
-    // ledger hook lives here. Only actual charges are ledgered: free
-    // metered traffic (no wallet) and zero-credit settlements move no money.
-    if update.modified_count > 0 && row.wallet_id.is_some() && actual_credits > 0 {
-        super::ledger::record_usage_settled_async(db.clone(), row.clone(), actual_credits);
-    }
     Ok(update.modified_count > 0)
 }
 
@@ -455,8 +439,8 @@ pub async fn apply_settlement_for_row(
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct WalletSettlementLock {
     row_id: String,
-    reserved_credits: i64,
-    actual_credits: i64,
+    reserved_credits: Credits,
+    actual_credits: Credits,
     applied: bool,
 }
 
@@ -523,6 +507,12 @@ async fn complete_wallet_settlement_lock(
     lock: &WalletSettlementLock,
 ) -> AppResult<()> {
     apply_wallet_settlement_lock(db, wallet_id, owner_id, lock).await?;
+    let row = db
+        .collection::<UsageMeterRow>(USAGE_METER)
+        .find_one(doc! { "_id": &lock.row_id })
+        .await?
+        .ok_or_else(|| AppError::Internal("usage row missing for ledger".into()))?;
+    super::ledger::record_usage_settled(db, &row, lock.actual_credits).await?;
     let update = db
         .collection::<UsageMeterRow>(USAGE_METER)
         .update_one(
@@ -559,17 +549,6 @@ async fn complete_wallet_settlement_lock(
         }
     }
 
-    // Crash-bridge counterpart of the ledger hook in
-    // `apply_settlement_for_row`: this path also commits a `released`
-    // transition for a charge, so it must be ledgered too.
-    if update.matched_count == 1 && lock.actual_credits > 0 {
-        super::ledger::record_usage_settled_by_row_id_async(
-            db.clone(),
-            lock.row_id.clone(),
-            lock.actual_credits,
-        );
-    }
-
     clear_wallet_settlement_lock(db, wallet_id, owner_id, &lock.row_id).await
 }
 
@@ -583,6 +562,23 @@ async fn apply_wallet_settlement_lock(
         return Ok(());
     }
 
+    // The active lock excludes every other balance writer. Check the exact
+    // arithmetic before MongoDB's Decimal128 $inc can round an overflow.
+    if let Some(wallet) = db
+        .collection::<BillingWallet>(BILLING_WALLET)
+        .find_one(doc! {
+            "_id": wallet_id,
+            "owner_id": owner_id,
+            "active_settlement.row_id": &lock.row_id,
+            "active_settlement.applied": false,
+        })
+        .await?
+    {
+        wallet
+            .pending_lago_debits
+            .checked_add(lock.actual_credits)?;
+        wallet.reserved_credits.checked_sub(lock.reserved_credits)?;
+    }
     let wallets = db.collection::<Document>(BILLING_WALLET);
     let update = wallets
         .update_one(
@@ -711,19 +707,22 @@ fn parse_wallet_settlement_lock(wallet: &Document) -> AppResult<Option<WalletSet
         .to_string();
     Ok(Some(WalletSettlementLock {
         row_id,
-        reserved_credits: document_i64(lock, "reserved_credits").unwrap_or(0).max(0),
-        actual_credits: document_i64(lock, "actual_credits").unwrap_or(0).max(0),
+        reserved_credits: Credits::from_bson(
+            lock.get("reserved_credits")
+                .cloned()
+                .ok_or(crate::models::credits::CreditsError)?,
+            crate::models::credits::SCALE,
+        )?
+        .max(Credits::ZERO),
+        actual_credits: Credits::from_bson(
+            lock.get("actual_credits")
+                .cloned()
+                .ok_or(crate::models::credits::CreditsError)?,
+            crate::models::credits::SCALE,
+        )?
+        .max(Credits::ZERO),
         applied: lock.get_bool("applied").unwrap_or(false),
     }))
-}
-
-fn document_i64(document: &Document, key: &str) -> Option<i64> {
-    match document.get(key) {
-        Some(Bson::Int32(value)) => Some(i64::from(*value)),
-        Some(Bson::Int64(value)) => Some(*value),
-        Some(Bson::Double(value)) if value.is_finite() => Some(*value as i64),
-        _ => None,
-    }
 }
 
 /// Settle a finalized row through the bounded wallet lock.
@@ -736,6 +735,9 @@ pub async fn claim_released_and_settle(
     db: &mongodb::Database,
     row: &UsageMeterRow,
 ) -> AppResult<bool> {
+    if row.wallet_id.is_some() {
+        super::exact_migration::require_ready(db).await?;
+    }
     let funding = super::funding::settle_usage_funding(db, row).await?;
     apply_settlement_for_row(db, row, funding.wallet_charge_credits).await
 }
@@ -1117,10 +1119,7 @@ async fn estimate_layer_reservations(
             estimated_quantity,
             credits_per_unit_micros: rate.credits_per_unit_micros,
             credits_per_unit_pico: rate.credits_per_unit_pico,
-            reserved_credits: super::amounts::whole_credits(super::amounts::cost_pico(
-                rate_pico,
-                estimated_quantity,
-            )),
+            reserved_credits: super::amounts::cost(rate_pico, estimated_quantity)?,
             allowance_reservations: Vec::new(),
             grant_reservations: Vec::new(),
         });
@@ -1142,6 +1141,11 @@ async fn fresh_rate(
                 "billing rate cache is missing for metric {lago_metric_code}"
             ))
         })?;
+    if rate.retired_at.is_some() {
+        return Err(AppError::BillingNotConfigured(format!(
+            "billing rate is retired for metric {lago_metric_code}"
+        )));
+    }
     let max_age_secs = i64::try_from(rate_cache_ttl_secs).unwrap_or(i64::MAX);
     if rate.synced_at < Utc::now() - Duration::seconds(max_age_secs) {
         return Err(AppError::BillingNotConfigured(format!(
@@ -1149,29 +1153,6 @@ async fn fresh_rate(
         )));
     }
     Ok(rate)
-}
-
-async fn estimate_credits(
-    db: &mongodb::Database,
-    lago_metric_code: &str,
-    model: Option<&str>,
-    quantity: i64,
-) -> AppResult<i64> {
-    if quantity <= 0 {
-        return Ok(0);
-    }
-
-    let rate = find_rate(db, lago_metric_code, model)
-        .await?
-        .ok_or_else(|| {
-            AppError::BillingNotConfigured(format!(
-                "billing rate cache is missing for metric {lago_metric_code}"
-            ))
-        })?;
-    Ok(super::amounts::whole_credits(super::amounts::cost_pico(
-        super::amounts::rate_pico(rate.credits_per_unit_pico, rate.credits_per_unit_micros),
-        quantity,
-    )))
 }
 
 pub(crate) async fn find_rate(
@@ -1238,7 +1219,7 @@ async fn release_one_unforwarded_row(
     Ok(true)
 }
 
-async fn suspend_wallet(db: &mongodb::Database, owner_id: &str) -> AppResult<()> {
+pub(super) async fn suspend_wallet(db: &mongodb::Database, owner_id: &str) -> AppResult<()> {
     db.collection::<BillingWallet>(BILLING_WALLET)
         .update_one(
             doc! { "owner_id": owner_id },
@@ -1371,12 +1352,12 @@ mod tests {
             lago_wallet_id: Some(format!("{owner_id}:wallet")),
             lago_subscription_id: Some(format!("{owner_id}:plan")),
             plan_kind: PlanKind::Prepaid,
-            balance_credits,
-            reserved_credits: 0,
-            pending_lago_debits: 0,
-            pending_topup_expiry_credits: 0,
+            balance_credits: crate::models::credits::Credits::from_whole(balance_credits),
+            reserved_credits: crate::models::credits::Credits::from_whole(0),
+            pending_lago_debits: crate::models::credits::Credits::from_whole(0),
+            pending_topup_expiry_credits: crate::models::credits::Credits::from_whole(0),
             has_payment_instrument: false,
-            overdraft_cap_credits: 0,
+            overdraft_cap_credits: crate::models::credits::Credits::from_whole(0),
             suspended: false,
             collection_state: CollectionState::Good,
             topup_expiry_checked_at: None,
@@ -1396,6 +1377,7 @@ mod tests {
                 credits_per_unit_micros: credits * 1_000_000,
                 credits_per_unit_pico: None,
                 synced_at: Utc::now(),
+                retired_at: None,
             })
             .await
             .expect("insert platform rate");
@@ -1437,10 +1419,14 @@ mod tests {
         for _ in 0..20 {
             let db = db.clone();
             tasks.push(tokio::spawn(async move {
-                try_reserve_prepaid(&db, owner_id, 1)
-                    .await
-                    .expect("reserve query")
-                    .is_some()
+                try_reserve_prepaid(
+                    &db,
+                    owner_id,
+                    crate::models::credits::Credits::from_whole(1),
+                )
+                .await
+                .expect("reserve query")
+                .is_some()
             }));
         }
 
@@ -1458,8 +1444,14 @@ mod tests {
             .expect("wallet exists");
 
         assert_eq!(successes, 10);
-        assert_eq!(saved.reserved_credits, 10);
-        assert_eq!(saved.available_credits(), 0);
+        assert_eq!(
+            saved.reserved_credits,
+            crate::models::credits::Credits::from_whole(10)
+        );
+        assert_eq!(
+            saved.available_credits().unwrap(),
+            crate::models::credits::Credits::from_whole(0)
+        );
     }
 
     #[tokio::test]
@@ -1529,8 +1521,72 @@ mod tests {
             .expect("find wallet")
             .expect("wallet exists");
 
-        assert_eq!(reservation.total_reserved_credits, 3);
-        assert_eq!(saved.reserved_credits, 3);
-        assert_eq!(saved.available_credits(), 7);
+        assert_eq!(
+            reservation.total_reserved_credits,
+            crate::models::credits::Credits::from_whole(3)
+        );
+        assert_eq!(
+            saved.reserved_credits,
+            crate::models::credits::Credits::from_whole(3)
+        );
+        assert_eq!(
+            saved.available_credits().unwrap(),
+            crate::models::credits::Credits::from_whole(7)
+        );
+    }
+
+    #[tokio::test]
+    async fn gate_fails_closed_when_rate_is_retired() {
+        let Some(db) = connect_test_database("billing_gate_retired_rate").await else {
+            return;
+        };
+        let owner_id = "owner-retired-rate";
+        db.collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
+            .insert_one(wallet(owner_id, 10))
+            .await
+            .expect("insert wallet");
+        insert_platform_rate(&db, 3).await;
+        let lago = EntitledLago {
+            entitlements: vec![Entitlement {
+                code: "service-one".to_string(),
+                raw: json!({}),
+            }],
+        };
+        let live = gate_and_reserve(&db, Some(&lago), &route_context(owner_id), false, 900)
+            .await
+            .expect("live rate gate")
+            .expect("live rate reservation");
+        assert_eq!(
+            live.total_reserved_credits,
+            crate::models::credits::Credits::from_whole(3)
+        );
+
+        db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
+            .update_one(
+                doc! { "_id": BillingRateCache::cache_id("platform_requests", None) },
+                doc! { "$set": { "retired_at": mongodb::bson::DateTime::from_chrono(Utc::now()) } },
+            )
+            .await
+            .expect("retire rate");
+        let err = gate_and_reserve(&db, Some(&lago), &route_context(owner_id), false, 900)
+            .await
+            .expect_err("a retired rate must deny new reservations");
+        let saved = db
+            .collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
+            .find_one(doc! { "owner_id": owner_id })
+            .await
+            .expect("find wallet")
+            .expect("wallet exists");
+
+        assert!(matches!(
+            err,
+            crate::errors::AppError::BillingNotConfigured(ref message)
+                if message == "billing rate is retired for metric platform_requests"
+        ));
+        // Only the live-rate reservation holds credits; the refusal reserved none.
+        assert_eq!(
+            saved.reserved_credits,
+            crate::models::credits::Credits::from_whole(3)
+        );
     }
 }

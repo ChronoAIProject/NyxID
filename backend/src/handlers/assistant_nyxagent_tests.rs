@@ -131,7 +131,7 @@ fn turn_request(id: Option<&str>) -> Request<Body> {
 async fn settled(state: &AppState) -> AssistantConversation {
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {
-            if let Some(row) = engine::list(&state.db, OWNER, 1, None)
+            if let Some(row) = engine::list(&state.db, OWNER, 1, None, None)
                 .await
                 .unwrap()
                 .into_iter()
@@ -209,7 +209,7 @@ async fn stop_persists_partial_reply_clears_binding_and_emits_cancelled() {
     .await
     .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let row = engine::list(&state.db, OWNER, 1, None)
+    let row = engine::list(&state.db, OWNER, 1, None, None)
         .await
         .unwrap()
         .remove(0);
@@ -256,6 +256,7 @@ async fn lost_session_rebinds_with_recap_and_same_turn_id() {
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            agent_id: None,
             conversation_id: None,
             text: "old question".into(),
             model: None,
@@ -511,6 +512,7 @@ async fn stale_fences_are_hidden_in_index_and_history_dtos() {
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            agent_id: None,
             conversation_id: None,
             text: "interrupted".into(),
             model: None,
@@ -560,6 +562,7 @@ async fn settlement_failure_is_bounded_emits_terminal_error_and_releases_permit(
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            agent_id: None,
             conversation_id: None,
             text: "question".into(),
             model: None,
@@ -688,6 +691,7 @@ async fn model_fallbacks_are_uncached_and_successes_are_cached() {
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            agent_id: None,
             conversation_id: None,
             text: "models".into(),
             model: None,
@@ -735,6 +739,7 @@ async fn invalid_and_wrong_owner_turns_do_not_consume_rate_limit() {
         &state.db,
         "other",
         &engine::TurnRequest {
+            agent_id: None,
             conversation_id: None,
             text: "private".into(),
             model: None,
@@ -778,7 +783,7 @@ async fn invalid_and_wrong_owner_turns_do_not_consume_rate_limit() {
 async fn acknowledgements_are_owner_scoped_sanitized_decided_once_and_audited() {
     use crate::services::assistant_authority_tests::fixture;
     let f = fixture("ack_route").await;
-    let refusal = acknowledgements::account_gate(&f.state.db, &f.chat)
+    let (refusal, _) = acknowledgements::account_gate(&f.state.db, &f.chat)
         .await
         .unwrap()
         .unwrap();
@@ -817,7 +822,18 @@ async fn acknowledgements_are_owner_scoped_sanitized_decided_once_and_audited() 
     .await
     .unwrap()
     .0;
-    assert_eq!(index.conversations[0].pending_acknowledgements, 1);
+    // The index lists every thread with its agent; the specialist's pending
+    // card is counted on its own thread.
+    let thread = index
+        .conversations
+        .iter()
+        .find(|row| row.id == f.row.id)
+        .unwrap();
+    assert_eq!(thread.pending_acknowledgements, 1);
+    assert_eq!(
+        thread.agent.as_ref().map(|agent| agent.name.as_str()),
+        Some("worker")
+    );
     let other = Uuid::new_v4().to_string();
     let result = decide_acknowledgement(
         State(f.state.clone()),
@@ -880,44 +896,34 @@ async fn acknowledgements_are_owner_scoped_sanitized_decided_once_and_audited() 
 }
 
 #[tokio::test]
-async fn mode_switch_response_and_audit_expose_only_owner_metadata() {
-    use crate::models::assistant_conversation::AccessMode::{Ask, Full};
-    let f = crate::services::assistant_authority_tests::fixture("mode_route").await;
-    f.state
-        .db
-        .collection::<mongodb::bson::Document>(
-            crate::models::assistant_conversation::COLLECTION_NAME,
-        )
-        .update_one(
-            doc! {"_id": &f.row.id},
-            doc! {"$set": {"active_turn": mongodb::bson::Bson::Null}},
-        )
+async fn retired_access_mode_route_answers_gone_and_every_chat_reports_full() {
+    let f = crate::services::assistant_authority_tests::orchestrator_fixture("mode_route").await;
+    let response = change_access_mode(
+        State(f.state.clone()),
+        test_auth_user(&f.owner),
+        Path(f.row.id.clone()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::GONE);
+    let bytes = axum::body::to_bytes(response.into_body(), 4096)
         .await
         .unwrap();
-    for mode in [Full, Ask] {
-        let response = change_access_mode(
-            State(f.state.clone()),
-            test_auth_user(&f.owner),
-            Path(f.row.id.clone()),
-            Json(AccessModeRequest { access_mode: mode }),
-        )
-        .await
-        .unwrap()
-        .0;
-        assert_eq!(response.access_mode, mode);
-        let value = serde_json::to_value(response).unwrap();
-        assert!(value.get("credential_api_key_id").is_none());
-        assert!(value.get("key_ciphertext").is_none());
-    }
-    let count = f
-        .state
-        .db
-        .collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME)
-        .count_documents(doc! {"event_type": "assistant_access_mode_changed",
-        "event_data.conversation_id": &f.row.id})
-        .await
-        .unwrap();
-    assert_eq!(count, 2);
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["error"], "access_mode_retired");
+    let history = history(
+        State(f.state.clone()),
+        test_auth_user(&f.owner),
+        Path(f.row.id.clone()),
+        Query(HistoryQuery::default()),
+    )
+    .await
+    .unwrap()
+    .0;
+    let dto = serde_json::to_value(history).unwrap();
+    assert_eq!(dto["conversation"]["access_mode"], "full");
+    assert_eq!(dto["conversation"]["role"], "orchestrator");
+    assert!(dto["conversation"].get("credential_api_key_id").is_none());
 }
 
 #[tokio::test]
@@ -931,6 +937,7 @@ async fn history_surfaces_pending_proxy_approvals_raised_by_the_chat_key() {
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            agent_id: None,
             conversation_id: None,
             text: "read my github profile".into(),
             model: None,
@@ -1017,6 +1024,7 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            agent_id: None,
             conversation_id: None,
             text: "use github".into(),
             model: None,
@@ -1046,9 +1054,14 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
         summary: "Summary text that must not be echoed".into(),
         status: status.into(),
         requested_turn_id: None,
+        trigger_run_id: None,
         created_at: Utc::now(),
         decided_at: decided,
         expires_at: Utc::now() + chrono::Duration::minutes(10),
+        decider: "user".into(),
+        request_excerpt: None,
+        decided_by: None,
+        reason: None,
     };
     // Decided before the turn that is about to settle: already reported to it.
     let stale = ack(

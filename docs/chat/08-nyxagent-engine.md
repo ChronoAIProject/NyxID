@@ -33,7 +33,7 @@ session deletion carry `Metered(Proxy)` billing policy. The initial hop uses
 server transport; user credential-node settings cannot reroute it.
 
 The **NyxAgent deployment** must set `NYXAGENT_SERVICE_SLUG=llm-nyx` so its
-`self_prefixes` recursion guard excludes `llm-nyx__*` tools. A Full access assistant key
+`self_prefixes` recursion guard excludes `llm-nyx__*` tools. An orchestrator key
 can access all services; this guard prevents it from calling NyxAgent recursively.
 NyxID cannot inspect or verify that upstream environment setting. This introduces
 no NyxID environment variable.
@@ -43,13 +43,12 @@ no NyxID environment variable.
 The first `begin_turn` transaction creates one ordinary key for the conversation,
 its encrypted credential row, its user message and its active-turn fence together.
 Keys are named `NyxID Assistant chat <first 8 hex of the conversation id>`, have
-platform `nyxid-assistant`, purpose General, and no expiry. Ask mode starts with
-scope `proxy`, empty service/node allowlists, `allow_all_services=false`,
-`allow_all_nodes=true`, and `allow_auto_connected_services=true`. The last flag gives the model bridge access
-to `chrono-llm-public` immediately. Full mode applies the authority described below.
-Conversation keys always allow all nodes, including after rotation, replacement and
-mode changes, because nodes are reachable only through services and service consent
-is the node consent; Ask mode keeps the service allowlist as its execution gate.
+platform `nyxid-assistant`, purpose General, and no expiry. Its authority follows the
+conversation's role (see Authority below) and is re-applied at every turn start,
+so a rotated, replaced or hand-edited key converges back. Conversation keys always
+allow all nodes, including after rotation and replacement, because nodes are
+reachable only through services and service consent is the node consent; a
+subagent's service allowlist remains its execution gate.
 The ordinary key registry does not accept `llm:proxy` or `assistant:account` as
 user-assigned scopes; `proxy` already authorizes MCP and LLM proxy access.
 
@@ -66,9 +65,10 @@ redacted. No API, audit, log, or error includes the raw key or its ciphertext.
 Every turn verifies owner, active state, expiry and the decrypted hash. Invalid
 credentials are replaced for that conversation only. Revoke removes the encrypted
 record. Rotation re-encrypts its successor in the same record/transaction; it never
-strands an additional key. Replacement and rotation clear explicit service/node
-allowlists and acknowledgements, preserve the conversation's human-selected mode,
-and clear the upstream binding with `credential_replaced`. Assistant rotation
+strands an additional key. Replacement and rotation expire pending and allowed
+acknowledgements, carry the conversation's role authority (Full for an
+orchestrator, the durable grants for a subagent) to the successor, and clear the
+upstream binding with `credential_replaced`. Assistant rotation
 returns empty `full_key`; browser and CLI explain that its secret remains encrypted
 on the server. Ordinary key rotations retain their one-time secret delivery.
 Settlement writes the credential record to fence concurrent invalidation.
@@ -90,34 +90,39 @@ Native chat tools cannot delete, widen, relabel, bind credentials to, or select 
 assistant key as a route agent, including keys belonging to another chat. The user
 deletes the conversation instead. Rotation and revocation remain available to the human user.
 
-## Access modes
+## Authority: Full-only NyxBot, granted specialists
 
-`AssistantConversation.access_mode` defaults to `ask` for existing BSON rows and
-new drafts. In Ask mode, the acknowledgements below apply. In `full`, the key has
-`allow_all_services=true`, `allow_all_nodes=true`, auto-connected access and the
-internal `assistant:account` scope. Service, account and action cards are bypassed;
-`chat_access` is `granted` for every listed service/tool. Existing per-service proxy
-approval policies still apply. The native tool inventory and secret boundaries
-remain identical in both modes.
+The Ask/Full choice is retired. Every owner has one persistent **NyxBot** agent;
+its threads run with Full access: `allow_all_services=true`, `allow_all_nodes=true`,
+auto-connected access and the internal `assistant:account` scope. Service and
+account cards are never created for NyxBot and `chat_access` is `granted` for
+every listed service/tool. Existing per-service proxy approval policies still
+apply. Destructive account tools still require a single-use **action** card
+unless the owner turned confirmations off in NyxBot settings
+(`skip_destructive_confirmation`, default `false`).
 
-A human changes mode with `PATCH /conversations/{id}/access-mode`. The owner-scoped,
-flag-gated transaction rejects a live turn with `turn_active`, updates the key via
-the key-mutation service and updates the conversation atomically. Returning to Ask
-removes `allow_all_services` and the account scope, keeps `allow_all_nodes=true`, and preserves individually
-acknowledged service IDs. Pending cards and unused action confirmations expire on
-switch. If revocation already removed the credential, the next turn provisions
-with the stored mode. Rotation/replacement also preserve that mode. Mode changes
-(including selecting Full for the initial draft) audit
-`assistant_access_mode_changed` with `conversation_id`, `old_mode`, `new_mode`.
+A **specialist** agent (see NyxBot agents below) holds only its grants on every
+one of its threads: `allow_all_services=false`, `allow_auto_connected_services=false`,
+`allowed_service_ids`/`allowed_platform_service_ids` from the agent's `grants`, and
+`assistant:account` only with an `account_read` grant, which reaches read-only
+account tools. The agent document is the durable source; thread keys mirror it
+at every turn start, rotation and replacement. NyxAgent calls its model through
+NyxID's proxy (`/api/v1/proxy/s/{model service}`, e.g. `chrono-llm-public`,
+`llm-deepseek`) with the thread's own key. The proxy therefore lets a live
+assistant conversation key (an `assistant_agent_credentials` row, which people
+cannot create) reach any active catalog service with `inference` metadata even
+outside its grants (`proxy::assistant_model_call`), whether the owner's own row,
+an org row or the catalog row resolves it. Nothing else widens: the key's
+allowlist, inventory, delegation tokens, consent screens and MCP tools stay its
+grants.
 
-The composer **Mode** selector offers **Ask before acting** and **Full access** with
-short descriptions. Full access requires explicit confirmation of access to all
-connected services and nodes, account changes and resource deletion. The selector
-is disabled while a turn runs; a Full access badge appears in the header. The
-assistant draft store remembers the last chosen mode locally per user and clears
-it on identity changes. This preference applies only to new drafts; an existing
-conversation requires the explicit mode route. Only the first POST may include
-`access_mode`; sending it alongside `conversation_id` is rejected.
+Legacy conversations deserialize with `access_mode: ask` and no `agent_id`. The
+next `begin_turn` adopts them as NyxBot threads inside the transaction that
+claims the turn: the row is set to `full`, the key converges to Full, and pending
+service/account cards expire. There is no startup sweep, so no upgrade races a
+live turn. `PATCH /conversations/{id}/access-mode` answers `410 Gone` with
+`{"error":"access_mode_retired"}`; `POST /turns` still accepts `access_mode` from
+older clients and ignores it. DTOs report `access_mode: "full"`.
 
 ## Acknowledgements
 
@@ -128,7 +133,12 @@ expiry dates, and the last persisted user turn that requested it. Debug is
 redacted. Index `(conversation_id,status,created_at)` has no TTL. Pending requests
 expire lazily after 15 minutes; allowed actions expire after 10 minutes and can
 be consumed only once. Decisions and key mutations serialize against the current
-conversation and credential generation.
+conversation and credential generation. Service and account requests come only
+from specialist threads and carry `decider: "orchestrator"` (NyxBot decides) and a
+bounded `request_excerpt` of the message that started the requesting work (the
+user's own words when the user spoke to the specialist). Action confirmations
+keep `decider: "user"`. Decided rows record `decided_by` (`user` or `orchestrator`)
+and NyxBot's bounded `reason`.
 
 Only keys identified by their actual credential row get this authority; a platform
 label alone grants nothing. Their MCP listing/search includes all services visible
@@ -144,8 +154,9 @@ JSON-RPC errors (which NyxAgent would flatten to opaque 502s):
   "acknowledgement_id": "<uuid>",
   "service_slug": "github",
   "service_name": "GitHub",
-  "summary": "Allow this chat to use GitHub?",
-  "instructions": "Ask the user to approve access to GitHub for this chat (a card is shown in the chat), then retry."
+  "summary": "Use GitHub",
+  "decider": "orchestrator",
+  "instructions": "NyxID asked your orchestrator for this permission. End your turn now with a one-line note about what you are waiting for; NyxID resumes you with the decision."
 }
 ```
 
@@ -156,17 +167,17 @@ the card, not settings, is how access is granted. Without this the model read th
 flag as "no permission" and never made the call that creates the card.
 
 Platform-source services have a DownstreamService ID and no owner-visible
-UserService row. They use the same Ask-mode card: the refusal is the ordinary
+UserService row. A subagent requests them the same way: the refusal is the ordinary
 `acknowledgement_required` result, the card summary reads "Allow this chat to use
 <name> (NyxID platform credential)?", and Allow records the catalog ID on the key's
 `allowed_platform_service_ids` (never on `allowed_service_ids`, whose REST
 validation admits only UserService rows). Only assistant chat keys hold platform
 grants; `ensure_service_in_scope` honours them for chat keys alone, execution
 still resolves the service through the owner's visible platform grants on every
-call, and Full mode continues to grant everything. `full_access_required` is no
-longer produced. The chat may also mint hosted connect links for any catalog
-service in Ask mode (`nyx__connect_service` skips the allowlist for chat keys);
-the resulting connection needs its own card before use.
+call, and orchestrators are granted everything. `full_access_required` is no
+longer produced. Chat keys may mint hosted connect links for any catalog service
+(`nyx__connect_service` skips the allowlist for chat keys); a subagent still needs
+a grant for the resulting connection.
 
 Account/action refusals use the same fields (`service_slug`/`service_name` are null)
 and `kind: "account" | "action"`; action instructions require a retry with
@@ -195,14 +206,21 @@ History includes all pending and the last 20 decided records, exposing only
 expires_at`. The conversation index includes `pending_acknowledgements`. Pending
 cards appear at the transcript tail; decided cards become compact status lines at
 the request's timestamp. Allow/Deny are explicit human actions with a 750 ms
-minimum throttle. The selected history polls every two seconds while a turn runs
-or a pending card exists. The index refreshes at settlement/count changes and
-mutations; it does not poll every two seconds.
+minimum throttle. The selected history refreshes when the owner's live stream
+(`GET /assistant/nyxagent/live`, identifiers only) reports a change to it; while
+that stream is open, the two-second poll (while a turn runs or a pending card
+exists) becomes a 30-second backstop, and without it the two-second poll
+applies. The index refreshes at settlement/count changes, mutations and live
+events; it does not poll every two seconds.
 
 The refusal tells the model to retry after approval, and NyxAgent cannot wait for
 the decision inside its own turn, so the turn that requested the card ends before
-the human decides. A successful **Allow** therefore resumes the assistant: when no
-turn is running, the browser sends an ordinary, visible user turn (`Approved: this
+the decision. A subagent's request is resumed by NyxID: the decision (by the
+orchestrator through `nyxid__decide_permission`, or by the user on the card in the
+subagent's thread) queues a `permission_decided` event and wakes the subagent with
+an event turn; the browser sends nothing. For user-decided cards in an
+orchestrator's thread (action confirmations), a successful **Allow** resumes the
+assistant: when no turn is running, the browser sends an ordinary, visible user turn (`Approved: this
 chat may use <service>. Continue.`, `Approved: account management for this chat.
 Continue.`, or `Confirmed: <summary> (acknowledgement_id <id>). Retry it now.`).
 The continuation is a normal turn with no extra authority; the allowed grant is
@@ -228,8 +246,12 @@ The virtual `nyxid` service is named **NyxID account**, category `internal`, exe
 and uses `McpToolSource::Internal`. Dispatch is in-process through the same service
 layer as REST; there is no HTTP loopback. Every tool has a closed input schema,
 bounded JSON output (100 list rows, 64 KiB), and an explicit destructive description.
-In Ask mode all tools require the account acknowledgement; the destructive tools
-add the single-use action acknowledgement. The closed inventory is:
+NyxBot reaches every tool; destructive tools add the single-use action
+confirmation unless the owner turned confirmations off. Specialists reach only the
+read-only tools (`list_*`, `get_*`) and only with an `account_read` grant; every
+other tool returns `orchestrator_only`. NyxBot also gets the agent and channel
+tools, and every agent gets its memory tools (see NyxBot agents). The closed
+account inventory is:
 
 | Area | Tools (prefix every name with `nyxid__`) | Destructive |
 | --- | --- | --- |
@@ -247,27 +269,111 @@ Keys, bindings, bots, routes, services, nodes and approval settings retain owner
 checks and not-found shaping. Responses explicitly project safe fields.
 
 Creating/rotating keys, entering credentials/tokens, deciding approvals, organization
-administration and billing are excluded in both modes; users complete those in the
-UI. Credential entry through the existing MCP connect helper is likewise refused
-for conversation keys. Full access does not bypass these boundaries or the ban on
-self-widening/assistant route agents.
+administration and billing are excluded; users complete those in the UI. Credential
+entry through the existing MCP connect helper is likewise refused for conversation
+keys. Full access does not bypass these boundaries or the ban on
+self-widening/assistant route agents, which covers subagent keys too.
 
 Every native call writes one `assistant_account_tool_call` audit with `api_key_id`,
 `conversation_id`, `tool_name`, validated target UUID when applicable, outcome,
-`access_mode` and presented acknowledgement UUID when applicable. No arguments,
+agent `role` and presented acknowledgement UUID when applicable. No arguments,
 response bodies, credentials, user-controlled URLs or raw errors are recorded.
 Execution/state-changing chat MCP requests (`nyx__call_tool`, `nyx__connect_service`,
 `nyx__wait_for_connection`, `nyx__ssh_exec`, `nyx__oracle_*`, and `nyxid__*`), including
 refusals, additionally record an
-`assistant_mcp_tool_call` entry with the conversation, key, mode and `requested`
-outcome. Only closed native/meta tool names are recorded at this boundary;
+`assistant_mcp_tool_call` entry with the conversation, key, `agent_role` and
+`requested` outcome. Only closed native/meta tool names are recorded at this boundary;
 resolved service execution events supply the service/tool identity. Service
-proxy call audits also include the chat's access mode. Read-only discovery
+proxy call audits also include the chat's `agent_role`. Read-only discovery
 (`nyx__search_tools`, `nyx__list_connected_services`, `nyx__discover_services` and
 SSH service listing) does not add an `assistant_mcp_tool_call` event; existing
 execution audits remain unchanged. Service-layer
 errors become bounded `isError` results with existing `AppError` codes and static
 safe messages; internals never enter the model context.
+
+## NyxBot agents
+
+Normative design: [09-nyxbot-orchestrator.md](09-nyxbot-orchestrator.md).
+`assistant_agents` holds one `nyxbot` per owner (unique partial index, created on
+first use) and persistent `specialist` agents with a name, role description,
+`grants`, `memory` (≤ 50 notes of ≤ 500 characters), `home_conversation_id`,
+`created_by`, `destroyed_at`, and an optional `display_name` (≤ 40) and
+`persona` (≤ 2000, style only). Conversations are threads of an agent
+(`agent_id`; legacy rows are NyxBot's) with a denormalized `role`, `report_to`,
+`pending_events` and `event_streak`. NyxAgent is unchanged: every thread is an
+ordinary conversation with its own key.
+
+NyxBot-only native tools (`nyxid__` prefix): `spawn_subagent`, `message_subagent`,
+`wait_for_subagents` (at most 120 s), `list_subagents`, `read_subagent`,
+`grant_subagent`, `revoke_subagent`, `set_guest_access`, `update_subagent`, `decide_permission`,
+`destroy_subagent`, `create_group`, `list_groups`, `post_to_group`,
+`update_group`, `delete_group`, `settings_link`, `channel_bot_setup_link`,
+`connect_channel_bot`, `link_channel_bot`, `list_channel_agents`,
+`disconnect_channel_bot`. Every agent has `remember` and
+`forget`; its memory is injected into every thread's instructions and refuses
+obvious credential shapes. A specialist calling a NyxBot-only tool gets
+`orchestrator_only`. Grants resolve slugs or IDs through the owner's MCP catalog.
+Creating a specialist fences the owner's NyxBot row; `max_live_subagents`
+(default 8, at most 32) bounds live specialists.
+
+NyxID starts turns itself: specialist work in the agent's home thread
+(`origin: orchestrator`, with `report_to` set to the assigning NyxBot thread),
+wake-ups (`origin: event`) and channel messages (`origin: channel`), with the
+owner's identity and billing. A NyxBot-assigned or event-resumed specialist turn
+reports to `report_to` as a `subagent_settled` event; a direct chat does not wake
+NyxBot and is listed in its next turn's instructions instead. A specialist's
+permission request goes to `report_to` or NyxBot's home thread. Events queue on
+the thread (at most 20) and one event turn drains them when it is idle; other
+turns carry drained events in their instructions. Loop guards: at most 20 event
+turns per owner per hour, and a NyxBot thread stops after 3 consecutive event
+turns without a user message. Specialist and event turns draw from an owner pool
+of `max_concurrent_subagent_turns` (default 3, at most 8) plus one for NyxBot; a
+full pool returns `pool_full`. A background task runs every 15 seconds: it
+resolves watches (connect links and channel bot setup links a chat handed out),
+retries deferred wake-ups and starts group members that were busy. Anything the
+owner finishes outside the chat (a connect link, a bot setup, owner
+verification) resumes the waiting thread with
+an event; the owner never replies "done". Agents are never destroyed automatically. Destroy requests Stop on live
+turns, revokes every thread key and ciphertext, expires cards, disconnects the
+agent's channel bots and keeps read-only threads; a destroyed specialist can be
+deleted with its threads. Deleting a thread deletes only that thread.
+
+Group chats (`assistant_groups`, `assistant_group_messages`, routes
+`/assistant/nyxagent/groups[/{id}[/messages]]`) hold the owner plus 1–8 agents.
+A user message goes to the members it `@mentions`, else to the lead (NyxBot when
+it is a member); members hand work on with `@name`, bounded by the owner's
+`max_group_handoffs` (per request, default 6) and `max_group_handoffs_per_hour`
+(default 60) settings. NyxBot posting work into a group from its own thread is
+woken with the members' replies (`group_settled`) once the group is quiet. Each member answers through a hidden member thread
+(`group_id`, `group_seen_seq`) with its own key, grants and memory, seeing only
+the transcript lines it has not been given.
+
+Role-to-profile routing (`assistant_profile_routes`, admin
+`GET/PUT /api/v1/admin/assistant/profile-routes`) validates and stores a NyxAgent
+profile per role and per specialist specialty, but is inactive
+(`ROUTING_ACTIVE = false`): specialists inherit NyxBot's profile.
+
+## Channel bots
+
+`nyxid__connect_channel_bot` (or `POST /channels`) links one of the owner's
+channel bots to NyxBot or a specialist (`link_channel_bot` / `PATCH /channels/{id}`
+relinks it). Telegram bots use the Agent Event Gateway (catalog slug
+`cmaeg`): NyxID mints a dedicated route key and gateway agent key, creates the
+gateway channel as the owner (the gateway verifies the agent key through
+`GET /users/me`), points the route key's callback at the gateway, and is the
+gateway's `nyxbot` provider under `/api/v1/nyxbot` (Agent Card, bindings,
+conversations, Responses SSE, event context). Other platforms use NyxID's own relay:
+the route key's callback is `/api/v1/nyxbot/relay/{id}`, verified with NyxID's
+relay callback token. Each chat partition maps to one thread of the linked
+agent, owned by the bot owner (`channel` set on the row). Only senders verified as the
+owner reach it: NyxID's Telegram notification link, or a one-time link code the
+owner sends from the chat app (a `t.me/<bot>?start=<code>` link for Telegram).
+Other senders get a short refusal in private chats and silence in groups, and no
+turn runs. Admitted gateway events keep their `event_context` encrypted for 24
+hours for `readEventContext`. Asynchronous replies (event turns) go back through
+the gateway's `replyToEvent` while the newest event reference is valid, or through
+the relay reply API for direct channels. The gateway operator must register the
+`nyxbot` provider before Telegram channels can be created.
 
 ## Browser routes
 
@@ -275,21 +381,34 @@ Paths below are relative to `/api/v1/assistant/nyxagent`.
 
 | Method and path | Request | Response |
 | --- | --- | --- |
-| `GET /conversations` | `limit` 1–100 (default 50), optional `cursor` | `{conversations,next_cursor}` |
+| `GET /conversations` | `limit` 1–100 (default 50), optional `cursor`, optional `agent_id` | `{conversations,next_cursor}` |
 | `GET /conversations/{id}` | `limit` 1–100 (default 50), optional positive `before_seq` | `{conversation,messages,acknowledgements,approvals,before_seq}` |
 | `PATCH /conversations/{id}` | closed `{title}`; trimmed nonempty, max 200 Unicode scalars | conversation DTO |
 | `DELETE /conversations/{id}` | no body | 204; local hard delete, best-effort upstream session delete |
 | `POST /conversations/{id}/stop` | no body | 204; owner-only, no active turn is a no-op |
-| `PATCH /conversations/{id}/access-mode` | closed `{access_mode:"ask"|"full"}` | conversation DTO |
+| `PATCH /conversations/{id}/access-mode` | ignored | `410 Gone` (`access_mode_retired`) |
+| `GET` / `POST /agents` | `POST`: closed `{name,description,services?,account_read?}` | `{agents,limits}` / `201 {id,name,home_conversation_id}` |
+| `GET` / `PATCH` / `DELETE /agents/{id}` | `PATCH`: `{name?,description?}`; `DELETE` only after destroy | `{agent,memory,threads}` / agent / 204 |
+| `PUT /agents/{id}/grants` | closed `{services,account_read}` (specialists) | `{id,services,account_read}` |
+| `POST /agents/{id}/destroy` | no body; specialists only | `{id,destroyed_at}` |
+| `DELETE /agents/{id}/memory/{note_id}` | no body | 204 |
+| `GET` / `PUT /settings` | `PUT`: any of `{skip_destructive_confirmation,max_live_subagents,max_concurrent_subagent_turns}` | settings with limits |
+| `GET` / `POST /channels` | `POST`: closed `{bot_id,agent_id?}` | channel agents / `{channel_agent,link}` |
+| `PATCH` / `DELETE /channels/{id}` | `PATCH`: closed `{agent_id}` | `{channel_agent_id,agent,changed}` / `{disconnected,platform,gateway_released}` |
 | `POST /conversations/{id}/acknowledgements/{ack_id}` | closed `{decision:"allow"|"deny"}` | acknowledgement DTO |
 | `GET /conversations/{id}/attachments/{attachment_id}` | no body | image bytes (owner only; see Tool images) |
-| `POST /turns` | closed `{conversation_id?,text,model?,access_mode?}` | NyxID SSE events |
+| `POST /turns` | closed `{conversation_id?,agent_id?,text,model?,access_mode?}` (`agent_id` for new threads; `access_mode` ignored) | NyxID SSE events |
 | `GET /models` | no body | `[{id,label}]` |
 
 Conversation DTO: `id,title,model,access_mode,created_at,last_message_at,message_count,
-pending_acknowledgements,active_turn,context_reset_at`. `active_turn` is null or
-`{turn_id,started_at,activities}`.
-Message DTO: `id,seq,turn_id,role,text,status,error_code,created_at,activities,attachments`.
+pending_acknowledgements,active_turn,context_reset_at,role,agent,pending_events,channel`.
+`access_mode` is always `full`; `agent` is `{id,kind,name,destroyed}` (a destroyed
+agent's threads are read-only).
+`active_turn` is null or `{turn_id,started_at,activities}`.
+Message DTO: `id,seq,turn_id,role,text,status,error_code,created_at,activities,attachments`,
+where `role` is `user`, `assistant`, `orchestrator` (an instruction the orchestrator
+sent a subagent) or `event` (a NyxID-authored wake-up notice).
+Acknowledgement DTO adds `decider`, `decided_by` and `reason`.
 `active_turn` also carries `attachments`. An attachment is
 `{id,content_type,size,label}` (see Tool images).
 
@@ -482,8 +601,9 @@ all raw upstream error bodies. The raw current key is redacted from reflected
 assistant output, including split deltas. Wire-log capture is disabled for this
 surface.
 
-On reload, the client fetches persisted history and polls active history every
-two seconds until its own metadata reports settlement. The index has no periodic
+On reload, the client fetches persisted history and follows active history
+through the live stream (or, without it, polls every two seconds) until its own
+metadata reports settlement. The index has no periodic
 poll: selected-history settlement refreshes it once, as does send completion.
 Unselected active conversations do not trigger expensive index-page polling. Browser subscriptions have a 45-second opening deadline
 and 135-second idle deadline; losing that subscription triggers history refresh without
@@ -563,3 +683,53 @@ refusals in both modes, and discovery audit suppression. The stale channel e2e
 specs were aligned to the descriptor-driven UI (`frontend/src/lib/channel-platforms.ts`)
 and shared fixture (`frontend/src/test/fixtures/channel-platforms.ts`), so their
 label changes preserve the UI contract rather than weaken assertions.
+
+
+## Trigger turns
+
+Scheduled and assistant-webhook work enters the same engine with
+`TurnOrigin::Trigger`, `guest = false` and an internal fenced `TurnClaim`.
+`begin_turn` admits that claim inside the conversation/credential transaction;
+the run record and active turn therefore agree even across a crash. This branch
+executes only for trigger turns, adding no database query to ordinary turn start.
+Scheduled trigger instructions retain owner authority. Webhook data is untrusted:
+`confirmation_policy = changes` (default) enforces owner cards on every changing
+tool call, using the same HTTP/catalog classifier as guest access and explicit
+native tool contracts. The owner may explicitly select `destructive` with a
+warning to confirm only destructive calls. This policy is snapshotted per run
+and is not bypassed by the global skip-destructive setting. Agent grants and
+billing continue through the existing engine. Webhooks default to a dedicated
+thread for every agent, keeping event text out of the home context used by later
+owner turns and private channel chats. An explicit `home` choice carries UI/tool
+and setup-prefill warnings that later full-authority turns are outside the webhook
+confirmation policy. Scheduled work retains the NyxBot-home/specialist-dedicated
+defaults. Dedicated/per-run automation threads are excluded from home adoption
+at creation, turn admission and recovery after deletion.
+
+`ActiveTurn.trigger_run_id` connects settlement and confirmations to metadata-only
+run history. Confirmation requests copy this identity and the active turn ID;
+automation settlement keeps the run waiting until cards are decided, scheduling
+its fallback at the earliest card expiry. The decision transaction wakes the
+work item; settlement reads card state transactionally to avoid lost wakeups. The
+scheduler resumes it as another trigger turn without a second occurrence-budget
+charge. Ordinary browser and chat continuations skip these cards. A failed/lost
+turn is terminal and never replayed. Final replies remain in the transcript;
+optional chat/push delivery claims one outbound attempt. An interrupted, ambiguous
+send is reported as failed rather than retried, since a remote provider cannot
+participate in the MongoDB transaction. Full details are in
+[NyxBot schedules](../NYXBOT_SCHEDULES.md).
+
+All NyxAgent REST routes require first-party human credentials; developer OAuth
+apps cannot turn their consent into the owner's full assistant authority. CLI
+device login, mobile and web first-party sessions carry no OAuth client ID.
+Ordinary denial stickiness remains keyed to the latest user/orchestrator message;
+only trigger turns key denials to their active run turn.
+
+Automations require all replicas upgraded before creation. Old trigger readers
+fail listings and ingress on new enum variants; existing retry/replay and TTL
+retention do not scan or delete automation rows. Setup links contain only an
+owner-bound watch ID, with prefill fetched after authentication and consumed in
+the trigger-insert transaction. Cron gaps collapse at the first valid instant;
+folds use the earlier instant. Recovery writes one missed-count/bounds summary
+and one audit. Busy/pool/overlap work backs off to 30 seconds; budget exhaustion
+waits for its next UTC budget window, all capped at the initial grace deadline.

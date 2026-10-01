@@ -66,6 +66,13 @@ Run the agent under launchd (macOS) or systemd (Linux):
 
 Run the agent in a container instead of a native service: **`build`**, **`start`**, **`stop`**, **`restart`**, **`status`**, **`logs`** (`--follow`). Each `--profile` runs as a separate container.
 
+`start` and `restart` validate nonempty `NYXID_CA_CERT`, `SSL_CERT_FILE`, and
+`SSL_CERT_DIR` before changing the container, then mount the sources read-only
+and point the container's environment at those mounts. They never forward proxy
+variables. Re-run either command with your intended CA environment to replace or
+remove the saved mounts. See [Network, proxies and TLS](/docs/cli/guides/network#background-node-services-and-automatic-updates)
+for container paths, supported host path characters, and file permissions.
+
 ## node openclaw
 
 Manage an OpenClaw gateway connection from the node: **`connect --url <gateway-url> [--token <t>]`**, **`status`**, **`disconnect`**.

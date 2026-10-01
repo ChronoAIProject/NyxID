@@ -393,6 +393,7 @@
     "/chat.update": {
       "post": {
         "operationId": "chat_update",
+        "x-nyxid-changes-existing": true,
         "summary": "Edit a sent message",
         "x-aevatar-tool": {
           "name": "chat_update",

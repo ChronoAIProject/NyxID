@@ -908,6 +908,7 @@ pub async fn initiate_oauth_connect(
         device_code_encrypted: None,
         user_code_encrypted: None,
         poll_interval: None,
+        last_polled_at: None,
         target_user_id: on_behalf_of.map(String::from),
         credential_user_id: resolved.credential_user_id.clone(),
         redirect_path: redirect_path.map(String::from),
@@ -1227,6 +1228,7 @@ pub async fn request_device_code(
         device_code_encrypted: Some(device_code_encrypted),
         user_code_encrypted: Some(user_code_encrypted),
         poll_interval: Some(interval),
+        last_polled_at: None,
         target_user_id: on_behalf_of.map(String::from),
         credential_user_id: resolved.credential_user_id.clone(),
         redirect_path: None,
@@ -1299,6 +1301,29 @@ pub async fn poll_device_code(
         return Err(AppError::BadRequest(
             "Device code state user mismatch".to_string(),
         ));
+    }
+
+    let interval_secs = i64::from(oauth_state.poll_interval.unwrap_or(5).max(1));
+    let poll_cutoff = now - Duration::seconds(interval_secs);
+    let claimed = db
+        .collection::<OAuthState>(OAUTH_STATES)
+        .find_one_and_update(
+            doc! {
+                "_id": state,
+                "$or": [
+                    { "last_polled_at": null },
+                    { "last_polled_at": { "$lte": bson::DateTime::from_chrono(poll_cutoff) } },
+                ],
+            },
+            doc! { "$set": { "last_polled_at": bson::DateTime::from_chrono(now) } },
+        )
+        .await?;
+    if claimed.is_none() {
+        return Ok(DeviceCodePollResult {
+            status: "pending".to_string(),
+            interval: oauth_state.poll_interval,
+            effective_user_id: None,
+        });
     }
 
     // When admin-on-behalf flow, store tokens under the target SA's ID
@@ -1945,13 +1970,6 @@ pub async fn handle_oauth_callback(
     let refresh_token = token_payload["refresh_token"].as_str();
     let expires_in = token_payload["expires_in"].as_i64();
     let scope = token_payload["scope"].as_str();
-
-    if let Some(product) =
-        google_product_for_connection(db, user_id, &provider, oauth_state.connection_id.as_deref())
-            .await?
-    {
-        product.validate_required_scopes(scope)?;
-    }
 
     let access_enc = encryption_keys.encrypt(access_token.as_bytes()).await?;
     let refresh_enc = match refresh_token {
@@ -3242,10 +3260,11 @@ mod tests {
         build_user_token_summary, chat_attempt_nonce_from_state, classify_device_poll_failure,
         ensure_additional_scopes_supported, merge_scopes, normalize_telegram_bot_api_key,
         oauth_token_payload, parse_additional_scopes, parse_token_exchange_response,
-        resolve_scope_param, token_exchange_provider_error,
+        poll_device_code, resolve_scope_param, token_exchange_provider_error,
     };
     use crate::crypto::telegram::TelegramLoginData;
     use crate::errors::AppError;
+    use crate::models::oauth_state::{COLLECTION_NAME as OAUTH_STATES, OAuthState};
     use crate::models::provider_config::ProviderConfig;
     use crate::models::user_provider_token::UserProviderToken;
     use crate::services::oauth_flow;
@@ -3255,6 +3274,64 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Notify;
+
+    #[tokio::test]
+    async fn device_poll_respects_provider_interval_before_upstream_work() {
+        let Some(db) = connect_test_database("device_poll_interval_guard").await else {
+            return;
+        };
+        let now = Utc::now();
+        let state_id = uuid::Uuid::new_v4().to_string();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<OAuthState>(OAUTH_STATES)
+            .insert_one(OAuthState {
+                id: state_id.clone(),
+                user_id: user_id.clone(),
+                history_context: None,
+                provider_config_id: provider_id.clone(),
+                code_verifier: None,
+                device_code_encrypted: None,
+                user_code_encrypted: None,
+                poll_interval: Some(10),
+                last_polled_at: Some(now),
+                target_user_id: None,
+                credential_user_id: None,
+                connection_id: None,
+                connect_link_id: None,
+                redirect_path: None,
+                flow_kind: None,
+                attempt_nonce: None,
+                consumed: false,
+                expires_at: now + Duration::minutes(5),
+                created_at: now,
+            })
+            .await
+            .unwrap();
+        let keys = test_encryption_keys();
+        let early = poll_device_code(&db, &keys, &user_id, &provider_id, &state_id)
+            .await
+            .unwrap();
+        assert_eq!(early.status, "pending");
+        assert_eq!(early.interval, Some(10));
+
+        db.collection::<OAuthState>(OAUTH_STATES)
+            .update_one(
+                doc! { "_id": &state_id },
+                doc! { "$set": { "last_polled_at": bson::DateTime::from_chrono(now - Duration::seconds(11)) } },
+            )
+            .await
+            .unwrap();
+        let due = poll_device_code(&db, &keys, &user_id, &provider_id, &state_id).await;
+        assert!(matches!(due, Err(AppError::Internal(_))));
+        let stored = db
+            .collection::<OAuthState>(OAUTH_STATES)
+            .find_one(doc! { "_id": &state_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored.last_polled_at.unwrap() > now - Duration::seconds(10));
+    }
 
     #[test]
     fn chat_state_discriminator_requires_canonical_uuid_v4() {
@@ -5255,7 +5332,7 @@ mod tests {
             }
             if matches!(product, GoogleProduct::Workspace | GoogleProduct::Gmail) {
                 for scopes in [vec![], vec![GMAIL_READONLY.to_string()]] {
-                    let error = super::initiate_oauth_connect(
+                    let result = super::initiate_oauth_connect(
                         &db,
                         &enc,
                         "http://localhost:3001",
@@ -5270,9 +5347,13 @@ mod tests {
                         None,
                     )
                     .await
-                    .unwrap_err();
-                    assert!(matches!(error, AppError::ValidationError(_)));
-                    assert!(error.to_string().contains("Gmail send permission"));
+                    .unwrap();
+                    let url = url::Url::parse(&result.authorization_url).unwrap();
+                    let requested = url
+                        .query_pairs()
+                        .find(|(name, _)| name == "scope")
+                        .map(|(_, value)| value.into_owned());
+                    assert_eq!(requested, (!scopes.is_empty()).then(|| scopes.join(" ")));
                 }
             }
             let forbidden = match product {
@@ -5318,7 +5399,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn google_mail_callback_requires_send_grant_before_storing_tokens() {
+    async fn google_mail_callback_accepts_partial_grants() {
         use crate::models::downstream_service::{COLLECTION_NAME as SERVICES, DownstreamService};
         use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
         use crate::services::google_workspace::{GMAIL_READONLY, GMAIL_SEND};
@@ -5366,7 +5447,12 @@ mod tests {
                 .await
                 .unwrap();
             let granted = format!("openid {GMAIL_READONLY} {GMAIL_SEND}");
-            for scope in [None, Some(GMAIL_READONLY), Some(granted.as_str())] {
+            for scope in [
+                None,
+                Some("openid email"),
+                Some(GMAIL_READONLY),
+                Some(granted.as_str()),
+            ] {
                 server.reset().await;
                 let mut response = serde_json::json!({"access_token": "google-access", "refresh_token": "google-refresh", "expires_in": 3600});
                 if let Some(scope) = scope {
@@ -5415,16 +5501,13 @@ mod tests {
                     .await
                     .unwrap()
                     .unwrap();
-                if scope == Some(granted.as_str()) {
-                    result.unwrap();
-                    assert_eq!(saved.status, "active");
-                    assert_eq!(saved.token_scopes.as_deref(), scope);
-                } else {
-                    assert!(matches!(result, Err(AppError::ValidationError(_))));
-                    assert_eq!(saved.status, key.status);
-                    assert_eq!(saved.access_token_encrypted, key.access_token_encrypted);
-                    assert_eq!(saved.token_scopes, key.token_scopes);
-                }
+                result.unwrap();
+                assert_eq!(saved.status, "active");
+                assert!(saved.access_token_encrypted.is_some());
+                assert_eq!(
+                    saved.token_scopes.as_deref(),
+                    scope.or(key.token_scopes.as_deref())
+                );
             }
         }
     }

@@ -110,3 +110,169 @@ fn pending_file_is_protected_and_terminal_states_erase_poll_secret() {
             .contains("private-poll-secret")
     );
 }
+
+#[test]
+fn login_failure_without_diagnostic_keeps_legacy_json_and_exit_codes() {
+    for kind in [
+        LoginError::Unavailable,
+        LoginError::Storage,
+        LoginError::Pending,
+        LoginError::Denied,
+    ] {
+        let failure = LoginFailure::from(kind);
+        assert_eq!(failure.json(), kind.json());
+        assert_eq!(failure.text(), kind.to_string());
+        assert_eq!(failure.kind.exit_code(), kind.exit_code());
+    }
+}
+
+#[tokio::test]
+async fn malformed_challenge_json_does_not_echo_device_code_values() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+    let server = MockServer::start().await;
+    Mock::given(method("GET")).respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        "device_code":"POLL_SECRET", "user_code":"ABCD-EFGH", "verification_uri":"https://example.com/login", "expires_in":"TOKEN_SECRET", "interval":5
+    }))).mount(&server).await;
+    let response = credential_client(None)
+        .unwrap()
+        .get(server.uri())
+        .send()
+        .await
+        .unwrap();
+    let failure = match response_json::<Challenge>(response).await {
+        Ok(_) => panic!("invalid challenge accepted"),
+        Err(error) => error,
+    };
+    assert_eq!(failure.diagnostic.as_ref().unwrap().stage, Stage::Response);
+    for text in [failure.text(), failure.json().to_string()] {
+        assert!(!text.contains("TOKEN_SECRET"));
+        assert!(!text.contains("POLL_SECRET"));
+    }
+}
+
+#[tokio::test]
+async fn non_json_rate_limit_response_preserves_rate_limited_code() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("Retry-After", "20")
+                .set_body_string("not JSON"),
+        )
+        .mount(&server)
+        .await;
+    let response = credential_client(None)
+        .unwrap()
+        .get(server.uri())
+        .send()
+        .await
+        .unwrap();
+    let (error, interval) = poll_error(response).await;
+    assert_eq!(error.kind, LoginError::RateLimited);
+    assert_eq!(interval, Some(20));
+    assert!(error.diagnostic.is_none());
+    assert_eq!(
+        error.json().to_string(),
+        LoginError::RateLimited.json().to_string()
+    );
+}
+
+#[tokio::test]
+async fn normal_login_outcomes_keep_legacy_json_without_diagnostics() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+    for (code, kind) in [
+        (11202, LoginError::Pending),
+        (11903, LoginError::Pending),
+        (11204, LoginError::Denied),
+        (11904, LoginError::Denied),
+        (11201, LoginError::Expired),
+        (11905, LoginError::Delivered),
+        (11206, LoginError::RateLimited),
+        (12000, LoginError::InvalidCode),
+        (12004, LoginError::RateLimited),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(400).set_body_json(
+                    serde_json::json!({"error_code":code,"message":"SERVER_SECRET"}),
+                ),
+            )
+            .mount(&server)
+            .await;
+        let response = credential_client(None)
+            .unwrap()
+            .get(server.uri())
+            .send()
+            .await
+            .unwrap();
+        let error = response_error(response).await;
+        assert_eq!(error.kind, kind);
+        assert!(error.diagnostic.is_none());
+        let legacy = match kind {
+            LoginError::Pending => {
+                r#"{"error":{"code":"login_pending","message":"Login is awaiting approval; resume this request later."}}"#
+            }
+            LoginError::Denied => {
+                r#"{"error":{"code":"login_denied","message":"Login was denied. Start a new request to try again."}}"#
+            }
+            LoginError::Expired => {
+                r#"{"error":{"code":"login_expired","message":"Login expired. Start a new request."}}"#
+            }
+            LoginError::Delivered => {
+                r#"{"error":{"code":"login_already_delivered","message":"This login has already been delivered. Check the saved profile with whoami."}}"#
+            }
+            LoginError::RateLimited => {
+                r#"{"error":{"code":"login_rate_limited","message":"Login is rate limited. Wait before retrying this request."}}"#
+            }
+            LoginError::InvalidCode => {
+                r#"{"error":{"code":"login_code_invalid","message":"The login code is invalid or cancelled."}}"#
+            }
+            _ => panic!("unexpected normal outcome"),
+        };
+        assert_eq!(error.json().to_string(), legacy);
+        assert_eq!(error.text(), kind.to_string());
+    }
+}
+
+#[tokio::test]
+async fn unavailable_response_exposes_only_numeric_server_error_code() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+    for code in [
+        serde_json::json!(99999),
+        serde_json::json!("SERVER_SECRET"),
+        serde_json::Value::Null,
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(503).set_body_json(
+                    serde_json::json!({"error_code":code,"message":"SERVER_SECRET"}),
+                ),
+            )
+            .mount(&server)
+            .await;
+        let response = credential_client(None)
+            .unwrap()
+            .get(server.uri())
+            .send()
+            .await
+            .unwrap();
+        let error = response_error(response).await;
+        assert_eq!(error.kind, LoginError::Unavailable);
+        assert_eq!(
+            error.diagnostic.as_ref().unwrap().server_error_code,
+            code.as_i64()
+        );
+        assert!(
+            error
+                .diagnostic
+                .as_ref()
+                .unwrap()
+                .hint
+                .contains("--base-url")
+        );
+        assert!(!error.json().to_string().contains("SERVER_SECRET"));
+    }
+}

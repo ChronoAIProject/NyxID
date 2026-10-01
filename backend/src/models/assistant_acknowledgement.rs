@@ -25,12 +25,32 @@ pub struct AssistantAcknowledgement {
     /// Denial is sticky for the user turn that requested it. A new user turn
     /// may ask again; the model is explicitly instructed not to retry otherwise.
     pub requested_turn_id: Option<String>,
+    #[serde(default)]
+    pub trigger_run_id: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(default, with = "super::bson_datetime::optional")]
     pub decided_at: Option<DateTime<Utc>>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub expires_at: DateTime<Utc>,
+    /// `user` (default) or `orchestrator`: a specialist's permission request is
+    /// decided by the owner's NyxBot (or by the owner on the card).
+    #[serde(default = "default_decider")]
+    pub decider: String,
+    /// Bounded excerpt of the text that started the requesting turn, so the
+    /// orchestrator can judge the request against what was actually asked.
+    #[serde(default)]
+    pub request_excerpt: Option<String>,
+    /// `user` or `orchestrator` once decided.
+    #[serde(default)]
+    pub decided_by: Option<String>,
+    /// The orchestrator's bounded reason for its decision.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+fn default_decider() -> String {
+    "user".into()
 }
 
 impl std::fmt::Debug for AssistantAcknowledgement {

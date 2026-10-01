@@ -461,7 +461,22 @@ impl TelegramNewService<'_> {
         with_operation(
             self.db,
             "telegram-new-manager-configuration",
-            self.begin_inner(actor, owner, label, auto_connect),
+            self.begin_inner(actor, owner, label, auto_connect, None),
+        )
+        .await
+    }
+
+    pub async fn begin_linked(
+        &self,
+        actor: &str,
+        owner: &str,
+        label: &str,
+        link_claim: &super::channel_connect_link_service::Claim,
+    ) -> AppResult<(TelegramBotRequest, String)> {
+        with_operation(
+            self.db,
+            "telegram-new-manager-configuration",
+            self.begin_inner(actor, owner, label, true, Some(link_claim)),
         )
         .await
     }
@@ -472,6 +487,7 @@ impl TelegramNewService<'_> {
         owner: &str,
         label: &str,
         auto_connect: bool,
+        link_claim: Option<&super::channel_connect_link_service::Claim>,
     ) -> AppResult<(TelegramBotRequest, String)> {
         self.check_owner(actor, owner).await?;
         let label = label.trim();
@@ -508,7 +524,9 @@ impl TelegramNewService<'_> {
         };
         let challenge = nonce();
         let request = TelegramBotRequest {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: link_claim
+                .map(|claim| claim.link.id.clone())
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             actor_user_id: actor.into(),
             owner_user_id: owner.into(),
             manager_bot_id: manager_id,
@@ -537,10 +555,15 @@ impl TelegramNewService<'_> {
             expires_at: Utc::now() + Duration::minutes(15),
             purge_after: None,
         };
-        self.db
-            .collection::<TelegramBotRequest>(REQUESTS)
-            .insert_one(&request)
-            .await?;
+        if let Some(claim) = link_claim {
+            super::channel_connect_link_service::insert_telegram_request(self.db, claim, &request)
+                .await?;
+        } else {
+            self.db
+                .collection::<TelegramBotRequest>(REQUESTS)
+                .insert_one(&request)
+                .await?;
+        }
         Ok((
             request,
             format!("https://t.me/{manager_name}?start={}", challenge.as_str()),

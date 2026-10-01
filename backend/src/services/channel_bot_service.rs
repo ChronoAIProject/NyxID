@@ -150,6 +150,32 @@ pub async fn create_bot(
     label: Option<&str>,
     fields: &RegistrationValues<'_>,
 ) -> AppResult<CreateBotResult> {
+    create_bot_linked(
+        db,
+        config,
+        encryption_keys,
+        http_client,
+        adapter,
+        user_id,
+        label,
+        fields,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn create_bot_linked(
+    db: &mongodb::Database,
+    config: &AppConfig,
+    encryption_keys: &EncryptionKeys,
+    http_client: &reqwest::Client,
+    adapter: &dyn PlatformAdapter,
+    user_id: &str,
+    label: Option<&str>,
+    fields: &RegistrationValues<'_>,
+    link_claim: Option<&super::channel_connect_link_service::Claim>,
+) -> AppResult<CreateBotResult> {
     let descriptor = adapter.registration();
     if descriptor.managed_only {
         return Err(AppError::ValidationError(
@@ -192,6 +218,7 @@ pub async fn create_bot(
         identity,
         None,
         None,
+        link_claim,
     )
     .await
 }
@@ -226,6 +253,7 @@ async fn persist_verified_bot(
     identity: BotIdentity,
     managed: Option<(&str, &crate::models::channel_bot::ManagedBotSetup)>,
     connection: Option<(&str, &super::channel_platform::PollOutcome)>,
+    link_claim: Option<&super::channel_connect_link_service::Claim>,
 ) -> AppResult<CreateBotResult> {
     let descriptor = adapter.registration();
     let BotIdentity {
@@ -245,7 +273,8 @@ async fn persist_verified_bot(
         .await?;
 
     if let Some(existing) = existing {
-        if managed.is_none()
+        if link_claim.is_none()
+            && managed.is_none()
             && connection.is_none()
             && adapter.platform_id() == "telegram"
             && existing.user_id == user_id
@@ -298,7 +327,9 @@ async fn persist_verified_bot(
         x_events: None,
         last_verification: None,
         ownership_version: 0,
-        id: uuid::Uuid::new_v4().to_string(),
+        id: link_claim
+            .map(|claim| claim.link.id.clone())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
         user_id: user_id.to_string(),
         platform: adapter.platform_id().to_string(),
         label: label.to_string(),
@@ -365,7 +396,14 @@ async fn persist_verified_bot(
     .await?;
     let bot: ChannelBot = bson::from_document(document)
         .map_err(|_| AppError::Internal("Invalid channel bot storage fields".to_string()))?;
-    insert_registered_bot(db, &bot, config.channel_relay_max_bots_per_user, None).await?;
+    insert_registered_bot_linked(
+        db,
+        &bot,
+        config.channel_relay_max_bots_per_user,
+        None,
+        link_claim,
+    )
+    .await?;
     let bot = get_bot(db, &bot.id).await?;
 
     Ok(CreateBotResult {
@@ -391,6 +429,26 @@ pub async fn create_managed_bot(
     label: &str,
     input: &super::channel_managed::ManagedOnboardingInput,
     progress: &super::channel_managed::ManagedProgress,
+) -> AppResult<CreateBotResult> {
+    create_managed_bot_linked(
+        db, billing, config, keys, http, adapter, owner, label, input, progress, None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn create_managed_bot_linked(
+    db: &mongodb::Database,
+    billing: &super::billing::BillingService,
+    config: &AppConfig,
+    keys: &EncryptionKeys,
+    http: &reqwest::Client,
+    adapter: &dyn PlatformAdapter,
+    owner: &str,
+    label: &str,
+    input: &super::channel_managed::ManagedOnboardingInput,
+    progress: &super::channel_managed::ManagedProgress,
+    link_claim: Option<&super::channel_connect_link_service::Claim>,
 ) -> AppResult<CreateBotResult> {
     let managed = adapter
         .managed_onboarding()
@@ -493,6 +551,7 @@ pub async fn create_managed_bot(
             identity,
             None,
             Some((connection_id, &outcome)),
+            link_claim,
         )
         .await?;
         progress.stage("subscribing");
@@ -546,6 +605,7 @@ pub async fn create_managed_bot(
         result.identity,
         Some((&result.registration_pin, &result.setup)),
         None,
+        link_claim,
     )
     .await?;
     let webhook_url = format!(
@@ -587,15 +647,25 @@ pub(crate) async fn insert_registered_bot(
     capacity: u32,
     telegram_request_revision: Option<i64>,
 ) -> AppResult<()> {
+    insert_registered_bot_linked(db, bot, capacity, telegram_request_revision, None).await
+}
+
+pub(crate) async fn insert_registered_bot_linked(
+    db: &mongodb::Database,
+    bot: &ChannelBot,
+    capacity: u32,
+    telegram_request_revision: Option<i64>,
+    link_claim: Option<&super::channel_connect_link_service::Claim>,
+) -> AppResult<()> {
     if matches!(bot.platform.as_str(), "telegram" | "telegram-new") {
         super::telegram_new_service::with_operation(
             db,
             &format!("telegram-manager-identity:{}", bot.platform_bot_id),
-            insert_registered_bot_inner(db, bot, capacity, telegram_request_revision),
+            insert_registered_bot_inner(db, bot, capacity, telegram_request_revision, link_claim),
         )
         .await
     } else {
-        insert_registered_bot_inner(db, bot, capacity, telegram_request_revision).await
+        insert_registered_bot_inner(db, bot, capacity, telegram_request_revision, link_claim).await
     }
 }
 
@@ -604,6 +674,7 @@ async fn insert_registered_bot_inner(
     bot: &ChannelBot,
     capacity: u32,
     telegram_request_revision: Option<i64>,
+    link_claim: Option<&super::channel_connect_link_service::Claim>,
 ) -> AppResult<()> {
     use super::api_key_mutation_service::{map_transaction_error, transaction_result};
     use crate::models::platform_settings::{COLLECTION_NAME as SETTINGS, PLATFORM_SETTINGS_ID};
@@ -618,6 +689,7 @@ async fn insert_registered_bot_inner(
     let mut session = db.client().start_session().await?;
     let db = db.clone();
     let mut bot = bot.clone();
+    let link_claim = link_claim.cloned();
     session.start_transaction().and_run2(async move |session| {
         let operation: AppResult<()> = async {
             db.collection::<bson::Document>(SETTINGS).update_one(doc! {"_id": PLATFORM_SETTINGS_ID}, doc! {"$inc": {"channel_bot_registration_revision": 1_i64}}).session(&mut *session).await?;
@@ -671,6 +743,11 @@ async fn insert_registered_bot_inner(
                         "Connected OAuth credential not found".into(),
                     ));
                 }
+            }
+            if let Some(claim) = &link_claim {
+                super::channel_connect_link_service::associate(&db, &mut *session, claim, &bot).await?;
+            } else if telegram_request_revision.is_some() {
+                super::channel_connect_link_service::associate_telegram(&db, &mut *session, &bot).await?;
             }
             bots.insert_one(&bot).session(&mut *session).await?;
             Ok(())
@@ -1580,8 +1657,9 @@ pub async fn list_bots(db: &mongodb::Database, user_id: &str) -> AppResult<Vec<C
     Ok(bots)
 }
 
-/// List active personal and administered-org bots in one newest-first list.
-pub async fn list_all_bots(db: &mongodb::Database, actor: &str) -> AppResult<Vec<ChannelBot>> {
+/// The actor and every organization they administer: the owners whose
+/// channel bots and routes the actor manages.
+pub async fn managed_owner_ids(db: &mongodb::Database, actor: &str) -> AppResult<Vec<String>> {
     use crate::models::user::{COLLECTION_NAME as USERS, User};
 
     let memberships = super::org_service::list_memberships_for_member(db, actor, false).await?;
@@ -1601,7 +1679,12 @@ pub async fn list_all_bots(db: &mongodb::Database, actor: &str) -> AppResult<Vec
             .await?;
         owner_ids.extend(orgs.into_iter().map(|org| org.id));
     }
+    Ok(owner_ids)
+}
 
+/// List active personal and administered-org bots in one newest-first list.
+pub async fn list_all_bots(db: &mongodb::Database, actor: &str) -> AppResult<Vec<ChannelBot>> {
+    let owner_ids = managed_owner_ids(db, actor).await?;
     Ok(db
         .collection::<ChannelBot>(COLLECTION_NAME)
         .find(doc! { "user_id": { "$in": owner_ids }, "is_active": true })

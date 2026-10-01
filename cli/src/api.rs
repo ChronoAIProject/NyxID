@@ -142,7 +142,7 @@ fn build_cli_http_client_with_redirect(
     let user_consented =
         crate::telemetry::consent::resolve_consent_preferring_profile(profile).enabled;
 
-    let mut builder = Client::builder()
+    let mut builder = crate::tls::client_builder()?
         .redirect(redirect)
         .user_agent(CLI_USER_AGENT)
         .connect_timeout(std::time::Duration::from_secs(10));
@@ -258,7 +258,7 @@ impl ApiClient {
     }
 
     pub fn for_credential_transfer(mut self) -> Result<Self> {
-        self.client = Client::builder()
+        self.client = crate::tls::client_builder()?
             .redirect(reqwest::redirect::Policy::none())
             .user_agent(CLI_USER_AGENT)
             .connect_timeout(std::time::Duration::from_secs(10))

@@ -1,3 +1,4 @@
+import { useChannelConnectLinkContext } from "@/hooks/use-channel-connect-link";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, apiClient } from "@/lib/api-client";
 import { mutationCreditsDenial } from "@/lib/credits-denial";
@@ -80,6 +81,7 @@ export function useChannelBot(id: string) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export function useCreateChannelBot() {
+  const link = useChannelConnectLinkContext();
   const queryClient = useQueryClient();
 
   return useMutation({
@@ -87,7 +89,9 @@ export function useCreateChannelBot() {
     mutationFn: async (
       data: CreateChannelBotRequest,
     ): Promise<CreateChannelBotResponse> => {
-      return api.post<CreateChannelBotResponse>("/channel-bots", data);
+      return link
+        ? api.post<CreateChannelBotResponse>("/channel-connect-links/complete", { ...data, token: link.token })
+        : api.post<CreateChannelBotResponse>("/channel-bots", data);
     },
     onSettled: () => {
       // Registration can save a bot before webhook setup fails.

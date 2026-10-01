@@ -3504,6 +3504,7 @@
     "/v1/email/drafts/{draftId}/send": {
       "post": {
         "operationId": "send_draft",
+        "x-nyxid-changes-existing": true,
         "tags": [
           "Drafts"
         ],

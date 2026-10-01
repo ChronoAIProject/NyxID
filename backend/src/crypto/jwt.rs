@@ -130,7 +130,6 @@ pub const RELAY_REPLY_TOKEN_TYPE: &str = "relay_reply";
 const RELAY_REPLY_CLOCK_SKEW_SECS: i64 = 60;
 pub const RELAY_CALLBACK_AUDIENCE: &str = "channel-relay/callback";
 pub const RELAY_CALLBACK_TOKEN_TYPE: &str = "relay_callback";
-#[cfg(test)]
 const RELAY_CALLBACK_CLOCK_SKEW_SECS: i64 = 60;
 
 /// Dedicated claims for `/api/v1/channel-relay/reply`.
@@ -1127,10 +1126,9 @@ pub fn validate_relay_reply_token(
 
 /// Verify and decode a relay callback token.
 ///
-/// NyxID itself never validates these tokens in production — downstream
-/// consumers (e.g. Aevatar) do so via the public JWKS. This helper exists
-/// for round-trip tests, so it is compiled only under `cfg(test)`.
-#[cfg(test)]
+/// Downstream consumers (e.g. Aevatar, the Agent Event Gateway) verify these
+/// via the public JWKS. NyxID verifies them itself only where it is the
+/// callback receiver: NyxBot's direct channel relay endpoint.
 pub fn validate_relay_callback_token(
     keys: &JwtKeys,
     config: &AppConfig,
@@ -1300,6 +1298,7 @@ mod tests {
             cli_pairing_hmac_key: None,
             audit_chain_hmac_key: None,
             billing_ledger_hmac_key: None,
+            billing_exact_cutover_drained: false,
             chain_verify_interval_secs: 0,
             sa_token_ttl_secs: 3600,
             telemetry_dsn: None,
@@ -1399,7 +1398,6 @@ mod tests {
             billing_default_overdraft_cap_credits: 0,
             billing_fail_closed: false,
             billing_resale_enabled: false,
-            invite_code_required: true,
             email_auth_enabled: false,
             auto_verify_email: false,
         };

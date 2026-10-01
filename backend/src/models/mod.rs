@@ -21,6 +21,7 @@ pub mod catalog_delegation_grant;
 pub mod catalog_identity_reconciliation;
 pub mod chain_verify_status;
 pub mod channel_bot;
+pub mod channel_connect_link;
 pub mod channel_conversation;
 pub mod channel_event_log;
 pub mod channel_message;
@@ -59,6 +60,7 @@ pub mod notification_channel;
 pub mod nullable_field;
 pub mod oauth_broker_binding;
 pub mod oauth_client;
+pub mod oauth_consent_request;
 pub mod oauth_flow_kind;
 pub mod oauth_state;
 pub mod oracle_login_profile;
@@ -86,6 +88,7 @@ pub mod service_approval_config;
 pub mod service_billing;
 pub mod service_endpoint;
 pub mod service_pool;
+pub mod service_pool_member_health;
 pub mod service_provider_requirement;
 pub mod session;
 pub mod ssh_auth_mode;
@@ -108,13 +111,18 @@ pub mod user_service_connection;
 pub mod ws_frame_injection;
 
 pub mod assistant_acknowledgement;
+pub mod assistant_agent;
 pub mod assistant_agent_credential;
 pub mod assistant_attachment;
 pub mod assistant_conversation;
+pub mod assistant_group;
 pub mod assistant_message;
+pub mod assistant_profile_route;
+pub mod assistant_settings;
 pub mod catalog_skill_revision;
 pub mod channel_delivery;
 pub mod channel_email;
+pub mod nyxbot_channel;
 pub mod service_change_event;
 pub mod usage_rollup_daily;
 pub mod usage_rollup_hourly;
@@ -122,3 +130,11 @@ pub mod usage_rollup_state;
 pub mod usage_workspace;
 
 pub mod channel_activity;
+
+pub mod credits;
+
+pub mod billing_lago_carry;
+
+pub mod pool_recovery_diagnostic;
+pub mod trigger_run;
+pub mod trigger_schedule;

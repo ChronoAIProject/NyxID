@@ -862,7 +862,10 @@ async fn resolve_edit_request_context(
 // Handlers
 // ---------------------------------------------------------------------------
 
-async fn check_initiate_rate_limit(state: &AppState, conversation_id: &str) -> AppResult<()> {
+pub(crate) async fn check_initiate_rate_limit(
+    state: &AppState,
+    conversation_id: &str,
+) -> AppResult<()> {
     if !state
         .per_conversation_initiate_limiter
         .check_shared(conversation_id)
@@ -976,7 +979,7 @@ pub async fn send_message(
     .map(Json)
 }
 
-async fn deliver_initiated_message(
+pub(crate) async fn deliver_initiated_message(
     state: &AppState,
     headers: &HeaderMap,
     auth_user: &AuthUser,
@@ -3707,8 +3710,10 @@ mod tests {
             thread_id: None,
             agent_api_key_id: Some(api_key.id.clone()),
             callback_status: Some("delivered".to_string()),
+            callback_http_status: None,
             reply_to_message_id: None,
             platform_reply_message_id: None,
+            reply_to_platform_message_id: None,
             created_at: now,
             updated_at: None,
         };
@@ -3731,8 +3736,10 @@ mod tests {
             thread_id: None,
             agent_api_key_id: Some(api_key.id.clone()),
             callback_status: None,
+            callback_http_status: None,
             reply_to_message_id: Some(message.id.clone()),
             platform_reply_message_id: None,
+            reply_to_platform_message_id: None,
             created_at: now,
             updated_at: Some(now),
         };
