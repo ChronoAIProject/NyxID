@@ -416,9 +416,12 @@ jobs:
         run: |
           docker build --build-arg MACHINE_IMAGE=nyxid-node-machine:ci -f cli/tests/Dockerfile.machine -t nyxid-machine-e2e:ci .
           docker run --rm --shm-size=256m --security-opt seccomp=cli/resources/machine-container/seccomp.json nyxid-machine-e2e:ci
+          python3 cli/tests/machine_mount_denied_profile.py cli/resources/machine-container/seccomp.json /tmp/nyxid-machine-deny-mount.json
+          docker run --rm --shm-size=256m --security-opt seccomp=/tmp/nyxid-machine-deny-mount.json nyxid-machine-e2e:ci
       - name: Verify existing-profile migration, signed updates and rollback
         env:
           MACHINE_IMAGE: nyxid-node-machine:ci
+          MACHINE_TEST_SECCOMP: /tmp/nyxid-machine-deny-mount.json
         run: sh cli/tests/machine_updater_e2e.sh
       - name: Remove test images and build cache
         if: always()

@@ -1236,9 +1236,20 @@ On Linux the developer browser runs as `devbrowser` (or `nyxdev-PROFILE` on a
 separated VM), with its own 0700 profile. It cannot read the secure browser user's
 0700 profile, cookies or home directory. Chromium's `--password-store=basic`
 makes profile files sensitive: preserve that OS-user separation and protect
-volume backups. Supervisor-owned managed policies block `file://`; bubblewrap
-mounts the developer policy over Chromium's policy directory in a private user
-and mount namespace. CDP uses only a supervisor-owned pipe; there is no TCP
+volume backups. Supervisor-owned managed policies block `file://`. Native Linux
+uses bubblewrap to mount the developer policy over Chromium's policy directory
+in a private user and mount namespace. In the official container, Docker's
+AppArmor profile can deny those mounts. The supervisor instead launches Chromium
+directly as `devbrowser`, retaining its own namespace/seccomp renderer sandbox.
+Secure and dev policy files are root-owned, mode 0640, and readable only by the
+`browser` and `devbrowser` groups respectively; neither browser can read the
+other's policy or change either file. No extra capabilities, privileged mode or
+AppArmor exception is needed. The developer user cannot read/write the secure
+profile or node identity/credential directory, write `/workspace`, or reach the
+saved-login native host (whose executable, manifest and socket are restricted to
+the secure browser). Saved-login storage remains server-side. The agent's
+namespace-denying filter and the secure browser's sandbox/policies are unchanged.
+CDP uses only a supervisor-owned pipe; there is no TCP
 DevTools endpoint and no job receives its descriptors. Agent commands and file
 workers retain their own namespace/mount-denying seccomp filter. On macOS, Chrome
 is the secure browser and Chrome Beta is the developer browser, with separate
@@ -1249,6 +1260,26 @@ physical desktop and OS user, so display/profile separation is not a security
 boundary there; takeover locks both views. Single-user Linux starts a private
 Xvfb for dev with its own cookie but the shared OS user can still read both
 cookies; the same warning and recommendation apply.
+
+Developer-browser setup, spawn, process and pipe failures return
+`machine_browser_unavailable` (12413) with fixed, actionable guidance. The node
+logs only the failure classification and available exit status, never child
+stderr, URLs, cookies or page content. An unavailable browser is discarded so
+the next call can launch a fresh process. Frame navigation retries must not
+swallow transport failures or return an empty successful snapshot.
+
+The container e2e runs with both the shipped seccomp profile and a stricter
+mount-denying profile, emulating AppArmor on Docker Desktop. To reproduce:
+
+```sh
+python3 cli/tests/machine_mount_denied_profile.py cli/resources/machine-container/seccomp.json /tmp/nyxid-machine-deny-mount.json
+docker run --rm --shm-size=256m --security-opt seccomp=/tmp/nyxid-machine-deny-mount.json nyxid-machine-e2e:local
+MACHINE_IMAGE=nyxid-node-machine:local MACHINE_TEST_SECCOMP=/tmp/nyxid-machine-deny-mount.json sh cli/tests/machine_updater_e2e.sh
+```
+
+These checks retain all browser, frame, display, attachment and update-migration
+assertions, including both renderer sandboxes and actual filesystem/socket
+access attempts as `devbrowser`. PR and Publish Images runs use the same profiles.
 
 The Linux image installs `at-spi2-core`, starts a D-Bus/AT-SPI session as the
 secure `browser` user, and enables Chromium renderer accessibility. Its bus

@@ -710,6 +710,8 @@ mod container_e2e {
         let name = std::env::var("NYXID_TEST_MACHINE")?;
         let driver = std::env::var("NYXID_TEST_DRIVER")?;
         let image = std::env::var("NYXID_TEST_IMAGE")?;
+        let target = std::env::var("NYXID_TEST_TARGET_VERSION")?;
+        update::version(&target).map_err(anyhow::Error::msg)?;
         ensure!(
             name.starts_with("nyxid-update-e2e-"),
             "Test container namespace required"
@@ -753,7 +755,7 @@ mod container_e2e {
         tokio::time::sleep(Duration::from_secs(35)).await;
         let before = api.inspect(&name).await?;
         api = docker::Docker::local_fixture(&image)?;
-        replace(&api, root, &name, "0.40.0", false, true).await?;
+        replace(&api, root, &name, &target, false, true).await?;
         let progress: Progress = serde_json::from_slice(&read(root, "progress.json", 4096)?)?;
         ensure!(progress.phase == Phase::Connected, "Migration rolled back");
         let migrated = ready(&client, 2).await?;
@@ -794,6 +796,16 @@ mod container_e2e {
             status(&client).await?["cookieVisits"].as_u64().unwrap_or(0) > 0,
             "Browser cookie did not survive migration"
         );
+        let dev = call(
+            &client,
+            "browser",
+            json!({"browser":"dev","action":"navigate","url":"http://127.0.0.1:33443/page"}),
+        )
+        .await?;
+        ensure!(
+            dev["status"] == "ok" && dev.to_string().contains("Identity and profile retained"),
+            "Developer browser unavailable after migration: {dev}"
+        );
         let denied=call(&client,"exec",json!({"runtime_id":migrated["machine"]["runtime_id"],"job_id":"2ad5f1c8-3105-4985-88eb-2c7711be40d5","conversation_id":"fixture","command":"test ! -w /var/lib/nyxid-machine-update","cwd":"/workspace","services":[],"timeout_secs":10})).await?;
         ensure!(
             denied["exit_code"] == 0,
@@ -803,7 +815,7 @@ mod container_e2e {
         let upgrade = call(
             &client,
             "upgrade",
-            json!({"version":"0.40.0","automatic":false,"owner_rollback":false}),
+            json!({"version":target,"automatic":false,"owner_rollback":false}),
         )
         .await?;
         ensure!(
@@ -811,10 +823,10 @@ mod container_e2e {
             "Signed upgrade refused: {upgrade}"
         );
         ensure!(
-            read(root, "request", 80)? == b"0.40.0",
+            read(root, "request", 80)? == target.as_bytes(),
             "Mailbox contains more than version"
         );
-        replace(&api, root, &name, "0.40.0", false, false).await?;
+        replace(&api, root, &name, &target, false, false).await?;
         ready(&client, 3).await?;
         ensure!(
             request(root)?.is_none(),
@@ -822,7 +834,7 @@ mod container_e2e {
         );
         let known = api.inspect(&name).await?["Id"].clone();
         api.test_failed_replacement = true;
-        replace(&api, root, &name, "0.40.0", false, false).await?;
+        replace(&api, root, &name, &target, false, false).await?;
         let rolled: Progress = serde_json::from_slice(&read(root, "progress.json", 4096)?)?;
         ensure!(
             rolled.phase == Phase::RolledBack,

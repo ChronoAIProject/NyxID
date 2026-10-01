@@ -104,6 +104,57 @@ fn write_owned(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     Ok(())
 }
 
+/// Docker's AppArmor profile forbids bwrap policy mounts. Chromium reads only
+/// its own group's policy file; both files remain supervisor-owned and immutable
+/// to either browser. Native Linux continues using the private bwrap policy mount.
+pub fn install_container_policies(root: &Path, secure_gid: u32, dev_gid: u32) -> Result<()> {
+    anyhow::ensure!(
+        secure_gid != dev_gid,
+        "Browser policy groups must be distinct"
+    );
+    let policies = owned_directory(root, Path::new("etc/chromium/policies/managed"))?;
+    write_owned(
+        &policies.join("nyxid-dev.json"),
+        &serde_json::to_vec(&dev_policy())?,
+        0o640,
+    )?;
+    for (path, gid, mode) in [
+        (policies.join("nyxid.json"), secure_gid, 0o640),
+        (policies.join("nyxid-dev.json"), dev_gid, 0o640),
+        (
+            root.join("etc/chromium/native-messaging-hosts/dev.nyxid.machine_filler.json"),
+            secure_gid,
+            0o640,
+        ),
+        (
+            root.join("opt/nyxid/machine-browser/native-host"),
+            secure_gid,
+            0o750,
+        ),
+        (
+            root.join("opt/nyxid/machine-browser/nyxid-native-host"),
+            secure_gid,
+            0o750,
+        ),
+    ] {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)?;
+        anyhow::ensure!(
+            file.metadata()?.is_file(),
+            "Managed policy must be a regular file"
+        );
+        // File descriptor ownership avoids following a replaced path.
+        use std::os::fd::AsRawFd;
+        if unsafe { libc::fchown(file.as_raw_fd(), libc::geteuid(), gid) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        file.set_permissions(std::fs::Permissions::from_mode(mode))?;
+    }
+    Ok(())
+}
+
 pub(super) fn runtime_directory(path: &Path, uid: u32, gid: u32, mode: u32) -> Result<()> {
     match std::fs::create_dir(path) {
         Ok(()) => {}

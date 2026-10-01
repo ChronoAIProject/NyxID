@@ -379,7 +379,13 @@ pub fn install_browser(port: u16) -> Result<()> {
         &installed,
         &format!("http://127.0.0.1:{port}/update.xml"),
         cfg!(target_os = "macos"),
-    )
+    )?;
+    if cfg!(target_os = "linux") && std::env::var_os("NYXID_MACHINE_CONTAINER").is_some() {
+        let secure = super::process::Identity::resolve(Some("browser"))?;
+        let dev = super::process::Identity::resolve(Some("devbrowser"))?;
+        super::browser::install_container_policies(Path::new("/"), secure.gid, dev.gid)?;
+    }
+    Ok(())
 }
 
 fn install_supervisor_binary() -> Result<PathBuf> {

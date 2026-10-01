@@ -22,6 +22,73 @@ const MAX_CDP_BYTES: usize = 8 * 1024 * 1024;
 #[error("{0}")]
 struct Refusal(&'static str);
 
+/// Fixed, secret-free diagnostics. Never include a CDP payload or child stderr.
+#[derive(Debug, Clone, Copy)]
+pub enum Failure {
+    Setup,
+    Identity,
+    #[cfg(target_os = "linux")]
+    Display,
+    Spawn,
+    Exited,
+    PipeWrite,
+    PipeRead,
+    PipeClosed,
+    Protocol,
+    Timeout,
+}
+
+impl Failure {
+    pub fn message(&self) -> &'static str {
+        match self {
+            Self::Setup => {
+                "machine_browser_unavailable: developer browser setup is incomplete; repair managed browser policies and profile permissions"
+            }
+            Self::Identity => {
+                "machine_browser_unavailable: developer browser OS user is missing or cannot be used; rerun setup --separate-users or update the machine image"
+            }
+            #[cfg(target_os = "linux")]
+            Self::Display => {
+                "machine_browser_unavailable: developer display is unavailable; check Xvfb, openbox and its private Xauthority"
+            }
+            #[cfg(target_os = "linux")]
+            Self::Spawn => {
+                "machine_browser_unavailable: cannot start developer browser; install Chromium and, on native Linux, bubblewrap"
+            }
+            #[cfg(target_os = "macos")]
+            Self::Spawn => {
+                "machine_browser_unavailable: cannot start developer browser; install Google Chrome Beta and repair its managed policies"
+            }
+            Self::Exited => {
+                "machine_browser_unavailable: developer browser exited; on native Linux check bubblewrap user-namespace permissions; restart the browser or update the machine image"
+            }
+            Self::PipeWrite => {
+                "machine_browser_unavailable: developer browser pipe write failed; retry to start a fresh browser"
+            }
+            Self::PipeRead => {
+                "machine_browser_unavailable: developer browser pipe read failed; retry to start a fresh browser"
+            }
+            Self::PipeClosed => {
+                "machine_browser_unavailable: developer browser closed its pipe; on native Linux check bubblewrap user-namespace permissions; retry or update the machine image"
+            }
+            Self::Protocol => {
+                "machine_browser_unavailable: invalid developer browser pipe response; restart the browser or update Chromium"
+            }
+            Self::Timeout => {
+                "machine_browser_unavailable: developer browser timed out; observe before retrying the action"
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message())
+    }
+}
+
+impl std::error::Error for Failure {}
+
 pub struct DevBrowser {
     child: Child,
     pipe: BufReader<UnixStream>,
@@ -47,11 +114,28 @@ impl DevBrowser {
         directory: &Path,
         identity: &Identity,
         secure_binary: &Path,
+        container: bool,
+    ) -> Result<Self> {
+        Self::launch_inner(directory, identity, secure_binary, container)
+            .await
+            .map_err(|error| {
+                let failure = error
+                    .downcast_ref::<Failure>()
+                    .copied()
+                    .unwrap_or(Failure::Setup);
+                tracing::warn!(reason = ?failure, "developer browser launch failed");
+                anyhow::Error::new(failure)
+            })
+    }
+
+    async fn launch_inner(
+        directory: &Path,
+        identity: &Identity,
+        secure_binary: &Path,
+        container: bool,
     ) -> Result<Self> {
         if identity.uid == 0 {
-            bail!(
-                "Developer browser needs a non-root user; rerun node setup --separate-users to provision it"
-            );
+            return Err(Failure::Identity.into());
         }
         browser::protected_runtime_parent(directory)?;
         let profile = directory.join("dev-browser-profile");
@@ -65,7 +149,12 @@ impl DevBrowser {
         }
         let fd = unsafe { OwnedFd::from_raw_fd(fd) };
         #[cfg(target_os = "linux")]
-        let mut command = {
+        let mut command = if container {
+            // Container policy files are readable only by their browser group.
+            // Docker/AppArmor already supplies the mount boundary; no bwrap mount
+            // is needed or permitted. Chromium still establishes its own sandbox.
+            Command::new(secure_binary)
+        } else {
             let mut cmd = Command::new("bwrap");
             cmd.args([
                 "--die-with-parent",
@@ -104,25 +193,25 @@ impl DevBrowser {
         };
         #[cfg(target_os = "macos")]
         let mut command = {
-            let _ = secure_binary;
+            let _ = (secure_binary, container);
             let binary =
                 Path::new("/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta");
             if !binary.is_file() {
-                bail!(
-                    "Install Google Chrome Beta for the developer browser; Chrome remains the secure browser"
-                );
+                return Err(Failure::Spawn.into());
             }
             Command::new(binary)
         };
-        identity.prepare(&mut command)?;
+        identity.prepare(&mut command).context(Failure::Identity)?;
         identity.desktop_env(&mut command);
         command
             .env_remove("DBUS_SESSION_BUS_ADDRESS")
             .env_remove("AT_SPI_BUS_ADDRESS");
         #[cfg(target_os = "linux")]
         {
-            super::dev_display::ensure(identity).await?;
-            let (display, authority) = super::dev_display::endpoint()?;
+            super::dev_display::ensure(identity)
+                .await
+                .context(Failure::Display)?;
+            let (display, authority) = super::dev_display::endpoint().context(Failure::Display)?;
             command.env("DISPLAY", display).env("XAUTHORITY", authority);
             // Remove the cookie copied by older versions. Never share X11 trust.
             match std::fs::remove_file(profile.join("Xauthority")) {
@@ -153,7 +242,7 @@ impl DevBrowser {
                 // Its fixed wrapper moves these to Chromium's CDP slots after
                 // the namespace is established. Neither is exposed to jobs.
                 #[cfg(target_os = "linux")]
-                let (read_fd, write_fd) = (0, 1);
+                let (read_fd, write_fd) = if container { (3, 4) } else { (0, 1) };
                 #[cfg(target_os = "macos")]
                 let (read_fd, write_fd) = (3, 4);
                 if libc::dup2(fd.as_raw_fd(), read_fd) < 0
@@ -164,9 +253,7 @@ impl DevBrowser {
                 Ok(())
             });
         }
-        let child = command
-            .spawn()
-            .context("developer browser unavailable; install bubblewrap on Linux")?;
+        let child = spawn(&mut command)?;
         drop(command);
         drop(child_pipe);
         let mut browser = Self {
@@ -182,7 +269,8 @@ impl DevBrowser {
             Duration::from_secs(15),
             browser.rpc(None, "Browser.getVersion", json!({})),
         )
-        .await??;
+        .await
+        .context(Failure::Timeout)??;
         Ok(browser)
     }
 
@@ -231,6 +319,25 @@ impl DevBrowser {
     }
 
     async fn rpc(&mut self, session: Option<&str>, method: &str, params: Value) -> Result<Value> {
+        let result = self.rpc_inner(session, method, params).await;
+        if let Err(error) = &result
+            && let Some(reason) = error.downcast_ref::<Failure>()
+        {
+            let exit_status = self.child.try_wait().ok().flatten();
+            tracing::warn!(?reason, ?exit_status, "developer browser transport failed");
+        }
+        result
+    }
+
+    async fn rpc_inner(
+        &mut self,
+        session: Option<&str>,
+        method: &str,
+        params: Value,
+    ) -> Result<Value> {
+        if self.child.try_wait().context(Failure::Exited)?.is_some() {
+            return Err(Failure::Exited.into());
+        }
         self.next_id += 1;
         let id = self.next_id;
         let mut request = json!({"id":id,"method":method,"params":params});
@@ -239,20 +346,24 @@ impl DevBrowser {
         }
         let mut bytes = serde_json::to_vec(&request)?;
         bytes.push(0);
-        self.pipe.get_mut().write_all(&bytes).await?;
+        self.pipe
+            .get_mut()
+            .write_all(&bytes)
+            .await
+            .context(Failure::PipeWrite)?;
         loop {
             let mut bytes = Vec::new();
             loop {
-                let buffer = self.pipe.fill_buf().await?;
+                let buffer = self.pipe.fill_buf().await.context(Failure::PipeRead)?;
                 if buffer.is_empty() {
-                    bail!("developer browser pipe closed");
+                    return Err(Failure::PipeClosed.into());
                 }
                 let size = buffer
                     .iter()
                     .position(|b| *b == 0)
                     .map_or(buffer.len(), |i| i + 1);
                 if bytes.len() + size > MAX_CDP_BYTES {
-                    bail!("developer browser result exceeds limit");
+                    return Err(Failure::Protocol.into());
                 }
                 bytes.extend_from_slice(&buffer[..size]);
                 self.pipe.consume(size);
@@ -261,7 +372,7 @@ impl DevBrowser {
                     break;
                 }
             }
-            let value: Value = serde_json::from_slice(&bytes)?;
+            let value: Value = serde_json::from_slice(&bytes).context(Failure::Protocol)?;
             if value["id"] == id {
                 if value.get("error").is_some() {
                     bail!("developer browser operation refused");
@@ -331,6 +442,7 @@ impl DevBrowser {
             .await
         {
             Ok(value) => (session.to_owned(), value),
+            Err(error) if error.downcast_ref::<Failure>().is_some() => return Err(error),
             Err(_) => {
                 // Cross-site out-of-process iframes have their own CDP target.
                 let child = if let Some(child) = self.sessions.get(frame) {
@@ -487,12 +599,15 @@ impl DevBrowser {
                     {
                         continue;
                     }
-                    let Ok((child_session, _)) = self.frame_context(session, id).await else {
+                    let Some((child_session, _)) =
+                        optional_frame(self.frame_context(session, id).await)?
+                    else {
                         continue;
                     };
-                    let Ok(child_tree) = self
-                        .rpc(Some(&child_session), "Page.getFrameTree", json!({}))
-                        .await
+                    let Some(child_tree) = optional_frame(
+                        self.rpc(Some(&child_session), "Page.getFrameTree", json!({}))
+                            .await,
+                    )?
                     else {
                         continue;
                     };
@@ -545,16 +660,18 @@ impl DevBrowser {
                 continue;
             }
             if parent.is_some() {
-                let Ok(point) = self
-                    .frame_action(session, frame, &json!({"action":"_visibility"}))
-                    .await
+                let Some(point) = optional_frame(
+                    self.frame_action(session, frame, &json!({"action":"_visibility"}))
+                        .await,
+                )?
                 else {
                     continue;
                 };
-                if self
-                    .frame_point(session, &frames, frame, point, false)
-                    .await
-                    .is_err()
+                if optional_frame(
+                    self.frame_point(session, &frames, frame, point, false)
+                        .await,
+                )?
+                .is_none()
                 {
                     continue;
                 }
@@ -565,7 +682,8 @@ impl DevBrowser {
             if let Some((_, ref_id)) = &scope {
                 params["scope"] = json!(ref_id);
             }
-            let Ok(page) = self.frame_action(session, frame, &params).await else {
+            let Some(page) = optional_frame(self.frame_action(session, frame, &params).await)?
+            else {
                 continue;
             };
             if frame == &root {
@@ -651,7 +769,7 @@ impl DevBrowser {
     pub async fn action(&mut self, request: &Value) -> Result<Value> {
         let result = tokio::time::timeout(Duration::from_secs(20), self.action_inner(request))
             .await
-            .context("developer browser action timed out; observe before retrying")?;
+            .context(Failure::Timeout)?;
         match result {
             Err(error) if error.downcast_ref::<Refusal>().is_some() => {
                 Ok(json!({"status":"refused","reason":error.downcast_ref::<Refusal>().unwrap().0}))
@@ -789,6 +907,7 @@ impl DevBrowser {
                     break value;
                 }
                 Ok(value) if tokio::time::Instant::now() >= deadline => break value,
+                Err(error) if error.downcast_ref::<Failure>().is_some() => return Err(error),
                 Err(error)
                     if !navigation && action != "wait"
                         || tokio::time::Instant::now() >= deadline =>
@@ -817,6 +936,20 @@ impl DevBrowser {
     }
 }
 
+// Detached/navigating frames can be skipped, but a dead pipe must reach the
+// caller as browser_unavailable, never as a successful empty snapshot.
+fn optional_frame<T>(result: Result<T>) -> Result<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if error.downcast_ref::<Failure>().is_some() => Err(error),
+        Err(_) => Ok(None),
+    }
+}
+
+fn spawn(command: &mut Command) -> Result<Child> {
+    command.spawn().context(Failure::Spawn)
+}
+
 fn web_url(text: &str) -> Result<String> {
     let url = url::Url::parse(text)?;
     if !matches!(url.scheme(), "http" | "https")
@@ -831,6 +964,88 @@ fn web_url(text: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_unavailable(error: anyhow::Error) {
+        let error = super::super::MachineError::from(error);
+        assert_eq!(error.public().0, 12413);
+        assert!(error.public().1.starts_with("machine_browser_unavailable:"));
+        assert!(!error.public().1.contains("secret-fixture"));
+    }
+
+    #[test]
+    fn browser_failures_are_typed_and_do_not_expose_sources() {
+        for failure in [
+            Failure::Setup,
+            Failure::Identity,
+            Failure::Spawn,
+            Failure::Exited,
+            Failure::PipeRead,
+            Failure::PipeWrite,
+            Failure::PipeClosed,
+            Failure::Protocol,
+            Failure::Timeout,
+        ] {
+            assert_unavailable(
+                anyhow::anyhow!("https://secret-fixture cookie=secret-fixture").context(failure),
+            );
+        }
+        assert!(
+            optional_frame::<()>(Err(anyhow::anyhow!("frame navigated")))
+                .unwrap()
+                .is_none()
+        );
+        assert_unavailable(optional_frame::<()>(Err(Failure::PipeRead.into())).unwrap_err());
+    }
+
+    #[tokio::test]
+    async fn missing_browser_executable_is_unavailable() {
+        let root = tempfile::tempdir().unwrap();
+        assert_unavailable(
+            spawn(&mut Command::new(root.path().join("missing-browser"))).unwrap_err(),
+        );
+    }
+
+    #[tokio::test]
+    async fn browser_pipe_failures_and_exited_child_are_unavailable() {
+        for fault in ["write", "eof", "decode", "exited"] {
+            let (parent, mut peer) = UnixStream::pair().unwrap();
+            let mut command = Command::new("/bin/sleep");
+            Identity::resolve(None)
+                .unwrap()
+                .prepare(&mut command)
+                .unwrap();
+            let child = command.arg("30").spawn().unwrap();
+            let mut browser = DevBrowser {
+                child,
+                pipe: BufReader::new(parent),
+                next_id: 0,
+                selected: None,
+                sessions: HashMap::new(),
+                console: VecDeque::new(),
+                network: VecDeque::new(),
+            };
+            match fault {
+                "write" => drop(peer),
+                "eof" => {
+                    peer.shutdown().await.unwrap();
+                    // Keep the read half open so the request write succeeds.
+                    let result = browser.rpc(None, "Browser.getVersion", json!({})).await;
+                    assert!(matches!(
+                        result.as_ref().unwrap_err().downcast_ref::<Failure>(),
+                        Some(Failure::PipeClosed)
+                    ));
+                    assert_unavailable(result.unwrap_err());
+                    continue;
+                }
+                "decode" => peer.write_all(b"secret-fixture\0").await.unwrap(),
+                "exited" => browser.child.kill().await.unwrap(),
+                _ => unreachable!(),
+            }
+            let result = browser.rpc(None, "Browser.getVersion", json!({})).await;
+            assert_unavailable(result.unwrap_err());
+        }
+    }
+
     #[test]
     fn navigation_refuses_local_files_and_credentials() {
         for url in [

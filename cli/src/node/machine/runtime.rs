@@ -51,6 +51,8 @@ enum MachineError {
     Driver(#[from] cua::DriverError),
     #[error("managed browser unavailable")]
     Browser,
+    #[error(transparent)]
+    DevBrowser(#[from] dev_browser::Failure),
     #[error("saved logins require the secure browser")]
     SecureBrowserRequired,
     #[error("machine operation refused")]
@@ -61,6 +63,9 @@ impl From<anyhow::Error> for MachineError {
     fn from(error: anyhow::Error) -> Self {
         if let Some(driver) = error.downcast_ref::<cua::DriverError>() {
             return Self::Driver(driver.clone());
+        }
+        if let Some(browser) = error.downcast_ref::<dev_browser::Failure>() {
+            return Self::DevBrowser(*browser);
         }
         error.downcast::<Self>().unwrap_or(Self::Operation)
     }
@@ -106,6 +111,7 @@ impl MachineError {
                 12413,
                 "managed browser unavailable; complete browser policy setup and restart the node",
             ),
+            Self::DevBrowser(error) => (12413, error.message()),
             Self::SecureBrowserRequired => (
                 12413,
                 "saved logins require the secure browser; use browser=secure",
@@ -752,8 +758,10 @@ impl Runtime {
                                     &config.data_dir,
                                     &process::Identity::resolve(
                                         self.config.effective_dev_browser_user(),
-                                    )?,
+                                    )
+                                    .context(dev_browser::Failure::Identity)?,
                                     &config.binary,
+                                    config.container,
                                 )
                                 .await?
                             }
@@ -987,8 +995,10 @@ impl Runtime {
             *browser = Some(
                 dev_browser::DevBrowser::launch(
                     &config.data_dir,
-                    &process::Identity::resolve(self.config.effective_dev_browser_user())?,
+                    &process::Identity::resolve(self.config.effective_dev_browser_user())
+                        .context(dev_browser::Failure::Identity)?,
                     &config.binary,
+                    config.container,
                 )
                 .await?,
             );

@@ -270,7 +270,11 @@ CHECK`,cwd:'/workspace',services:[],timeout_secs:10});
  });
  browserSite.listen(0,'127.0.0.1');await once(browserSite,'listening');
  const browserUrl=`http://127.0.0.1:${browserSite.address().port}/`;
- const browser=(action,args={},which='secure')=>call('browser',{browser:which,action,...args});
+ const browser=async(action,args={},which='secure')=>{
+  const result=await call('browser',{browser:which,action,...args});
+  if(which==='dev'&&result.error)console.error('Developer browser error:',JSON.stringify(result.error));
+  return result;
+ };
  let observed=await browser('navigate',{url:browserUrl});
  assert.equal(observed.status,'ok',JSON.stringify(observed));
  assert.match(observed.snapshot.text,/Project catalog/);
@@ -437,6 +441,19 @@ CHECK`,cwd:'/workspace',services:[],timeout_secs:10});
   assert(profile.computer_ready&&profile.computer_tools.includes('get_window_state'));
   console.log(`Cua crash/recovery at ${killDelay} ms: passed`);
  }
+ // Real startup failures must be diagnosable, never generic 12407, and retryable.
+ const chromiumBackup='/usr/bin/chromium.nyxid-e2e-backup';
+ await fs.rename('/usr/bin/chromium',chromiumBackup);
+ try {
+  let unavailable=await browser('navigate',{url:browserUrl},'dev');
+  assert.equal(unavailable.error?.code,12413,JSON.stringify(unavailable));
+  assert.match(unavailable.error.message,/cannot start developer browser/);
+  await fs.writeFile('/usr/bin/chromium',"#!/bin/sh\necho 'https://stderr-secret-fixture/ cookie=stderr-secret-fixture' >&2\nexit 42\n",{mode:0o755});
+  unavailable=await browser('navigate',{url:browserUrl},'dev');
+  assert.equal(unavailable.error?.code,12413,JSON.stringify(unavailable));
+  assert.match(unavailable.error.message,/pipe|exited/);
+  assert(!output.join('').includes('stderr-secret-fixture'),'browser diagnostics must not expose child stderr');
+ } finally {await fs.rename(chromiumBackup,'/usr/bin/chromium');}
  let dev=await browser('navigate',{url:browserUrl},'dev');assert.equal(dev.status,'ok',JSON.stringify(dev));
  dev=await browser('navigate',{url:browserUrl+'frames'},'dev');
  let devName=dev.snapshot.elements.find(e=>e.label==='Embedded name');
@@ -464,6 +481,47 @@ CHECK`,cwd:'/workspace',services:[],timeout_secs:10});
  assert((await browser('screenshot',{},'dev')).content.some(c=>c.type==='image'&&c.mimeType==='image/jpeg'));
  const securePath='/var/lib/nyxid-machine/desktop/browser-profile';
  assert.notEqual(spawnSync('runuser',['-u','devbrowser','--','cat',`${securePath}/Default/Cookies`]).status,0);
+ // Direct container launch relies on distinct UIDs and the existing Chromium
+ // sandbox, not bwrap mounts. Exercise actual filesystem/socket operations.
+ const devBoundary=spawnSync('runuser',['-u','devbrowser','--','python3','-c',`
+import os,socket,json
+for path in ['/var/lib/nyxid-machine/desktop/browser-profile','/var/lib/nyxid-machine/node','/home/browser']:
+ try: os.listdir(path)
+ except PermissionError: pass
+ else: raise AssertionError('devbrowser read protected directory: '+path)
+for path in ['/var/lib/nyxid-machine/desktop/browser-profile/dev-write','/var/lib/nyxid-machine/node/dev-write','/workspace/dev-write','/var/lib/nyxid-machine-update/dev-write']:
+ try: open(path,'w')
+ except PermissionError: pass
+ else: raise AssertionError('devbrowser wrote protected path: '+path)
+for path in ['/var/lib/nyxid-machine/node/config.toml','/etc/chromium/policies/managed/nyxid.json','/etc/chromium/native-messaging-hosts/dev.nyxid.machine_filler.json','/opt/nyxid/machine-browser/native-host','/opt/nyxid/machine-browser/nyxid-native-host']:
+ try: open(path,'rb')
+ except PermissionError: pass
+ else: raise AssertionError('devbrowser read protected file: '+path)
+s=socket.socket(socket.AF_UNIX)
+try: s.connect('/var/lib/nyxid-machine/desktop/browser-run/filler.sock')
+except PermissionError: pass
+else: raise AssertionError('devbrowser reached saved-login native host')
+p='/etc/chromium/policies/managed/nyxid-dev.json'
+assert not os.access(p,os.W_OK)
+policy=json.load(open(p));assert policy['RemoteDebuggingAllowed'] and policy['NativeMessagingBlocklist']==['*']
+assert policy['URLBlocklist']==['file://*'] and 'ExtensionInstallForcelist' not in policy
+`],{encoding:'utf8'});
+ assert.equal(devBoundary.status,0,devBoundary.stderr);
+ assert.notEqual(spawnSync('runuser',['-u','browser','--','cat','/etc/chromium/policies/managed/nyxid-dev.json']).status,0,'secure browser cannot read developer policy');
+ const devRenderers=[];
+ for(const pid of await fs.readdir('/proc')) {
+  if(!/^\d+$/.test(pid))continue;
+  const args=await fs.readFile(`/proc/${pid}/cmdline`).then(b=>b.toString().split(/[\0\s]+/),()=>[]);
+  if(!args.includes('--type=renderer'))continue;
+  const mapping=await fs.readFile(`/proc/${pid}/uid_map`,'utf8');
+  if(!/\b1002\s+1\b/.test(mapping))continue;
+  const status=await fs.readFile(`/proc/${pid}/status`,'utf8');
+  assert.match(status,/NoNewPrivs:\s+1/);assert.match(status,/Seccomp:\s+2/);
+  assert(status.match(/NSpid:\s+([^\n]+)/)[1].trim().split(/\s+/).length>=2);
+  devRenderers.push(pid);
+ }
+ assert(devRenderers.length>0,'developer renderer retains Chromium namespace/seccomp sandbox');
+ console.log('Developer UID, policy, credential/native-host boundaries and renderer sandbox: passed');
  assert.equal(await fs.access('/var/lib/nyxid-machine/desktop/dev-browser-profile/DevToolsActivePort').then(()=>true,()=>false),false);
  // X11 clients must not share trust across these browser users.
  for(const [user,display,authority] of [['devbrowser',':99','/var/lib/nyxid-machine/desktop/Xauthority'],['browser',':100','/home/devbrowser/.Xauthority']]) {
@@ -574,6 +632,7 @@ CHECK`,cwd:'/workspace',services:[],timeout_secs:10});
  assert(latencies[9]<=limits.inputMs,`input-to-frame p95 ${latencies[9]} ms exceeds ${limits.inputMs} ms`);
  await call('desktop_control',{session_id:session,viewer_id:'test-owner',owner:false,revision:4});
  for(const secret of [token,auth,signing.toString('hex')])assert(!output.join('').includes(secret),'node logs must not contain credentials');
+ assert(!output.join('').includes('stderr-secret-fixture'),'developer diagnostics must never expose child stderr');
  console.log('| Scenario | Changed frames/s | Frame bytes/s | Actions |\n|---|---:|---:|---:|');
  for(const sample of performanceSamples)console.log(`| ${sample.scenario} | ${sample.fps.toFixed(2)} | ${sample.bytes_per_second.toFixed(0)} | ${sample.actions} |`);
  console.log(JSON.stringify({passed:true,capabilities:profile,desktop_frames:frames.length,file_round_trip_mib:4,file_round_trip_ms:transferMs,takeover_ms:takeoverMs,renderer_sandbox:true,agent_no_new_privs:true,agent_namespace_filter:true,desktop_performance:performanceSamples,input_to_frame_ms:{p50:latencies[4],p95:latencies[9]}}));
