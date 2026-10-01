@@ -82,7 +82,7 @@ impl MachineError {
                 12403,
                 "job_not_found: jobs expire after one hour or a daemon restart",
             ),
-            Self::Computer => (
+            Self::Computer | Self::Driver(cua::DriverError::Refused) => (
                 12406,
                 "computer unavailable or action refused; check cua permissions and mode",
             ),
@@ -259,7 +259,7 @@ impl Runtime {
             tokio::time::timeout(std::time::Duration::from_secs(20), driver.tools())
                 .await
                 .ok()
-                .and_then(Result::ok)
+                .and_then(|result| result.ok())
                 .unwrap_or_else(|| driver.advertised_tools())
         } else {
             Vec::new()

@@ -1271,6 +1271,14 @@ lockout or withdrawing advertised capabilities. Results distinguish
 `display_unavailable` (12417), and `machine_turn_stopped` (12418).
 NyxBot retries transient recovery itself, observing before repeating a changing
 action whose result is uncertain. `machine_browser_unavailable` remains 12413.
+Driver spawn, pipe write/read, EOF, malformed response, timeout and process-exit
+failures share a typed transport-error path: discard the session, schedule
+backoff and return 12414. Recognised permission, display and unsupported-tool
+refusals retain their specific error codes and healthy session. Other tool errors
+keep cua's explanation intact for runtime redaction and agent correction; neither
+kind schedules a restart. JSON-RPC errors retain their typed refusal mapping.
+Unit tests inject these failures, and the container crash loop checks recovery at
+0, 10 and 100 ms after SIGKILL.
 
 Explicit NyxAgent `tool_budget_exhausted` and `turn_timeout` failures continue the
 same session automatically. The owner setting `max_auto_continuations` defaults

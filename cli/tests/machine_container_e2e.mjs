@@ -420,19 +420,22 @@ CHECK`,cwd:'/workspace',services:[],timeout_secs:10});
  }
  console.log('Stop latency:',JSON.stringify(stopTimes));
  // Multiple driver crashes recover automatically, with no three/minute lockout.
- for(let attempt=0;attempt<4;attempt++){
+ for(const killDelay of [0,10,100,0,10,100]){
+  let killed=0;
   for(const pid of await fs.readdir('/proc')){
    if(!/^\d+$/.test(pid))continue;
    const args=await fs.readFile(`/proc/${pid}/cmdline`).then(b=>b.toString().split(/[\0\s]+/),()=>[]);
-   if(args[0]==='/opt/nyxid/cua/cua-driver'&&args.includes('mcp'))process.kill(Number(pid),'SIGKILL');
+   if(args[0]==='/opt/nyxid/cua/cua-driver'&&args.includes('mcp')){process.kill(Number(pid),'SIGKILL');killed++;}
   }
-  await delay(10);
+  assert(killed>0,'crash test must kill a live cua session');
+  await delay(killDelay);
   const restarting=await call('computer',{tool:'list_windows',arguments:{}});
-  assert.equal(restarting.error.code,12414,JSON.stringify(restarting));assert(restarting.error.retry_after_ms>0);
+  assert.equal(restarting.error?.code,12414,`cua crash after ${killDelay} ms: ${JSON.stringify(restarting)}`);assert(restarting.error.retry_after_ms>0);
   await delay(restarting.error.retry_after_ms);
   const recovered=await call('computer',{tool:'list_windows',arguments:{}});
-  assert(!recovered.error&&!recovered.isError,JSON.stringify(recovered));
+  assert(!recovered.error&&!recovered.isError,`cua recovery after ${killDelay} ms: ${JSON.stringify(recovered)}`);
   assert(profile.computer_ready&&profile.computer_tools.includes('get_window_state'));
+  console.log(`Cua crash/recovery at ${killDelay} ms: passed`);
  }
  let dev=await browser('navigate',{url:browserUrl},'dev');assert.equal(dev.status,'ok',JSON.stringify(dev));
  dev=await browser('navigate',{url:browserUrl+'frames'},'dev');
