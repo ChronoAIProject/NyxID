@@ -34,8 +34,14 @@ const MAX_YAML_SPEC_SCALAR_BYTES: usize = 2 * MAX_SPEC_RESPONSE_BYTES;
 const MAX_YAML_SPEC_ANCHOR_EVENTS: usize = 250_000;
 const MAX_YAML_SPEC_DEPTH: usize = 64;
 const MAX_SPEC_ERROR_DETAIL_CHARS: usize = 300;
+// A large YAML document can briefly use tens of MiB while it expands. Spec URLs
+// can be set on user services, so only a few such parses run at once.
+const MAX_CONCURRENT_YAML_PARSES: usize = 4;
+const YAML_PARSE_QUEUE_WAIT: Duration = Duration::from_secs(10);
 
 static SPEC_CACHE: LazyLock<DashMap<String, CachedSpecEntry>> = LazyLock::new(DashMap::new);
+static YAML_PARSE_PERMITS: LazyLock<Arc<tokio::sync::Semaphore>> =
+    LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_YAML_PARSES)));
 static SPEC_FETCH_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
@@ -959,13 +965,30 @@ async fn read_spec_body(mut response: reqwest::Response, log_url: &str) -> AppRe
 /// exactly as before. Anything else is read as YAML on the blocking pool,
 /// because YAML parsing is roughly ten times slower than JSON.
 pub(crate) async fn parse_spec_body(body: bytes::Bytes) -> AppResult<serde_json::Value> {
+    parse_spec_body_with_permits(body, &YAML_PARSE_PERMITS, YAML_PARSE_QUEUE_WAIT).await
+}
+
+async fn parse_spec_body_with_permits(
+    body: bytes::Bytes,
+    permits: &Arc<tokio::sync::Semaphore>,
+    queue_wait: Duration,
+) -> AppResult<serde_json::Value> {
     let json_error = match serde_json::from_slice::<serde_json::Value>(&body) {
         Ok(spec) => return Ok(spec),
         Err(error) => error,
     };
-    tokio::task::spawn_blocking(move || parse_yaml_spec_body(&body, &json_error))
+    // The permit moves into the blocking task, so it stays held until parsing
+    // ends even if the caller stops waiting.
+    let permit = tokio::time::timeout(queue_wait, Arc::clone(permits).acquire_owned())
         .await
-        .map_err(|error| AppError::Internal(format!("YAML spec parsing task failed: {error}")))?
+        .map_err(|_| AppError::RateLimited)?
+        .map_err(|_| AppError::Internal("YAML spec parsing is unavailable".into()))?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        parse_yaml_spec_body(&body, &json_error)
+    })
+    .await
+    .map_err(|error| AppError::Internal(format!("YAML spec parsing task failed: {error}")))?
 }
 
 /// A YAML spec must be an OpenAPI, Swagger, or AsyncAPI mapping, so a text or
@@ -1360,8 +1383,8 @@ mod tests {
         CachedSpecEntry, MAX_SPEC_CACHE_ENTRIES, MAX_SPEC_RESPONSE_BYTES, MAX_YAML_SPEC_DEPTH,
         ServiceDocumentationMetadata, SpecCacheTestGuard, build_asyncapi_document, cache_spec,
         catalog_csp, detect_streaming_from_openapi, discover_service_docs_for_category,
-        fetch_spec_json, get_cached_spec, parse_spec_body, read_spec_body, render_scalar_html,
-        scalar_docs_csp, validate_spec_fetch_target,
+        fetch_spec_json, get_cached_spec, parse_spec_body, parse_spec_body_with_permits,
+        read_spec_body, render_scalar_html, scalar_docs_csp, validate_spec_fetch_target,
     };
     use crate::errors::AppError;
     use std::sync::Arc;
@@ -1492,6 +1515,34 @@ paths:
             );
             assert!(message.contains(expected), "{body:?}: {message}");
         }
+    }
+
+    #[tokio::test]
+    async fn yaml_parses_wait_for_a_bounded_permit_and_json_needs_none() {
+        let permits = Arc::new(tokio::sync::Semaphore::new(1));
+        let held = Arc::clone(&permits).acquire_owned().await.unwrap();
+        let yaml = bytes::Bytes::from_static(b"openapi: 3.0.0\npaths: {}\n");
+        let json = bytes::Bytes::from_static(br#"{"openapi":"3.0.0","paths":{}}"#);
+
+        // JSON never waits for the YAML pool.
+        assert!(
+            parse_spec_body_with_permits(json, &permits, Duration::from_millis(50))
+                .await
+                .is_ok()
+        );
+        // YAML waits for a permit and gives up after the queue wait.
+        assert!(matches!(
+            parse_spec_body_with_permits(yaml.clone(), &permits, Duration::from_millis(50)).await,
+            Err(AppError::RateLimited)
+        ));
+        drop(held);
+        assert!(
+            parse_spec_body_with_permits(yaml, &permits, Duration::from_millis(50))
+                .await
+                .is_ok()
+        );
+        // The permit is released when parsing finishes.
+        assert_eq!(permits.available_permits(), 1);
     }
 
     #[tokio::test]
