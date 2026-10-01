@@ -15,6 +15,12 @@ production-data view at `/keys?view=routing`. This is application code, not the
 standalone HTML reference. Current main's full detail pages, authorship/history,
 org permissions and reconnect flows are retained.
 
+Latest pool integration validation: 102 focused frontend tests and all 6 backend
+pool billing tests passed. The backend tests used an isolated MongoDB 8.0.16
+replica set, including a regression joining each attempt's service history to its
+billing request ID. TypeScript, the production frontend build, changed-file lint
+and whitespace checks passed. Signed-in visual review is still outstanding.
+
 Run from `frontend/`:
 
 ```sh

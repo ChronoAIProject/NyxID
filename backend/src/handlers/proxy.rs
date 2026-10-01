@@ -3605,7 +3605,10 @@ async fn execute_proxy_inner(
         credential_source.as_deref(),
         &target,
     );
-    let billing_request_id = uuid::Uuid::new_v4().to_string();
+    let billing_request_id = pool_accounting
+        .as_ref()
+        .map(|ctx| ctx.request_id.clone())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let mut request_audit = crate::services::service_insights_activity::RequestAudit::new(
         &state.db,
         auth_user,
@@ -3625,10 +3628,6 @@ async fn execute_proxy_inner(
         )
         .await
         .inspect_err(|error| request_audit.admission_error(error))?;
-    let billing_request_id = pool_accounting
-        .as_ref()
-        .map(|ctx| ctx.request_id.clone())
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let is_ws_candidate = is_ws_upgrade_request(&request);
     let platform_metric = platform_metric_for_target(&target, is_ws_candidate);
     let node_intent = match &node_route {
