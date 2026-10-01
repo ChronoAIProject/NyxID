@@ -14,6 +14,7 @@ use std::collections::HashSet;
 
 pub struct CandidateInspection {
     pub user_service_id: String,
+    pub name: String,
     pub slug: String,
     pub is_active: bool,
     pub eligible: bool,
@@ -38,6 +39,8 @@ pub struct InspectionQuery<'a> {
     pub search: Option<&'a str>,
     pub limit: u32,
     pub members_only: bool,
+    pub inventory_only: bool,
+    pub selected_only: bool,
     pub peer_ids: Option<&'a [String]>,
     pub declared_peer_ids: Option<&'a str>,
 }
@@ -68,6 +71,11 @@ pub async fn inspect(
     } else {
         contract
     };
+    let saved_operation = !query.inventory_only
+        && (query.members_only
+            || (query.peer_ids.is_none()
+                && query.declared_peer_ids.is_none()
+                && pool.is_some_and(|p| p.strategy == strategy && p.member_contract == contract)));
     let priority = strategy == PoolStrategy::Priority;
     let contract = if priority {
         contract
@@ -90,6 +98,7 @@ pub async fn inspect(
     }
     let offset = query
         .after
+        .filter(|_| !query.members_only && !query.selected_only)
         .map(str::parse::<u64>)
         .transpose()
         .map_err(|_| crate::errors::AppError::BadRequest("Invalid candidate cursor".into()))?
@@ -101,6 +110,8 @@ pub async fn inspect(
     }
     if query.members_only {
         filter.insert("_id", doc! { "$in": pool.map(|p| p.members.iter().filter(|m| allowed_services.is_none_or(|a| a.contains(&m.user_service_id))).map(|m| m.user_service_id.clone()).collect::<Vec<_>>()).unwrap_or_default() });
+    } else if query.selected_only {
+        filter.insert("_id", doc! {"$in": query.peer_ids.unwrap_or_default().iter().filter(|id| allowed_services.is_none_or(|allowed| allowed.contains(*id))).cloned().collect::<Vec<_>>()});
     } else {
         if let Some(search) = query.search.filter(|s| !s.is_empty()) {
             filter.insert(
@@ -109,7 +120,7 @@ pub async fn inspect(
             );
         }
     }
-    let limit = if query.members_only {
+    let limit = if query.members_only || query.selected_only {
         50
     } else {
         query.limit.clamp(1, 100) as usize
@@ -118,7 +129,11 @@ pub async fn inspect(
         crate::services::service_history::collection(db, "user_services")
             .find(filter)
             .sort(doc! {"_id":1})
-            .skip(if query.members_only { 0 } else { offset })
+            .skip(if query.members_only || query.selected_only {
+                0
+            } else {
+                offset
+            })
             .limit((limit + 1) as i64)
             .await?
             .try_collect()
@@ -159,6 +174,7 @@ pub async fn inspect(
         });
         let mut row = CandidateInspection {
             user_service_id: service.id.clone(),
+            name: service.slug.clone(),
             slug: service.slug.clone(),
             is_active: service.is_active,
             eligible: true,
@@ -189,6 +205,7 @@ pub async fn inspect(
             .await;
             match resolution {
                 Ok(Some(resolution)) => {
+                    row.name = resolution.target.service.name.clone();
                     row.credential_binding = if resolution.master_credential {
                         "platform"
                     } else if resolution.target.auth_method == "none" {
@@ -226,10 +243,19 @@ pub async fn inspect(
                             member
                                 .and_then(|m| m.model.as_deref())
                                 .unwrap_or("candidate-model"),
-                            &http::Method::from_bytes(method.as_bytes()).map_err(|_| {
+                            &http::Method::from_bytes(if query.inventory_only {
+                                b"POST"
+                            } else {
+                                method.as_bytes()
+                            })
+                            .map_err(|_| {
                                 crate::errors::AppError::BadRequest("Invalid method".into())
                             })?,
-                            path,
+                            if query.inventory_only {
+                                "chat/completions"
+                            } else {
+                                path
+                            },
                             br#"{"messages":[{"role":"user","content":""}]}"#,
                         ) {
                             Ok(prepared) => prepared.path,
@@ -241,7 +267,7 @@ pub async fn inspect(
                     } else {
                         path.to_owned()
                     };
-                    if row.reason.is_none() {
+                    if !query.inventory_only && row.reason.is_none() {
                         let canonical =
                             super::proxy_authorization::CanonicalPath::from_rest_decoded(
                                 &native_path,
@@ -256,7 +282,7 @@ pub async fn inspect(
                             row.reason = Some("operation_unsupported".into());
                         }
                     }
-                    if row.reason.is_none() {
+                    if saved_operation && priority && row.reason.is_none() {
                         let credential_override = if let Some(agent) = agent_key {
                             proxy_service::read_agent_credential_override_identity(
                                 db,
@@ -310,7 +336,10 @@ pub async fn inspect(
                 Err(error) => return Err(error),
             }
         }
-        if row.reason.is_none() && member.is_some_and(|m| !m.enabled) {
+        if (query.members_only || saved_operation)
+            && row.reason.is_none()
+            && member.is_some_and(|m| !m.enabled)
+        {
             row.reason = Some("disabled".into());
         }
         if row.reason.is_none() && row.cooldown_until.is_some() {
@@ -341,6 +370,7 @@ pub async fn inspect(
             }
             result.push(CandidateInspection {
                 user_service_id: member.user_service_id.clone(),
+                name: "Unavailable connection".into(),
                 slug: "Unavailable member".into(),
                 is_active: false,
                 eligible: false,

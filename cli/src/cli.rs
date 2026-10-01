@@ -1576,8 +1576,9 @@ pub enum PoolCommands {
         contract: Option<String>,
         #[arg(long, value_enum)]
         strategy: Option<PoolStrategyArg>,
-        #[arg(long, default_value = "POST")]
-        method: String,
+        /// Optional operation method. Omit method/path to browse inventory.
+        #[arg(long)]
+        method: Option<String>,
         #[arg(long)]
         path: Option<String>,
         #[arg(long)]
