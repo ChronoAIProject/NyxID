@@ -1,6 +1,6 @@
 [package]
 name = "nyxid"
-version = "0.38.2"
+version = "0.39.0"
 edition = "2024"
 rust-version.workspace = true
 license.workspace = true
@@ -81,6 +81,7 @@ nyxid-cloud-auth = { path = "../cloud-auth" }
 nyxid-service-adapters = { path = "../service-adapters" }
 http = "1.4"
 http-body-util = "0.1"
+httpdate = "1"
 # Direct rustls dep so we can install a default CryptoProvider at startup.
 # Feature unification picks up BOTH `ring` (via google-cloud-kms ->
 # google-cloud-auth -> jsonwebtoken 9.x and via the transitively-enabled

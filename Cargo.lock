@@ -4071,7 +4071,7 @@ dependencies = [
 
 [[package]]
 name = "nyxid"
-version = "0.38.2"
+version = "0.39.0"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -4104,6 +4104,7 @@ dependencies = [
  "hmac",
  "http 1.4.0",
  "http-body-util",
+ "httpdate",
  "jsonwebtoken 10.3.0",
  "libc",
  "mime",
@@ -4151,7 +4152,7 @@ dependencies = [
 
 [[package]]
 name = "nyxid-cli"
-version = "0.38.2"
+version = "0.39.0"
 dependencies = [
  "aes-gcm",
  "anyhow",

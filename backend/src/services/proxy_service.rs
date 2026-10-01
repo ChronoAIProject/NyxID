@@ -1591,6 +1591,10 @@ pub struct UserServiceResolution {
     /// `UserApiKey.credential_epoch` of that key, or `1` when no user key
     /// was resolved.
     pub credential_epoch: i64,
+    /// Stable, non-secret revision of the catalog master credential. Catalog
+    /// rows keep credential_epoch at one, so health fencing uses this metadata
+    /// to distinguish a rotated platform key.
+    pub master_credential_revision: Option<String>,
     /// True when the injected credential is the catalog service's master
     /// credential (auto-provisioned UserService with no user key), not a
     /// key the user supplied. Drives resale credential classification.
@@ -1906,7 +1910,7 @@ pub async fn resolve_proxy_target_from_user_service(
 /// count on each of `user_service_connections` / `user_provider_tokens`.
 /// The short-circuits keep the common "no legacy at all" case to ~2 round
 /// trips. Users fully migrated to `UserService` never hit this path.
-async fn user_has_legacy_personal_connection(
+pub(crate) async fn user_has_legacy_personal_connection(
     db: &mongodb::Database,
     user_id: &str,
     slug: Option<&str>,
@@ -2834,6 +2838,12 @@ async fn finish_resolution(
         minimal_service.token_exchange_config = catalog_service.token_exchange_config.clone();
         minimal_service.inference = catalog_service.inference.clone();
 
+        let master_credential_revision = {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(&catalog_service.credential_encrypted);
+            Some(format!("master:{:x}", hasher.finalize()))
+        };
         return Ok(UserServiceResolution {
             target: ProxyTarget {
                 base_url: catalog_service.base_url.clone(),
@@ -2855,6 +2865,7 @@ async fn finish_resolution(
             has_server_credential: true,
             api_key_id: None,
             credential_epoch: 1,
+            master_credential_revision,
             master_credential: true,
             credential_source: None,
             org_routing,
@@ -2901,6 +2912,7 @@ async fn finish_resolution(
             has_server_credential: true,
             api_key_id: None,
             credential_epoch: 1,
+            master_credential_revision: None,
             master_credential: false,
             credential_source: None,
             org_routing,
@@ -3001,6 +3013,7 @@ async fn finish_resolution(
             has_server_credential,
             api_key_id: Some(api_key.id.clone()),
             credential_epoch: api_key.credential_epoch,
+            master_credential_revision: None,
             master_credential: false,
             credential_source: api_key.credential_source.clone(),
             org_routing,
@@ -3067,6 +3080,7 @@ async fn finish_resolution(
         has_server_credential: true,
         api_key_id: Some(api_key.id.clone()),
         credential_epoch: api_key.credential_epoch,
+        master_credential_revision: None,
         master_credential: false,
         credential_source: api_key.credential_source.clone(),
         org_routing,
@@ -3104,6 +3118,7 @@ async fn load_catalog_service_for_user_service(
 
 #[derive(Clone, Default)]
 struct CatalogProxyAuthorization {
+    inference: Option<crate::models::downstream_service::ServiceInference>,
     workspace_destinations_pending: bool,
     destination_targets: std::collections::BTreeMap<String, String>,
     policy: Option<ProxyOperationPolicy>,
@@ -3131,6 +3146,7 @@ async fn load_catalog_proxy_authorization_for_user_service(
     super::destination_routing::validate_credential_source(&service)?;
     super::retired_service_service::require_available(&service)?;
     Ok(CatalogProxyAuthorization {
+        inference: service.inference.clone(),
         workspace_destinations_pending: super::destination_routing::workspace_destinations_pending(
             &service,
         ),
@@ -3145,6 +3161,7 @@ fn apply_catalog_proxy_authorization(
     service: &mut DownstreamService,
     authorization: &CatalogProxyAuthorization,
 ) {
+    service.inference = authorization.inference.clone();
     service.proxy_operation_policy = authorization.policy.clone();
     service.destination_targets = authorization.destination_targets.clone();
     if let Some(service_category) = authorization.service_category.as_ref() {
@@ -4587,6 +4604,8 @@ mod tests {
         );
 
         let consent = crate::models::consent::Consent {
+            revision: None,
+            issuance_fence: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: actor_id.clone(),
             client_id: app_id.clone(),

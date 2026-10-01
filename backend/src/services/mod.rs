@@ -81,6 +81,7 @@ pub mod google_workspace;
 pub mod group_service;
 pub mod identity_service;
 pub mod ifttt_oauth_service;
+pub mod incremental_consent_service;
 pub mod internal_auth;
 pub mod invite_code_service;
 pub mod key_service;
@@ -106,6 +107,7 @@ pub mod node_ws_manager;
 pub mod notification_service;
 pub mod oauth_broker_service;
 pub mod oauth_client_service;
+pub mod oauth_consent_request_service;
 pub mod oauth_flow;
 pub mod oauth_resource_service;
 pub mod oauth_revocation;
@@ -132,6 +134,7 @@ mod ownership_transfer_tests;
 pub mod par_service;
 pub mod platform_credential_service;
 pub mod platform_settings_service;
+pub mod pool_failover;
 pub mod provider_service;
 pub mod provider_token_exchange_service;
 pub mod proxy_authorization;
@@ -145,6 +148,7 @@ pub mod scope_catalog;
 pub mod service_account_key_read_service;
 pub mod service_account_service;
 pub mod service_endpoint_service;
+pub mod service_pool_health_service;
 pub mod service_pool_service;
 pub mod social_auth_service;
 pub mod social_token_exchange_service;
@@ -210,3 +214,14 @@ pub mod channel_activity_callback_service;
 pub mod channel_activity_service;
 
 pub mod trigger_schedule;
+
+#[cfg(test)]
+mod service_pool_health_tests;
+
+pub mod pool_ai_service;
+
+pub mod service_pool_inspection;
+
+pub mod service_pool_contract;
+
+pub mod service_pool_routing;

@@ -7,6 +7,21 @@ use crate::models::service_billing::BillingMetric;
 
 pub const COLLECTION_NAME: &str = "usage_meter";
 
+pub const POOL_RECOVERY_COLLECTION_NAME: &str = "billing_pool_recovery";
+
+/// One bounded scan cursor, independent of request lifetimes and process restarts.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PoolRecoveryCursor {
+    #[serde(rename = "_id")]
+    pub id: String,
+    pub name: String,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub lease_until: Option<DateTime<Utc>>,
+    pub row_id: Option<String>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub updated_at: DateTime<Utc>,
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum BillingLayer {
@@ -156,6 +171,52 @@ crate::exact_credit_model! {
     }
 }
 
+/// Additive pool-attempt accounting; historical UsageStatus values remain valid.
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+pub struct PoolAttemptAccounting {
+    pub pool_id: String,
+    pub member_id: String,
+    pub attempt: u32,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub lease_until: DateTime<Utc>,
+    #[serde(default)]
+    pub outcome: Option<PoolAttemptOutcome>,
+    #[serde(default)]
+    pub completion_cause: Option<PoolCompletionCause>,
+}
+
+/// Transport completion is independent of whether usage is known or settled.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PoolCompletionCause {
+    Complete,
+    UpstreamBodyFailure,
+    UpstreamTimeout,
+    CallerCancelled,
+    LeaseLost,
+}
+
+impl PoolCompletionCause {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::UpstreamBodyFailure => "transport_error",
+            Self::UpstreamTimeout => "timeout",
+            Self::CallerCancelled => "caller_cancelled",
+            Self::LeaseLost => "lease_lost",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PoolAttemptOutcome {
+    Unsent,
+    Rejected,
+    Unknown,
+    Reported,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 pub struct UsageMeterRow {
     #[serde(rename = "_id")]
@@ -201,6 +262,8 @@ pub struct UsageMeterRow {
     /// Crash-recoverable final quantities for all platform components.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_platform_usage: Option<crate::models::service_billing::PlatformUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_attempt: Option<PoolAttemptAccounting>,
     pub status: UsageStatus,
     pub forwarded: bool,
     pub released: bool,

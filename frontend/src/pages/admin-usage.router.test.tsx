@@ -64,6 +64,8 @@ it("keeps the dashboard and list on one route with a shared saved time range", a
     </QueryClientProvider>,
   );
   await act(() => router.load());
+  // router.load() does not await the page's React.lazy import.
+  await act(() => vi.dynamicImportSettled());
   expect(
     // The real lazy page imports the analytics bundle on a cold test worker.
     // Allow that load to finish even while the backend compiler is running.

@@ -73,6 +73,10 @@ impl BillingReconciler {
             return Ok(ReconcileStats::default());
         }
         let mut stats = ReconcileStats::default();
+        match super::pool_attempt::recover_expired(&self.db, Utc::now()).await {
+            Ok(count) => stats.abandoned += count,
+            Err(error) => super::pool_attempt::record_recovery_error(&self.db, None, &error).await,
+        }
         stats.abandoned += self.abandon_unforwarded_reserved().await?;
         stats.funding_releases_recovered +=
             super::funding::recover_terminal_releases(&self.db).await?;
@@ -717,6 +721,7 @@ mod tests {
             quantity: Some(1),
             pending_resale_quantity: None,
             pending_platform_usage: None,
+            pool_attempt: None,
             status: UsageStatus::Finalized,
             forwarded: true,
             released: true,

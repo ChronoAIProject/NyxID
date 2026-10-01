@@ -10,7 +10,8 @@ use utoipa::{IntoParams, ToSchema};
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::models::service_pool::{
-    COLLECTION_NAME as SERVICE_POOLS, PoolStrategy, ServicePool, ServicePoolMember,
+    COLLECTION_NAME as SERVICE_POOLS, FailoverPolicy, PoolMemberContract, PoolStrategy,
+    ServicePool, ServicePoolMember, TierBalance,
 };
 use crate::mw::auth::AuthUser;
 use crate::services::{org_service, service_pool_service};
@@ -24,10 +25,22 @@ pub struct PoolListQuery {
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct PoolMemberRequest {
     pub user_service_id: String,
-    #[serde(default = "default_member_weight")]
-    pub weight: u32,
-    #[serde(default = "default_member_enabled")]
-    pub enabled: bool,
+    #[serde(default)]
+    pub weight: Option<u32>,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub priority: Option<u32>,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize"
+    )]
+    pub same_api_compatible: Option<Option<bool>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize"
+    )]
+    pub model: Option<Option<String>>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -39,6 +52,12 @@ pub struct CreateServicePoolRequest {
     #[serde(default)]
     pub strategy: PoolStrategy,
     #[serde(default)]
+    pub tier_balance: TierBalance,
+    #[serde(default)]
+    pub member_contract: PoolMemberContract,
+    #[serde(default)]
+    pub failover: Option<FailoverPolicy>,
+    #[serde(default)]
     pub members: Vec<PoolMemberRequest>,
     #[serde(default)]
     pub is_active: Option<bool>,
@@ -49,11 +68,23 @@ pub struct CreateServicePoolRequest {
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct UpdateServicePoolRequest {
+    /// Optional revision last observed by the editor. Stale saves return 409.
+    pub expected_revision: Option<i64>,
     pub slug: Option<String>,
     pub name: Option<String>,
-    #[serde(default)]
-    pub description: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize"
+    )]
+    pub description: Option<Option<String>>,
     pub strategy: Option<PoolStrategy>,
+    pub tier_balance: Option<TierBalance>,
+    pub member_contract: Option<PoolMemberContract>,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize"
+    )]
+    pub failover: Option<Option<FailoverPolicy>>,
     #[serde(default)]
     pub members: Option<Vec<PoolMemberRequest>>,
     pub is_active: Option<bool>,
@@ -70,6 +101,10 @@ pub struct PoolMemberResponse {
     pub user_service_id: String,
     pub weight: u32,
     pub enabled: bool,
+    pub priority: u32,
+    pub same_api_compatible: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -81,6 +116,11 @@ pub struct ServicePoolResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub strategy: String,
+    pub tier_balance: TierBalance,
+    pub config_revision: i64,
+    pub member_contract: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failover: Option<FailoverPolicy>,
     pub members: Vec<PoolMemberResponse>,
     pub rr_counter: i64,
     pub is_active: bool,
@@ -91,14 +131,6 @@ pub struct ServicePoolResponse {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ServicePoolListResponse {
     pub pools: Vec<ServicePoolResponse>,
-}
-
-fn default_member_weight() -> u32 {
-    1
-}
-
-fn default_member_enabled() -> bool {
-    true
 }
 
 async fn resolve_requested_owner(
@@ -125,10 +157,15 @@ async fn resolve_pool_write_owner(
     actor: &str,
     pool_id: &str,
 ) -> AppResult<String> {
+    let filter = if uuid::Uuid::parse_str(pool_id).is_ok() {
+        doc! { "_id": pool_id }
+    } else {
+        doc! { "slug": pool_id, "user_id": actor }
+    };
     let pool = state
         .db
         .collection::<ServicePool>(SERVICE_POOLS)
-        .find_one(doc! { "_id": pool_id })
+        .find_one(filter)
         .await?
         .ok_or_else(|| AppError::ServicePoolNotFound(pool_id.to_string()))?;
 
@@ -195,7 +232,14 @@ pub async fn create_pool(
             name: body.name,
             description: body.description,
             strategy: body.strategy,
-            members: body.members.into_iter().map(member_from_request).collect(),
+            tier_balance: body.tier_balance,
+            member_contract: body.member_contract,
+            failover: body.failover,
+            members: resolve_member_requests(&state, &owner_id, body.members)
+                .await?
+                .into_iter()
+                .map(member_from_request)
+                .collect(),
             is_active: body.is_active,
         },
     )
@@ -247,6 +291,23 @@ pub async fn update_pool(
 ) -> AppResult<Json<ServicePoolResponse>> {
     let actor = auth_user.user_id.to_string();
     let owner_id = resolve_pool_write_owner(&state, &actor, &pool_id).await?;
+    let current = service_pool_service::get_pool(&state.db, &owner_id, &pool_id).await?;
+    let members = match body.members {
+        Some(members) => Some(resolve_member_requests(&state, &owner_id, members).await?),
+        None => None,
+    };
+    let members = members.map(|members| {
+        members
+            .into_iter()
+            .map(|member| {
+                let existing = current
+                    .members
+                    .iter()
+                    .find(|row| row.user_service_id == member.user_service_id);
+                member_from_request_preserving(existing, member)
+            })
+            .collect()
+    });
     let pool = service_pool_service::update_pool(
         &state.db,
         &owner_id,
@@ -256,10 +317,12 @@ pub async fn update_pool(
             name: body.name,
             description: body.description,
             strategy: body.strategy,
-            members: body
-                .members
-                .map(|members| members.into_iter().map(member_from_request).collect()),
+            tier_balance: body.tier_balance,
+            member_contract: body.member_contract,
+            failover: body.failover,
+            members,
             is_active: body.is_active,
+            expected_revision: body.expected_revision.or(Some(current.config_revision)),
         },
     )
     .await?;
@@ -310,11 +373,24 @@ pub async fn set_members(
 ) -> AppResult<Json<ServicePoolResponse>> {
     let actor = auth_user.user_id.to_string();
     let owner_id = resolve_pool_write_owner(&state, &actor, &pool_id).await?;
-    let pool = service_pool_service::set_members(
+    let current = service_pool_service::get_pool(&state.db, &owner_id, &pool_id).await?;
+    let members = resolve_member_requests(&state, &owner_id, body.members)
+        .await?
+        .into_iter()
+        .map(|member| {
+            let existing = current
+                .members
+                .iter()
+                .find(|row| row.user_service_id == member.user_service_id);
+            member_from_request_preserving(existing, member)
+        })
+        .collect();
+    let pool = service_pool_service::set_members_with_revision(
         &state.db,
         &owner_id,
         &pool_id,
-        body.members.into_iter().map(member_from_request).collect(),
+        members,
+        Some(current.config_revision),
     )
     .await?;
     Ok(Json(pool_response(pool)))
@@ -341,9 +417,26 @@ pub async fn add_member(
 ) -> AppResult<Json<ServicePoolResponse>> {
     let actor = auth_user.user_id.to_string();
     let owner_id = resolve_pool_write_owner(&state, &actor, &pool_id).await?;
-    let pool =
-        service_pool_service::add_member(&state.db, &owner_id, &pool_id, member_from_request(body))
-            .await?;
+    let current = service_pool_service::get_pool(&state.db, &owner_id, &pool_id).await?;
+    let mut body = body;
+    body.user_service_id = service_pool_service::resolve_member_identifier(
+        &state.db,
+        &owner_id,
+        &body.user_service_id,
+    )
+    .await?;
+    let existing = current
+        .members
+        .iter()
+        .find(|member| member.user_service_id == body.user_service_id);
+    let pool = service_pool_service::add_member_with_revision(
+        &state.db,
+        &owner_id,
+        &pool_id,
+        member_from_request_preserving(existing, body),
+        Some(current.config_revision),
+    )
+    .await?;
     Ok(Json(pool_response(pool)))
 }
 
@@ -369,17 +462,75 @@ pub async fn remove_member(
 ) -> AppResult<Json<ServicePoolResponse>> {
     let actor = auth_user.user_id.to_string();
     let owner_id = resolve_pool_write_owner(&state, &actor, &pool_id).await?;
-    let pool =
-        service_pool_service::remove_member(&state.db, &owner_id, &pool_id, &user_service_id)
-            .await?;
+    let current = service_pool_service::get_pool(&state.db, &owner_id, &pool_id).await?;
+    let user_service_id = if current
+        .members
+        .iter()
+        .any(|m| m.user_service_id == user_service_id)
+    {
+        user_service_id
+    } else {
+        service_pool_service::resolve_member_identifier(&state.db, &owner_id, &user_service_id)
+            .await?
+    };
+    let pool = service_pool_service::remove_member_with_revision(
+        &state.db,
+        &owner_id,
+        &pool_id,
+        &user_service_id,
+        Some(current.config_revision),
+    )
+    .await?;
     Ok(Json(pool_response(pool)))
 }
 
+async fn resolve_member_requests(
+    state: &AppState,
+    owner: &str,
+    mut members: Vec<PoolMemberRequest>,
+) -> AppResult<Vec<PoolMemberRequest>> {
+    for member in &mut members {
+        member.user_service_id = service_pool_service::resolve_member_identifier(
+            &state.db,
+            owner,
+            &member.user_service_id,
+        )
+        .await?;
+    }
+    Ok(members)
+}
+
 fn member_from_request(member: PoolMemberRequest) -> ServicePoolMember {
+    member_from_request_preserving(None, member)
+}
+
+fn member_from_request_preserving(
+    existing: Option<&ServicePoolMember>,
+    member: PoolMemberRequest,
+) -> ServicePoolMember {
     ServicePoolMember {
         user_service_id: member.user_service_id,
-        weight: member.weight,
-        enabled: member.enabled,
+        weight: member
+            .weight
+            .or_else(|| existing.map(|row| row.weight))
+            .unwrap_or(1),
+        enabled: member
+            .enabled
+            .or_else(|| existing.map(|row| row.enabled))
+            .unwrap_or(true),
+        priority: member
+            .priority
+            .or_else(|| existing.map(|row| row.priority))
+            .unwrap_or(0),
+        model: match member.model {
+            Some(value) => value,
+            None => existing.and_then(|row| row.model.clone()),
+        },
+        same_api_compatible: match member.same_api_compatible {
+            Some(value) => value.unwrap_or(false),
+            None => existing.map(|row| row.same_api_compatible).unwrap_or(false),
+        },
+        health_reset_generation: existing.map(|row| row.health_reset_generation).unwrap_or(0),
     }
 }
 
@@ -392,6 +543,10 @@ fn pool_response(pool: ServicePool) -> ServicePoolResponse {
         name: pool.name,
         description: pool.description,
         strategy: strategy.as_str().to_string(),
+        tier_balance: pool.tier_balance,
+        config_revision: pool.config_revision,
+        member_contract: pool.member_contract.as_str().to_string(),
+        failover: pool.failover,
         members: pool
             .members
             .into_iter()
@@ -399,6 +554,9 @@ fn pool_response(pool: ServicePool) -> ServicePoolResponse {
                 user_service_id: member.user_service_id,
                 weight: member.weight,
                 enabled: member.enabled,
+                priority: member.priority,
+                same_api_compatible: member.same_api_compatible,
+                model: member.model,
             })
             .collect(),
         rr_counter: pool.rr_counter,
@@ -406,4 +564,237 @@ fn pool_response(pool: ServicePool) -> ServicePoolResponse {
         created_at: pool.created_at.to_rfc3339(),
         updated_at: pool.updated_at.to_rfc3339(),
     }
+}
+
+#[derive(Debug, Deserialize, IntoParams)]
+pub struct PoolCandidatesQuery {
+    pub after: Option<String>,
+    pub search: Option<String>,
+    pub limit: Option<u32>,
+    pub strategy: Option<PoolStrategy>,
+    pub declared_peer_ids: Option<String>,
+    pub org_id: Option<String>,
+    #[serde(default)]
+    pub member_contract: Option<PoolMemberContract>,
+    /// Comma-separated selected UserService IDs in the draft (maximum 50).
+    pub peer_ids: Option<String>,
+    pub method: Option<String>,
+    pub path: Option<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct PoolCandidateResponse {
+    pub user_service_id: String,
+    pub slug: String,
+    pub is_active: bool,
+    pub eligible: bool,
+    pub reason: Option<String>,
+    pub credential_binding: String,
+    pub protocol: Option<crate::models::downstream_service::InferenceWireProtocol>,
+    pub catalog_service_id: Option<String>,
+    pub requires_compatibility_declaration: bool,
+    pub cooldown_until: Option<String>,
+    pub consecutive_failures: i64,
+    pub last_status: Option<i32>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct PoolCandidatesResponse {
+    pub method: String,
+    pub path: String,
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
+    pub candidates: Vec<PoolCandidateResponse>,
+}
+
+async fn inspect_pool_candidates(
+    state: &AppState,
+    auth: &AuthUser,
+    owner: &str,
+    pool: Option<&ServicePool>,
+    query: PoolCandidatesQuery,
+    members_only: bool,
+) -> AppResult<Json<PoolCandidatesResponse>> {
+    let allowed =
+        (!auth.allow_all_services).then(|| auth.allowed_service_ids.iter().cloned().collect());
+    let nodes = (!auth.allow_all_nodes).then(|| auth.allowed_node_ids.iter().cloned().collect());
+    let method = query.method.as_deref().unwrap_or("POST");
+    http::Method::from_bytes(method.as_bytes())
+        .map_err(|_| AppError::BadRequest("Invalid method".into()))?;
+    let strategy = if members_only {
+        pool.map_or(PoolStrategy::Priority, |pool| pool.strategy)
+    } else {
+        query
+            .strategy
+            .or_else(|| pool.map(|p| p.strategy))
+            .unwrap_or(PoolStrategy::Priority)
+    };
+    let contract = if members_only {
+        pool.map(|p| p.member_contract).unwrap_or_default()
+    } else {
+        query
+            .member_contract
+            .or_else(|| pool.map(|p| p.member_contract))
+            .unwrap_or_default()
+    };
+    let path = query
+        .path
+        .as_deref()
+        .unwrap_or(if contract == PoolMemberContract::AiChat {
+            "chat/completions"
+        } else {
+            "/"
+        });
+    let peers = query.peer_ids.as_ref().map(|value| {
+        value
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    });
+    if peers.as_ref().is_some_and(|peers| {
+        peers.len() > 50 || peers.iter().any(|id| uuid::Uuid::parse_str(id).is_err())
+    }) {
+        return Err(AppError::BadRequest("Invalid draft members".into()));
+    }
+    if let Some(declarations) = &query.declared_peer_ids {
+        let ids: Vec<_> = declarations
+            .split(',')
+            .filter(|id| !id.is_empty())
+            .collect();
+        if ids.len() > 50 || ids.iter().any(|id| uuid::Uuid::parse_str(id).is_err()) {
+            return Err(AppError::BadRequest("Invalid draft declarations".into()));
+        }
+    }
+    let candidates = crate::services::service_pool_inspection::inspect(
+        &state.db,
+        &state.encryption_keys,
+        &auth.user_id.to_string(),
+        auth.api_key_id.as_deref(),
+        owner,
+        pool,
+        strategy,
+        contract,
+        method,
+        path,
+        allowed.as_ref(),
+        nodes.as_ref(),
+        crate::services::service_pool_inspection::InspectionQuery {
+            after: query.after.as_deref(),
+            search: query.search.as_deref(),
+            limit: query.limit.unwrap_or(100),
+            members_only,
+            peer_ids: peers.as_deref(),
+            declared_peer_ids: query.declared_peer_ids.as_deref(),
+        },
+    )
+    .await?;
+    Ok(Json(PoolCandidatesResponse {
+        method: method.into(),
+        path: path.into(),
+        has_more: candidates.next_cursor.is_some(),
+        next_cursor: candidates.next_cursor,
+        candidates: candidates
+            .candidates
+            .into_iter()
+            .map(|row| PoolCandidateResponse {
+                user_service_id: row.user_service_id,
+                slug: row.slug,
+                is_active: row.is_active,
+                eligible: row.eligible,
+                reason: row.reason,
+                credential_binding: row.credential_binding,
+                protocol: row.protocol,
+                catalog_service_id: row.catalog_service_id,
+                requires_compatibility_declaration: row.requires_compatibility_declaration,
+                cooldown_until: row.cooldown_until.map(|t| t.to_rfc3339()),
+                consecutive_failures: row.consecutive_failures,
+                last_status: row.last_status,
+            })
+            .collect(),
+    }))
+}
+
+#[utoipa::path(get, path="/api/v1/service-pools/candidates", params(PoolCandidatesQuery), responses((status=200, body=PoolCandidatesResponse)), tag="Service Pools")]
+pub async fn candidates(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Query(query): Query<PoolCandidatesQuery>,
+) -> AppResult<Json<PoolCandidatesResponse>> {
+    let owner = resolve_requested_owner(
+        &state,
+        &auth.user_id.to_string(),
+        query.org_id.as_deref(),
+        "inspect",
+    )
+    .await?;
+    inspect_pool_candidates(&state, &auth, &owner, None, query, false).await
+}
+
+#[utoipa::path(get, path="/api/v1/service-pools/{pool_id}/candidates", params(("pool_id"=String, Path), PoolCandidatesQuery), responses((status=200, body=PoolCandidatesResponse)), tag="Service Pools")]
+pub async fn pool_candidates(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+    Query(query): Query<PoolCandidatesQuery>,
+) -> AppResult<Json<PoolCandidatesResponse>> {
+    let owner = resolve_pool_write_owner(&state, &auth.user_id.to_string(), &id).await?;
+    let pool = service_pool_service::get_pool(&state.db, &owner, &id).await?;
+    inspect_pool_candidates(&state, &auth, &owner, Some(&pool), query, false).await
+}
+
+#[utoipa::path(get, path="/api/v1/service-pools/{pool_id}/health", params(("pool_id"=String, Path), PoolCandidatesQuery), responses((status=200, body=PoolCandidatesResponse)), tag="Service Pools")]
+pub async fn health(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+    Query(query): Query<PoolCandidatesQuery>,
+) -> AppResult<Json<PoolCandidatesResponse>> {
+    let owner = resolve_pool_write_owner(&state, &auth.user_id.to_string(), &id).await?;
+    let pool = service_pool_service::get_pool(&state.db, &owner, &id).await?;
+    let Json(mut inspected) =
+        inspect_pool_candidates(&state, &auth, &owner, Some(&pool), query, true).await?;
+    inspected.candidates.retain(|row| {
+        pool.members
+            .iter()
+            .any(|member| member.user_service_id == row.user_service_id)
+    });
+    Ok(Json(inspected))
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct ResetPoolHealthRequest {
+    pub user_service_id: Option<String>,
+}
+#[derive(Serialize, ToSchema)]
+pub struct ResetPoolHealthResponse {
+    pub reset: bool,
+}
+
+#[utoipa::path(post, path="/api/v1/service-pools/{pool_id}/health/reset", params(("pool_id"=String, Path)), request_body=ResetPoolHealthRequest, responses((status=200, body=ResetPoolHealthResponse)), tag="Service Pools")]
+pub async fn reset_health(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+    Json(body): Json<ResetPoolHealthRequest>,
+) -> AppResult<Json<ResetPoolHealthResponse>> {
+    let owner = resolve_pool_write_owner(&state, &auth.user_id.to_string(), &id).await?;
+    let pool = service_pool_service::get_pool(&state.db, &owner, &id).await?;
+    let member = if let Some(id) = body.user_service_id {
+        Some(if pool.members.iter().any(|m| m.user_service_id == id) {
+            id
+        } else {
+            service_pool_service::resolve_member_identifier(&state.db, &owner, &id).await?
+        })
+    } else {
+        None
+    };
+    crate::services::service_pool_health_service::reset_pool(
+        &state.db,
+        &pool.id,
+        &owner,
+        member.as_deref(),
+    )
+    .await?;
+    Ok(Json(ResetPoolHealthResponse { reset: true }))
 }

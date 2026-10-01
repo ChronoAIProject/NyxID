@@ -13,6 +13,7 @@ pub enum NodeIntent {
 #[derive(Clone, Debug)]
 pub struct BillingRouteContext {
     pub ingress: BillingIngress,
+    pub pool_attempt: Option<crate::models::usage_meter::PoolAttemptAccounting>,
     pub billing_request_id: String,
     pub billing_owner_id: String,
     pub actor_user_id: String,
@@ -118,6 +119,7 @@ impl BillingRouteContext {
         }
         Self {
             ingress,
+            pool_attempt: None,
             billing_request_id,
             billing_owner_id,
             actor_user_id,

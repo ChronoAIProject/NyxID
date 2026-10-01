@@ -344,6 +344,8 @@ mod tests {
     fn consent_service_access_flags_cover_explicit_and_legacy_rows() {
         let now = Utc::now();
         let mut consent = Consent {
+            revision: None,
+            issuance_fence: None,
             id: "consent-1".to_string(),
             user_id: "user-1".to_string(),
             client_id: "client-1".to_string(),

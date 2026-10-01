@@ -15,6 +15,8 @@ export interface LoginRedirectOptions {
   readonly redirectUri?: string;
   readonly state?: string;
   readonly prompt?: "none" | "consent" | "login" | (string & {});
+  readonly includeGrantedScopes?: boolean;
+  readonly requestedServiceIds?: readonly string[];
 }
 
 export interface NyxIDTokenSet {
@@ -41,7 +43,7 @@ interface PendingAuthState {
   readonly state: string;
   readonly codeVerifier: string;
   readonly redirectUri: string;
-  readonly scope: string;
+  readonly scope?: string;
 }
 
 interface TokenResponse {
@@ -132,11 +134,16 @@ export class NyxIDClient {
   }
 
   async buildAuthorizeUrl(options: LoginRedirectOptions = {}): Promise<string> {
+    if (options.requestedServiceIds?.length && !options.includeGrantedScopes) {
+      throw new Error("requestedServiceIds requires includeGrantedScopes");
+    }
     const codeVerifier = randomUrlSafeString(48);
     const codeChallenge = await sha256Base64Url(codeVerifier);
     const state = options.state ?? randomUrlSafeString(24);
     const redirectUri = options.redirectUri ?? this.defaultRedirectUri;
-    const scope = options.scope ?? this.defaultScope;
+    const scope =
+      options.scope ??
+      (options.includeGrantedScopes ? undefined : this.defaultScope);
 
     const pending: PendingAuthState = {
       state,
@@ -150,12 +157,18 @@ export class NyxIDClient {
     url.searchParams.set("response_type", "code");
     url.searchParams.set("client_id", this.clientId);
     url.searchParams.set("redirect_uri", redirectUri);
-    url.searchParams.set("scope", scope);
+    if (scope) url.searchParams.set("scope", scope);
     url.searchParams.set("code_challenge", codeChallenge);
     url.searchParams.set("code_challenge_method", "S256");
     url.searchParams.set("state", state);
     if (options.prompt) {
       url.searchParams.set("prompt", options.prompt);
+    }
+    if (options.includeGrantedScopes) {
+      url.searchParams.set("include_granted_scopes", "true");
+    }
+    for (const id of options.requestedServiceIds ?? []) {
+      url.searchParams.append("requested_service_ids", id);
     }
     return url.toString();
   }
@@ -173,16 +186,9 @@ export class NyxIDClient {
   ): Promise<NyxIDTokenSet> {
     const callback = new URL(currentUrl);
     const oauthError = callback.searchParams.get("error");
-    if (oauthError) {
-      throw new Error(
-        callback.searchParams.get("error_description") ??
-          `OAuth error: ${oauthError}`,
-      );
-    }
-
     const code = callback.searchParams.get("code");
     const state = callback.searchParams.get("state");
-    if (!code || !state) {
+    if (!state) {
       throw new Error("Missing authorization code or state");
     }
 
@@ -200,6 +206,17 @@ export class NyxIDClient {
 
     if (pending.state !== state) {
       throw new Error("State mismatch");
+    }
+
+    if (oauthError) {
+      this.storage.removeItem(this.pendingKey);
+      throw new Error(
+        callback.searchParams.get("error_description") ??
+          `OAuth error: ${oauthError}`,
+      );
+    }
+    if (!code) {
+      throw new Error("Missing authorization code or state");
     }
 
     const form = new URLSearchParams();

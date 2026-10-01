@@ -166,6 +166,7 @@ pub async fn claim(
         now + Duration::from_std(lease_ttl).unwrap_or_else(|_| Duration::seconds(i64::MAX / 4));
     let owner = NodeConnectionOwner {
         http_signature_v2: false,
+        http_cancellation: false,
         instance_name: identity.instance_name.clone(),
         generation_id: identity.generation_id.clone(),
         connection_id: connection_id.to_string(),
@@ -263,6 +264,7 @@ pub async fn record_capabilities(
             doc! {
                 "$set": {
                     "connection_owner.http_signature_v2": capabilities.http_signature_v2,
+                    "connection_owner.http_cancellation": capabilities.http_cancellation,
                     "connection_owner.credential_ack_correlation": capabilities.credential_ack_correlation,
                     "connection_owner.remote_credential_crypto_v1": capabilities.remote_credential_crypto_v1,
                     "connection_owner.proxy_max_body_size": capabilities.proxy_max_body_size.map(|value| value as i64),

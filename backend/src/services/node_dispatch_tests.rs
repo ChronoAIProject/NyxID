@@ -200,6 +200,7 @@ async fn local_session_info_prefers_exact_socket_capabilities() {
         &node_id,
         &crate::services::node_ws_manager::NodeCapabilitiesMsg {
             http_signature_v2: false,
+            http_cancellation: false,
             remote_credential_crypto_v1: true,
             ..Default::default()
         },
@@ -308,6 +309,13 @@ async fn remote_proxy_streams_before_completion_and_cancels_owner_work() {
     let Some(mut fixture) = two_replica_fixture("node_dispatch_stream").await else {
         return;
     };
+    fixture.owner_manager.record_capabilities(
+        &fixture.node_id,
+        &crate::services::node_ws_manager::NodeCapabilitiesMsg {
+            http_cancellation: true,
+            ..Default::default()
+        },
+    );
     let request_id = uuid::Uuid::new_v4().to_string();
     let dispatch = fixture.caller_dispatch.clone();
     let node_id = fixture.node_id.clone();
@@ -362,6 +370,9 @@ async fn remote_proxy_streams_before_completion_and_cancels_owner_work() {
     })
     .await
     .expect("owner-side proxy request was not cancelled");
+    let cancel = message_json(&next_outbound(&mut fixture.outbound).await);
+    assert_eq!(cancel["type"], "proxy_cancel");
+    assert_eq!(cancel["request_id"], request_id);
 }
 
 #[tokio::test]
@@ -369,6 +380,13 @@ async fn remote_proxy_cancellation_before_headers_clears_owner_work() {
     let Some(mut fixture) = two_replica_fixture("node_dispatch_preheader_cancel").await else {
         return;
     };
+    fixture.owner_manager.record_capabilities(
+        &fixture.node_id,
+        &crate::services::node_ws_manager::NodeCapabilitiesMsg {
+            http_cancellation: true,
+            ..Default::default()
+        },
+    );
     let request_id = uuid::Uuid::new_v4().to_string();
     let dispatch = fixture.caller_dispatch.clone();
     let node_id = fixture.node_id.clone();
@@ -406,6 +424,9 @@ async fn remote_proxy_cancellation_before_headers_clears_owner_work() {
     })
     .await;
     assert!(cleared.is_ok(), "owner pending work was not cancelled");
+    let cancel = message_json(&next_outbound(&mut fixture.outbound).await);
+    assert_eq!(cancel["type"], "proxy_cancel");
+    assert_eq!(cancel["request_id"], request_id);
 }
 
 #[tokio::test]
@@ -841,6 +862,7 @@ async fn workspace_remote_node_dispatch_gates_persisted_capability_and_preserves
         &fixture.node_id,
         &NodeCapabilitiesMsg {
             http_signature_v2: true,
+            http_cancellation: false,
             ..Default::default()
         },
     );
@@ -849,6 +871,7 @@ async fn workspace_remote_node_dispatch_gates_persisted_capability_and_preserves
         &fence,
         NodeCapabilitiesFlags {
             http_signature_v2: true,
+            http_cancellation: false,
             ..Default::default()
         },
         true,

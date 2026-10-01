@@ -200,6 +200,7 @@ impl LlmTranslator for ChatgptTranslator {
 
         let mut text_parts = Vec::new();
         let mut tool_calls = Vec::new();
+        let mut refusals = Vec::new();
 
         for item in &output {
             let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
@@ -212,11 +213,20 @@ impl LlmTranslator for ChatgptTranslator {
                             {
                                 text_parts.push(text.to_string());
                             }
+                            if block.get("type").and_then(|t| t.as_str()) == Some("refusal")
+                                && let Some(text) = block.get("refusal").and_then(|v| v.as_str())
+                            {
+                                refusals.push(text.to_owned());
+                            }
                         }
                     }
                 }
                 "function_call" => {
-                    let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
+                    let id = item
+                        .get("call_id")
+                        .or_else(|| item.get("id"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
                     let name = item
                         .get("name")
                         .and_then(|v| v.as_str())
@@ -282,6 +292,9 @@ impl LlmTranslator for ChatgptTranslator {
                 serde_json::Value::String(content_text)
             },
         });
+        if !refusals.is_empty() {
+            message["refusal"] = serde_json::json!(refusals.join(""));
+        }
         if !tool_calls.is_empty() {
             message["tool_calls"] = serde_json::Value::Array(tool_calls);
         }
@@ -362,7 +375,11 @@ impl LlmTranslator for ChatgptTranslator {
                         .unwrap_or(0) as usize;
                     state.tool_call_indices.push((output_index, tool_index));
 
-                    let tool_id = item.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
+                    let tool_id = item
+                        .get("call_id")
+                        .or_else(|| item.get("id"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
                     let tool_name = item
                         .get("name")
                         .and_then(|v| v.as_str())
@@ -395,6 +412,13 @@ impl LlmTranslator for ChatgptTranslator {
                 }
             }
 
+            "response.refusal.delta" => Some(format!(
+                "data: {}\n\n",
+                serde_json::json!({
+                    "id": format!("chatcmpl-{}", state.id), "object":"chat.completion.chunk",
+                    "created":state.created, "model":state.model, "choices":[{"index":0, "delta":{"refusal":data.get("delta")?}, "finish_reason":serde_json::Value::Null}]
+                })
+            )),
             "response.output_text.delta" => {
                 let delta = data.get("delta").and_then(|d| d.as_str()).unwrap_or("");
 
@@ -869,7 +893,7 @@ const CHATGPT_RESPONSES_API_URL: &str = "https://chatgpt.com/backend-api/codex/r
 
 /// Build a User-Agent string matching the codex-rs format:
 /// `codex_cli_rs/{version} ({os_type} {os_version}; {arch})`
-fn codex_user_agent() -> String {
+pub(crate) fn codex_user_agent() -> String {
     let os = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
     // Map Rust OS names to codex-rs os_info style names

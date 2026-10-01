@@ -4419,8 +4419,9 @@ fn node_dispatch_failure_disposition(dispatched: bool) -> NodeDispatchFailureDis
 }
 
 async fn collect_node_stream_response(
-    mut stream: tokio::sync::mpsc::Receiver<crate::services::node_ws_manager::StreamChunk>,
+    stream: impl Into<crate::services::node_ws_manager::NodeProxyStream>,
 ) -> AppResult<(u16, Vec<(String, String)>, Vec<u8>)> {
+    let mut stream = stream.into();
     use crate::services::node_ws_manager::StreamChunk;
 
     let mut status = 200u16;
@@ -11363,6 +11364,7 @@ mod tests {
             has_server_credential: false,
             api_key_id: None,
             credential_epoch: 1,
+            master_credential_revision: None,
             master_credential: false,
             credential_source: None,
             org_routing: org_user_id.map(|org_user_id| proxy_service::OrgRouting {

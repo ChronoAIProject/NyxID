@@ -22,6 +22,27 @@ const client = new NyxIDClient({
 await client.loginWithRedirect();
 ```
 
+To request more access after an existing NyxID grant, use the same redirect
+and callback flow. `scope` contains only the new OAuth permissions; omit it
+when only adding services. The new scope must be allowed for the client, and
+service IDs are exact NyxID UserService UUIDs.
+
+```ts
+await client.loginWithRedirect({
+  includeGrantedScopes: true,
+  scope: "email",
+  requestedServiceIds: ["USER_SERVICE_UUID"],
+});
+```
+
+The SDK generates a random `state` and `handleRedirectCallback()` verifies it
+on success and error callbacks. If you need to restore a draft, generate a fresh
+random state, store the draft reference under it in your app, and pass that
+state to `loginWithRedirect()`. Exchange a successful code with
+`handleRedirectCallback()`, then re-read the effective grant before enabling
+the new access. An error or cancellation does not prove that access changed.
+Existing scopes and services are retained by NyxID.
+
 ## Connect and call a service
 
 ```ts
