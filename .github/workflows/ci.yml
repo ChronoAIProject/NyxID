@@ -388,6 +388,8 @@ jobs:
   machine-container:
     name: Machine Container E2E
     needs: changes
+    permissions:
+      contents: read
     if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.machine == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45

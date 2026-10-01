@@ -379,7 +379,7 @@ async fn machine_gateway_uses_live_specialist_scope_and_server_credentials() {
     .unwrap();
     assert_eq!(
         allowed["stdout"], "upstream accepted server credential",
-        "{allowed}"
+        "declared service call should reach the upstream"
     );
     let env = call(
         &f.state,
@@ -417,7 +417,10 @@ async fn machine_loopback_exec_performance() {
         )
         .await
         .unwrap();
-        assert_eq!(result["exit_code"], 0, "{result}");
+        assert_eq!(
+            result["exit_code"], 0,
+            "result command should exit successfully"
+        );
         let overhead = (start.elapsed().as_secs_f64() * 1000.0
             - result["duration_ms"].as_f64().unwrap())
         .max(0.0);
@@ -745,7 +748,10 @@ async fn machine_gateway_streaming_and_git_performance() {
     let direct_download = direct.elapsed();
     assert_eq!(count, 100 * 1024 * 1024);
     let download=call(&f.state,&f.chat,"nyx__machine_exec",json!({"machine":node.id,"services":["api-github"],"command":"curl --fail -sS -H \"Authorization: Bearer $NYXID_GATEWAY_TOKEN\" \"$NYXID_GATEWAY_URL/s/api-github/download\" -o large.bin && wc -c < large.bin","timeout_secs":120})).await.unwrap();
-    assert_eq!(download["exit_code"], 0, "{download}");
+    assert_eq!(
+        download["exit_code"], 0,
+        "download command should exit successfully"
+    );
     assert_eq!(download["stdout"].as_str().unwrap().trim(), "104857600");
     let direct = Instant::now();
     let output = tokio::process::Command::new("git")
@@ -770,10 +776,16 @@ async fn machine_gateway_streaming_and_git_performance() {
     );
     let direct_clone = direct.elapsed();
     let cloned=call(&f.state,&f.chat,"nyx__machine_exec",json!({"machine":node.id,"services":["api-github"],"command":"git clone --quiet https://github.com/owner/repo.git clone && git -C clone config --get remote.origin.url","timeout_secs":120})).await.unwrap();
-    assert_eq!(cloned["exit_code"], 0, "{cloned}");
+    assert_eq!(
+        cloned["exit_code"], 0,
+        "cloned command should exit successfully"
+    );
     assert_eq!(cloned["stdout"], "https://github.com/owner/repo.git\n");
     let pushed=call(&f.state,&f.chat,"nyx__machine_exec",json!({"machine":node.id,"services":["api-github"],"command":"cd clone && git config user.name 'Machine test' && git config user.email machine@example.test && printf verified > pushed.txt && git add pushed.txt && git commit -qm push && git push --quiet origin main && git fetch --quiet && git pull --quiet","timeout_secs":120})).await.unwrap();
-    assert_eq!(pushed["exit_code"], 0, "{pushed}");
+    assert_eq!(
+        pushed["exit_code"], 0,
+        "pushed command should exit successfully"
+    );
     let verify = tokio::process::Command::new("git")
         .args(["--git-dir=owner/repo.git", "show", "main:pushed.txt"])
         .current_dir(upstream.root.path())
@@ -822,16 +834,22 @@ async fn machine_gateway_git_clone_fetch_pull_push_and_sdk_preserve_gzip() {
         "machine":node.id,"services":["api-github"],
         "command":"curl --compressed --fail -sS -H \"Authorization: Bearer $NYXID_GATEWAY_TOKEN\" \"$NYXID_GATEWAY_URL/s/api-github/sdk\"",
     })).await.unwrap();
-    assert_eq!(sdk["exit_code"], 0, "{sdk}");
+    assert_eq!(sdk["exit_code"], 0, "sdk command should exit successfully");
     assert_eq!(
         serde_json::from_str::<Value>(sdk["stdout"].as_str().unwrap()).unwrap()["sdk"],
         "compressed response decoded"
     );
     let cloned=call(&f.state,&f.chat,"nyx__machine_exec",json!({"machine":node.id,"services":["api-github"],"command":"git clone --quiet https://github.com/owner/repo.git clone && git -C clone config --get remote.origin.url","timeout_secs":120})).await.unwrap();
-    assert_eq!(cloned["exit_code"], 0, "{cloned}");
+    assert_eq!(
+        cloned["exit_code"], 0,
+        "cloned command should exit successfully"
+    );
     assert_eq!(cloned["stdout"], "https://github.com/owner/repo.git\n");
     let pushed=call(&f.state,&f.chat,"nyx__machine_exec",json!({"machine":node.id,"services":["api-github"],"command":"cd clone && git config user.name 'Machine test' && git config user.email machine@example.test && printf verified > pushed.txt && git add pushed.txt && git commit -qm push && git push --quiet origin main && git fetch --quiet && git pull --quiet","timeout_secs":120})).await.unwrap();
-    assert_eq!(pushed["exit_code"], 0, "{pushed}");
+    assert_eq!(
+        pushed["exit_code"], 0,
+        "pushed command should exit successfully"
+    );
     let verify = tokio::process::Command::new("git")
         .args(["--git-dir=owner/repo.git", "show", "main:pushed.txt"])
         .current_dir(upstream.root.path())
@@ -897,7 +915,10 @@ async fn machine_declared_services_are_bound_to_job_card_and_audit() {
     let result = call(&f.state, &f.chat, "nyx__machine_exec", args)
         .await
         .unwrap();
-    assert_eq!(result["exit_code"], 0, "{result}");
+    assert_eq!(
+        result["exit_code"], 0,
+        "result command should exit successfully"
+    );
     let job = f
         .state
         .db

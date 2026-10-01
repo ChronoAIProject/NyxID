@@ -45,7 +45,7 @@ fn open_at(parent: i32, name: &std::ffi::OsStr, flags: i32, mode: u32) -> Result
 
 // /dev/fd directory traversal is not portable to macOS. fdopendir keeps
 // enumeration anchored to the verified descriptor on both supported platforms.
-fn directory_entries(directory: &File) -> Result<Vec<(std::ffi::OsString, u32)>> {
+fn directory_entries(directory: &File) -> Result<Vec<(std::ffi::OsString, libc::mode_t)>> {
     use std::os::fd::IntoRawFd;
     use std::os::unix::ffi::OsStringExt;
     let fd = open_at(
@@ -109,7 +109,7 @@ fn directory_entries(directory: &File) -> Result<Vec<(std::ffi::OsString, u32)>>
             }
             return Err(error.into());
         }
-        let mode = unsafe { metadata.assume_init().st_mode } as u32;
+        let mode = unsafe { metadata.assume_init().st_mode };
         entries.push((std::ffi::OsString::from_vec(name.to_bytes().to_vec()), mode));
         if entries.len() > 10000 {
             bail!("directory listing limit exceeded");
@@ -519,8 +519,8 @@ impl Roots {
                 if self.excluded.iter().any(|denied| child.starts_with(denied)) {
                     continue;
                 }
-                let is_dir = mode & libc::S_IFMT as u32 == libc::S_IFDIR as u32;
-                let is_symlink = mode & libc::S_IFMT as u32 == libc::S_IFLNK as u32;
+                let is_dir = mode & libc::S_IFMT == libc::S_IFDIR;
+                let is_symlink = mode & libc::S_IFMT == libc::S_IFLNK;
                 if is_dir && level < depth {
                     pending.push((child.clone(), level + 1));
                 }
