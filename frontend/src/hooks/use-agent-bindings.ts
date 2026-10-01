@@ -38,6 +38,7 @@ export function useCreateBinding() {
       );
     },
     onSuccess: (_data, variables) => {
+      void queryClient.invalidateQueries({ queryKey: ["keys", "insights"] });
       void queryClient.invalidateQueries({
         queryKey: ["agent-bindings", variables.keyId],
       });
@@ -63,6 +64,7 @@ export function useDeleteBinding() {
       return api.delete<void>(`/api-keys/${keyId}/bindings/${bindingId}`);
     },
     onSuccess: (_data, variables) => {
+      void queryClient.invalidateQueries({ queryKey: ["keys", "insights"] });
       void queryClient.invalidateQueries({
         queryKey: ["agent-bindings", variables.keyId],
       });

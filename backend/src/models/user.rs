@@ -81,6 +81,71 @@ pub struct UserProfileConfig {
     pub onboarding: OnboardingState,
     #[serde(default)]
     pub release_integrity: ReleaseIntegrityProfileConfig,
+    #[serde(default)]
+    pub services_view: Option<ServiceViewPreferences>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceViewSource {
+    All,
+    Personal,
+    Org,
+    Platform,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceViewState {
+    All,
+    Enabled,
+    Disabled,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceViewType {
+    All,
+    Http,
+    Ssh,
+}
+
+pub(crate) fn deserialize_service_view_ids<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Selection {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match Option::<Selection>::deserialize(deserializer)? {
+        Some(Selection::One(id)) => vec![id],
+        Some(Selection::Many(ids)) => ids,
+        None => Vec::new(),
+    })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceViewPreferences {
+    #[serde(
+        default,
+        alias = "organization_id",
+        deserialize_with = "crate::models::user::deserialize_service_view_ids"
+    )]
+    pub organization_ids: Vec<String>,
+    #[serde(
+        default,
+        alias = "service_group_id",
+        deserialize_with = "crate::models::user::deserialize_service_view_ids"
+    )]
+    pub service_group_ids: Vec<String>,
+    pub search: String,
+    pub source: ServiceViewSource,
+    pub state: ServiceViewState,
+    pub service_type: ServiceViewType,
+    pub show_auto_connected: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

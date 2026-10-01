@@ -1,47 +1,31 @@
-import { ServiceAuthorshipFooter, ArchivedServiceHistory } from "@/components/dashboard/service-history";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { ServiceConnectionTable } from "@/components/dashboard/service-connection-table";
+import { ArchivedServiceHistory } from "@/components/dashboard/service-history";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearch, useNavigate } from "@tanstack/react-router";
-import { useKeys } from "@/hooks/use-keys";
+import { useKeys, useCatalog } from "@/hooks/use-keys";
+import { GroupedServiceCards } from "@/components/dashboard/grouped-service-cards";
 import { useUserServices } from "@/hooks/use-user-services";
 import { PageHeader } from "@/components/shared/page-header";
 import { CodexConnectionSection } from "@/components/providers/codex-connection";
 import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { TeachingEmptyState } from "@/components/shared/teaching-empty-state";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Badge } from "@/components/ui/badge";
 import { Button, ButtonIcon } from "@/components/ui/button";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import {
-  Table,
-  TableHeader,
-  TableBody,
-  TableRow,
-  TableHead,
-  TableCell,
-} from "@/components/ui/table";
-import {
-  Globe,
-  KeySquare,
-  Server,
-  Terminal,
-  RefreshCw,
-  Shield,
-} from "lucide-react";
+import { KeySquare, Terminal, RefreshCw, Shield } from "lucide-react";
 import { MagicKeyIcon } from "@/components/icons/empty-state";
-import { Switch } from "@/components/ui/switch";
-import { Label } from "@/components/ui/label";
-import { useNodes } from "@/hooks/use-nodes";
-import { ViewToggle, useViewMode, type ViewMode } from "@/components/shared/view-toggle";
-import { ServiceIcon } from "@/components/service-icon";
+import {
+  ViewToggle,
+  useViewMode,
+  type ViewMode,
+} from "@/components/shared/view-toggle";
 import { AddKeyDialog } from "@/components/dashboard/add-key-dialog";
 import { ApiKeyTable } from "@/components/dashboard/api-key-table";
 import { ApiKeyCreateDialog } from "@/components/dashboard/api-key-create-dialog";
 import { ApiKeyUsageDashboard } from "@/components/dashboard/api-key-usage-dashboard";
 import { ServicePoolsTab } from "@/components/dashboard/service-pools-tab";
-import { RoleBadge } from "@/components/orgs/role-badge";
-import { OrgAvatar } from "@/components/orgs/org-avatar";
 import type { KeyInfo } from "@/types/keys";
 import type { CredentialSource } from "@/schemas/orgs";
 import {
@@ -53,35 +37,6 @@ import {
   isValidTab,
   parseTab,
 } from "@/lib/url-tabs";
-
-function statusVariant(
-  status: string,
-): "success" | "secondary" | "destructive" {
-  switch (status) {
-    case "active":
-    case "online":
-      return "success";
-    case "expired":
-    case "inaccessible":
-    case "draining":
-      return "secondary";
-    case "revoked":
-    case "failed":
-    case "refresh_failed":
-    case "offline":
-    case "node_deleted":
-    case "unknown":
-      return "destructive";
-    default:
-      return "secondary";
-  }
-}
-
-interface KeyCardProps {
-  readonly keyInfo: KeyInfo;
-  /** Credential provenance; undefined is treated as personal. */
-  readonly source: CredentialSource | undefined;
-}
 
 const RECONNECTABLE_STATUSES = new Set([
   "pending_auth",
@@ -98,9 +53,17 @@ function isReconnectableKey(
   keyInfo: KeyInfo,
   source: CredentialSource | undefined,
 ): boolean {
-  if (keyInfo.auto_connected || isNonAdminOrgSource(source)) return false;
+  if (
+    keyInfo.auto_connected ||
+    isNonAdminOrgSource(source) ||
+    (source?.type === "org" && !source.allowed)
+  )
+    return false;
   const effectiveStatus = keyInfo.connection_status ?? keyInfo.status;
-  if (!keyInfo.credential_missing && !RECONNECTABLE_STATUSES.has(effectiveStatus)) {
+  if (
+    !keyInfo.credential_missing &&
+    !RECONNECTABLE_STATUSES.has(effectiveStatus)
+  ) {
     return false;
   }
   return (
@@ -111,508 +74,32 @@ function isReconnectableKey(
 }
 
 function reconnectLabel(status: string): string {
-  return status === "pending_auth"
-    ? "Continue authentication"
-    : "Reconnect";
+  return status === "pending_auth" ? "Continue authentication" : "Reconnect";
 }
 
-function KeyCardContent({
-  keyInfo,
-  source,
-  onReconnect,
-}: KeyCardProps & {
-  readonly onReconnect?: (keyInfo: KeyInfo) => void;
-}) {
-  const isSsh = keyInfo.service_type === "ssh";
-  const hasSshCertificateAuth = isSsh && keyInfo.ssh_ca_public_key !== null;
-  // Issue #416: resolve the bound node's name so the list card shows
-  // "Via my-node" instead of bare "Via node". TanStack Query dedupes
-  // the request across all rendered cards.
-  const { data: nodes } = useNodes();
-  const nodeName = keyInfo.node_id
-    ? (nodes?.find((n) => n.id === keyInfo.node_id)?.name ??
-      keyInfo.node_id.slice(0, 8))
-    : null;
-  const endpointUrl = keyInfo.endpoint_url ?? "";
-  const displayUrl = keyInfo.auto_connected
-    ? "Platform managed"
-    : isSsh
-      ? `${keyInfo.ssh_host ?? "unknown"}:${keyInfo.ssh_port ?? 22}`
-      : endpointUrl.length > 50
-        ? `${endpointUrl.slice(0, 50)}...`
-        : endpointUrl;
-
-  const isOrgInherited = source?.type === "org";
-  // Viewers and out-of-scope members see the card with reduced opacity.
-  const isBlocked = source?.type === "org" && !source.allowed;
-  // Members can USE the credential (allowed=true) but cannot MODIFY it.
-  // Non-admin org cards are non-clickable on the listing (see KeyCard)
-  // and flagged as read-only so the user knows why.
-  const isReadOnly =
-    source?.type === "org" && source.allowed && source.role !== "admin";
-
-  const displayStatus = keyInfo.connection_status === "expired"
-    ? "expired"
-    : keyInfo.node_id && keyInfo.node_status
-    ? (keyInfo.node_status === "unknown" ? "node_deleted" : keyInfo.node_status)
-    : keyInfo.status;
-
-  const displayStatusLabel =
-    displayStatus === "node_deleted"
-      ? "Node Deleted"
-      : displayStatus.charAt(0).toUpperCase() + displayStatus.slice(1);
-  const showReconnect = onReconnect && isReconnectableKey(keyInfo, source);
-  const autoAuthLabel = keyInfo.auth_method === "none"
-    ? "No auth required"
-    : "Platform managed";
-
-  return (
-    <Card
-      className={`h-full transition-colors duration-300 ${
-        isBlocked
-          ? "opacity-60"
-          : "hover:border-white/[0.15] hover:bg-accent/30"
-      }`}
-      aria-disabled={isBlocked ? true : undefined}
-    >
-      <CardContent className="flex h-full min-h-[140px] flex-col gap-3 p-4">
-        <div className="flex items-start gap-3 min-w-0">
-          <ServiceIcon
-            slug={keyInfo.catalog_service_slug ?? keyInfo.slug}
-            iconUrl={keyInfo.icon_url}
-            size="md"
-            className="mt-0.5"
-          />
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-[12px] font-medium text-foreground">
-              {keyInfo.label}
-            </p>
-            {keyInfo.catalog_service_name && (
-              <p className="truncate text-xs text-muted-foreground">
-                {keyInfo.catalog_service_name}
-              </p>
-            )}
-          </div>
-        </div>
-        <div className="flex flex-wrap items-center gap-1.5">
-          {isOrgInherited && (
-            <Badge variant="info">Org</Badge>
-          )}
-          {isBlocked && (
-            <Badge variant="secondary">Read-Only</Badge>
-          )}
-          {isReadOnly && !isBlocked && (
-            <Badge variant="secondary">View-Only</Badge>
-          )}
-          {keyInfo.admin_only && (
-            <Badge variant="secondary">Admin-only</Badge>
-          )}
-          <Badge variant={statusVariant(displayStatus)}>
-            {displayStatusLabel}
-          </Badge>
-          {keyInfo.credential_missing && (
-            <Badge variant="warning">Credential Missing</Badge>
-          )}
-          {isSsh && <Badge variant="secondary">SSH</Badge>}
-          {(keyInfo.auto_connected ||
-            isSsh ||
-            (keyInfo.credential_type !== "oauth2" &&
-              keyInfo.credential_type !== "api_key")) && (
-            <Badge variant="secondary">
-              {keyInfo.auto_connected
-                ? autoAuthLabel
-                : isSsh
-                  ? hasSshCertificateAuth
-                    ? "certificate"
-                    : "ssh tunnel"
-                  : keyInfo.credential_type}
-            </Badge>
-          )}
-          {/* Routing pill — moved to top so it aligns across cards.
-              When routed via a node, the badge becomes a real Link so the
-              user can jump straight to the node detail page (deferred Wave B
-              cleanup, ships with C.1 canon sweep). */}
-          {nodeName && keyInfo.node_id ? (
-            <Link
-              to="/nodes/$nodeId"
-              params={{ nodeId: keyInfo.node_id }}
-              onClick={(e) => e.stopPropagation()}
-              className="inline-flex"
-            >
-              <Badge variant="secondary" className="cursor-pointer transition-colors hover:bg-muted/70">
-                → {nodeName}
-              </Badge>
-            </Link>
-          ) : (
-            <Badge variant="secondary">Direct</Badge>
-          )}
-          {keyInfo.auto_connected && (
-            <Badge variant="secondary">
-              {keyInfo.source_app_name
-                ? `Via ${keyInfo.source_app_name}`
-                : "Auto-connected"}
-            </Badge>
-          )}
-          {!keyInfo.is_active && <Badge variant="secondary">Disabled</Badge>}
-        </div>
-
-        {showReconnect && (
-          <Button
-            variant="outline"
-            className="w-fit"
-            onClick={(event) => {
-              event.preventDefault();
-              event.stopPropagation();
-              onReconnect(keyInfo);
-            }}
-          >
-            <ButtonIcon><RefreshCw className="h-3 w-3" /></ButtonIcon>
-            {reconnectLabel(keyInfo.status)}
-          </Button>
-        )}
-
-        <div className="mt-auto flex min-w-0 items-end justify-between gap-3">
-          <div className="min-w-0 flex-1 space-y-1.5 text-xs text-muted-foreground">
-            <div className="flex min-w-0 items-center gap-1.5">
-              {isSsh ? (
-                <Terminal className="h-3 w-3 shrink-0" />
-              ) : (
-                <Globe className="h-3 w-3 shrink-0" />
-              )}
-              <span className="truncate">{displayUrl}</span>
-            </div>
-            <div className="flex min-w-0 items-center gap-1.5">
-              <Server className="h-3 w-3 shrink-0" />
-              <span className="truncate">
-                {isSsh ? keyInfo.slug : `/proxy/s/${keyInfo.slug}`}
-              </span>
-            </div>
-          </div>
-          <ServiceAuthorshipFooter
-            authorship={keyInfo.authorship}
-            className="mt-0 max-w-[60%]"
-          />
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
-
-function KeyCard({
-  keyInfo,
-  source,
-  onReconnect,
-}: KeyCardProps & {
-  readonly onReconnect?: (keyInfo: KeyInfo) => void;
-}) {
-  // Navigation gating:
-  //
-  // - Personal credentials and admin-role org credentials: fully clickable
-  //   and the detail page renders all mutation controls.
-  // - Member / viewer org credentials: clickable, but the detail page
-  //   renders in read-only mode (see KeyDetailPage's `readOnly` branch).
-  //   Members can still see endpoint / auth metadata and a usage snippet
-  //   for credentials they're entitled to proxy through.
-  // - Out-of-scope org items (source.allowed === false due to scope, not
-  //   role) don't even appear in the listing because
-  //   `list_user_services_with_sources` drops them.
-  return (
-    <Link to="/keys/$keyId" params={{ keyId: keyInfo.id }} className="h-full">
-      <KeyCardContent
-        keyInfo={keyInfo}
-        source={source}
-        onReconnect={onReconnect}
-      />
-    </Link>
-  );
-}
-
-function ServiceTableRow({
-  keyInfo,
-  source,
-  onReconnect,
-}: KeyCardProps & {
-  readonly onReconnect?: (keyInfo: KeyInfo) => void;
-}) {
-  const navigate = useNavigate();
-  const isSsh = keyInfo.service_type === "ssh";
-  const hasSshCertificateAuth = isSsh && keyInfo.ssh_ca_public_key !== null;
-  const { data: nodes } = useNodes();
-  const nodeName = keyInfo.node_id
-    ? (nodes?.find((n) => n.id === keyInfo.node_id)?.name ??
-      keyInfo.node_id.slice(0, 8))
-    : null;
-
-  const isOrgInherited = source?.type === "org";
-  const isBlocked = source?.type === "org" && !source.allowed;
-  const isReadOnly =
-    source?.type === "org" && source.allowed && source.role !== "admin";
-
-  const displayStatus = keyInfo.connection_status === "expired"
-    ? "expired"
-    : keyInfo.node_id && keyInfo.node_status
-    ? (keyInfo.node_status === "unknown" ? "node_deleted" : keyInfo.node_status)
-    : keyInfo.status;
-
-  const displayStatusLabel =
-    displayStatus === "node_deleted"
-      ? "Node Deleted"
-      : displayStatus.charAt(0).toUpperCase() + displayStatus.slice(1);
-
-  const displayUrl = keyInfo.auto_connected
-    ? "Platform managed"
-    : isSsh
-      ? `${keyInfo.ssh_host ?? "unknown"}:${keyInfo.ssh_port ?? 22}`
-      : (keyInfo.endpoint_url ?? "");
-
-  const authLabel = keyInfo.auto_connected
-    ? keyInfo.auth_method === "none"
-      ? "No auth"
-      : "Platform managed"
-    : isSsh
-      ? hasSshCertificateAuth
-        ? "certificate"
-        : "ssh tunnel"
-      : keyInfo.credential_type;
-  const showReconnect = onReconnect && isReconnectableKey(keyInfo, source);
-
-  return (
-    <TableRow
-      className={`border-border/30 cursor-pointer hover:bg-white/[0.03] ${isBlocked ? "opacity-60" : ""}`}
-      onClick={() => void navigate({ to: "/keys/$keyId", params: { keyId: keyInfo.id } })}
-    >
-      <TableCell className="h-[60px]">
-        <div className="flex items-center gap-2.5 min-w-0">
-          <ServiceIcon
-            slug={keyInfo.catalog_service_slug ?? keyInfo.slug}
-            iconUrl={keyInfo.icon_url}
-            size="sm"
-          />
-          <div className="min-w-0 flex-1">
-        <p className="truncate font-medium text-foreground">{keyInfo.label}</p>
-        <p className="truncate text-[11px] text-text-tertiary mt-0.5">
-          {keyInfo.catalog_service_name ?? " "}
-        </p>
-          </div>
-        </div>
-      </TableCell>
-
-      <TableCell className="h-[60px]">
-        <span className="truncate text-muted-foreground text-[11px] font-mono">
-          {displayUrl}
-        </span>
-      </TableCell>
-
-      <TableCell className="h-[60px] text-muted-foreground">{authLabel}</TableCell>
-
-      <TableCell className="h-[60px]">
-        <span className="truncate text-muted-foreground text-[11px] font-mono">
-          {isSsh ? keyInfo.slug : `/proxy/s/${keyInfo.slug}`}
-        </span>
-      </TableCell>
-
-      <TableCell className="h-[60px] text-muted-foreground">
-        {nodeName && keyInfo.node_id ? (
-          <Link
-            to="/nodes/$nodeId"
-            params={{ nodeId: keyInfo.node_id }}
-            onClick={(e) => e.stopPropagation()}
-            className="text-foreground hover:underline"
-          >
-            → {nodeName}
-          </Link>
-        ) : (
-          "Direct"
-        )}
-      </TableCell>
-
-      <TableCell className="h-[60px]">
-        <div className="flex flex-wrap items-center gap-1.5">
-          <div className="flex flex-wrap gap-1">
-            {isOrgInherited && <Badge variant="info">Org</Badge>}
-            {isBlocked && <Badge variant="secondary">Read-Only</Badge>}
-            {isReadOnly && !isBlocked && <Badge variant="secondary">View-Only</Badge>}
-            {keyInfo.admin_only && <Badge variant="secondary">Admin-only</Badge>}
-            {/* Disabled services are listed so they can be re-enabled, so the
-                table has to say so — the credential status badge beside this
-                one reports the credential, which stays healthy while paused. */}
-            {!keyInfo.is_active && <Badge variant="secondary">Disabled</Badge>}
-            <Badge variant={statusVariant(displayStatus)}>
-              {displayStatusLabel}
-            </Badge>
-            {keyInfo.credential_missing && (
-              <Badge variant="warning">Credential Missing</Badge>
-            )}
-            {isSsh && <Badge variant="secondary">SSH</Badge>}
-          </div>
-          {showReconnect && (
-            <Button
-              variant="outline"
-              onClick={(event) => {
-                event.stopPropagation();
-                onReconnect(keyInfo);
-              }}
-            >
-              <ButtonIcon><RefreshCw className="h-3 w-3" /></ButtonIcon>
-              {reconnectLabel(keyInfo.status)}
-            </Button>
-          )}
-        </div>
-      </TableCell>
-      <TableCell><ServiceAuthorshipFooter authorship={keyInfo.authorship} /></TableCell>
-    </TableRow>
-  );
-}
-
-function ServiceTableView({
-  groups,
+function ConnectionReconnect({
+  connection,
   onReconnect,
 }: {
-  readonly groups: readonly ServiceGroup[];
-  readonly onReconnect: (keyInfo: KeyInfo) => void;
+  readonly connection: KeyInfo;
+  readonly onReconnect?: (key: KeyInfo) => void;
 }) {
+  if (
+    !onReconnect ||
+    !isReconnectableKey(connection, connection.credential_source)
+  )
+    return null;
   return (
-    <div className="space-y-8">
-      {groups.map((group) => (
-        <section key={group.key} className="space-y-3">
-          <div className="flex items-center gap-3">
-            <div className="flex items-center gap-2">
-              {group.icon === "org" ? (
-                <OrgAvatar
-                  avatarUrl={group.avatarUrl}
-                  displayName={group.title}
-                  className="h-6 w-6 text-[0.625rem]"
-                />
-              ) : (
-                <Globe className="h-4 w-4 text-muted-foreground" />
-              )}
-              <h3 className="text-[13px] font-semibold text-foreground">
-                {group.title}
-              </h3>
-            </div>
-            {group.role && <RoleBadge role={group.role} />}
-            {group.subtitle && (
-              <span className="text-xs text-muted-foreground">
-                {group.subtitle}
-              </span>
-            )}
-          </div>
-          <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
-            <Table className="min-w-[1000px] table-fixed">
-              <TableHeader>
-                <TableRow className="border-border/50 hover:bg-transparent">
-                  <TableHead className="w-[16%]">Name</TableHead>
-                  <TableHead className="w-[18%]">Endpoint</TableHead>
-                  <TableHead className="w-[8%]">Auth</TableHead>
-                  <TableHead className="w-[16%]">Proxy Slug</TableHead>
-                  <TableHead className="w-[10%]">Routing</TableHead>
-                  <TableHead className="w-[12%]">Status</TableHead>
-                  <TableHead className="w-[20%] min-w-52 text-right">Authorship</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {group.keys.map(({ keyInfo, source }) => (
-                  <ServiceTableRow
-                    key={keyInfo.id}
-                    keyInfo={keyInfo}
-                    source={source}
-                    onReconnect={onReconnect}
-                  />
-                ))}
-              </TableBody>
-            </Table>
-          </div>
-        </section>
-      ))}
-    </div>
+    <Button
+      size="sm"
+      variant="link"
+      className="mt-1 flex h-auto p-0 text-[11px]"
+      onClick={() => onReconnect(connection)}
+    >
+      <RefreshCw className="size-3" />
+      {reconnectLabel(connection.status)}
+    </Button>
   );
-}
-
-interface ServiceGroup {
-  readonly key: string;
-  readonly title: string;
-  readonly subtitle: string | null;
-  readonly role: "owner" | "admin" | "member" | "viewer" | null;
-  readonly icon: "personal" | "org";
-  /**
-   * Org avatar URL when `icon === "org"`. Surfaced via `credential_source`
-   * on the API response so we can render the same avatar as the
-   * Organizations page (#545). `null` when the org has no avatar configured
-   * — falls back to initials / building icon inside `OrgAvatar`.
-   */
-  readonly avatarUrl: string | null;
-  readonly keys: readonly {
-    readonly keyInfo: KeyInfo;
-    readonly source: CredentialSource;
-  }[];
-}
-
-/**
- * Group visible keys by credential source. Personal items first, then one
- * section per org (ordered by first-seen in the incoming list).
- *
- * Keys without an explicit `credential_source` default to `personal` so the
- * UI keeps working against older backends that have not yet been augmented.
- */
-function groupKeysBySource(
-  keys: readonly KeyInfo[],
-  sourceById: ReadonlyMap<string, CredentialSource>,
-): readonly ServiceGroup[] {
-  const personal: ServiceGroup = {
-    key: "personal",
-    title: "My Services",
-    subtitle: null,
-    role: null,
-    icon: "personal",
-    avatarUrl: null,
-    keys: [],
-  };
-
-  const orgGroups = new Map<string, ServiceGroup>();
-  const personalMut: { keyInfo: KeyInfo; source: CredentialSource }[] = [];
-
-  for (const keyInfo of keys) {
-    const source: CredentialSource = keyInfo.credential_source ??
-      sourceById.get(keyInfo.id) ?? { type: "personal" };
-
-    if (source.type === "personal") {
-      personalMut.push({ keyInfo, source });
-      continue;
-    }
-
-    const existing = orgGroups.get(source.org_id);
-    if (existing) {
-      orgGroups.set(source.org_id, {
-        ...existing,
-        // Prefer the first non-null avatar we see for this org. The backend
-        // returns the same avatar on every row, but when `/keys` loads
-        // before /user-services has finished hydrating the source map, the
-        // earliest entry may lack it — keep whichever value we've already
-        // captured.
-        avatarUrl: existing.avatarUrl ?? source.avatar_url ?? null,
-        keys: [...existing.keys, { keyInfo, source }],
-      });
-    } else {
-      orgGroups.set(source.org_id, {
-        key: `org-${source.org_id}`,
-        title: source.org_name,
-        subtitle: "Shared from organization",
-        role: source.role,
-        icon: "org",
-        avatarUrl: source.avatar_url ?? null,
-        keys: [{ keyInfo, source }],
-      });
-    }
-  }
-
-  const groups: ServiceGroup[] = [];
-  if (personalMut.length > 0) {
-    groups.push({ ...personal, keys: personalMut });
-  }
-  for (const g of orgGroups.values()) {
-    groups.push(g);
-  }
-  return groups;
 }
 
 function ServicesEmptyState({ onAdd }: { readonly onAdd: () => void }) {
@@ -639,12 +126,10 @@ function LoadingSkeleton() {
 function ExternalServicesTab({
   onAdd,
   onReconnect,
-  showAutoConnected,
   viewMode,
 }: {
   readonly onAdd: () => void;
   readonly onReconnect: (keyInfo: KeyInfo) => void;
-  readonly showAutoConnected: boolean;
   readonly viewMode: ViewMode;
 }) {
   const { data: keys, isLoading, error, refetch } = useKeys();
@@ -653,6 +138,7 @@ function ExternalServicesTab({
   // future change, the `credential_source` field on KeyInfo will take
   // precedence and this call becomes a no-op.
   const { data: userServices } = useUserServices();
+  const { data: catalog } = useCatalog();
 
   const sourceById = useMemo(() => {
     const map = new Map<string, CredentialSource>();
@@ -666,85 +152,53 @@ function ExternalServicesTab({
 
   if (error) {
     return (
-      <ErrorBanner message="Failed to load services. Please try again." onRetry={refetch} />
+      <ErrorBanner
+        message="Failed to load services. Please try again."
+        onRetry={refetch}
+      />
     );
   }
 
-  const userKeys = (keys ?? []).filter((k) => !k.auto_connected);
-  const autoKeys = (keys ?? []).filter((k) => k.auto_connected);
-  const visibleKeys = showAutoConnected ? (keys ?? []) : userKeys;
-
-  if (visibleKeys.length === 0 && autoKeys.length === 0) {
-    return <ServicesEmptyState onAdd={onAdd} />;
-  }
-
-  if (visibleKeys.length === 0) {
-    return <ServicesEmptyState onAdd={onAdd} />;
-  }
-
-  const groups = groupKeysBySource(visibleKeys, sourceById);
-
-  if (viewMode === "table") {
-    return <ServiceTableView groups={groups} onReconnect={onReconnect} />;
-  }
-
-  // If only personal services exist, skip section headers to preserve the
-  // current flat-grid look-and-feel.
-  const [firstGroup] = groups;
-  if (groups.length === 1 && firstGroup && firstGroup.icon === "personal") {
-    return (
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {firstGroup.keys.map(({ keyInfo, source }) => (
-          <KeyCard
-            key={keyInfo.id}
-            keyInfo={keyInfo}
-            source={source}
-            onReconnect={onReconnect}
-          />
-        ))}
-      </div>
-    );
-  }
+  if (!keys?.length) return <ServicesEmptyState onAdd={onAdd} />;
 
   return (
-    <div className="space-y-8">
-      {groups.map((group) => (
-        <section key={group.key} className="space-y-3">
-          <div className="flex items-center gap-3">
-            <div className="flex items-center gap-2">
-              {group.icon === "org" ? (
-                <OrgAvatar
-                  avatarUrl={group.avatarUrl}
-                  displayName={group.title}
-                  className="h-6 w-6 text-[0.625rem]"
+    <GroupedServiceCards
+      keys={keys.map((keyInfo) => ({
+        ...keyInfo,
+        credential_source:
+          keyInfo.credential_source ?? sourceById.get(keyInfo.id),
+      }))}
+      catalog={catalog}
+      actions={(compact) => (
+        <AddCtaButton
+          label="Connect Service"
+          onClick={onAdd}
+          compact={compact}
+          compactLabel="Connect"
+        />
+      )}
+      renderTable={
+        viewMode === "table"
+          ? (filteredKeys) => (
+              <div className="overflow-hidden rounded-xl border border-border bg-card">
+                <ServiceConnectionTable
+                  connections={filteredKeys}
+                  serviceName="All services"
+                  renderActions={(key) => (
+                    <ConnectionReconnect
+                      connection={key}
+                      onReconnect={onReconnect}
+                    />
+                  )}
                 />
-              ) : (
-                <Globe className="h-4 w-4 text-muted-foreground" />
-              )}
-              <h3 className="text-[13px] font-semibold text-foreground">
-                {group.title}
-              </h3>
-            </div>
-            {group.role && <RoleBadge role={group.role} />}
-            {group.subtitle && (
-              <span className="text-xs text-muted-foreground">
-                {group.subtitle}
-              </span>
-            )}
-          </div>
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {group.keys.map(({ keyInfo, source }) => (
-              <KeyCard
-                key={keyInfo.id}
-                keyInfo={keyInfo}
-                source={source}
-                onReconnect={onReconnect}
-              />
-            ))}
-          </div>
-        </section>
-      ))}
-    </div>
+              </div>
+            )
+          : undefined
+      }
+      renderConnectionActions={(keyInfo) => (
+        <ConnectionReconnect connection={keyInfo} onReconnect={onReconnect} />
+      )}
+    />
   );
 }
 
@@ -783,7 +237,9 @@ function NyxIdApiKeysTab({
             </div>
           </div>
           <Button className="shrink-0" onClick={onSetupAgent}>
-            <ButtonIcon><Terminal className="h-3 w-3" /></ButtonIcon>
+            <ButtonIcon>
+              <Terminal className="h-3 w-3" />
+            </ButtonIcon>
             Start Setup
           </Button>
         </CardContent>
@@ -791,7 +247,9 @@ function NyxIdApiKeysTab({
       <div className="space-y-3">
         <div className="flex items-center gap-2">
           <KeySquare className="h-4 w-4 text-muted-foreground" />
-          <h3 className="text-[13px] font-semibold text-foreground">Agent Keys</h3>
+          <h3 className="text-[13px] font-semibold text-foreground">
+            Agent Keys
+          </h3>
         </div>
         <ApiKeyTable viewMode={viewMode} />
       </div>
@@ -827,47 +285,41 @@ function AddButton({
   return <AddCtaButton label="Create API Key" onClick={onCreateKey} />;
 }
 
-function AutoConnectedToggle({
-  checked,
-  onCheckedChange,
-  count,
-}: {
-  readonly checked: boolean;
-  readonly onCheckedChange: (checked: boolean) => void;
-  readonly count: number;
-}) {
-  return (
-    <div className="flex items-center gap-2">
-      <Switch
-        id="show-auto-connected"
-        checked={checked}
-        onCheckedChange={onCheckedChange}
-        disabled={count === 0}
-      />
-      <Label
-        htmlFor="show-auto-connected"
-        className="text-[12px] text-muted-foreground"
-      >
-        Show auto-connected ({count})
-      </Label>
-    </div>
-  );
-}
+const RoutingPreview = import.meta.env.DEV
+  ? lazy(() => import("@/components/dashboard/service-routing-preview"))
+  : null;
 
 export function KeysPage() {
-  const search: { tab?: string; slug?: string; action?: string; service?: string } = useSearch({ strict: false });
+  const search: {
+    tab?: string;
+    slug?: string;
+    action?: string;
+    service?: string;
+    view?: string;
+    pool?: string;
+    org?: string;
+  } = useSearch({ strict: false });
   const navigate = useNavigate();
   const tab = parseTab(search.tab, KEYS_TABS, KEYS_TAB_DEFAULT);
+  const previewActive = Boolean(
+    RoutingPreview &&
+    (search.view === "routing" || import.meta.env.VITE_ROUTING_PREVIEW === "1"),
+  );
 
   const [addServiceOpen, setAddServiceOpen] = useState(false);
   const [createPoolOpen, setCreatePoolOpen] = useState(false);
   const [createKeyOpen, setCreateKeyOpen] = useState(false);
   const [createKeySetupMode, setCreateKeySetupMode] = useState(false);
-  const [initialSetupServiceId, setInitialSetupServiceId] = useState<string | null>(null);
-  const [showAutoConnected, setShowAutoConnected] = useState(false);
+  const [initialSetupServiceId, setInitialSetupServiceId] = useState<
+    string | null
+  >(null);
   const [servicesViewMode, setServicesViewMode] = useViewMode("keys-services");
   const [agentKeysViewMode, setAgentKeysViewMode] = useViewMode("keys-agent");
-  const [pendingPrefillSlug, setPendingPrefillSlug] = useState<string | null>(null);
+  // Shared query with ExternalServicesTab; only decides header CTA placement.
+  const { data: pageKeys } = useKeys();
+  const [pendingPrefillSlug, setPendingPrefillSlug] = useState<string | null>(
+    null,
+  );
   const [reconnectKey, setReconnectKey] = useState<KeyInfo | null>(null);
   const appliedSlugRef = useRef<string | null>(null);
   const appliedActionRef = useRef<string | null>(null);
@@ -939,11 +391,12 @@ export function KeysPage() {
     }
   }
 
-  const { data: keys } = useKeys();
-  const autoCount = (keys ?? []).filter((k) => k.auto_connected).length;
-
   function setTab(value: string) {
-    void navigate({ to: "/keys", search: { tab: value }, replace: true });
+    void navigate({
+      to: "/keys",
+      search: { tab: value, ...(previewActive ? { view: "routing" } : {}) },
+      replace: true,
+    });
   }
 
   return (
@@ -951,6 +404,15 @@ export function KeysPage() {
       <PageHeader
         title="Services & Credentials"
         description="Manage your AI service credentials and agent keys."
+        actions={
+          import.meta.env.DEV && !previewActive ? (
+            <Button variant="outline" asChild>
+              <Link to="/keys" search={{ view: "routing" }}>
+                Routing preview
+              </Link>
+            </Button>
+          ) : undefined
+        }
       />
 
       <Tabs value={tab} onValueChange={setTab}>
@@ -961,44 +423,74 @@ export function KeysPage() {
             <TabsTrigger value="nyxid">Agent Keys</TabsTrigger>
           </TabsList>
           <div className="flex shrink-0 items-center justify-between gap-4 sm:pb-1">
-            {tab === "services" && (
-              <AutoConnectedToggle
-                checked={showAutoConnected}
-                onCheckedChange={setShowAutoConnected}
-                count={autoCount}
-              />
-            )}
-            {tab !== "pools" && (
+            {tab !== "pools" && !(tab === "services" && previewActive) && (
               <ViewToggle
-                viewMode={tab === "services" ? servicesViewMode : agentKeysViewMode}
-                onViewModeChange={tab === "services" ? setServicesViewMode : setAgentKeysViewMode}
+                viewMode={
+                  tab === "services" ? servicesViewMode : agentKeysViewMode
+                }
+                onViewModeChange={
+                  tab === "services"
+                    ? setServicesViewMode
+                    : setAgentKeysViewMode
+                }
               />
             )}
-            <AddButton
-              tab={tab}
-              onAddService={() => setAddServiceOpen(true)}
-              onCreatePool={() => setCreatePoolOpen(true)}
-              onCreateKey={() => setCreateKeyOpen(true)}
-            />
+            {/* Services keep Connect Service inside the sticky filter toolbar;
+                the empty state has no toolbar, so the header button stays. */}
+            {(tab === "nyxid" || (tab === "services" && !pageKeys?.length)) && (
+              <AddButton
+                tab={tab}
+                onAddService={() => setAddServiceOpen(true)}
+                onCreatePool={() => setCreatePoolOpen(true)}
+                onCreateKey={() => setCreateKeyOpen(true)}
+              />
+            )}
           </div>
         </div>
 
         <TabsContent value="services" className="mt-6">
           <CodexConnectionSection />
-          <ExternalServicesTab
-            onAdd={() => setAddServiceOpen(true)}
-            onReconnect={(keyInfo) => {
-              setReconnectKey(keyInfo);
-              setAddServiceOpen(true);
-            }}
-            showAutoConnected={showAutoConnected}
-            viewMode={servicesViewMode}
-          />
+          {previewActive && RoutingPreview ? (
+            <Suspense fallback={<Skeleton className="h-96 w-full" />}>
+              <RoutingPreview
+                actions={(compact) => (
+                  <AddCtaButton
+                    label="Connect Service"
+                    onClick={() => setAddServiceOpen(true)}
+                    compact={compact}
+                    compactLabel="Connect"
+                  />
+                )}
+                renderConnectionActions={(connection) => (
+                  <ConnectionReconnect
+                    connection={connection}
+                    onReconnect={(keyInfo) => {
+                      setReconnectKey(keyInfo);
+                      setAddServiceOpen(true);
+                    }}
+                  />
+                )}
+              />
+            </Suspense>
+          ) : (
+            <ExternalServicesTab
+              onAdd={() => setAddServiceOpen(true)}
+              onReconnect={(keyInfo) => {
+                setReconnectKey(keyInfo);
+                setAddServiceOpen(true);
+              }}
+              viewMode={servicesViewMode}
+            />
+          )}
           <ArchivedServiceHistory />
         </TabsContent>
 
         <TabsContent value="pools" className="mt-6">
           <ServicePoolsTab
+            key={`${search.org ?? "personal"}:${search.pool ?? ""}`}
+            layout="cards"
+            initialOrgId={search.org}
+            initialPoolId={search.pool}
             createOpen={createPoolOpen}
             onCreateOpenChange={setCreatePoolOpen}
           />

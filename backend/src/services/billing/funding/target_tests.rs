@@ -116,6 +116,7 @@ async fn member_removal_blocks_new_funding_but_preserves_admitted_reservations()
             wallet_id: Some("wallet".into()),
             actor_user_id: "person".into(),
             api_key_id: None,
+            user_service_id: None,
             service_id: Some("service".into()),
             service_slug: Some("service".into()),
             metric: BillingMetric::Requests,

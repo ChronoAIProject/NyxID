@@ -468,6 +468,23 @@ pub async fn redeem_request(
             }
         };
         let exec_ctx = mcp_service::McpExecContext {
+            attribution: Some(super::service_insights_activity::RequestAttribution {
+                actor: super::audit_service::AuditActor {
+                    user_id: caller.actor_user_id.clone(),
+                    api_key_id: caller.api_key_id.clone(),
+                    api_key_name: caller
+                        .api_key_id
+                        .as_ref()
+                        .and(caller.requester_label.clone()),
+                    ip_address: None,
+                    user_agent: None,
+                },
+                auth_kind: caller.requester_type.clone(),
+                acting_client_id: (caller.requester_type == "delegated")
+                    .then(|| caller.requester_id.clone()),
+                oauth_client_id: None,
+                api_key_credential_id: None,
+            }),
             api_key_id: caller.api_key_id.as_deref(),
             allow_all_nodes: caller.allow_all_nodes,
             allowed_node_ids: &caller.allowed_node_ids,

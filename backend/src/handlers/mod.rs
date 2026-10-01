@@ -132,6 +132,9 @@ pub mod nyxbot;
 pub mod options;
 
 pub mod service_history;
+pub mod service_insights;
+#[cfg(test)]
+mod service_insights_tests;
 
 pub mod channel_activities;
 

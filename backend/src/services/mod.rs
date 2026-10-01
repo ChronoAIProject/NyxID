@@ -173,6 +173,7 @@ pub mod url_validation;
 pub mod user_api_key_service;
 pub mod user_credentials_service;
 pub mod user_endpoint_service;
+pub mod user_preferences_service;
 pub mod user_service_service;
 pub mod user_token_service;
 pub mod webhook_delivery_service;
@@ -201,6 +202,8 @@ pub mod channel_retry_ingress;
 pub mod provider_link_service;
 pub mod retired_service_service;
 pub mod service_history;
+pub mod service_insights_activity;
+pub mod service_insights_billing;
 
 #[cfg(test)]
 pub(crate) mod assistant_authority_tests;

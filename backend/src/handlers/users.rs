@@ -5,7 +5,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
-use crate::models::user::{COLLECTION_NAME as USERS, User};
+use crate::models::user::{
+    COLLECTION_NAME as USERS, ServiceViewPreferences, ServiceViewSource, ServiceViewState,
+    ServiceViewType, User,
+};
 use crate::mw::auth::AuthUser;
 use crate::services::{admin_user_service, audit_service, role_service, telemetry_erasure_service};
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
@@ -22,7 +25,79 @@ pub struct OnboardingStateResponse {
 /// User-scoped config / preferences surfaced on `GET /users/me`.
 #[derive(Debug, Serialize)]
 pub struct ProfileConfigResponse {
+    pub services_view: Option<ServiceViewResponse>,
     pub onboarding: OnboardingStateResponse,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SaveServiceViewRequest {
+    #[serde(
+        default,
+        alias = "organization_id",
+        deserialize_with = "crate::models::user::deserialize_service_view_ids"
+    )]
+    pub organization_ids: Vec<String>,
+    #[serde(
+        default,
+        alias = "service_group_id",
+        deserialize_with = "crate::models::user::deserialize_service_view_ids"
+    )]
+    pub service_group_ids: Vec<String>,
+    pub search: String,
+    pub source: ServiceViewSource,
+    pub state: ServiceViewState,
+    pub service_type: ServiceViewType,
+    pub show_auto_connected: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ServiceViewResponse {
+    pub organization_ids: Vec<String>,
+    pub service_group_ids: Vec<String>,
+    pub search: String,
+    pub source: ServiceViewSource,
+    pub state: ServiceViewState,
+    pub service_type: ServiceViewType,
+    pub show_auto_connected: bool,
+}
+
+impl From<ServiceViewPreferences> for ServiceViewResponse {
+    fn from(value: ServiceViewPreferences) -> Self {
+        Self {
+            organization_ids: value.organization_ids,
+            service_group_ids: value.service_group_ids,
+            search: value.search,
+            source: value.source,
+            state: value.state,
+            service_type: value.service_type,
+            show_auto_connected: value.show_auto_connected,
+        }
+    }
+}
+
+/// PUT /api/v1/users/me/preferences/services
+pub async fn save_services_view(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(body): Json<SaveServiceViewRequest>,
+) -> AppResult<Json<ServiceViewResponse>> {
+    let preferences = ServiceViewPreferences {
+        organization_ids: body.organization_ids,
+        service_group_ids: body.service_group_ids,
+        search: body.search,
+        source: body.source,
+        state: body.state,
+        service_type: body.service_type,
+        show_auto_connected: body.show_auto_connected,
+    };
+    let saved = crate::services::user_preferences_service::save_services_view(
+        &state.db,
+        &auth_user.user_id.to_string(),
+        preferences,
+    )
+    .await?;
+    Ok(Json(saved.into()))
 }
 
 #[derive(Debug, Serialize)]
@@ -155,6 +230,7 @@ pub async fn get_me(
         updated_at: user_model.updated_at.to_rfc3339(),
         last_login_at: user_model.last_login_at.map(|t| t.to_rfc3339()),
         profile_config: ProfileConfigResponse {
+            services_view: user_model.profile_config.services_view.map(Into::into),
             onboarding: OnboardingStateResponse {
                 ai_services_completed_at: user_model
                     .profile_config
@@ -382,6 +458,223 @@ mod tests {
     use crate::test_utils::{connect_test_database, test_app_state, test_auth_user, test_user};
     use uuid::Uuid;
 
+    fn service_view_request() -> SaveServiceViewRequest {
+        SaveServiceViewRequest {
+            organization_ids: vec!["org-selection".into(), "org-second".into()],
+            service_group_ids: vec!["catalog:service-selection".into(), "catalog:second".into()],
+            search: "team".into(),
+            source: ServiceViewSource::Org,
+            state: ServiceViewState::Enabled,
+            service_type: ServiceViewType::Http,
+            show_auto_connected: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn services_view_round_trips_without_overwriting_other_settings_or_users() {
+        let db = connect_test_database("services_view_round_trip")
+            .await
+            .unwrap();
+        let user_id = Uuid::new_v4().to_string();
+        let other_id = Uuid::new_v4().to_string();
+        let mut user = test_user(&user_id, UserType::Person);
+        user.profile_config.onboarding.ai_services_completed_at =
+            chrono::DateTime::from_timestamp_millis(Utc::now().timestamp_millis());
+        user.profile_config
+            .release_integrity
+            .remote_credential_integrity_verification_opt_out = true;
+        db.collection::<User>(USERS)
+            .insert_many([user.clone(), test_user(&other_id, UserType::Person)])
+            .await
+            .unwrap();
+        db.collection::<User>(USERS)
+            .update_one(
+                doc! { "_id": &user_id },
+                doc! { "$set": { "profile_config.future_setting": "preserve" } },
+            )
+            .await
+            .unwrap();
+        role_service::seed_system_roles(&db).await.unwrap();
+        let state = test_app_state(db.clone());
+        let before = get_me(State(state.clone()), test_auth_user(&user_id))
+            .await
+            .unwrap()
+            .0;
+        assert!(before.profile_config.services_view.is_none());
+        let saved = save_services_view(
+            State(state.clone()),
+            test_auth_user(&user_id),
+            Json(service_view_request()),
+        )
+        .await
+        .unwrap()
+        .0;
+        let loaded = get_me(State(state.clone()), test_auth_user(&user_id))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(
+            serde_json::to_value(&saved).unwrap(),
+            serde_json::to_value(loaded.profile_config.services_view.unwrap()).unwrap()
+        );
+        let persisted = db
+            .collection::<User>(USERS)
+            .find_one(doc! { "_id": &user_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            persisted.profile_config.onboarding,
+            user.profile_config.onboarding
+        );
+        assert_eq!(
+            persisted.profile_config.release_integrity,
+            user.profile_config.release_integrity
+        );
+        let raw = db
+            .collection::<bson::Document>(USERS)
+            .find_one(doc! { "_id": &user_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            raw.get_document("profile_config")
+                .unwrap()
+                .get_str("future_setting")
+                .unwrap(),
+            "preserve"
+        );
+        let other = get_me(State(state.clone()), test_auth_user(&other_id))
+            .await
+            .unwrap()
+            .0;
+        assert!(other.profile_config.services_view.is_none());
+
+        let mut clear = service_view_request();
+        clear.search.clear();
+        clear.organization_ids.clear();
+        clear.service_group_ids.clear();
+        clear.source = ServiceViewSource::All;
+        clear.state = ServiceViewState::All;
+        clear.service_type = ServiceViewType::All;
+        clear.show_auto_connected = true;
+        let _ = save_services_view(State(state.clone()), test_auth_user(&user_id), Json(clear))
+            .await
+            .unwrap();
+        let reset = get_me(State(state), test_auth_user(&user_id))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(
+            reset.profile_config.services_view.unwrap().source,
+            ServiceViewSource::All
+        );
+    }
+
+    #[tokio::test]
+    async fn services_view_validates_and_supports_legacy_profiles() {
+        let db = connect_test_database("services_view_legacy").await.unwrap();
+        let user_id = Uuid::new_v4().to_string();
+        let mut raw = bson::to_document(&test_user(&user_id, UserType::Person)).unwrap();
+        raw.remove("profile_config");
+        db.collection::<bson::Document>(USERS)
+            .insert_one(raw)
+            .await
+            .unwrap();
+        let state = test_app_state(db.clone());
+        let mut invalid = service_view_request();
+        invalid.search = "x".repeat(201);
+        assert!(matches!(
+            save_services_view(
+                State(state.clone()),
+                test_auth_user(&user_id),
+                Json(invalid)
+            )
+            .await,
+            Err(AppError::ValidationError(_))
+        ));
+        for (organizations, services) in [
+            (vec!["org".to_string(); 101], vec![]),
+            (vec![], vec![" ".to_string()]),
+            (vec![], vec!["x".repeat(129)]),
+        ] {
+            let mut invalid = service_view_request();
+            invalid.organization_ids = organizations;
+            invalid.service_group_ids = services;
+            assert!(matches!(
+                save_services_view(
+                    State(state.clone()),
+                    test_auth_user(&user_id),
+                    Json(invalid)
+                )
+                .await,
+                Err(AppError::ValidationError(_))
+            ));
+        }
+        let unchanged = db
+            .collection::<bson::Document>(USERS)
+            .find_one(doc! { "_id": &user_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!unchanged.contains_key("profile_config"));
+        let _ = save_services_view(
+            State(state.clone()),
+            test_auth_user(&user_id),
+            Json(service_view_request()),
+        )
+        .await
+        .unwrap();
+        let loaded = db
+            .collection::<User>(USERS)
+            .find_one(doc! { "_id": &user_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.profile_config.services_view.unwrap().search, "team");
+        assert!(matches!(
+            save_services_view(
+                State(state),
+                test_auth_user(&Uuid::new_v4().to_string()),
+                Json(service_view_request())
+            )
+            .await,
+            Err(AppError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn services_view_reads_legacy_selections_and_writes_arrays() {
+        let legacy = serde_json::json!({ "search": "", "organization_id": "org-1", "service_group_id": null,
+            "source": "all", "state": "all", "service_type": "all", "show_auto_connected": true });
+        let persisted: ServiceViewPreferences = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(persisted.organization_ids, vec!["org-1"]);
+        assert!(persisted.service_group_ids.is_empty());
+        let request: SaveServiceViewRequest = serde_json::from_value(legacy).unwrap();
+        assert_eq!(request.organization_ids, vec!["org-1"]);
+        let response = serde_json::to_value(ServiceViewResponse::from(persisted)).unwrap();
+        assert_eq!(response["organization_ids"], serde_json::json!(["org-1"]));
+        assert_eq!(response["service_group_ids"], serde_json::json!([]));
+        assert!(response.get("organization_id").is_none());
+    }
+
+    #[test]
+    fn services_view_rejects_unknown_filter_values_and_owner_injection() {
+        let body = serde_json::json!({ "search": "", "source": "all", "state": "all",
+            "service_type": "all", "show_auto_connected": true });
+        for (field, value) in [
+            ("source", "admin"),
+            ("state", "healthy"),
+            ("service_type", "ftp"),
+            ("user_id", "someone-else"),
+        ] {
+            let mut invalid = body.clone();
+            invalid[field] = value.into();
+            assert!(serde_json::from_value::<SaveServiceViewRequest>(invalid).is_err());
+        }
+        assert!(serde_json::from_value::<SaveServiceViewRequest>(body).is_ok());
+    }
+
     #[tokio::test]
     async fn get_me_derives_platform_role_fields_from_rbac_membership() {
         let Some(db) = connect_test_database("users_me_platform_role").await else {
@@ -596,6 +889,7 @@ mod tests {
             updated_at: "2025-01-01T00:00:00+00:00".to_string(),
             last_login_at: Some("2025-06-01T12:00:00+00:00".to_string()),
             profile_config: ProfileConfigResponse {
+                services_view: None,
                 onboarding: OnboardingStateResponse {
                     ai_services_completed_at: Some("2025-03-15T10:00:00+00:00".to_string()),
                 },
@@ -645,6 +939,7 @@ mod tests {
             updated_at: "2025-06-01T00:00:00+00:00".to_string(),
             last_login_at: None,
             profile_config: ProfileConfigResponse {
+                services_view: None,
                 onboarding: OnboardingStateResponse {
                     ai_services_completed_at: None,
                 },
@@ -685,6 +980,7 @@ mod tests {
             updated_at: "2026-01-01T00:00:01Z".to_string(),
             last_login_at: None,
             profile_config: ProfileConfigResponse {
+                services_view: None,
                 onboarding: OnboardingStateResponse {
                     ai_services_completed_at: None,
                 },
@@ -728,6 +1024,7 @@ mod tests {
     #[test]
     fn profile_config_response_serialization() {
         let resp = ProfileConfigResponse {
+            services_view: None,
             onboarding: OnboardingStateResponse {
                 ai_services_completed_at: Some("2025-01-01T00:00:00+00:00".to_string()),
             },
@@ -863,6 +1160,7 @@ mod tests {
             updated_at: "2025-01-01T00:00:00+00:00".to_string(),
             last_login_at: None,
             profile_config: ProfileConfigResponse {
+                services_view: None,
                 onboarding: OnboardingStateResponse {
                     ai_services_completed_at: None,
                 },

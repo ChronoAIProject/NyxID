@@ -787,3 +787,81 @@ html.theme-dark .assistant-halo--visible {
   border-color: rgba(255, 255, 255, 0.15);
   box-shadow: 0 0 24px rgba(255, 255, 255, 0.03);
 }
+
+.service-filter-pills {
+  --service-filter-pill-height: 2.75rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 2px;
+  max-height: calc(2 * var(--service-filter-pill-height) + 10px);
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  scroll-snap-type: y mandatory;
+  scroll-padding-block: 2px;
+}
+
+.service-filter-pills > * {
+  height: var(--service-filter-pill-height);
+  min-height: var(--service-filter-pill-height);
+  flex-shrink: 0;
+  scroll-snap-align: start;
+}
+
+@media (min-width: 768px) {
+  .service-filter-controls form > div,
+  .service-filter-controls > div:first-child > div button,
+  .service-filter-controls > div:first-child > button {
+    height: 2rem;
+  }
+  .service-filter-pills {
+    --service-filter-pill-height: 1.75rem;
+  }
+}
+
+/* Blur passing card outlines and fade the cover together at the lower edge. */
+.service-filter-toolbar[data-stuck="true"]::before {
+  content: "";
+  position: absolute;
+  pointer-events: none;
+  top: -100vh;
+  height: calc(100vh + var(--service-filters-height, 0px) + 28px);
+  left: calc(-1 * var(--service-filter-gutter-left, 0px));
+  right: calc(-1 * var(--service-filter-gutter-right, 0px));
+  background: var(--color-background);
+  backdrop-filter: blur(8px);
+  mask-image: linear-gradient(
+    to bottom,
+    #000 calc(100% - 28px),
+    rgb(0 0 0 / 0.95) calc(100% - 20px),
+    rgb(0 0 0 / 0.6) calc(100% - 10px),
+    transparent
+  );
+}
+
+.service-card-header[data-stuck="true"]::before {
+  content: "";
+  position: absolute;
+  pointer-events: none;
+  top: -100vh;
+  bottom: 0;
+  left: calc(-1 * var(--service-filter-gutter-left, 0px) - 1px);
+  right: calc(-1 * var(--service-filter-gutter-right, 0px) - 1px);
+  background: var(--color-background);
+}
+
+/* Keep the expanding service and its neighbors attached to their grid positions. */
+html.service-card-transition::view-transition-group(*) {
+  animation-duration: 240ms;
+  animation-timing-function: cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+html.service-card-transition::view-transition-old(root),
+html.service-card-transition::view-transition-new(root) {
+  animation: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  html.service-card-transition::view-transition-group(*) {
+    animation-duration: 0s;
+  }
+}

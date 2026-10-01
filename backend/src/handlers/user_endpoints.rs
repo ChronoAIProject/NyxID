@@ -227,7 +227,18 @@ pub async fn list_endpoints(
         (actor, org_service::OwnerAccess::Direct)
     };
     let mut endpoints = user_endpoint_service::list_endpoints(&state.db, &user_id_str).await?;
-    if let Some(scope) = auth_user.api_key_service_scope() {
+    let owner_scope = match &access {
+        org_service::OwnerAccess::AsOrgAdmin {
+            allowed_service_ids,
+            ..
+        }
+        | org_service::OwnerAccess::AsOrgMember {
+            allowed_service_ids,
+            ..
+        } => allowed_service_ids.as_deref(),
+        _ => None,
+    };
+    if let Some(scope) = auth_user.api_key_service_scope().or(owner_scope) {
         let scope: Vec<String> = scope
             .iter()
             .filter(|id| access.allows_resource(id))
@@ -552,7 +563,10 @@ pub async fn list_openapi_endpoints(
 
     Ok(Json(UserEndpointOperationsResponse {
         endpoint_id: endpoint.id,
-        openapi_spec_url: Some(spec_url.clone()),
+        openapi_spec_url: org_service::resolve_owner_access(&state.db, &actor, &endpoint.user_id)
+            .await?
+            .can_write()
+            .then(|| spec_url.clone()),
         operations,
     }))
 }
@@ -614,6 +628,58 @@ mod tests {
         assert_eq!(resp.endpoints.len(), 1);
         assert_eq!(resp.endpoints[0].id, ep_id);
         assert_eq!(resp.endpoints[0].label, "My Endpoint");
+    }
+
+    #[tokio::test]
+    async fn scoped_admin_endpoint_list_hides_other_connection_targets() {
+        use crate::models::org_membership::{OrgMembership, OrgRole};
+        let db =
+            crate::test_utils::connect_transaction_test_database("scoped_endpoint_targets").await;
+        let actor = uuid::Uuid::new_v4().to_string();
+        let org = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&actor, UserType::Person))
+            .await
+            .unwrap();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&org, UserType::Org))
+            .await
+            .unwrap();
+        for id in ["allowed", "hidden"] {
+            db.collection::<UserEndpoint>(USER_ENDPOINTS)
+                .insert_one(test_user_endpoint(
+                    id,
+                    &org,
+                    id,
+                    "https://private.internal",
+                    None,
+                    None,
+                ))
+                .await
+                .unwrap();
+            db.collection::<crate::models::user_service::UserService>(USER_SERVICES)
+                .insert_one(test_user_service(id, &org, id, id, None, None))
+                .await
+                .unwrap();
+        }
+        db.collection::<OrgMembership>("org_memberships")
+            .insert_one(crate::test_utils::test_membership(
+                &org,
+                &actor,
+                OrgRole::Admin,
+                Some(vec!["allowed".into()]),
+            ))
+            .await
+            .unwrap();
+        let Json(response) = list_endpoints(
+            State(test_app_state(db)),
+            test_auth_user(&actor),
+            Query(EndpointListQuery { org_id: Some(org) }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.endpoints.len(), 1);
+        assert_eq!(response.endpoints[0].id, "allowed");
     }
 
     #[tokio::test]
