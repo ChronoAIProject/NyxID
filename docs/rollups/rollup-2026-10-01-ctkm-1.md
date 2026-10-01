@@ -11,7 +11,8 @@ Admin Usage needed token counts that users can combine without double counting,
 filter options and service details ready when opened, and data tables that can
 stay visible or collapse per panel. The OpenAI plugin portal also needed to
 verify control of the NyxID MCP host before the Codex/ChatGPT plugin can be
-submitted.
+submitted. The OAuth consent screen also needed to identify every requested
+scope and keep app-requested default services selected.
 
 ## Included changes
 
@@ -28,6 +29,8 @@ base before its final CI run; GitHub reported no merge conflicts.
 For #1725, the source and landed commits have the same tree
 (`ffb7e232c1edba00be67fb368dd67df06f181104`). The PR was based on the current
 rollup head, so no rebase was needed; GitHub reported it mergeable and clean.
+
+The OAuth consent change landed directly in this rollup as `9b4abe7c`.
 
 ## Behavior
 
@@ -46,6 +49,12 @@ rollup head, so no rebase was needed; GitHub reported it mergeable and clean.
   plugin portal requires for domain verification. When the variable is unset
   the path returns 404, as before. The OIDC, OAuth authorization-server,
   protected-resource, and JWKS discovery documents are unchanged.
+- The standard OAuth consent screen describes `roles`, `groups`, and `proxy`,
+  shows each requested scope's exact value, and uses the full scope value as
+  the label when no description is available.
+- App-declared default services and requested resource services stay checked
+  and cannot be deselected on the consent screen. Other services remain
+  selectable, and the locked rows are labeled Required by app.
 
 ## Validation And Rollout
 
@@ -62,6 +71,10 @@ CodeQL; frontend, CLI, and mobile jobs were skipped as unaffected. Locally, the
 passed. A local server run returned the exact token with `200 text/plain` and no
 redirect, returned 404 with the variable unset, and served all four discovery
 documents unchanged.
+
+For the OAuth consent change, the standard and incremental consent test files
+passed all 50 tests on the rollup branch. TypeScript and focused ESLint checks
+passed after resolving the consent route wrapper overlap.
 
 Deploy the backend workspace change before the frontend. An older backend
 rejects the new `table_display` field when saving panel settings.
