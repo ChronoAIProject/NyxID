@@ -56,17 +56,110 @@ pub fn legacy_public_master(service: &DownstreamService) -> bool {
 }
 
 pub fn has_platform_key(service: &DownstreamService) -> bool {
-    if super::retired_service_service::is_retired(service) {
-        return false;
-    }
-    match &service.platform_key {
-        Some(config) => {
-            config.enabled
-                && service.is_active
-                && service.service_type == "http"
-                && !service.credential_encrypted.is_empty()
+    PlatformKeyView::from(service).has_platform_key()
+}
+
+/// The exact fields needed for metadata-only platform ACL checks. Listings can
+/// project these fields without loading unrelated catalog configuration.
+#[derive(serde::Deserialize)]
+pub struct PlatformKeyMetadata {
+    pub slug: String,
+    pub is_active: bool,
+    #[serde(default = "http_service_type")]
+    pub service_type: String,
+    #[serde(default = "public_visibility")]
+    pub visibility: String,
+    #[serde(default = "connection_category")]
+    pub service_category: String,
+    pub auth_method: String,
+    #[serde(default = "requires_credential")]
+    pub requires_user_credential: bool,
+    pub provider_config_id: Option<String>,
+    pub platform_key: Option<PlatformKeyConfig>,
+    /// Computed in the database projection; encrypted bytes never enter discovery.
+    pub credential_present: bool,
+}
+
+fn http_service_type() -> String {
+    "http".into()
+}
+fn public_visibility() -> String {
+    "public".into()
+}
+fn connection_category() -> String {
+    "connection".into()
+}
+fn requires_credential() -> bool {
+    true
+}
+
+struct PlatformKeyView<'a> {
+    slug: &'a str,
+    is_active: bool,
+    service_type: &'a str,
+    visibility: &'a str,
+    service_category: &'a str,
+    auth_method: &'a str,
+    requires_user_credential: bool,
+    provider_config_id: Option<&'a str>,
+    platform_key: Option<&'a PlatformKeyConfig>,
+    credential_present: bool,
+}
+
+impl<'a> From<&'a DownstreamService> for PlatformKeyView<'a> {
+    fn from(service: &'a DownstreamService) -> Self {
+        Self {
+            slug: &service.slug,
+            is_active: service.is_active,
+            service_type: &service.service_type,
+            visibility: &service.visibility,
+            service_category: &service.service_category,
+            auth_method: &service.auth_method,
+            requires_user_credential: service.requires_user_credential,
+            provider_config_id: service.provider_config_id.as_deref(),
+            platform_key: service.platform_key.as_ref(),
+            credential_present: !service.credential_encrypted.is_empty(),
         }
-        None => legacy_public_master(service),
+    }
+}
+
+impl<'a> From<&'a PlatformKeyMetadata> for PlatformKeyView<'a> {
+    fn from(service: &'a PlatformKeyMetadata) -> Self {
+        Self {
+            slug: &service.slug,
+            is_active: service.is_active,
+            service_type: &service.service_type,
+            visibility: &service.visibility,
+            service_category: &service.service_category,
+            auth_method: &service.auth_method,
+            requires_user_credential: service.requires_user_credential,
+            provider_config_id: service.provider_config_id.as_deref(),
+            platform_key: service.platform_key.as_ref(),
+            credential_present: service.credential_present,
+        }
+    }
+}
+
+impl PlatformKeyView<'_> {
+    fn has_platform_key(&self) -> bool {
+        if self.service_category == super::retired_service_service::RETIRED_CATEGORY
+            || (self.service_category == "internal" && self.slug.starts_with("platform-"))
+            || !self.is_active
+            || self.service_type != "http"
+            || !self.credential_present
+        {
+            return false;
+        }
+        match &self.platform_key {
+            Some(config) => config.enabled,
+            None => {
+                self.visibility == "public"
+                    && self.service_category == "internal"
+                    && !matches!(self.auth_method, "none" | "token_exchange")
+                    && !self.requires_user_credential
+                    && self.provider_config_id.is_none()
+            }
+        }
     }
 }
 
@@ -228,10 +321,27 @@ pub fn available_with_grants(
     owner_id: &str,
     grants: &OwnerGrants,
 ) -> bool {
-    if !has_platform_key(service)
+    available_view_with_grants(PlatformKeyView::from(service), provider, owner_id, grants)
+}
+
+pub fn available_metadata_with_grants(
+    service: &PlatformKeyMetadata,
+    provider: Option<&ProviderConfig>,
+    owner_id: &str,
+    grants: &OwnerGrants,
+) -> bool {
+    available_view_with_grants(PlatformKeyView::from(service), provider, owner_id, grants)
+}
+
+fn available_view_with_grants(
+    service: PlatformKeyView<'_>,
+    provider: Option<&ProviderConfig>,
+    owner_id: &str,
+    grants: &OwnerGrants,
+) -> bool {
+    if !service.has_platform_key()
         || service
             .provider_config_id
-            .as_deref()
             .is_some_and(|id| !provider.is_some_and(|p| p.id == id && !p.requires_gateway_url))
     {
         return false;

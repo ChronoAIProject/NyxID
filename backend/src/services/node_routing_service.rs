@@ -495,6 +495,9 @@ mod tests {
 
     fn node(node_id: &str, owner_id: &str) -> Node {
         Node {
+            machine: None,
+            machine_confirm: Default::default(),
+            allow_single_user_saved_logins: false,
             id: node_id.to_string(),
             user_id: owner_id.to_string(),
             name: format!("test-node-{node_id}"),
@@ -528,6 +531,7 @@ mod tests {
         let expired_at = Utc::now() - chrono::Duration::seconds(1);
         node.connection_owner = Some(crate::models::node::NodeConnectionOwner {
             http_signature_v2: false,
+            proxy_upload_v1: false,
             http_cancellation: false,
             instance_name: "other-backend".to_string(),
             generation_id: "generation-b".to_string(),

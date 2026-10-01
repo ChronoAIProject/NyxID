@@ -155,6 +155,8 @@ pub(crate) async fn fixture(name: &str) -> Fixture {
         &state.encryption_keys,
         &owner,
         super::assistant_team_service::CreateRequest {
+            machines: None,
+            logins: None,
             name: "worker".into(),
             description: "Help with the user's account".into(),
             display_name: None,
@@ -187,6 +189,8 @@ pub(crate) async fn fixture(name: &str) -> Fixture {
 
 fn orchestrator_chat() -> acks::ChatAuthority {
     acks::ChatAuthority {
+        machine_node_ids: Vec::new(),
+        saved_login_ids: Vec::new(),
         confirmation_policy: None,
         conversation_id: "nyxa-00000000000000000000000000000000".into(),
         user_id: "owner".into(),

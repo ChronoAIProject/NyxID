@@ -77,6 +77,9 @@ mod tests {
     fn make_test_node(id: &str) -> Node {
         let now = Utc::now();
         Node {
+            machine: None,
+            machine_confirm: Default::default(),
+            allow_single_user_saved_logins: false,
             id: id.to_string(),
             user_id: "test-user".to_string(),
             name: "test-node".to_string(),

@@ -52,6 +52,7 @@ Strict separation: `handlers/` -> `services/` -> `models/`
 - 12100 `AssistantTurnActive` (HTTP 409, `turn_active`): a persisted NyxAgent conversation already has an active turn.
 - 12200 `AdminUsageQueryTimeout` (HTTP 503): bounded admin usage aggregation timed out; retry with a narrower window or filters.
 - 12300 `WorkspaceDestinationsNotActivated` (HTTP 503): incomplete automatic Drive/Workspace editor reconciliation; excluded from proxy-fault telemetry
+- 12400-12413 machine nodes: 12400 `MachineCapabilityDisabled`, 12401 `MachineNotAllowed`, 12402 `MachinePathOutsideRoots`, 12403 `MachineJobNotFound`, 12404 `MachineConfirmationPending`, 12405 `MachineConfirmationDeclined`, 12406 `MachineComputerUnavailable`, 12407 `MachineLimitExceeded`, 12408 `MachineOwnerInControl`, 12409 `MachineNotIsolated`, 12410 `MachineLoginNotFound`, 12411 `MachineLoginOriginMismatch`, 12412 `MachineLoginWrongField`, 12413 `MachineBrowserUnavailable`.
 
 ### 4. Frontend Patterns
 
@@ -104,6 +105,11 @@ Add new entries here when introducing additional vendored URN types.
 - SSH services use `ssh_auth_mode` (`cert` | `node_key` | `proxy_only`); legacy `certificate_auth_enabled` true/false maps to `cert`/`proxy_only`. Node-key credentials live only in the node-local encrypted store, keyed by `(service_slug, principal)`, with configured `host_key_sha256` enforced by the russh client. Cert-mode `ssh exec` and browser terminal also run through russh on the node agent (backend-issued ephemeral private key + OpenSSH user certificate) and verify target host keys against a node-local TOFU store `ssh_cert_host_keys.toml` in the node config dir; pins are enforced on every session, and a changed key returns `SshHostKeyMismatch` (1012) + `ssh_host_key_mismatch` audit. Manage pins with `nyxid node ssh cert-host-key list|pin|forget` (`pin` pre-seeds/replaces a SHA256 fingerprint; `forget` is the legitimate rotation recovery path; the store is live-reloaded, so no daemon restart). `ssh proxy` is unsupported for `node_key` -- use `ssh exec` or the browser terminal.
 - Admin node endpoints (`handlers/admin_nodes.rs`) require admin role and have no ownership check
 - `nyxid node daemon` manages background service lifecycle (`cli/src/node/daemon.rs`): launchd LaunchAgent on macOS / systemd user unit on Linux. All node commands support `--profile` for multi-instance: service labels `dev.nyxid.node.{profile}` (macOS) / `nyxid-node-{profile}.service` (Linux), config at `~/.nyxid-node/profiles/{name}/`.
+
+- Machine nodes add locally-authoritative `shell`/`files`/`computer` capabilities (all off by default), mandatory signed requests, bounded jobs/files, cua MCP stdio, job-bound service gateway and human-only live desktops. Only owner-turn assistant chat keys can use them; guests never. Specialists store `machine_node_ids` and `saved_login_ids` beside `grants`. Owner settings (`machine_confirm`, single-user saved-login opt-in) are human-only. Browser policies/extension/native host belong to the supervisor; separated children run as `browser` or `agent`. Saved logins are encrypted, write-only, exact-origin fills, with no secret-bearing Debug, logs, audit or tool results. Setup/control watches queue their event transactionally. No extra machine DB reads on unrelated proxy/MCP/turn paths. See `docs/MACHINE_NODES.md` for the binding contract and `docs/NYXID_NODE.md` for setup and warnings.
+- Machine exec `services` is an explicit per-job least-privilege declaration (default none), bound as ID+slug on MachineJob, shown on cards/audit and rechecked at gateway execution. Server catalog `inference.wire_protocol` and `git_http` metadata generate the signed SDK/git environment; no node slug mappings. Reuse the shared service visibility resolver and middleware API-key identity constructor. Preserve Content-Encoding with Content-Length through both streaming hops. Non-isolated shell warnings must explicitly mention access to node tokens/signing secrets/stored credentials; recommend the container or `--separate-users`, never refuse solely for owner-machine risk. Container Chromium uses user-namespace/seccomp sandboxing via the shipped profile; every Linux agent/file child sets NoNewPrivs and denies namespace syscalls through a per-process filter; browser/cua retain sandbox namespace access. Human live view uses X11/XTest or ScreenCaptureKit/separate human cua input, at 30 Hz with JPEG dirty rectangles and zero idle payload; agent actions/observations stay on cua. Controller revisions cancel in-flight agent work without locks across I/O. Run extension freshness/unit tests and machine container e2e in PR CI. Performance measurements and repeatable commands: `docs/MACHINE_NODES.md#validation-and-measurements`.
+- Machine automation turns retain live machine/login grants and owner-control fences. Webhook confirmation is additive to `machine_confirm`; one exact, one-use owner card satisfies both. Exec, file writes/saves, job cancellation and mutating computer input are destructive; checked login fills and owner-control requests are changing only. Apply the gate in the machine adapter after normalization so direct and universal tool calls agree. Machine gateway streamed uploads bind exact services and never retry another node or pool member; declared pools support buffered SDK/JSON requests with normal failover and live member ACLs. Catalog discovery projects one ID-bounded batch. All human machine routes reuse `login_client_context::require_first_party_human`; desktop upgrades also retain the `/assistant/nyxagent/*` OAuth-client rejection layer.
+
 
 ### 7. OpenClaw Integration
 
@@ -543,6 +549,9 @@ nyxid node start | agent-status | credentials list
 nyxid node openclaw connect --url http://localhost:18789   # --credential-env for non-interactive
 nyxid node openclaw status | disconnect
 nyxid node daemon install|start|stop|restart|status|logs --follow|uninstall   # launchd/systemd; supports --profile
+nyxid node setup --machine [--computer] [--profile NAME]  # pairing or page-issued --token; Linux isolation: sudo + --separate-users
+nyxid node machine enable|disable|status                 # independent shell/files/computer; local authority
+nyxid node docker start --machine                       # desktop image, persistent identity/workspace
 nyxid node docker build|start|stop|status|logs [--profile <name>]             # Docker alternative to native daemon
 
 # Oracle relay
@@ -616,3 +625,11 @@ In QA mode, flag any code that doesn't match DESIGN.md.
 - The `aurinko` channel adapter has independent encrypted account-token/signing-secret storage, signed raw-byte POST validation, bound subscriptions, and bounded inline producer retries. Never return 422 to Aurinko.
 - ADR-013 still applies: persist only email subscription bindings, batch digest/cursor, stable UUID-v4 receipts, and send-attempt barriers. Receipts/sends have no TTL while their bot exists; owner/bot deletion must fence in-flight effects before cleanup. Do not consume a retryable Aurinko reply token before preflight or resend an uncertain POST. Legacy adapter behavior remains unchanged.
 - See `docs/AURINKO_INTEGRATION.md` for lifecycle, callback routing, filtering, reply authority, scopes, and validation limits. Aurinko is included in the catalog overlay drift map.
+
+Assistant workspace navigation places Automations (`/assistant/automations`) and
+Machines (`/assistant/machines`, Saved logins at `?tab=logins`) beside Plugins and
+Approvals for both engines. Setup/pairing stay in `AssistantShell`; the desktop is
+standalone under `/assistant/machines/{id}/desktop`. Studio Nodes shows only a
+read-only machine summary linking to assistant settings; Developer → Triggers
+retains secrets/replay. `/automations` redirects with `setup` and `agent` intact.
+Server-generated browser URLs use `services::assistant_links::AssistantPage`.

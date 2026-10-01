@@ -1109,6 +1109,9 @@ mod tests {
     fn test_node(owner_id: &str, name: &str) -> Node {
         let now = Utc::now();
         Node {
+            machine: None,
+            machine_confirm: Default::default(),
+            allow_single_user_saved_logins: false,
             id: Uuid::new_v4().to_string(),
             user_id: owner_id.to_string(),
             name: name.to_string(),
@@ -1185,6 +1188,9 @@ mod tests {
 
         let now = chrono::Utc::now();
         let node = Node {
+            machine: None,
+            machine_confirm: Default::default(),
+            allow_single_user_saved_logins: false,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: actor_id.clone(),
             name: "retry-node".to_string(),
@@ -1999,6 +2005,7 @@ mod tests {
             &node_id,
             &crate::services::node_ws_manager::NodeCapabilitiesMsg {
                 http_signature_v2: false,
+                proxy_upload_v1: false,
                 http_cancellation: false,
                 remote_credential_crypto_v1: true,
                 ..Default::default()

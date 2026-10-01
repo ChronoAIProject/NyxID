@@ -50,7 +50,9 @@ export interface CommandItem {
 
 export const ALL_ITEMS: readonly CommandItem[] = [
   { icon: Bot, label: "Assistant", to: "/assistant", group: "navigation" },
-  { icon: CalendarClock, label: "Automations", to: "/automations", group: "navigation" },
+  { icon: CalendarClock, label: "Automations", to: "/assistant/automations", group: "navigation" },
+  { icon: Server, label: "Machines", to: "/assistant/machines", group: "navigation" },
+  { icon: KeyRound, label: "Saved logins", to: "/assistant/machines", search: { tab: "logins" }, group: "navigation" },
   { icon: LayoutDashboard, label: "Dashboard", to: "/dashboard", group: "navigation" },
   { icon: Cable, label: "AI Services", to: "/keys", group: "navigation" },
   { icon: Building2, label: "Organizations", to: "/orgs", group: "navigation" },

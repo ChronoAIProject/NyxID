@@ -335,3 +335,9 @@ export const DocsPage = lazy(() =>
 export const AdminUsagePage = lazy(() =>
   import("@/pages/admin-usage").then((m) => ({ default: m.AdminUsagePage })),
 );
+
+export const MachineSetupPage = lazy(() => import("./machine-setup").then((m) => ({ default: m.MachineSetupPage })));
+export const MachinePairPage = lazy(() => import("./machine-setup").then((m) => ({ default: m.MachinePairPage })));
+export const SavedLoginsPage = lazy(() => import("./saved-logins").then((m) => ({ default: m.SavedLoginsPage })));
+
+export const MachineDesktopPage = lazy(() => import("./machine-desktop").then((m) => ({ default: m.MachineDesktopPage })));

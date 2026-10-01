@@ -45,6 +45,10 @@ const WS_WRITER_CHANNEL_SIZE: usize = 256;
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 enum NodeMessage {
+    #[serde(rename = "machine_service_call")]
+    MachineServiceCall(nyxid_machine::Request),
+    #[serde(rename = "machine_result")]
+    MachineResult(nyxid_machine::Response),
     #[serde(rename = "register")]
     Register {
         token: String,
@@ -482,11 +486,29 @@ async fn apply_status_update_capabilities(
     if let Some(fence) = owner_fence {
         let flags = state.node_ws_manager.session_info(node_id).capabilities;
         match crate::services::node_owner_service::record_capabilities(
-            &state.db, fence, flags, true,
+            &state.db,
+            fence,
+            flags,
+            true,
+            capabilities
+                .as_ref()
+                .and_then(|caps| caps.machine.as_ref())
+                .filter(|profile| profile.enabled()),
         )
         .await
         {
-            Ok(true) => {}
+            Ok(true) => {
+                if capabilities
+                    .as_ref()
+                    .is_some_and(|caps| caps.machine.is_some())
+                    && let Err(error) = crate::services::machine_setup_service::complete_page_setup(
+                        &state.db, node_id,
+                    )
+                    .await
+                {
+                    tracing::warn!(node_id, %error, "Machine setup grant completion deferred");
+                }
+            }
             Ok(false) => tracing::warn!(node_id, "Ignored capabilities from a fenced node socket"),
             Err(error) => tracing::warn!(node_id, %error, "Failed to persist node capabilities"),
         }
@@ -1084,6 +1106,7 @@ async fn handle_node_connection(
 
     // H4: Use bounded channel to prevent memory exhaustion from slow/malicious nodes
     let (tx, rx) = mpsc::channel::<NodeOutboundMessage>(WS_WRITER_CHANNEL_SIZE);
+    let machine_gateway = super::machine_gateway::Session::new(tx.clone());
     let connection_id = uuid::Uuid::new_v4().to_string();
     let owner = match crate::services::node_owner_service::claim(
         &state.db,
@@ -1211,6 +1234,20 @@ async fn handle_node_connection(
         // Binary frames carry streaming proxy data chunks:
         //   [36 bytes: request_id as ASCII UUID][remaining: raw data]
         if let Ok(Message::Binary(data)) = &msg {
+            if nyxid_machine::binary::is_machine(data) {
+                if let Ok(frame) = nyxid_machine::binary::Frame::decode(data) {
+                    if matches!(
+                        frame.kind,
+                        nyxid_machine::binary::Kind::Desktop
+                            | nyxid_machine::binary::Kind::DesktopActivity
+                    ) {
+                        ws_manager.deliver_desktop_frame(&node_id_reader, &frame, data);
+                    } else {
+                        machine_gateway.receive(frame).await;
+                    }
+                }
+                continue;
+            }
             match decode_binary_stream_frame(data) {
                 Ok((request_id, chunk)) => {
                     ws_manager.deliver_stream_chunk(&node_id_reader, request_id, chunk.to_vec());
@@ -1432,6 +1469,14 @@ async fn handle_node_connection(
                     closed.error_code,
                 );
             }
+            NodeMessage::MachineServiceCall(request) => {
+                machine_gateway
+                    .start(state.clone(), &node_id_reader, request)
+                    .await;
+            }
+            NodeMessage::MachineResult(result) => {
+                ws_manager.deliver_machine_result(&node_id_reader, result);
+            }
             NodeMessage::SshExecResult(result) => {
                 let stdout = decode_base64_payload(
                     result.stdout.as_deref(),
@@ -1638,6 +1683,7 @@ async fn handle_node_connection(
     writer_task.abort();
     ws_manager.unregister_connection_if(&node_id, &connection_id);
 
+    machine_gateway.close().await;
     if let Err(error) = crate::services::node_owner_service::release(&state.db, &owner_fence).await
     {
         tracing::warn!(node_id = %node_id, %error, "Failed to release node connection ownership");
@@ -1710,6 +1756,18 @@ async fn run_node_writer<S>(
                             tracing::debug!(node_id = %node_id, "WebSocket send failed, closing writer");
                             break;
                         }
+                    }
+                }
+            }
+            NodeOutboundMessage::Binary(bytes) => {
+                tokio::select! {
+                    biased;
+                    result = close_rx.changed() => {
+                        if result.is_err() { break; }
+                        continue;
+                    },
+                    result = ws_sink.send(Message::Binary(bytes.into())) => {
+                        if result.is_err() { break; }
                     }
                 }
             }
@@ -2169,6 +2227,9 @@ mod tests {
     fn test_node(owner_id: &str, name: &str, raw_auth_token: &str) -> Node {
         let now = Utc::now();
         Node {
+            machine: None,
+            machine_confirm: Default::default(),
+            allow_single_user_saved_logins: false,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: owner_id.to_string(),
             name: name.to_string(),
@@ -2840,6 +2901,7 @@ mod tests {
             Some("0.7.1-test".to_string()),
             Some(NodeCapabilitiesMsg {
                 http_signature_v2: false,
+                proxy_upload_v1: false,
                 http_cancellation: false,
                 remote_credential_crypto_v1: true,
                 ..NodeCapabilitiesMsg::default()
@@ -2962,6 +3024,7 @@ mod tests {
             None,
             Some(NodeCapabilitiesMsg {
                 http_signature_v2: false,
+                proxy_upload_v1: false,
                 http_cancellation: false,
                 remote_credential_crypto_v1: true,
                 ..NodeCapabilitiesMsg::default()

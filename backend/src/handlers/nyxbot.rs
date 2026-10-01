@@ -9,6 +9,7 @@
 //! orchestrator conversation per chat and sender, owned by the bot owner, with
 //! Full access. Only senders verified as the owner reach it; everyone else gets
 //! a short refusal and no turn.
+use crate::services::assistant_links::AssistantPage;
 use axum::{
     Json,
     body::{Body, Bytes},
@@ -2078,6 +2079,8 @@ async fn resolve(state: &AppState, watch: &NyxbotWatch) {
     let result = match watch.kind.as_str() {
         "channel_bot" => channel_bot_watch(state, watch).await,
         "connect_link" => connect_link_watch(state, watch).await,
+        "machine_setup" => machine_setup_watch(state, watch).await,
+        "machine_control" => machine_control_watch(state, watch).await,
         "trigger_created" => trigger_created_watch(state, watch).await,
         _ => Ok(()),
     };
@@ -2100,6 +2103,12 @@ pub fn spawn_live_dispatch(state: AppState) {
                 Err(broadcast::error::RecvError::Closed) => break,
             };
             let filter = match event {
+                LiveEvent::MachineDesktop { id, user_id } => {
+                    doc! {"kind":"machine_control","connect_link_id":id,"user_id":user_id}
+                }
+                LiveEvent::Machine { id, .. } | LiveEvent::MachineSetup { id, .. } => {
+                    doc! {"kind":"machine_setup","connect_link_id":id}
+                }
                 LiveEvent::ConnectLink {
                     id,
                     user_id,
@@ -4081,6 +4090,159 @@ mod tests;
 mod status;
 pub(crate) use status::{WaitingItem, check_deliveries, waiting};
 
+async fn machine_setup_watch(state: &AppState, watch: &NyxbotWatch) -> AppResult<()> {
+    use crate::models::{
+        machine_setup::{COLLECTION_NAME as SETUPS, MachineSetup},
+        node::NodeStatus,
+    };
+    let Some(id) = watch.connect_link_id.as_deref() else {
+        return Ok(());
+    };
+    let row = state
+        .db
+        .collection::<MachineSetup>(SETUPS)
+        .find_one(doc! {"_id":id})
+        .await?;
+    let Some(mut row) = row else {
+        return Ok(());
+    };
+    if !row.user_id.is_empty() && row.user_id != watch.user_id {
+        machine_wake(
+            state,
+            watch,
+            "machine_setup_finished",
+            "This pairing was completed by another owner. Start a fresh setup for this account."
+                .into(),
+            Some("paired_elsewhere"),
+        )
+        .await?;
+        return Ok(());
+    }
+    let node = crate::services::node_service::get_node_by_id(&state.db, id).await?;
+    if node.as_ref().is_some_and(|node| {
+        node.user_id != row.choices.owner_id.as_deref().unwrap_or(&watch.user_id)
+    }) {
+        machine_wake(
+            state,
+            watch,
+            "machine_setup_finished",
+            "This machine is not owned by this account. Start a fresh setup.".into(),
+            Some("owner_changed"),
+        )
+        .await?;
+        return Ok(());
+    }
+    let declined_card = if row.status == "pending" {
+        state.db.collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
+            .find_one(doc! {"user_id":&watch.user_id,"conversation_id":&watch.conversation_id,"tool_name":"nyxid__machine_pair","status":"denied","service_id":id}).await?.is_some()
+    } else {
+        false
+    };
+    if declined_card {
+        match crate::services::machine_setup_service::decide(
+            &state.db,
+            &watch.user_id,
+            id,
+            false,
+            Some(&watch.conversation_id),
+        )
+        .await
+        {
+            Ok(decided) => row = decided,
+            Err(AppError::Conflict(_)) => return Ok(()),
+            Err(error) => return Err(error),
+        }
+    }
+    let (status, message) = if row.status == "declined" || declined_card {
+        (
+            "declined",
+            "The owner declined machine pairing. Do not retry without a new owner request."
+                .to_owned(),
+        )
+    } else if row.status == "failed" {
+        ("failed", "Machine setup failed. Offer a fresh setup link and the machine's local status guidance.".to_owned())
+    } else if let Some(node) = node.as_ref().filter(|node| node.machine.is_some()) {
+        let profile = node.machine.as_ref().expect("filtered profile");
+        if node.status != NodeStatus::Online {
+            (
+                "offline",
+                "The machine registered but is offline. Ask the owner to start its node daemon."
+                    .to_owned(),
+            )
+        } else if profile.computer && !profile.computer_ready {
+            ("permissions_missing", "The machine connected, but computer use is unavailable. Ask the owner to check Screen Recording/Accessibility or the Linux display using nyxid node machine status.".to_owned())
+        } else {
+            (
+                "connected",
+                format!(
+                    "Machine {} ({}) connected with capabilities {}. Use nyx__machine_list and a harmless check such as git --version to verify it, then continue. Requested specialist grant: {}. Grant it with nyxid__grant_subagent after verification.",
+                    node.name,
+                    node.id,
+                    row.choices.capabilities.join(", "),
+                    row.choices.grant_to.as_deref().unwrap_or("none")
+                ),
+            )
+        }
+    } else if row.expires_at <= Utc::now() {
+        ("expired", "Machine setup expired before it connected. Offer a fresh setup link or ask the owner to run setup again for a new pairing code.".to_owned())
+    } else {
+        return Ok(());
+    };
+    state
+        .db
+        .collection::<MachineSetup>(SETUPS)
+        .update_one(
+            doc! {"_id":id,"user_id":&row.user_id},
+            doc! {"$set":{"status":status}},
+        )
+        .await?;
+    machine_wake(
+        state,
+        watch,
+        "machine_setup_finished",
+        message,
+        if status == "connected" {
+            None
+        } else {
+            Some(status)
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+async fn machine_control_watch(state: &AppState, watch: &NyxbotWatch) -> AppResult<()> {
+    let Some(node) = watch.connect_link_id.as_deref() else {
+        return Ok(());
+    };
+    let Some(row) = crate::services::machine_desktop_service::get(&state.db, node).await? else {
+        return Ok(());
+    };
+    if row.user_id != watch.user_id
+        || row.conversation_id.as_deref() != Some(watch.conversation_id.as_str())
+        || row.status != "agent"
+    {
+        return Ok(());
+    }
+    machine_wake(state,watch,"machine_control_returned",format!("The owner handed machine {node} back. Observe its state fresh, then continue. Owner note: {}",row.handback_note.unwrap_or_default()),None).await?;
+    Ok(())
+}
+
+async fn machine_wake(
+    state: &AppState,
+    watch: &NyxbotWatch,
+    kind: &str,
+    message: String,
+    error: Option<&str>,
+) -> AppResult<()> {
+    if crate::services::machine_service::settle_watch(&state.db, watch, kind, message, error)
+        .await?
+    {
+        super::assistant_team::wake(state, &watch.user_id, &watch.conversation_id).await;
+    }
+    Ok(())
+}
+
 /// A secret-free webhook setup link. Only the page may mint its inbound secret.
 pub(crate) async fn trigger_setup_link(
     state: &AppState,
@@ -4121,7 +4283,7 @@ pub(crate) async fn trigger_setup_link(
         })
         .await?;
     Ok(json!({
-        "url": format!("{}/automations?setup={id}",state.config.frontend_url.trim_end_matches('/')),
+        "url": AssistantPage::Automations { setup: Some(&id) }.url(&state.config.frontend_url),
         "note": "Open this page to create the webhook trigger and save its URL and one-time secret. Never paste the secret into chat. NyxID resumes this thread once it exists. Webhooks default to a dedicated thread. Choose home only with explicit owner consent: untrusted event text would remain in later full-authority owner turns, including private channel chats; webhook confirmation policy does not protect those later turns.",
     }))
 }

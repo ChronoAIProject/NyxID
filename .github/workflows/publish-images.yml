@@ -5,7 +5,7 @@ name: Publish Images
 #   - every push to `main`             -> tags: main, main-<sha>, edge
 #   - every pushed tag matching v*.*.* -> tags: <version>, <major>.<minor>, <major>, latest
 #
-# Components: backend, frontend, node-agent.
+# Components: backend, frontend, node-agent, nyxid-node-machine.
 # mcp-proxy is intentionally excluded (source not yet in repo).
 #
 # Build strategy: native runner matrix (no QEMU). The `build` job fans out
@@ -58,7 +58,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        component: [backend, frontend, node-agent]
+        component: [backend, frontend, node-agent, nyxid-node-machine]
         platform: [linux/amd64, linux/arm64]
         include:
           - platform: linux/amd64
@@ -79,6 +79,9 @@ jobs:
           - component: node-agent
             context: .
             file: cli/Dockerfile.node
+          - component: nyxid-node-machine
+            context: .
+            file: cli/Dockerfile.machine
     steps:
       - uses: actions/checkout@v6
 
@@ -132,6 +135,16 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ matrix.component }}-${{ matrix.platform_pair }}
           provenance: false
 
+      - name: Verify machine browser and desktop
+        if: matrix.component == 'nyxid-node-machine'
+        timeout-minutes: 10
+        env:
+          MACHINE_IMAGE: ${{ steps.repo.outputs.image }}@${{ steps.build.outputs.digest }}
+        run: |
+          docker build --build-arg MACHINE_IMAGE="$MACHINE_IMAGE" \
+            -f cli/tests/Dockerfile.machine -t nyxid-machine-e2e:ci .
+          docker run --rm --shm-size=256m --security-opt seccomp=cli/resources/machine-container/seccomp.json nyxid-machine-e2e:ci
+
       - name: Export digest
         run: |
           mkdir -p /tmp/digests
@@ -157,7 +170,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        component: [backend, frontend, node-agent]
+        component: [backend, frontend, node-agent, nyxid-node-machine]
     steps:
       - name: Compute lowercase image repo
         id: repo
@@ -227,7 +240,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           owner="${GITHUB_REPOSITORY_OWNER,,}"
-          for component in backend frontend node-agent; do
+          for component in backend frontend node-agent nyxid-node-machine; do
             package="nyxid/${component}"
             encoded=$(printf '%s' "$package" | jq -sRr @uri)
             echo "Ensuring ghcr.io/${owner}/${package} is public..."

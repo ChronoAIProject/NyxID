@@ -175,7 +175,7 @@ And a new **delivery**:
   - `nyxid__run_schedule_now`: run once now, to test.
 - **Webhook triggers to agents.** Creating one needs its inbound secret shown
   exactly once. Secrets never pass through chat, so NyxBot hands out a
-  prefilled Automations page link (`nyxid__settings_link` area `triggers`,
+  prefilled Automations page link (`nyxid__settings_link` area `automations`,
   extended with a server-stored, owner-authenticated setup watch). There the owner sees the URL and secret
   once. The page is watched, so NyxBot is told when the trigger exists and can
   explain how to connect it (e.g. the GitHub webhook settings).
@@ -396,7 +396,7 @@ All `/assistant/nyxagent/*` routes reject developer OAuth client access tokens,
 alongside API-key, delegated, relay and service-account credentials. Web sessions,
 CLI device login and mobile first-party access tokens have no OAuth client ID.
 
-Webhook setup links are `/automations?setup=<watch-id>`. The owner-authenticated
+Webhook setup links are `/assistant/automations?setup=<watch-id>`. The owner-authenticated
 `GET /triggers/setup/{id}` returns label, instruction, agent and policy only for
 an owned, pending, unexpired, unused watch. Creation validates and consumes the
 watch in the trigger-insert transaction, so concurrent submissions cannot reuse
@@ -469,3 +469,13 @@ it does not create another stream or ingress query.
 | S6 forms and previews | `frontend/src/pages/automations.test.tsx` covers create, preview, webhook prefill/one-time secrets, edit, pause/resume, run now, deletion, history paging/thread links, invalid preferences and late-loaded owner timezones without overwriting edits; `schemas/automations.test.ts`; existing Triggers, NyxBot settings/details and confirmation tests |
 | S7 measurements | `schedule_benchmark_10000_covering_discovery_and_100_list`, `next_run_timing_benchmark`, concurrent fake-NyxAgent latency test |
 | S8 audit/privacy/compatibility | metadata assertions in webhook/watch/authority tests, existing trigger audit and redaction tests, full regression suites |
+
+### Assistant workspace placement
+
+Automations lives at `/assistant/automations` in the assistant Workspace sidebar,
+next to Machines, Plugins and Approvals, for both assistant engines. Agent details
+link here with `?agent=…`; webhook setup links use `?setup=…`. The previous
+`/automations` page redirects here preserving both parameters. Studio's Developer
+→ Triggers remains for webhook secrets and replay and links to the assistant for
+automation management. Browser links share `services::assistant_links`; API
+endpoints and webhook confirmation policies are unchanged.

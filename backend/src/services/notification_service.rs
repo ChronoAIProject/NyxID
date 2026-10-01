@@ -1128,6 +1128,37 @@ fn unique_devices_by_token(devices: &[DeviceToken]) -> Vec<&DeviceToken> {
     unique
 }
 
+/// A human-control request carries only a machine label and authenticated page link.
+pub async fn machine_control_requested(
+    state: &crate::AppState,
+    owner: &str,
+    label: &str,
+    link: &str,
+) -> AppResult<()> {
+    let channel = get_or_create_channel(&state.db, owner).await?;
+    if !channel.push_enabled {
+        return Ok(());
+    }
+    let data = HashMap::from([
+        ("type".into(), "machine_control".into()),
+        ("url".into(), link.into()),
+    ]);
+    for device in unique_devices_by_token(&channel.push_devices) {
+        let _ = send_push_to_device(
+            &state.http_client,
+            state.fcm_auth.as_deref(),
+            state.apns_auth.as_deref(),
+            &state.config,
+            device,
+            "NyxBot needs you",
+            &format!("Take control of {label}"),
+            &data,
+        )
+        .await;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

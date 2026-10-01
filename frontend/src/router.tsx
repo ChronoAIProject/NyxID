@@ -1,5 +1,10 @@
 import { parseAutomationSearch } from "@/lib/automation-search";
-import { AutomationsPage } from "@/pages/automations";
+import {
+  parseMachinesSearch,
+  parseMachineSetupSearch,
+  parseMachinePairSearch,
+  parseMachineDesktopSearch,
+} from "@/lib/machine-search";
 import { ChannelConnectLinkPage } from "@/pages/channel-connect-link";
 import { AdminOwnershipPage } from "@/pages/admin-ownership";
 import { normalizeAdminUsageSearch } from "@/schemas/admin-usage";
@@ -82,6 +87,7 @@ import {
   ApprovalHistoryPage,
   ApprovalGrantsPage,
   NodesPage,
+  MachineDesktopPage,
   NodeDetailPage,
   AdminNodesPage,
   AdminAuditLogPage,
@@ -653,9 +659,32 @@ const developerAppDetailRoute = createRoute({
 
 const automationsRoute = createRoute({
   path: "/automations",
-  getParentRoute: () => dashboardLayout,
+  getParentRoute: () => rootRoute,
   validateSearch: parseAutomationSearch,
-  component: AutomationsPage,
+  beforeLoad: async (context) => {
+    await standaloneAuthBeforeLoad(context);
+    throw redirect({
+      to: "/assistant/automations",
+      search: parseAutomationSearch(context.search),
+      replace: true,
+    });
+  },
+});
+
+const assistantAutomationsRoute = createRoute({
+  path: "/assistant/automations",
+  getParentRoute: () => rootRoute,
+  beforeLoad: standaloneAuthBeforeLoad,
+  validateSearch: parseAutomationSearch,
+  component: () => <AssistantPage view="automations" />,
+});
+
+const assistantMachinesRoute = createRoute({
+  path: "/assistant/machines",
+  getParentRoute: () => rootRoute,
+  beforeLoad: standaloneAuthBeforeLoad,
+  validateSearch: parseMachinesSearch,
+  component: () => <AssistantPage view="machines" />,
 });
 
 const triggersRoute = createRoute({
@@ -715,6 +744,29 @@ const nodesRoute = createRoute({
   component: NodesPage,
 });
 
+const machineDesktopRoute = createRoute({
+  path: "/assistant/machines/$nodeId/desktop",
+  getParentRoute: () => rootRoute,
+  beforeLoad: standaloneAuthBeforeLoad,
+  component: MachineDesktopPage,
+  validateSearch: parseMachineDesktopSearch,
+});
+
+const machineSetupRoute = createRoute({
+  path: "/assistant/machines/new",
+  getParentRoute: () => rootRoute,
+  beforeLoad: standaloneAuthBeforeLoad,
+  component: () => <AssistantPage view="machine-setup" />,
+  validateSearch: parseMachineSetupSearch,
+});
+const machinePairRoute = createRoute({
+  path: "/assistant/machines/pair",
+  getParentRoute: () => rootRoute,
+  beforeLoad: standaloneAuthBeforeLoad,
+  component: () => <AssistantPage view="machine-pair" />,
+  validateSearch: parseMachinePairSearch,
+});
+
 const nodeDetailRoute = createRoute({
   path: "/nodes/$nodeId",
   getParentRoute: () => dashboardLayout,
@@ -752,7 +804,8 @@ const keysRoute = createRoute({
 const billingRoute = createRoute({
   path: "/billing",
   getParentRoute: () => dashboardLayout,
-  validateSearch: (search: Record<string, unknown>) => billingSearchSchema.parse(search),
+  validateSearch: (search: Record<string, unknown>) =>
+    billingSearchSchema.parse(search),
   beforeLoad: () => {
     const { isLoading, user } = useAuthStore.getState();
     if (shouldRedirectFromBilling({ isLoading, user })) {
@@ -780,9 +833,20 @@ const apiKeyDetailRoute = createRoute({
 
 const channelBotsRoute = createRoute({
   path: "/channel-bots",
-  validateSearch: (search: Record<string, unknown>): { connect?: ReturnType<typeof managedConnectPlatform>; label?: string; target_org_id?: string; request_id?: string; claim_entry?: boolean } => ({
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): {
+    connect?: ReturnType<typeof managedConnectPlatform>;
+    label?: string;
+    target_org_id?: string;
+    request_id?: string;
+    claim_entry?: boolean;
+  } => ({
     connect: managedConnectPlatform(search.connect),
-    claim_entry: search.claim_entry === true || search.claim_entry === "true" ? true : undefined,
+    claim_entry:
+      search.claim_entry === true || search.claim_entry === "true"
+        ? true
+        : undefined,
     ...parseChannelBotSetupSearch(search),
   }),
   getParentRoute: () => dashboardLayout,
@@ -953,10 +1017,12 @@ const adminAnalyticsRoute = createRoute({
   validateSearch: (search: Record<string, unknown>) => usagePageSearch(search),
 });
 
-function usagePageSearch(search: Record<string, unknown>): Partial<Pick<
-  ReturnType<typeof normalizeAdminUsageSearch>,
-  "sort" | "metric" | "page" | "per_page"
->> & {
+function usagePageSearch(search: Record<string, unknown>): Partial<
+  Pick<
+    ReturnType<typeof normalizeAdminUsageSearch>,
+    "sort" | "metric" | "page" | "per_page"
+  >
+> & {
   tab?: "dashboard" | "list";
   sample?: "overview" | "operations" | "explorer";
   mock?: string;
@@ -984,7 +1050,9 @@ const adminUsageRoute = createRoute({
   validateSearch: usagePageSearch,
   beforeLoad: ({ search, location }) => {
     const params = new URLSearchParams(location.searchStr);
-    if (["period", "from", "to", "user", "service"].some((key) => params.has(key))) {
+    if (
+      ["period", "from", "to", "user", "service"].some((key) => params.has(key))
+    ) {
       throw redirect({
         to: "/admin/usage",
         search: usagePageSearch(search),
@@ -1059,9 +1127,15 @@ const routeTree = rootRoute.addChildren([
   channelConnectLinkRoute,
   connectLinkReturnRoute,
   sshTerminalRoute,
+  machineDesktopRoute,
   assistantRoute,
   assistantPluginsRoute,
   assistantApprovalsRoute,
+  assistantAutomationsRoute,
+  assistantMachinesRoute,
+  automationsRoute,
+  machineSetupRoute,
+  machinePairRoute,
   designSystemRoute,
   dashboardLayout.addChildren([
     dashboardIndexRoute,
@@ -1089,7 +1163,6 @@ const routeTree = rootRoute.addChildren([
     developerAppsRoute,
     developerAppDetailRoute,
     triggersRoute,
-    automationsRoute,
     integrationGuideRoute,
     aiSetupRoute,
     notificationSettingsRoute,

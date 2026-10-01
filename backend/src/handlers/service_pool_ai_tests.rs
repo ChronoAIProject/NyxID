@@ -145,6 +145,7 @@ async fn fixture(label: &str, backup: ResponseTemplate) -> Fixture {
 enum Entry {
     Slug,
     Gateway,
+    Machine,
 }
 
 async fn call(
@@ -154,7 +155,7 @@ async fn call(
     body: Value,
 ) -> crate::errors::AppResult<Response> {
     let (uri, ingress) = match entry {
-        Entry::Slug => (
+        Entry::Slug | Entry::Machine => (
             format!("/api/v1/proxy/s/review-ai-route/{path}?trace=review"),
             BillingIngress::Proxy,
         ),
@@ -174,8 +175,16 @@ async fn call(
     request
         .extensions_mut()
         .insert(BillingRoutePolicy::Metered(ingress));
+    if matches!(entry, Entry::Machine) {
+        request
+            .extensions_mut()
+            .insert(crate::services::machine_gateway_service::Ingress {
+                declared_id: fixture.pool_id.clone(),
+                git: None,
+            });
+    }
     match entry {
-        Entry::Slug => {
+        Entry::Slug | Entry::Machine => {
             super::proxy::proxy_request_by_slug(
                 State(fixture.state.clone()),
                 fixture.auth.clone(),
@@ -200,6 +209,160 @@ async fn call(
 fn basic_request() -> Value {
     json!({"model":"pool:review-ai-route", "max_tokens": 64,
         "messages":[{"role":"system","content":"Be brief"},{"role":"user","content":"hello"}]})
+}
+
+#[tokio::test]
+async fn machine_declared_pool_uses_its_protocol_and_live_member_scope() {
+    use crate::services::{key_service, machine_gateway_service as gateway};
+    let fixture = fixture(
+        "machine_pool_declaration",
+        ResponseTemplate::new(200).set_body_json(anthropic_text_response()),
+    )
+    .await;
+    let owner = fixture.auth.user_id.to_string();
+    let key = key_service::create_api_key(
+        &fixture.state.db,
+        &owner,
+        "machine-pool",
+        "proxy",
+        None,
+        None,
+        None,
+        None,
+        Some(true),
+        Some(false),
+        Some(true),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let rows = gateway::services(&fixture.state.db, &owner, &key.id)
+        .await
+        .unwrap();
+    let declared = gateway::declare(std::slice::from_ref(&fixture.pool_id), rows).unwrap();
+    assert_eq!(declared[0].slug, "review-ai-route");
+    let environment = gateway::environment(&declared).unwrap();
+    assert_eq!(
+        environment.variables["OPENAI_BASE_URL"],
+        nyxid_machine::gateway::Variable::GatewayPath("/s/review-ai-route".into())
+    );
+    assert_eq!(
+        environment.variables["OPENAI_API_KEY"],
+        nyxid_machine::gateway::Variable::GatewayToken
+    );
+    assert!(!environment.variables.contains_key("ANTHROPIC_API_KEY"));
+    assert!(environment.git.is_empty());
+    // Pool IDs alone do not grant access to members, matching direct execution.
+    fixture.state.db.collection::<Document>("api_keys").update_one(
+        doc! { "_id": &key.id },
+        doc! { "$set": { "allow_all_services": false, "allowed_service_ids": [&fixture.pool_id] } },
+    ).await.unwrap();
+    let rows = gateway::services(&fixture.state.db, &owner, &key.id)
+        .await
+        .unwrap();
+    assert!(gateway::declare(std::slice::from_ref(&fixture.pool_id), rows).is_err());
+    fixture.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn machine_pool_discovery_and_execution_share_org_admin_only_acl() {
+    use crate::models::org_membership::OrgRole;
+    use crate::services::{key_service, machine_gateway_service as gateway};
+    let mut fixture = fixture(
+        "machine_pool_org_acl",
+        ResponseTemplate::new(200).set_body_json(anthropic_text_response()),
+    )
+    .await;
+    let org = fixture.auth.user_id.to_string();
+    let actor = Uuid::new_v4().to_string();
+    let db = &fixture.state.db;
+    db.collection::<Document>("users")
+        .update_one(
+            doc! { "_id": &org },
+            doc! { "$set": { "user_type": "org" } },
+        )
+        .await
+        .unwrap();
+    db.collection("users")
+        .insert_one(test_user(&actor, UserType::Person))
+        .await
+        .unwrap();
+    db.collection("org_memberships")
+        .insert_one(crate::test_utils::test_membership(
+            &org,
+            &actor,
+            OrgRole::Member,
+            None,
+        ))
+        .await
+        .unwrap();
+    let key = key_service::create_api_key(
+        db,
+        &actor,
+        "machine-org-pool",
+        "proxy",
+        None,
+        None,
+        None,
+        None,
+        Some(true),
+        Some(false),
+        Some(true),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let stored = key_service::get_api_key(db, &actor, &key.id).await.unwrap();
+    fixture.auth = crate::mw::auth::api_key_auth_user(db, &stored, None, None, None)
+        .await
+        .unwrap();
+    assert!(
+        gateway::services(db, &actor, &key.id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|row| row.id == fixture.pool_id)
+    );
+    let response = call(
+        &fixture,
+        Entry::Machine,
+        "chat/completions",
+        basic_request(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let _ = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    db.collection::<Document>("user_services")
+        .update_many(doc! {}, doc! { "$set": { "admin_only": true } })
+        .await
+        .unwrap();
+    assert!(
+        gateway::services(db, &actor, &key.id)
+            .await
+            .unwrap()
+            .iter()
+            .all(|row| row.id != fixture.pool_id)
+    );
+    assert!(
+        call(
+            &fixture,
+            Entry::Machine,
+            "chat/completions",
+            basic_request()
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(fixture.first.received_requests().await.unwrap().len(), 1);
+    assert_eq!(fixture.second.received_requests().await.unwrap().len(), 1);
+    db.drop().await.unwrap();
 }
 
 #[tokio::test]
@@ -327,7 +490,7 @@ async fn pool_ai_truncated_native_stream_surfaces_failure_after_partial_output()
 
 #[tokio::test]
 async fn pool_ai_slug_and_gateway_preserve_destination_and_translate_each_member() {
-    for entry in [Entry::Slug, Entry::Gateway] {
+    for entry in [Entry::Slug, Entry::Gateway, Entry::Machine] {
         let fixture = fixture(
             "pool_ai_entry",
             ResponseTemplate::new(200).set_body_json(anthropic_text_response()),
@@ -535,7 +698,7 @@ async fn pool_ai_anthropic_stream_has_one_openai_completion_sequence() {
         .collect();
     for entry in [Entry::Slug, Entry::Gateway] {
         let framed = match entry {
-            Entry::Slug => upstream.clone(),
+            Entry::Slug | Entry::Machine => upstream.clone(),
             Entry::Gateway => upstream.replace('\n', "\r\n"),
         };
         let fixture = fixture(

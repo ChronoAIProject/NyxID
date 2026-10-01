@@ -560,6 +560,8 @@ async fn specialist(state: &AppState) -> crate::models::assistant_agent::Assista
         &state.encryption_keys,
         OWNER,
         team::CreateRequest {
+            machines: None,
+            logins: None,
             name: "schedule-researcher".into(),
             description: "Research using only granted services".into(),
             display_name: None,
@@ -615,6 +617,8 @@ async fn schedule_specialist_authority_threads_and_guest_refusal() {
     assert!(key.allowed_service_ids.is_empty());
     assert!(key.allowed_platform_service_ids.is_empty());
     let chat = ChatAuthority {
+        machine_node_ids: Vec::new(),
+        saved_login_ids: Vec::new(),
         confirmation_policy: None,
         user_id: OWNER.into(),
         conversation_id: thread.id,
@@ -1908,7 +1912,7 @@ async fn schedule_webhook_prefill_watch_and_human_api_boundary() {
     let url = url::Url::parse(link["url"].as_str().unwrap()).unwrap();
     let params: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
     assert_eq!(params.len(), 1);
-    assert_eq!(url.path(), "/automations");
+    assert_eq!(url.path(), "/assistant/automations");
     let prefill = crate::handlers::triggers::setup(
         axum::extract::State(state.clone()),
         crate::test_utils::test_auth_user(OWNER),

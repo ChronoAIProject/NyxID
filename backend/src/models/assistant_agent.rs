@@ -108,6 +108,11 @@ pub struct AssistantAgent {
     /// so writers of `grants` that predate it never erase it.
     #[serde(default)]
     pub guest_access: BTreeMap<String, GuestAccess>,
+    /// Beside grants so older replicas rewriting service grants retain these.
+    #[serde(default)]
+    pub machine_node_ids: Vec<String>,
+    #[serde(default)]
+    pub saved_login_ids: Vec<String>,
     /// `user` or `nyxbot`.
     pub created_by: String,
     /// NyxAgent profile for new threads.

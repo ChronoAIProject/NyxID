@@ -144,6 +144,8 @@ pub async fn ensure_nyxbot(db: &Database, owner: &str) -> AppResult<AssistantAge
     }
     let now = Utc::now();
     let agent = AssistantAgent {
+        machine_node_ids: Vec::new(),
+        saved_login_ids: Vec::new(),
         id: Uuid::new_v4().to_string(),
         user_id: owner.into(),
         kind: AgentKind::Nyxbot,
@@ -549,6 +551,8 @@ pub async fn resolve_each_target(
 
 #[derive(Clone)]
 pub struct CreateRequest {
+    pub machines: Option<Vec<String>>,
+    pub logins: Option<Vec<String>>,
     pub name: String,
     pub description: String,
     /// Optional friendly name and persona (tone, personality).
@@ -609,6 +613,22 @@ pub async fn create_specialist(
             "specialty uses up to 32 lowercase letters, digits, hyphens or underscores".into(),
         ));
     }
+    // Resolve machine/login grants before creating any agent, thread or key.
+    let machine_change = super::machine_service::resolve_grant_change(
+        db,
+        owner,
+        request.machines.clone(),
+        request.logins.clone(),
+        GrantChange::Add(AgentGrants::default()),
+        MachineGrantMode::Add,
+    )
+    .await?;
+    let (machine_node_ids, saved_login_ids) = match machine_change {
+        GrantChange::Machine {
+            machines, logins, ..
+        } => (machines.unwrap_or_default(), logins.unwrap_or_default()),
+        _ => (Vec::new(), Vec::new()),
+    };
     let nyxbot = ensure_nyxbot(db, owner).await?;
     let limit = assistant_settings_service::get(db, owner)
         .await?
@@ -623,6 +643,8 @@ pub async fn create_specialist(
     .await;
     let now = Utc::now();
     let agent = AssistantAgent {
+        machine_node_ids,
+        saved_login_ids,
         id: Uuid::new_v4().to_string(),
         user_id: owner.into(),
         kind: AgentKind::Specialist,
@@ -839,6 +861,12 @@ pub async fn update_agent(
 /// change keeps levels only for granted services, and none for the default.
 #[derive(Clone, Debug)]
 pub enum GrantChange {
+    Machine {
+        base: Box<GrantChange>,
+        machines: Option<Vec<String>>,
+        logins: Option<Vec<String>>,
+        mode: MachineGrantMode,
+    },
     /// The owner's full replacement of services and account access, with
     /// the guest access levels it names (others are kept).
     Replace {
@@ -853,6 +881,13 @@ pub enum GrantChange {
     Guests(BTreeMap<String, GuestAccess>),
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum MachineGrantMode {
+    Add,
+    Remove,
+    Replace,
+}
+
 impl GrantChange {
     /// The grants and guest access levels after this change.
     pub fn apply(
@@ -860,6 +895,9 @@ impl GrantChange {
         current: &AgentGrants,
         current_guests: &BTreeMap<String, GuestAccess>,
     ) -> (AgentGrants, BTreeMap<String, GuestAccess>) {
+        if let Self::Machine { base, .. } = self {
+            return base.apply(current, current_guests);
+        }
         let mut grants = current.clone();
         let mut guests = current_guests.clone();
         match self {
@@ -893,6 +931,7 @@ impl GrantChange {
                 grants.account_read &= !remove.account_read;
             }
             Self::Guests(levels) => guests.extend(levels.clone()),
+            Self::Machine { .. } => unreachable!("handled above"),
         }
         // A service granted anew starts at the default level, whatever an
         // earlier grant of it left behind (a writer that predates levels
@@ -905,6 +944,7 @@ impl GrantChange {
         let named: HashSet<&String> = match self {
             Self::Replace { guests: levels, .. } | Self::Guests(levels) => levels.keys().collect(),
             Self::Add(_) | Self::Remove(_) => HashSet::new(),
+            Self::Machine { .. } => unreachable!("handled above"),
         };
         guests.retain(|id, _| before.contains(id) || named.contains(id));
         let granted: HashSet<&String> = grants
@@ -964,6 +1004,39 @@ pub async fn apply_grants_in_session(
         .session(&mut *session)
         .await?
         .ok_or_else(not_found)?;
+    let previous_machines = agent.machine_node_ids.clone();
+    let previous_logins = agent.saved_login_ids.clone();
+    if let GrantChange::Machine {
+        machines,
+        logins,
+        mode,
+        ..
+    } = change
+    {
+        for (current, requested) in [
+            (&mut agent.machine_node_ids, machines),
+            (&mut agent.saved_login_ids, logins),
+        ] {
+            if let Some(ids) = requested {
+                match mode {
+                    MachineGrantMode::Replace => *current = ids.clone(),
+                    MachineGrantMode::Remove => current.retain(|id| !ids.contains(id)),
+                    MachineGrantMode::Add => {
+                        for id in ids {
+                            if !current.contains(id) {
+                                current.push(id.clone());
+                            }
+                        }
+                    }
+                }
+                if current.len() > 64 {
+                    return Err(AppError::ValidationError(
+                        "At most 64 machine or login grants are allowed".into(),
+                    ));
+                }
+            }
+        }
+    }
     let (grants, guest_access) = change.apply(&agent.grants, &agent.guest_access);
     let removed: Vec<String> = agent
         .grants
@@ -979,13 +1052,22 @@ pub async fn apply_grants_in_session(
     let encode = |value: bson::ser::Result<bson::Bson>| {
         value.map_err(|_| AppError::Internal("Grant encoding failed".into()))
     };
+    let mut set = doc! {"grants": encode(bson::to_bson(&agent.grants))?,
+    "guest_access": encode(bson::to_bson(&agent.guest_access))?, "updated_at": bson::DateTime::now()};
+    if matches!(change, GrantChange::Machine { .. }) {
+        set.insert(
+            "machine_node_ids",
+            bson::to_bson(&agent.machine_node_ids)
+                .map_err(|_| AppError::Internal("Machine grant encoding failed".into()))?,
+        );
+        set.insert(
+            "saved_login_ids",
+            bson::to_bson(&agent.saved_login_ids)
+                .map_err(|_| AppError::Internal("Login grant encoding failed".into()))?,
+        );
+    }
     collection
-        .update_one(
-            filter,
-            doc! {"$set": {"grants": encode(bson::to_bson(&agent.grants))?,
-            "guest_access": encode(bson::to_bson(&agent.guest_access))?,
-            "updated_at": bson::DateTime::now()}},
-        )
+        .update_one(filter, doc! {"$set": set})
         .session(&mut *session)
         .await?;
     let mut cursor = db
@@ -1005,6 +1087,15 @@ pub async fn apply_grants_in_session(
     let mut expire = Vec::new();
     if !removed.is_empty() {
         expire.push(doc! {"kind": "service", "service_id": {"$in": &removed}});
+    }
+    for (kind, before, after) in [
+        ("machine", &previous_machines, &agent.machine_node_ids),
+        ("saved_login", &previous_logins, &agent.saved_login_ids),
+    ] {
+        let removed: Vec<_> = before.iter().filter(|id| !after.contains(id)).collect();
+        if !removed.is_empty() {
+            expire.push(doc! {"kind":kind,"service_id":{"$in":removed}});
+        }
     }
     if lost_account {
         expire.push(doc! {"kind": "account"});
@@ -1053,6 +1144,8 @@ pub async fn set_grants(
             "platform_service_ids": &agent.grants.platform_service_ids,
             "account_read": agent.grants.account_read,
             "guest_access": &agent.guest_access,
+            "machines": &agent.machine_node_ids,
+            "logins": &agent.saved_login_ids,
         }),
     )
     .await;
@@ -1354,6 +1447,8 @@ pub struct ReplySummary {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct AgentSummary {
+    pub machines: Vec<String>,
+    pub logins: Vec<String>,
     pub id: String,
     pub kind: AgentKind,
     pub name: String,
@@ -1573,6 +1668,8 @@ pub async fn summaries(
             (chars, Some(home)) => last_reply(db, owner, home, chars).await?,
         };
         out.push(AgentSummary {
+            machines: agent.machine_node_ids.clone(),
+            logins: agent.saved_login_ids.clone(),
             services: agent
                 .grants
                 .service_ids
