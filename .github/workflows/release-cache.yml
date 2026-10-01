@@ -33,7 +33,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-build-cache
+  group: release-build-cache-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
