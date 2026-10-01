@@ -2,6 +2,9 @@
 
 This rollup starts from `main` commit `80a153d31200eaa8eafbf005cc13d3e3894181a9`
 and integrates [#1721](https://github.com/ChronoAIProject/NyxID/pull/1721).
+After that squash landed, `main` advanced through #1722 to
+`479840e8`. The rollup merged that commit as `478b960a`, preserving the latest
+main history without conflicts or changes to the Admin Usage files.
 Admin Usage needed token counts that users can combine without double counting,
 filter options and service details ready when opened, and data tables that can
 stay visible or collapse per panel.
