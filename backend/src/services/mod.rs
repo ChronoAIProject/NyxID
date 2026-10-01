@@ -191,6 +191,7 @@ pub mod channel_platform_catalog_service;
 pub mod assistant_account_tools;
 pub mod assistant_acknowledgement_service;
 pub mod assistant_agent_credential_service;
+pub mod assistant_continuation;
 pub mod assistant_group_service;
 pub mod assistant_live;
 pub mod assistant_nyxagent;
@@ -217,6 +218,7 @@ pub mod machine_desktop_service;
 pub mod machine_gateway_service;
 pub mod machine_service;
 pub mod machine_tools;
+pub mod machine_update_service;
 pub mod saved_login_service;
 
 pub mod machine_setup_service;

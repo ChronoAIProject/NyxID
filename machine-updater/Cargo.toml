@@ -1,0 +1,40 @@
+[package]
+name = "nyxid-machine-updater"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }
+anyhow = "1"
+base64 = "0.22"
+const-oid = { version = "0.9", features = ["db"] }
+pki-types = { package = "rustls-pki-types", version = "1.11" }
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false }
+sha2 = "0.10"
+sigstore = { version = "0.13", default-features = false, features = ["bundle", "cosign", "sigstore-trust-root", "rustls-tls"] }
+tough = { version = "0.21", default-features = false }
+webpki = { package = "rustls-webpki", version = "0.103", default-features = false, features = ["std"] }
+x509-cert = "0.2"
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "logging", "aws_lc_rs"] }
+rustls-native-certs = "0.8"
+webpki-roots = "1"
+url = "2"
+urlencoding = "2.1"
+libc = "0.2"
+tempfile = "3"
+hex = "0.4"
+thiserror = "2"
+nyxid-machine = { path = "../machine" }
+
+[dev-dependencies]
+wiremock = "0.6"
+rcgen = "0.14"
+tokio-rustls = "0.26"
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-native-roots"] }

@@ -275,8 +275,12 @@ describe("NyxBot team, settings and channel schemas", () => {
       max_concurrent_subagent_turns: 1,
       max_group_handoffs: 0,
       max_group_handoffs_per_hour: 0,
+      max_auto_continuations: 8,
     };
     expect(schema.safeParse(valid).success).toBe(true);
+    expect(schema.safeParse({ ...valid, max_auto_continuations: 0 }).success).toBe(true);
+    expect(schema.safeParse({ ...valid, max_auto_continuations: 32 }).success).toBe(true);
+    expect(schema.safeParse({ ...valid, max_auto_continuations: 33 }).success).toBe(false);
     expect(schema.safeParse({ ...valid, max_group_handoffs: 24 }).success).toBe(true);
     expect(schema.safeParse({ ...valid, max_group_handoffs: 25 }).success).toBe(false);
     expect(schema.safeParse({ ...valid, max_group_handoffs_per_hour: 601 }).success).toBe(false);

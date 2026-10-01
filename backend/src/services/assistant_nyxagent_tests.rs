@@ -493,6 +493,10 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         credential_api_key_id: "key".into(),
         message_count: 0,
         active_turn: Some(ActiveTurn {
+            machine_node_ids: Vec::new(),
+            continuations: 0,
+            tool_progress: Default::default(),
+            lease_expires_at: None,
             trigger_run_id: None,
             activities: Vec::new(),
             attachments: Vec::new(),
@@ -969,4 +973,35 @@ async fn turn_images_are_bounded_copied_to_the_reply_and_deleted_with_the_chat()
     );
     delete(&db, &owner, &row.id).await.unwrap();
     assert_eq!(count().await, 0, "deleted with the conversation");
+}
+
+#[test]
+fn upstream_codes_are_bounded_identifiers_and_budget_errors_preserve_the_session() {
+    for code in [
+        "tool_budget_exhausted",
+        "turn_timeout",
+        "continuation_no_progress",
+    ] {
+        let error = TurnError::new(code);
+        assert_eq!(error.code, code);
+        assert!(error.preserves_session());
+    }
+    assert_eq!(
+        TurnError::new("new_upstream_error")
+            .upstream_code
+            .as_deref(),
+        Some("new_upstream_error")
+    );
+    for code in [
+        "secret provider message",
+        "Bearer xxx",
+        "nyx_secret",
+        "sk_secret",
+        "new\nline",
+        &"a".repeat(65),
+    ] {
+        let error = TurnError::new(code);
+        assert!(error.upstream_code.is_none());
+        assert!(!serde_json::to_string(&error).unwrap().contains(code));
+    }
 }

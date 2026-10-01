@@ -23,6 +23,7 @@ pub async fn get(db: &Database, user_id: &str) -> AppResult<AssistantSettings> {
 
 #[derive(Clone, Debug, Default)]
 pub struct Update {
+    pub max_auto_continuations: Option<i32>,
     pub timezone: Option<String>,
     pub schedule_minimum_minutes: Option<i32>,
     pub trigger_runs_per_hour: Option<i32>,
@@ -74,6 +75,12 @@ pub async fn update(db: &Database, user_id: &str, update: Update) -> AppResult<A
     }
     for (name, value, low, high) in [
         (
+            "max_auto_continuations",
+            update.max_auto_continuations,
+            0,
+            super::assistant_continuation::HARD_MAX,
+        ),
+        (
             "schedule_minimum_minutes",
             update.schedule_minimum_minutes,
             DEFAULT_SCHEDULE_MINIMUM_MINUTES,
@@ -103,6 +110,10 @@ pub async fn update(db: &Database, user_id: &str, update: Update) -> AppResult<A
         .map_err(|_| AppError::Internal("Settings serialization failed".into()))?;
     defaults.remove("_id");
     defaults.remove("updated_at");
+    if let Some(value) = update.max_auto_continuations {
+        set.insert("max_auto_continuations", value);
+        defaults.remove("max_auto_continuations");
+    }
     if let Some(value) = update.timezone {
         set.insert("timezone", value);
         defaults.remove("timezone");
@@ -169,6 +180,7 @@ pub async fn audit(
         "assistant_settings_updated",
         Some(serde_json::json!({
             "timezone_changed":before.timezone!=after.timezone,
+            "max_auto_continuations":after.max_auto_continuations,
             "schedule_minimum_minutes":after.schedule_minimum_minutes,
             "trigger_runs_per_hour":after.trigger_runs_per_hour,
             "trigger_runs_per_day":after.trigger_runs_per_day,

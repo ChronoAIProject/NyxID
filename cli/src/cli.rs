@@ -2291,6 +2291,13 @@ pub enum NodeCommands {
     #[command(hide = true)]
     MachineWorker,
     #[command(hide = true)]
+    MachineBrowserRefresh { profile: std::path::PathBuf },
+    /// Install or run the independent verified machine updater.
+    MachineUpdater {
+        #[command(subcommand)]
+        command: crate::commands::machine_native_update::Command,
+    },
+    #[command(hide = true)]
     MachineTransferWorker,
     #[command(hide = true)]
     MachineNativeHost { origin: String },

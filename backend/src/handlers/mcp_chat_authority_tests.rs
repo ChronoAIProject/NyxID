@@ -872,6 +872,11 @@ async fn chat_tool_calls_are_recorded_as_metadata_only_turn_activity() {
     let row = crate::services::assistant_nyxagent::get(&f.state.db, &f.owner, &f.row.id)
         .await
         .unwrap();
+    let progress = &row.active_turn.as_ref().unwrap().tool_progress;
+    assert_eq!(progress.calls, 3);
+    assert_eq!(progress.digest.len(), 64);
+    let encoded_progress = serde_json::to_string(progress).unwrap();
+    assert!(!encoded_progress.contains("do_not_record") && !encoded_progress.contains("issues"));
     let activities = row.active_turn.as_ref().unwrap().activities.clone();
     let labels: Vec<_> = activities.iter().map(|a| a.label.as_str()).collect();
     assert_eq!(
@@ -895,6 +900,7 @@ async fn chat_tool_calls_are_recorded_as_metadata_only_turn_activity() {
     let row = crate::services::assistant_nyxagent::get(&f.state.db, &f.owner, &f.row.id)
         .await
         .unwrap();
+    assert_eq!(row.active_turn.as_ref().unwrap().tool_progress.calls, 3);
     assert_eq!(row.active_turn.unwrap().activities.len(), 3);
 }
 

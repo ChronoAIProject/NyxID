@@ -663,7 +663,9 @@ mod tests {
         .await
         .expect("failure is isolated from ingress");
         assert_eq!(response.status, "accepted");
-        tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        // Generous deadlines only bound a failure; success returns immediately,
+        // and the full suite can delay retries and the chained audit append.
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
             while attempts.load(Ordering::SeqCst) < 3 {
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
@@ -671,7 +673,7 @@ mod tests {
         .await
         .expect("three bounded attempts");
 
-        let audit = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        let audit = tokio::time::timeout(std::time::Duration::from_secs(30), async {
             loop {
                 if let Some(audit) = db
                     .collection::<AuditLog>(AUDIT_LOGS)

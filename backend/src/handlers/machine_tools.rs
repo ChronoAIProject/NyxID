@@ -104,6 +104,20 @@ pub async fn call(
     let operation = tools::operation(name)
         .ok_or_else(|| AppError::NotFound("Machine tool not found".into()))?;
     machines::capable(&node, operation)?;
+    if operation == Operation::Browser
+        && !node
+            .machine
+            .as_ref()
+            .is_some_and(|profile| profile.browser_tools)
+    {
+        return Ok(json!({
+            "error": {
+                "code": 12416,
+                "message": "This machine predates the managed browser tools. Offer nyxid__machine_update: it raises an owner card and guides the host step if needed. Do not ask the owner to diagnose browser settings."
+            },
+            "settings_path": AssistantPage::MachineSettings {node: &node.id}.path(),
+        }));
+    }
     if operation == Operation::Computer
         && !node.machine.as_ref().is_some_and(|profile| {
             arguments["tool"]
@@ -111,14 +125,44 @@ pub async fn call(
                 .is_some_and(|tool| profile.computer_tools.iter().any(|allowed| allowed == tool))
         })
     {
-        return Err(AppError::MachineComputerUnavailable);
+        return Err(AppError::MachineComputerToolUnsupported);
     }
     if name != "nyx__machine_request_control" {
-        crate::services::machine_desktop_service::agent_allowed(&state.db, &node.id).await?;
+        if matches!(
+            operation,
+            Operation::Browser | Operation::Computer | Operation::FillLogin
+        ) {
+            let display = if operation == Operation::Browser && arguments["browser"] == "dev" {
+                nyxid_machine::desktop::Display::Dev
+            } else {
+                nyxid_machine::desktop::Display::Secure
+            };
+            if node
+                .machine
+                .as_ref()
+                .is_some_and(|profile| profile.os == "linux")
+            {
+                crate::services::machine_desktop_service::agent_display_allowed(
+                    &state.db, &node.id, display,
+                )
+                .await?;
+            } else {
+                // Native macOS browsers share a physical desktop.
+                crate::services::machine_desktop_service::agent_allowed(&state.db, &node.id)
+                    .await?;
+            }
+        } else {
+            crate::services::machine_desktop_service::agent_allowed(&state.db, &node.id).await?;
+        }
     }
     arguments["machine"] = json!(node.id);
     let mut login = None;
     if operation == Operation::FillLogin {
+        if arguments.get("browser").is_some_and(|v| v != "secure") {
+            return Err(AppError::ValidationError(
+                "Saved logins are available only in the secure browser".into(),
+            ));
+        }
         let selector = argument(&arguments, "login")?;
         let rows =
             crate::services::saved_login_service::available(&state.db, &chat.user_id).await?;
@@ -184,7 +228,8 @@ pub async fn call(
     let destructive = matches!(
         operation,
         Operation::Exec | Operation::WriteFile | Operation::SaveAttachment | Operation::JobCancel
-    ) || (operation == Operation::Computer && !read_only);
+    ) || (matches!(operation, Operation::Computer | Operation::Browser)
+        && !read_only);
     let webhook_confirmation = acks::webhook_confirmation_required(chat, read_only, destructive);
     if webhook_confirmation {
         if let Some(refusal) =
@@ -235,21 +280,45 @@ pub async fn call(
             return Ok(acks::refusal(&row));
         }
     }
+    // Fence against Stop/settlement before issuing any signed machine work.
+    let turn_id = chat
+        .turn_id
+        .as_deref()
+        .filter(|_| !chat.turn_stopped)
+        .ok_or(AppError::MachineTurnStopped)?;
+    let admitted = state.db.collection::<crate::models::assistant_conversation::AssistantConversation>(
+        crate::models::assistant_conversation::COLLECTION_NAME,
+    ).update_one(
+        mongodb::bson::doc! {"_id":&chat.conversation_id,"user_id":&chat.user_id,"active_turn.turn_id":turn_id,"active_turn.stop_requested":false},
+        mongodb::bson::doc! {"$addToSet":{"active_turn.machine_node_ids":&node.id}},
+    ).await?;
+    if admitted.matched_count != 1 {
+        return Err(AppError::MachineTurnStopped);
+    }
+    arguments["conversation_id"] = json!(chat.conversation_id);
+    arguments["turn_id"] = json!(turn_id);
     if name == "nyx__machine_request_control" {
         return super::machine_desktop::request_control(
             state,
             chat,
             &node,
             argument(&arguments, "reason")?,
+            nyxid_machine::desktop::Display::from_parameters(&arguments)
+                .map_err(|message| AppError::ValidationError(message.into()))?,
         )
         .await;
     }
-    if operation == Operation::Computer {
-        crate::services::machine_desktop_service::open(
+    if matches!(operation, Operation::Computer | Operation::Browser) {
+        crate::services::machine_desktop_service::open_display(
             &state.db,
             &chat.user_id,
             &node.id,
             Some(&chat.conversation_id),
+            if operation == Operation::Browser && arguments["browser"] == "dev" {
+                nyxid_machine::desktop::Display::Dev
+            } else {
+                nyxid_machine::desktop::Display::Secure
+            },
         )
         .await?;
     }
@@ -337,7 +406,7 @@ pub async fn call(
             return Err(error);
         }
     };
-    if operation == Operation::Computer {
+    if matches!(operation, Operation::Computer | Operation::Browser) {
         attach_computer_images(state, chat, &mut result).await?;
     }
     if let Some(login) = login {
@@ -407,7 +476,7 @@ pub async fn call(
     Ok(tools::bounded_result(result))
 }
 
-async fn permission(
+pub(crate) async fn permission(
     state: &AppState,
     chat: &ChatAuthority,
     kind: &str,
@@ -537,6 +606,8 @@ async fn save_attachment(
     use sha2::{Digest, Sha256};
     let parameters = json!({
         "path":args["path"],
+        "conversation_id":args["conversation_id"],
+        "turn_id":args["turn_id"],
         "size":bytes.len(),
         "sha256":hex::encode(Sha256::digest(&bytes))
     });
@@ -563,7 +634,7 @@ async fn share_file(
         state,
         node,
         Operation::ShareFile,
-        json!({"path":args["path"]}),
+        json!({"path":args["path"],"conversation_id":args["conversation_id"],"turn_id":args["turn_id"]}),
         axum::body::Body::empty(),
         crate::services::mcp_service::MAX_TOOL_IMAGE_BYTES,
     )

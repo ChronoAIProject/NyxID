@@ -12,6 +12,50 @@ pub struct Identity {
 }
 
 impl Identity {
+    /// Probe using the same UID/GID and supplementary-group policy as commands.
+    /// A configured username alone says nothing about filesystem access.
+    pub async fn commands_isolated(&self, directories: &[PathBuf]) -> bool {
+        if self.uid == unsafe { libc::geteuid() } || self.uid == 0 || directories.is_empty() {
+            return false;
+        }
+        let mut paths = Vec::new();
+        for (index, directory) in directories.iter().enumerate() {
+            if !directory.is_dir() {
+                if index == 0 {
+                    return false;
+                }
+                continue;
+            }
+            use std::os::unix::ffi::OsStrExt;
+            let Ok(path) = CString::new(directory.as_os_str().as_bytes()) else {
+                return false;
+            };
+            paths.push(path);
+        }
+        let mut probe = Command::new("/bin/true");
+        if self.prepare_agent(&mut probe).is_err() {
+            return false;
+        }
+        unsafe {
+            probe.pre_exec(move || {
+                for path in &paths {
+                    for mode in [libc::R_OK, libc::X_OK] {
+                        if libc::faccessat(libc::AT_FDCWD, path.as_ptr(), mode, libc::AT_EACCESS)
+                            == 0
+                        {
+                            return Err(std::io::Error::from_raw_os_error(libc::EACCES));
+                        }
+                        if std::io::Error::last_os_error().raw_os_error() != Some(libc::EACCES) {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                    }
+                }
+                Ok(())
+            });
+        }
+        matches!(probe.status().await, Ok(status) if status.success())
+    }
+
     /// Agent children inherit a namespace-denying filter. Browser/cua children
     /// use `prepare` instead, so Chromium can establish its own sandbox.
     pub fn prepare_agent(&self, command: &mut Command) -> Result<()> {
@@ -62,6 +106,31 @@ impl Identity {
             name: string(record.pw_name),
             home: PathBuf::from(string(record.pw_dir)),
         })
+    }
+
+    /// Desktop-only environment. Commands/file workers never call this method.
+    pub fn desktop_env(&self, command: &mut Command) {
+        for key in [
+            "DISPLAY",
+            "XAUTHORITY",
+            "WAYLAND_DISPLAY",
+            "XDG_RUNTIME_DIR",
+            "DBUS_SESSION_BUS_ADDRESS",
+            "AT_SPI_BUS_ADDRESS",
+        ] {
+            if let Some(value) = std::env::var_os(key) {
+                command.env(key, value);
+            }
+        }
+        #[cfg(target_os = "linux")]
+        if let Ok(address) =
+            std::fs::read_to_string(self.home.join(".nyxid-desktop/session-bus.address"))
+        {
+            let address = address.trim();
+            if address.starts_with("unix:") && !address.contains(['\n', '\r', '\0']) {
+                command.env("DBUS_SESSION_BUS_ADDRESS", address);
+            }
+        }
     }
 
     pub fn prepare(&self, command: &mut Command) -> Result<()> {
@@ -148,6 +217,12 @@ fn deny_agent_namespaces() -> std::io::Result<()> {
             0x40000000,
         ),
         ins(RET, 0, 0, DENY),
+        ins(EQ, 0, 1, libc::SYS_mount as u32),
+        ins(RET, 0, 0, DENY),
+        ins(EQ, 0, 1, libc::SYS_umount2 as u32),
+        ins(RET, 0, 0, DENY),
+        ins(EQ, 0, 1, libc::SYS_pivot_root as u32),
+        ins(RET, 0, 0, DENY),
         ins(EQ, 0, 1, libc::SYS_unshare as u32),
         ins(RET, 0, 0, DENY),
         ins(EQ, 0, 1, libc::SYS_setns as u32),
@@ -233,6 +308,18 @@ pub fn pin_cwd(command: &mut Command, directories: Vec<std::fs::File>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn own_uid_is_never_reported_as_command_isolated() {
+        let directory = tempfile::tempdir().unwrap();
+        let identity = Identity::resolve(None).unwrap();
+        assert!(
+            !identity
+                .commands_isolated(&[directory.path().to_owned()])
+                .await
+        );
+        assert!(!identity.commands_isolated(&[]).await);
+    }
 
     #[cfg(target_os = "linux")]
     #[tokio::test]

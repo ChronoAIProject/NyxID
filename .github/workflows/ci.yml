@@ -90,11 +90,15 @@ jobs:
             machine:
               - 'frontend/scripts/machine-seccomp.ts'
               - 'machine/**'
+              - 'machine-updater/**'
               - 'cli/src/node/machine/**'
               - 'cli/resources/machine-browser/**'
               - 'cli/resources/machine-container/**'
               - 'cli/container/**'
               - 'cli/Dockerfile.machine'
+              - 'cli/Dockerfile.machine-updater'
+              - 'cli/src/machine_updater/**'
+              - 'cli/src/commands/machine_native_update.rs'
               - 'cli/tests/machine*'
               - 'cli/tests/Dockerfile.machine'
               - 'cli/Cargo.toml'
@@ -103,6 +107,7 @@ jobs:
             backend:
               - 'backend/**'
               - 'machine/**'
+              - 'machine-updater/**'
               - 'integrations/oracle/cdp-worker/worker.mjs'
               - 'cloud-auth/**'
               - 'service-adapters/**'
@@ -119,6 +124,7 @@ jobs:
             cli:
               - 'cli/**'
               - 'machine/**'
+              - 'machine-updater/**'
               - 'skills/nyxid/scripts/**'
               - 'cloud-auth/**'
               - 'service-adapters/**'
@@ -138,6 +144,7 @@ jobs:
               - 'integrations/oracle/cdp-worker/worker.mjs'
               - 'cli/**'
               - 'machine/**'
+              - 'machine-updater/**'
               - 'cloud-auth/**'
               - 'service-adapters/**'
               - 'nyxid-crypto/**'
@@ -409,10 +416,17 @@ jobs:
         run: |
           docker build --build-arg MACHINE_IMAGE=nyxid-node-machine:ci -f cli/tests/Dockerfile.machine -t nyxid-machine-e2e:ci .
           docker run --rm --shm-size=256m --security-opt seccomp=cli/resources/machine-container/seccomp.json nyxid-machine-e2e:ci
+          python3 cli/tests/machine_mount_denied_profile.py cli/resources/machine-container/seccomp.json /tmp/nyxid-machine-deny-mount.json
+          docker run --rm --shm-size=256m --security-opt seccomp=/tmp/nyxid-machine-deny-mount.json nyxid-machine-e2e:ci
+      - name: Verify existing-profile migration, signed updates and rollback
+        env:
+          MACHINE_IMAGE: nyxid-node-machine:ci
+          MACHINE_TEST_SECCOMP: /tmp/nyxid-machine-deny-mount.json
+        run: sh cli/tests/machine_updater_e2e.sh
       - name: Remove test images and build cache
         if: always()
         run: |
-          docker image rm -f nyxid-machine-e2e:ci nyxid-node-machine:ci || true
+          docker image rm -f nyxid-machine-e2e:ci nyxid-node-machine:ci nyxid-machine-updater-e2e:local || true
           docker builder prune -f
 
   cli-test:
@@ -443,7 +457,7 @@ jobs:
         run: node --test cli/tests/machine_filler.test.mjs
 
       - name: Run CLI tests
-        run: cargo nextest run -p nyxid-cli -p nyxid-machine --profile ci
+        run: cargo nextest run -p nyxid-cli -p nyxid-machine -p nyxid-machine-updater --profile ci
 
       - name: Publish test summary
         if: always()

@@ -175,6 +175,7 @@ pub async fn initiate(
         db,
         "",
         Choices {
+            automatic_updates: None,
             owner_id: None,
             name,
             location: "vm".into(),
@@ -321,9 +322,20 @@ pub async fn decide(
     approve: bool,
     conversation: Option<&str>,
 ) -> AppResult<MachineSetup> {
+    decide_with_updates(db, owner, id, approve, conversation, None).await
+}
+
+pub async fn decide_with_updates(
+    db: &Database,
+    owner: &str,
+    id: &str,
+    approve: bool,
+    conversation: Option<&str>,
+    automatic_updates: Option<bool>,
+) -> AppResult<MachineSetup> {
     let row = db.collection::<MachineSetup>(COLLECTION_NAME).find_one_and_update(
         doc! {"_id":id,"status":"pending","expires_at":{"$gt":bson::DateTime::now()}},
-        doc! {"$set":{"user_id":owner,"status":if approve {"approved"} else {"declined"},"conversation_id":conversation}},
+        doc! {"$set":{"user_id":owner,"status":if approve {"approved"} else {"declined"},"conversation_id":conversation,"choices.automatic_updates":automatic_updates}},
     ).return_document(ReturnDocument::After).await?.ok_or_else(|| AppError::Conflict("Pairing was already decided or expired".into()))?;
     if let Some(conversation) = conversation {
         watch(db, owner, conversation, &row.id, row.expires_at).await?;

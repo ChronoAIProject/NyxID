@@ -2104,6 +2104,19 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
 
     // Routes that BLOCK service account tokens (human-only endpoints)
     let api_v1_human_only = Router::new()
+        .route(
+            "/machines/updater-image",
+            get(handlers::machine_update::updater_image),
+        )
+        .route("/machines/updates", get(handlers::machine_update::list))
+        .route(
+            "/machines/{id}/update",
+            post(handlers::machine_update::start),
+        )
+        .route(
+            "/machines/{id}/update-policy",
+            put(handlers::machine_update::policy),
+        )
         .route("/machines/setups", post(handlers::machine_setup::create))
         .route("/machines/setups/{id}", get(handlers::machine_setup::get))
         .route(

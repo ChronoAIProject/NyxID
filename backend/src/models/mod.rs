@@ -140,6 +140,7 @@ pub mod machine_job;
 pub mod saved_login;
 
 pub mod machine_setup;
+pub mod machine_update;
 pub mod pool_recovery_diagnostic;
 pub mod trigger_run;
 pub mod trigger_schedule;

@@ -6,6 +6,7 @@ pub mod desktop;
 pub mod gateway;
 pub mod signing;
 pub mod text;
+pub mod update;
 
 use serde::{Deserialize, Serialize};
 
@@ -61,7 +62,13 @@ pub struct MachineProfile {
     pub computer_ready: bool,
     pub computer_permissions: Option<ComputerPermissions>,
     pub browser_isolated: bool,
+    /// None on nodes predating the actual agent-UID filesystem access probe.
+    pub commands_isolated: Option<bool>,
     pub saved_login_ready: bool,
+    /// Browser action protocol support, independent of transient readiness.
+    pub browser_tools: bool,
+    pub installation: Option<update::Installation>,
+    pub updater_ready: bool,
 }
 
 impl MachineProfile {
@@ -86,6 +93,12 @@ pub enum Operation {
     SaveAttachment,
     ShareFile,
     Computer,
+    Browser,
+    Cancel,
+    Upgrade,
+    UpgradeStatus,
+    ContainerInspect,
+    ContainerMigrate,
     DesktopOpen,
     DesktopClose,
     DesktopControl,
@@ -100,9 +113,14 @@ impl Operation {
         }
         match self {
             Self::ProxyUpload => false,
-            Self::Exec | Self::Job | Self::JobCancel | Self::ServiceCall | Self::JobFinished => {
-                profile.shell
-            }
+            Self::Cancel | Self::Upgrade | Self::UpgradeStatus => profile.enabled(),
+            Self::ContainerInspect
+            | Self::ContainerMigrate
+            | Self::Exec
+            | Self::Job
+            | Self::JobCancel
+            | Self::ServiceCall
+            | Self::JobFinished => profile.shell,
             Self::ListFiles
             | Self::ReadFile
             | Self::WriteFile
@@ -110,6 +128,7 @@ impl Operation {
             | Self::SaveAttachment
             | Self::ShareFile => profile.files,
             Self::Computer
+            | Self::Browser
             | Self::DesktopOpen
             | Self::DesktopClose
             | Self::DesktopControl

@@ -153,6 +153,11 @@ pub async fn run(mut args: Setup) -> Result<()> {
         };
         config.machine.agent_user = Some(agent.name.clone());
         config.machine.browser_user = Some(browser.name.clone());
+        config.machine.dev_browser_user = Some(if args.container {
+            "devbrowser".into()
+        } else {
+            format!("nyxdev-{}", profile.unwrap_or("default"))
+        });
         let data = directory
             .parent()
             .context("invalid node directory")?
@@ -232,17 +237,37 @@ pub async fn run(mut args: Setup) -> Result<()> {
         }
     }
     if !separated {
+        if args.computer && cfg!(target_os = "linux") {
+            eprintln!(
+                "Linux computer use needs at-spi2-core, dbus-x11 and a session D-Bus: start the node inside your desktop session (or dbus-run-session). Install bubblewrap, Xvfb and openbox for the developer browser, which starts its own display and cookie. Chromium is launched with renderer accessibility enabled."
+            );
+        }
+        if args.computer && cfg!(target_os = "macos") {
+            eprintln!(
+                "The secure browser uses Google Chrome. Install Google Chrome Beta for the separate developer browser; its managed policy permits DevTools and forbids saved-login filling. macOS browsers share your desktop and OS user, so they are not isolated from each other; use a separated Linux machine for sensitive accounts. Owner takeover locks both views."
+            );
+        }
         eprintln!(
             "Saved-login typing is off until the owner allows it in Assistant → Machines settings. Agent commands share the browser user's access and could read typed values. The machine container or separated VM is recommended."
         );
     }
     if !args.no_daemon {
+        if !args.container {
+            crate::commands::machine_native_update::prepare(
+                &directory,
+                profile,
+                args.separate_users,
+            )?;
+        }
         if args.separate_users {
             install_supervisor(&directory, profile, args.computer)?;
         } else {
             crate::node::daemon::install(directory.to_str(), profile, None, false)?;
             crate::node::daemon::start(directory.to_str(), profile)?;
         }
+    }
+    if !args.no_daemon && !args.container {
+        crate::commands::machine_native_update::install(&directory, profile, args.separate_users)?;
     }
     eprintln!(
         "Machine setup complete. The Assistant → Machines page shows connection progress; NyxBot resumes when capabilities are reported."
@@ -354,7 +379,13 @@ pub fn install_browser(port: u16) -> Result<()> {
         &installed,
         &format!("http://127.0.0.1:{port}/update.xml"),
         cfg!(target_os = "macos"),
-    )
+    )?;
+    if cfg!(target_os = "linux") && std::env::var_os("NYXID_MACHINE_CONTAINER").is_some() {
+        let secure = super::process::Identity::resolve(Some("browser"))?;
+        let dev = super::process::Identity::resolve(Some("devbrowser"))?;
+        super::browser::install_container_policies(Path::new("/"), secure.gid, dev.gid)?;
+    }
+    Ok(())
 }
 
 fn install_supervisor_binary() -> Result<PathBuf> {
@@ -383,7 +414,8 @@ fn provision_users(
     }
     let agent = format!("nyxagent-{suffix}");
     let browser = format!("nyxbrowser-{suffix}");
-    for name in [&agent, &browser] {
+    let dev = format!("nyxdev-{suffix}");
+    for name in [&agent, &browser, &dev] {
         if super::process::Identity::resolve(Some(name)).is_err() {
             let status = std::process::Command::new("useradd")
                 .args([
@@ -408,12 +440,19 @@ fn provision_users(
 }
 
 fn install_supervisor(directory: &Path, profile: Option<&str>, computer: bool) -> Result<()> {
-    let binary = install_supervisor_binary()?;
+    let binary = crate::commands::machine_native_update::prepare(directory, profile, true)?;
     let suffix = profile.unwrap_or("default");
     let unit = format!("nyxid-machine-{suffix}.service");
     let mut display = String::new();
     if computer {
-        for binary in ["Xvfb", "xauth", "openbox"] {
+        for binary in [
+            "Xvfb",
+            "xauth",
+            "openbox",
+            "dbus-run-session",
+            "dbus-send",
+            "bwrap",
+        ] {
             if !std::process::Command::new("sh")
                 .args(["-c", &format!("command -v {binary}")])
                 .stdout(std::process::Stdio::null())
@@ -421,9 +460,12 @@ fn install_supervisor(directory: &Path, profile: Option<&str>, computer: bool) -
                 .success()
             {
                 bail!(
-                    "Install xvfb, xauth, openbox and Chromium on this VM, then run setup --separate-users again"
+                    "Install xvfb, xauth, openbox, dbus-x11, at-spi2-core, bubblewrap and Chromium on this VM, then run setup --separate-users again"
                 );
             }
+        }
+        if !Path::new("/usr/share/dbus-1/services/org.a11y.Bus.service").is_file() {
+            bail!("Install at-spi2-core on this VM, then run setup --separate-users again");
         }
         let config = crate::node::config::NodeConfig::load(&directory.join("config.toml"))?;
         let browser = config
@@ -449,6 +491,52 @@ fn install_supervisor(directory: &Path, profile: Option<&str>, computer: bool) -
             "Environment=DISPLAY=:{number}\nEnvironment=XAUTHORITY={}\n",
             authority.display()
         );
+        let session_script = Path::new("/opt/nyxid/bin/desktop-session");
+        std::fs::write(
+            session_script,
+            include_str!("../../../container/desktop-session.sh"),
+        )?;
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(session_script, std::fs::Permissions::from_mode(0o755))?;
+        }
+        let session_unit = format!("nyxid-desktop-{suffix}.service");
+        std::fs::write(
+            Path::new("/etc/systemd/system").join(&session_unit),
+            format!(
+                "[Unit]\nDescription=NyxID browser accessibility session\nRequires={display_unit}\nAfter={display_unit}\n[Service]\nUser={browser}\n{display}ExecStart={}\nRestart=on-failure\n[Install]\nWantedBy=multi-user.target\n",
+                session_script.display()
+            ),
+        )?;
+        let dev = config
+            .machine
+            .dev_browser_user
+            .as_deref()
+            .context("Developer browser user missing")?;
+        let dev_number = number + 1000;
+        let dev_identity = super::process::Identity::resolve(Some(dev))?;
+        let dev_authority = dev_identity.home.join(".Xauthority");
+        super::browser::create_xauthority(&dev_authority, dev, dev_number)?;
+        let dev_display_unit = format!("nyxid-dev-display-{suffix}.service");
+        let dev_session_unit = format!("nyxid-dev-desktop-{suffix}.service");
+        std::fs::write(
+            Path::new("/etc/systemd/system").join(&dev_display_unit),
+            format!(
+                "[Unit]\nDescription=NyxID developer display\n[Service]\nUser={dev}\nExecStart=/usr/bin/Xvfb :{dev_number} -screen 0 1280x800x24 -nolisten tcp -auth {}\nRestart=on-failure\n[Install]\nWantedBy=multi-user.target\n",
+                dev_authority.display()
+            ),
+        )?;
+        std::fs::write(
+            Path::new("/etc/systemd/system").join(&dev_session_unit),
+            format!(
+                "[Unit]\nDescription=NyxID developer window manager\nRequires={dev_display_unit}\nAfter={dev_display_unit}\n[Service]\nUser={dev}\nEnvironment=DISPLAY=:{dev_number}\nEnvironment=XAUTHORITY={}\nExecStart=/usr/bin/openbox\nRestart=on-failure\n[Install]\nWantedBy=multi-user.target\n",
+                dev_authority.display()
+            ),
+        )?;
+        display.push_str(&format!(
+            "Environment=NYXID_DEV_DISPLAY=:{dev_number}\nEnvironment=NYXID_DEV_XAUTHORITY={}\n",
+            dev_authority.display()
+        ));
         let status = std::process::Command::new("systemctl")
             .args(["daemon-reload"])
             .status()?;
@@ -456,7 +544,14 @@ fn install_supervisor(directory: &Path, profile: Option<&str>, computer: bool) -
             bail!("Could not reload machine display service");
         }
         let status = std::process::Command::new("systemctl")
-            .args(["enable", "--now", &display_unit])
+            .args([
+                "enable",
+                "--now",
+                &display_unit,
+                &session_unit,
+                &dev_display_unit,
+                &dev_session_unit,
+            ])
             .status()?;
         if !status.success() {
             bail!("Could not start machine display service");

@@ -36,8 +36,11 @@ pub const ACTIVE_TURN_TTL_SECS: i64 = (TURN_EXECUTION_SECS + SETTLEMENT_GRACE_SE
 /// A crashed worker cannot hold a conversation beyond execution and settlement.
 pub fn live_turn(row: &AssistantConversation, now: DateTime<Utc>) -> Option<&ActiveTurn> {
     row.active_turn.as_ref().filter(|turn| {
-        turn.started_at
-            .checked_add_signed(chrono::Duration::seconds(ACTIVE_TURN_TTL_SECS))
+        turn.lease_expires_at
+            .or_else(|| {
+                turn.started_at
+                    .checked_add_signed(chrono::Duration::seconds(ACTIVE_TURN_TTL_SECS))
+            })
             .is_some_and(|expires_at| expires_at > now)
     })
 }
@@ -1214,6 +1217,10 @@ pub async fn begin_turn(
                 });
                 row.credential_api_key_id = credential_id.into();
                 row.active_turn = Some(ActiveTurn {
+                    machine_node_ids: Vec::new(),
+                    continuations: 0,
+                    tool_progress: Default::default(),
+                    lease_expires_at: None,
                     trigger_run_id: start.trigger.as_ref().map(|c| c.run_id.clone()),
                     turn_id: turn_id.clone(),
                     origin: start.origin,
@@ -1550,7 +1557,7 @@ pub async fn finish_turn(
                     .map(|turn| turn.also_deliver.clone())
                     .unwrap_or_default();
                 current.active_turn = None;
-                if error.is_some() || !credential_alive {
+                if error.as_ref().is_some_and(|e| !e.preserves_session()) || !credential_alive {
                     current.nyxagent_session_id = None;
                     current.nyxagent_last_response_id = None;
                     current.context_reset_at = Some(now);
@@ -1563,9 +1570,12 @@ pub async fn finish_turn(
                         .into(),
                     );
                 } else {
-                    current.nyxagent_session_id = result.session_id.clone();
+                    current.nyxagent_session_id = result.session_id.clone().or(current.nyxagent_session_id);
                     current.nyxagent_last_response_id = result.response_id.clone();
                     current.credential_api_key_id = credential_id.clone();
+                }
+                if let Some(error) = &error {
+                    tracing::warn!(conversation_id = %row.id, turn_id = %turn_id, upstream_error_code = error.upstream_code.as_deref().unwrap_or(error.code), "Assistant turn failed");
                 }
                 let message = AssistantMessage {
                     id: message_id.clone(),
@@ -1581,7 +1591,7 @@ pub async fn finish_turn(
                         "completed"
                     }
                     .into(),
-                    error_code: error.as_ref().map(|e| e.code.into()),
+                    error_code: error.as_ref().map(|e| e.upstream_code.clone().unwrap_or_else(|| e.code.into())),
                     created_at: now,
                     activities,
                     attachments,
@@ -2024,11 +2034,29 @@ pub fn upstream_body(model: &str, text: &str, session: Option<&str>, instruction
 
 #[derive(Clone, Debug, Serialize)]
 pub struct TurnError {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_code: Option<String>,
     pub code: &'static str,
     pub message: &'static str,
 }
 impl TurnError {
+    pub fn preserves_session(&self) -> bool {
+        matches!(
+            self.code,
+            "tool_budget_exhausted" | "turn_timeout" | "continuation_no_progress"
+        )
+    }
     pub fn new(code: &str) -> Self {
+        // Upstream prose, URLs, tokens and control characters never enter the
+        // transcript or logs. Keep only bounded protocol-style identifiers.
+        let upstream_code = (code.len() <= 64
+            && code.bytes().next().is_some_and(|b| b.is_ascii_lowercase())
+            && code
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+            && !code.starts_with("nyx_")
+            && !code.starts_with("sk_"))
+        .then(|| code.to_owned());
         let (code, message) = match code {
             "session_busy" => (
                 "session_busy",
@@ -2069,7 +2097,22 @@ impl TurnError {
                 "first_byte_timeout",
                 "The assistant did not start responding in time.",
             ),
-            "idle_timeout" | "turn_timeout" => ("turn_timeout", "The assistant turn timed out."),
+            "idle_timeout" => (
+                "idle_timeout",
+                "The assistant stopped responding. Try again.",
+            ),
+            "turn_timeout" => (
+                "turn_timeout",
+                "This task reached its automatic continuation limit after a time budget. Its context is saved; resume to continue.",
+            ),
+            "tool_budget_exhausted" => (
+                "tool_budget_exhausted",
+                "This task reached its automatic continuation limit after a tool budget. Its context is saved; resume to continue.",
+            ),
+            "continuation_no_progress" => (
+                "continuation_no_progress",
+                "Paused because the task repeated without progress. Its context is saved; give it new guidance.",
+            ),
             "output_too_large" | "session_too_large" => (
                 "output_too_large",
                 "The assistant reached its response limit.",
@@ -2089,7 +2132,11 @@ impl TurnError {
                 "The assistant could not complete this turn. Try again.",
             ),
         };
-        Self { code, message }
+        Self {
+            code,
+            message,
+            upstream_code,
+        }
     }
 }
 #[derive(Default)]

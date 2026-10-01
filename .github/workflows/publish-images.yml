@@ -31,6 +31,8 @@ permissions:
   contents: read
   packages: write
   pull-requests: write
+  id-token: write
+  attestations: write
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -58,7 +60,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        component: [backend, frontend, node-agent, nyxid-node-machine]
+        component: [backend, frontend, node-agent, nyxid-node-machine, nyxid-machine-updater]
         platform: [linux/amd64, linux/arm64]
         include:
           - platform: linux/amd64
@@ -82,6 +84,9 @@ jobs:
           - component: nyxid-node-machine
             context: .
             file: cli/Dockerfile.machine
+          - component: nyxid-machine-updater
+            context: .
+            file: cli/Dockerfile.machine-updater
     steps:
       - uses: actions/checkout@v6
 
@@ -144,6 +149,15 @@ jobs:
           docker build --build-arg MACHINE_IMAGE="$MACHINE_IMAGE" \
             -f cli/tests/Dockerfile.machine -t nyxid-machine-e2e:ci .
           docker run --rm --shm-size=256m --security-opt seccomp=cli/resources/machine-container/seccomp.json nyxid-machine-e2e:ci
+          python3 cli/tests/machine_mount_denied_profile.py cli/resources/machine-container/seccomp.json /tmp/nyxid-machine-deny-mount.json
+          docker run --rm --shm-size=256m --security-opt seccomp=/tmp/nyxid-machine-deny-mount.json nyxid-machine-e2e:ci
+
+      - name: Attest published image digest
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-name: ${{ steps.repo.outputs.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
 
       - name: Export digest
         run: |
@@ -170,7 +184,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        component: [backend, frontend, node-agent, nyxid-node-machine]
+        component: [backend, frontend, node-agent, nyxid-node-machine, nyxid-machine-updater]
     steps:
       - name: Compute lowercase image repo
         id: repo
@@ -218,6 +232,19 @@ jobs:
             $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
             $(printf '${{ steps.repo.outputs.image }}@sha256:%s ' *)
 
+      - name: Resolve merged image digest
+        id: merged
+        run: |
+          digest=$(docker buildx imagetools inspect '${{ steps.repo.outputs.image }}:${{ steps.meta.outputs.version }}' --format '{{json .Manifest.Digest}}' | jq -r .)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Attest multi-architecture release
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-name: ${{ steps.repo.outputs.image }}
+          subject-digest: ${{ steps.merged.outputs.digest }}
+          push-to-registry: true
+
       - name: Inspect image
         run: |
           docker buildx imagetools inspect \
@@ -240,7 +267,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           owner="${GITHUB_REPOSITORY_OWNER,,}"
-          for component in backend frontend node-agent nyxid-node-machine; do
+          for component in backend frontend node-agent nyxid-node-machine nyxid-machine-updater; do
             package="nyxid/${component}"
             encoded=$(printf '%s' "$package" | jq -sRr @uri)
             echo "Ensuring ghcr.io/${owner}/${package} is public..."

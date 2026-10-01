@@ -847,3 +847,30 @@ standalone under `/assistant/machines/{id}/desktop`. Studio Nodes shows only a
 read-only machine summary linking to assistant settings; Developer → Triggers
 retains secrets/replay. `/automations` redirects with `setup` and `agent` intact.
 Server-generated browser URLs use `services::assistant_links::AssistantPage`.
+NyxBot instructions direct web tasks to `nyx__machine_browser` and development/debugging to the isolated dev browser. Saved-login filling remains a dedicated secure-browser operation. Continuation and stop events are delivered to the same owner, specialist or automation turn.
+`max_auto_continuations` defaults to 8 (0–32); the settings tool and NyxBot settings
+edit it. Channel turns deliver one final reply and automation continuations retain
+the same TriggerRun and budget. Only a repeated full tool-name/argument/result
+digest sequence plus unchanged reply text stops the loop without resetting context. Live desktop collapse state is stored per conversation; standalone Stop
+cancels all agent activity on its machine. See [machine browser and recovery](../MACHINE_NODES.md#browser-use-recovery-and-stopping)
+for the secure/dev browser boundary, tool actions and recovery codes.
+
+Machine updates use `nyxid__machine_update` and always require an owner action
+card, including requests from granted specialists. Ungranted specialists request
+machine permission through NyxBot. Legacy containers receive a token-free link to
+the prefilled host command; the agent ends its turn while a durable
+`machine_update` watch waits for reconnect/failure/expiry. On wake, verify the
+version, AX state and browser snapshot before resuming. An owner-identified,
+different granted native machine may run the command after metadata-only Docker
+inspection; the card binds both machines and the inspected container ID. Offer
+this assistance proactively for Update available or missing old-node capabilities.
+The server release is the supported update target. New setup recommends idle
+automatic updates; existing machines require explicit owner opt-in.
+
+Use browser snapshot `query`, `offset` and `scope` to find items on long pages;
+follow `more` markers and use frame-prefixed refs for embedded forms. Trusted
+input supports OAuth popups, new-tab links and native choosers; a covered target
+is refused. Secure and dev Linux displays have independent control, selected
+from the desktop panel. macOS shares a physical desktop and locks both views
+on takeover. Update guidance never supplies an unverified updater tag: the
+server publishes only an attested digest or a temporary verification state.

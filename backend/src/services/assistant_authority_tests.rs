@@ -189,6 +189,8 @@ pub(crate) async fn fixture(name: &str) -> Fixture {
 
 fn orchestrator_chat() -> acks::ChatAuthority {
     acks::ChatAuthority {
+        turn_id: None,
+        turn_stopped: false,
         machine_node_ids: Vec::new(),
         saved_login_ids: Vec::new(),
         confirmation_policy: None,
