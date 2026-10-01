@@ -158,6 +158,7 @@ pub(crate) async fn team_pool_limit(state: &AppState, owner: &str) -> u32 {
 
 fn event_turn(conversation_id: &str) -> TurnStart {
     TurnStart {
+        trigger: None,
         conversation_id: Some(conversation_id.to_owned()),
         text: String::new(),
         model: None,
@@ -274,6 +275,9 @@ pub(crate) async fn after_turn(
         return;
     };
     let owner = row.user_id.as_str();
+    if let Some(run_id) = turn.trigger_run_id.as_deref() {
+        super::trigger_scheduler::settled(state, row, run_id, text, error.map(|e| e.code)).await;
+    }
     // Every reply of a hidden group member thread belongs to the group,
     // including event turns (a finished link, a confirmed action).
     if row.group_id.is_some() {
@@ -405,6 +409,9 @@ pub(crate) async fn permission_decided(
     owner: &str,
     request: &AssistantAcknowledgement,
 ) {
+    if request.trigger_run_id.is_some() {
+        return;
+    }
     let allowed = request.status == "allowed";
     let target = match request.kind.as_str() {
         "service" => format!(
@@ -623,6 +630,7 @@ pub(crate) async fn assign(
         state,
         owner,
         TurnStart {
+            trigger: None,
             conversation_id: Some(home.id),
             text: text.to_owned(),
             model: None,
@@ -668,6 +676,9 @@ pub(crate) async fn execute_tool(
     args: &Value,
 ) -> (Value, bool) {
     let name = tool_name.strip_prefix("nyxid__").unwrap_or_default();
+    if chat.guest {
+        return (acks::guest_refusal(), true);
+    }
     if !chat.is_orchestrator() && !assistant_team_tools::is_agent_tool(name) {
         return refusal(
             "orchestrator_only",
@@ -676,6 +687,18 @@ pub(crate) async fn execute_tool(
     }
     let result = async {
         assistant_team_tools::validate(name, args)?;
+        if let Some(refusal) = acks::webhook_action_gate(
+            &state.db,
+            chat,
+            tool_name,
+            args,
+            assistant_team_tools::read_only(name),
+            assistant_team_tools::destructive(name),
+        )
+        .await?
+        {
+            return Ok((refusal, true));
+        }
         engine::require_enabled(&state.db, &chat.user_id).await?;
         dispatch(state, chat, name, args).await
     }
@@ -718,6 +741,11 @@ async fn dispatch(
     let owner = chat.user_id.as_str();
     let caller = chat.conversation_id.as_str();
     Ok(match name {
+        "create_schedule" | "list_schedules" | "update_schedule" | "delete_schedule"
+        | "run_schedule_now" => (
+            super::assistant_schedules::dispatch(state, owner, name, args).await?,
+            false,
+        ),
         "remember" => {
             let note = team::remember(
                 db,
@@ -1105,6 +1133,38 @@ async fn dispatch(
         }
         "settings_link" => {
             let area = text_arg(args, "area");
+            if area == "triggers" && args.get("instruction").is_some() {
+                let agent = target_agent(state, owner, args["agent"].as_str()).await?;
+                return Ok((
+                    super::nyxbot::trigger_setup_link(
+                        state,
+                        owner,
+                        caller,
+                        crate::models::nyxbot_channel::TriggerPrefill {
+                            agent_id: agent.id,
+                            label: text_arg(args, "label").into(),
+                            instruction: text_arg(args, "instruction").into(),
+                            thread_policy: args
+                                .get("thread_policy")
+                                .map(|v| serde_json::from_value(v.clone()))
+                                .transpose()
+                                .map_err(|_| {
+                                    AppError::ValidationError("Invalid thread policy".into())
+                                })?,
+                            confirmation_policy: args
+                                .get("confirmation_policy")
+                                .map(|v| serde_json::from_value(v.clone()))
+                                .transpose()
+                                .map_err(|_| {
+                                    AppError::ValidationError("Invalid confirmation policy".into())
+                                })?
+                                .unwrap_or_default(),
+                        },
+                    )
+                    .await?,
+                    false,
+                ));
+            }
             let path = crate::services::assistant_team_tools::settings_path(
                 area,
                 args["service"].as_str(),
@@ -1618,6 +1678,10 @@ pub async fn delete_memory(
 
 #[derive(Serialize)]
 pub struct SettingsResponse {
+    trigger_runs_per_day: i32,
+    trigger_runs_per_hour: i32,
+    schedule_minimum_minutes: i32,
+    timezone: Option<String>,
     skip_destructive_confirmation: bool,
     max_live_subagents: i32,
     max_concurrent_subagent_turns: i32,
@@ -1631,6 +1695,10 @@ pub struct SettingsResponse {
 impl From<crate::models::assistant_settings::AssistantSettings> for SettingsResponse {
     fn from(row: crate::models::assistant_settings::AssistantSettings) -> Self {
         Self {
+            timezone: row.timezone,
+            schedule_minimum_minutes: row.schedule_minimum_minutes,
+            trigger_runs_per_hour: row.trigger_runs_per_hour,
+            trigger_runs_per_day: row.trigger_runs_per_day,
             skip_destructive_confirmation: row.skip_destructive_confirmation,
             max_live_subagents: row.max_live_subagents,
             max_concurrent_subagent_turns: row.max_concurrent_subagent_turns,
@@ -1650,6 +1718,7 @@ pub async fn get_settings(
     State(state): State<AppState>,
     auth: AuthUser,
 ) -> AppResult<Json<SettingsResponse>> {
+    super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     Ok(Json(settings::get(&state.db, &owner).await?.into()))
@@ -1658,6 +1727,10 @@ pub async fn get_settings(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SettingsRequest {
+    trigger_runs_per_day: Option<i32>,
+    trigger_runs_per_hour: Option<i32>,
+    schedule_minimum_minutes: Option<i32>,
+    timezone: Option<String>,
     skip_destructive_confirmation: Option<bool>,
     max_live_subagents: Option<i32>,
     max_concurrent_subagent_turns: Option<i32>,
@@ -1672,6 +1745,7 @@ pub async fn update_settings(
     auth: AuthUser,
     Json(body): Json<SettingsRequest>,
 ) -> AppResult<Json<SettingsResponse>> {
+    super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     let before = settings::get(&state.db, &owner).await?;
@@ -1679,6 +1753,10 @@ pub async fn update_settings(
         &state.db,
         &owner,
         settings::Update {
+            timezone: body.timezone,
+            schedule_minimum_minutes: body.schedule_minimum_minutes,
+            trigger_runs_per_hour: body.trigger_runs_per_hour,
+            trigger_runs_per_day: body.trigger_runs_per_day,
             skip_destructive_confirmation: body.skip_destructive_confirmation,
             max_live_subagents: body.max_live_subagents,
             max_concurrent_subagent_turns: body.max_concurrent_subagent_turns,

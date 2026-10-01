@@ -64,7 +64,7 @@ pub mod keys;
 pub mod llm_gateway;
 pub mod llms_txt;
 pub mod login_approval;
-mod login_client_context;
+pub(crate) mod login_client_context;
 pub mod login_code;
 pub mod mcp;
 pub mod mcp_transport;
@@ -134,3 +134,9 @@ pub mod options;
 pub mod service_history;
 
 pub mod channel_activities;
+
+pub mod trigger_scheduler;
+
+pub mod assistant_schedules;
+
+pub(crate) mod trigger_schedule_dto;

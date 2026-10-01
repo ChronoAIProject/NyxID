@@ -275,12 +275,15 @@ fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
             via: None,
         })
         .collect();
-    let prompt = instructions(&stale_test_row(Utc::now()), None, &messages);
+    let row = stale_test_row(Utc::now());
+    let base = base_prompt(&row, None);
+    let prompt = instructions(&row, None, &messages);
     assert!(prompt.starts_with(SYSTEM_PROMPT));
     assert!(prompt.contains("Prior conversation history"));
     assert!(prompt.contains("marker29"));
     assert!(!prompt.contains("marker0:"));
-    assert!(prompt.len() <= SYSTEM_PROMPT.len() + 8192);
+    assert!(prompt.contains(SCHEDULE_PROMPT));
+    assert!(prompt.len() <= base.len() + 8192);
 }
 
 #[tokio::test]
@@ -479,6 +482,7 @@ fn live_turn_expires_at_the_exact_ttl_boundary() {
 
 fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
     AssistantConversation {
+        automation_thread: false,
         id: format!("nyxa-{}", Uuid::new_v4().simple()),
         user_id: "owner".into(),
         title: "Interrupted turn".into(),
@@ -489,6 +493,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         credential_api_key_id: "key".into(),
         message_count: 0,
         active_turn: Some(ActiveTurn {
+            trigger_run_id: None,
             activities: Vec::new(),
             attachments: Vec::new(),
             turn_id: Uuid::new_v4().to_string(),

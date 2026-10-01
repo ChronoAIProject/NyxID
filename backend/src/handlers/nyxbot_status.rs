@@ -79,6 +79,13 @@ pub(crate) async fn waiting(
     let mut items = Vec::new();
     for watch in watches {
         match watch.kind.as_str() {
+            "trigger_created" => items.push(WaitingItem {
+                kind: "trigger_created",
+                title: "Waiting for your webhook trigger to be created".into(),
+                detail: None,
+                since: watch.created_at,
+                expires_at: Some(watch.expires_at),
+            }),
             "channel_bot" => items.push(WaitingItem {
                 kind: "channel_bot",
                 title: format!(

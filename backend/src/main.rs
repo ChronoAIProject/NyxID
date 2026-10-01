@@ -1009,6 +1009,7 @@ async fn main() {
 
     // NyxBot: destroy idle subagents and retry deferred team wake-ups.
     handlers::assistant_team::spawn_sweeps(state.clone());
+    handlers::trigger_scheduler::spawn(state.clone());
     // Live assistant changes: one change stream for this process, and the
     // NyxBot reaction to finished links and new bots.
     handlers::nyxbot::spawn_live_dispatch(state.clone());

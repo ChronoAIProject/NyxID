@@ -1,3 +1,4 @@
+import { DEFAULT_SCHEDULE_MINIMUM_MINUTES } from "@/lib/automation-limits";
 import { z } from "zod";
 
 const conversationId = z.string().regex(/^nyxa-[a-f0-9]{32}$/);
@@ -110,6 +111,7 @@ export const nyxAgentMessageSchema = z.object({
   via: z.string().nullish(),
 });
 export const nyxAgentAcknowledgementSchema = z.object({
+  trigger_run_id: z.string().nullable().optional(),
   id: z.string().uuid(),
   kind: z.enum(["service", "account", "action"]),
   status: z.enum(["pending", "allowed", "denied", "expired", "used"]),
@@ -206,6 +208,14 @@ export type NyxAgentConversation = z.infer<typeof nyxAgentConversationSchema>;
 export type NyxAgentHistory = z.infer<typeof nyxAgentHistorySchema>;
 
 export const nyxAgentSettingsSchema = z.object({
+  timezone: z.string().nullable().optional(),
+  schedule_minimum_minutes: z
+    .number()
+    .int()
+    .min(DEFAULT_SCHEDULE_MINIMUM_MINUTES)
+    .optional(),
+  trigger_runs_per_hour: z.number().int().positive().optional(),
+  trigger_runs_per_day: z.number().int().positive().optional(),
   skip_destructive_confirmation: z.boolean(),
   max_live_subagents: z.number().int().nonnegative(),
   max_concurrent_subagent_turns: z.number().int().nonnegative(),
@@ -216,12 +226,20 @@ export const nyxAgentSettingsSchema = z.object({
   /** Hand-offs per hour across all your groups. */
   max_group_handoffs_per_hour: z.number().int().nonnegative().default(60),
   max_group_handoffs_limit: z.number().int().nonnegative().default(24),
-  max_group_handoffs_per_hour_limit: z.number().int().nonnegative().default(600),
+  max_group_handoffs_per_hour_limit: z
+    .number()
+    .int()
+    .nonnegative()
+    .default(600),
 });
 export type NyxAgentSettings = z.infer<typeof nyxAgentSettingsSchema>;
 export type NyxAgentSettingsUpdate = Partial<
   Pick<
     NyxAgentSettings,
+    | "timezone"
+    | "schedule_minimum_minutes"
+    | "trigger_runs_per_hour"
+    | "trigger_runs_per_day"
     | "skip_destructive_confirmation"
     | "max_live_subagents"
     | "max_concurrent_subagent_turns"

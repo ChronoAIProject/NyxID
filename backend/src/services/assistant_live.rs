@@ -54,7 +54,10 @@ pub enum LiveEvent {
         messages: i64,
     },
     /// A group or its transcript changed.
-    Group { id: String, user_id: String },
+    Group {
+        id: String,
+        user_id: String,
+    },
     /// A connect link was written; `status` is its current status.
     ConnectLink {
         id: String,
@@ -66,6 +69,10 @@ pub enum LiveEvent {
         id: String,
         user_id: String,
         active: bool,
+    },
+    TriggerCreated {
+        user_id: String,
+        watch_id: String,
     },
     /// Changes may have been missed (the stream restarted or a receiver
     /// fell behind): re-read state instead of trusting the event history.
@@ -79,7 +86,8 @@ impl LiveEvent {
             Self::Conversation { user_id, .. }
             | Self::Group { user_id, .. }
             | Self::ConnectLink { user_id, .. }
-            | Self::ChannelBot { user_id, .. } => Some(user_id),
+            | Self::ChannelBot { user_id, .. }
+            | Self::TriggerCreated { user_id, .. } => Some(user_id),
             Self::Resync => None,
         }
     }
@@ -274,6 +282,7 @@ fn pipeline() -> Vec<Document> {
             "operationType": {"$in": ["insert", "update", "replace"]},
             "$or": [
                 {"ns.coll": {"$in": [CONVERSATIONS, GROUPS, GROUP_MESSAGES]}},
+                {"ns.coll": crate::models::trigger::COLLECTION_NAME, "operationType": "insert", "fullDocument.setup_watch_id": {"$type":"string"}},
                 // Links and bots matter only when created or when their
                 // status or activation changes, not on every bookkeeping write.
                 {"ns.coll": {"$in": [CONNECT_LINKS, CHANNEL_BOTS]}, "$or": [
@@ -287,6 +296,7 @@ fn pipeline() -> Vec<Document> {
             "operationType": 1, "ns": 1, "documentKey": 1,
             "fullDocument.user_id": 1, "fullDocument.group_id": 1,
             "fullDocument.status": 1, "fullDocument.is_active": 1,
+            "fullDocument.setup_watch_id": 1,
             "fullDocument.active_turn.turn_id": 1, "fullDocument.message_count": 1,
         }},
     ]
@@ -327,6 +337,10 @@ fn decode(change: &ChangeStreamEvent<Document>) -> Option<LiveEvent> {
         GROUP_MESSAGES => LiveEvent::Group {
             id: full.get_str("group_id").ok()?.to_owned(),
             user_id,
+        },
+        crate::models::trigger::COLLECTION_NAME => LiveEvent::TriggerCreated {
+            user_id,
+            watch_id: full.get_str("setup_watch_id").ok()?.into(),
         },
         CONNECT_LINKS => LiveEvent::ConnectLink {
             id: key,

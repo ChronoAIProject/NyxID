@@ -1098,6 +1098,44 @@ pub(crate) async fn set_private_chats(
     Ok(json!({"channel_agent_id": row.id, "private_chats": private_chats}))
 }
 
+/// Validate an automation destination with the same posting ACL as native tools.
+pub(crate) async fn validate_post(
+    state: &AppState,
+    owner: &str,
+    chat_id: &str,
+    agent_id: Option<&str>,
+) -> AppResult<()> {
+    let (row, chat) = load_chat(state, owner, chat_id).await?;
+    if row.status != "active" {
+        return Err(AppError::Conflict("The channel bot is not active".into()));
+    }
+    if let Some(agent_id) = agent_id {
+        let answering = match chat.agent_id.as_deref().or(row.agent_id.as_deref()) {
+            Some(id) => id.to_owned(),
+            None => team::ensure_nyxbot(&state.db, owner).await?.id,
+        };
+        if answering != agent_id {
+            return Err(AppError::Forbidden(
+                "Only the agent that answers this chat (or NyxBot) posts there".into(),
+            ));
+        }
+    }
+    if !chat.allow_posts {
+        return Err(AppError::Forbidden(
+            "Posting is off for this chat; the owner can allow it".into(),
+        ));
+    }
+    if !org_access_holds(state, &row).await? {
+        return Err(AppError::Forbidden("org_access_lost".into()));
+    }
+    if chat.platform_chat_id.is_none() {
+        return Err(AppError::ValidationError(
+            "Chat has no known address".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Post a message the agent writes on its own into a chat that allows it.
 pub(crate) async fn post(
     state: &AppState,
@@ -1105,6 +1143,28 @@ pub(crate) async fn post(
     chat_id: &str,
     text: &str,
     agent_id: Option<&str>,
+) -> AppResult<Value> {
+    post_inner(state, owner, chat_id, text, agent_id, None).await
+}
+
+pub(crate) async fn post_automation(
+    state: &AppState,
+    owner: &str,
+    chat_id: &str,
+    text: &str,
+    agent_id: Option<&str>,
+    thread_id: &str,
+) -> AppResult<Value> {
+    post_inner(state, owner, chat_id, text, agent_id, Some(thread_id)).await
+}
+
+async fn post_inner(
+    state: &AppState,
+    owner: &str,
+    chat_id: &str,
+    text: &str,
+    agent_id: Option<&str>,
+    full_thread: Option<&str>,
 ) -> AppResult<Value> {
     let (row, chat) = load_chat(state, owner, chat_id).await?;
     if row.status != "active" {
@@ -1127,7 +1187,7 @@ pub(crate) async fn post(
         ));
     }
     let text = text.trim();
-    if text.is_empty() || text.chars().count() > MAX_POST_CHARS {
+    if text.is_empty() || (full_thread.is_none() && text.chars().count() > MAX_POST_CHARS) {
         return Err(AppError::ValidationError(format!(
             "text must have 1 to {MAX_POST_CHARS} characters"
         )));
@@ -1150,6 +1210,19 @@ pub(crate) async fn post(
             "Bot has been deactivated".to_string(),
         ));
     }
+    let text = full_thread.map_or_else(
+        || text.to_owned(),
+        |thread| {
+            automation_reply(
+                &bot.platform,
+                text,
+                &format!(
+                    "{}/assistant?c={thread}",
+                    state.config.frontend_url.trim_end_matches('/')
+                ),
+            )
+        },
+    );
     let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
     crate::handlers::channel_relay::check_initiate_rate_limit(state, &chat.id).await?;
     let key_owner = bot_owner(&row);
@@ -1326,4 +1399,69 @@ pub async fn update_channel_chat(
         return Err(AppError::NotFound("Chat not found".into()));
     }
     Ok(Json(update_chat(&state, &owner, &chat_id, &body).await?))
+}
+
+/// Fit a single proactive message to the destination's text contract. The full
+/// result stays in its durable thread; shortening is always explicit.
+fn automation_reply(platform: &str, text: &str, thread_url: &str) -> String {
+    let limit = match platform {
+        "discord" => 2000,
+        "telegram" | "telegram-new" | "whatsapp" => 4096,
+        "slack" => 40_000,
+        "x" => 10_000,
+        // Lark's JSON text content is limited to 30 KB.
+        "lark" | "feishu" => 30 * 1024,
+        _ => MAX_POST_CHARS,
+    };
+    let json_bytes = matches!(platform, "lark" | "feishu");
+    let cost = |value: &str| {
+        if json_bytes {
+            serde_json::json!({"text": value}).to_string().len()
+        } else {
+            value.encode_utf16().count()
+        }
+    };
+    if cost(text) <= limit {
+        return text.to_owned();
+    }
+    let suffix = format!("\n\n[Reply shortened. Read the full reply: {thread_url}]");
+    let mut result = String::new();
+    let budget = limit.saturating_sub(cost(&suffix));
+    let mut used = 0;
+    for ch in text.chars() {
+        let units = if json_bytes {
+            serde_json::to_string(&ch.to_string()).map_or(6, |v| v.len().saturating_sub(2))
+        } else {
+            ch.len_utf16()
+        };
+        if used + units > budget {
+            break;
+        }
+        result.push(ch);
+        used += units;
+    }
+    result.push_str(&suffix);
+    result
+}
+
+#[cfg(test)]
+mod automation_reply_tests {
+    use super::automation_reply;
+    #[test]
+    fn respects_platform_limits_and_links_shortened_unicode_replies() {
+        for (platform, limit) in [("telegram", 4096), ("discord", 2000), ("slack", 40_000)] {
+            let reply = automation_reply(
+                platform,
+                &"🦉".repeat(25_000),
+                "https://nyx.id/assistant?c=thread",
+            );
+            assert!(reply.encode_utf16().count() <= limit);
+            assert!(reply.contains("Reply shortened"));
+            assert!(reply.contains("https://nyx.id/assistant?c=thread"));
+        }
+        assert_eq!(
+            automation_reply("discord", "All done", "https://nyx.id"),
+            "All done"
+        );
+    }
 }

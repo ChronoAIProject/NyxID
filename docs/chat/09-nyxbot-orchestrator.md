@@ -685,3 +685,69 @@ admin-settable at `/api/v1/admin/assistant/profile-routes` but inactive
    next turn.
 6. NyxBot is one persistent personal agent (Muse / Grok Bot), not one
    orchestrator per chat; chat apps link to NyxBot or any specialist.
+
+
+## 17. Scheduled and webhook automations
+
+NyxBot manages automations through the existing Triggers system. Ask for recurring
+work, a reminder, or an external webhook event; target NyxBot or a specialist.
+`nyxid__create_schedule`, `nyxid__list_schedules`, `nyxid__update_schedule`,
+`nyxid__delete_schedule`, and `nyxid__run_schedule_now` are NyxBot-only tools.
+Listing and updating also expose assistant webhook automations and their
+confirmation policies. Specialists ask NyxBot; guests cannot discover or execute
+these tools. The web
+Automations page (`/automations`) exposes the same configuration and run history,
+and an agent's details show its automations.
+
+The create tool accepts `schedule` (`cron`, `every`, or `at`), an instruction,
+agent name, optional thread policy, overlap and `deliver_to`. Cron has five fields
+and an IANA timezone. Intervals use elapsed UTC time; cron collapses missing local
+times onto the first valid instant after the gap, once, and chooses the earlier
+instance of repeated local times. NyxBot reads back
+the next three occurrences in the owner's saved timezone. When unknown it asks
+and passes the owner's answer as `owner_timezone`, saving the preference. The
+browser defaults the timezone form from its IANA timezone.
+
+Scheduled NyxBot work defaults to home; a specialist defaults to one dedicated
+thread per trigger. Webhook work defaults to dedicated for every agent. `home`
+for a webhook is an explicit owner choice, warned about in the UI and tool/setup
+prefill: untrusted text persists into later full-authority owner turns and private
+channel chats, outside the webhook run's confirmation policy. `new` creates one
+thread per run. Dedicated/per-run automation threads never become home, even
+when the previous home is deleted. Runs use the
+owner's identity and billing and the target's normal grants and credential key.
+The final reply stays in the thread unless `deliver_to` selects an owner-approved
+channel chat or push notification. Chat posting checks live ownership, agent
+assignment, posting permission and bot status again at delivery. Chat outputs
+respect each platform's message limit; a shortened reply says so and links its full thread.
+
+Trigger turns have their own budget (30/hour, 300/day by default), use the existing
+owner turn pool, and do not increment or reset `MAX_EVENT_STREAK`. A busy thread,
+full pool or queued overlap backs off from one to 30 seconds within grace.
+An exhausted budget waits until the next hour/day window or deadline; notices
+are once per exhausted window. Expiry records a skip. Overlap skips by default, or retains one queued run. Confirmation cards
+keep the run open in `waiting`, with fallback work due at card expiry. The card
+decision transaction wakes the work row; the scheduler owns continuation,
+without another run-budget charge. Browser and channel confirmation handlers do
+not start a second continuation for these cards. Confirmation expiry or a lost
+turn records failure, and a started turn is never replayed.
+
+For an assistant webhook, `nyxid__settings_link` with area `triggers`, `agent`,
+`label`, `instruction` and optional `confirmation_policy` stores the prefill on
+a watch and returns `/automations?setup=<watch-id>`. An owner-authenticated
+endpoint checks ownership, pending state and expiry; creation consumes the watch
+transactionally with the trigger insert. Only the
+page creates and reveals the inbound secret. The metadata-only change stream
+resolves the watch immediately, with the existing 15-second sweep as a backstop.
+Webhook payloads are bounded and stored only in the chosen thread transcript.
+The default `changes` policy requires owner action cards for changing calls, using
+HTTP and catalog semantics shared with guest access. The owner can explicitly
+choose `destructive` after a warning; NyxBot must not silently relax this policy.
+Scheduled runs keep normal owner authority. Run records and audit contain no
+payloads or instructions; the watch stores only the owner-authored setup prefill.
+Downtime produces one missed-occurrence summary (count and bounds), one audit,
+and at most one executed occurrence. Upgrade all replicas before creating
+automations: old replicas cannot deserialize new source/delivery enum variants
+and fail owner lists and ingress. Their retry/replay and TTL retention paths do
+not scan or remove automation rows. See [the scheduling contract](../NYXBOT_SCHEDULES.md) for leases,
+retention, API shapes, rolling compatibility and measured performance.

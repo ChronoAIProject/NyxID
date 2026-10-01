@@ -25,6 +25,8 @@ pub struct AssistantAcknowledgement {
     /// Denial is sticky for the user turn that requested it. A new user turn
     /// may ask again; the model is explicitly instructed not to retry otherwise.
     pub requested_turn_id: Option<String>,
+    #[serde(default)]
+    pub trigger_run_id: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(default, with = "super::bson_datetime::optional")]

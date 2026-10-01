@@ -31,6 +31,9 @@ use crate::services::push_service::{ApnsAuth, FcmAuth};
 use crate::services::webhook_delivery_service::{self, DeliveryFailure, SignatureContract};
 use crate::services::{audit_service, notification_service};
 
+use super::{api_key_mutation_service as transactions, trigger_schedule as schedules};
+use crate::models::trigger_schedule::{OverlapPolicy, ScheduleSpec, ScheduleState, TriggerSource};
+
 pub const TRIGGER_SECRET_PREFIX: &str = "nyx_trg_";
 pub const TRIGGER_DELIVERY_SECRET_PREFIX: &str = "nyx_twh_";
 pub const TRIGGER_ENVELOPE_OVERHEAD_BYTES: usize = 4 * 1024;
@@ -40,6 +43,10 @@ const MAX_EVENT_ID_LEN: usize = 128;
 
 #[derive(Debug)]
 pub struct CreateInput {
+    pub source: TriggerSource,
+    pub setup_watch_id: Option<String>,
+    pub schedule: Option<ScheduleSpec>,
+    pub overlap: OverlapPolicy,
     pub user_id: String,
     pub label: String,
     pub user_service_id: Option<String>,
@@ -49,6 +56,8 @@ pub struct CreateInput {
 
 #[derive(Debug)]
 pub struct UpdateInput {
+    pub schedule: Option<ScheduleSpec>,
+    pub overlap: Option<OverlapPolicy>,
     pub label: Option<String>,
     pub status: Option<TriggerStatus>,
     pub delivery: Option<TriggerDelivery>,
@@ -104,24 +113,71 @@ pub async fn create(
     )
     .await?;
     validate_verification(&input.verification)?;
+    let settings = if input.source == TriggerSource::Schedule {
+        Some(super::assistant_settings_service::get(db, &input.user_id).await?)
+    } else {
+        None
+    };
+    let mut schedule_state = ScheduleState::default();
+    if input.source == TriggerSource::Schedule {
+        let spec = input
+            .schedule
+            .as_ref()
+            .ok_or_else(|| AppError::ValidationError("schedule is required".into()))?;
+        schedules::compute::validate(spec, settings.as_ref().unwrap().schedule_minimum_minutes)?;
+        schedule_state.next_due_at = schedules::compute::next(spec, Utc::now())?;
+        if schedule_state.next_due_at.is_none() {
+            return Err(AppError::ValidationError(
+                "Schedule has no future occurrence".into(),
+            ));
+        }
+    } else if input.schedule.is_some()
+        || matches!(input.verification, TriggerVerification::Schedule)
+    {
+        return Err(AppError::ValidationError(
+            "Webhook triggers require inbound verification and no schedule".into(),
+        ));
+    }
     let (delivery, delivery_secret_encrypted, delivery_signing_secret, delivery_key_id) =
         prepare_delivery(encryption_keys, input.delivery).await?;
-    let raw_secret = format!("{TRIGGER_SECRET_PREFIX}{}", generate_random_token());
-    let verification_secret_encrypted = match input.verification {
-        TriggerVerification::HmacSha256 { .. } => {
-            Some(encryption_keys.encrypt(raw_secret.as_bytes()).await?)
+    let id = Uuid::new_v4().to_string();
+    let raw_secret = if input.source == TriggerSource::Webhook {
+        format!("{TRIGGER_SECRET_PREFIX}{}", generate_random_token())
+    } else {
+        String::new()
+    };
+    let verification_secret_encrypted = if input.source == TriggerSource::Schedule {
+        None
+    } else {
+        match input.verification {
+            TriggerVerification::HmacSha256 { .. } => {
+                Some(encryption_keys.encrypt(raw_secret.as_bytes()).await?)
+            }
+            TriggerVerification::Token { .. } | TriggerVerification::Schedule => None,
         }
-        TriggerVerification::Token { .. } => None,
     };
     let now = Utc::now();
     let trigger = Trigger {
-        id: Uuid::new_v4().to_string(),
+        id: id.clone(),
+        source: input.source,
+        setup_watch_id: input.setup_watch_id,
+        schedule: input.schedule,
+        schedule_state,
+        overlap: input.overlap,
         user_id: input.user_id,
         label,
         user_service_id: input.user_service_id,
         status: TriggerStatus::Active,
-        secret_hash: hash_token(&raw_secret),
-        verification: input.verification,
+        secret_hash: if input.source == TriggerSource::Schedule {
+            format!("schedule:{id}")
+        } else {
+            hash_token(&raw_secret)
+        },
+        verification: if input.source == TriggerSource::Schedule {
+            TriggerVerification::Schedule
+        } else {
+            input.verification
+        },
         verification_secret_encrypted,
         delivery,
         delivery_secret_encrypted,
@@ -129,9 +185,80 @@ pub async fn create(
         created_at: now,
         updated_at: now,
     };
-    db.collection::<Trigger>(TRIGGERS)
-        .insert_one(&trigger)
-        .await?;
+    let saved = trigger.clone();
+    let db_copy = db.clone();
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let result: AppResult<()> = async {
+                if let Some(watch_id) = &saved.setup_watch_id {
+                    if saved.source != TriggerSource::Webhook
+                        || !matches!(saved.delivery, TriggerDelivery::Assistant { .. })
+                    {
+                        return Err(AppError::ValidationError(
+                            "Setup links require a webhook assistant automation".into(),
+                        ));
+                    }
+                    let consumed = db_copy
+                        .collection::<bson::Document>(
+                            crate::models::nyxbot_channel::WATCHES_COLLECTION_NAME,
+                        )
+                        .update_one(
+                            doc! {
+                                "_id": watch_id,
+                                "user_id": &saved.user_id,
+                                "kind": "trigger_created",
+                                "status": "pending",
+                                "trigger_id": null,
+                                "expires_at": { "$gt": schedules::date(Utc::now()) },
+                            },
+                            doc! { "$set": {"trigger_id": &saved.id} },
+                        )
+                        .session(&mut *session)
+                        .await?;
+                    if consumed.modified_count != 1 {
+                        return Err(AppError::ValidationError(
+                            "Webhook setup link expired, was used, or belongs to another owner"
+                                .into(),
+                        ));
+                    }
+                }
+                if saved.source == TriggerSource::Schedule {
+                    db_copy
+                        .collection::<bson::Document>(schedules::OWNER_LIMITS)
+                        .update_one(
+                            doc! { "_id": &saved.user_id },
+                            doc! { "$inc": {"version":1} },
+                        )
+                        .upsert(true)
+                        .session(&mut *session)
+                        .await?;
+                    if db_copy
+                        .collection::<Trigger>(TRIGGERS)
+                        .count_documents(doc! { "user_id": &saved.user_id, "source": "schedule" })
+                        .session(&mut *session)
+                        .await?
+                        >= 100
+                    {
+                        return Err(AppError::ValidationError(
+                            "An owner can have at most 100 schedules".into(),
+                        ));
+                    }
+                }
+                db_copy
+                    .collection::<Trigger>(TRIGGERS)
+                    .insert_one(&saved)
+                    .session(&mut *session)
+                    .await?;
+                schedules::set_schedule_job(&db_copy, &saved, session).await?;
+                Ok(())
+            }
+            .await;
+            transactions::transaction_result(result)
+        })
+        .await
+        .map_err(transactions::map_transaction_error)?;
     Ok(CreatedTrigger {
         trigger,
         raw_secret,
@@ -190,19 +317,23 @@ pub async fn update(
     current: &Trigger,
     input: UpdateInput,
 ) -> AppResult<UpdatedTrigger> {
-    let mut set_doc = doc! { "updated_at": bson::DateTime::from_chrono(Utc::now()) };
+    let mut next = current.clone();
+    next.updated_at = Utc::now().max(current.updated_at + chrono::Duration::milliseconds(1));
     let mut delivery_signing_secret = None;
-    let mut delivery_signing_key_id = current.delivery_key_id.clone();
     if let Some(label) = input.label {
-        set_doc.insert("label", validate_label(&label)?);
+        next.label = validate_label(&label)?;
     }
     if let Some(status) = input.status {
-        set_doc.insert(
-            "status",
-            bson::to_bson(&status).map_err(serialization_error)?,
-        );
+        next.status = status;
+        next.schedule_state.pause_reason = None;
     }
-    if let Some(delivery) = input.delivery {
+    if let Some(overlap) = input.overlap {
+        next.overlap = overlap;
+    }
+    if let Some(delivery) = input
+        .delivery
+        .filter(|delivery| *delivery != current.delivery)
+    {
         validate_associations(
             db,
             &current.user_id,
@@ -210,62 +341,146 @@ pub async fn update(
             &delivery,
         )
         .await?;
-        let (delivery, encrypted, raw, key_id) =
-            prepare_delivery(encryption_keys, delivery).await?;
-        set_doc.insert(
-            "delivery",
-            bson::to_bson(&delivery).map_err(serialization_error)?,
-        );
+        let (delivery, encrypted, raw, key) = prepare_delivery(encryption_keys, delivery).await?;
+        next.delivery = delivery;
+        next.delivery_secret_encrypted = encrypted;
+        next.delivery_key_id = key;
         delivery_signing_secret = raw;
-        delivery_signing_key_id = key_id.clone();
-        match encrypted {
-            Some(encrypted) => {
-                set_doc.insert(
-                    "delivery_secret_encrypted",
-                    bson::Binary {
-                        subtype: bson::spec::BinarySubtype::Generic,
-                        bytes: encrypted,
-                    },
-                );
-                set_doc.insert("delivery_key_id", key_id.unwrap_or_default());
-            }
-            None => {
-                let updated = db
-                    .collection::<Trigger>(TRIGGERS)
-                    .find_one_and_update(
-                        doc! { "_id": &current.id, "user_id": &current.user_id },
-                        doc! {
-                            "$set": set_doc,
-                            "$unset": {
-                                "delivery_secret_encrypted": "",
-                                "delivery_key_id": "",
-                            },
-                        },
-                    )
-                    .return_document(ReturnDocument::After)
-                    .await?
-                    .ok_or(AppError::TriggerNotFound)?;
-                return Ok(UpdatedTrigger {
-                    trigger: updated,
-                    delivery_signing_secret,
-                    delivery_signing_key_id,
-                });
-            }
+        if next.delivery != current.delivery {
+            next.schedule_state.dedicated_thread_id = None;
+        }
+    }
+    if let Some(spec) = input.schedule {
+        if current.source != TriggerSource::Schedule {
+            return Err(AppError::ValidationError(
+                "A webhook source cannot be changed to a schedule".into(),
+            ));
+        }
+        let settings = super::assistant_settings_service::get(db, &current.user_id).await?;
+        schedules::compute::validate(&spec, settings.schedule_minimum_minutes)?;
+        next.schedule = Some(spec);
+    }
+    if next.source == TriggerSource::Schedule
+        && (input.status == Some(TriggerStatus::Active) || next.schedule != current.schedule)
+    {
+        let spec = next
+            .schedule
+            .as_ref()
+            .ok_or_else(|| AppError::ValidationError("Schedule specification missing".into()))?;
+        next.schedule_state.next_due_at = if spec
+            .max_runs
+            .is_some_and(|max| next.schedule_state.occurrences >= max)
+        {
+            None
+        } else {
+            schedules::compute::next(spec, Utc::now())?
         };
     }
-    let updated = db
+    let schedule_changed = next.schedule != current.schedule || input.status.is_some();
+    let target_changed = match (&next.delivery, &current.delivery) {
+        (
+            TriggerDelivery::Assistant {
+                agent_id: a,
+                thread_policy: ap,
+                ..
+            },
+            TriggerDelivery::Assistant {
+                agent_id: b,
+                thread_policy: bp,
+                ..
+            },
+        ) => a != b || ap != bp,
+        _ => next.delivery != current.delivery,
+    };
+    let db_copy = db.clone();
+    let saved = next.clone();
+    let previous = current.updated_at;
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let result: AppResult<()> = async {
+                let encrypted = saved
+                    .delivery_secret_encrypted
+                    .as_ref()
+                    .map(|bytes| {
+                        bson::Bson::Binary(bson::Binary {
+                            subtype: bson::spec::BinarySubtype::Generic,
+                            bytes: bytes.clone(),
+                        })
+                    })
+                    .unwrap_or(bson::Bson::Null);
+                let mut set = doc! {
+                    "label": &saved.label,
+                    "status": bson::to_bson(&saved.status).map_err(serialization_error)?,
+                    "delivery": bson::to_bson(&saved.delivery).map_err(serialization_error)?,
+                    "delivery_secret_encrypted": encrypted,
+                    "delivery_key_id": &saved.delivery_key_id,
+                    "overlap": bson::to_bson(&saved.overlap).map_err(serialization_error)?,
+                    "schedule": bson::to_bson(&saved.schedule).map_err(serialization_error)?,
+                    "updated_at": schedules::date(saved.updated_at),
+                    "schedule_state.pause_reason": &saved.schedule_state.pause_reason,
+                };
+                let mut saved = saved.clone();
+                if schedule_changed {
+                    let live = db_copy
+                        .collection::<Trigger>(TRIGGERS)
+                        .find_one(doc! { "_id": &saved.id })
+                        .session(&mut *session)
+                        .await?
+                        .ok_or(AppError::TriggerNotFound)?;
+                    saved.schedule_state.occurrences = live.schedule_state.occurrences;
+                    if let Some(spec) = &saved.schedule {
+                        saved.schedule_state.next_due_at = if spec
+                            .max_runs
+                            .is_some_and(|max| live.schedule_state.occurrences >= max)
+                        {
+                            None
+                        } else {
+                            schedules::compute::next(spec, Utc::now())?
+                        };
+                    }
+                    set.insert(
+                        "schedule_state.next_due_at",
+                        saved.schedule_state.next_due_at.map(schedules::date),
+                    );
+                }
+                if target_changed {
+                    set.insert("schedule_state.dedicated_thread_id", bson::Bson::Null);
+                }
+                let modified = db_copy
+                    .collection::<Trigger>(TRIGGERS)
+                    .update_one(
+                        doc! { "_id": &saved.id, "updated_at": schedules::date(previous) },
+                        doc! { "$set": set },
+                    )
+                    .session(&mut *session)
+                    .await?
+                    .matched_count;
+                if modified == 0 {
+                    return Err(AppError::Conflict(
+                        "Trigger changed; reload and retry".into(),
+                    ));
+                }
+                if schedule_changed {
+                    schedules::set_schedule_job(&db_copy, &saved, session).await?;
+                }
+                Ok(())
+            }
+            .await;
+            transactions::transaction_result(result)
+        })
+        .await
+        .map_err(transactions::map_transaction_error)?;
+    let trigger = db
         .collection::<Trigger>(TRIGGERS)
-        .find_one_and_update(
-            doc! { "_id": &current.id, "user_id": &current.user_id },
-            doc! { "$set": set_doc },
-        )
-        .return_document(ReturnDocument::After)
+        .find_one(doc! { "_id": &next.id })
         .await?
         .ok_or(AppError::TriggerNotFound)?;
     Ok(UpdatedTrigger {
-        trigger: updated,
+        delivery_signing_key_id: trigger.delivery_key_id.clone(),
+        trigger,
         delivery_signing_secret,
-        delivery_signing_key_id,
     })
 }
 
@@ -275,6 +490,9 @@ pub async fn delete(db: &Database, current: &Trigger) -> AppResult<()> {
         .delete_one(doc! { "_id": &current.id, "user_id": &current.user_id })
         .await?;
     if result.deleted_count == 1 {
+        db.collection::<bson::Document>(schedules::WORK)
+            .delete_many(doc! {"trigger_id":&current.id,"kind":"schedule"})
+            .await?;
         Ok(())
     } else {
         Err(AppError::TriggerNotFound)
@@ -286,6 +504,11 @@ pub async fn rotate_secret(
     encryption_keys: &EncryptionKeys,
     current: &Trigger,
 ) -> AppResult<(Trigger, String)> {
+    if current.source == TriggerSource::Schedule {
+        return Err(AppError::ValidationError(
+            "Scheduled automations have no inbound secret".into(),
+        ));
+    }
     let raw_secret = format!("{TRIGGER_SECRET_PREFIX}{}", generate_random_token());
     let mut set_doc = doc! {
         "secret_hash": hash_token(&raw_secret),
@@ -303,6 +526,7 @@ pub async fn rotate_secret(
             );
             doc! { "$set": set_doc }
         }
+        TriggerVerification::Schedule => return Err(AppError::TriggerDeliveryUnsupported),
         TriggerVerification::Token { .. } => doc! {
             "$set": set_doc,
             "$unset": { "verification_secret_encrypted": "" },
@@ -360,7 +584,7 @@ pub async fn rotate_delivery_secret(
 pub async fn load_active_for_ingress(db: &Database, id: &str) -> AppResult<Trigger> {
     let trigger = db
         .collection::<Trigger>(TRIGGERS)
-        .find_one(doc! { "_id": id, "status": "active" })
+        .find_one(doc! { "_id": id, "status": "active", "source": {"$ne":"schedule"} })
         .await?
         .ok_or(AppError::TriggerNotFound)?;
     let trigger = ensure_delivery_key_id(db, trigger).await?;
@@ -378,6 +602,7 @@ pub async fn verify_ingress(
     body: &[u8],
 ) -> AppResult<()> {
     match &trigger.verification {
+        TriggerVerification::Schedule => return Err(AppError::TriggerNotFound),
         TriggerVerification::Token { location } => {
             let supplied = match location {
                 TriggerTokenLocation::Bearer => headers
@@ -465,31 +690,63 @@ pub async fn deliver_event(
     let envelope = TriggerEventEnvelope {
         event_id: event_id.to_string(),
         trigger_id: trigger.id.clone(),
-        source: "inbound_webhook",
+        source: if trigger.source == TriggerSource::Schedule {
+            "schedule"
+        } else {
+            "inbound_webhook"
+        },
         received_at: Utc::now(),
         payload,
     };
     let value = serde_json::to_value(&envelope).map_err(serialization_error)?;
     match &trigger.delivery {
+        TriggerDelivery::Assistant { .. } => return Err(AppError::TriggerDeliveryUnsupported),
         TriggerDelivery::Webhook { .. } => {
-            let body = serde_json::to_vec(&envelope).map_err(serialization_error)?;
-            deliver_webhook_body(
-                encryption_keys,
-                http_client,
-                trigger,
-                event_id,
-                &body,
-                config
-                    .trigger_payload_max_bytes
-                    .saturating_add(TRIGGER_ENVELOPE_OVERHEAD_BYTES),
-            )
-            .await
-            .map_err(|_| AppError::TriggerDeliveryFailed)?
+            let max_body_bytes = config
+                .trigger_payload_max_bytes
+                .saturating_add(TRIGGER_ENVELOPE_OVERHEAD_BYTES);
+            if trigger.source == TriggerSource::Schedule {
+                let admission = admit_webhook_delivery(
+                    db,
+                    encryption_keys,
+                    trigger,
+                    event_id,
+                    envelope.payload,
+                    config.trigger_delivery_retention_hours,
+                    max_body_bytes,
+                )
+                .await?;
+                if let WebhookAdmission::Accepted { record, body } = admission {
+                    let outcome = deliver_webhook_body(
+                        encryption_keys,
+                        http_client,
+                        trigger,
+                        event_id,
+                        &body,
+                        max_body_bytes,
+                    )
+                    .await;
+                    update_delivery_after_attempt(db, &record, &outcome).await?;
+                    outcome.map_err(|_| AppError::TriggerDeliveryFailed)?;
+                }
+            } else {
+                let body = serde_json::to_vec(&envelope).map_err(serialization_error)?;
+                deliver_webhook_body(
+                    encryption_keys,
+                    http_client,
+                    trigger,
+                    event_id,
+                    &body,
+                    max_body_bytes,
+                )
+                .await
+                .map_err(|_| AppError::TriggerDeliveryFailed)?;
+            }
         }
         TriggerDelivery::Agent { conversation_id } => {
             let agent_envelope = EventEnvelope {
                 event_id: agent_event_uuid(&trigger.id, event_id),
-                source: "inbound_webhook".to_string(),
+                source: envelope.source.to_string(),
                 event_type: "trigger.event".to_string(),
                 timestamp: envelope.received_at,
                 payload: Some(value),
@@ -562,7 +819,11 @@ pub async fn admit_webhook_delivery(
     let envelope = TriggerEventEnvelope {
         event_id: event_id.to_string(),
         trigger_id: trigger.id.clone(),
-        source: "inbound_webhook",
+        source: if trigger.source == TriggerSource::Schedule {
+            "schedule"
+        } else {
+            "inbound_webhook"
+        },
         received_at: now,
         payload,
     };
@@ -947,7 +1208,7 @@ async fn prepare_delivery(
     }
 }
 
-async fn validate_associations(
+pub(crate) async fn validate_associations(
     db: &Database,
     user_id: &str,
     user_service_id: Option<&str>,
@@ -961,6 +1222,25 @@ async fn validate_associations(
         if !exists {
             return Err(AppError::TriggerNotFound);
         }
+    }
+    if let TriggerDelivery::Assistant {
+        agent_id,
+        instruction,
+        ..
+    } = delivery
+    {
+        if instruction.trim().is_empty() || instruction.len() > 8192 {
+            return Err(AppError::ValidationError(
+                "Instruction must contain 1–8192 bytes".into(),
+            ));
+        }
+        let agent = super::assistant_team_service::agent(db, user_id, agent_id).await?;
+        if agent.destroyed_at.is_some() {
+            return Err(AppError::ValidationError(
+                "Target agent was destroyed".into(),
+            ));
+        }
+        super::assistant_nyxagent::require_enabled(db, user_id).await?;
     }
     if let TriggerDelivery::Agent { conversation_id } = delivery {
         let exists = db
@@ -1034,6 +1314,11 @@ mod tests {
 
     fn trigger(verification: TriggerVerification, encrypted: Option<Vec<u8>>) -> Trigger {
         Trigger {
+            source: Default::default(),
+            setup_watch_id: None,
+            schedule: None,
+            schedule_state: Default::default(),
+            overlap: Default::default(),
             id: Uuid::new_v4().to_string(),
             user_id: Uuid::new_v4().to_string(),
             label: "Test trigger".to_string(),
@@ -1375,6 +1660,10 @@ mod tests {
             &db,
             &keys,
             CreateInput {
+                source: Default::default(),
+                setup_watch_id: None,
+                schedule: None,
+                overlap: Default::default(),
                 user_id: owner.clone(),
                 label: "Repository activity".to_string(),
                 user_service_id: None,
@@ -1401,6 +1690,8 @@ mod tests {
             &keys,
             &current,
             UpdateInput {
+                schedule: None,
+                overlap: None,
                 label: Some("Deployment activity".to_string()),
                 status: Some(TriggerStatus::Disabled),
                 delivery: None,

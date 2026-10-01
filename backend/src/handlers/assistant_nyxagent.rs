@@ -448,6 +448,7 @@ pub async fn attachment(
 }
 #[derive(Serialize)]
 pub struct AcknowledgementResponse {
+    trigger_run_id: Option<String>,
     id: String,
     kind: String,
     status: String,
@@ -472,6 +473,7 @@ impl From<crate::models::assistant_acknowledgement::AssistantAcknowledgement>
             kind: row.kind,
             status: row.status,
             summary: row.summary,
+            trigger_run_id: row.trigger_run_id,
             decider: row.decider,
             decided_by: row.decided_by,
             reason: row.reason,

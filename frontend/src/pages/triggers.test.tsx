@@ -1,3 +1,4 @@
+import type { ComponentProps } from "react";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -22,6 +23,12 @@ const mocks = vi.hoisted(() => ({
   rotate: vi.fn(),
   update: vi.fn(),
   useTriggers: vi.fn(),
+}));
+
+vi.mock("@tanstack/react-router", () => ({
+  Link: ({ to, search, ...props }: ComponentProps<"a"> & { to: string; search?: Record<string, string> }) => (
+    <a href={to + (search ? `?${new URLSearchParams(search)}` : "")} {...props} />
+  ),
 }));
 
 vi.mock("@/hooks/use-triggers", () => ({

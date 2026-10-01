@@ -228,6 +228,40 @@ pub struct McpDurableEndpointMetadata {
     pub operation_generation: i64,
 }
 
+/// Shared guest/webhook classification. Only stored catalog contracts may
+/// widen access; remote metadata can narrow it. Never infer from tool names.
+#[derive(Clone, Copy)]
+pub struct OperationEffects {
+    pub reads: bool,
+    pub uses: bool,
+    pub destructive: bool,
+}
+
+pub fn operation_effects(
+    method: &reqwest::Method,
+    metadata: McpDurableEndpointMetadata,
+) -> OperationEffects {
+    let safe = matches!(
+        *method,
+        reqwest::Method::GET | reqwest::Method::HEAD | reqwest::Method::OPTIONS
+    );
+    let reads = (safe && metadata.risk != Some(EndpointRisk::Write))
+        || (*method == reqwest::Method::POST
+            && metadata.catalog_contract
+            && metadata.risk == Some(EndpointRisk::Read));
+    let changes = match metadata.changes_existing {
+        Some(true) => true,
+        Some(false) if metadata.catalog_contract => false,
+        _ => !(safe || *method == reqwest::Method::POST),
+    };
+    let destructive = *method == reqwest::Method::DELETE || metadata.destructive;
+    OperationEffects {
+        reads: reads && !changes && !destructive,
+        uses: !changes && !destructive,
+        destructive,
+    }
+}
+
 /// Resolve the operation revision published by the owning producer. Missing or
 /// non-positive values are intentionally unavailable rather than inferred from
 /// caller input or endpoint shape. The endpoint contract remains authoritative
