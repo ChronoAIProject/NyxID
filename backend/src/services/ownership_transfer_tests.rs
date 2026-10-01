@@ -1855,6 +1855,12 @@ async fn admin_handlers_preview_without_writes_and_never_serialize_credentials()
     .unwrap();
     let value = serde_json::to_value(response.0).unwrap();
     assert_eq!(value["items"][0]["id"], bot.id);
+    assert_eq!(value["items"][0]["owner_name"], "Test User");
+    assert_eq!(
+        value["items"][0]["owner_email"],
+        format!("{}@example.com", f.owner)
+    );
+    assert_eq!(value["items"][0]["owner_user_id"], f.owner);
     let serialized = value.to_string();
     assert!(!serialized.contains("encrypted"));
     assert!(!serialized.contains("secret"));

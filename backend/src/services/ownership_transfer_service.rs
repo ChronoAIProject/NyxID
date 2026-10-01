@@ -4,6 +4,7 @@ use futures::TryStreamExt;
 use mongodb::{ClientSession, Database};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 use super::api_key_mutation_service::{map_transaction_error, transaction_result};
@@ -896,6 +897,37 @@ pub async fn transfer(db: &Database, command: TransferCommand<'_>) -> AppResult<
             }
         }
     }
+}
+
+pub struct OwnerIdentity {
+    pub name: Option<String>,
+    pub email: Option<String>,
+}
+
+pub async fn owner_identities(
+    db: &Database,
+    owner_ids: &[&str],
+) -> AppResult<HashMap<String, OwnerIdentity>> {
+    let users: Vec<Document> = db
+        .collection::<Document>(USERS)
+        .find(doc! { "_id": { "$in": owner_ids } })
+        .projection(doc! { "display_name": 1, "email": 1 })
+        .await?
+        .try_collect()
+        .await?;
+    Ok(users
+        .into_iter()
+        .filter_map(|user| {
+            let id = user.get_str("_id").ok()?;
+            let name = user
+                .get_str("display_name")
+                .ok()
+                .filter(|name| !name.trim().is_empty())
+                .map(str::to_owned);
+            let email = user.get_str("email").ok().map(str::to_owned);
+            Some((id.to_owned(), OwnerIdentity { name, email }))
+        })
+        .collect())
 }
 
 pub async fn list_resources(
