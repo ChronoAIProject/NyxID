@@ -72,9 +72,10 @@ opt-level = 3
 [profile.test.package.num-bigint-dig]
 opt-level = 3
 
-# The profile that 'dist' will build with
+# The profile that 'dist' will build with. It keeps the release default of 16
+# codegen units: with a single unit the large CLI crate compiles and optimizes
+# serially, which made release builds much slower for a marginal size gain.
 [profile.dist]
 inherits = "release"
 lto = "thin"
 strip = true
-codegen-units = 1
