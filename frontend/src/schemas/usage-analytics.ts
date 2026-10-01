@@ -67,6 +67,7 @@ export const analyticsPanelSchema = z
     span: z.union([z.literal(1), z.literal(2), z.literal(3)]).optional(),
     height: z.enum(["compact", "standard", "tall"]).optional(),
     interval: z.enum(ANALYTICS_INTERVALS).optional(),
+    table_display: z.enum(["always", "accordion"]).optional(),
   })
   .refine(
     (panel) => panel.chart !== "combo" || panel.measure !== "requests",
