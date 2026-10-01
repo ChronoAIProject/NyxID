@@ -381,6 +381,7 @@ Requires all four values. Create a Services ID and key at the [Apple Developer p
 | `TELEGRAM_WEBHOOK_SECRET` | | Secret for verifying Telegram webhook callbacks |
 | `TELEGRAM_WEBHOOK_URL` | | Public URL for Telegram webhooks (e.g. `https://auth.nyxid.dev/api/v1/webhooks/telegram`). Omit to use long polling mode. |
 | `TELEGRAM_BOT_USERNAME` | | Bot username without @ (for link instructions) |
+| `OPENAI_APPS_CHALLENGE_TOKEN` | | OpenAI plugin-portal domain verification token, served as plain text at `/.well-known/openai-apps-challenge` on the MCP host. Unset = 404 |
 | `APPROVAL_EXPIRY_INTERVAL_SECS` | `5` | Interval between approval expiry sweeps (seconds) |
 
 The approval system works without Telegram -- users can always approve/reject via the web UI. Telegram delivery requires `TELEGRAM_BOT_TOKEN`.
