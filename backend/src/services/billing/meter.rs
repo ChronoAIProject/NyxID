@@ -313,7 +313,7 @@ pub(super) async fn persist_settlement_intent(
     Ok(finalized_rows)
 }
 
-async fn materialize_component_intent(
+pub(super) async fn materialize_component_intent(
     db: &mongodb::Database,
     coordinator: &UsageMeterRow,
 ) -> AppResult<Vec<UsageMeterRow>> {
@@ -464,15 +464,14 @@ pub async fn fail(
     Ok(())
 }
 
-async fn insert_reserved_row(
-    db: &mongodb::Database,
+pub(super) fn reserved_row(
     ctx: &BillingRouteContext,
     layer: BillingLayer,
     metric: BillingMetric,
     lago_metric_code: String,
     reservation: Option<&BillingReservation>,
     flush_seq: Option<i64>,
-) -> AppResult<Option<String>> {
+) -> UsageMeterRow {
     let now = Utc::now();
     let transaction_id = if layer == BillingLayer::Platform {
         platform_transaction_id(ctx, &lago_metric_code, flush_seq)
@@ -504,7 +503,7 @@ async fn insert_reserved_row(
             ..Default::default()
         }
     });
-    let row = UsageMeterRow {
+    UsageMeterRow {
         rollup_pending: true,
         id: Uuid::new_v4().to_string(),
         transaction_id,
@@ -530,6 +529,7 @@ async fn insert_reserved_row(
         quantity: None,
         pending_resale_quantity: None,
         pending_platform_usage: None,
+        pool_attempt: ctx.pool_attempt.clone(),
         status: UsageStatus::Reserved,
         forwarded: false,
         released: false,
@@ -542,7 +542,19 @@ async fn insert_reserved_row(
         finalized_at: None,
         expires_at: None,
         last_error: None,
-    };
+    }
+}
+
+async fn insert_reserved_row(
+    db: &mongodb::Database,
+    ctx: &BillingRouteContext,
+    layer: BillingLayer,
+    metric: BillingMetric,
+    lago_metric_code: String,
+    reservation: Option<&BillingReservation>,
+    flush_seq: Option<i64>,
+) -> AppResult<Option<String>> {
+    let row = reserved_row(ctx, layer, metric, lago_metric_code, reservation, flush_seq);
 
     let inserted = db
         .collection::<UsageMeterRow>(USAGE_METER)
@@ -599,9 +611,24 @@ async fn finalize_matching(
     if let Some(resale_quantity) = pending_resale_quantity {
         set.insert("pending_resale_quantity", resale_quantity);
     }
+    // Known quantity and pool outcome commit in the same claim. Recovery of
+    // component/resale intents uses this boundary too; ordinary rows retain
+    // their absent/null pool metadata.
+    let mut literal_set = bson::Document::new();
+    for (key, value) in set {
+        literal_set.insert(key, doc! {"$literal":value});
+    }
+    literal_set.insert(
+        "pool_attempt",
+        doc! {"$cond":[
+            {"$eq":[{"$type":"$pool_attempt"},"object"]},
+            {"$mergeObjects":["$pool_attempt",{"outcome":"reported"}]},
+            "$pool_attempt"
+        ]},
+    );
     let collection = db.collection::<UsageMeterRow>(USAGE_METER);
     let claimed = collection
-        .find_one_and_update(filter, doc! { "$set": set })
+        .find_one_and_update(filter, vec![doc! { "$set": literal_set }])
         .with_options(
             mongodb::options::FindOneAndUpdateOptions::builder()
                 .return_document(mongodb::options::ReturnDocument::After)
@@ -616,7 +643,7 @@ async fn finalize_matching(
     Ok(Some(claimed))
 }
 
-async fn materialize_pending_resale_intent(
+pub(super) async fn materialize_pending_resale_intent(
     db: &mongodb::Database,
     coordinator: &UsageMeterRow,
 ) -> AppResult<Option<UsageMeterRow>> {

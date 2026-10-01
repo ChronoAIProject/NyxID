@@ -12,9 +12,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-pub fn require_human(auth: &AuthUser) -> AppResult<()> {
-    super::login_client_context::require_first_party_human(auth)
-}
+use super::login_client_context::require_first_party_human;
 
 #[derive(Deserialize)]
 pub struct Owner {
@@ -59,7 +57,7 @@ pub async fn list(
     auth: AuthUser,
     Query(query): Query<Owner>,
 ) -> AppResult<Json<Vec<Metadata>>> {
-    require_human(&auth)?;
+    require_first_party_human(&auth)?;
     let actor = auth.user_id.to_string();
     let owner = query.owner_id.as_deref().unwrap_or(&actor);
     let rows = if query.available {
@@ -75,7 +73,7 @@ pub async fn create(
     Query(query): Query<Owner>,
     Json(input): Json<service::Input>,
 ) -> AppResult<(StatusCode, Json<Metadata>)> {
-    require_human(&auth)?;
+    require_first_party_human(&auth)?;
     let actor = auth.user_id.to_string();
     let owner = query.owner_id.as_deref().unwrap_or(&actor);
     let login = service::put(
@@ -101,7 +99,7 @@ pub async fn replace(
     Path(id): Path<String>,
     Json(input): Json<service::Input>,
 ) -> AppResult<Json<Metadata>> {
-    require_human(&auth)?;
+    require_first_party_human(&auth)?;
     let actor = auth.user_id.to_string();
     let prior = service::get(&state.db, &actor, &id).await?;
     let login = service::put(
@@ -126,7 +124,7 @@ pub async fn delete(
     auth: AuthUser,
     Path(id): Path<String>,
 ) -> AppResult<StatusCode> {
-    require_human(&auth)?;
+    require_first_party_human(&auth)?;
     service::delete(&state.db, &auth.user_id.to_string(), &id).await?;
     audit_service::log_for_user(
         state.db.clone(),

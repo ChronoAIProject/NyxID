@@ -43,6 +43,7 @@ pub struct ChatAuthority {
     /// owner): service calls only as far as the owner lets guests use each
     /// service (`AssistantAgent::guest_access`); see `guest_refusal`.
     pub guest: bool,
+    pub confirmation_policy: Option<crate::models::trigger_schedule::ConfirmationPolicy>,
 }
 impl ChatAuthority {
     /// NyxBot threads run with Full access; specialists only with their grants.
@@ -118,6 +119,20 @@ pub async fn for_key(
     if agent.destroyed_at.is_some() {
         return Err(not_found());
     }
+    let confirmation_policy = if let Some(run_id) = conversation
+        .active_turn
+        .as_ref()
+        .and_then(|turn| turn.trigger_run_id.as_deref())
+    {
+        db.collection::<crate::models::trigger_run::TriggerRun>(
+            crate::models::trigger_run::COLLECTION_NAME,
+        )
+        .find_one(doc! {"_id": run_id, "user_id": user})
+        .await?
+        .and_then(|run| run.confirmation_policy)
+    } else {
+        None
+    };
     Ok(Some(ChatAuthority {
         machine_node_ids: agent.machine_node_ids.clone(),
         saved_login_ids: agent.saved_login_ids.clone(),
@@ -132,6 +147,7 @@ pub async fn for_key(
         agent_id: agent.id,
         agent_name: agent.name,
         guest: conversation.guest_turn,
+        confirmation_policy,
     }))
 }
 
@@ -382,6 +398,7 @@ pub async fn request_tracked(
         summary: request.summary.into(),
         status: "pending".into(),
         requested_turn_id: None,
+        trigger_run_id: None,
         created_at: now,
         decided_at: None,
         expires_at: now + Duration::seconds(PENDING_SECONDS),
@@ -399,8 +416,8 @@ pub async fn request_tracked(
             let operation = async {
                 let (conversation, _) = fence(&db, &chat, session).await?;
                 let mut row = candidate.clone();
-                // The message that started the current work: the user's, the
-                // orchestrator's instruction, or the event batch that resumed it.
+                // Ordinary denials stay bound to the initiating user/orchestrator
+                // message across event turns. Only trigger runs use the active turn.
                 let started_by = db
                     .collection::<AssistantMessage>(MESSAGES)
                     .find_one(doc! {
@@ -411,7 +428,11 @@ pub async fn request_tracked(
                     .sort(doc! {"seq": -1})
                     .session(&mut *session)
                     .await?;
-                row.requested_turn_id = started_by.as_ref().map(|message| message.turn_id.clone());
+                row.requested_turn_id = conversation.active_turn.as_ref()
+                    .filter(|turn| turn.trigger_run_id.is_some())
+                    .map(|turn| turn.turn_id.clone())
+                    .or_else(|| started_by.as_ref().map(|message| message.turn_id.clone()));
+                row.trigger_run_id = conversation.active_turn.as_ref().and_then(|turn| turn.trigger_run_id.clone());
                 if row.decider == "orchestrator" {
                     row.request_excerpt = started_by.map(|message| {
                         format!(
@@ -748,6 +769,7 @@ pub async fn decide_as(
                 let chat = ChatAuthority {
                     machine_node_ids: Vec::new(),
                     saved_login_ids: Vec::new(),
+                    confirmation_policy: None,
                     user_id: user.clone(),
                     conversation_id: row.conversation_id.clone(),
                     api_key_id: row.api_key_id.clone(),
@@ -793,16 +815,48 @@ pub async fn decide_as(
                 if matches!(row.kind.as_str(), "machine" | "saved_login") {
                     let id = row.service_id.as_deref().ok_or_else(not_found)?;
                     if row.kind == "machine" {
-                        let node = super::node_service::get_node_by_id(&db, id).await?.ok_or_else(not_found)?;
-                        if !node.is_active || !super::org_service::resolve_owner_access(&db, &user, &node.user_id).await?.can_write() { return Err(not_found()); }
-                    } else { super::saved_login_service::get(&db, &user, id).await?; }
+                        let node = super::node_service::get_node_by_id(&db, id)
+                            .await?
+                            .ok_or_else(not_found)?;
+                        if !node.is_active
+                            || !super::org_service::resolve_owner_access(&db, &user, &node.user_id)
+                                .await?
+                                .can_write()
+                        {
+                            return Err(not_found());
+                        }
+                    } else {
+                        super::saved_login_service::get(&db, &user, id).await?;
+                    }
                     if allow && subagent {
-                        let field = if row.kind == "machine" { "machine_node_ids" } else { "saved_login_ids" };
-                        let mut add = doc! {}; add.insert(field, id);
-                        let result = db.collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
-                            .update_one(doc! {"_id": target.agent_id.as_deref().ok_or_else(not_found)?, "user_id": &user, "kind":"specialist", "destroyed_at": bson::Bson::Null}, doc! {"$addToSet":add,"$set":{"updated_at":bson::DateTime::now()}})
-                            .session(&mut *session).await?;
-                        if result.matched_count != 1 { return Err(not_found()); }
+                        let field = if row.kind == "machine" {
+                            "machine_node_ids"
+                        } else {
+                            "saved_login_ids"
+                        };
+                        let mut add = doc! {};
+                        add.insert(field, id);
+                        let result = db
+                            .collection::<bson::Document>(
+                                crate::models::assistant_agent::COLLECTION_NAME,
+                            )
+                            .update_one(
+                                doc! {
+                                    "_id": target.agent_id.as_deref().ok_or_else(not_found)?,
+                                    "user_id": &user,
+                                    "kind": "specialist",
+                                    "destroyed_at": bson::Bson::Null,
+                                },
+                                doc! {
+                                    "$addToSet": add,
+                                    "$set": { "updated_at": bson::DateTime::now() },
+                                },
+                            )
+                            .session(&mut *session)
+                            .await?;
+                        if result.matched_count != 1 {
+                            return Err(not_found());
+                        }
                     }
                 }
                 if allow && subagent {
@@ -866,6 +920,20 @@ pub async fn decide_as(
                     .replace_one(filter, &row)
                     .session(&mut *session)
                     .await?;
+                if let Some(run_id) = &row.trigger_run_id {
+                    // Durable wakeup in the decision transaction. Settlement
+                    // reads card state and writes this same work row, preventing
+                    // a simultaneous settlement from overwriting the wakeup.
+                    db.collection::<bson::Document>(super::trigger_schedule::WORK)
+                        .update_one(
+                            doc! {"_id": run_id},
+                            doc! {"$set": {
+                                "at": bson::DateTime::from_chrono(now), "fence": "", "deferrals": 0,
+                            }},
+                        )
+                        .session(&mut *session)
+                        .await?;
+                }
                 Ok(row)
             }
             .await;
@@ -924,4 +992,69 @@ pub async fn audit_decision(
         })),
     )
     .await;
+}
+
+/// Confirm exact changing actions initiated by untrusted webhook data. Native
+/// tools use their closed inventory; service callers use catalog/HTTP semantics.
+pub fn webhook_confirmation_required(
+    chat: &ChatAuthority,
+    read_only: bool,
+    destructive: bool,
+) -> bool {
+    use crate::models::trigger_schedule::ConfirmationPolicy;
+    match chat.confirmation_policy {
+        Some(ConfirmationPolicy::Changes) => !read_only,
+        Some(ConfirmationPolicy::Destructive) => destructive,
+        None => false,
+    }
+}
+
+pub async fn webhook_action_gate(
+    db: &Database,
+    chat: &ChatAuthority,
+    tool: &str,
+    args: &Value,
+    read_only: bool,
+    destructive: bool,
+) -> AppResult<Option<Value>> {
+    if !webhook_confirmation_required(chat, read_only, destructive) {
+        return Ok(None);
+    }
+    if let Some(id) = args["acknowledgement_id"].as_str() {
+        return Ok((!consume_action(db, chat, id, tool, args).await?).then(|| json!({
+            "error": "acknowledgement_invalid",
+            "instructions": "This action card is missing, expired, used or does not match the call.",
+        })));
+    }
+    let summary = if tool == "nyx__machine_exec" {
+        let services = args["services"]
+            .as_array()
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        format!(
+            "Webhook automation requests {tool} on {}; declared services: {services}. Review this action before allowing it.",
+            args["machine"].as_str().unwrap_or_default()
+        )
+    } else {
+        format!("Webhook automation requests {tool}. Review this action before allowing it.")
+    };
+    let card = request(
+        db,
+        chat,
+        Request {
+            kind: "action",
+            service: None,
+            tool: Some(tool),
+            arguments: Some(args),
+            summary: &summary,
+            platform: false,
+        },
+    )
+    .await?;
+    Ok(Some(refusal(&card)))
 }

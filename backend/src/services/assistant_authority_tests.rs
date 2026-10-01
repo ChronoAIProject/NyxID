@@ -191,6 +191,7 @@ fn orchestrator_chat() -> acks::ChatAuthority {
     acks::ChatAuthority {
         machine_node_ids: Vec::new(),
         saved_login_ids: Vec::new(),
+        confirmation_policy: None,
         conversation_id: "nyxa-00000000000000000000000000000000".into(),
         user_id: "owner".into(),
         api_key_id: "key".into(),
@@ -378,6 +379,57 @@ async fn acknowledgements_deny_expire_and_reask_only_after_a_new_user_message() 
         .unwrap();
     assert_eq!(denial["error"], "acknowledgement_denied");
     assert_eq!(denial["acknowledgement_id"], id);
+    // A following event turn must retain the initiating user turn's denial.
+    db.collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &f.row.id},
+            doc! {"$set": {
+                "active_turn.turn_id": "following-event", "active_turn.origin": "event",
+            }},
+        )
+        .await
+        .unwrap();
+    let event_denial = service_gate(db, &f.chat, &service, "github", "GitHub", false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(event_denial["acknowledgement_id"], id);
+    assert_eq!(event_denial["error"], "acknowledgement_denied");
+    db.collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &f.row.id},
+            doc! {"$set": {
+                "active_turn.turn_id": "trigger-turn", "active_turn.trigger_run_id": "trigger-run",
+            }},
+        )
+        .await
+        .unwrap();
+    let trigger_card = acks::request(
+        db,
+        &f.chat,
+        acks::Request {
+            kind: "action",
+            service: None,
+            tool: Some("nyxid__delete_node"),
+            arguments: Some(&json!({"node_id": "sample"})),
+            summary: "Delete node",
+            platform: false,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        trigger_card.requested_turn_id.as_deref(),
+        Some("trigger-turn")
+    );
+    assert_eq!(trigger_card.trigger_run_id.as_deref(), Some("trigger-run"));
+    db.collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &f.row.id},
+            doc! {"$set": {"active_turn": bson::to_bson(&f.row.active_turn).unwrap()}},
+        )
+        .await
+        .unwrap();
     engine::finish_turn(
         db,
         &f.row,

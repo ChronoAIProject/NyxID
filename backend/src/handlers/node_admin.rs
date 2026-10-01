@@ -464,6 +464,7 @@ fn node_session_info(
             capabilities: crate::services::node_ws_manager::NodeCapabilitiesFlags {
                 http_signature_v2: owner.http_signature_v2,
                 proxy_upload_v1: owner.proxy_upload_v1,
+                http_cancellation: owner.http_cancellation,
                 credential_ack_correlation: owner.credential_ack_correlation,
                 remote_credential_crypto_v1: owner.remote_credential_crypto_v1,
                 proxy_max_body_size: owner.proxy_max_body_size,
@@ -3153,6 +3154,7 @@ mod tests {
             &NodeCapabilitiesMsg {
                 http_signature_v2: false,
                 proxy_upload_v1: false,
+                http_cancellation: false,
                 remote_credential_crypto_v1: true,
                 ..NodeCapabilitiesMsg::default()
             },
@@ -3559,6 +3561,7 @@ mod tests {
             &NodeCapabilitiesMsg {
                 http_signature_v2: false,
                 proxy_upload_v1: false,
+                http_cancellation: false,
                 remote_credential_crypto_v1: true,
                 ..NodeCapabilitiesMsg::default()
             },
@@ -3841,6 +3844,7 @@ mod tests {
                         &NodeCapabilitiesMsg {
                             http_signature_v2: false,
                             proxy_upload_v1: false,
+                            http_cancellation: false,
                             remote_credential_crypto_v1: true,
                             ..NodeCapabilitiesMsg::default()
                         },
@@ -5803,6 +5807,7 @@ mod tests {
             capabilities: NodeCapabilitiesFlags {
                 http_signature_v2: false,
                 proxy_upload_v1: false,
+                http_cancellation: false,
                 credential_ack_correlation: true,
                 remote_credential_crypto_v1: true,
                 proxy_max_body_size: Some(100 * 1024 * 1024),
@@ -6332,7 +6337,7 @@ pub async fn machine_settings(
     Path(node_id): Path<String>,
     Json(input): Json<MachineSettingsRequest>,
 ) -> AppResult<StatusCode> {
-    super::saved_logins::require_human(&auth)?;
+    super::login_client_context::require_first_party_human(&auth)?;
     let node = node_service::get_node_by_id(&state.db, &node_id)
         .await?
         .ok_or_else(|| AppError::NodeNotFound("Machine not found".into()))?;

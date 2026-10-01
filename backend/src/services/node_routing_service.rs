@@ -532,6 +532,7 @@ mod tests {
         node.connection_owner = Some(crate::models::node::NodeConnectionOwner {
             http_signature_v2: false,
             proxy_upload_v1: false,
+            http_cancellation: false,
             instance_name: "other-backend".to_string(),
             generation_id: "generation-b".to_string(),
             connection_id: "connection-b".to_string(),

@@ -12,7 +12,7 @@ use crate::telemetry::consent::{self, ConsentSource};
 use crate::update_check;
 
 pub async fn run(args: DoctorArgs) -> Result<()> {
-    let report = build_report().await;
+    let report = build_report(&args).await;
     if args.json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
@@ -26,11 +26,26 @@ pub async fn run(args: DoctorArgs) -> Result<()> {
     Ok(())
 }
 
-async fn build_report() -> DoctorReport {
+async fn build_report(args: &DoctorArgs) -> DoctorReport {
     let mut sections = Vec::new();
     sections.push(installation_section());
+    sections.push(network_section());
+    let base = selected_base_url(
+        args.base_url.as_deref(),
+        auth::read_saved_base_url_for(args.profile.as_deref()),
+    );
+    let client = crate::tls::client_builder()
+        .map_err(anyhow::Error::from)
+        .and_then(|builder| {
+            builder
+                .connect_timeout(std::time::Duration::from_secs(3))
+                .timeout(std::time::Duration::from_secs(5))
+                .build()
+                .map_err(Into::into)
+        });
+    sections.push(nyxid_api_section(&base, client).await);
     sections.push(github_section().await);
-    sections.push(authentication_section());
+    sections.push(authentication_section(args.profile.as_deref()));
     sections.push(telemetry_section());
     sections.push(update_check_section());
     DoctorReport { sections }
@@ -61,6 +76,8 @@ struct DoctorRow {
     label: String,
     detail: String,
     status: DoctorStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diagnostic: Option<crate::net_diagnostics::Diagnostic>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
@@ -86,6 +103,7 @@ fn row(label: impl Into<String>, detail: impl Into<String>, status: DoctorStatus
         label: label.into(),
         detail: detail.into(),
         status,
+        diagnostic: None,
     }
 }
 
@@ -108,6 +126,9 @@ fn format_report(report: &DoctorReport) -> String {
                     row.detail,
                     row.status.glyph()
                 ));
+            }
+            if let Some(diagnostic) = &row.diagnostic {
+                lines.extend(diagnostic.text().lines().map(|line| format!("    {line}")));
             }
         }
         lines.push(String::new());
@@ -258,6 +279,145 @@ fn install_version_row(current_exe: Option<&Path>) -> DoctorRow {
     row("nyxid version", version, status)
 }
 
+fn network_section() -> DoctorSection {
+    let trust = crate::tls::trust().report();
+    let mut rows = trust
+        .sources
+        .iter()
+        .map(|source| {
+            let detail = match &source.error {
+                Some(error) => error.clone(),
+                None => format!(
+                    "{} certificates{}",
+                    source.certificates,
+                    source
+                        .path
+                        .as_ref()
+                        .map(|p| format!(" from {p}"))
+                        .unwrap_or_default()
+                ),
+            };
+            row(
+                source.name,
+                detail,
+                if source.error.is_some() {
+                    DoctorStatus::Fail
+                } else {
+                    DoctorStatus::Pass
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    if !trust.sources.iter().any(|s| s.name == "NYXID_CA_CERT") {
+        rows.push(row("NYXID_CA_CERT", "not set", DoctorStatus::Pass));
+    }
+    rows.push(row(
+        "Native root load",
+        format!("{:.3} ms (once per process)", trust.native_load_ms),
+        DoctorStatus::Pass,
+    ));
+    for name in [
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+        "NO_PROXY",
+        "no_proxy",
+    ] {
+        if let Some(value) = std::env::var_os(name) {
+            let detail = if name.eq_ignore_ascii_case("no_proxy") {
+                crate::net_diagnostics::bypass_list(&value.to_string_lossy())
+            } else {
+                crate::net_diagnostics::proxy_origin(&value.to_string_lossy())
+            };
+            rows.push(row(name, detail, DoctorStatus::Pass));
+        }
+    }
+    rows.push(row(
+        "WebSocket transport",
+        "direct (HTTP proxy variables do not apply)",
+        DoctorStatus::Pass,
+    ));
+    DoctorSection {
+        title: "Network / TLS".into(),
+        rows,
+    }
+}
+
+fn network_failure(label: &str, diagnostic: crate::net_diagnostics::Diagnostic) -> DoctorRow {
+    let mut row = row(label, "network check failed", DoctorStatus::Fail);
+    row.diagnostic = Some(diagnostic);
+    row
+}
+
+fn github_failure(label: &str, diagnostic: crate::net_diagnostics::Diagnostic) -> DoctorRow {
+    network_failure(label, diagnostic.for_github())
+}
+
+fn selected_base_url(explicit: Option<&str>, saved: Option<String>) -> String {
+    explicit
+        .map(str::to_owned)
+        .or(saved)
+        .unwrap_or_else(|| auth::DEFAULT_LOGIN_BASE_URL.into())
+}
+
+async fn nyxid_api_section(base: &str, client: Result<reqwest::Client>) -> DoctorSection {
+    use crate::net_diagnostics::{Diagnostic, Stage, sanitize_endpoint};
+    let endpoint = sanitize_endpoint(base)
+        .filter(|url| url.starts_with("https://") || url.starts_with("http://"))
+        .map(|url| format!("{}/health", url.trim_end_matches('/')));
+    let check = match (endpoint, client) {
+        (None, _) => {
+            let mut diagnostic = Diagnostic::new(
+                Stage::Config,
+                None,
+                None,
+                "NyxID base URL must be an HTTP or HTTPS URL with a host",
+            );
+            diagnostic.hint = "Check --base-url or the saved profile's base URL.".into();
+            network_failure("Health", diagnostic)
+        }
+        (Some(endpoint), Err(error)) => {
+            let diagnostic = Diagnostic::from_anyhow(&error).unwrap_or_else(|| {
+                Diagnostic::new(
+                    Stage::Config,
+                    Some(&endpoint),
+                    None,
+                    "could not build HTTP client",
+                )
+            });
+            network_failure("Health", diagnostic.for_login())
+        }
+        (Some(endpoint), Ok(client)) => match client.get(&endpoint).send().await {
+            Ok(response) if response.status().is_success() => row(
+                "Health",
+                format!("{endpoint} returned HTTP {}", response.status().as_u16()),
+                DoctorStatus::Pass,
+            ),
+            Ok(response) => network_failure(
+                "Health",
+                Diagnostic::new(
+                    Stage::Response,
+                    Some(&endpoint),
+                    Some(response.status().as_u16()),
+                    "NyxID health endpoint returned a non-success status",
+                )
+                .for_login(),
+            ),
+            Err(error) => network_failure(
+                "Health",
+                Diagnostic::reqwest(&error.without_url(), Some(&endpoint), None).for_login(),
+            ),
+        },
+    };
+    DoctorSection {
+        title: "NyxID API".into(),
+        rows: vec![check],
+    }
+}
+
 async fn github_section() -> DoctorSection {
     let url = format!(
         "{}/repos/{}/{}/releases/latest",
@@ -269,10 +429,16 @@ async fn github_section() -> DoctorSection {
     let client = match update::github_client() {
         Ok(client) => client,
         Err(err) => {
-            rows.push(row(
+            rows.push(github_failure(
                 "API reachable",
-                format!("client error: {err:#}"),
-                DoctorStatus::Fail,
+                crate::net_diagnostics::Diagnostic::from_anyhow(&err).unwrap_or_else(|| {
+                    crate::net_diagnostics::Diagnostic::new(
+                        crate::net_diagnostics::Stage::Config,
+                        Some(&url),
+                        None,
+                        "could not build HTTP client",
+                    )
+                }),
             ));
             return DoctorSection {
                 title: "GitHub Releases".to_string(),
@@ -284,37 +450,44 @@ async fn github_section() -> DoctorSection {
     match client.get(&url).send().await {
         Ok(response) => {
             let headers = response.headers().clone();
+            let status = response.status().as_u16();
             if response.status().is_success() {
-                rows.push(row("API reachable", url, DoctorStatus::Pass));
+                rows.push(row("API reachable", &url, DoctorStatus::Pass));
                 match response.json::<update::GitHubRelease>().await {
                     Ok(release) => rows.push(latest_release_row(&release.tag_name)),
-                    Err(err) => rows.push(row(
+                    Err(err) => rows.push(github_failure(
                         "Latest release",
-                        format!("response parse failed: {err}"),
-                        DoctorStatus::Fail,
+                        crate::net_diagnostics::Diagnostic::reqwest(
+                            &err.without_url(),
+                            Some(&url),
+                            Some(status),
+                        ),
                     )),
                 }
             } else if response.status() == reqwest::StatusCode::NOT_FOUND {
-                rows.push(row("API reachable", url, DoctorStatus::Pass));
+                rows.push(row("API reachable", &url, DoctorStatus::Pass));
                 rows.push(row(
                     "Latest release",
                     "no releases published yet",
                     DoctorStatus::Warn,
                 ));
             } else {
-                rows.push(row(
+                rows.push(github_failure(
                     "API reachable",
-                    format!("{url} returned {}", response.status()),
-                    DoctorStatus::Fail,
+                    crate::net_diagnostics::Diagnostic::new(
+                        crate::net_diagnostics::Stage::Response,
+                        Some(&url),
+                        Some(status),
+                        "GitHub returned a non-success status",
+                    ),
                 ));
             }
             rows.push(rate_limit_row(&headers));
         }
         Err(err) => {
-            rows.push(row(
+            rows.push(github_failure(
                 "API reachable",
-                format!("{url}: {err}"),
-                DoctorStatus::Fail,
+                crate::net_diagnostics::Diagnostic::reqwest(&err.without_url(), Some(&url), None),
             ));
         }
     }
@@ -360,16 +533,21 @@ fn rate_limit_row(headers: &reqwest::header::HeaderMap) -> DoctorRow {
     )
 }
 
-fn authentication_section() -> DoctorSection {
+fn authentication_section(profile: Option<&str>) -> DoctorSection {
     let mut rows = Vec::new();
-    match auth::read_saved_base_url_for(None) {
-        Some(base_url) => rows.push(row("Stored base URL", base_url, DoctorStatus::Pass)),
+    match auth::read_saved_base_url_for(profile) {
+        Some(base_url) => rows.push(row(
+            "Stored base URL",
+            crate::net_diagnostics::sanitize_endpoint(&base_url)
+                .unwrap_or_else(|| "invalid URL (redacted)".into()),
+            DoctorStatus::Pass,
+        )),
         None => rows.push(row("Stored base URL", "not configured", DoctorStatus::Warn)),
     }
 
-    match auth::read_saved_token_for(None) {
-        Some(_) if auth::agent_key::is_agent_key_profile(None) => {
-            let detail = auth::agent_key::read_metadata(None)
+    match auth::read_saved_token_for(profile) {
+        Some(_) if auth::agent_key::is_agent_key_profile(profile) => {
+            let detail = auth::agent_key::read_metadata(profile)
                 .map(|identity| auth::agent_key::format_identity(&identity))
                 .unwrap_or_else(|| "Authentication: Agent Key".into());
             rows.push(row("Login state", detail, DoctorStatus::Pass));
@@ -534,6 +712,46 @@ mod tests {
         assert!(rendered.contains("!"));
         assert!(rendered.contains("✗"));
         assert!(report.has_failures());
+    }
+
+    #[test]
+    fn report_diagnostics_nest_under_rows_without_changing_shared_text() {
+        let mut diagnostic = crate::net_diagnostics::Diagnostic::new(
+            crate::net_diagnostics::Stage::Response,
+            Some("https://example.com/health"),
+            Some(503),
+            "service unavailable",
+        );
+        diagnostic.causes.push("second cause".into());
+        let mut health = row("Health", "network check failed", DoctorStatus::Fail);
+        health.diagnostic = Some(diagnostic.clone());
+        let report = DoctorReport {
+            sections: vec![DoctorSection {
+                title: "NyxID API".into(),
+                rows: vec![health],
+            }],
+        };
+        let text = format_report(&report);
+        let lines: Vec<_> = text.lines().collect();
+        assert_eq!(lines[2], "  NyxID API");
+        assert!(lines[3].starts_with("    Health"));
+        assert_eq!(
+            &lines[4..],
+            [
+                "      stage: response",
+                "      status: 503",
+                "      endpoint: https://example.com/health",
+                "      cause: service unavailable",
+                "      cause: second cause",
+                "      hint: Check the requested endpoint and the service status, then retry.",
+            ]
+        );
+        let shared_text = diagnostic.text();
+        assert!(
+            shared_text
+                .lines()
+                .all(|line| line.starts_with("  ") && !line.starts_with("   "))
+        );
     }
 
     #[test]
@@ -713,5 +931,138 @@ mod command_tests {
         assert_eq!(human_age(now - Duration::minutes(2)), "2 minutes ago");
         // Sub-minute elapsed falls through to "just now".
         assert_eq!(human_age(now - Duration::seconds(10)), "just now");
+    }
+}
+
+#[cfg(test)]
+mod network_tests {
+    use super::*;
+    use crate::net_diagnostics::Stage;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+
+    fn client() -> reqwest::Client {
+        crate::tls::client_builder()
+            .unwrap()
+            .no_proxy()
+            .build()
+            .unwrap()
+    }
+    fn formats(section: DoctorSection) -> [String; 2] {
+        let report = DoctorReport {
+            sections: vec![section],
+        };
+        [
+            serde_json::to_string(&report).unwrap(),
+            format_report(&report),
+        ]
+    }
+
+    #[tokio::test]
+    async fn nyxid_health_reports_success_and_non_success_statuses_safely() {
+        for status in [200, 403, 503] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/health"))
+                .respond_with(ResponseTemplate::new(status).set_body_string("SERVER_SECRET"))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let base = server
+                .uri()
+                .replacen("http://", "http://user:USER_SECRET@", 1)
+                + "?QUERY_SECRET#FRAGMENT_SECRET";
+            let section = nyxid_api_section(&base, Ok(client())).await;
+            assert_eq!(section.title, "NyxID API");
+            if status == 200 {
+                assert_eq!(section.rows[0].status, DoctorStatus::Pass);
+                assert!(section.rows[0].detail.contains("HTTP 200"));
+            } else {
+                let diagnostic = section.rows[0].diagnostic.as_ref().unwrap();
+                assert_eq!(diagnostic.stage, Stage::Response);
+                assert_eq!(diagnostic.http_status, Some(status));
+                assert!(diagnostic.hint.contains("--base-url"));
+            }
+            for text in formats(section) {
+                assert!(text.contains(&format!("{}/health", server.uri())));
+                for secret in [
+                    "USER_SECRET",
+                    "QUERY_SECRET",
+                    "FRAGMENT_SECRET",
+                    "SERVER_SECRET",
+                    "user:",
+                ] {
+                    assert!(!text.contains(secret), "{text}");
+                }
+            }
+            let request = &server.received_requests().await.unwrap()[0];
+            assert!(request.url.query().is_none());
+            assert!(!request.headers.contains_key("authorization"));
+        }
+    }
+
+    #[tokio::test]
+    async fn nyxid_health_classifies_refused_connection_and_untrusted_tls() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let section = nyxid_api_section(&format!("http://{address}"), Ok(client())).await;
+        assert_eq!(
+            section.rows[0].diagnostic.as_ref().unwrap().stage,
+            Stage::Connect
+        );
+        let server = crate::tls::tests::Server::start("localhost", false).await;
+        let section = nyxid_api_section(
+            &server.url(),
+            Ok(crate::tls::tests::client(&crate::tls::tests::configured(
+                None,
+            ))),
+        )
+        .await;
+        assert_eq!(
+            section.rows[0].diagnostic.as_ref().unwrap().stage,
+            Stage::Tls
+        );
+        for text in formats(section) {
+            assert!(text.contains("NYXID_CA_CERT"));
+        }
+    }
+
+    #[test]
+    fn nyxid_health_base_url_prefers_explicit_then_saved_then_default() {
+        assert_eq!(
+            selected_base_url(
+                Some("https://explicit.example"),
+                Some("https://saved.example".into())
+            ),
+            "https://explicit.example"
+        );
+        assert_eq!(
+            selected_base_url(None, Some("https://saved.example".into())),
+            "https://saved.example"
+        );
+        assert_eq!(selected_base_url(None, None), auth::DEFAULT_LOGIN_BASE_URL);
+    }
+
+    #[test]
+    fn github_response_rows_use_github_hints_in_both_formats() {
+        let section = DoctorSection {
+            title: "GitHub Releases".into(),
+            rows: vec![github_failure(
+                "API reachable",
+                crate::net_diagnostics::Diagnostic::new(
+                    Stage::Response,
+                    Some("https://api.github.com/releases"),
+                    Some(403),
+                    "GitHub returned a non-success status",
+                ),
+            )],
+        };
+        for text in formats(section) {
+            assert!(text.contains("GitHub API status and rate limits"));
+            assert!(!text.contains("--base-url"));
+        }
     }
 }

@@ -1,3 +1,5 @@
+import { parseAutomationSearch } from "@/lib/automation-search";
+import { AutomationsPage } from "@/pages/automations";
 import { ChannelConnectLinkPage } from "@/pages/channel-connect-link";
 import { AdminOwnershipPage } from "@/pages/admin-ownership";
 import { normalizeAdminUsageSearch } from "@/schemas/admin-usage";
@@ -653,6 +655,13 @@ const developerAppDetailRoute = createRoute({
   component: DeveloperAppDetailPage,
 });
 
+const automationsRoute = createRoute({
+  path: "/automations",
+  getParentRoute: () => dashboardLayout,
+  validateSearch: parseAutomationSearch,
+  component: AutomationsPage,
+});
+
 const triggersRoute = createRoute({
   path: "/triggers",
   getParentRoute: () => dashboardLayout,
@@ -1136,6 +1145,7 @@ const routeTree = rootRoute.addChildren([
     developerAppsRoute,
     developerAppDetailRoute,
     triggersRoute,
+    automationsRoute,
     integrationGuideRoute,
     aiSetupRoute,
     notificationSettingsRoute,

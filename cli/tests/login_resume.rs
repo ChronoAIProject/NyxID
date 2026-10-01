@@ -74,26 +74,82 @@ fn output_json(output: &Output) -> Value {
 
 #[tokio::test]
 async fn in_flight_account_request_never_retries_credentials_from_a_replaced_login() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
     for same_instance in [false, true] {
-        let first = MockServer::start().await;
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let reads = Arc::new(AtomicUsize::new(0));
+        let refreshes = Arc::new(AtomicUsize::new(0));
+        let logins = Arc::new(AtomicUsize::new(0));
+        let router = axum::Router::new()
+            .route(
+                "/api/v1/auth/login-code/redeem",
+                axum::routing::post({
+                    let logins = logins.clone();
+                    move |axum::Json(body): axum::Json<Value>| async move {
+                        logins.fetch_add(1, Ordering::SeqCst);
+                        let token = match body["code"].as_str().unwrap() {
+                            "AAAA-BBBB" => "fixture-original-token",
+                            "CCCC-DDDD" => "fixture-replacement-token",
+                            _ => panic!("unexpected login code"),
+                        };
+                        axum::Json(json!({"auth_kind":"account_session",
+                            "access_token":token,"refresh_token":format!("{token}-refresh")}))
+                    }
+                }),
+            )
+            .route(
+                "/api/v1/users/me",
+                axum::routing::get({
+                    let started = started.clone();
+                    let release = release.clone();
+                    let reads = reads.clone();
+                    move || async move {
+                        reads.fetch_add(1, Ordering::SeqCst);
+                        started.notify_one();
+                        // Return the stale 401 only after the replacement login is durable.
+                        // A fixed delay races process startup and native CA loading.
+                        release.notified().await;
+                        axum::http::StatusCode::UNAUTHORIZED
+                    }
+                }),
+            )
+            .route(
+                "/api/v1/auth/refresh",
+                axum::routing::post({
+                    let refreshes = refreshes.clone();
+                    move || async move {
+                        refreshes.fetch_add(1, Ordering::SeqCst);
+                        axum::http::StatusCode::UNAUTHORIZED
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let first = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         let other = MockServer::start().await;
-        let second = if same_instance { &first } else { &other };
-        let home = tempfile::tempdir().unwrap();
-        for (server, code, token) in [
-            (&first, "AAAA-BBBB", "fixture-original-token"),
-            (second, "CCCC-DDDD", "fixture-replacement-token"),
-        ] {
+        let second = if same_instance {
+            first.clone()
+        } else {
+            other.uri()
+        };
+        if !same_instance {
             Mock::given(method("POST"))
                 .and(path("/api/v1/auth/login-code/redeem"))
-                .and(body_partial_json(json!({"code":code})))
-                .respond_with(
-                    ResponseTemplate::new(200).set_body_json(json!({"auth_kind":"account_session",
-                    "access_token":token,"refresh_token":format!("{token}-refresh")})),
-                )
+                .and(body_partial_json(json!({"code":"CCCC-DDDD"})))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "auth_kind":"account_session", "access_token":"fixture-replacement-token",
+                    "refresh_token":"fixture-replacement-token-refresh"
+                })))
                 .expect(1)
-                .mount(server)
+                .mount(&other)
                 .await;
         }
+        let home = tempfile::tempdir().unwrap();
         let login = run(
             home.path(),
             &[
@@ -101,39 +157,18 @@ async fn in_flight_account_request_never_retries_credentials_from_a_replaced_log
                 "--code",
                 "AAAA-BBBB",
                 "--base-url",
-                &first.uri(),
+                &first,
                 "--output",
                 "json",
             ],
         )
         .await;
         assert!(login.status.success());
-        Mock::given(method("GET"))
-            .and(path("/api/v1/users/me"))
-            .respond_with(
-                ResponseTemplate::new(401).set_delay(std::time::Duration::from_millis(750)),
-            )
-            .expect(1)
-            .mount(&first)
-            .await;
         let request = run(home.path(), &["whoami", "--output", "json"]);
         let replace = async {
-            tokio::time::timeout(std::time::Duration::from_secs(3), async {
-                loop {
-                    if first
-                        .received_requests()
-                        .await
-                        .unwrap()
-                        .iter()
-                        .any(|request| request.url.path() == "/api/v1/users/me")
-                    {
-                        break;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(10), started.notified())
+                .await
+                .unwrap();
             let login = run(
                 home.path(),
                 &[
@@ -141,33 +176,28 @@ async fn in_flight_account_request_never_retries_credentials_from_a_replaced_log
                     "--code",
                     "CCCC-DDDD",
                     "--base-url",
-                    &second.uri(),
+                    &second,
                     "--output",
                     "json",
                 ],
             )
             .await;
             assert!(login.status.success());
+            release.notify_one();
         };
         let (request, ()) = tokio::join!(request, replace);
         assert!(!request.status.success());
-        let requests = first.received_requests().await.unwrap();
-        assert!(
-            !requests
-                .iter()
-                .any(|r| r.url.path().ends_with("/auth/refresh"))
-        );
+        assert_eq!(refreshes.load(Ordering::SeqCst), 0);
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
         assert_eq!(
-            requests
-                .iter()
-                .filter(|r| r.url.path() == "/api/v1/users/me")
-                .count(),
-            1
+            logins.load(Ordering::SeqCst),
+            if same_instance { 2 } else { 1 }
         );
         assert_eq!(
             std::fs::read_to_string(home.path().join(".nyxid/access_token")).unwrap(),
             "fixture-replacement-token"
         );
+        server.abort();
     }
 }
 

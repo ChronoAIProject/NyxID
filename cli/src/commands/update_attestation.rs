@@ -17,6 +17,8 @@ use x509_cert::ext::pkix::name::GeneralName;
 use x509_cert::ext::pkix::sct::{HashAlgorithm, SignatureAlgorithm, SignedCertificateTimestamp};
 use x509_cert::ext::pkix::{SignedCertificateTimestampList, SubjectAltName};
 
+mod trust;
+
 const GITHUB_API_URL: &str = "https://api.github.com";
 const MAX_ATTESTATIONS: usize = 30;
 
@@ -37,7 +39,7 @@ pub(crate) async fn verify_release_attestation(
         anyhow::bail!("No GitHub artifact attestations found for sha256:{expected_digest}");
     }
 
-    let trust_root = SigstoreTrustRoot::new(None)
+    let trust_root = trust::load()
         .await
         .context("Failed to load Sigstore public-good trust root")?;
     let mut failures = Vec::new();

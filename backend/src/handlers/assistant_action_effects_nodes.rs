@@ -2006,6 +2006,7 @@ mod tests {
             &crate::services::node_ws_manager::NodeCapabilitiesMsg {
                 http_signature_v2: false,
                 proxy_upload_v1: false,
+                http_cancellation: false,
                 remote_credential_crypto_v1: true,
                 ..Default::default()
             },

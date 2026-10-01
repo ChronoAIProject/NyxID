@@ -1,3 +1,4 @@
+import { Link } from "@tanstack/react-router";
 import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
@@ -100,6 +101,7 @@ function titleCase(value: string): string {
 }
 
 function deliveryLabel(trigger: TriggerResponse): string {
+  if (trigger.delivery.type === "assistant") return "NyxBot / specialist";
   return trigger.delivery.type === "agent"
     ? "Agent"
     : trigger.delivery.type === "webhook"
@@ -108,6 +110,7 @@ function deliveryLabel(trigger: TriggerResponse): string {
 }
 
 function verificationLabel(trigger: TriggerResponse): string {
+  if (trigger.verification.mode === "schedule") return "Scheduled";
   if (trigger.verification.mode === "hmac_sha256") return "HMAC-SHA256";
   return trigger.verification.location === "bearer"
     ? "Bearer token"
@@ -202,7 +205,7 @@ function TriggerDetail({
               />
               <DetailRow
                 label="Inbound URL"
-                value={trigger.inbound_url}
+                value={trigger.inbound_url ?? "No inbound URL"}
                 copyable
                 mono
               />
@@ -249,8 +252,8 @@ function TriggerCreateDialog({
         buildCreateTriggerRequest(values),
       );
       const oneTimeValues: OneTimeSecretValue[] = [
-        { label: "Inbound URL", value: created.trigger.inbound_url },
-        { label: "Inbound Secret", value: created.secret },
+        { label: "Inbound URL", value: created.trigger.inbound_url ?? "" },
+        { label: "Inbound Secret", value: created.secret ?? "" },
       ];
       if (created.delivery_signing_secret) {
         oneTimeValues.push({
@@ -439,7 +442,10 @@ export function TriggersPage() {
   const [secretValues, setSecretValues] = useState<
     readonly OneTimeSecretValue[]
   >([]);
-  const triggers = triggersQuery.data?.triggers ?? [];
+  const triggers =
+    triggersQuery.data?.triggers.filter(
+      (trigger) => trigger.source !== "schedule",
+    ) ?? [];
 
   function reveal(title: string, values: readonly OneTimeSecretValue[]) {
     setSecretTitle(title);
@@ -506,10 +512,15 @@ export function TriggersPage() {
         title="Triggers"
         description="Relay verified inbound events to agents, webhooks, or notifications."
         actions={
-          <AddCtaButton
-            label="Create Trigger"
-            onClick={() => setCreateOpen(true)}
-          />
+          <>
+            <Link to="/automations" className="text-[12px] text-primary underline">
+              Automations
+            </Link>
+            <AddCtaButton
+              label="Create Trigger"
+              onClick={() => setCreateOpen(true)}
+            />
+          </>
         }
       />
 

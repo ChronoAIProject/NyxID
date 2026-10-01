@@ -34,6 +34,8 @@ pub struct AuthorizationCode {
     #[serde(default)]
     pub resource_uris: Vec<String>,
     #[serde(default)]
+    pub incremental_consent: Option<crate::models::consent::IncrementalConsent>,
+    #[serde(default)]
     pub allowed_service_ids: Vec<String>,
     #[serde(default = "default_allow_all_services")]
     pub allow_all_services: bool,
@@ -122,6 +124,7 @@ mod tests {
     #[test]
     fn bson_roundtrip() {
         let code = AuthorizationCode {
+            incremental_consent: None,
             id: uuid::Uuid::new_v4().to_string(),
             code_hash: "hash123".to_string(),
             client_id: "default-client".to_string(),
@@ -159,6 +162,7 @@ mod tests {
     #[test]
     fn bson_roundtrip_no_pkce() {
         let code = AuthorizationCode {
+            incremental_consent: None,
             id: uuid::Uuid::new_v4().to_string(),
             code_hash: "hash123".to_string(),
             client_id: "default-client".to_string(),

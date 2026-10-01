@@ -303,11 +303,12 @@ impl ReportedLlmUsageAccumulator {
     }
 
     pub fn finalize(self) -> Option<ReportedLlmUsage> {
-        let total_tokens = if self.total_tokens > 0 {
-            self.total_tokens
-        } else {
-            self.prompt_tokens.saturating_add(self.completion_tokens)
-        };
+        // Native streams may report input and output in separate snapshots.
+        // Preserve larger explicit totals (e.g. reasoning tokens), but never
+        // lose a class that arrived in a different snapshot.
+        let total_tokens = self
+            .total_tokens
+            .max(self.prompt_tokens.saturating_add(self.completion_tokens));
 
         let usage = ReportedLlmUsage {
             prompt_tokens: self.prompt_tokens,
@@ -337,6 +338,13 @@ pub fn token_quantity_or_estimate(usage: Option<&ReportedLlmUsage>, fallback_byt
             (usage.total_tokens > 0).then_some(usage.total_tokens.min(i64::MAX as u64) as i64)
         })
         .unwrap_or_else(|| estimate_tokens_from_bytes(fallback_bytes))
+}
+
+pub fn service_supports_stream_options_include_usage(service_slug: &str) -> bool {
+    matches!(
+        service_slug,
+        "llm-openai" | "llm-deepseek" | "llm-xai" | "chrono-llm" | "chrono-llm-public"
+    )
 }
 
 pub fn force_stream_options_include_usage(body: &mut serde_json::Value) -> bool {
@@ -558,45 +566,17 @@ pub fn extract_reported_usage_for_path(
 /// response capture. Oversized events are discarded through their separator.
 #[derive(Default)]
 pub struct BoundedUsageEvents {
-    buffer: Vec<u8>,
-    discarding: bool,
-    line_empty: bool,
+    decoder: super::sse_parser::BoundedEventDecoder,
     accumulator: ReportedLlmUsageAccumulator,
 }
 impl BoundedUsageEvents {
     pub fn push(&mut self, bytes: &[u8]) {
         for &byte in bytes {
-            if self.discarding {
-                if byte == b'\n' {
-                    if self.line_empty {
-                        self.discarding = false;
-                        self.line_empty = false;
-                    } else {
-                        self.line_empty = true;
-                    }
-                } else if byte != b'\r' {
-                    self.line_empty = false;
-                }
-                continue;
-            }
-            self.buffer.push(byte);
-            if self.buffer.ends_with(b"\n\n") || self.buffer.ends_with(b"\r\n\r\n") {
-                // The shared parser consumes LF separators. Normalize complete
-                // CRLF events only after enforcing this observer's byte limit.
-                let mut text = String::from_utf8_lossy(&self.buffer).replace("\r\n", "\n");
-                if let Some(event) = super::sse_parser::parse_next_event(&mut text)
-                    && let Some((usage, mode)) = extract_reported_usage_from_sse_event(
-                        event.event_type.as_deref(),
-                        &event.data,
-                    )
-                {
-                    self.accumulator.observe(usage, mode);
-                }
-                self.buffer.clear();
-            } else if self.buffer.len() >= 512 * 1024 {
-                self.buffer.clear();
-                self.discarding = true;
-                self.line_empty = byte == b'\n';
+            if let Some(Ok(event)) = self.decoder.push_byte(byte)
+                && let Some((usage, mode)) =
+                    extract_reported_usage_from_sse_event(event.event_type.as_deref(), &event.data)
+            {
+                self.accumulator.observe(usage, mode);
             }
         }
     }
@@ -752,6 +732,78 @@ mod tests {
         extract_reported_usage, extract_reported_usage_from_sse_event,
         force_stream_options_include_usage, token_quantity_or_estimate,
     };
+
+    #[test]
+    fn pool_native_usage_preserves_cr_only_and_split_utf8_frames() {
+        for (ending, separator) in [
+            ("\r", "\r\r"),
+            ("\n", "\n\n"),
+            ("\r\n", "\r\n\r\n"),
+            ("\n", "\n\r"),
+            ("\r", "\r\n\r"),
+        ] {
+            let native = format!(
+                "event: message_start{ending}data: {{\"type\":\"message_start\",\"message\":{{\"model\":\"你好\",\"usage\":{{\"input_tokens\":7,\"cache_read_input_tokens\":3,\"cache_creation_input_tokens\":2}}}}}}{separator}event: message_delta{ending}data: {{\"type\":\"message_delta\",\"usage\":{{\"output_tokens\":4}}}}{separator}"
+            );
+            let mut observer = super::BoundedUsageEvents::default();
+            for byte in native.as_bytes() {
+                observer.push(&[*byte]);
+            }
+            let usage = observer.finalize().expect("native reported usage");
+            assert_eq!(
+                (
+                    usage.prompt_tokens,
+                    usage.completion_tokens,
+                    usage.cached_tokens,
+                    usage.cache_creation_tokens,
+                    usage.total_tokens
+                ),
+                (7, 4, 3, 2, 11)
+            );
+            let priced = super::platform_usage(Some(&usage), 0, false);
+            assert_eq!(
+                (
+                    priced.input_tokens,
+                    priced.output_tokens,
+                    priced.cache_read_tokens,
+                    priced.cache_write_tokens,
+                    priced.tokens
+                ),
+                (7, 4, 3, 2, 11)
+            );
+            assert_eq!(priced.token_breakdown, Some(usage.token_breakdown()));
+        }
+    }
+
+    #[test]
+    fn partial_usage_snapshots_include_all_classes_and_preserve_larger_provider_total() {
+        for explicit_total in [0, 50] {
+            let mut accumulator = ReportedLlmUsageAccumulator::default();
+            for value in [
+                serde_json::json!({"usage":{"input_tokens":7}}),
+                serde_json::json!({"usage":{"output_tokens":4}}),
+            ] {
+                accumulator.observe_snapshot(extract_reported_usage(&value).unwrap());
+            }
+            if explicit_total > 0 {
+                accumulator.observe_snapshot(
+                    extract_reported_usage(
+                        &serde_json::json!({"usage":{"total_tokens":explicit_total}}),
+                    )
+                    .unwrap(),
+                );
+            }
+            let usage = accumulator.finalize().unwrap();
+            assert_eq!(
+                (
+                    usage.prompt_tokens,
+                    usage.completion_tokens,
+                    usage.total_tokens
+                ),
+                (7, 4, explicit_total.max(11))
+            );
+        }
+    }
 
     #[test]
     fn provider_token_counts_accept_floats_and_preserve_integer_precision() {

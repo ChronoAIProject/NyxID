@@ -1208,3 +1208,25 @@ Admin routes under the admin router:
 - All node management operations are audit-logged
 - Proxy requests routed through nodes include `routed_via: "node"` and `node_id` in audit data
 - Node connection/disconnection events are logged
+
+## HTTP cancellation for priority service pools
+
+The CLI advertises `http_cancellation` in its live node capabilities. Priority
+pools require that capability on eligible selected/fallback node routes; discovery
+reports `node_upgrade_required` until the agent is upgraded and reconnected.
+Catalog master/platform credentials continue to use server transport and ignore
+legacy owner-node bindings. Legacy round-robin/weighted pools retain their existing
+transport eligibility.
+
+The backend owns a pending guard from dispatch through response completion.
+Header timeout (including the manager's own timeout), request/response drop,
+stream overflow and connection loss terminate correlation and send `proxy_cancel`
+when the connection remains writable. Stream receivers own their cancellation
+guard; no observer retains a sender that could keep a terminated stream alive.
+Normal End disarms cancellation. Remote dispatch retains the owner/session fence
+and propagates cancellation to the owner. The CLI tracks HTTP tasks by request ID
+and aborts the provider request on `proxy_cancel` or connection shutdown.
+
+See [Service pool routing architecture](SERVICE_POOL_ROUTING_PROOF.md) for the
+attempt deadlines, replay evidence and durable accounting that depend on this
+transport lifecycle.

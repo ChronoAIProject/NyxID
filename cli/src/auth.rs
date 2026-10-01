@@ -21,7 +21,7 @@ pub mod login_hints;
 /// was never associated with a saved base URL. Mirrors the `LoginArgs::base_url`
 /// clap default in `cli.rs`; kept in sync so the prompt path and the explicit
 /// `nyxid login` command target the same server by default.
-const DEFAULT_LOGIN_BASE_URL: &str = "https://nyx-api.chrono-ai.fun";
+pub(crate) const DEFAULT_LOGIN_BASE_URL: &str = "https://nyx-api.chrono-ai.fun";
 
 /// Clock-skew cushion: an access token is treated as still usable only if it
 /// has more than this many seconds of validity left. Small on purpose -- the

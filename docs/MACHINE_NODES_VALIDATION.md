@@ -1,5 +1,8 @@
 # Machine nodes: implementation and validation
 
+This report preserves the implementation and round-1 measurements. For the
+subsequent merge with 0.39.0 main, see [merged-tree validation](MACHINE_NODES_MERGE_VALIDATION.md).
+
 This records the implementation on `nyxbot/machine-nodes`, based on `fa96a28a`,
 without changing the repository's 0.38.1 version. The binding design is
 [MACHINE_NODES.md](MACHINE_NODES.md); operator instructions are in

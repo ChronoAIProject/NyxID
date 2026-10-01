@@ -73,6 +73,8 @@ pub struct NodeMetrics {
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub struct NodeConnectionOwner {
     #[serde(default, skip_serializing_if = "is_false")]
+    pub http_cancellation: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
     pub http_signature_v2: bool,
     #[serde(default)]
     pub proxy_upload_v1: bool,
@@ -104,6 +106,7 @@ impl fmt::Debug for NodeConnectionOwner {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("NodeConnectionOwner")
             .field("http_signature_v2", &self.http_signature_v2)
+            .field("http_cancellation", &self.http_cancellation)
             .field("instance_name", &self.instance_name)
             .field("generation_id", &self.generation_id)
             .field("connection_id", &self.connection_id)
@@ -303,6 +306,7 @@ mod tests {
         let owner = NodeConnectionOwner {
             http_signature_v2: false,
             proxy_upload_v1: false,
+            http_cancellation: false,
             instance_name: "backend-0".to_string(),
             generation_id: uuid::Uuid::new_v4().to_string(),
             connection_id: uuid::Uuid::new_v4().to_string(),

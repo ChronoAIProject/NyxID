@@ -179,7 +179,7 @@ pub fn schema(name: &str) -> Value {
         }
         _ => {}
     }
-    if destructive(name) {
+    if !read_only(name) {
         add("acknowledgement_id", string, false);
     }
     json!({"type": "object", "properties": props, "required": required, "additionalProperties": false})
@@ -558,7 +558,24 @@ impl AccountTools<'_> {
                 permission_request: request,
             });
         }
+        if let Some(refusal) = acks::webhook_action_gate(
+            self.db,
+            chat,
+            tool_name,
+            args,
+            read_only(name),
+            destructive(name),
+        )
+        .await?
+        {
+            return Ok(ToolResult {
+                permission_request: None,
+                value: refusal,
+                is_error: true,
+            });
+        }
         if destructive(name)
+            && chat.confirmation_policy.is_none()
             && !super::assistant_settings_service::get(self.db, &chat.user_id)
                 .await?
                 .skip_destructive_confirmation

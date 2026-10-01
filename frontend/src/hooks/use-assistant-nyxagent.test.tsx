@@ -308,40 +308,69 @@ it("sends one continuation after a turn settles for cards allowed while it ran, 
   }, 8000,
 );
 
-it("never sends a continuation for a specialist's request routed to NyxBot", async () => {
-  page.conversation.active_turn = null;
-  page.conversation.pending_acknowledgements = 1;
-  page.acknowledgements = [{
-    id: "12345678-1234-4123-8123-123456789012",
-    kind: "service", status: "pending", summary: "Use GitHub",
-    decider: "orchestrator", decided_by: null, reason: null,
-    service_slug: "github", service_name: "GitHub", tool_name: null,
-    created_at: "2026-09-17T00:00:00Z", decided_at: null,
-    expires_at: "2026-09-17T00:15:00Z",
-  }];
-  const { result, unmount } = renderHook(() => useNyxAgentAssistantChat({
-    selectedConversationId: id, onConversationAdopted: vi.fn(),
-  }), { wrapper });
-  await waitFor(() => expect(result.current.acknowledgements).toHaveLength(1));
-  const send = vi.spyOn(nyxAgentTransport, "send").mockResolvedValue(undefined);
-  vi.spyOn(nyxAgentTransport, "decide").mockImplementation(async () => {
-    page.acknowledgements[0] = {
-      ...page.acknowledgements[0]!, status: "allowed", decided_by: "user",
-    };
-    return page.acknowledgements[0];
-  });
-  const reads = () => requests.filter((r) => r.startsWith(`GET /assistant/nyxagent/conversations/${id}?`)).length;
-  const before = reads();
-  await act(() => result.current.decideAcknowledgement({
-    id: page.acknowledgements[0]!.id, choice: "allow",
-  }));
-  // The server resumes the subagent itself; the page only refreshes history.
-  await waitFor(() => expect(reads()).toBeGreaterThan(before));
-  await new Promise((resolve) => setTimeout(resolve, 50));
-  expect(send).not.toHaveBeenCalled();
-  unmount();
-});
-
+it.each(["specialist", "automation"])(
+  "leaves %s confirmation continuation to the server",
+  async (kind) => {
+    page.conversation.active_turn = null;
+    page.conversation.pending_acknowledgements = 1;
+    page.acknowledgements = [
+      {
+        id: "12345678-1234-4123-8123-123456789012",
+        kind: "service",
+        status: "pending",
+        summary: "Use GitHub",
+        decider: kind === "specialist" ? "orchestrator" : "user",
+        trigger_run_id: kind === "automation" ? "run-id" : null,
+        decided_by: null,
+        reason: null,
+        service_slug: "github",
+        service_name: "GitHub",
+        tool_name: null,
+        created_at: "2026-09-17T00:00:00Z",
+        decided_at: null,
+        expires_at: "2026-09-17T00:15:00Z",
+      },
+    ];
+    const { result, unmount } = renderHook(
+      () =>
+        useNyxAgentAssistantChat({
+          selectedConversationId: id,
+          onConversationAdopted: vi.fn(),
+        }),
+      { wrapper },
+    );
+    await waitFor(() =>
+      expect(result.current.acknowledgements).toHaveLength(1),
+    );
+    const send = vi
+      .spyOn(nyxAgentTransport, "send")
+      .mockResolvedValue(undefined);
+    vi.spyOn(nyxAgentTransport, "decide").mockImplementation(async () => {
+      page.acknowledgements[0] = {
+        ...page.acknowledgements[0]!,
+        status: "allowed",
+        decided_by: "user",
+      };
+      return page.acknowledgements[0];
+    });
+    const reads = () =>
+      requests.filter((r) =>
+        r.startsWith(`GET /assistant/nyxagent/conversations/${id}?`),
+      ).length;
+    const before = reads();
+    await act(() =>
+      result.current.decideAcknowledgement({
+        id: page.acknowledgements[0]!.id,
+        choice: "allow",
+      }),
+    );
+    // The server resumes the subagent itself; the page only refreshes history.
+    await waitFor(() => expect(reads()).toBeGreaterThan(before));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(send).not.toHaveBeenCalled();
+    unmount();
+  },
+);
 it("polls a thread whose agent NyxID set to work, without a turn of its own", async () => {
   const specialist = `nyxa-${"b".repeat(32)}`;
   page.conversation.active_turn = null;

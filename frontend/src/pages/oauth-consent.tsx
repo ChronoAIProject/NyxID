@@ -1,3 +1,4 @@
+import { useQuery } from "@tanstack/react-query";
 import {
   useCallback,
   useLayoutEffect,
@@ -29,8 +30,14 @@ import { NyxidIcon } from "@/components/brand/nyxid-icon";
 import { DetailRow } from "@/components/shared/detail-row";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { useUserServices } from "@/hooks/use-user-services";
-import { oauthConsentServiceAccessSchema } from "@/schemas/oauth-consent";
+import { api } from "@/lib/api-client";
+import {
+  oauthConsentServiceAccessSchema,
+  readIncrementalConsentRequest,
+} from "@/schemas/oauth-consent";
 import { useAuthStore } from "@/stores/auth-store";
+
+import { OAuthIncrementalConsentPage } from "./oauth-incremental-consent";
 
 // Paint the canvas because public pages leave a dark body anti-flash color.
 function ConsentShell({
@@ -124,6 +131,52 @@ function serviceOrgName(service: ConsentServiceDisplay): string | null {
     : null;
 }
 
+export function OAuthConsentPage({
+  preview,
+}: {
+  readonly preview?: ConsentPreview;
+} = {}) {
+  const [requestHandle] = useState(() =>
+    new URLSearchParams(window.location.search).get("consent_request_id"),
+  );
+  const [incremental] = useState(() =>
+    readIncrementalConsentRequest(new URLSearchParams(window.location.search)),
+  );
+  if (requestHandle) return <StoredIncrementalConsent handle={requestHandle} />;
+  if (incremental) return <OAuthIncrementalConsentPage {...incremental} />;
+  return <StandardConsentPage preview={preview} />;
+}
+
+function StoredIncrementalConsent({ handle }: { readonly handle: string }) {
+  const { data, isPending, isError } = useQuery({
+    queryKey: ["oauth-consent-request", handle],
+    queryFn: () =>
+      api.get<{ token: string }>(
+        `/users/me/oauth-consent-requests/${encodeURIComponent(handle)}`,
+      ),
+    retry: false,
+  });
+  if (isPending || isError) {
+    return (
+      <main className="mx-auto flex min-h-dvh max-w-xl items-center px-4">
+        {isPending ? (
+          <p role="status">Loading authorization request...</p>
+        ) : (
+          <ErrorBanner message="This authorization request is unavailable. Return to the application and try again." />
+        )}
+      </main>
+    );
+  }
+  const parsed = readIncrementalConsentRequest(
+    new URLSearchParams({ consent_request: data.token }),
+  );
+  return parsed ? (
+    <OAuthIncrementalConsentPage {...parsed} />
+  ) : (
+    <OAuthIncrementalConsentPage error="Invalid consent request. Please restart authorization." />
+  );
+}
+
 function ScopeIcon({ scope }: { readonly scope: string }) {
   const Icon =
     scope === "openid"
@@ -198,7 +251,7 @@ function ServiceScrollList({
   );
 }
 
-export function OAuthConsentPage({
+function StandardConsentPage({
   preview,
 }: {
   readonly preview?: ConsentPreview;

@@ -924,3 +924,27 @@ This document describes what shipped. Also update:
   style and comment density.
 - When a decision here is impossible or clearly wrong on contact with the code,
   stop and explain it in your report; do not silently diverge.
+
+## Integration with NyxBot automations and service pools
+
+Machine tools in scheduled turns retain the same live machine/login grants,
+owner-control lockout and `machine_confirm` rules as owner-initiated turns.
+Webhook turns add their per-run confirmation policy. One exact-argument,
+one-use owner action card satisfies both policies when both require approval.
+Exec, file writes/attachment saves, job cancellation and changing computer
+input are destructive because they can overwrite data or interrupt arbitrary
+work. Saved-login filling and requesting owner control are changing, but not
+destructive: they are restricted field insertion or an owner handoff rather
+than arbitrary execution. Machine listing, saved-login metadata, file listing,
+file reads and job status pass the webhook read-only gate; machine-level `all`
+confirmation still applies to operations as configured. Both direct native
+calls and `nyx__call_tool` use these checks. Guests and developer OAuth tokens
+cannot use machine tools or the human desktop/control routes.
+
+Machine gateway declarations bind exact connected services. A pool slug is not
+a machine service declaration, and a machine gateway upload cannot enter a
+pool or retry on another credential node. Normal proxy pool priority/AI routing
+and failover remain available to their existing callers. Streamed uploads use
+the shared HTTP cancellation path, including after their request body finishes.
+
+Merged-tree verification is recorded in [MACHINE_NODES_MERGE_VALIDATION.md](MACHINE_NODES_MERGE_VALIDATION.md).

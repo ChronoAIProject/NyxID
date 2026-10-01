@@ -82,8 +82,9 @@ fn admin_node_info_from_model(
             is_connected: true,
             capabilities_resolved: owner.capabilities_resolved,
             capabilities: NodeCapabilitiesFlags {
-                http_signature_v2: false,
-                proxy_upload_v1: false,
+                http_signature_v2: owner.http_signature_v2,
+                proxy_upload_v1: owner.proxy_upload_v1,
+                http_cancellation: owner.http_cancellation,
                 credential_ack_correlation: owner.credential_ack_correlation,
                 remote_credential_crypto_v1: owner.remote_credential_crypto_v1,
                 proxy_max_body_size: owner.proxy_max_body_size,

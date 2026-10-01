@@ -49,6 +49,12 @@ nyxid node daemon logs --follow
 
 `daemon install` creates a launchd LaunchAgent on macOS or a systemd user unit on Linux. To run more than one node on a single machine, pass `--profile <name>` to every node command — each profile gets its own config directory and service label. There is also a `nyxid node docker` family if you'd rather run the agent in a container.
 
+For private CAs, set `NYXID_CA_CERT`, `SSL_CERT_FILE`, or `SSL_CERT_DIR` before
+installing the daemon or running `nyxid node docker start`/`restart`. Docker commands
+validate and mount CA sources read-only using container-local paths; they do not
+forward proxy variables. See [Network, proxies and TLS](/docs/cli/guides/network#background-node-services-and-automatic-updates)
+for persistence, mount paths, and permissions.
+
 ## 4. Store the credential on the node
 
 The secret lives only on the node — NyxID never sees it. Add it locally, keyed by service slug:

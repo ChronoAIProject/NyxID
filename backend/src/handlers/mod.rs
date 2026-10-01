@@ -64,7 +64,7 @@ pub mod keys;
 pub mod llm_gateway;
 pub mod llms_txt;
 pub mod login_approval;
-mod login_client_context;
+pub(crate) mod login_client_context;
 pub mod login_code;
 pub mod mcp;
 pub mod mcp_transport;
@@ -92,7 +92,13 @@ pub mod runtime_config;
 pub mod service_account_key_reads;
 #[cfg(test)]
 mod service_account_key_reads_tests;
+#[cfg(test)]
+mod service_pool_ai_tests;
+#[cfg(test)]
+mod service_pool_proxy_tests;
 pub mod service_pools_handler;
+#[cfg(test)]
+mod service_pools_tests;
 pub mod service_requirements;
 pub mod services;
 pub(crate) mod services_helpers;
@@ -135,3 +141,9 @@ pub mod machine_desktop;
 pub mod machine_gateway;
 
 pub mod machine_setup;
+
+pub mod trigger_scheduler;
+
+pub mod assistant_schedules;
+
+pub(crate) mod trigger_schedule_dto;

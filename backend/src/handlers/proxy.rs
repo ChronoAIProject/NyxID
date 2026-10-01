@@ -2,7 +2,7 @@ use axum::{
     Json,
     body::Body,
     extract::{FromRequestParts, OriginalUri, Path, Query, State, ws::WebSocketUpgrade},
-    http::{Method, Request, StatusCode},
+    http::{HeaderMap, Method, Request, StatusCode, Uri},
     response::{IntoResponse, Response},
 };
 use futures::{SinkExt, StreamExt};
@@ -31,7 +31,8 @@ use crate::services::{
     approval_service, audit_service, chatgpt_translator, delegation_service,
     durable_operation_grant_service, identity_service, llm_usage_service, node_metrics_service,
     node_routing_service, node_service, notification_service, operation_descriptor,
-    proxy_discovery_service, proxy_service, sse_parser, ws_frame_injector,
+    proxy_discovery_service, proxy_service, service_pool_health_service, service_pool_service,
+    sse_parser, ws_frame_injector,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
@@ -242,15 +243,17 @@ const ALLOWED_RESPONSE_HEADERS: &[&str] = &[
     "preference-applied",
     "location",
     "operation-location",
+    "content-location",
 ];
 
-const ASYNC_LOCATION_HEADERS: &[&str] = &["location", "operation-location"];
+const ASYNC_LOCATION_HEADERS: &[&str] = &["location", "operation-location", "content-location"];
 
 #[derive(Clone, Debug)]
 struct AsyncLocationContext {
     service_base: url::Url,
     downstream_request: url::Url,
     caller_proxy_prefix: String,
+    exact_user_service_id: Option<String>,
 }
 
 impl AsyncLocationContext {
@@ -280,6 +283,7 @@ impl AsyncLocationContext {
             service_base,
             downstream_request,
             caller_proxy_prefix,
+            exact_user_service_id: None,
         })
     }
 
@@ -303,7 +307,19 @@ impl AsyncLocationContext {
             service_base,
             downstream_request,
             caller_proxy_prefix,
+            exact_user_service_id: None,
         })
+    }
+
+    fn pin_pool_member(mut self, authority: Option<&PoolExecutionAuthority>) -> Self {
+        if let Some(authority) = authority {
+            self.caller_proxy_prefix = format!(
+                "/api/v1/proxy/s/{}/",
+                urlencoding::encode(&authority.member_slug)
+            );
+            self.exact_user_service_id = Some(authority.scope.user_service_id.clone());
+        }
+        self
     }
 
     fn rewrite(&self, value: &str) -> Option<axum::http::HeaderValue> {
@@ -326,7 +342,19 @@ impl AsyncLocationContext {
             self.caller_proxy_prefix,
             relative_path.trim_start_matches('/')
         );
-        if let Some(query) = resolved.query() {
+        if let Some(member_id) = &self.exact_user_service_id {
+            let query = resolved
+                .query()
+                .map(strip_internal_query_params)
+                .unwrap_or_default();
+            caller_location.push('?');
+            if !query.is_empty() {
+                caller_location.push_str(&query);
+                caller_location.push('&');
+            }
+            caller_location.push_str("_nyxid_via=");
+            caller_location.push_str(&urlencoding::encode(member_id));
+        } else if let Some(query) = resolved.query() {
             caller_location.push('?');
             caller_location.push_str(query);
         }
@@ -372,7 +400,7 @@ fn apply_proxy_request_id_header(response: &mut Response, request_id: &str) {
 }
 
 #[derive(Clone, Copy)]
-struct ProxyExchangeStartedAt(std::time::Instant);
+pub(crate) struct ProxyExchangeStartedAt(pub(crate) std::time::Instant);
 
 #[derive(Clone)]
 struct ProxyExchangeDiagnostics {
@@ -1045,6 +1073,7 @@ async fn proxy_request_inner(
 
     let user_id_str = auth_user.proxy_resolution_user_id();
     let via_service = extract_via_service(&request);
+
     preflight_proxy_deny_before_resolution(
         state,
         auth_user,
@@ -1233,21 +1262,24 @@ pub async fn proxy_request_by_slug(
     // intentionally do NOT seed with the path-param slug: telemetry §5.1
     // requires a resolved slug or empty, and the path param is unvalidated
     // user input until resolution succeeds.
-    let started_at = std::time::Instant::now();
+    let started_at = request
+        .extensions()
+        .get::<ProxyExchangeStartedAt>()
+        .map_or_else(std::time::Instant::now, |started| started.0);
     let method = request.method().clone();
     request
         .extensions_mut()
         .insert(ProxyExchangeStartedAt(started_at));
     let request_id = ensure_proxy_request_id(request.headers_mut());
     let mut resolved_slug = String::new();
-    let mut result = proxy_request_by_slug_inner(
+    let mut result = Box::pin(proxy_request_by_slug_inner(
         &state,
         &auth_user,
         &slug,
         &path,
         request,
         &mut resolved_slug,
-    )
+    ))
     .await;
     if let Ok(response) = &mut result {
         apply_proxy_request_id_header(response, &request_id);
@@ -1275,6 +1307,1125 @@ pub async fn proxy_request_by_slug(
     result
 }
 
+#[path = "service_pool_attempt.rs"]
+mod pool_attempt;
+
+#[derive(Clone, Copy)]
+struct PoolAttemptMarker;
+
+/// Trusted, internal exact selection. Public `_nyxid_via` checks are unchanged.
+#[derive(Clone)]
+struct PoolExactMember {
+    selection: service_pool_service::PoolSelection,
+    scope: Option<service_pool_health_service::HealthScope>,
+}
+
+#[derive(Clone)]
+struct PoolExecutionAuthority {
+    scope: service_pool_health_service::HealthScope,
+    member_slug: String,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct PoolIngressAdmitted;
+
+#[derive(Clone, Copy)]
+pub(crate) struct PoolGatewayIngress;
+
+async fn pool_scope_for_resolution(
+    state: &AppState,
+    auth: &AuthUser,
+    resolution: &proxy_service::UserServiceResolution,
+    expected: Option<&service_pool_health_service::HealthScope>,
+    method: &str,
+    path: &str,
+) -> AppResult<service_pool_health_service::HealthScope> {
+    let actor = auth.proxy_resolution_user_id();
+    let credential_override = match auth.api_key_id.as_deref() {
+        Some(key) => {
+            proxy_service::read_agent_credential_override_identity(
+                &state.db,
+                &actor,
+                key,
+                &resolution.user_service_id,
+                &resolution.target,
+            )
+            .await?
+        }
+        None => None,
+    };
+    service_pool_health_service::scope_from_resolution(
+        &state.db,
+        expected.map_or("", |scope| scope.pool_id.as_str()),
+        expected.map_or(actor.as_str(), |scope| scope.owner_id.as_str()),
+        expected.map_or(0, |scope| scope.pool_config_revision),
+        resolution,
+        expected.and_then(|scope| scope.model.clone()),
+        credential_override.as_ref(),
+        method,
+        path,
+    )
+    .await
+}
+
+#[derive(Clone)]
+struct PoolAttemptDispatchState(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+fn mark_pool_attempt_dispatched(state: Option<&PoolAttemptDispatchState>) {
+    if let Some(state) = state {
+        state.0.store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
+fn pool_no_redirect_http_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("pool HTTP client")
+    });
+    &CLIENT
+}
+
+enum PoolResponseGate {
+    Response(Response),
+    BodyFailure {
+        status: StatusCode,
+        headers: HeaderMap,
+    },
+}
+
+fn encode_pool_attempt_error(
+    error: crate::services::proxy_service::ForwardRequestError,
+) -> AppError {
+    match error {
+        crate::services::proxy_service::ForwardRequestError::Application(error) => error,
+        crate::services::proxy_service::ForwardRequestError::OutcomeUnknown => AppError::Conflict(
+            "Provider outcome is unknown; check the provider before retrying".into(),
+        ),
+        crate::services::proxy_service::ForwardRequestError::Transport(error) => {
+            let cause = if error.is_connect() {
+                crate::errors::PoolAttemptTransportKind::Connect
+            } else if error.is_timeout() {
+                crate::errors::PoolAttemptTransportKind::Timeout
+            } else {
+                crate::errors::PoolAttemptTransportKind::AfterDispatch
+            };
+            AppError::PoolAttemptTransport(cause)
+        }
+    }
+}
+
+fn pool_node_failure(error: AppError, dispatched: bool) -> AppError {
+    use crate::errors::PoolAttemptTransportKind as Kind;
+    match error {
+        AppError::NodeOffline(_)
+        | AppError::NodeCredentialMissing(_)
+        | AppError::NodeProxyTimeout => AppError::PoolAttemptTransport(if !dispatched {
+            Kind::NodeUnsent
+        } else if matches!(error, AppError::NodeProxyTimeout) {
+            Kind::NodeTimeout
+        } else {
+            Kind::NodeAfterDispatch
+        }),
+        error => error,
+    }
+}
+
+fn pool_should_retry(
+    evidence: crate::services::pool_failover::AttemptEvidence,
+    method: &Method,
+    policy: &crate::models::service_pool::FailoverPolicy,
+) -> bool {
+    use crate::services::pool_failover::{self, AttemptEvidence};
+    if matches!(
+        evidence,
+        AttemptEvidence::NodeTimeout | AttemptEvidence::NodeTransportAfterDispatch
+    ) && !pool_failover::method_is_safe(method)
+    {
+        return false;
+    }
+    pool_failover::should_retry(
+        pool_failover::classify(evidence),
+        pool_failover::trigger_for(evidence),
+        method,
+        policy,
+    )
+}
+
+fn pool_attempt_evidence(
+    error: &AppError,
+) -> Option<crate::services::pool_failover::AttemptEvidence> {
+    let AppError::PoolAttemptTransport(cause) = error else {
+        return None;
+    };
+    Some(match cause {
+        crate::errors::PoolAttemptTransportKind::Connect => {
+            crate::services::pool_failover::AttemptEvidence::ConnectError
+        }
+        crate::errors::PoolAttemptTransportKind::Timeout => {
+            crate::services::pool_failover::AttemptEvidence::Timeout
+        }
+        crate::errors::PoolAttemptTransportKind::NodeUnsent => {
+            crate::services::pool_failover::AttemptEvidence::NodeRejectedBeforeDispatch
+        }
+        crate::errors::PoolAttemptTransportKind::NodeTimeout => {
+            crate::services::pool_failover::AttemptEvidence::NodeTimeout
+        }
+        crate::errors::PoolAttemptTransportKind::NodeAfterDispatch => {
+            crate::services::pool_failover::AttemptEvidence::NodeTransportAfterDispatch
+        }
+        crate::errors::PoolAttemptTransportKind::AfterDispatch => {
+            crate::services::pool_failover::AttemptEvidence::TransportAfterDispatch
+        }
+    })
+}
+
+/// Gate on the first nonempty data item (or clean EOF) before committing the
+/// response. Empty transport frames do not establish client-visible progress.
+/// The caller's absolute attempt deadline bounds this wait.
+async fn gate_pool_response(response: Response) -> PoolResponseGate {
+    let (parts, body) = response.into_parts();
+    let status = parts.status;
+    let headers = parts.headers.clone();
+    let mut stream = body.into_data_stream();
+    loop {
+        match stream.next().await {
+            Some(Ok(first)) if first.is_empty() => continue,
+            Some(Ok(first)) => {
+                let body = async_stream::stream! {
+                    yield Ok::<bytes::Bytes, std::io::Error>(first);
+                    while let Some(item) = stream.next().await {
+                        yield item.map_err(std::io::Error::other);
+                    }
+                };
+                return PoolResponseGate::Response(Response::from_parts(
+                    parts,
+                    Body::from_stream(body),
+                ));
+            }
+            Some(Err(_)) => return PoolResponseGate::BodyFailure { status, headers },
+            None => return PoolResponseGate::Response(Response::from_parts(parts, Body::empty())),
+        }
+    }
+}
+
+#[cfg(test)]
+mod pool_response_gate_tests {
+    use super::*;
+
+    fn response(items: Vec<Result<bytes::Bytes, std::io::Error>>) -> Response {
+        Response::new(Body::from_stream(futures::stream::iter(items)))
+    }
+
+    #[tokio::test]
+    async fn pool_gate_empty_frames_do_not_commit_a_failure() {
+        let result = gate_pool_response(response(vec![
+            Ok(bytes::Bytes::new()),
+            Err(std::io::Error::other("broken")),
+        ]))
+        .await;
+        assert!(matches!(
+            result,
+            PoolResponseGate::BodyFailure {
+                status: StatusCode::OK,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn pool_gate_preserves_nonempty_data_and_later_error() {
+        let result = gate_pool_response(response(vec![
+            Ok(bytes::Bytes::new()),
+            Ok(bytes::Bytes::from_static(b"payload")),
+            Err(std::io::Error::other("broken")),
+        ]))
+        .await;
+        let PoolResponseGate::Response(response) = result else {
+            panic!("first data must commit")
+        };
+        let mut body = response.into_body().into_data_stream();
+        assert_eq!(body.next().await.unwrap().unwrap(), "payload");
+        assert!(body.next().await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn pool_gate_empty_frames_then_clean_eof_are_empty_success() {
+        let result = gate_pool_response(response(vec![Ok(bytes::Bytes::new())])).await;
+        let PoolResponseGate::Response(response) = result else {
+            panic!("clean EOF is valid")
+        };
+        assert!(
+            axum::body::to_bytes(response.into_body(), 1)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+use crate::services::service_pool_routing::SlugMetadataRoute;
+
+async fn select_slug_metadata(
+    state: &AppState,
+    auth: &AuthUser,
+    actor: &str,
+    slug: &str,
+) -> AppResult<SlugMetadataRoute> {
+    crate::services::service_pool_routing::select_slug_metadata(
+        &state.db,
+        &state.encryption_keys,
+        (!auth.allow_all_services).then_some(auth.allowed_service_ids.as_slice()),
+        (!auth.allow_all_nodes).then_some(auth.allowed_node_ids.as_slice()),
+        actor,
+        slug,
+    )
+    .await
+}
+
+pub(super) async fn find_pool_for_proxy_actor(
+    state: &AppState,
+    auth: &AuthUser,
+    actor: &str,
+    slug: &str,
+) -> AppResult<Option<crate::models::service_pool::ServicePool>> {
+    Ok(
+        match select_slug_metadata(state, auth, actor, slug).await? {
+            SlugMetadataRoute::Pool(pool) => Some(*pool),
+            _ => None,
+        },
+    )
+}
+
+async fn drain_pool_response(response: Response) -> Result<(), ()> {
+    let mut stream = response.into_body().into_data_stream();
+    while let Some(item) = stream.next().await {
+        if item.is_err() {
+            return Err(());
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pool_attempt_request(
+    method: &Method,
+    uri: &Uri,
+    headers: &HeaderMap,
+    body: &bytes::Bytes,
+    user_service_id: &str,
+    billing_policy: Option<crate::services::billing::route_inventory::BillingRoutePolicy>,
+    started_at: Option<ProxyExchangeStartedAt>,
+    connection_cancellation: Option<crate::downstream_disconnect::ClientConnectionCancellation>,
+    dispatch_state: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    extensions: &axum::http::Extensions,
+    scope: &service_pool_health_service::HealthScope,
+    selection: service_pool_service::PoolSelection,
+    accounting: pool_attempt::AttemptContext,
+) -> AppResult<Request<Body>> {
+    let original_query = uri
+        .query()
+        .map(strip_internal_query_params)
+        .filter(|query| !query.is_empty());
+    let encoded_member = urlencoding::encode(user_service_id);
+    let query = match original_query {
+        Some(query) => format!("{query}&_nyxid_via={encoded_member}"),
+        None => format!("_nyxid_via={encoded_member}"),
+    };
+    let path_and_query = format!("{}?{query}", uri.path());
+    let attempt_uri: Uri = path_and_query
+        .parse()
+        .map_err(|error| AppError::Internal(format!("invalid pool attempt URI: {error}")))?;
+    let mut request = Request::builder()
+        .method(method.clone())
+        .uri(attempt_uri)
+        .body(Body::from(body.clone()))
+        .map_err(|error| AppError::Internal(format!("failed to build pool attempt: {error}")))?;
+    *request.headers_mut() = headers.clone();
+    *request.extensions_mut() = extensions.clone();
+    request.extensions_mut().insert(PoolAttemptMarker);
+    request.extensions_mut().insert(accounting);
+    request.extensions_mut().insert(PoolExactMember {
+        selection,
+        scope: Some(scope.clone()),
+    });
+    request
+        .extensions_mut()
+        .insert(PoolAttemptDispatchState(dispatch_state));
+    if let Some(policy) = billing_policy {
+        request.extensions_mut().insert(policy);
+    }
+    if let Some(started_at) = started_at {
+        request.extensions_mut().insert(started_at);
+    }
+    if let Some(connection_cancellation) = connection_cancellation {
+        request.extensions_mut().insert(connection_cancellation);
+    }
+    Ok(request)
+}
+
+async fn proxy_request_through_pool(
+    state: &AppState,
+    auth_user: &AuthUser,
+    slug: &str,
+    path: &str,
+    request: Request<Body>,
+    resolved_slug: &mut String,
+    pool: crate::models::service_pool::ServicePool,
+) -> AppResult<Response> {
+    if request.method() == Method::CONNECT || is_ws_upgrade_request(&request) {
+        return Err(AppError::BadRequest(
+            "service pool failover does not support WebSocket or CONNECT requests".to_string(),
+        ));
+    }
+
+    if auth_user.auth_method == AuthMethod::Delegated
+        || auth_user.api_key_purpose == ApiKeyPurpose::ScheduledInvocation
+    {
+        return Err(AppError::Forbidden(
+            "Service pool execution requires a caller authorized to select members".into(),
+        ));
+    }
+    if request.extensions().get::<PoolIngressAdmitted>().is_none() {
+        crate::mw::rate_limit::check_agent_rate_limit(&state.per_agent_limiter, auth_user).await?;
+    }
+    let pool_cancellation = request_cancellation(&request);
+    let extensions = request.extensions().clone();
+    let method = request.method().clone();
+    let uri = request.uri().clone();
+    let headers = request.headers().clone();
+    let billing_policy = request
+        .extensions()
+        .get::<crate::services::billing::route_inventory::BillingRoutePolicy>()
+        .copied();
+    let started_at = request
+        .extensions()
+        .get::<ProxyExchangeStartedAt>()
+        .copied();
+    let connection_cancellation = request
+        .extensions()
+        .get::<crate::downstream_disconnect::ClientConnectionCancellation>()
+        .cloned();
+    let policy = pool.failover.clone().unwrap_or_default();
+    let request_started_at = started_at
+        .map(|started| started.0)
+        .unwrap_or_else(std::time::Instant::now);
+    let overall_deadline = request_started_at
+        .checked_add(std::time::Duration::from_millis(u64::from(
+            policy.overall_deadline_ms,
+        )))
+        .ok_or(AppError::ServicePoolDeadlineExceeded { attempts: vec![] })?;
+    let body_remaining = overall_deadline
+        .checked_duration_since(std::time::Instant::now())
+        .ok_or(AppError::ServicePoolDeadlineExceeded { attempts: vec![] })?;
+    let body = tokio::time::timeout(
+        body_remaining,
+        read_proxy_request_body(request, state.config.proxy_max_body_size),
+    )
+    .await
+    .map_err(|_| AppError::ServicePoolDeadlineExceeded { attempts: vec![] })??;
+    let actor_user_id = auth_user.proxy_resolution_user_id();
+    let allowed_services = (!auth_user.allow_all_services).then(|| {
+        auth_user
+            .allowed_service_ids
+            .iter()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>()
+    });
+    let allowed_nodes = (!auth_user.allow_all_nodes).then(|| {
+        auth_user
+            .allowed_node_ids
+            .iter()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>()
+    });
+    let mut plan = tokio::time::timeout(
+        overall_deadline
+            .checked_duration_since(std::time::Instant::now())
+            .ok_or(AppError::ServicePoolDeadlineExceeded { attempts: vec![] })?,
+        service_pool_service::plan_candidates_with_allowlist(
+            &state.db,
+            &state.encryption_keys,
+            &actor_user_id,
+            auth_user.api_key_id.as_deref(),
+            &pool.user_id,
+            slug,
+            &method,
+            Some(path),
+            body.len(),
+            Some(&body),
+            allowed_services.as_ref(),
+            allowed_nodes.as_ref(),
+        ),
+    )
+    .await
+    .map_err(|_| AppError::ServicePoolDeadlineExceeded { attempts: vec![] })??;
+    if plan.pool.id != pool.id || plan.pool.config_revision != pool.config_revision {
+        return Err(AppError::Conflict(
+            "Pool configuration changed while preparing the request".into(),
+        ));
+    }
+    if extensions.get::<PoolGatewayIngress>().is_some()
+        && (plan.pool.strategy != crate::models::service_pool::PoolStrategy::Priority
+            || plan.pool.member_contract != crate::models::service_pool::PoolMemberContract::AiChat)
+    {
+        return Err(AppError::BadRequest(
+            "Gateway pool aliases require an AI chat priority pool".into(),
+        ));
+    }
+    if plan.candidates.is_empty() {
+        *resolved_slug = slug.to_string();
+        let retry_after = plan
+            .all_cooled_until
+            .and_then(|until| (until - chrono::Utc::now()).to_std().ok())
+            .map(|duration| {
+                duration
+                    .as_secs()
+                    .saturating_add(u64::from(duration.subsec_nanos() != 0))
+                    .max(1)
+                    .to_string()
+            })
+            .unwrap_or_else(|| "1".to_string());
+        return Response::builder()
+            .status(StatusCode::SERVICE_UNAVAILABLE)
+            .header("retry-after", retry_after)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&AppError::ServicePoolCoolingDown.response_body())
+                    .expect("error response serializes"),
+            ))
+            .map_err(|error| {
+                AppError::Internal(format!("failed to build pool response: {error}"))
+            });
+    }
+    *resolved_slug = slug.to_string();
+
+    let per_attempt_timeout =
+        std::time::Duration::from_millis(u64::from(policy.per_attempt_timeout_ms));
+    let mut summaries = Vec::new();
+    let mut visited_tier = None;
+    let mut tier_tick = 0;
+    for index in 0..plan.max_attempts.min(plan.candidates.len()) {
+        if pool_cancellation.is_cancelled() {
+            return Err(AppError::ClientDisconnected);
+        }
+        if visited_tier != Some(plan.candidates[index].tier) {
+            tier_tick = pool_attempt::within_deadline(
+                overall_deadline,
+                &summaries,
+                service_pool_service::order_visited_tier(
+                    &state.db,
+                    &plan.pool,
+                    &mut plan.candidates[index..],
+                ),
+            )
+            .await?;
+            visited_tier = Some(plan.candidates[index].tier);
+        }
+        if pool_cancellation.is_cancelled() {
+            return Err(AppError::ClientDisconnected);
+        }
+        let candidate = &plan.candidates[index];
+        let attempt_number = index + 1;
+        let attempt_deadline = std::time::Instant::now()
+            .checked_add(per_attempt_timeout)
+            .ok_or(AppError::ServicePoolDeadlineExceeded { attempts: vec![] })?
+            .min(overall_deadline);
+        attempt_deadline
+            .checked_duration_since(std::time::Instant::now())
+            .ok_or_else(|| AppError::ServicePoolDeadlineExceeded {
+                attempts: summaries.clone(),
+            })?;
+        let has_backup = attempt_number < plan.candidates.len().min(plan.max_attempts);
+        let dispatch_state = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ticket = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(attempt_deadline),
+            service_pool_health_service::issue_observation_ticket(
+                &state.db,
+                candidate.health_scope.clone(),
+            ),
+        )
+        .await
+        .map_err(|_| AppError::ServicePoolDeadlineExceeded {
+            attempts: summaries.clone(),
+        })??;
+        let prepared_chat = candidate
+            .chat_plan
+            .as_ref()
+            .zip(plan.chat_request.as_ref())
+            .map(|(adapter, request)| adapter.prepare(request))
+            .transpose()?;
+        let accounting = pool_attempt::AttemptContext {
+            audit: pool_attempt::AttemptAudit::new(
+                &state.db,
+                auth_user,
+                &pool.id,
+                &candidate.member.user_service_id,
+                attempt_number as u32,
+                candidate.tier,
+            ),
+            finalization: Default::default(),
+            request_id: uuid::Uuid::new_v4().to_string(),
+            metadata: crate::models::usage_meter::PoolAttemptAccounting {
+                pool_id: pool.id.clone(),
+                member_id: candidate.member.user_service_id.clone(),
+                attempt: attempt_number as u32,
+                lease_until: chrono::Utc::now()
+                    + chrono::Duration::milliseconds(
+                        attempt_deadline
+                            .saturating_duration_since(std::time::Instant::now())
+                            .as_millis() as i64,
+                    )
+                    + chrono::Duration::seconds(30),
+                outcome: None,
+                completion_cause: None,
+            },
+            ticket: ticket.clone(),
+            policy: policy.clone(),
+            lease_lost: Default::default(),
+            timed_out: Default::default(),
+            status: std::sync::Arc::new(std::sync::atomic::AtomicU16::new(0)),
+            node_dispatched: Default::default(),
+            retry_after: Default::default(),
+            prepared_chat: prepared_chat.clone(),
+        };
+        let native_path = prepared_chat
+            .as_ref()
+            .map_or(path, |prepared| prepared.path.as_str());
+        let native_body = prepared_chat
+            .as_ref()
+            .map_or(&body, |prepared| &prepared.body);
+        let mut native_headers = headers.clone();
+        if let Some(prepared) = &prepared_chat {
+            native_headers.remove(axum::http::header::CONTENT_LENGTH);
+            for (name, value) in &prepared.headers {
+                native_headers.insert(
+                    axum::http::HeaderName::from_bytes(name.as_bytes())
+                        .map_err(|_| AppError::BadRequest("Invalid adapter header".into()))?,
+                    axum::http::HeaderValue::from_str(value)
+                        .map_err(|_| AppError::BadRequest("Invalid adapter header".into()))?,
+                );
+            }
+        }
+        let attempt_result = until_client_disconnect(
+            &pool_cancellation,
+            pool_attempt::attempt_timeout(
+                &accounting,
+                attempt_deadline,
+                Box::pin(async {
+                    let attempt_request = pool_attempt_request(
+                        &method,
+                        &uri,
+                        &native_headers,
+                        native_body,
+                        &candidate.member.user_service_id,
+                        billing_policy,
+                        started_at,
+                        connection_cancellation.clone(),
+                        dispatch_state.clone(),
+                        &extensions,
+                        &candidate.health_scope,
+                        service_pool_service::PoolSelection {
+                            pool_id: pool.id.clone(),
+                            pool_slug: pool.slug.clone(),
+                            strategy: pool.strategy,
+                            selected_member_id: candidate.member.user_service_id.clone(),
+                            tick: tier_tick,
+                            tier: candidate.tier,
+                            attempt: attempt_number as u32,
+                            failover_enabled: plan.max_attempts > 1,
+                        },
+                        accounting.clone(),
+                    )?;
+                    let gated = match Box::pin(proxy_request_by_selected_member(
+                        state,
+                        auth_user,
+                        // The candidate's own UserService slug is the trusted
+                        // internal expected-slug fence. The public pool slug
+                        // remains the external route.
+                        &candidate.service.slug,
+                        native_path,
+                        attempt_request,
+                        resolved_slug,
+                        &candidate.member.user_service_id,
+                    ))
+                    .await
+                    {
+                        Ok(result) => Ok(gate_pool_response(result).await),
+                        Err(error) => Err(error),
+                    };
+                    Ok::<_, AppError>((ticket.clone(), gated))
+                }),
+            ),
+        )
+        .await;
+        let attempt_result = match attempt_result {
+            Ok(result) => result,
+            Err(_) => {
+                accounting.audit.record("cancelled", None, "cancelled");
+                pool_attempt::finish_attempt(
+                    &state.db,
+                    &accounting,
+                    crate::models::usage_meter::PoolAttemptOutcome::Unknown,
+                    overall_deadline,
+                    &summaries,
+                )
+                .await?;
+                return Err(AppError::ClientDisconnected);
+            }
+        };
+        let attempt_result = match attempt_result {
+            Ok(result) => result,
+            Err(_) => {
+                let observed = accounting.status.load(std::sync::atomic::Ordering::Acquire);
+                let observed_status = StatusCode::from_u16(observed).ok();
+                let rejection = observed_status
+                    .filter(|status| status.is_client_error() || status.is_server_error());
+                let reason = if let Some(status) = rejection {
+                    format!("http_{}", status.as_u16())
+                } else if dispatch_state.load(std::sync::atomic::Ordering::Acquire) {
+                    "timeout".into()
+                } else {
+                    "preparation_timeout".into()
+                };
+                accounting
+                    .audit
+                    .record(&reason, observed_status, "timed_out");
+                summaries.push(crate::errors::PoolAttemptSummary {
+                    attempt: attempt_number as u32,
+                    priority: candidate.tier,
+                    reason,
+                    upstream_status: observed_status.map(|status| status.as_u16()),
+                });
+                pool_attempt::finish_attempt(
+                    &state.db,
+                    &accounting,
+                    crate::models::usage_meter::PoolAttemptOutcome::Unknown,
+                    overall_deadline,
+                    &summaries,
+                )
+                .await?;
+                // Preparation, policy, approval, billing, and credential
+                // admission timeouts are terminal for this attempt. Only a
+                // timeout after the transport boundary may be considered for
+                // ambiguous failover.
+                if !dispatch_state.load(std::sync::atomic::Ordering::Acquire) {
+                    return Err(AppError::ServicePoolDeadlineExceeded {
+                        attempts: summaries.clone(),
+                    });
+                }
+                let evidence = if let Some(status) = rejection {
+                    crate::services::pool_failover::AttemptEvidence::Upstream(status)
+                } else if accounting
+                    .node_dispatched
+                    .load(std::sync::atomic::Ordering::Acquire)
+                {
+                    crate::services::pool_failover::AttemptEvidence::NodeTimeout
+                } else {
+                    crate::services::pool_failover::AttemptEvidence::Timeout
+                };
+                pool_attempt::within_deadline(
+                    overall_deadline,
+                    &summaries,
+                    accounting.observe_failure(
+                        &state.db,
+                        evidence,
+                        observed_status,
+                        accounting.retry_after(),
+                    ),
+                )
+                .await?;
+                if has_backup && pool_should_retry(evidence, &method, &policy) {
+                    continue;
+                }
+                return Err(AppError::ServicePoolDeadlineExceeded {
+                    attempts: summaries,
+                });
+            }
+        };
+        let (_ticket, gated) = match attempt_result {
+            Ok(pair) => pair,
+            Err(error) => return Err(error),
+        };
+        if accounting.infrastructure_failed() {
+            return Err(AppError::ServicePoolInfrastructureUnavailable);
+        }
+        let (mut response, _body_failed) = match gated {
+            Ok(PoolResponseGate::Response(response)) => (response, false),
+            Ok(PoolResponseGate::BodyFailure { status, headers }) => {
+                let evidence = if status.is_success() {
+                    if accounting
+                        .node_dispatched
+                        .load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        crate::services::pool_failover::AttemptEvidence::NodeTransportAfterDispatch
+                    } else {
+                        crate::services::pool_failover::AttemptEvidence::TransportAfterDispatch
+                    }
+                } else {
+                    crate::services::pool_failover::AttemptEvidence::Upstream(status)
+                };
+                accounting.audit.record(
+                    crate::services::pool_failover::trigger_for(evidence)
+                        .map_or("terminal", |t| t.as_str()),
+                    Some(status),
+                    "body_interrupted",
+                );
+                let trigger = crate::services::pool_failover::trigger_for(evidence);
+                summaries.push(crate::errors::PoolAttemptSummary {
+                    attempt: attempt_number as u32,
+                    priority: candidate.tier,
+                    reason: trigger
+                        .map_or("terminal", |trigger| trigger.as_str())
+                        .to_owned(),
+                    upstream_status: match evidence {
+                        crate::services::pool_failover::AttemptEvidence::Upstream(status) => {
+                            Some(status.as_u16())
+                        }
+                        _ => None,
+                    },
+                });
+                let retry = pool_should_retry(evidence, &method, &policy);
+                let retry_after =
+                    crate::services::pool_failover::parse_retry_after(&headers, chrono::Utc::now());
+                pool_attempt::within_deadline(
+                    overall_deadline,
+                    &summaries,
+                    accounting.observe_failure(&state.db, evidence, Some(status), retry_after),
+                )
+                .await?;
+                pool_attempt::finish_attempt(
+                    &state.db,
+                    &accounting,
+                    crate::models::usage_meter::PoolAttemptOutcome::Unknown,
+                    overall_deadline,
+                    &summaries,
+                )
+                .await?;
+                if pool_cancellation.is_cancelled() {
+                    return Err(AppError::ClientDisconnected);
+                }
+                if retry && has_backup {
+                    continue;
+                }
+                if status.is_success() {
+                    return Err(AppError::ServicePoolAttemptsExhausted {
+                        attempts: summaries,
+                    });
+                }
+                let mut response = Response::new(Body::empty());
+                *response.status_mut() = status;
+                *response.headers_mut() = headers;
+                for name in [
+                    "content-length",
+                    "content-encoding",
+                    "transfer-encoding",
+                    "content-range",
+                    "etag",
+                    "content-md5",
+                    "digest",
+                ] {
+                    response.headers_mut().remove(name);
+                }
+                attach_pool_response_headers(
+                    &mut response,
+                    attempt_number,
+                    &candidate.service.slug,
+                )?;
+                accounting.audit.commit();
+                return Ok(response);
+            }
+            Err(error) => {
+                accounting.audit.record(
+                    pool_attempt_evidence(&error)
+                        .and_then(crate::services::pool_failover::trigger_for)
+                        .map_or("admission_failed", |t| t.as_str()),
+                    None,
+                    "failed",
+                );
+                pool_attempt::finish_attempt(
+                    &state.db,
+                    &accounting,
+                    if matches!(
+                        pool_attempt_evidence(&error),
+                        Some(crate::services::pool_failover::AttemptEvidence::ConnectError | crate::services::pool_failover::AttemptEvidence::NodeRejectedBeforeDispatch)
+                    ) {
+                        crate::models::usage_meter::PoolAttemptOutcome::Unsent
+                    } else {
+                        crate::models::usage_meter::PoolAttemptOutcome::Unknown
+                    },
+                    overall_deadline,
+                    &summaries,
+                )
+                .await?;
+                let Some(evidence) = pool_attempt_evidence(&error) else {
+                    return Err(error);
+                };
+                let trigger = crate::services::pool_failover::trigger_for(evidence);
+                summaries.push(crate::errors::PoolAttemptSummary {
+                    attempt: attempt_number as u32,
+                    priority: candidate.tier,
+                    reason: trigger
+                        .map_or("terminal", |trigger| trigger.as_str())
+                        .to_owned(),
+                    upstream_status: match evidence {
+                        crate::services::pool_failover::AttemptEvidence::Upstream(status) => {
+                            Some(status.as_u16())
+                        }
+                        _ => None,
+                    },
+                });
+                pool_attempt::within_deadline(
+                    overall_deadline,
+                    &summaries,
+                    accounting.observe_failure(&state.db, evidence, None, None),
+                )
+                .await?;
+                if has_backup && pool_should_retry(evidence, &method, &policy) {
+                    continue;
+                }
+                return Err(AppError::ServicePoolAttemptsExhausted {
+                    attempts: summaries,
+                });
+            }
+        };
+
+        let status = response.status();
+        let evidence = crate::services::pool_failover::AttemptEvidence::Upstream(status);
+        let class = crate::services::pool_failover::classify(evidence);
+        let trigger = crate::services::pool_failover::trigger_for(evidence);
+        summaries.push(crate::errors::PoolAttemptSummary {
+            attempt: attempt_number as u32,
+            priority: candidate.tier,
+            reason: trigger
+                .map_or("terminal", |trigger| trigger.as_str())
+                .to_owned(),
+            upstream_status: match evidence {
+                crate::services::pool_failover::AttemptEvidence::Upstream(status) => {
+                    Some(status.as_u16())
+                }
+                _ => None,
+            },
+        });
+        let retry = has_backup && pool_should_retry(evidence, &method, &policy);
+        if !status.is_success()
+            && trigger.is_some_and(|trigger| policy.retry_on.contains(&trigger))
+            && !matches!(
+                class,
+                crate::services::pool_failover::FailureClass::Terminal
+            )
+        {
+            let retry_after = crate::services::pool_failover::parse_retry_after(
+                response.headers(),
+                chrono::Utc::now(),
+            );
+            pool_attempt::within_deadline(
+                overall_deadline,
+                &summaries,
+                accounting.observe_failure(&state.db, evidence, Some(status), retry_after),
+            )
+            .await?;
+        }
+        if retry {
+            accounting.audit.record(
+                trigger.map_or("terminal", |t| t.as_str()),
+                Some(status),
+                "retry",
+            );
+            let remaining = attempt_deadline
+                .checked_duration_since(std::time::Instant::now())
+                .unwrap_or_default();
+            if until_client_disconnect(
+                &pool_cancellation,
+                pool_attempt::attempt_timeout(
+                    &accounting,
+                    std::time::Instant::now() + remaining,
+                    drain_pool_response(response),
+                ),
+            )
+            .await
+            .map_err(|_| AppError::ClientDisconnected)?
+            .is_err()
+            {
+                pool_attempt::within_deadline(
+                    overall_deadline,
+                    &summaries,
+                    accounting.observe_failure(
+                        &state.db,
+                        evidence,
+                        Some(status),
+                        accounting.retry_after(),
+                    ),
+                )
+                .await?;
+            }
+            pool_attempt::finish_attempt(
+                &state.db,
+                &accounting,
+                if status == StatusCode::TOO_MANY_REQUESTS {
+                    crate::models::usage_meter::PoolAttemptOutcome::Rejected
+                } else {
+                    crate::models::usage_meter::PoolAttemptOutcome::Unknown
+                },
+                overall_deadline,
+                &summaries,
+            )
+            .await?;
+            continue;
+        }
+        attach_pool_response_headers(&mut response, attempt_number, &candidate.service.slug)?;
+        accounting.audit.commit();
+        return Ok(response);
+    }
+
+    Err(AppError::ServicePoolAttemptsExhausted {
+        attempts: summaries,
+    })
+}
+
+fn attach_pool_response_headers(
+    response: &mut Response,
+    attempt: usize,
+    member: &str,
+) -> AppResult<()> {
+    response.headers_mut().insert(
+        "x-nyxid-pool-attempts",
+        axum::http::HeaderValue::from_str(&attempt.to_string()).expect("numeric header"),
+    );
+    response.headers_mut().insert(
+        "x-nyxid-pool-member",
+        axum::http::HeaderValue::from_str(member)
+            .map_err(|_| AppError::Internal("invalid pool member slug".into()))?,
+    );
+    Ok(())
+}
+
+async fn proxy_request_by_selected_member(
+    state: &AppState,
+    auth_user: &AuthUser,
+    slug: &str,
+    path: &str,
+    request: Request<Body>,
+    resolved_slug: &mut String,
+    us_id: &str,
+) -> AppResult<Response> {
+    let user_id_str = auth_user.proxy_resolution_user_id();
+    preflight_proxy_deny_before_resolution(
+        state,
+        auth_user,
+        Some(us_id),
+        Some(slug),
+        None,
+        path,
+        request.method().as_str(),
+    )
+    .await?;
+    let exact = request.extensions().get::<PoolExactMember>().cloned();
+    let resolved = if exact.is_some() {
+        proxy_service::read_proxy_authority_snapshot_by_user_service_id(
+            &state.db,
+            &state.encryption_keys,
+            &user_id_str,
+            us_id,
+            Some(slug),
+        )
+        .await?
+    } else {
+        proxy_service::resolve_proxy_target_by_user_service_id(
+            &state.db,
+            &state.encryption_keys,
+            &user_id_str,
+            us_id,
+            Some(slug),
+            None,
+            proxy_service::ProxyExecutionContext::new(
+                Some(&state.connection_expiry_notifier),
+                state.platform_user_rate_limit,
+            ),
+        )
+        .await?
+    };
+    if let Some(mut resolved) = resolved {
+        let mut request = request;
+        if let Some(exact) = exact {
+            resolved.pool_selection = Some(exact.selection);
+            let scope = pool_scope_for_resolution(
+                state,
+                auth_user,
+                &resolved,
+                exact.scope.as_ref(),
+                request.method().as_str(),
+                path,
+            )
+            .await?;
+            if exact
+                .scope
+                .as_ref()
+                .is_some_and(|expected| expected != &scope)
+            {
+                return Err(AppError::Conflict(
+                    "Pool member authority changed before admission".into(),
+                ));
+            }
+            request.extensions_mut().insert(PoolExecutionAuthority {
+                scope,
+                member_slug: slug.to_owned(),
+            });
+        }
+        let effective_service_id = resolved.target.service.id.clone();
+        if let Some(routing) = &resolved.org_routing {
+            audit_org_routing(
+                state,
+                auth_user,
+                routing,
+                &resolved.user_service_id,
+                &effective_service_id,
+                resolved.pool_selection.as_ref(),
+            );
+        } else {
+            audit_personal_routing(
+                state,
+                auth_user,
+                Some(&resolved.user_service_id),
+                &effective_service_id,
+                resolved.pool_selection.as_ref(),
+            );
+        }
+        return Box::pin(execute_proxy_inner(
+            state,
+            auth_user,
+            &effective_service_id,
+            path,
+            request,
+            Some(PreResolved {
+                target: resolved.target,
+                catalog_service_slug: resolved.catalog_service_slug,
+                node_id: resolved.node_id,
+                user_service_id: Some(resolved.user_service_id),
+                has_server_credential: resolved.has_server_credential,
+                master_credential: resolved.master_credential,
+                require_identity_assertion: false,
+                credential_source: resolved.credential_source,
+                effective_owner_id: resolved
+                    .org_routing
+                    .as_ref()
+                    .map(|r| r.org_user_id.clone())
+                    .unwrap_or_else(|| user_id_str.clone()),
+                billing_owner_id: None,
+                is_auto_connected: resolved.is_auto_connected,
+            }),
+            TargetMode::CallerAddressed,
+            Vec::new(),
+            resolved_slug,
+        ))
+        .await;
+    }
+    Err(AppError::NotFound(format!(
+        "UserService '{us_id}' not found"
+    )))
+}
+
 // Box the shared execution future at each dispatch arm, as the UUID path does,
 // to bound stack growth when the router constructs nested handler futures.
 pub(crate) async fn proxy_request_by_slug_inner(
@@ -1286,7 +2437,11 @@ pub(crate) async fn proxy_request_by_slug_inner(
     resolved_slug: &mut String,
 ) -> AppResult<Response> {
     validate_original_proxy_request_path(&request)?;
-    auth_user.ensure_rest_proxy_access()?;
+    if request.extensions().get::<PoolGatewayIngress>().is_some() {
+        auth_user.ensure_llm_proxy_access()?;
+    } else {
+        auth_user.ensure_rest_proxy_access()?;
+    }
 
     if auth_user.auth_method == AuthMethod::ServiceAccount {
         let sa = crate::services::service_account_service::get_service_account(
@@ -1325,6 +2480,109 @@ pub(crate) async fn proxy_request_by_slug_inner(
 
     let user_id_str = auth_user.proxy_resolution_user_id();
     let via_service = extract_via_service(&request);
+    let route = if via_service.is_none() {
+        select_slug_metadata(state, auth_user, &user_id_str, slug).await?
+    } else {
+        SlugMetadataRoute::Legacy
+    };
+    let selected_pool = match &route {
+        SlugMetadataRoute::Pool(pool) => Some(pool.as_ref()),
+        _ => None,
+    };
+    if request.extensions().get::<PoolGatewayIngress>().is_some()
+        && request.extensions().get::<PoolExactMember>().is_none()
+    {
+        let alias = selected_pool
+            .as_ref()
+            .ok_or_else(|| AppError::ServicePoolNotFound(slug.into()))?;
+        if alias.strategy != crate::models::service_pool::PoolStrategy::Priority
+            || alias.member_contract != crate::models::service_pool::PoolMemberContract::AiChat
+            || via_service.is_some()
+        {
+            return Err(AppError::BadRequest(
+                "Gateway pool aliases require an AI chat priority pool".into(),
+            ));
+        }
+    }
+
+    if let Some(pool) = selected_pool {
+        if request
+            .extensions()
+            .get::<crate::services::machine_gateway_service::Ingress>()
+            .is_some()
+        {
+            return Err(AppError::ApiKeyScopeForbidden(
+                "Machine gateways require a declared service connection, not a pool".into(),
+            ));
+        }
+        if pool.strategy == crate::models::service_pool::PoolStrategy::Priority {
+            return Box::pin(proxy_request_through_pool(
+                state,
+                auth_user,
+                slug,
+                path,
+                request,
+                resolved_slug,
+                pool.clone(),
+            ))
+            .await;
+        }
+        // Reserve legacy balancing exactly once before policy preflight. This
+        // request carries the selected identity through every remaining gate.
+        let (member, selection) =
+            service_pool_service::resolve_member(&state.db, &pool.user_id, slug)
+                .await?
+                .ok_or_else(|| AppError::ServicePoolNoViableMember(slug.into()))?;
+        let (mut parts, body) = request.into_parts();
+        let query = parts
+            .uri
+            .query()
+            .map(strip_internal_query_params)
+            .unwrap_or_default();
+        let uri = format!(
+            "{}?{}_nyxid_via={}",
+            parts.uri.path(),
+            if query.is_empty() {
+                String::new()
+            } else {
+                format!("{query}&")
+            },
+            urlencoding::encode(&member.id)
+        );
+        parts.uri = uri
+            .parse()
+            .map_err(|_| AppError::Internal("Invalid exact member URI".into()))?;
+        parts.extensions.insert(PoolExactMember {
+            selection,
+            scope: None,
+        });
+        return Box::pin(proxy_request_by_selected_member(
+            state,
+            auth_user,
+            &member.slug,
+            path,
+            Request::from_parts(parts, body),
+            resolved_slug,
+            &member.id,
+        ))
+        .await;
+    }
+
+    if let SlugMetadataRoute::Service(id) = route {
+        // Reuse the metadata selection for ordinary routes; exact resolution
+        // rechecks live authority without repeating the personal/org cascade.
+        return Box::pin(proxy_request_by_selected_member(
+            state,
+            auth_user,
+            slug,
+            path,
+            request,
+            resolved_slug,
+            &id,
+        ))
+        .await;
+    }
+
     preflight_proxy_deny_before_resolution(
         state,
         auth_user,
@@ -1340,71 +2598,16 @@ pub(crate) async fn proxy_request_by_slug_inner(
     // Constrained to the slug in the route path so the override cannot
     // silently proxy through a different service.
     if let Some(ref us_id) = via_service {
-        if let Some(resolved) = proxy_service::resolve_proxy_target_by_user_service_id(
-            &state.db,
-            &state.encryption_keys,
-            &user_id_str,
+        return Box::pin(proxy_request_by_selected_member(
+            state,
+            auth_user,
+            slug,
+            path,
+            request,
+            resolved_slug,
             us_id,
-            Some(slug),
-            None,
-            proxy_service::ProxyExecutionContext::new(
-                Some(&state.connection_expiry_notifier),
-                state.platform_user_rate_limit,
-            ),
-        )
-        .await?
-        {
-            let effective_service_id = resolved.target.service.id.clone();
-            if let Some(routing) = &resolved.org_routing {
-                audit_org_routing(
-                    state,
-                    auth_user,
-                    routing,
-                    &resolved.user_service_id,
-                    &effective_service_id,
-                    resolved.pool_selection.as_ref(),
-                );
-            } else {
-                audit_personal_routing(
-                    state,
-                    auth_user,
-                    Some(&resolved.user_service_id),
-                    &effective_service_id,
-                    resolved.pool_selection.as_ref(),
-                );
-            }
-            return Box::pin(execute_proxy_inner(
-                state,
-                auth_user,
-                &effective_service_id,
-                path,
-                request,
-                Some(PreResolved {
-                    target: resolved.target,
-                    catalog_service_slug: resolved.catalog_service_slug,
-                    node_id: resolved.node_id,
-                    user_service_id: Some(resolved.user_service_id),
-                    has_server_credential: resolved.has_server_credential,
-                    master_credential: resolved.master_credential,
-                    require_identity_assertion: false,
-                    credential_source: resolved.credential_source,
-                    effective_owner_id: resolved
-                        .org_routing
-                        .as_ref()
-                        .map(|r| r.org_user_id.clone())
-                        .unwrap_or_else(|| user_id_str.clone()),
-                    billing_owner_id: None,
-                    is_auto_connected: resolved.is_auto_connected,
-                }),
-                TargetMode::CallerAddressed,
-                Vec::new(),
-                resolved_slug,
-            ))
-            .await;
-        }
-        return Err(AppError::NotFound(format!(
-            "UserService '{us_id}' not found"
-        )));
+        ))
+        .await;
     }
 
     // Try new UserService path first (by slug)
@@ -1621,7 +2824,11 @@ pub(crate) fn enforce_proxy_billing_classification(
             .extensions()
             .get::<crate::services::billing::route_inventory::BillingRoutePolicy>()
             .copied(),
-        crate::services::billing::BillingIngress::Proxy,
+        if request.extensions().get::<PoolGatewayIngress>().is_some() {
+            crate::services::billing::BillingIngress::LlmGateway
+        } else {
+            crate::services::billing::BillingIngress::Proxy
+        },
     )
 }
 
@@ -1963,6 +3170,35 @@ async fn execute_proxy_inner(
     let machine_git = machine_ingress
         .as_ref()
         .is_some_and(|ingress| ingress.git.is_some());
+    let pool_authority = request
+        .extensions()
+        .get::<PoolExecutionAuthority>()
+        .cloned();
+    let pool_accounting = request
+        .extensions()
+        .get::<pool_attempt::AttemptContext>()
+        .cloned();
+    let is_pool_attempt = request.extensions().get::<PoolAttemptMarker>().is_some();
+    if machine_ingress.is_some() && is_pool_attempt {
+        // A machine job declares an exact connection, not a pool. Its body can
+        // be a one-shot stream and must never be replayed on another member.
+        return Err(AppError::ApiKeyScopeForbidden(
+            "Machine gateways require a declared service connection, not a pool member attempt"
+                .into(),
+        ));
+    }
+    if let Some(prepared) = pool_accounting
+        .as_ref()
+        .and_then(|context| context.prepared_chat.as_ref())
+    {
+        // Adapter-required headers are trusted outbound defaults, not client
+        // headers subject to the inbound forwarding allowlist.
+        extra_outbound_headers.extend(prepared.headers.iter().cloned());
+    }
+    let pool_dispatch_state = request
+        .extensions()
+        .get::<PoolAttemptDispatchState>()
+        .cloned();
     let exchange_started_at = request
         .extensions()
         .get::<ProxyExchangeStartedAt>()
@@ -1980,8 +3216,9 @@ async fn execute_proxy_inner(
     // `proxy_request_denied` audit event on 429 so Usage aggregation can
     // count rate-limited requests in both `request_count` and `error_count`
     // (see ChronoAIProject/NyxID#341).
-    if let Err(e) =
-        crate::mw::rate_limit::check_agent_rate_limit(&state.per_agent_limiter, auth_user).await
+    if request.extensions().get::<PoolAttemptMarker>().is_none()
+        && let Err(e) =
+            crate::mw::rate_limit::check_agent_rate_limit(&state.per_agent_limiter, auth_user).await
     {
         audit_service::log_for_user(
             state.db.clone(),
@@ -2069,7 +3306,11 @@ async fn execute_proxy_inner(
                     "node_routing_required": true,
                 })),
             );
-            return Err(err);
+            return Err(if is_pool_attempt {
+                pool_node_failure(err, false)
+            } else {
+                err
+            });
         }
 
         // API key scope enforcement. Emit a `proxy_request_denied` audit
@@ -2178,7 +3419,8 @@ async fn execute_proxy_inner(
         }
         // Per-agent credential override: if this request is via an API key and
         // the user has bound a different credential for this service, swap it in.
-        if let (Some(ak_id), Some(us_id)) = (&auth_user.api_key_id, &pre.user_service_id)
+        if pool_authority.is_none()
+            && let (Some(ak_id), Some(us_id)) = (&auth_user.api_key_id, &pre.user_service_id)
             && let Some(override_cred) = proxy_service::resolve_agent_credential_override(
                 &state.db,
                 &state.encryption_keys,
@@ -2194,6 +3436,19 @@ async fn execute_proxy_inner(
             agent_override_applied = true;
         }
 
+        if pool_authority.is_some()
+            && let (Some(key), Some(service)) = (&auth_user.api_key_id, &pre.user_service_id)
+        {
+            agent_override_applied = proxy_service::read_agent_credential_override_identity(
+                &state.db,
+                &auth_user.proxy_resolution_user_id(),
+                key,
+                service,
+                &pre.target,
+            )
+            .await?
+            .is_some();
+        }
         override_audit.dismiss();
         let required = pre.node_id.is_some();
         let catalog_service_slug = pre.catalog_service_slug;
@@ -2299,6 +3554,44 @@ async fn execute_proxy_inner(
         }
     }
 
+    if is_pool_attempt && let Some(route) = &node_route {
+        for node in std::iter::once(&route.node_id).chain(route.fallback_node_ids.iter()) {
+            if !state
+                .node_dispatch
+                .session_info(node)
+                .await
+                .capabilities
+                .http_cancellation
+            {
+                return Err(AppError::PoolAttemptTransport(
+                    crate::errors::PoolAttemptTransportKind::NodeUnsent,
+                ));
+            }
+        }
+    }
+
+    if is_pool_attempt {
+        // The common owner observes native bytes for accounting (and may translate
+        // them); reqwest/node transports do not automatically decode compression.
+        extra_outbound_headers.push(("accept-encoding".into(), "identity".into()));
+        if catalog_service_slug.as_deref() == Some("llm-openai-codex")
+            && pool_accounting
+                .as_ref()
+                .is_some_and(|c| c.prepared_chat.is_some())
+            && target.service.custom_user_agent.is_none()
+            && !target
+                .catalog_default_headers
+                .iter()
+                .chain(target.user_service_default_headers.iter())
+                .any(|header| header.name.eq_ignore_ascii_case("user-agent"))
+        {
+            extra_outbound_headers.push((
+                "user-agent".into(),
+                crate::services::chatgpt_translator::codex_user_agent(),
+            ));
+        }
+    }
+
     if machine_git {
         let git = machine_ingress
             .as_ref()
@@ -2329,6 +3622,7 @@ async fn execute_proxy_inner(
     // REST method/path before approval, billing, credential injection, node
     // transport, or forwarding. Rows without a policy retain the legacy path
     // bytes and behavior unchanged.
+    let pool_authority_path = path;
     let canonical_forward_path = if target.service.proxy_operation_policy.is_some()
         || !target.service.destination_targets.is_empty()
     {
@@ -2382,7 +3676,10 @@ async fn execute_proxy_inner(
             credential_class,
         )
         .await?;
-    let billing_request_id = uuid::Uuid::new_v4().to_string();
+    let billing_request_id = pool_accounting
+        .as_ref()
+        .map(|ctx| ctx.request_id.clone())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let is_ws_candidate = is_ws_upgrade_request(&request);
     let platform_metric = platform_metric_for_target(&target, is_ws_candidate);
     let node_intent = match &node_route {
@@ -2393,7 +3690,11 @@ async fn execute_proxy_inner(
         None => crate::services::billing::NodeIntent::Direct,
     };
     let billing_ctx = crate::services::billing::BillingRouteContext::new(
-        crate::services::billing::BillingIngress::Proxy,
+        if request.extensions().get::<PoolGatewayIngress>().is_some() {
+            crate::services::billing::BillingIngress::LlmGateway
+        } else {
+            crate::services::billing::BillingIngress::Proxy
+        },
         billing_request_id,
         billing_owner.owner_id,
         user_id_str.clone(),
@@ -2647,6 +3948,105 @@ async fn execute_proxy_inner(
         }
     }
 
+    if let Some(authority) = &pool_authority {
+        let actor = auth_user.proxy_resolution_user_id();
+        let service = &authority.scope.user_service_id;
+        let snapshot = proxy_service::read_proxy_authority_snapshot_by_user_service_id(
+            &state.db,
+            &state.encryption_keys,
+            &actor,
+            service,
+            Some(&authority.member_slug),
+        )
+        .await?
+        .ok_or_else(|| AppError::Conflict("Pool member was removed during admission".into()))?;
+        if pool_scope_for_resolution(
+            state,
+            auth_user,
+            &snapshot,
+            Some(&authority.scope),
+            method.as_str(),
+            pool_authority_path,
+        )
+        .await?
+            != authority.scope
+        {
+            return Err(AppError::Conflict(
+                "Pool member authority changed during admission".into(),
+            ));
+        }
+        let resolved = proxy_service::resolve_proxy_target_by_user_service_id(
+            &state.db,
+            &state.encryption_keys,
+            &actor,
+            service,
+            Some(&authority.member_slug),
+            None,
+            proxy_service::ProxyExecutionContext::new(
+                Some(&state.connection_expiry_notifier),
+                state.platform_user_rate_limit,
+            ),
+        )
+        .await?
+        .ok_or_else(|| AppError::Conflict("Pool member was removed during admission".into()))?;
+        if pool_scope_for_resolution(
+            state,
+            auth_user,
+            &resolved,
+            Some(&authority.scope),
+            method.as_str(),
+            pool_authority_path,
+        )
+        .await?
+            != authority.scope
+        {
+            return Err(AppError::Conflict(
+                "Pool member authority changed during credential resolution".into(),
+            ));
+        }
+        target.credential = resolved.target.credential;
+        if let Some(key) = auth_user.api_key_id.as_deref()
+            && let Some(credential) = proxy_service::resolve_agent_credential_override(
+                &state.db,
+                &state.encryption_keys,
+                &actor,
+                key,
+                service,
+                &target,
+                Some(&state.connection_expiry_notifier),
+            )
+            .await?
+        {
+            target.credential = credential;
+        }
+        let snapshot = proxy_service::read_proxy_authority_snapshot_by_user_service_id(
+            &state.db,
+            &state.encryption_keys,
+            &actor,
+            service,
+            Some(&authority.member_slug),
+        )
+        .await?
+        .ok_or_else(|| {
+            AppError::Conflict("Pool member was removed during credential resolution".into())
+        })?;
+        if pool_scope_for_resolution(
+            state,
+            auth_user,
+            &snapshot,
+            Some(&authority.scope),
+            method.as_str(),
+            pool_authority_path,
+        )
+        .await?
+            != authority.scope
+        {
+            return Err(AppError::Conflict(
+                "Pool member authority changed during credential resolution".into(),
+            ));
+        }
+    }
+
     let body = if body_bytes.is_empty() {
         None
     } else {
@@ -2841,7 +4241,8 @@ async fn execute_proxy_inner(
         }
     }
 
-    let billing_ctx = billing_ctx.with_request_body(body.as_deref());
+    let mut billing_ctx = billing_ctx.with_request_body(body.as_deref());
+    billing_ctx.pool_attempt = pool_accounting.as_ref().map(|ctx| ctx.metadata.clone());
     let metered = state.billing.open(&billing_ctx).await?;
 
     let durable_reservation = if let Some(api_key_id) = scheduled_api_key_id {
@@ -3076,7 +4477,8 @@ async fn execute_proxy_inner(
             &node_path,
             prepared.query.as_deref(),
             caller_proxy_prefix.clone(),
-        );
+        )
+        .map(|context| context.pin_pool_member(pool_authority.as_ref()));
 
         let mut base_headers = node_forward_headers;
         // Forward the caller's NyxID access token when the service is configured for it.
@@ -3112,6 +4514,7 @@ async fn execute_proxy_inner(
         // Try primary node, then fallbacks
         let all_node_ids: Vec<&str> = std::iter::once(node_route.node_id.as_str())
             .chain(node_route.fallback_node_ids.iter().map(|s| s.as_str()))
+            .take(if stream_upload { 1 } else { usize::MAX })
             .collect();
 
         let mut last_error: Option<AppError> = None;
@@ -3179,7 +4582,6 @@ async fn execute_proxy_inner(
                 return Err(error);
             }
             let start = std::time::Instant::now();
-            destination_audit.dispatch();
             if let Err(error) = state.billing.mark_forwarded(&metered).await {
                 if let Some(reservation) = durable_reservation.as_ref() {
                     durable_operation_grant_service::mark_pre_dispatch_rejected(
@@ -3199,6 +4601,13 @@ async fn execute_proxy_inner(
                 )
                 .await?;
             }
+            if let Some(accounting) = &pool_accounting {
+                accounting
+                    .node_dispatched
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
+            mark_pool_attempt_dispatched(pool_dispatch_state.as_ref());
+            destination_audit.dispatch();
             let target_admission_ms =
                 *first_dispatch_admission_ms.get_or_insert_with(|| elapsed_ms(exchange_started_at));
             let downstream_started_at = std::time::Instant::now();
@@ -3267,6 +4676,58 @@ async fn execute_proxy_inner(
                         let _ =
                             node_metrics_service::record_success(db_clone, nid, latency_ms).await;
                     });
+
+                    if let Some(accounting) = pool_accounting.clone() {
+                        let usage = should_capture_llm_usage(&target.service, platform_metric)
+                            .then(|| llm_usage_service::UsageAuditContext {
+                                db: state.db.clone(),
+                                user_id: user_id_str.clone(),
+                                provider_slug: None,
+                                service_id: Some(service_id.to_owned()),
+                                model: None,
+                                path: path.to_owned(),
+                                api_key_id: auth_user.api_key_id.clone(),
+                                api_key_name: auth_user.api_key_name.clone(),
+                            });
+                        let mut response = pool_attempt::node_response(
+                            state,
+                            auth_user,
+                            accounting,
+                            proxy_response,
+                            metered.clone(),
+                            request_body_len,
+                            path,
+                            downstream_cancellation.clone(),
+                            node_location_context.as_ref(),
+                            pool_attempt::Observability {
+                                usage,
+                                diagnostics: None,
+                            },
+                        )
+                        .await?;
+                        audit_service::log_for_user(
+                            state.db.clone(),
+                            auth_user,
+                            "proxy_request",
+                            Some(node_proxy_audit_event_data(
+                                service_id,
+                                &method_str,
+                                path,
+                                response.status().as_u16(),
+                                node_id,
+                                service_owner_for_approval,
+                                &auth_user.proxy_resolution_user_id(),
+                                target.connection_id.as_deref(),
+                            )),
+                        );
+                        apply_agent_attribution_headers(
+                            &mut response,
+                            auth_user.api_key_id.as_deref(),
+                            target.connection_id.as_deref(),
+                        );
+                        destination_audit.complete(response.status().as_u16());
+                        return Ok(response);
+                    }
 
                     let response_result: AppResult<Response> = async {
                         let response = match proxy_response {
@@ -3575,7 +5036,11 @@ async fn execute_proxy_inner(
                             "node rejected the request before downstream credential use",
                         )
                         .await;
-                        return Err(err);
+                        return Err(if is_pool_attempt {
+                            pool_node_failure(err, dispatched)
+                        } else {
+                            err
+                        });
                     }
                     if stream_upload || !should_retry_node_failure(&method, dispatched) {
                         emit_preheader_diagnostics(
@@ -3585,7 +5050,11 @@ async fn execute_proxy_inner(
                             &all_headers,
                             "upstream_error",
                         );
-                        return Err(err);
+                        return Err(if is_pool_attempt {
+                            pool_node_failure(err, dispatched)
+                        } else {
+                            err
+                        });
                     }
                     last_error = Some(err);
                     continue;
@@ -3632,7 +5101,11 @@ async fn execute_proxy_inner(
                             method = %method,
                             "Not retrying unsafe proxy request after possible node dispatch"
                         );
-                        return Err(err);
+                        return Err(if is_pool_attempt {
+                            pool_node_failure(err, dispatched)
+                        } else {
+                            err
+                        });
                     }
                     tracing::warn!(node_id = %node_id, "Node proxy failed, trying next");
                     last_error = Some(err);
@@ -3683,7 +5156,11 @@ async fn execute_proxy_inner(
                             "connect_error"
                         },
                     );
-                    return Err(e);
+                    return Err(if is_pool_attempt {
+                        pool_node_failure(e, dispatched)
+                    } else {
+                        e
+                    });
                 }
             }
         }
@@ -3728,14 +5205,19 @@ async fn execute_proxy_inner(
                     "attempted_node_ids": all_node_ids,
                 })),
             );
-            return Err(last_error.unwrap_or_else(|| {
+            let error = last_error.unwrap_or_else(|| {
                 AppError::NodeOffline(if node_routing_required {
                     "Service is configured to route via a node, but all node routes failed"
                         .to_string()
                 } else {
                     "All node routes failed and no server-side credential is available".to_string()
                 })
-            }));
+            });
+            return Err(if is_pool_attempt {
+                pool_node_failure(error, had_dispatched_failure)
+            } else {
+                error
+            });
         }
 
         // Fall through to standard proxy with server-side credential.
@@ -3779,6 +5261,7 @@ async fn execute_proxy_inner(
     let is_codex = target.service.slug == "llm-openai-codex";
 
     if is_codex
+        && !is_pool_attempt
         && target.target_id.is_none()
         && is_codex_transport_path(path)
         && let Some(body_ref) = body.as_ref()
@@ -3825,7 +5308,6 @@ async fn execute_proxy_inner(
             model.clone(),
         );
 
-        destination_audit.dispatch();
         if let Err(error) = state.billing.mark_forwarded(&metered).await {
             if let Some(reservation) = durable_reservation.as_ref() {
                 durable_operation_grant_service::mark_pre_dispatch_rejected(
@@ -3840,6 +5322,8 @@ async fn execute_proxy_inner(
         if let Some(reservation) = durable_reservation.as_ref() {
             durable_operation_grant_service::mark_dispatched(&state.db, reservation, None).await?;
         }
+        mark_pool_attempt_dispatched(pool_dispatch_state.as_ref());
+        destination_audit.dispatch();
         let response_result = until_client_disconnect(
             &downstream_cancellation,
             chatgpt_translator::send_to_chatgpt(
@@ -3878,6 +5362,9 @@ async fn execute_proxy_inner(
                     )
                     .await;
                     return Err(AppError::DurableOperationOutcomeUncertain);
+                }
+                if is_pool_attempt {
+                    return Err(error);
                 }
                 return Err(error);
             }
@@ -3944,7 +5431,6 @@ async fn execute_proxy_inner(
     }
 
     // Reuse the shared reqwest::Client from AppState for connection pooling.
-    destination_audit.dispatch();
     if let Err(error) = state.billing.mark_forwarded(&metered).await {
         if let Some(reservation) = durable_reservation.as_ref() {
             durable_operation_grant_service::mark_pre_dispatch_rejected(
@@ -3959,12 +5445,18 @@ async fn execute_proxy_inner(
     if let Some(reservation) = durable_reservation.as_ref() {
         durable_operation_grant_service::mark_dispatched(&state.db, reservation, None).await?;
     }
+    mark_pool_attempt_dispatched(pool_dispatch_state.as_ref());
+    destination_audit.dispatch();
     let target_admission_ms = elapsed_ms(exchange_started_at);
     let downstream_started_at = std::time::Instant::now();
     let downstream_result = until_client_disconnect(
         &downstream_cancellation,
         proxy_service::forward_request_with_extra_outbound_headers(
-            &state.http_client,
+            if is_pool_attempt {
+                pool_no_redirect_http_client()
+            } else {
+                &state.http_client
+            },
             &target,
             reqwest_method,
             path,
@@ -4014,6 +5506,9 @@ async fn execute_proxy_inner(
                 .await;
                 return Err(AppError::DurableOperationOutcomeUncertain);
             }
+            if is_pool_attempt {
+                return Err(encode_pool_attempt_error(error));
+            }
             return Err(error.into_app_error());
         }
         Err(_) => {
@@ -4048,7 +5543,8 @@ async fn execute_proxy_inner(
         &target.base_url,
         downstream_response.url().clone(),
         caller_proxy_prefix,
-    );
+    )
+    .map(|context| context.pin_pool_member(pool_authority.as_ref()));
 
     if let Some(reservation) = durable_reservation.as_ref() {
         finish_durable_operation(
@@ -4104,6 +5600,42 @@ async fn execute_proxy_inner(
             api_key_name: auth_user.api_key_name.clone(),
         }
     });
+
+    if let Some(accounting) = pool_accounting {
+        let mut response = pool_attempt::direct_response(
+            state,
+            auth_user,
+            accounting,
+            downstream_response,
+            metered,
+            request_body_len,
+            path,
+            downstream_cancellation,
+            direct_location_context.as_ref(),
+            pool_attempt::Observability {
+                usage: usage_context,
+                diagnostics: Some(exchange_diagnostics),
+            },
+        )
+        .await?;
+        audit_service::log_for_user(
+            state.db.clone(),
+            auth_user,
+            "proxy_request",
+            Some(serde_json::json!({
+                "service_id": service_id, "method": method.as_str(), "path": path,
+                "response_status": status.as_u16(), "acting_client_id": &auth_user.acting_client_id,
+                "connection_id": target.connection_id.as_deref(),
+            })),
+        );
+        apply_agent_attribution_headers(
+            &mut response,
+            auth_user.api_key_id.as_deref(),
+            target.connection_id.as_deref(),
+        );
+        destination_audit.complete(status.as_u16());
+        return Ok(response);
+    }
 
     let mut response_builder = Response::builder().status(status);
 
@@ -4751,13 +6283,6 @@ fn websocket_resale_usage(
     Some(ResaleUsage { metric, quantity })
 }
 
-fn service_supports_stream_options_include_usage(service_slug: &str) -> bool {
-    matches!(
-        service_slug,
-        "llm-openai" | "llm-deepseek" | "llm-xai" | "chrono-llm" | "chrono-llm-public"
-    )
-}
-
 fn force_stream_usage_for_service(
     service_slug: &str,
     path: &str,
@@ -4765,7 +6290,7 @@ fn force_stream_usage_for_service(
 ) -> Option<bytes::Bytes> {
     let body_bytes = body?;
     if body_bytes.is_empty()
-        || !service_supports_stream_options_include_usage(service_slug)
+        || !llm_usage_service::service_supports_stream_options_include_usage(service_slug)
         || !path.contains("chat/completions")
     {
         return Some(body_bytes);
@@ -10052,6 +11577,141 @@ mod proxy_resolution_integration_tests {
             }
         }
         echo_server.abort();
+    }
+
+    #[tokio::test]
+    async fn machine_stream_upload_never_retries_a_fallback_node() {
+        use crate::services::node_ws_manager::{NodeCapabilitiesMsg, NodeOutboundMessage};
+        for dispatched in [false, true] {
+            let db = connect_test_database("machine_stream_no_node_retry")
+                .await
+                .unwrap();
+            let state = test_app_state(db.clone());
+            let owner = Uuid::new_v4().to_string();
+            db.collection::<crate::models::user::User>(USERS)
+                .insert_one(test_user(&owner, UserType::Person))
+                .await
+                .unwrap();
+            let primary = insert_online_node(&state, &owner, "primary").await;
+            let fallback = insert_online_node(&state, &owner, "fallback").await;
+            let mut service =
+                insert_user_service(&db, &owner, "stream-service", "https://example.com", None)
+                    .await;
+            service.node_id = Some(primary.id.clone());
+            db.collection::<UserService>(USER_SERVICES)
+                .replace_one(doc! { "_id": &service.id }, &service)
+                .await
+                .unwrap();
+            crate::services::node_service::create_binding(&db, &owner, &fallback.id, &service.id)
+                .await
+                .unwrap();
+            let (primary_tx, mut primary_rx) = tokio::sync::mpsc::channel(32);
+            let (fallback_tx, mut fallback_rx) = tokio::sync::mpsc::channel(32);
+            crate::test_utils::register_test_node_connection(&state, &primary.id, primary_tx).await;
+            crate::test_utils::register_test_node_connection(&state, &fallback.id, fallback_tx)
+                .await;
+            state.node_ws_manager.record_capabilities(
+                &primary.id,
+                &NodeCapabilitiesMsg {
+                    proxy_upload_v1: true,
+                    ..Default::default()
+                },
+            );
+            let route = super::build_pre_resolved_node_route(
+                &state,
+                &owner,
+                &service.id,
+                Some(&primary.id),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                route.fallback_node_ids.as_slice(),
+                std::slice::from_ref(&fallback.id)
+            );
+            if !dispatched {
+                db.collection::<Node>(NODES)
+                    .update_one(
+                        doc! { "_id": &primary.id },
+                        doc! { "$unset": { "signing_secret_encrypted": "" } },
+                    )
+                    .await
+                    .unwrap();
+            }
+            let manager = state.node_ws_manager.clone();
+            let primary_id = primary.id.clone();
+            let task = tokio::spawn(async move {
+                if dispatched {
+                    let NodeOutboundMessage::Text(message) = primary_rx.recv().await.unwrap()
+                    else {
+                        panic!("expected signed upload opening");
+                    };
+                    let opening: serde_json::Value = serde_json::from_str(&message).unwrap();
+                    assert_eq!(opening["type"], "proxy_upload");
+                    manager.deliver_proxy_error(
+                        &primary_id,
+                        opening["request_id"].as_str().unwrap(),
+                        "credential missing",
+                        502,
+                        true,
+                        Some("credential_missing"),
+                    );
+                }
+            });
+            let mut request = Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/proxy/s/stream-service/upload")
+                .header("content-type", "application/octet-stream")
+                .body(Body::from_stream(futures::stream::once(async {
+                    Ok::<_, std::io::Error>(bytes::Bytes::from_static(b"one-shot upload"))
+                })))
+                .unwrap();
+            request.extensions_mut().insert(
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Proxy,
+                ),
+            );
+            request
+                .extensions_mut()
+                .insert(crate::services::machine_gateway_service::Ingress {
+                    declared_id: service.id.clone(),
+                    git: None,
+                });
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                proxy_request_by_slug_inner(
+                    &state,
+                    &access_token_auth(&owner),
+                    &service.slug,
+                    "upload",
+                    request,
+                    &mut String::new(),
+                ),
+            )
+            .await
+            .unwrap();
+            if dispatched {
+                assert!(
+                    matches!(result, Err(AppError::NodeCredentialMissing(_))),
+                    "{result:?}"
+                );
+            } else {
+                assert!(
+                    matches!(result, Err(AppError::NodeOffline(_))),
+                    "{result:?}"
+                );
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                fallback_rx.try_recv().is_err(),
+                "stream must never reach the fallback"
+            );
+            db.drop().await.unwrap();
+        }
     }
 
     #[tokio::test]

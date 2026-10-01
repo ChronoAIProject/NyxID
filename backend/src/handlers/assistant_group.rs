@@ -214,6 +214,7 @@ async fn run_member(
         return Ok(());
     }
     let start = TurnStart {
+        trigger: None,
         conversation_id: thread.as_ref().map(|row| row.id.clone()),
         text: engine::excerpt(
             &format!(

@@ -710,3 +710,68 @@ and observations still use cua. Takeover cancels active agent cua/command/file
 work immediately; late results are discarded. Pixel/input data never enters
 agent tools or transcripts during owner control. Frame-rate, latency and
 bandwidth measurements are in [MACHINE_NODES_VALIDATION.md](../MACHINE_NODES_VALIDATION.md).
+
+## Trigger turns
+
+Scheduled and assistant-webhook work enters the same engine with
+`TurnOrigin::Trigger`, `guest = false` and an internal fenced `TurnClaim`.
+`begin_turn` admits that claim inside the conversation/credential transaction;
+the run record and active turn therefore agree even across a crash. This branch
+executes only for trigger turns, adding no database query to ordinary turn start.
+Scheduled trigger instructions retain owner authority. Webhook data is untrusted:
+`confirmation_policy = changes` (default) enforces owner cards on every changing
+tool call, using the same HTTP/catalog classifier as guest access and explicit
+native tool contracts. The owner may explicitly select `destructive` with a
+warning to confirm only destructive calls. This policy is snapshotted per run
+and is not bypassed by the global skip-destructive setting. Agent grants and
+billing continue through the existing engine. Webhooks default to a dedicated
+thread for every agent, keeping event text out of the home context used by later
+owner turns and private channel chats. An explicit `home` choice carries UI/tool
+and setup-prefill warnings that later full-authority turns are outside the webhook
+confirmation policy. Scheduled work retains the NyxBot-home/specialist-dedicated
+defaults. Dedicated/per-run automation threads are excluded from home adoption
+at creation, turn admission and recovery after deletion.
+
+`ActiveTurn.trigger_run_id` connects settlement and confirmations to metadata-only
+run history. Confirmation requests copy this identity and the active turn ID;
+automation settlement keeps the run waiting until cards are decided, scheduling
+its fallback at the earliest card expiry. The decision transaction wakes the
+work item; settlement reads card state transactionally to avoid lost wakeups. The
+scheduler resumes it as another trigger turn without a second occurrence-budget
+charge. Ordinary browser and chat continuations skip these cards. A failed/lost
+turn is terminal and never replayed. Final replies remain in the transcript;
+optional chat/push delivery claims one outbound attempt. An interrupted, ambiguous
+send is reported as failed rather than retried, since a remote provider cannot
+participate in the MongoDB transaction. Full details are in
+[NyxBot schedules](../NYXBOT_SCHEDULES.md).
+
+All NyxAgent REST routes require first-party human credentials; developer OAuth
+apps cannot turn their consent into the owner's full assistant authority. CLI
+device login, mobile and web first-party sessions carry no OAuth client ID.
+Ordinary denial stickiness remains keyed to the latest user/orchestrator message;
+only trigger turns key denials to their active run turn.
+
+Automations require all replicas upgraded before creation. Old trigger readers
+fail listings and ingress on new enum variants; existing retry/replay and TTL
+retention do not scan or delete automation rows. Setup links contain only an
+owner-bound watch ID, with prefill fetched after authentication and consumed in
+the trigger-insert transaction. Cron gaps collapse at the first valid instant;
+folds use the earlier instant. Recovery writes one missed-count/bounds summary
+and one audit. Busy/pool/overlap work backs off to 30 seconds; budget exhaustion
+waits for its next UTC budget window, all capped at the initial grace deadline.
+
+### Machines in automation turns
+
+Machine tools in scheduled turns retain the same live machine/login grants,
+owner-control lockout and `machine_confirm` rules as owner-initiated turns.
+Webhook turns add their per-run confirmation policy. One exact-argument,
+one-use owner action card satisfies both policies when both require approval.
+Exec, file writes/attachment saves, job cancellation and changing computer
+input are destructive because they can overwrite data or interrupt arbitrary
+work. Saved-login filling and requesting owner control are changing, but not
+destructive: they are restricted field insertion or an owner handoff rather
+than arbitrary execution. Machine listing, saved-login metadata, file listing,
+file reads and job status pass the webhook read-only gate; machine-level `all`
+confirmation still applies to operations as configured. Both direct native
+calls and `nyx__call_tool` use these checks. Guests and developer OAuth tokens
+cannot use machine tools or the human desktop/control routes.

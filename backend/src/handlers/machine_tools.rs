@@ -112,24 +112,8 @@ pub async fn call(
     {
         return Err(AppError::MachineComputerUnavailable);
     }
-    if name == "nyx__machine_request_control" {
-        return super::machine_desktop::request_control(
-            state,
-            chat,
-            &node,
-            argument(&arguments, "reason")?,
-        )
-        .await;
-    }
-    crate::services::machine_desktop_service::agent_allowed(&state.db, &node.id).await?;
-    if operation == Operation::Computer {
-        crate::services::machine_desktop_service::open(
-            &state.db,
-            &chat.user_id,
-            &node.id,
-            Some(&chat.conversation_id),
-        )
-        .await?;
+    if name != "nyx__machine_request_control" {
+        crate::services::machine_desktop_service::agent_allowed(&state.db, &node.id).await?;
     }
     arguments["machine"] = json!(node.id);
     let mut login = None;
@@ -192,7 +176,25 @@ pub async fn call(
     } else {
         Vec::new()
     };
-    if machines::confirmation(&node, operation, &arguments)
+    // Arbitrary commands, writes and mutating desktop input can destroy data.
+    // Filling a checked login field and asking the owner for control change
+    // state, but do not themselves remove data or grant arbitrary execution.
+    let read_only = !machines::changing(operation, &arguments);
+    let destructive = matches!(
+        operation,
+        Operation::Exec | Operation::WriteFile | Operation::SaveAttachment | Operation::JobCancel
+    ) || (operation == Operation::Computer && !read_only);
+    let webhook_confirmation = acks::webhook_confirmation_required(chat, read_only, destructive);
+    if webhook_confirmation {
+        if let Some(refusal) =
+            acks::webhook_action_gate(&state.db, chat, name, &arguments, read_only, destructive)
+                .await?
+        {
+            return Ok(refusal);
+        }
+        // One digest-bound owner decision satisfies both policies. Never
+        // consume it twice when machine_confirm also requires confirmation.
+    } else if machines::confirmation(&node, operation, &arguments)
         || login.as_ref().is_some_and(|row| row.confirm_each_sign_in)
     {
         let approved = if let Some(id) = arguments["acknowledgement_id"].as_str() {
@@ -231,6 +233,24 @@ pub async fn call(
             .await?;
             return Ok(acks::refusal(&row));
         }
+    }
+    if name == "nyx__machine_request_control" {
+        return super::machine_desktop::request_control(
+            state,
+            chat,
+            &node,
+            argument(&arguments, "reason")?,
+        )
+        .await;
+    }
+    if operation == Operation::Computer {
+        crate::services::machine_desktop_service::open(
+            &state.db,
+            &chat.user_id,
+            &node.id,
+            Some(&chat.conversation_id),
+        )
+        .await?;
     }
     if matches!(operation, Operation::Job | Operation::JobCancel) {
         machines::job(&state.db, chat, &node.id, argument(&arguments, "job_id")?).await?;

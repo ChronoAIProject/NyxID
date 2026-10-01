@@ -56,6 +56,11 @@ macro_rules! llm_billing_routes {
                 )
             ),
             (
+                "/pools", "/api/v1/llm/pools", "handlers::llm_gateway::pool_aliases",
+                get(handlers::llm_gateway::pool_aliases),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt("AI pool alias discovery; no downstream request")
+            ),
+            (
                 "/status",
                 "/api/v1/llm/status",
                 "handlers::llm_gateway::llm_status",
@@ -538,6 +543,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             delete(handlers::broker_bindings::revoke_my_broker_binding),
         )
         .route("/me/consents", get(handlers::consent::list_my_consents))
+        .route(
+            "/me/oauth-consent-requests/{handle}",
+            get(handlers::oauth::get_consent_request),
+        )
         .route(
             "/me/consents/{client_id}/authorization",
             get(handlers::consent::get_my_consent_authorization),
@@ -1070,6 +1079,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             "/authorize/decision",
             post(handlers::oauth::authorize_decision),
         )
+        .route(
+            "/authorize/incremental/decision",
+            post(handlers::oauth::authorize_incremental_decision),
+        )
         .route("/par", post(handlers::oauth::pushed_authorization_request))
         .route("/token", post(handlers::oauth::token))
         .route(
@@ -1344,6 +1357,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .layer(middleware::from_fn(reject_relay_tokens));
 
     let trigger_routes = Router::new()
+        .route("/setup/{id}", get(handlers::triggers::setup))
+        .route("/preview", post(handlers::triggers::preview))
+        .route("/{id}/runs", get(handlers::triggers::runs))
+        .route("/{id}/run", post(handlers::triggers::run_now))
         .route(
             "/",
             get(handlers::triggers::list_triggers).post(handlers::triggers::create_trigger),
@@ -1403,6 +1420,22 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         );
 
     let service_pool_routes = Router::new()
+        .route(
+            "/candidates",
+            get(handlers::service_pools_handler::candidates),
+        )
+        .route(
+            "/{pool_id}/candidates",
+            get(handlers::service_pools_handler::pool_candidates),
+        )
+        .route(
+            "/{pool_id}/health",
+            get(handlers::service_pools_handler::health),
+        )
+        .route(
+            "/{pool_id}/health/reset",
+            post(handlers::service_pools_handler::reset_health),
+        )
         .route(
             "/",
             get(handlers::service_pools_handler::list_pools)
@@ -2062,7 +2095,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             "/actions/org",
             handlers::assistant_action_effects_org::router(),
         )
-        .merge(assistant_proxy_routes);
+        .merge(assistant_proxy_routes)
+        .layer(middleware::from_fn(
+            crate::mw::auth::reject_oauth_client_tokens,
+        ));
 
     let ssh_billing_routes = ssh_billing_routes!(register_billing_routes, Router::new());
 

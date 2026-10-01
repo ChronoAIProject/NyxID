@@ -1406,7 +1406,7 @@ async fn handle_tools_list(
             serde_json::json!({
                 "name": t.name,
                 "description": t.description,
-                "inputSchema": t.input_schema,
+                "inputSchema": webhook_tool_schema(auth, &t.input_schema),
             })
         })
         .collect();
@@ -1564,12 +1564,62 @@ async fn dispatch_tools_call(
     if let Some(refused) = guest_tool_refusal(auth, tool_name, request.id.clone()) {
         return refused;
     }
-    if crate::services::machine_tools::is_tool(tool_name) {
-        return handle_machine_tool(state, auth, tool_name, arguments, request.id.clone()).await;
-    }
 
     if tool_name.starts_with("nyxid__") {
         return handle_account_tool(state, auth, tool_name, &arguments, request.id.clone()).await;
+    }
+    if tool_name.starts_with("nyx__")
+        && !matches!(
+            tool_name,
+            "nyx__search_tools"
+                | "nyx__discover_services"
+                | "nyx__list_connected_services"
+                | "nyx__call_tool"
+                | "nyx__wait_for_connection"
+                | "nyx__ssh_list_services"
+                | "nyx__oracle_pools"
+                | "nyx__oracle_result"
+                | "nyx__oracle_session"
+                | "nyx__machine_list"
+                | "nyx__saved_logins"
+                | "nyx__machine_list_files"
+                | "nyx__machine_read_file"
+                | "nyx__machine_job"
+        )
+        // The machine adapter applies this gate after live grants, controller
+        // checks and argument normalization, sharing a card with machine_confirm.
+        // This also covers calls wrapped in nyx__call_tool.
+        && !crate::services::machine_tools::is_tool(tool_name)
+        && let Some(chat) = auth
+            .chat
+            .as_ref()
+            .filter(|chat| chat.confirmation_policy.is_some())
+    {
+        match crate::services::assistant_acknowledgement_service::webhook_action_gate(
+            &state.db,
+            chat,
+            tool_name,
+            &arguments,
+            false,
+            matches!(tool_name, "nyx__ssh_exec" | "nyx__oracle_ask"),
+        )
+        .await
+        {
+            Ok(Some(refusal)) => {
+                return tool_result(request.id.clone(), &refusal.to_string(), true);
+            }
+            Err(_) => {
+                return tool_result(
+                    request.id.clone(),
+                    "Confirmation could not be checked",
+                    true,
+                );
+            }
+            Ok(None) => {}
+        }
+    }
+    if crate::services::machine_tools::is_tool(tool_name) {
+        return handle_machine_tool(state, auth, tool_name, arguments, request.id.clone()).await;
     }
     // -- Meta-tools --
     match tool_name {
@@ -1743,22 +1793,38 @@ async fn dispatch_tools_call(
         );
     }
 
-    let prepared = match mcp_service::prepare_proxy_tool_call(service, endpoint, &arguments) {
-        Ok(prepared) => prepared,
-        Err(e) => {
-            return tool_result(
-                request.id.clone(),
-                &format!("Invalid tool arguments: {e}"),
-                true,
-            );
-        }
-    };
+    let execution_arguments = webhook_execution_arguments(auth, &arguments);
+    let prepared =
+        match mcp_service::prepare_proxy_tool_call(service, endpoint, &execution_arguments) {
+            Ok(prepared) => prepared,
+            Err(e) => {
+                return tool_result(
+                    request.id.clone(),
+                    &format!("Invalid tool arguments: {e}"),
+                    true,
+                );
+            }
+        };
     if let Some(refused) = guest_service_refusal(
         state,
         auth,
         service,
         endpoint,
         &prepared,
+        request.id.clone(),
+    )
+    .await
+    {
+        return refused;
+    }
+    if let Some(refused) = webhook_service_gate(
+        state,
+        auth,
+        service,
+        endpoint,
+        &prepared,
+        tool_name,
+        &arguments,
         request.id.clone(),
     )
     .await
@@ -2155,29 +2221,9 @@ async fn guest_service_refusal(
             true,
         ));
     }
-    let method = prepared.method();
-    let safe = matches!(
-        *method,
-        reqwest::Method::GET | reqwest::Method::HEAD | reqwest::Method::OPTIONS
-    );
-    // A POST its stored catalog contract marks read-only reads (a search), a
-    // GET its spec marks as writing does not; a remote spec may only narrow.
-    let reads = (safe
-        && metadata.risk != Some(crate::models::service_endpoint::EndpointRisk::Write))
-        || (*method == reqwest::Method::POST
-            && metadata.catalog_contract
-            && metadata.risk == Some(crate::models::service_endpoint::EndpointRisk::Read));
-    // Using a service is reading, creating and acting: PUT, PATCH and DELETE
-    // change or remove what exists, unless NyxID's marker says an operation
-    // only acts (a PUT that starts playback) or edits (a POST that edits a
-    // message); a DELETE and what Aevatar's marker calls destructive never.
-    // "Only acts" widens, so only a catalog contract may say it.
-    let changes = match metadata.changes_existing {
-        Some(true) => true,
-        Some(false) if metadata.catalog_contract => false,
-        _ => !(safe || *method == reqwest::Method::POST),
-    };
-    let uses = *method != reqwest::Method::DELETE && !changes && !metadata.destructive;
+    let effects = mcp_service::operation_effects(prepared.method(), metadata);
+    let reads = effects.reads;
+    let uses = effects.uses;
     let allowed = match access {
         GuestAccess::All => true,
         GuestAccess::Use => uses,
@@ -2194,6 +2240,82 @@ async fn guest_service_refusal(
             true,
         )
     })
+}
+
+// Action-card identifiers are NyxID control metadata, never downstream body
+// fields. Preserve them in the digest/gate arguments, remove them for execution.
+fn webhook_execution_arguments(
+    auth: &McpAuthContext,
+    args: &serde_json::Value,
+) -> serde_json::Value {
+    let mut result = args.clone();
+    if auth
+        .chat
+        .as_ref()
+        .is_some_and(|chat| chat.confirmation_policy.is_some())
+        && let Some(object) = result.as_object_mut()
+    {
+        object.remove("acknowledgement_id");
+    }
+    result
+}
+
+fn webhook_tool_schema(auth: &McpAuthContext, schema: &serde_json::Value) -> serde_json::Value {
+    let mut schema = schema.clone();
+    if auth
+        .chat
+        .as_ref()
+        .is_some_and(|chat| chat.confirmation_policy.is_some())
+        && let Some(properties) = schema["properties"].as_object_mut()
+    {
+        properties.insert("acknowledgement_id".into(), serde_json::json!({
+            "type": "string",
+            "description": "Owner-approved action card ID. Retry the exact approved call with this ID once.",
+        }));
+    }
+    schema
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn webhook_service_gate(
+    state: &AppState,
+    auth: &McpAuthContext,
+    service: &mcp_service::McpToolService,
+    endpoint: &mcp_service::McpToolEndpoint,
+    prepared: &mcp_service::PreparedProxyCall,
+    tool: &str,
+    args: &serde_json::Value,
+    request_id: Option<serde_json::Value>,
+) -> Option<Response> {
+    let chat = auth
+        .chat
+        .as_ref()
+        .filter(|chat| chat.confirmation_policy.is_some())?;
+    let metadata = service
+        .durable_endpoint_metadata
+        .get(&endpoint.endpoint_id)
+        .copied()
+        .unwrap_or_default();
+    let effects = mcp_service::operation_effects(prepared.method(), metadata);
+    // Method overrides have unknown effects; they must never bypass a card.
+    let result = crate::services::assistant_acknowledgement_service::webhook_action_gate(
+        &state.db,
+        chat,
+        tool,
+        args,
+        effects.reads && !prepared.carries_method_override(),
+        effects.destructive || prepared.carries_method_override(),
+    )
+    .await;
+    match result {
+        Ok(None) => None,
+        Ok(Some(refusal)) => Some(tool_result(request_id, &refusal.to_string(), true)),
+        Err(_) => Some(tool_result(
+            request_id,
+            "Confirmation could not be checked",
+            true,
+        )),
+    }
 }
 
 /// A channel chat member who is not the owner asked for this turn.
@@ -2301,7 +2423,13 @@ async fn handle_machine_tool(
             true,
         );
     };
-    match super::machine_tools::call(state, chat, tool_name, arguments).await {
+    // Keep the machine adapter's dispatch/confirmation future off the common
+    // MCP router stack. Unrelated callers do not allocate or enter this branch.
+    match Box::pin(super::machine_tools::call(
+        state, chat, tool_name, arguments,
+    ))
+    .await
+    {
         Ok(value) => tool_result(request_id, &value.to_string(), value.get("error").is_some()),
         Err(error) => tool_result(
             request_id,
@@ -2423,18 +2551,34 @@ async fn handle_meta_call_tool(
         return response;
     }
 
-    let prepared = match mcp_service::prepare_proxy_tool_call(service, endpoint, &inner_args) {
-        Ok(prepared) => prepared,
-        Err(e) => {
-            return tool_result(request_id, &format!("Invalid tool arguments: {e}"), true);
-        }
-    };
+    let execution_arguments = webhook_execution_arguments(auth, &inner_args);
+    let prepared =
+        match mcp_service::prepare_proxy_tool_call(service, endpoint, &execution_arguments) {
+            Ok(prepared) => prepared,
+            Err(e) => {
+                return tool_result(request_id, &format!("Invalid tool arguments: {e}"), true);
+            }
+        };
     if let Some(refused) = guest_service_refusal(
         state,
         auth,
         service,
         endpoint,
         &prepared,
+        request_id.clone(),
+    )
+    .await
+    {
+        return refused;
+    }
+    if let Some(refused) = webhook_service_gate(
+        state,
+        auth,
+        service,
+        endpoint,
+        &prepared,
+        tool_name,
+        &inner_args,
         request_id.clone(),
     )
     .await
@@ -2582,7 +2726,7 @@ async fn handle_meta_search(
             let mut value = serde_json::json!({
                 "name": t.name,
                 "description": t.description,
-                "inputSchema": t.input_schema,
+                "inputSchema": webhook_tool_schema(auth, &t.input_schema),
             });
             if auth.chat.is_some()
                 && let Some((service, _)) = mcp_service::resolve_tool_call(&t.name, &services)

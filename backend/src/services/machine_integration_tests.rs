@@ -538,7 +538,9 @@ async fn machine_lookups_are_batched_and_gateway_binding_is_one_indexed_read() {
 }
 #[tokio::test]
 async fn machine_saved_logins_are_encrypted_write_only_human_only_and_owner_scoped() {
-    use crate::handlers::saved_logins::{Metadata, require_human};
+    use crate::handlers::{
+        login_client_context::require_first_party_human, saved_logins::Metadata,
+    };
     let f = orchestrator_fixture("machine_login_storage").await;
     let login = logins::put(
         &f.state.db,
@@ -576,8 +578,8 @@ async fn machine_saved_logins_are_encrypted_write_only_human_only_and_owner_scop
             .as_str(),
         "287082"
     );
-    assert!(require_human(&f.auth).is_err());
-    assert!(require_human(&crate::test_utils::test_auth_user(&f.owner)).is_ok());
+    assert!(require_first_party_human(&f.auth).is_err());
+    assert!(require_first_party_human(&crate::test_utils::test_auth_user(&f.owner)).is_ok());
     assert!(
         logins::get(&f.state.db, &Uuid::new_v4().to_string(), &login.id)
             .await

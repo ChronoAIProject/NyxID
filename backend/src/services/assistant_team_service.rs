@@ -278,11 +278,32 @@ pub async fn threads(
 
 /// Create a thread row (no turn yet) with its key and credential, and make
 /// it the agent's home when it has none.
-async fn create_thread(
+pub(crate) async fn create_thread(
     db: &Database,
     keys: &EncryptionKeys,
     agent: &AssistantAgent,
     title: &str,
+    session: &mut ClientSession,
+) -> AppResult<AssistantConversation> {
+    create_thread_with_kind(db, keys, agent, title, false, session).await
+}
+
+pub(crate) async fn create_automation_thread(
+    db: &Database,
+    keys: &EncryptionKeys,
+    agent: &AssistantAgent,
+    title: &str,
+    session: &mut ClientSession,
+) -> AppResult<AssistantConversation> {
+    create_thread_with_kind(db, keys, agent, title, true, session).await
+}
+
+async fn create_thread_with_kind(
+    db: &Database,
+    keys: &EncryptionKeys,
+    agent: &AssistantAgent,
+    title: &str,
+    automation_thread: bool,
     session: &mut ClientSession,
 ) -> AppResult<AssistantConversation> {
     let now = Utc::now();
@@ -307,6 +328,7 @@ async fn create_thread(
             AgentRole::Subagent
         },
         agent_id: Some(agent.id.clone()),
+        automation_thread,
         report_to: None,
         pending_events: Vec::new(),
         event_streak: 0,
@@ -336,13 +358,15 @@ async fn create_thread(
         )
         .session(&mut *session)
         .await?;
-    db.collection::<AssistantAgent>(AGENTS)
-        .update_one(
-            doc! {"_id": &agent.id, "home_conversation_id": bson::Bson::Null},
-            doc! {"$set": {"home_conversation_id": &row.id}},
-        )
-        .session(&mut *session)
-        .await?;
+    if !automation_thread {
+        db.collection::<AssistantAgent>(AGENTS)
+            .update_one(
+                doc! {"_id": &agent.id, "home_conversation_id": bson::Bson::Null},
+                doc! {"$set": {"home_conversation_id": &row.id}},
+            )
+            .session(&mut *session)
+            .await?;
+    }
     Ok(row)
 }
 
@@ -354,18 +378,20 @@ pub async fn home_thread(
     agent: &AssistantAgent,
 ) -> AppResult<AssistantConversation> {
     // An agent's home is one of its own threads, never a chat app channel
-    // thread (a group's, or someone else's private chat).
+    // thread (a group's, or someone else's private chat), nor an isolated
+    // automation thread whose untrusted context must stay separate.
     if let Some(id) = agent.home_conversation_id.as_deref()
         && let Some(row) = db
             .collection::<AssistantConversation>(CONVERSATIONS)
             .find_one(doc! {"_id": id, "user_id": &agent.user_id,
-            "channel": bson::Bson::Null})
+            "channel": bson::Bson::Null, "automation_thread": {"$ne": true}})
             .await?
     {
         return Ok(row);
     }
     let mut own = thread_filter(agent);
     own.insert("channel", bson::Bson::Null);
+    own.insert("automation_thread", doc! {"$ne": true});
     let newest = db
         .collection::<AssistantConversation>(CONVERSATIONS)
         .find_one(own)

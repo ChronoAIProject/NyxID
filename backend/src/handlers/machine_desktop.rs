@@ -586,6 +586,11 @@ mod tests {
             .unwrap()
             .origin()
             .ascii_serialization();
+        let mut developer = crate::test_utils::test_auth_user(&f.owner);
+        developer.auth_method = crate::mw::auth::AuthMethod::AccessToken;
+        developer.oauth_client_id = Some("developer-app".into());
+        let mut first_party = crate::test_utils::test_auth_user(&f.owner);
+        first_party.auth_method = crate::mw::auth::AuthMethod::AccessToken;
         for (auth, request_origin, expected) in [
             (
                 crate::test_utils::test_auth_user(&f.owner),
@@ -602,15 +607,23 @@ mod tests {
                 origin.clone(),
                 403,
             ),
-            (f.auth.clone(), origin, 403),
+            (f.auth.clone(), origin.clone(), 403),
+            (developer, origin.clone(), 403),
+            (first_party, origin, 101),
         ] {
             let app = Router::new()
-                .route("/desktop/{node}", get(endpoint))
+                .route(
+                    "/api/v1/assistant/nyxagent/machines/{node}/desktop",
+                    get(endpoint),
+                )
+                .layer(axum::middleware::from_fn(
+                    crate::mw::auth::reject_oauth_client_tokens,
+                ))
                 .layer(Extension(auth))
                 .with_state(f.state.clone());
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!(
-                "ws://{}/desktop/{}",
+                "ws://{}/api/v1/assistant/nyxagent/machines/{}/desktop",
                 listener.local_addr().unwrap(),
                 node.id
             );

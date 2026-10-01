@@ -43,6 +43,10 @@ pub struct PushedAuthorizationRequest {
     pub binding_grant_id: Option<String>,
     #[serde(default)]
     pub resources: Vec<String>,
+    #[serde(default)]
+    pub service_access_mode: Option<crate::models::consent::ServiceAccessMode>,
+    #[serde(default)]
+    pub requested_service_ids: Vec<String>,
 
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub expires_at: DateTime<Utc>,

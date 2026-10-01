@@ -195,7 +195,7 @@ pub async fn fetch_catalog_oauth_config(
     access_token: Option<&str>,
     service_slug: &str,
 ) -> Result<OAuthConfig> {
-    let client = reqwest::Client::new();
+    let client = crate::tls::client_builder()?.build()?;
     let url = format!("{api_base_url}/api/v1/catalog/{service_slug}");
 
     let mut req = client.get(&url);

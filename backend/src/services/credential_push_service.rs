@@ -1063,6 +1063,7 @@ mod no_auth_strict_push_tests {
                 machine: None,
                 http_signature_v2: false,
                 proxy_upload_v1: false,
+                http_cancellation: false,
                 credential_ack_correlation: true,
                 remote_credential_crypto_v1: false,
                 proxy_max_body_size: None,

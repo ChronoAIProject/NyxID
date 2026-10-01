@@ -5,7 +5,7 @@ set -euo pipefail
 # 300-second snapshot window so dropped per-test idents do not exhaust FDs.
 docker run --detach --name nyxid-test-mongodb --publish 27017:27017 \
   --ulimit nofile=65536:65536 \
-  mongo:8.0 --replSet rs0 --bind_ip_all \
+  mongo:8.0@sha256:4968f22d0c6c10ef29952f3e807f62872ba22b3312f25803564fbfc08255efc2 --replSet rs0 --bind_ip_all \
   --setParameter minSnapshotHistoryWindowInSeconds=0
 for attempt in {1..30}; do
   if docker exec nyxid-test-mongodb mongosh --quiet \

@@ -206,7 +206,11 @@ export function useNyxAgentAssistantChat({
       // An allowed card resumes the assistant: the refusal told it to retry after
       // approval, and it cannot wait for the decision inside its own turn. A
       // specialist's request routed to NyxBot is resumed by the server itself.
-      if (acknowledgement.decider === "orchestrator") return;
+      if (
+        acknowledgement.decider === "orchestrator" ||
+        acknowledgement.trigger_run_id
+      )
+        return;
       if (choice !== "allow" || !selectedConversationId) return;
       if (nyxAgentTransport.isRunning(selectedConversationId)) {
         const queued = pendingContinuations.current.get(selectedConversationId);
