@@ -296,6 +296,8 @@ export function KeysPage() {
     action?: string;
     service?: string;
     view?: string;
+    pool?: string;
+    org?: string;
   } = useSearch({ strict: false });
   const navigate = useNavigate();
   const tab = parseTab(search.tab, KEYS_TABS, KEYS_TAB_DEFAULT);
@@ -485,7 +487,10 @@ export function KeysPage() {
 
         <TabsContent value="pools" className="mt-6">
           <ServicePoolsTab
+            key={`${search.org ?? "personal"}:${search.pool ?? ""}`}
             layout="cards"
+            initialOrgId={search.org}
+            initialPoolId={search.pool}
             createOpen={createPoolOpen}
             onCreateOpenChange={setCreatePoolOpen}
           />

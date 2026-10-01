@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ChevronRight, GitBranch } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -17,12 +17,22 @@ export function ServicePoolCards({
   pools,
   actions,
   onEdit,
+  initialOpenId,
 }: {
   readonly pools: readonly ServicePool[];
   readonly actions: (pool: ServicePool) => ReactNode;
   readonly onEdit: (pool: ServicePool) => void;
+  readonly initialOpenId?: string;
 }) {
-  const [open, setOpen] = useState<string | null>(null);
+  const [open, setOpen] = useState<string | null>(initialOpenId ?? null);
+  const linkedCard = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (!initialOpenId) return;
+    const frame = requestAnimationFrame(() => {
+      linkedCard.current?.scrollIntoView({ block: "start", inline: "nearest" });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [initialOpenId]);
   const transition = useServiceCardTransition();
   const keys = useKeys();
   const connections = keys.isError ? [] : (keys.data ?? []);
@@ -34,6 +44,7 @@ export function ServicePoolCards({
         return (
           <section
             key={pool.id}
+            ref={pool.id === initialOpenId ? linkedCard : undefined}
             aria-label={`${pool.name} pool`}
             style={{
               viewTransitionName: `pool-card-${pool.id.replace(/[^a-zA-Z0-9-]/g, "")}`,

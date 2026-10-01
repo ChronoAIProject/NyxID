@@ -14,15 +14,12 @@ import { ServiceViewToolbar } from "./service-view-toolbar";
 import { ServiceConnectionTable } from "./service-connection-table";
 import { ServiceAvatarStack } from "./service-avatar-stack";
 import { ServiceBillingSummary } from "./service-billing-summary";
-import { GitBranch } from "lucide-react";
 import {
   useServiceRoutingPools,
   type ServiceRoutingPools,
 } from "@/hooks/use-service-routing-pools";
-import { poolStrategyLabel } from "@/lib/service-pool-display";
-import type { ServicePool } from "@/schemas/pools";
 import { ServicePoolRoutingPanel } from "./service-pool-routing-panel";
-import { PoolEditor } from "./service-pools-tab";
+import { ServicePoolSummary } from "./service-pool-summary";
 import { useAuthStore } from "@/stores/auth-store";
 import {
   connectionSourceLabel as sourceLabel,
@@ -79,22 +76,12 @@ function GroupCard({
     version: number;
   } | null>(null);
   const [routeId, setRouteId] = useState<string | null>(null);
-  const [editingPool, setEditingPool] = useState<ServicePool | null>(null);
   const pools = routing.pools.filter((pool) =>
     pool.members.some((member) =>
       connections.some((key) => key.id === member.user_service_id),
     ),
   );
   const selectedPool = pools.find((pool) => pool.id === routeId) ?? pools[0];
-  const routingLabel = routing.loading
-    ? "Loading routing…"
-    : pools.length === 1
-      ? `${poolStrategyLabel(pools[0]!)}${pools[0]!.is_active ? "" : " · disabled"}`
-      : pools.length
-        ? `${pools.length} pools`
-        : routing.incomplete
-          ? "Pool access incomplete"
-          : "Individual slugs";
   const contentId = useId();
   const headingId = useId();
   const cardRef = useRef<HTMLElement>(null);
@@ -348,7 +335,9 @@ function GroupCard({
             <div
               className={cn(
                 "mt-auto text-xs",
-                expanded ? "grid gap-x-6 gap-y-2 md:grid-cols-2" : "space-y-1",
+                expanded
+                  ? "grid items-center gap-x-6 gap-y-2 md:grid-cols-2"
+                  : "space-y-0.5",
               )}
             >
               {!expanded && (
@@ -383,28 +372,18 @@ function GroupCard({
                   {agents.text}
                 </span>
               </button>
-              <button
-                type="button"
-                className="flex h-6 w-full min-w-0 items-center gap-2 rounded-sm text-left focus-visible:outline-2 focus-visible:outline-ring"
-                aria-label={`Show routing for ${group.name}`}
-                aria-expanded={expanded && routingOpen}
-                aria-controls={contentId}
-                onClick={() => {
+              <ServicePoolSummary
+                pools={pools}
+                loading={routing.loading}
+                incomplete={routing.incomplete}
+                serviceName={group.name}
+                expanded={expanded && routingOpen}
+                contentId={contentId}
+                onOpen={() => {
                   setRoutingOpen(true);
                   if (!expanded) onToggle(cardRef.current);
                 }}
-              >
-                <span className="w-16 shrink-0 text-muted-foreground">
-                  Routing
-                </span>
-                <GitBranch
-                  className="size-3.5 shrink-0 text-muted-foreground"
-                  aria-hidden="true"
-                />
-                <span className="truncate" title={routingLabel}>
-                  {routingLabel}
-                </span>
-              </button>
+              />
               <ServiceBillingSummary
                 connections={connections}
                 insights={insights}
@@ -480,10 +459,18 @@ function GroupCard({
                   ))}
                   <Link
                     to="/keys"
-                    search={{ tab: "pools", view: "routing" }}
+                    search={{
+                      tab: "pools",
+                      view: "routing",
+                      pool: selectedPool?.id,
+                      org:
+                        selectedPool && selectedPool.user_id !== identity
+                          ? selectedPool.user_id
+                          : undefined,
+                    }}
                     className="ml-auto text-xs text-primary hover:underline"
                   >
-                    Manage pools
+                    Manage in Service Pools
                   </Link>
                 </div>
                 {selectedPool ? (
@@ -492,7 +479,6 @@ function GroupCard({
                     pool={selectedPool}
                     connections={allConnections}
                     insights={insights}
-                    onEdit={() => setEditingPool(selectedPool)}
                   />
                 ) : (
                   <p className="p-4 text-xs text-muted-foreground">
@@ -522,15 +508,6 @@ function GroupCard({
           </div>
         )}
       </div>
-      {editingPool && (
-        <PoolEditor
-          pool={editingPool}
-          orgId={
-            editingPool.user_id === identity ? undefined : editingPool.user_id
-          }
-          onClose={() => setEditingPool(null)}
-        />
-      )}
     </section>
   );
 }

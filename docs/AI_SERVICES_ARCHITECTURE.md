@@ -90,13 +90,20 @@ Card billing summaries keep each source separate even when the expected payer is
 the same. Personal credentials normally use the personal account, organization
 credentials use the owning organization's account, and a platform key uses the
 acting person's personal account. Each source opens its own inline billing panel.
-The service card's **Routing** row shows saved pools containing its connections.
+Each collapsed service card shows **Pool** (name, strategy, additional pool count)
+and **Failover** (configured attempt limit or off/disabled state). Multiple pools
+show how many have failover enabled; hover/focus lists their individual policies.
+These two compact lines keep the common 256px collapsed card height.
 Grouping by catalog does not create a pool or change an individual connection slug.
-Open Routing to inspect the pool slug, strategy, priority/weight, credential supplier,
+Click the pool summary to inspect the pool slug, strategy, priority/weight, credential supplier,
 billing account/rates, and operation-scoped eligibility/cooldown in a table inside
 the card. All members of the selected pool are shown, including members of other
 catalog services. Pool management inventory is currently personal or organization
 admin only; incomplete access is labeled instead of asserting there are no pools.
+AI service routing details are read-only. **Manage in Service Pools** opens the
+selected pool under its personal or organization owner and scrolls its expanded
+card into view. Pool configuration, member ordering and policy edits live in
+**Service Pools** only.
 
 Priority pools support bounded failover; round-robin and weighted pools select a
 single member per request. Omitted/null priority policies use server defaults, not

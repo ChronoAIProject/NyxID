@@ -14,11 +14,36 @@ export function poolStrategyLabel(pool: ServicePool): string {
 }
 
 export function poolFailoverLabel(pool: ServicePool): string {
+  if (!pool.is_active) return "Pool disabled · no failover";
   if (pool.strategy !== "priority") return "Single attempt · no failover";
   const policy = pool.failover ?? defaultFailoverPolicy;
   return policy.max_attempts === 1 || !policy.retry_on.length
     ? "Failover off"
     : `Failover · up to ${policy.max_attempts} attempts`;
+}
+
+function configuredAttempts(pool: ServicePool): number {
+  if (!pool.is_active || !pool.members.some((member) => member.enabled))
+    return 0;
+  if (pool.strategy !== "priority") return 1;
+  const policy = pool.failover ?? defaultFailoverPolicy;
+  return policy.retry_on.length ? policy.max_attempts : 1;
+}
+
+export function poolFailoverSummary(pools: readonly ServicePool[]): string {
+  if (!pools.length) return "No pool";
+  if (pools.length === 1) {
+    const pool = pools[0]!;
+    if (!pool.is_active) return "Pool disabled";
+    const attempts = configuredAttempts(pool);
+    if (!attempts) return "No enabled members";
+    return attempts > 1 ? `Up to ${attempts} attempts` : "Off · single attempt";
+  }
+  if (pools.every((pool) => !pool.is_active)) return "Pools disabled";
+  const enabled = pools.filter((pool) => configuredAttempts(pool) > 1).length;
+  return enabled
+    ? `On in ${enabled} of ${pools.length} pools`
+    : "Off in all pools";
 }
 
 export function orderedPoolMembers(

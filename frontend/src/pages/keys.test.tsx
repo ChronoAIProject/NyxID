@@ -22,8 +22,9 @@ function render(ui: ReactNode) {
   });
 }
 
-const { mockNavigate, state } = vi.hoisted(() => ({
+const { mockNavigate, mockPoolOwner, state } = vi.hoisted(() => ({
   mockNavigate: vi.fn(),
+  mockPoolOwner: vi.fn(),
   // Mutable containers populated per-test before render.
   state: {
     search: {} as {
@@ -31,6 +32,8 @@ const { mockNavigate, state } = vi.hoisted(() => ({
       slug?: string;
       action?: string;
       view?: string;
+      pool?: string;
+      org?: string;
     },
     keys: [] as KeyInfo[],
     keysLoading: false,
@@ -89,18 +92,21 @@ vi.mock("@/hooks/use-pools", () => ({
     isError: false,
     isLoading: false,
   }),
-  useServicePools: () => ({
-    data: [
-      {
-        id: "pool-one",
-        name: "My pool",
-        slug: "my-pool",
-        strategy: "round_robin",
-        members: [{ user_service_id: "key-1", enabled: true, weight: 1 }],
-        is_active: true,
-      },
-    ],
-  }),
+  useServicePools: (orgId?: string) => {
+    mockPoolOwner(orgId);
+    return {
+      data: [
+        {
+          id: "pool-one",
+          name: "My pool",
+          slug: "my-pool",
+          strategy: "round_robin",
+          members: [{ user_service_id: "key-1", enabled: true, weight: 1 }],
+          is_active: true,
+        },
+      ],
+    };
+  },
 }));
 
 vi.mock("@/hooks/use-service-routing-pools", () => ({
@@ -110,7 +116,18 @@ vi.mock("@/hooks/use-service-routing-pools", () => ({
     incomplete: false,
   }),
 }));
-vi.mock("@/hooks/use-orgs", () => ({ useOrgs: () => ({ data: [] }) }));
+vi.mock("@/hooks/use-orgs", () => ({
+  useOrgs: () => ({
+    data: [
+      {
+        id: "team-id",
+        display_name: "Research",
+        slug: "research",
+        your_role: "admin",
+      },
+    ],
+  }),
+}));
 
 // Heavy children — stubbed to assert wiring (open state, presence), not driven.
 vi.mock("@/components/providers/codex-connection", () => ({
@@ -295,7 +312,27 @@ describe("KeysPage", () => {
     expect(screen.getByText("My OpenAI")).toBeVisible();
     expect(screen.getByText("/api/v1/proxy/s/my-pool")).toBeVisible();
     expect(screen.getByRole("button", { name: "Create pool" })).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Configure pool" }),
+    ).toBeVisible();
   });
+
+  it.each([undefined, "team-id"])(
+    "opens a linked pool under its owner (%s) without opening an editor",
+    async (org) => {
+      state.search = { tab: "pools", pool: "pool-one", org };
+      state.keys = [makeKey({ credential_source: { type: "personal" } })];
+      render(<KeysPage />);
+      expect(
+        await screen.findByRole("table", { name: "My pool route members" }),
+      ).toBeVisible();
+      expect(mockPoolOwner).toHaveBeenLastCalledWith(org);
+      expect(
+        screen.getByRole("button", { name: "Configure pool" }),
+      ).toBeVisible();
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    },
+  );
 
   it("omits oauth2 and api_key credential pills from service cards", () => {
     state.keys = [

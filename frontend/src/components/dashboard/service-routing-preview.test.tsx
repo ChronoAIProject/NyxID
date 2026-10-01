@@ -83,10 +83,14 @@ vi.mock("@tanstack/react-router", () => ({
   Link: ({
     children,
     params = {},
+    to,
+    search,
     ...props
   }: {
     children: ReactNode;
     params: { keyId?: string; groupId?: string };
+    to: string;
+    search?: Record<string, string | undefined>;
     "aria-label"?: string;
   }) => (
     <a
@@ -94,7 +98,9 @@ vi.mock("@tanstack/react-router", () => ({
       href={
         params.groupId
           ? `/keys/services/${params.groupId}`
-          : `/keys/${params.keyId}`
+          : params.keyId
+            ? `/keys/${params.keyId}`
+            : `${to}${search ? `?${new URLSearchParams(Object.entries(search).filter((entry): entry is [string, string] => entry[1] !== undefined))}` : ""}`
       }
     >
       {children}
@@ -1224,6 +1230,11 @@ describe("saved routing in service cards", () => {
       { ...pool("Reliable"), strategy: "priority", failover: null },
     ];
     render(preview());
+    expect(screen.getByText("Reliable")).toBeVisible();
+    expect(screen.getByText("Up to 3 attempts")).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Show routing for OpenAI" }),
+    ).toHaveAttribute("aria-expanded", "false");
     await userEvent.click(
       screen.getByRole("button", { name: "Show routing for OpenAI" }),
     );
@@ -1235,6 +1246,12 @@ describe("saved routing in service cards", () => {
     ).toBeVisible();
     expect(within(card).getByText("Personal account")).toBeVisible();
     expect(within(card).getByText("Team account")).toBeVisible();
+    expect(
+      within(card).queryByRole("button", { name: "Configure pool" }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(card).getByRole("link", { name: "Manage in Service Pools" }),
+    ).toHaveAttribute("href", "/keys?tab=pools&view=routing&pool=Reliable");
     expect(
       within(card).queryByRole("table", { name: "OpenAI connections" }),
     ).not.toBeInTheDocument();
@@ -1268,10 +1285,38 @@ describe("saved routing in service cards", () => {
   it("does not describe weighted rotation as failover", async () => {
     poolState.data = [{ ...pool("Rotate"), strategy: "weighted" }];
     render(preview());
+    expect(screen.getByText("Rotate")).toBeVisible();
+    expect(screen.getByText("Weighted")).toBeVisible();
+    expect(screen.getByText("Off · single attempt")).toBeVisible();
     await userEvent.click(
       screen.getByRole("button", { name: "Show routing for OpenAI" }),
     );
     expect(screen.getByText("Single attempt · no failover")).toBeVisible();
+  });
+  it("shows mixed failover at a glance and links the selected org pool to its owner", async () => {
+    poolState.data = [
+      { ...pool("Personal"), strategy: "weighted" },
+      { ...pool("Team"), user_id: "team-id", strategy: "priority" },
+    ];
+    render(preview());
+    const summary = screen.getByRole("button", {
+      name: "Show routing for OpenAI",
+    });
+    expect(within(summary).getByText("+1")).toBeVisible();
+    expect(within(summary).getByText("On in 1 of 2 pools")).toBeVisible();
+    await userEvent.click(summary);
+    await userEvent.click(
+      screen.getByRole("button", { name: "Team" }),
+    );
+    expect(
+      screen.getByRole("link", { name: "Manage in Service Pools" }),
+    ).toHaveAttribute(
+      "href",
+      "/keys?tab=pools&view=routing&pool=Team&org=team-id",
+    );
+    expect(
+      screen.queryByRole("button", { name: "Configure pool" }),
+    ).not.toBeInTheDocument();
   });
   it("reports pool read failures instead of claiming individual routes only", async () => {
     poolState.error = new Error("Unavailable");

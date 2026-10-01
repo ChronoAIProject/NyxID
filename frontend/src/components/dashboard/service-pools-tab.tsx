@@ -76,6 +76,8 @@ import {
 
 interface ServicePoolsTabProps {
   readonly layout?: "cards" | "table";
+  readonly initialOrgId?: string;
+  readonly initialPoolId?: string;
   readonly createOpen: boolean;
   readonly onCreateOpenChange: (open: boolean) => void;
 }
@@ -989,10 +991,12 @@ export function PoolHealthDialog({
 
 export function ServicePoolsTab({
   layout = "table",
+  initialOrgId,
+  initialPoolId,
   createOpen,
   onCreateOpenChange,
 }: ServicePoolsTabProps) {
-  const [owner, setOwner] = useState("personal");
+  const [owner, setOwner] = useState(initialOrgId ?? "personal");
   const orgId = owner === "personal" ? undefined : owner;
   const { data: orgs } = useOrgs();
   const pools = useServicePools(orgId);
@@ -1094,7 +1098,9 @@ export function ServicePoolsTab({
       {(pools.data?.length ?? 0) > 0 &&
         (layout === "cards" ? (
           <ServicePoolCards
+            key={owner}
             pools={pools.data ?? []}
+            initialOpenId={orgId === initialOrgId ? initialPoolId : undefined}
             actions={actions}
             onEdit={setEditing}
           />

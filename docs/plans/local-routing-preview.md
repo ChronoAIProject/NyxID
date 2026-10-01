@@ -15,11 +15,16 @@ production-data view at `/keys?view=routing`. This is application code, not the
 standalone HTML reference. Current main's full detail pages, authorship/history,
 org permissions and reconnect flows are retained.
 
-Latest pool integration validation: 102 focused frontend tests and all 6 backend
+Pool integration validation: 102 focused frontend tests and all 6 backend
 pool billing tests passed. The backend tests used an isolated MongoDB 8.0.16
 replica set, including a regression joining each attempt's service history to its
 billing request ID. TypeScript, the production frontend build, changed-file lint
 and whitespace checks passed. Signed-in visual review is still outstanding.
+
+The latest at-a-glance pool/failover summaries and owner-specific management links
+passed 70 focused frontend tests, the production/credential-accept builds and
+changed-file lint. AI service routing inspection has no pool editor; editing is
+confined to Service Pools.
 
 Run from `frontend/`:
 
@@ -66,11 +71,17 @@ cards and filter controls are also used by the normal production frontend.
 5. Organization and Service have separate named selectors. Search matches names,
    slugs and owners. Only matching rows appear in an expanded card; the full
    group count and Service details link preserve context.
-6. Each service card has a Routing row linked to its real saved pools. Opening it
-   shows priority/rotation, the pool slug, eligibility/cooldown and billing per
-   member inside the card. The Service Pools tab uses the same route table in
-   expandable cards. Configure opens the real revision-checked pool editor; this
-   production-data preview allows drafting but disables Save and mutations.
+6. Each collapsed service card shows its saved **Pool** name and strategy, plus
+   **Failover**: for example, `Up to 3 attempts`, `Off · single attempt`, or
+   `Pool disabled`. Multiple pools show the additional count and how many have
+   failover enabled. Hover/focus shows each policy and its pool slug. These
+   summaries describe configured policies, not successful health probes.
+7. Click the pool summary to see priority/rotation, the pool slug,
+   eligibility/cooldown and billing per member inside the card. This inspection
+   is read-only. **Manage in Service Pools** opens the selected pool, selects its
+   owner and scrolls its expanded card into view. **Configure** and member/policy
+   editing live only in Service Pools. The real revision-checked editor allows
+   drafting in this production-data preview but disables Save and mutations.
 
 The service-grid changes passed 98 focused frontend tests, TypeScript checking,
 targeted lint and the production build. The running Vite server serves the updated

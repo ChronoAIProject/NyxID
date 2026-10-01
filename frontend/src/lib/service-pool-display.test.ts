@@ -3,6 +3,7 @@ import { defaultFailoverPolicy, type ServicePool } from "@/schemas/pools";
 import {
   orderedPoolMembers,
   poolFailoverLabel,
+  poolFailoverSummary,
   poolMemberStatus,
   reorderPoolMembers,
 } from "./service-pool-display";
@@ -30,8 +31,41 @@ const members = [
     model: null,
   },
 ];
-const pool = { strategy: "priority", members, failover: null } as ServicePool;
+const pool = {
+  strategy: "priority",
+  members,
+  failover: null,
+  is_active: true,
+} as ServicePool;
 describe("saved pool presentation", () => {
+  it("summarizes configured failover without treating rotation or disabled pools as backups", () => {
+    expect(poolFailoverSummary([pool])).toBe("Up to 3 attempts");
+    const rotation = { ...pool, strategy: "weighted" as const };
+    const disabled = { ...pool, is_active: false };
+    expect(poolFailoverSummary([rotation])).toBe("Off · single attempt");
+    expect(poolFailoverSummary([disabled])).toBe("Pool disabled");
+    expect(poolFailoverLabel(disabled)).toBe("Pool disabled · no failover");
+    expect(poolFailoverSummary([pool, rotation, disabled])).toBe(
+      "On in 1 of 3 pools",
+    );
+    expect(poolFailoverSummary([rotation, disabled])).toBe("Off in all pools");
+    expect(poolFailoverSummary([disabled, disabled])).toBe("Pools disabled");
+    expect(
+      poolFailoverSummary([
+        {
+          ...pool,
+          members: members.map((member) => ({ ...member, enabled: false })),
+        },
+      ]),
+    ).toBe("No enabled members");
+    for (const failover of [
+      { ...defaultFailoverPolicy, max_attempts: 1 },
+      { ...defaultFailoverPolicy, retry_on: [] },
+    ])
+      expect(poolFailoverSummary([{ ...pool, failover }])).toBe(
+        "Off · single attempt",
+      );
+  });
   it("uses default failover for null policy and honors disabled retry policies", () => {
     expect(poolFailoverLabel(pool)).toBe("Failover · up to 3 attempts");
     expect(

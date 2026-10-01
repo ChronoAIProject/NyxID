@@ -737,7 +737,7 @@ const keysRoute = createRoute({
   // service scope in the Agent Key create dialog.
   validateSearch: (
     search: Record<string, unknown>,
-  ): { tab?: string; slug?: string; action?: string; service?: string; view?: string } => ({
+  ): { tab?: string; slug?: string; action?: string; service?: string; view?: string; pool?: string; org?: string } => ({
     ...(import.meta.env.DEV && search.view === "routing" ? { view: "routing" } : {}),
     ...(typeof search.tab === "string" ? { tab: search.tab } : {}),
     ...(typeof search.slug === "string" && search.slug.length > 0
@@ -747,6 +747,10 @@ const keysRoute = createRoute({
     ...(typeof search.service === "string" && search.service.length > 0
       ? { service: search.service }
       : {}),
+    ...(typeof search.pool === "string" && search.pool.length > 0 && search.pool.length <= 128
+      ? { pool: search.pool } : {}),
+    ...(typeof search.org === "string" && search.org.length > 0 && search.org.length <= 128
+      ? { org: search.org } : {}),
   }),
   component: KeysPage,
 });
