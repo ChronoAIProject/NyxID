@@ -1809,82 +1809,33 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     // tokens via the shared layer below). Submits can carry a PDF
     // attachment as base64, so this router gets a 16 MiB body cap instead
     // of the app-wide 1 MiB.
-    let oracle_consumer_routes = oracle_billing_routes!(
-        register_billing_routes,
+    //
+    // With `ORACLE_UPSTREAM_URL` set the whole nest is replaced by a
+    // streaming reverse proxy to the standalone oracle service (or a 503
+    // hold). The proxy router is a bare fallback so every current and
+    // future oracle path forwards; the parent `api_v1_shared` layers still
+    // reject delegated and relay tokens before the proxy runs. The
+    // `oracle_billing_routes!` inventory keeps describing the in-process
+    // handlers: the billing route test compares the macro expansion with the
+    // static table, and the proxied routes are billing-exempt either way.
+    let oracle_upstream_enabled = router_state
+        .as_ref()
+        .is_some_and(|state| state.config.oracle_upstream_url.is_some());
+    let oracle_consumer_routes = if oracle_upstream_enabled {
         Router::new()
-            .route(
-                "/pools",
-                get(handlers::oracle_pools::list_pools).post(handlers::oracle_pools::create_pool),
-            )
-            .route(
-                "/pools/{id_or_slug}",
-                get(handlers::oracle_pools::get_pool).patch(handlers::oracle_pools::update_pool),
-            )
-            .route(
-                "/pools/{id_or_slug}/rotate-token",
-                post(handlers::oracle_pools::rotate_token),
-            )
-            .route(
-                "/pools/{id_or_slug}/workers",
-                get(handlers::oracle_workers::list_workers),
-            )
-            .route(
-                "/pools/{id_or_slug}/workers/enroll",
-                post(handlers::oracle_workers::enroll_worker)
-                    .layer(DefaultBodyLimit::max(4096))
-                    .layer(middleware::map_response(|mut response: axum::response::Response| async move {
-                        response.headers_mut().insert(axum::http::header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
-                        response
-                    })),
-            )
-            .route(
-                "/pools/{id_or_slug}/workers/allocate",
-                post(handlers::oracle_workers::allocate_worker),
-            )
-            .route(
-                "/pools/{id_or_slug}/workers/{label}",
-                get(handlers::oracle_workers::show_worker)
-                    .delete(handlers::oracle_workers::forget_worker),
-            )
-            .route(
-                "/pools/{id_or_slug}/workers/{label}/commands",
-                get(handlers::oracle_workers::list_commands)
-                    .post(handlers::oracle_workers::enqueue_command),
-            )
-            .route(
-                "/pools/{id_or_slug}/workers/{label}/commands/{command_id}",
-                delete(handlers::oracle_workers::cancel_command),
-            )
-            .route(
-                "/pools/{id_or_slug}/login-snapshots",
-                post(handlers::oracle_workers::upload_login_snapshot).layer(DefaultBodyLimit::max(
-                    crate::services::oracle_login_snapshot_service::MAX_LOGIN_SNAPSHOT_BASE64_CHARS
-                        + 4096,
-                ),),
-            )
-            .route(
-                "/pools/{id_or_slug}/login-profiles",
-                get(handlers::oracle_login_profiles::list),
-            )
-            .route(
-                "/pools/{id_or_slug}/login-profiles/{name}",
-                put(handlers::oracle_login_profiles::save)
-                    .delete(handlers::oracle_login_profiles::delete)
-                    .layer(DefaultBodyLimit::max(
-                        crate::services::oracle_login_snapshot_service::MAX_LOGIN_SNAPSHOT_BASE64_CHARS + 4096,
-                    )),
-            )
-            .route(
-                "/pools/{id_or_slug}/workers/{label}/login-profile",
-                put(handlers::oracle_login_profiles::bind)
-                    .delete(handlers::oracle_login_profiles::unbind),
-            )
-            .route(
-                "/worker-bundle",
-                get(handlers::oracle_worker_bundle::get_bundle),
-            )
-    )
-    .layer(DefaultBodyLimit::max(16 * 1024 * 1024));
+            .fallback(handlers::oracle_proxy::forward)
+            .layer(DefaultBodyLimit::disable())
+    } else {
+        oracle_in_process_consumer_routes()
+    };
+
+    let oracle_worker_routes = if oracle_upstream_enabled {
+        Router::new()
+            .fallback(handlers::oracle_proxy::forward)
+            .layer(DefaultBodyLimit::disable())
+    } else {
+        oracle_in_process_worker_routes()
+    };
 
     // Shared management routes; individual groups retain service-account gates.
     // Delegated reads require account:read and the existing route/method policy.
@@ -2385,37 +2336,8 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         // (`nyx_owk_...`) inside each handler, NOT by the JWT middleware,
         // so they mount alongside node-agent rather than inside api_v1.
         // Results can carry multi-MB extracted answers: 16 MiB body cap.
-        .nest(
-            "/api/v1/oracle/worker",
-            Router::new()
-                .route("/task", get(handlers::oracle_worker::poll_task))
-                .route("/heartbeat", post(handlers::oracle_worker::heartbeat))
-                .route(
-                    "/login-profile",
-                    get(handlers::oracle_login_profiles::current)
-                        .post(handlers::oracle_login_profiles::refresh)
-                        .layer(DefaultBodyLimit::max(
-                            crate::services::oracle_login_snapshot_service::MAX_LOGIN_SNAPSHOT_BASE64_CHARS + 4096,
-                        )),
-                )
-                .route(
-                    "/login-snapshots/{snapshot_id}",
-                    get(handlers::oracle_worker::fetch_login_snapshot),
-                )
-                .route("/bundle", get(handlers::oracle_worker::fetch_bundle))
-                .route("/ack", post(handlers::oracle_worker::ack))
-                .route("/result", post(handlers::oracle_worker::submit_result))
-                .route(
-                    "/transcript",
-                    post(handlers::oracle_worker::submit_transcript),
-                )
-                .route(
-                    "/worker/transcript",
-                    post(handlers::oracle_worker::submit_transcript),
-                )
-                .route("/pin-conv-url", post(handlers::oracle_worker::pin_conv_url))
-                .layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
-        )
+        // With `ORACLE_UPSTREAM_URL` set this is the streaming proxy instead.
+        .nest("/api/v1/oracle/worker", oracle_worker_routes)
         // NyxBot as the Agent Event Gateway's `nyxbot` provider, and NyxID's
         // direct relay receiver for NyxBot channels. Authenticated inside each
         // handler (the channel's agent key, or NyxID's signed relay callback),
@@ -2439,7 +2361,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                     get(handlers::nyxbot::get_event_context),
                 )
                 .route("/responses", post(handlers::nyxbot::responses))
-                .route("/relay/{channel_id}", post(handlers::nyxbot::relay_callback))
+                .route(
+                    "/relay/{channel_id}",
+                    post(handlers::nyxbot::relay_callback),
+                )
                 .layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
         )
         .nest("/api/v1", api_v1)
@@ -2465,6 +2390,119 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             crate::services::service_history::context::middleware,
         )),
     )
+}
+
+/// In-process oracle consumer routes (used when `ORACLE_UPSTREAM_URL` is unset).
+fn oracle_in_process_consumer_routes() -> Router<AppState> {
+    oracle_billing_routes!(
+        register_billing_routes,
+        Router::new()
+            .route(
+                "/pools",
+                get(handlers::oracle_pools::list_pools).post(handlers::oracle_pools::create_pool),
+            )
+            .route(
+                "/pools/{id_or_slug}",
+                get(handlers::oracle_pools::get_pool).patch(handlers::oracle_pools::update_pool),
+            )
+            .route(
+                "/pools/{id_or_slug}/rotate-token",
+                post(handlers::oracle_pools::rotate_token),
+            )
+            .route(
+                "/pools/{id_or_slug}/workers",
+                get(handlers::oracle_workers::list_workers),
+            )
+            .route(
+                "/pools/{id_or_slug}/workers/enroll",
+                post(handlers::oracle_workers::enroll_worker)
+                    .layer(DefaultBodyLimit::max(4096))
+                    .layer(middleware::map_response(|mut response: axum::response::Response| async move {
+                        response.headers_mut().insert(axum::http::header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
+                        response
+                    })),
+            )
+            .route(
+                "/pools/{id_or_slug}/workers/allocate",
+                post(handlers::oracle_workers::allocate_worker),
+            )
+            .route(
+                "/pools/{id_or_slug}/workers/{label}",
+                get(handlers::oracle_workers::show_worker)
+                    .delete(handlers::oracle_workers::forget_worker),
+            )
+            .route(
+                "/pools/{id_or_slug}/workers/{label}/commands",
+                get(handlers::oracle_workers::list_commands)
+                    .post(handlers::oracle_workers::enqueue_command),
+            )
+            .route(
+                "/pools/{id_or_slug}/workers/{label}/commands/{command_id}",
+                delete(handlers::oracle_workers::cancel_command),
+            )
+            .route(
+                "/pools/{id_or_slug}/login-snapshots",
+                post(handlers::oracle_workers::upload_login_snapshot).layer(DefaultBodyLimit::max(
+                    crate::services::oracle_login_snapshot_service::MAX_LOGIN_SNAPSHOT_BASE64_CHARS
+                        + 4096,
+                ),),
+            )
+            .route(
+                "/pools/{id_or_slug}/login-profiles",
+                get(handlers::oracle_login_profiles::list),
+            )
+            .route(
+                "/pools/{id_or_slug}/login-profiles/{name}",
+                put(handlers::oracle_login_profiles::save)
+                    .delete(handlers::oracle_login_profiles::delete)
+                    .layer(DefaultBodyLimit::max(
+                        crate::services::oracle_login_snapshot_service::MAX_LOGIN_SNAPSHOT_BASE64_CHARS + 4096,
+                    )),
+            )
+            .route(
+                "/pools/{id_or_slug}/workers/{label}/login-profile",
+                put(handlers::oracle_login_profiles::bind)
+                    .delete(handlers::oracle_login_profiles::unbind),
+            )
+            .route(
+                "/worker-bundle",
+                get(handlers::oracle_worker_bundle::get_bundle),
+            )
+    )
+    .layer(DefaultBodyLimit::max(16 * 1024 * 1024))
+}
+
+/// In-process oracle worker routes (used when `ORACLE_UPSTREAM_URL` is unset).
+fn oracle_in_process_worker_routes() -> Router<AppState> {
+    Router::new()
+        .route("/task", get(handlers::oracle_worker::poll_task))
+        .route("/heartbeat", post(handlers::oracle_worker::heartbeat))
+        .route(
+            "/login-profile",
+            get(handlers::oracle_login_profiles::current)
+                .post(handlers::oracle_login_profiles::refresh)
+                .layer(DefaultBodyLimit::max(
+                    crate::services::oracle_login_snapshot_service::MAX_LOGIN_SNAPSHOT_BASE64_CHARS
+                        + 4096,
+                )),
+        )
+        .route(
+            "/login-snapshots/{snapshot_id}",
+            get(handlers::oracle_worker::fetch_login_snapshot),
+        )
+        .route("/bundle", get(handlers::oracle_worker::fetch_bundle))
+        .route("/ack", post(handlers::oracle_worker::ack))
+        .route("/result", post(handlers::oracle_worker::submit_result))
+        .route(
+            "/transcript",
+            post(handlers::oracle_worker::submit_transcript),
+        )
+        .route(
+            "/worker/transcript",
+            post(handlers::oracle_worker::submit_transcript),
+        )
+        .route("/pin-conv-url", post(handlers::oracle_worker::pin_conv_url))
+        .layer(DefaultBodyLimit::max(16 * 1024 * 1024))
 }
 
 #[cfg(test)]

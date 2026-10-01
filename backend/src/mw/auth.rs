@@ -1390,7 +1390,7 @@ fn delegated_bearer_token(request: &axum::http::Request<axum::body::Body>) -> Op
 /// later in the `AuthUser` extractor). We only inspect the unverified claims to
 /// decide whether to reject early. If the token is forged, the extractor will
 /// reject it during signature verification.
-fn is_jwt_delegated(token: &str) -> bool {
+pub(crate) fn is_jwt_delegated(token: &str) -> bool {
     peek_jwt_claims(token)
         .is_some_and(|claims| claims.get("delegated") == Some(&serde_json::Value::Bool(true)))
 }

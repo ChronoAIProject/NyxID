@@ -958,6 +958,7 @@ Oracle errors occupy the **11000–11099** block (see
 | 11014 | `oracle_worker_label_unavailable` | 409 |
 | 11015 | `oracle_login_snapshot_not_found` | 404 |
 | 11016 | `oracle_worker_credential_renewal_required` | 409 |
+| 11017 | `oracle_upstream_unavailable` | 502 (upstream unreachable) or 503 + `Retry-After: 10` (`ORACLE_UPSTREAM_URL=hold`) |
 
 ---
 
@@ -987,6 +988,101 @@ manager installation against an older backend through the prior token flow.
 Member enrollment requires the new backend; an older server produces upgrade
 guidance without requesting the organization's shared token. Existing rows and
 commands without a worker generation remain valid for their original worker.
+
+## Standalone oracle service
+
+The relay can run as its own service outside NyxID. NyxID then keeps two
+jobs: it is the public entry point for `/api/v1/oracle`, and it stays the
+identity provider. Two settings turn this on. Both are documented in
+[ENV.md](ENV.md#oracle-relay).
+
+### `ORACLE_UPSTREAM_URL`
+
+Unset: nothing changes. The in-process handlers in this document serve every
+oracle route.
+
+Set to a base URL such as `http://oracle:8080`: the consumer nest
+(`/api/v1/oracle/*`) and the worker nest (`/api/v1/oracle/worker/*`) are
+replaced by a streaming reverse proxy (`handlers/oracle_proxy.rs`). The
+proxy:
+
+- rebuilds `ORACLE_UPSTREAM_URL` + the original path and query;
+- forwards the method and the headers `Authorization`, `X-API-Key`,
+  `Content-Type`, `Content-Length`, `Accept`, `User-Agent`, `Cache-Control`
+  and `X-Request-Id`;
+- adds `X-Forwarded-For` (client IP), `X-Forwarded-Proto` and
+  `X-Forwarded-Host`;
+- streams the request body up and the response body down, so SSE streams,
+  five-minute long polls and 16 MiB results are never buffered in NyxID;
+- copies the upstream status and the headers `Content-Type`,
+  `Cache-Control`, `Content-Length`, `Retry-After`, `X-Accel-Buffering` and
+  `X-Request-Id`;
+- answers `502` with error `oracle_upstream_unavailable` (11017) when the
+  service cannot be reached. The body never contains the upstream address.
+
+The delegated-token and relay-token rejections on the consumer nest still run
+before the proxy, so those token classes get the same `403` as today without
+reaching the service. The service re-checks every other credential through
+the internal endpoints below.
+
+Set to the literal `hold`: every oracle request answers `503` with
+`Retry-After: 10` and the same `oracle_upstream_unavailable` (11017) body.
+Use this during the cutover window while the standalone service takes over
+the database. Clients and workers retry; nothing is lost.
+
+### `ORACLE_INTERNAL_SECRET`
+
+A 64-character lowercase hex secret shared with the oracle service. It is
+required whenever `ORACLE_UPSTREAM_URL` is set. When it is set, NyxID mounts
+three endpoints on the private listener (`INTERNAL_BIND_ADDR`, port 3002 by
+default). They never enter the public router, so an ingress rule cannot
+expose them. Each request must send `Authorization: Bearer <secret>`. The
+comparison is constant time. A wrong or missing secret gets the standard
+`401` `unauthorized` body. Every response carries `Cache-Control: no-store`.
+
+`POST /api/v1/internal/oracle/introspect` resolves a consumer credential.
+The body carries the header exactly as the client sent it, either
+`{"authorization": "Bearer ..."}` or `{"x_api_key": "..."}`, plus optional
+`ip` and `user_agent` for audit attribution. NyxID runs the same `AuthUser`
+extractor a real oracle request runs, so `nyxid_ag_` keys, session JWTs,
+service-account tokens, delegated tokens and relay tokens classify exactly
+as today. An active credential answers `200`:
+
+```json
+{
+  "active": true,
+  "token_class": "api_key",
+  "principal": {"user_id": "...", "user_type": "person", "is_active": true},
+  "scope": "proxy:*",
+  "api_key": {"id": "...", "name": "ci-bot", "purpose": "general"},
+  "memberships": [
+    {"org_user_id": "...", "membership_id": "...", "role": "member",
+     "created_at": "2026-03-01T10:00:00.000+00:00", "active": true}
+  ],
+  "exp": 1790000000
+}
+```
+
+`token_class` is `session` (browser session or user access token),
+`api_key`, `service_account`, `delegated` or `relay`. `scope` is `null` for
+a session. `api_key` is `null` unless `token_class` is `api_key`.
+`memberships` lists every membership row of the user, revoked rows included
+with `active: false`. For an org principal the rows are the org's members.
+`exp` is the token expiry in Unix seconds, or `null` for a key without
+expiry. A credential that fails answers `200` as well:
+`{"active": false, "reason": "expired"}`. `reason` is `expired`, `invalid`,
+`inactive_user` or `revoked`.
+
+`GET /api/v1/internal/oracle/principals/{user_id}` resolves a stored user
+id, for example a pool owner. It answers `200` with `user_id`, `user_type`
+(`person`, `org`, `service_account` or `missing`), `is_active` and the same
+`memberships` list. An unknown id answers `user_type: "missing"`,
+`is_active: false` and an empty list.
+
+`POST /api/v1/internal/oracle/audit` forwards one audit event. The body
+carries `event_type`, `user_id`, `api_key_id`, `api_key_name`, `ip`,
+`user_agent` and `event_data`. NyxID writes it through `audit_service` with
+those actor fields, best effort, and answers `202`.
 
 ## Relationship to the local oracle servers
 

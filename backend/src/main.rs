@@ -367,6 +367,7 @@ async fn main() {
     let mut config = AppConfig::from_env();
     config.validate_ssh_runtime_config();
     config.validate_cluster_runtime_config();
+    config.validate_oracle_config();
     if config.trusted_proxy_ips.is_empty() {
         tracing::warn!(
             "TRUSTED_PROXY_IPS is empty; forwarded client IPs and Cloudflare country headers cannot be verified. Requester attribution will be unavailable when the observed peer is an internal proxy, and strict public per-IP limits may collapse to that proxy address."
@@ -1401,6 +1402,13 @@ async fn main() {
     // Applying it to one branch, or merging a router after it, would
     // silently exempt those routes.
     let internal_node_dispatch = state.node_dispatch.clone();
+    // Identity endpoints for the standalone oracle service. Private listener
+    // only; mounted when ORACLE_INTERNAL_SECRET is configured.
+    let internal_oracle_router = state
+        .config
+        .oracle_internal_secret
+        .is_some()
+        .then(|| handlers::internal_oracle::router(state.clone()));
     let app = mw::security_headers::with_response_headers(
         public_oauth
             .merge(private_api)
@@ -1447,6 +1455,20 @@ async fn main() {
         internal_body_limit,
         std::time::Duration::from_secs(config.internal_duplex_handshake_timeout_secs),
     );
+    let internal_app = match internal_oracle_router {
+        Some(oracle) => {
+            tracing::info!("Internal oracle identity endpoints enabled");
+            internal_app.merge(oracle)
+        }
+        None => internal_app,
+    };
+    if let Some(upstream) = config.oracle_upstream_url.as_deref() {
+        if config::is_oracle_hold(upstream) {
+            tracing::warn!("ORACLE_UPSTREAM_URL=hold: every oracle request answers 503");
+        } else {
+            tracing::info!("Oracle routes proxied to the standalone oracle service");
+        }
+    }
 
     tracing::info!("Listening on {addr}");
     tracing::info!(
