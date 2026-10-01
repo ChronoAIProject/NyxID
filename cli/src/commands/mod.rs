@@ -17,6 +17,7 @@ pub mod endpoint;
 pub mod external_key;
 pub(crate) mod grant_cascade;
 pub mod lark_permission;
+pub(crate) mod machine_native_update;
 pub mod mcp;
 pub mod mfa;
 pub mod node;

@@ -31,6 +31,13 @@ async fn setup(
     error: Option<(u16, &'static str)>,
     delay: Duration,
 ) -> (AppState, Captures, tokio::task::JoinHandle<()>) {
+    setup_script(error, delay, Vec::new()).await
+}
+async fn setup_script(
+    error: Option<(u16, &'static str)>,
+    delay: Duration,
+    failures: Vec<&'static str>,
+) -> (AppState, Captures, tokio::task::JoinHandle<()>) {
     let db = connect_transaction_test_database("nyxa_http").await;
     engine::ensure_indexes(&db).await.unwrap();
     db.collection(USERS)
@@ -46,9 +53,12 @@ async fn setup(
             move |uri: Uri, headers: HeaderMap, Json(body): Json<Value>| {
                 let sink = sink.clone();
                 let attempts = attempts.clone();
+                let failures = failures.clone();
                 async move {
                     sink.lock().await.push(Capture { uri, headers, body });
-                    if attempts.fetch_add(1, Ordering::SeqCst) == 0
+                    let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                    let failure = failures.get(attempt).copied();
+                    if attempt == 0
                         && let Some((status, code)) = error
                     {
                         return (
@@ -69,12 +79,13 @@ async fn setup(
                         yield Ok::<_, Infallible>(Event::default().data(delta.to_string()));
                         tokio::time::sleep(delay).await;
                         let completed = json!({
-                            "type": "response.completed",
+                            "type": if failure.is_some() { "response.failed" } else { "response.completed" },
                             "sequence_number": 1,
                             "response": {
                                 "id": RESPONSE,
                                 "conversation": {"id": SESSION},
-                                "status": "completed",
+                                "status": if failure.is_some() { "failed" } else { "completed" },
+                                "error": failure.map(|code| json!({"code":code,"message":"SECRET upstream prose"})),
                                 "output": [{
                                     "type": "message",
                                     "role": "assistant",
@@ -213,6 +224,7 @@ async fn stop_persists_partial_reply_clears_binding_and_emits_cancelled() {
         .await
         .unwrap()
         .remove(0);
+    let stopped_at = std::time::Instant::now();
     assert_eq!(
         stop(
             State(state.clone()),
@@ -232,6 +244,17 @@ async fn stop_persists_partial_reply_clears_binding_and_emits_cancelled() {
     .unwrap();
     let events = String::from_utf8(bytes.to_vec()).unwrap();
     assert!(events.contains("\"status\":\"cancelled\""));
+    assert!(
+        stopped_at.elapsed()
+            < Duration::from_secs(
+                if std::env::var("NYXID_MACHINE_STRICT_BENCHMARK").as_deref() == Ok("1") {
+                    1
+                } else {
+                    5
+                }
+            ),
+        "stop must interrupt a quiet 30 second stream (CI sanity ceiling)"
+    );
     let row = settled(&state).await;
     assert!(row.nyxagent_session_id.is_none());
     assert_eq!(row.context_reset_reason.as_deref(), Some("turn_failed"));
@@ -1169,4 +1192,94 @@ fn upstream_error_code_reads_nested_and_flat_insufficient_credits_envelopes() {
     let unknown = json!({"error":{"code":"brand_new_code"}});
     assert_eq!(upstream_error_code(402, &unknown), "brand_new_code");
     assert_eq!(upstream_error_code(402, &Value::Null), "");
+}
+
+#[tokio::test]
+async fn budget_and_time_limits_continue_the_same_session_without_reset_or_extra_messages() {
+    for code in ["tool_budget_exhausted", "turn_timeout"] {
+        let (state, calls, server) = setup_script(None, Duration::ZERO, vec![code]).await;
+        let response = turns(
+            State(state.clone()),
+            test_auth_user(OWNER),
+            turn_request(None),
+        )
+        .await
+        .unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 100_000)
+            .await
+            .unwrap();
+        let events = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(events.contains("turn.continuing"));
+        assert!(!events.contains("turn.notice") && !events.contains("SECRET"));
+        let row = settled(&state).await;
+        assert_eq!(row.nyxagent_session_id.as_deref(), Some(SESSION));
+        assert!(row.context_reset_at.is_none());
+        let messages = engine::messages(&state.db, OWNER, &row.id, 10, None)
+            .await
+            .unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].turn_id, messages[1].turn_id);
+        assert!(messages[1].error_code.is_none());
+        let calls = calls.lock().await;
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1].body["conversation"], SESSION);
+        assert_eq!(
+            calls[0].headers["authorization"],
+            calls[1].headers["authorization"]
+        );
+        assert_eq!(calls[0].body["instructions"], calls[1].body["instructions"]);
+        assert!(
+            calls[1].headers["idempotency-key"]
+                .to_str()
+                .unwrap()
+                .ends_with(":continuation:1")
+        );
+        assert_eq!(
+            calls[1].body["input"],
+            crate::services::assistant_continuation::INSTRUCTION
+        );
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn continuation_limit_and_no_progress_preserve_context_and_a_diagnostic_code() {
+    for (limit, expected, attempts) in [
+        (0, "tool_budget_exhausted", 1),
+        (1, "tool_budget_exhausted", 2),
+        (8, "continuation_no_progress", 2),
+    ] {
+        let (state, calls, server) =
+            setup_script(None, Duration::ZERO, vec!["tool_budget_exhausted"; 4]).await;
+        crate::services::assistant_settings_service::update(
+            &state.db,
+            OWNER,
+            crate::services::assistant_settings_service::Update {
+                max_auto_continuations: Some(limit),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let response = turns(
+            State(state.clone()),
+            test_auth_user(OWNER),
+            turn_request(None),
+        )
+        .await
+        .unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 100_000)
+            .await
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("turn.notice"));
+        let row = settled(&state).await;
+        assert_eq!(row.nyxagent_session_id.as_deref(), Some(SESSION));
+        assert!(row.context_reset_at.is_none());
+        let messages = engine::messages(&state.db, OWNER, &row.id, 10, None)
+            .await
+            .unwrap();
+        assert_eq!(messages[1].error_code.as_deref(), Some(expected));
+        assert_eq!(calls.lock().await.len(), attempts);
+        server.abort();
+    }
 }

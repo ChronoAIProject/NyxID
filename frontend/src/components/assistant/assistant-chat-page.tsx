@@ -703,7 +703,8 @@ function NyxAgentThreadPage() {
           </div>
         ) : (
           <AssistantLinkModalHost>
-            {chat.session.conversationId ? <ConversationMachineDesktops conversationId={chat.session.conversationId} /> : null}
+            {chat.isStreaming && chat.continuations > 0 ? <p role="status" className="mx-auto w-full max-w-[758px] px-4 pb-2 text-[11px] text-muted-foreground">Continuing task…</p> : null}
+            {chat.session.conversationId ? <ConversationMachineDesktops conversationId={chat.session.conversationId} turnActive={chat.isStreaming} /> : null}
             <ChatMessageList
               session={chat.session}
               renderMessage={(message) => {

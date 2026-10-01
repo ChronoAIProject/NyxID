@@ -168,7 +168,12 @@ pub fn install(
     // Persist the config dir so other daemon subcommands can find it
     save_daemon_config_dir(&config_dir, profile)?;
 
-    let nyxid_bin = resolve_binary()?;
+    let machine_active = config_dir.join("machine-update/active");
+    let nyxid_bin = if machine_active.exists() {
+        machine_active
+    } else {
+        resolve_binary()?
+    };
 
     if cfg!(target_os = "macos") {
         let log_dir = config_dir.join(LOG_DIR_NAME);

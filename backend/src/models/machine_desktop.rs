@@ -6,7 +6,11 @@ pub const COLLECTION_NAME: &str = "machine_desktops";
 #[derive(Clone, Serialize, Deserialize)]
 pub struct MachineDesktop {
     #[serde(rename = "_id")]
+    pub id: String,
+    #[serde(default)]
     pub node_id: String,
+    #[serde(default)]
+    pub display: nyxid_machine::desktop::Display,
     pub session_id: String,
     pub user_id: String,
     pub conversation_id: Option<String>,

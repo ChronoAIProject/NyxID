@@ -1,4 +1,4 @@
-importScripts("policy.js");
+importScripts("policy.js", "browser-background.js");
 
 (() => {
   let port;
@@ -69,7 +69,18 @@ importScripts("policy.js");
       active = true;
       retryMs = 500;
       let result;
-      try { result = await fill(request); }
+      try {
+        if (request?.operation === "browser") {
+          if (!/^[0-9a-f-]{36}$/.test(nonce) || request.expires_at_ms < Date.now() || request.expires_at_ms > Date.now() + 30000 || seen.has(nonce)) {
+            result = {status: "refused", reason: "expired_or_replayed"};
+          } else {
+            for (const [id, expiry] of seen) if (expiry <= Date.now()) seen.delete(id);
+            if (seen.size >= 512) throw new Error("busy");
+            seen.set(nonce, request.expires_at_ms);
+            result = await NyxIdBrowserBackground.perform(request);
+          }
+        } else result = await fill(request);
+      }
       catch { result = { status: "refused", reason: "browser_unavailable" }; }
       finally { if (request) request.value = ""; active = false; }
       try { currentPort.postMessage({ nonce, ...result }); }

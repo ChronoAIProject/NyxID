@@ -1,6 +1,9 @@
+import { MachineIsolationBadge } from "@/components/shared/machine-isolation";
 import { useState } from "react";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { Monitor, Settings } from "lucide-react";
+import { useMachineUpdates } from "@/hooks/use-machines";
+import type { MachineUpdateStatus } from "@/schemas/machines";
 import { useNodes } from "@/hooks/use-nodes";
 import { useOrgs } from "@/hooks/use-orgs";
 import { useAuthStore } from "@/stores/auth-store";
@@ -25,9 +28,11 @@ import type { NodeInfo } from "@/types/nodes";
 function MachineCard({
   node,
   onSettings,
+  update,
 }: {
   readonly node: NodeInfo;
   readonly onSettings: () => void;
+  readonly update?: MachineUpdateStatus;
 }) {
   const machine = node.machine!;
   return (
@@ -37,10 +42,16 @@ function MachineCard({
         <h3 className="min-w-0 flex-1 truncate text-[13px] font-medium">
           {node.name}
         </h3>
-        <NodeStatusBadge status={node.status} isConnected={node.is_connected} />
-        {machine.shell && !machine.browser_isolated ? (
-          <Badge variant="warning">Not isolated</Badge>
+        {update?.update_available ? (
+          <Badge variant="warning">
+            Update available ({update.target_version})
+          </Badge>
         ) : null}
+        <span className="text-[11px] text-muted-foreground">
+          v{node.metadata?.agent_version ?? "unknown"}
+        </span>
+        <NodeStatusBadge status={node.status} isConnected={node.is_connected} />
+        <MachineIsolationBadge machine={machine} />
       </div>
       <p className="text-[12px] text-muted-foreground">
         {[
@@ -86,9 +97,17 @@ export function MachinesPage() {
     useSearch({ strict: false }) as Record<string, unknown>,
   );
   const nodes = useNodes({ pollIntervalMs: 5000 });
+  const updates = useMachineUpdates();
   const orgs = useOrgs();
   const userId = useAuthStore((state) => state.user?.id);
-  const [selectedId, setSelectedId] = useState<string>();
+  const [selectedId, setSelectedId] = useState<string | undefined>(
+    search.machine,
+  );
+  const [linkedMachine, setLinkedMachine] = useState(search.machine);
+  if (linkedMachine !== search.machine) {
+    setLinkedMachine(search.machine);
+    setSelectedId(search.machine);
+  }
   const adminOrgs = new Set(
     orgs.data?.filter((org) => org.your_role === "admin").map((org) => org.id),
   );
@@ -149,6 +168,7 @@ export function MachinesPage() {
               <MachineCard
                 key={node.id}
                 node={node}
+                update={updates.data?.find((row) => row.node_id === node.id)}
                 onSettings={() => setSelectedId(node.id)}
               />
             ))}
@@ -164,15 +184,20 @@ export function MachinesPage() {
           if (!open) setSelectedId(undefined);
         }}
       >
-        <SheetContent className="w-full space-y-6 overflow-y-auto sm:max-w-lg">
-          <SheetHeader>
+        <SheetContent className="flex w-full min-w-0 flex-col gap-0 overflow-hidden p-0 sm:max-w-lg">
+          <SheetHeader className="shrink-0 p-5 pr-10">
             <SheetTitle>{selected?.name} settings</SheetTitle>
             <SheetDescription>
               Control confirmations, saved-login typing and specialist access.
             </SheetDescription>
           </SheetHeader>
           {selected ? (
-            <MachineSettings key={selected.id} node={selected} canManage />
+            <MachineSettings
+              key={selected.id}
+              node={selected}
+              canManage
+              update={updates.data?.find((row) => row.node_id === selected.id)}
+            />
           ) : null}
         </SheetContent>
       </Sheet>

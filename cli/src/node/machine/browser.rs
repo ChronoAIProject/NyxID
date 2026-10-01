@@ -30,7 +30,23 @@ pub fn policy(update_url: &str) -> Value {
         .as_str()
         .expect("extension id")
         .to_owned();
-    json!({"DeveloperToolsAvailability":2,"RemoteDebuggingAllowed":false,"URLBlocklist":["javascript:*"],"PasswordManagerEnabled":false,"AutofillAddressEnabled":false,"AutofillCreditCardEnabled":false,"BrowserSignin":0,"SyncDisabled":true,"ExtensionInstallForcelist":[format!("{id};{update_url}")],"ExtensionSettings":{"*":{"installation_mode":"blocked"},id:{"installation_mode":"force_installed","update_url":update_url,"override_update_url":true}},"NativeMessagingBlocklist":["*"],"NativeMessagingAllowlist":[NATIVE_HOST],"NativeMessagingUserLevelHosts":false})
+    json!({"DeveloperToolsAvailability":2,"RemoteDebuggingAllowed":false,"URLBlocklist":["javascript:*", "file://*"],"PasswordManagerEnabled":false,"AutofillAddressEnabled":false,"AutofillCreditCardEnabled":false,"BrowserSignin":0,"SyncDisabled":true,"ExtensionInstallForcelist":[format!("{id};{update_url}")],"ExtensionSettings":{"*":{"installation_mode":"blocked"},id:{"installation_mode":"force_installed","update_url":update_url,"override_update_url":true}},"NativeMessagingBlocklist":["*"],"NativeMessagingAllowlist":[NATIVE_HOST],"NativeMessagingUserLevelHosts":false})
+}
+
+pub fn dev_policy() -> Value {
+    json!({
+        "DeveloperToolsAvailability": 1,
+        "RemoteDebuggingAllowed": true,
+        "URLBlocklist": ["file://*"],
+        "PasswordManagerEnabled": false,
+        "AutofillAddressEnabled": false,
+        "AutofillCreditCardEnabled": false,
+        "BrowserSignin": 0,
+        "SyncDisabled": true,
+        "ExtensionSettings": {"*": {"installation_mode": "blocked"}},
+        "NativeMessagingBlocklist": ["*"],
+        "NativeMessagingUserLevelHosts": false
+    })
 }
 
 pub fn macos_policy(update_url: &str) -> Result<Vec<u8>> {
@@ -88,7 +104,7 @@ fn write_owned(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     Ok(())
 }
 
-fn runtime_directory(path: &Path, uid: u32, gid: u32, mode: u32) -> Result<()> {
+pub(super) fn runtime_directory(path: &Path, uid: u32, gid: u32, mode: u32) -> Result<()> {
     match std::fs::create_dir(path) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -105,7 +121,7 @@ fn runtime_directory(path: &Path, uid: u32, gid: u32, mode: u32) -> Result<()> {
     Ok(())
 }
 
-fn protected_runtime_parent(directory: &Path) -> Result<()> {
+pub(super) fn protected_runtime_parent(directory: &Path) -> Result<()> {
     let supervisor = unsafe { libc::geteuid() };
     std::fs::create_dir_all(directory)?;
     if std::fs::symlink_metadata(directory)?
@@ -151,6 +167,15 @@ pub fn install(system_root: &Path, binary: &Path, update_url: &str, macos: bool)
     executable_file.as_file().sync_all()?;
     executable_file.persist(&executable_path)?;
     write_owned(&resources.join("filler.crx"), PACKAGE, 0o644)?;
+    let dev_policies = owned_directory(
+        system_root,
+        Path::new("opt/nyxid/machine-browser/dev-policies"),
+    )?;
+    write_owned(
+        &dev_policies.join("nyxid.json"),
+        &serde_json::to_vec(&dev_policy())?,
+        0o644,
+    )?;
     let launcher = resources.join("native-host");
     let executable = shlex::try_quote(
         executable_path
@@ -172,6 +197,14 @@ pub fn install(system_root: &Path, binary: &Path, update_url: &str, macos: bool)
         write_owned(
             &system_root.join("Library/Managed Preferences/com.google.Chrome.plist"),
             &macos_policy(update_url)?,
+            0o644,
+        )?;
+        let dev: plist::Value = serde_json::from_value(dev_policy())?;
+        let mut dev_bytes = Vec::new();
+        dev.to_writer_xml(&mut dev_bytes)?;
+        write_owned(
+            &system_root.join("Library/Managed Preferences/com.google.Chrome.beta.plist"),
+            &dev_bytes,
             0o644,
         )?;
         write_owned(
@@ -196,6 +229,32 @@ pub fn install(system_root: &Path, binary: &Path, update_url: &str, macos: bool)
             &serde_json::to_vec(&manifest(&launcher))?,
             0o644,
         )?;
+    }
+    Ok(())
+}
+
+/// Runs as the browser user, with Chromium stopped. Removing only this managed
+/// extension's installed package makes force-install policy repair it, including
+/// same-version signed-package changes. Never run profile traversal as root.
+pub fn refresh_extension(profile: &Path) -> Result<()> {
+    if unsafe { libc::geteuid() } == 0 {
+        bail!("Extension cache refresh must run as the browser user");
+    }
+    let id = pin()["extension_id"]
+        .as_str()
+        .context("extension id")?
+        .to_owned();
+    for entry in std::fs::read_dir(profile)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let path = entry.path().join("Extensions").join(&id);
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
     }
     Ok(())
 }
@@ -261,13 +320,27 @@ impl Browser {
             );
         let profile = directory.join("browser-profile");
         runtime_directory(&profile, identity.uid, identity.gid, 0o700)?;
+        let package_hash = hex::encode(Sha256::digest(PACKAGE));
+        let marker = run.join("extension-package-sha256");
+        if std::fs::read_to_string(&marker).ok().as_deref() != Some(&package_hash) {
+            let mut refresh = Command::new(std::env::current_exe()?);
+            identity.prepare(&mut refresh)?;
+            let result = refresh
+                .args(["node", "machine-browser-refresh"])
+                .arg(&profile)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .await?;
+            if !result.success() {
+                bail!("Managed extension refresh failed");
+            }
+            write_owned(&marker, package_hash.as_bytes(), 0o600)?;
+        }
         let mut command = Command::new(binary);
         identity.prepare(&mut command)?;
-        for key in ["DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS"] {
-            if let Some(value) = std::env::var_os(key) {
-                command.env(key, value);
-            }
-        }
+        identity.desktop_env(&mut command);
         command
             .env("NYXID_BROWSER_SOCKET", &socket)
             .arg(format!("--user-data-dir={}", profile.display()))
@@ -275,6 +348,7 @@ impl Browser {
                 "--no-first-run",
                 "--no-default-browser-check",
                 "--disable-sync",
+                "--force-renderer-accessibility",
                 "--disable-breakpad",
                 "--disable-crash-reporter",
                 "--password-store=basic",
@@ -284,11 +358,8 @@ impl Browser {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
-        if container {
-            if !cfg!(target_os = "linux") || identity.uid == 0 {
-                bail!("container browser requires the isolated non-root browser user");
-            }
-            command.arg("--disable-setuid-sandbox");
+        if container && (!cfg!(target_os = "linux") || identity.uid == 0) {
+            bail!("container browser requires the isolated non-root browser user");
         }
         command.kill_on_drop(true);
         let child = command.spawn().context("managed browser unavailable")?;
@@ -344,6 +415,51 @@ impl Browser {
         }
     }
 
+    pub async fn alive(&self) -> bool {
+        self.child
+            .lock()
+            .await
+            .as_mut()
+            .is_some_and(|child| child.try_wait().is_ok_and(|exit| exit.is_none()))
+    }
+
+    pub async fn action(&self, mut parameters: Value) -> Result<Value> {
+        if !self.ready().await {
+            bail!("managed browser extension unavailable");
+        }
+        let nonce = uuid::Uuid::new_v4().to_string();
+        parameters["operation"] = json!("browser");
+        parameters["nonce"] = json!(nonce);
+        parameters["expires_at_ms"] = json!(chrono::Utc::now().timestamp_millis() + 20000);
+        let bytes = zeroize::Zeroizing::new(serde_json::to_vec(&parameters)?);
+        let mut response = self.exchange(&nonce, &bytes).await?;
+        if let Some(object) = response.as_object_mut() {
+            object.remove("nonce");
+        }
+        Ok(response)
+    }
+
+    async fn exchange(&self, nonce: &str, bytes: &[u8]) -> Result<Value> {
+        // Take ownership before I/O. Dropping a cancelled exchange closes the
+        // stream, forcing a fresh handshake; a late reply cannot poison a turn.
+        let mut connection = self.connection.lock().await;
+        let mut stream = connection
+            .take()
+            .context("managed browser extension unavailable")?;
+        let raw = tokio::time::timeout(Duration::from_secs(20), async {
+            write_native(&mut stream, bytes).await?;
+            read_native(&mut stream).await
+        })
+        .await
+        .context("managed browser timed out; observe before retrying")??;
+        let response: Value = serde_json::from_slice(&raw).context("invalid browser response")?;
+        if response["nonce"] != nonce {
+            bail!("managed browser nonce mismatch");
+        }
+        *connection = Some(stream);
+        Ok(response)
+    }
+
     pub async fn fill(&self, field: &str, origins: &[String], value: &str) -> Result<Value> {
         if self
             .child
@@ -359,10 +475,6 @@ impl Browser {
         if !self.ready().await {
             bail!("managed browser extension unavailable; check the installed policies");
         }
-        let mut connection = self.connection.lock().await;
-        let stream = connection
-            .as_mut()
-            .context("managed browser extension unavailable; check the installed policies")?;
         let nonce = uuid::Uuid::new_v4().to_string();
         #[derive(serde::Serialize)]
         struct Fill<'a> {
@@ -380,23 +492,7 @@ impl Browser {
             value,
         };
         let bytes = Zeroizing::new(serde_json::to_vec(&request)?);
-        let response = tokio::time::timeout(Duration::from_secs(15), async {
-            write_native(stream, &bytes).await?;
-            read_native(stream).await
-        })
-        .await;
-        let raw = match response {
-            Ok(Ok(bytes)) => bytes,
-            _ => {
-                *connection = None;
-                bail!("managed browser did not acknowledge filling; never retry automatically");
-            }
-        };
-        let response: Value = serde_json::from_slice(&raw).context("invalid browser response")?;
-        if response["nonce"] != nonce {
-            *connection = None;
-            bail!("managed browser nonce mismatch");
-        }
+        let response = self.exchange(&nonce, &bytes).await?;
         if response["status"] == "filled"
             && response["field"] == field
             && origins.iter().any(|origin| response["origin"] == *origin)
@@ -543,7 +639,7 @@ mod tests {
         let value = policy(url);
         assert_eq!(value["DeveloperToolsAvailability"], 2);
         assert_eq!(value["RemoteDebuggingAllowed"], false);
-        assert_eq!(value["URLBlocklist"], json!(["javascript:*"]));
+        assert_eq!(value["URLBlocklist"], json!(["javascript:*", "file://*"]));
         let id = pin()["extension_id"].as_str().unwrap().to_owned();
         assert_eq!(
             value["ExtensionSettings"][&id]["installation_mode"],

@@ -514,9 +514,9 @@ role, text, completed/failed status, optional stable error and date. Unique inde
 conversation + seq. All dates use the repository BSON date helpers.
 
 Before egress, a transaction writes the user message and claims `active_turn`.
-A competing send gets `turn_active` while the fence is live. A fence expires at
+A competing send gets `turn_active` while the fence is live. A fence initially expires at
 `started_at + ACTIVE_TURN_TTL_SECS` (1800 seconds execution + 300 seconds settlement
-grace). One shared `live_turn` check governs admission, Rename, Delete, Stop and
+grace). Automatic continuation refreshes `lease_expires_at` on that same turn. One shared `live_turn` check governs admission, Rename, Delete, Stop and
 DTOs; an expired fence appears as `active_turn: null`. The next send transactionally
 inserts an empty failed reply for the lost turn (`error_code=turn_lost`), clears
 the binding with `turn_failed`, inserts the new user message and claims its fence.
@@ -543,6 +543,9 @@ drops the upstream stream, saves partial text as failed/error `cancelled`, clear
 the binding with `turn_failed`, then emits `turn.completed(cancelled)`. A Stop
 committed before settlement wins the transaction race. There is no NyxAgent Stop
 API: stream cancellation is the supported upstream cancellation mechanism.
+Stop also signs a conversation-scoped node cancel: cua, process groups and
+gateway streams stop immediately, and stopped-turn machine calls are refused.
+A standalone desktop Stop applies to all agent activity on that machine.
 
 Upstream request, rebuilt entirely by NyxID:
 
@@ -569,7 +572,8 @@ messages are labeled. The current user message is excluded from the recap.
 
 First-byte deadline is 30 seconds including request setup. Idle timeout is
 120 seconds (upstream keepalive is 15 seconds). Turn execution is capped at
-30 minutes; stream bytes at 8 MiB and output text at 2 MiB. Incremental decoding
+610 seconds per possible upstream turn, bounded by the continuation hard cap
+(32 continuations); each stream is capped at 8 MiB and total output text at 2 MiB. Incremental decoding
 handles split UTF-8 and LF/CRLF frames. Unknown event types are ignored; malformed
 recognized events, invalid IDs, or nonmonotonic recognized sequence numbers fail
 closed. Cached upstream replay may contain only a terminal response, so terminal
@@ -578,7 +582,7 @@ stored on success. Locally guessing the first session ID is incorrect.
 
 NyxID events have a strictly increasing `cursor`: `turn.status` (also carries
 `conversation_id`), `message.started`, `block.started`, `block.delta`,
-`block.completed`, `message.completed`, `turn.completed`. They reuse the Direct
+`block.completed`, `message.completed`, `turn.completed`, and `turn.continuing`. They reuse the Direct
 text-event grammar. Terminal status is `completed`, `failed`, or `cancelled`;
 error is null or a stable `{code,message}`. The additive `turn.notice` carries
 `code=context_reset` and the fixed message:
@@ -592,7 +596,9 @@ error is null or a stable `{code,message}`. The additive `turn.notice` carries
 | 401/403 or `agent_key_required` | Replace credential, clear binding, emit notice, retry once with recap |
 | `stale_response`, `outcome_unknown` | Fail without retry; discard binding |
 | `insufficient_credits` (typed `AppError::InsufficientCredits`, nested `error.code`, NyxID's flat 402 `{"error":"insufficient_credits"}`, or `response.failed`) | Fail without credential replacement, retry, backoff or rebind, with the fixed message "There aren't enough credits to run this turn." During a rolling deploy old replicas keep reporting `assistant_unavailable`; existing failed rows are not backfilled |
-| Any failed turn, timeout, invalid stream, cancellation or other error | Persist failed partial reply; discard binding immediately with `turn_failed` |
+| `tool_budget_exhausted`, `turn_timeout` | Continue automatically on the same session, with the same grants/TriggerRun, up to `max_auto_continuations` (default 8, hard cap 32). Preserve context if the bound is reached |
+| Identical full call/result sequence and unchanged reply text | Stop with `continuation_no_progress`; preserve the session |
+| Other failed turn, invalid stream or cancellation | Persist failed partial reply; discard binding immediately with `turn_failed` |
 
 The transcript displays one inline system note for the latest reset, before the
 first message whose `created_at` is strictly greater than `context_reset_at`, or
@@ -602,8 +608,9 @@ message. Rebind resets occur during execution and precede that turn's reply.
 Live `turn.notice` displays the same note immediately and refreshes the persisted
 reset timestamp; subsequent reloads retain its transcript position without a banner.
 
-The next turn after any reset sends a recap and emits the notice. There is no
-retry after an upstream stream has started. Generic allowlisted messages replace
+The next turn after any reset sends a recap and emits the notice. There is no replay of an uncertain action after an upstream stream has started.
+Explicit budget/time terminal errors start a new continuation request on the same
+session with an idempotency key suffixed `:continuation:N`; they do not reset or recap. Generic allowlisted messages replace
 all raw upstream error bodies. The raw current key is redacted from reflected
 assistant output, including split deltas. Wire-log capture is disabled for this
 surface.
@@ -635,8 +642,8 @@ but the operator must configure NyxAgent's recursion guard there separately.
 The brief's statement that upstream cannot cancel and will always commit is
 superseded by its D5 addendum and `api.rs:142–144`: dropping SSE cancels runtime.
 Browser disconnect therefore drops only the subscription; explicit Stop drops
-the worker's stream. `responses.rs:503–524` poisons every failed session, so every
-failure invalidates the binding immediately. The numbered [6]/[7] header block
+the worker's stream. Explicit upstream budget/time errors retain a resumable session; other failures
+invalidate the binding immediately. The numbered [6]/[7] header block
 mentioned in D4 is WebSocket assembly in this checkout; the actual HTTP overwrite
 was `proxy_service`'s bearer forwarding after shared assembly. Both HTTP paths now
 use the shared guard and the ordering test. The exact scope correction and models
@@ -783,3 +790,28 @@ standalone under `/assistant/machines/{id}/desktop`. Studio Nodes shows only a
 read-only machine summary linking to assistant settings; Developer → Triggers
 retains secrets/replay. `/automations` redirects with `setup` and `agent` intact.
 Server-generated browser URLs use `services::assistant_links::AssistantPage`.
+Machine turns use the compact browser tool for ordinary web work. Explicit NyxAgent `tool_budget_exhausted` and `turn_timeout` results continue the existing session under the owner-configured continuation bound; they do not reset context. Stop fences the turn and cancels in-flight machine work.
+
+Machine updates use `nyxid__machine_update` and always require an owner action
+card, including requests from granted specialists. Ungranted specialists request
+machine permission through NyxBot. Legacy containers receive a token-free link to
+the prefilled host command; the agent ends its turn while a durable
+`machine_update` watch waits for reconnect/failure/expiry. On wake, verify the
+version, AX state and browser snapshot before resuming. An owner-identified,
+different granted native machine may run the command after metadata-only Docker
+inspection; the card binds both machines and the inspected container ID. Offer
+this assistance proactively for Update available or missing old-node capabilities.
+The server release is the supported update target. New setup recommends idle
+automatic updates; existing machines require explicit owner opt-in.
+
+Continuation progress is derived server-side at MCP completion from tool name,
+canonical arguments and result hashes. Only a rolling digest and call count are
+stored on the active turn, fenced by turn and continuation IDs. The activity UI's
+bounded labels are not a progress signal. Issued/completed counters exclude incomplete windows from loop detection. Different arguments/results or reply
+text continue even when every call uses the same tool.
+
+Machine browser snapshots aggregate visible frames and support query/offset/scope
+paging. Trusted native input follows extension hit-testing; explicit DOM fallback
+is labelled. Secure and dev Linux desktops have separate X servers and cookies,
+with a live-panel display switcher and per-display owner control. On macOS the
+physical desktop is shared and takeover locks both views.

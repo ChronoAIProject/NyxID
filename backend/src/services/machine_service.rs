@@ -140,6 +140,10 @@ pub fn capable(node: &Node, operation: Operation) -> AppResult<()> {
 pub fn changing(operation: Operation, parameters: &Value) -> bool {
     match operation {
         Operation::ListFiles | Operation::ReadFile | Operation::ShareFile | Operation::Job => false,
+        Operation::Browser => !matches!(
+            parameters["action"].as_str(),
+            Some("snapshot" | "tabs" | "wait" | "console" | "network" | "screenshot")
+        ),
         Operation::Computer => {
             static TOOLS: std::sync::LazyLock<Vec<Value>> = std::sync::LazyLock::new(|| {
                 serde_json::from_str(nyxid_machine::CUA_TOOLS).expect("embedded cua contract")
@@ -165,6 +169,9 @@ pub fn metadata(node: &Node) -> Value {
         "status":node.status,
         "machine":node.machine,
         "machine_confirm":node.machine_confirm,
+        "agent_version":super::machine_update_service::current(node),
+        "supported_version":super::machine_update_service::TARGET,
+        "update_available":super::machine_update_service::update_available(node),
         "allow_single_user_saved_logins":node.allow_single_user_saved_logins
     })
 }

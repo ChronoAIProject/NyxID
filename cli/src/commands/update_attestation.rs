@@ -17,6 +17,7 @@ use x509_cert::ext::pkix::name::GeneralName;
 use x509_cert::ext::pkix::sct::{HashAlgorithm, SignatureAlgorithm, SignedCertificateTimestamp};
 use x509_cert::ext::pkix::{SignedCertificateTimestampList, SubjectAltName};
 
+#[path = "update_attestation/trust.rs"]
 mod trust;
 
 const GITHUB_API_URL: &str = "https://api.github.com";
@@ -62,6 +63,27 @@ pub(crate) async fn verify_release_attestation(
     );
 }
 
+/// Image updates use the same certificate, Rekor, DSSE and digest verifier as
+/// CLI releases, with TUF metadata mirrored on GitHub (no third-party egress).
+pub(crate) async fn verify_image_attestation(
+    client: &reqwest::Client,
+    digest: &str,
+    version: &str,
+) -> Result<()> {
+    let attestations =
+        fetch_github_attestations(client, "ChronoAIProject", "NyxID", digest).await?;
+    let root = trust::load_github(client.clone()).await?;
+    let identity = format!(
+        "https://github.com/ChronoAIProject/NyxID/.github/workflows/publish-images.yml@refs/tags/v{version}"
+    );
+    for attestation in attestations {
+        if verify_single_attestation(&attestation, &root, digest, &identity).is_ok() {
+            return Ok(());
+        }
+    }
+    anyhow::bail!("Official release image attestation missing or invalid")
+}
+
 async fn fetch_github_attestations(
     client: &reqwest::Client,
     owner: &str,
@@ -105,6 +127,21 @@ async fn fetch_github_attestations(
 }
 
 async fn fetch_bundle_url(client: &reqwest::Client, bundle_url: &str) -> Result<SigstoreBundle> {
+    let parsed = url::Url::parse(bundle_url)?;
+    anyhow::ensure!(
+        parsed.scheme() == "https"
+            && parsed.port_or_known_default() == Some(443)
+            && matches!(
+                parsed.host_str(),
+                Some(
+                    "api.github.com"
+                        | "github.com"
+                        | "objects.githubusercontent.com"
+                        | "release-assets.githubusercontent.com"
+                )
+            ),
+        "Untrusted attestation bundle URL"
+    );
     let response = client
         .get(bundle_url)
         .send()

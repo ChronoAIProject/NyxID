@@ -1389,6 +1389,35 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .build(),
         )
         .await?;
+    db.collection::<bson::Document>(crate::models::machine_update::COLLECTION_NAME)
+        .create_indexes([
+            IndexModel::builder()
+                .keys(doc! {"attempt_id":1})
+                .options(
+                    IndexOptions::builder()
+                        .unique(true)
+                        .partial_filter_expression(doc! {"attempt_id":{"$type":"string"}})
+                        .build(),
+                )
+                .build(),
+            IndexModel::builder()
+                .keys(doc! {"automatic":1,"phase":1,"updated_at":1})
+                .build(),
+        ])
+        .await?;
+    db.collection::<bson::Document>(crate::models::machine_update::ATTEMPTS_COLLECTION_NAME)
+        .create_indexes([
+            IndexModel::builder().keys(doc! {"user_id": 1}).build(),
+            IndexModel::builder()
+                .keys(doc! {"state.updated_at": 1})
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(std::time::Duration::from_secs(90 * 86400))
+                        .build(),
+                )
+                .build(),
+        ])
+        .await?;
     // Machine records carry metadata only; ephemeral setup proofs are HMACs.
     let setups = db.collection::<bson::Document>(crate::models::machine_setup::COLLECTION_NAME);
     for field in ["code_hmac", "device_hmac"] {

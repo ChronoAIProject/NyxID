@@ -1,6 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
-import type { MachineChoices, MachineSetup } from "@/schemas/machines";
+import type {
+  MachineChoices,
+  MachineSetup,
+  MachineUpdateStatus,
+} from "@/schemas/machines";
 
 export function useMachineSetup(id: string | undefined) {
   return useQuery({
@@ -38,8 +42,11 @@ export function useMachinePairPreview() {
 }
 export function useMachinePairDecision() {
   return useMutation({
-    mutationFn: (body: { code: string; approve: boolean }) =>
-      api.post<MachineSetup>("/machines/pair/decide", body),
+    mutationFn: (body: {
+      code: string;
+      approve: boolean;
+      automatic_updates?: boolean;
+    }) => api.post<MachineSetup>("/machines/pair/decide", body),
   });
 }
 export function useMachineSettings(id: string) {
@@ -55,6 +62,7 @@ export function useMachineSettings(id: string) {
 }
 
 export interface MachineDesktopMetadata {
+  readonly display?: "secure" | "dev";
   readonly node_id: string;
   readonly session_id: string;
   readonly conversation_id: string | null;
@@ -70,5 +78,40 @@ export function useMachineDesktops(conversation: string) {
       ),
     enabled: Boolean(conversation),
     refetchInterval: 5000,
+  });
+}
+
+export function useMachineUpdates() {
+  return useQuery({
+    queryKey: ["machine-updates"],
+    queryFn: () => api.get<MachineUpdateStatus[]>("/machines/updates"),
+    refetchInterval: 3000,
+  });
+}
+export function useStartMachineUpdate(id: string) {
+  const query = useQueryClient();
+  return useMutation({
+    mutationFn: () =>
+      api.post<{ status: string; reason?: string }>(
+        `/machines/${id}/update`,
+        {},
+      ),
+    onSuccess: () => query.invalidateQueries({ queryKey: ["machine-updates"] }),
+  });
+}
+export function useMachineUpdatePolicy(id: string) {
+  const query = useQueryClient();
+  return useMutation({
+    mutationFn: (automatic: boolean) =>
+      api.put(`/machines/${id}/update-policy`, { automatic }),
+    onSuccess: () => query.invalidateQueries({ queryKey: ["machine-updates"] }),
+  });
+}
+
+export function useVerifiedUpdaterImage() {
+  return useQuery({
+    queryKey: ["machine-updater-image"],
+    queryFn: () => api.get<{version: string; image: string | null; status: string}>("/machines/updater-image"),
+    refetchInterval: (query) => query.state.data?.image ? 3_600_000 : 5000,
   });
 }

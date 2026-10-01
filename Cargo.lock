@@ -4180,6 +4180,7 @@ dependencies = [
  "nyxid-cli",
  "nyxid-cloud-auth",
  "nyxid-machine",
+ "nyxid-machine-updater",
  "nyxid-service-adapters",
  "open",
  "p256",
@@ -4337,12 +4338,48 @@ dependencies = [
  "base64 0.22.1",
  "hex",
  "hmac",
+ "semver",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "urlencoding",
  "uuid",
  "zeroize",
+]
+
+[[package]]
+name = "nyxid-machine-updater"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "const-oid 0.9.6",
+ "futures",
+ "hex",
+ "libc",
+ "nyxid-machine",
+ "rcgen",
+ "reqwest 0.12.28",
+ "rustls 0.23.37",
+ "rustls-native-certs",
+ "rustls-pki-types",
+ "rustls-webpki 0.103.9",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sigstore",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-rustls 0.26.4",
+ "tokio-tungstenite",
+ "tough",
+ "tracing",
+ "url",
+ "urlencoding",
+ "webpki-roots 1.0.6",
+ "wiremock",
+ "x509-cert",
 ]
 
 [[package]]

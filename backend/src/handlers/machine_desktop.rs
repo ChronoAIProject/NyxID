@@ -32,6 +32,8 @@ use std::time::{Duration, Instant};
 #[derive(Deserialize)]
 pub struct DesktopQuery {
     pub conversation_id: Option<String>,
+    #[serde(default)]
+    pub display: nyxid_machine::desktop::Display,
 }
 
 #[derive(Serialize)]
@@ -41,6 +43,7 @@ pub struct Metadata {
     conversation_id: Option<String>,
     status: String,
     reason: Option<String>,
+    display: nyxid_machine::desktop::Display,
 }
 
 impl From<MachineDesktop> for Metadata {
@@ -51,6 +54,7 @@ impl From<MachineDesktop> for Metadata {
             conversation_id: row.conversation_id,
             status: row.status,
             reason: row.reason,
+            display: row.display,
         }
     }
 }
@@ -106,14 +110,22 @@ pub async fn upgrade(
     }
     let owner = auth.user_id.to_string();
     let node = authorized(&state, &owner, &node).await?;
+    if query.display == nyxid_machine::desktop::Display::Dev
+        && !node.machine.as_ref().is_some_and(|m| m.browser_tools)
+    {
+        return Err(AppError::ValidationError(
+            "Update this machine before opening the developer browser display".into(),
+        ));
+    }
     if let Some(id) = &query.conversation_id {
         engine::get(&state.db, &owner, id).await?;
     }
-    let row = desktop::open(
+    let row = desktop::open_display(
         &state.db,
         &owner,
         &node.id,
         query.conversation_id.as_deref(),
+        query.display,
     )
     .await?;
     let secret =
@@ -189,7 +201,7 @@ async fn relay(
         &state,
         &node.id,
         Operation::DesktopOpen,
-        json!({"session_id":row.session_id,"refresh_frame":true}),
+        json!({"display":row.display,"session_id":row.session_id,"refresh_frame":true}),
         &secret,
     )
     .await
@@ -202,8 +214,9 @@ async fn relay(
         &mut socket,
         json!({
             "type":"connected",
+            "name":node.name,
             "viewer_id":viewer,
-            "session_id":row.session_id,
+            "display":row.display,"session_id":row.session_id,
             "controller":row.status,
             "reason":row.reason
         }),
@@ -236,7 +249,7 @@ async fn relay(
                 if authorized(&state, &row.user_id, &node.id).await.is_err() {
                     break;
                 }
-                let Ok(Some(current)) = desktop::get(&state.db, &node.id).await else {
+                let Ok(Some(current)) = desktop::get(&state.db, &row.id).await else {
                     break;
                 };
                 if current.session_id != row.session_id || current.user_id != row.user_id {
@@ -254,7 +267,7 @@ async fn relay(
                     &state,
                     &node.id,
                     Operation::DesktopOpen,
-                    json!({"session_id":row.session_id}),
+                    json!({"display":row.display,"session_id":row.session_id}),
                     &secret,
                 )
                 .await
@@ -308,6 +321,7 @@ async fn relay(
                         if !parameters.is_object() {
                             break;
                         }
+                        parameters["display"] = json!(row.display);
                         parameters["session_id"] = json!(row.session_id);
                         parameters["viewer_id"] = json!(viewer);
                         parameters["revision"] = json!(row.revision);
@@ -346,6 +360,7 @@ async fn relay(
                                             &node.id,
                                             Operation::DesktopOpen,
                                             json!({
+                                                "display": row.display,
                                                 "session_id": row.session_id,
                                                 "refresh_frame": true,
                                             }),
@@ -365,7 +380,7 @@ async fn relay(
                                         &node.id,
                                         Operation::DesktopControl,
                                         json!({
-                                            "session_id":row.session_id,
+                                            "display":row.display,"session_id":row.session_id,
                                             "owner":true,
                                             "viewer_id":viewer,
                                             "revision":row.revision
@@ -391,7 +406,7 @@ async fn relay(
                                         &node.id,
                                         Operation::DesktopControl,
                                         json!({
-                                            "session_id":row.session_id,
+                                            "display":row.display,"session_id":row.session_id,
                                             "owner":false,
                                             "viewer_id":viewer,
                                             "revision":row.revision
@@ -406,7 +421,9 @@ async fn relay(
                                 }
                                 Some("stop") => {
                                     if let Some(id) = &row.conversation_id {
-                                        engine::request_stop(&state.db, &row.user_id, id).await?;
+                                        super::machine_cancel::conversation(&state, &row.user_id, id).await?;
+                                    } else {
+                                        super::machine_cancel::machine(&state, &node.id).await?;
                                     }
                                 }
                                 _ => return Err(AppError::MachineNotAllowed),
@@ -452,7 +469,7 @@ fn audit(state: &AppState, row: &MachineDesktop, outcome: &str) {
         "machine_desktop".into(),
         Some(json!({
             "node_id":row.node_id,
-            "session_id":row.session_id,
+            "display":row.display,"session_id":row.session_id,
             "conversation_id":row.conversation_id,
             "outcome":outcome,
             "reason":row.reason
@@ -470,7 +487,7 @@ pub async fn watch(state: &AppState, row: &MachineDesktop) -> AppResult<()> {
         state.db.collection::<bson::Document>(crate::models::nyxbot_channel::WATCHES_COLLECTION_NAME).update_one(
             doc!{
                 "kind":"machine_control",
-                "connect_link_id":&row.node_id,
+                "connect_link_id":&row.id,
                 "conversation_id":conversation,
                 "status":"pending"
             },
@@ -479,7 +496,7 @@ pub async fn watch(state: &AppState, row: &MachineDesktop) -> AppResult<()> {
                     "_id":uuid::Uuid::new_v4().to_string(),
                     "user_id":&row.user_id,
                     "kind":"machine_control",
-                    "connect_link_id":&row.node_id,
+                    "connect_link_id":&row.id,
                     "conversation_id":conversation,
                     "status":"pending",
                     "created_at":bson::DateTime::now(),
@@ -496,12 +513,14 @@ pub async fn request_control(
     chat: &crate::services::assistant_acknowledgement_service::ChatAuthority,
     node: &Node,
     reason: &str,
+    display: nyxid_machine::desktop::Display,
 ) -> AppResult<Value> {
-    let row = desktop::open(
+    let row = desktop::open_display(
         &state.db,
         &chat.user_id,
         &node.id,
         Some(&chat.conversation_id),
+        display,
     )
     .await?;
     let row = desktop::request(&state.db, &row, reason).await?;
@@ -511,7 +530,7 @@ pub async fn request_control(
         state,
         &node.id,
         Operation::DesktopOpen,
-        json!({"session_id":row.session_id}),
+        json!({"display":row.display,"session_id":row.session_id}),
         &secret,
     )
     .await?;
@@ -522,7 +541,7 @@ pub async fn request_control(
         &node.id,
         Operation::DesktopControl,
         json!({
-            "session_id":row.session_id,
+            "display":row.display,"session_id":row.session_id,
             "owner":true,
             "viewer_id":"waiting-for-owner",
             "revision":row.revision
@@ -534,6 +553,7 @@ pub async fn request_control(
     let link = AssistantPage::MachineDesktop {
         node: &node.id,
         conversation: Some(&chat.conversation_id),
+        display,
     }
     .url(&state.config.frontend_url);
     let message = format!(

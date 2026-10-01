@@ -128,16 +128,14 @@ pub async fn run(command: Commands, config: Option<&str>, profile: Option<&str>)
         }
         Commands::Status => {
             let runtime = super::Runtime::new(&config.machine, &config.node.id, &directory)?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&runtime.profile().await)?
-            );
+            let profile = runtime.profile().await;
+            println!("{}", serde_json::to_string_pretty(&profile)?);
             if config.machine.agent_user.is_none() {
                 eprintln!(
                     "Saved logins require managed browser policies and owner opt-in on the Assistant → Machines page. Commands run as the browser user, so a misbehaving or prompt-injected agent could read typed values. Prefer the machine container or a separated VM."
                 );
             }
-            if config.machine.shell && config.machine.agent_user.is_none() {
+            if config.machine.shell && profile.commands_isolated == Some(false) {
                 eprintln!(
                     "Not isolated: agent commands can read this node's stored credentials, signing secret and node token, including its config and local credential store. Prefer the container or --separate-users; you may continue on this machine."
                 );

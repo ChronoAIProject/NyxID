@@ -25,6 +25,8 @@ use super::{
 
 #[derive(Deserialize)]
 pub struct Exec {
+    #[serde(flatten)]
+    pub scope: super::cancellation::Scope,
     pub job_id: String,
     pub command: String,
     pub cwd: Option<String>,
@@ -46,6 +48,7 @@ struct State {
 }
 
 pub struct Job {
+    scope: super::cancellation::Scope,
     state: Mutex<State>,
     cancel: watch::Sender<bool>,
     changed: Notify,
@@ -143,6 +146,7 @@ impl Jobs {
         let mut stdin = child.stdin.take();
         let (cancel, mut cancelled) = watch::channel(false);
         let job = Arc::new(Job {
+            scope: request.scope,
             state: Mutex::new(State {
                 stdout: OutputRing::with_head(self.output_bytes / 2),
                 stderr: OutputRing::with_head(self.output_bytes / 2),
@@ -226,6 +230,24 @@ impl Jobs {
         }
     }
 
+    pub async fn preempt_scope(&self, scope: Option<&super::cancellation::Scope>) -> Vec<String> {
+        let jobs = self.jobs.lock().await;
+        let mut ids = Vec::new();
+        for (id, job) in jobs.iter() {
+            if scope.is_none_or(|s| {
+                s.conversation_id == job.scope.conversation_id
+                    && (s.turn_id.is_empty() || s.turn_id == job.scope.turn_id)
+            }) {
+                if job.running.load(Ordering::Acquire) {
+                    signal_group(job.pid, libc::SIGKILL);
+                }
+                job.cancel.send_replace(true);
+                ids.push(id.clone());
+            }
+        }
+        ids
+    }
+
     pub async fn cancel_all(&self) {
         let jobs: Vec<_> = self.jobs.lock().await.values().cloned().collect();
         for job in &jobs {
@@ -252,10 +274,18 @@ impl Jobs {
         }
     }
 
+    pub async fn any_running(&self) -> bool {
+        self.jobs
+            .lock()
+            .await
+            .values()
+            .any(|job| job.running.load(Ordering::Acquire))
+    }
+
     pub async fn running(&self, id: &str) -> bool {
         let job = self.jobs.lock().await.get(id).cloned();
         match job {
-            Some(job) => job.state.lock().await.finished.is_none(),
+            Some(job) => job.running.load(Ordering::Acquire) && !*job.cancel.borrow(),
             None => false,
         }
     }
@@ -374,6 +404,7 @@ mod tests {
         let id = uuid::Uuid::new_v4().to_string();
         jobs.start(
             Exec {
+                scope: Default::default(),
                 job_id: id.clone(),
                 command: "printf before; sleep 30 & wait".into(),
                 cwd: None,
@@ -409,6 +440,7 @@ mod tests {
         let result = jobs
             .start(
                 Exec {
+                    scope: Default::default(),
                     job_id: uuid::Uuid::new_v4().to_string(),
                     command: "printf BEGIN; yes x | head -c 20000; printf END; sleep 30".into(),
                     cwd: None,

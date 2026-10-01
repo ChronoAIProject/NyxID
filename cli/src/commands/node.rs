@@ -22,6 +22,12 @@ pub async fn run(command: NodeCommands) -> Result<()> {
             crate::node::machine::commands::run(command, config.as_deref(), profile.as_deref())
                 .await
         }
+        NodeCommands::MachineUpdater { command } => {
+            crate::commands::machine_native_update::run(command).await
+        }
+        NodeCommands::MachineBrowserRefresh { profile } => {
+            crate::node::machine::browser::refresh_extension(&profile)
+        }
         NodeCommands::MachineWorker => crate::node::machine::worker().await,
         NodeCommands::MachineTransferWorker => crate::node::machine::transfer::worker(),
         NodeCommands::MachineNativeHost { origin } => {

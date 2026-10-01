@@ -239,7 +239,7 @@ pub enum AppError {
     #[error("External provider not configured: {0}")]
     ExternalProviderNotConfigured(String),
 
-    // 12400–12413: machine access, controller privacy and saved-login filling.
+    // 12400–12418: machine access, controller privacy and saved-login filling.
     #[error("Machine capability is disabled; the owner must enable it on the node")]
     MachineCapabilityDisabled,
 
@@ -285,6 +285,19 @@ pub enum AppError {
         "Managed browser filling is unavailable; install the protected browser policies during setup"
     )]
     MachineBrowserUnavailable,
+
+    #[error(
+        "Computer driver is restarting; retry after a short delay and observe before repeating an action"
+    )]
+    MachineDriverRestarting,
+    #[error("Enable Accessibility and Screen Recording for this node")]
+    MachineComputerPermissionMissing,
+    #[error("This computer tool is not supported; choose an advertised tool or browser action")]
+    MachineComputerToolUnsupported,
+    #[error("The machine display is unavailable; start its desktop session")]
+    MachineDisplayUnavailable,
+    #[error("The owner stopped this turn; wait for a new turn")]
+    MachineTurnStopped,
 
     #[error("Node not found: {0}")]
     NodeNotFound(String),
@@ -753,6 +766,12 @@ impl AppError {
             Self::MachineLoginOriginMismatch => StatusCode::FORBIDDEN,
             Self::MachineLoginWrongField => StatusCode::BAD_REQUEST,
             Self::MachineBrowserUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            Self::MachineDriverRestarting | Self::MachineDisplayUnavailable => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+            Self::MachineComputerPermissionMissing => StatusCode::FORBIDDEN,
+            Self::MachineComputerToolUnsupported => StatusCode::BAD_REQUEST,
+            Self::MachineTurnStopped => StatusCode::CONFLICT,
             Self::NodeNotFound(_) => StatusCode::NOT_FOUND,
             Self::NodeOffline(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::NodeProxyTimeout => StatusCode::GATEWAY_TIMEOUT,
@@ -961,6 +980,11 @@ impl AppError {
             Self::MachineLoginOriginMismatch => 12411,
             Self::MachineLoginWrongField => 12412,
             Self::MachineBrowserUnavailable => 12413,
+            Self::MachineDriverRestarting => 12414,
+            Self::MachineComputerPermissionMissing => 12415,
+            Self::MachineComputerToolUnsupported => 12416,
+            Self::MachineDisplayUnavailable => 12417,
+            Self::MachineTurnStopped => 12418,
             Self::NodeNotFound(_) => 8000,
             Self::NodeOffline(_) => 8001,
             Self::NodeProxyTimeout => 8002,
@@ -1208,6 +1232,11 @@ impl AppError {
             Self::MachineLoginOriginMismatch => "machine_login_origin_mismatch",
             Self::MachineLoginWrongField => "machine_login_wrong_field",
             Self::MachineBrowserUnavailable => "machine_browser_unavailable",
+            Self::MachineDriverRestarting => "driver_restarting",
+            Self::MachineComputerPermissionMissing => "computer_permission_missing",
+            Self::MachineComputerToolUnsupported => "computer_tool_not_supported",
+            Self::MachineDisplayUnavailable => "display_unavailable",
+            Self::MachineTurnStopped => "machine_turn_stopped",
             Self::NodeNotFound(_) => "node_not_found",
             Self::NodeOffline(_) => "node_offline",
             Self::NodeProxyTimeout => "node_proxy_timeout",

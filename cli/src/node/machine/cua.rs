@@ -17,7 +17,7 @@ use tokio::{
 
 use super::process::Identity;
 
-pub const VERSION: &str = "0.30.4";
+pub const VERSION: &str = "0.31.0";
 const MAX_MCP_LINE: usize = 12 * 1024 * 1024;
 static TOOLS: std::sync::LazyLock<Vec<Value>> = std::sync::LazyLock::new(|| {
     serde_json::from_str(nyxid_machine::CUA_TOOLS).expect("embedded contract")
@@ -115,6 +115,7 @@ pub async fn verify_version(path: &Path) -> Result<String> {
     command
         .arg("--version")
         .env("CUA_DRIVER_RS_TELEMETRY_ENABLED", "false")
+        .env("CUA_DRIVER_RS_UPDATE_CHECK", "false")
         .stderr(std::process::Stdio::null());
     let output = tokio::time::timeout(Duration::from_secs(10), command.output()).await??;
     let version = String::from_utf8_lossy(&output.stdout);
@@ -128,6 +129,20 @@ pub async fn verify_version(path: &Path) -> Result<String> {
     Ok(VERSION.into())
 }
 
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum DriverError {
+    #[error(
+        "driver restarting; retry after {retry_after_ms} ms and observe before repeating an action"
+    )]
+    Restarting { retry_after_ms: u64 },
+    #[error("computer permission missing; enable Accessibility and Screen Recording for the node")]
+    PermissionMissing,
+    #[error("computer tool is not supported on this platform")]
+    ToolUnsupported,
+    #[error("display unavailable; start the desktop session")]
+    DisplayUnavailable,
+}
+
 pub struct Driver {
     human_input: bool,
     #[cfg(target_os = "macos")]
@@ -137,7 +152,11 @@ pub struct Driver {
     mode: ComputerMode,
     session: Mutex<Option<Session>>,
     cancelled: tokio::sync::watch::Sender<u64>,
-    attempts: Mutex<Vec<Instant>>,
+    failures: std::sync::atomic::AtomicU32,
+    next_start: std::sync::Mutex<Option<Instant>>,
+    known_tools: std::sync::RwLock<Vec<String>>,
+    #[cfg(target_os = "macos")]
+    known_permissions: std::sync::RwLock<Option<nyxid_machine::ComputerPermissions>>,
 }
 
 struct Session {
@@ -161,7 +180,11 @@ impl Driver {
             mode,
             session: Mutex::new(None),
             cancelled: tokio::sync::watch::channel(0).0,
-            attempts: Mutex::new(Vec::new()),
+            failures: std::sync::atomic::AtomicU32::new(0),
+            next_start: std::sync::Mutex::new(None),
+            known_tools: std::sync::RwLock::new(Vec::new()),
+            #[cfg(target_os = "macos")]
+            known_permissions: std::sync::RwLock::new(None),
         }
     }
 
@@ -180,29 +203,17 @@ impl Driver {
     }
 
     async fn start(&self) -> Result<Session> {
-        let mut attempts = self.attempts.lock().await;
-        attempts.retain(|at| at.elapsed() < Duration::from_secs(60));
-        if attempts.len() >= 3 {
-            bail!("cua driver restart limit reached; retry after one minute");
+        let next = *self.next_start.lock().expect("driver backoff lock");
+        if let Some(at) = next {
+            tokio::time::sleep(at.saturating_duration_since(Instant::now())).await;
         }
-        attempts.push(Instant::now());
-        drop(attempts);
         let mut command = Command::new(&self.path);
         self.identity.prepare(&mut command)?;
-        for key in [
-            "DISPLAY",
-            "XAUTHORITY",
-            "WAYLAND_DISPLAY",
-            "XDG_RUNTIME_DIR",
-            "DBUS_SESSION_BUS_ADDRESS",
-        ] {
-            if let Some(value) = std::env::var_os(key) {
-                command.env(key, value);
-            }
-        }
+        self.identity.desktop_env(&mut command);
         command
             .args(["mcp", "--direct"])
             .env("CUA_DRIVER_RS_TELEMETRY_ENABLED", "false")
+            .env("CUA_DRIVER_RS_UPDATE_CHECK", "false")
             .env(
                 "CUA_DRIVER_PERMISSION_MODE",
                 if self.mode == ComputerMode::Unrestricted {
@@ -267,7 +278,35 @@ impl Driver {
                 bail!("cua human cursor configuration unavailable");
             }
         }
+        *self.known_tools.write().expect("driver tools lock") = session.tools.clone();
+        *self.next_start.lock().expect("driver backoff lock") = None;
         Ok(session)
+    }
+
+    /// A transport restart does not withdraw installed capability support.
+    pub fn advertised_tools(&self) -> Vec<String> {
+        let cached = self.known_tools.read().expect("driver tools lock");
+        if cached.is_empty() {
+            TOOLS
+                .iter()
+                .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
+                .collect()
+        } else {
+            cached.clone()
+        }
+    }
+
+    fn restarting(&self) -> anyhow::Error {
+        let failures = self
+            .failures
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .min(5);
+        let delay = Duration::from_millis((100u64 << failures).min(2000));
+        *self.next_start.lock().expect("driver backoff lock") = Some(Instant::now() + delay);
+        DriverError::Restarting {
+            retry_after_ms: delay.as_millis() as u64,
+        }
+        .into()
     }
 
     pub async fn tools(&self) -> Result<Vec<String>> {
@@ -279,7 +318,7 @@ impl Driver {
                 let mut session = self.session.lock().await;
                 let mut active = session.take();
                 if active.is_none() {
-                    active = Some(tokio::time::timeout(Duration::from_secs(20), self.start()).await??);
+                    active = Some(tokio::time::timeout(Duration::from_secs(20), self.start()).await.map_err(|_|self.restarting())?.map_err(|_|self.restarting())?);
                 }
                 let tools = active.as_ref().context("cua session unavailable")?.tools.clone();
                 *session = active;
@@ -302,15 +341,25 @@ impl Driver {
             ),
         )
         .await??;
-        Ok(nyxid_machine::ComputerPermissions {
+        let permissions = nyxid_machine::ComputerPermissions {
             screen_recording: result["structuredContent"]["screen_recording"].as_bool(),
             accessibility: result["structuredContent"]["accessibility"].as_bool(),
-        })
+        };
+        *self.known_permissions.write().expect("permissions lock") = Some(permissions.clone());
+        Ok(permissions)
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn last_permissions(&self) -> Option<nyxid_machine::ComputerPermissions> {
+        self.known_permissions
+            .read()
+            .expect("permissions lock")
+            .clone()
     }
 
     pub async fn call(&self, name: &str, arguments: Value) -> Result<Value> {
         if !public_tool(name) {
-            bail!("cua tool is outside the supported public contract");
+            return Err(DriverError::ToolUnsupported.into());
         }
         let mut cancelled = self.cancelled.subscribe();
         let mut session = tokio::select! {
@@ -328,14 +377,36 @@ impl Driver {
                 }
                 let active = active.as_mut().context("cua session unavailable")?;
                 if !active.tools.iter().any(|tool| tool == name) {
-                    bail!("cua tool is not advertised on this platform");
+                    return Err(DriverError::ToolUnsupported.into());
                 }
                 tokio::time::timeout(Duration::from_secs(30), active.rpc("tools/call", json!({"name":name,"arguments":arguments}))).await?
             } => result,
         };
-        if result.is_ok() {
-            *session = active;
-        }
+        let result = match result {
+            Ok(value) => {
+                self.failures.store(0, std::sync::atomic::Ordering::Relaxed);
+                *session = active;
+                match value["structuredContent"]["code"].as_str() {
+                    Some(
+                        "permission_denied"
+                        | "accessibility_permission_denied"
+                        | "screen_recording_permission_denied",
+                    ) => Err(DriverError::PermissionMissing.into()),
+                    Some("display_unavailable" | "display_not_found") => {
+                        Err(DriverError::DisplayUnavailable.into())
+                    }
+                    Some("unsupported_tool" | "tool_not_supported") => {
+                        Err(DriverError::ToolUnsupported.into())
+                    }
+                    _ => Ok(value),
+                }
+            }
+            Err(error) if error.downcast_ref::<DriverError>().is_some() => {
+                *session = active;
+                Err(error)
+            }
+            Err(_) => Err(self.restarting()),
+        };
         // The local session owns a kill_on_drop child. Dropping a cancelled
         // call kills it even when the outer operation future was dropped.
         result
@@ -405,6 +476,7 @@ impl Session {
     }
 }
 
+#[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -417,7 +489,7 @@ mod tests {
             ("macos", "x86_64"),
         ] {
             let (url, hash) = platform_asset(os, arch).unwrap();
-            assert!(url.contains("cua-driver-rs-v0.30.4"));
+            assert!(url.contains("cua-driver-rs-v0.31.0"));
             assert_eq!(hex::decode(hash).unwrap().len(), 32);
         }
         assert!(!public_tool("parse_visual_regions"));
@@ -434,6 +506,7 @@ mod tests {
         std::fs::write(&path, r#"#!/usr/bin/env python3
 import sys,json,os
 assert os.environ['CUA_DRIVER_RS_TELEMETRY_ENABLED']=='false'
+assert os.environ['CUA_DRIVER_RS_UPDATE_CHECK']=='false'
 assert os.environ['CUA_DRIVER_PERMISSION_MODE']=='standard'
 configured=False
 for line in sys.stdin:
@@ -489,4 +562,96 @@ for line in sys.stdin:
             true
         );
     }
+}
+
+/// Keep actionable refs and visible labels before structural AX nodes. Never
+/// duplicate the tree as markdown, and never expose an input's current value.
+pub fn compact_window_state(mut result: Value) -> Value {
+    if result["isError"] == true {
+        return result;
+    }
+    let Some(state) = result.get_mut("structuredContent") else {
+        return result;
+    };
+    let Some(rows) = state.get_mut("elements").and_then(Value::as_array_mut) else {
+        return result;
+    };
+    let total = rows.len();
+    rows.sort_by_key(|row| {
+        let role = row["role"].as_str().unwrap_or_default().to_lowercase();
+        if row["actions"].as_array().is_some_and(|a| !a.is_empty())
+            || [
+                "button",
+                "link",
+                "entry",
+                "text field",
+                "checkbox",
+                "combo",
+                "radio",
+                "slider",
+                "menu item",
+            ]
+            .iter()
+            .any(|name| role.contains(name))
+        {
+            0
+        } else if row["label"]
+            .as_str()
+            .is_some_and(|label| !label.trim().is_empty())
+        {
+            1
+        } else {
+            2
+        }
+    });
+    let mut kept = Vec::new();
+    let mut bytes = 0;
+    for row in rows.iter() {
+        let mut compact = json!({});
+        for name in [
+            "element_index",
+            "element_token",
+            "role",
+            "label",
+            "frame",
+            "enabled",
+            "selected",
+            "actions",
+        ] {
+            if let Some(value) = row.get(name) {
+                let value = match value {
+                    Value::String(text) if name != "element_token" => {
+                        json!(text.chars().take(200).collect::<String>())
+                    }
+                    _ => value.clone(),
+                };
+                compact[name] = value;
+            }
+        }
+        let size = compact.to_string().len();
+        if bytes + size > 6800 {
+            continue;
+        }
+        bytes += size;
+        kept.push(compact);
+        if kept.len() >= 60 {
+            break;
+        }
+    }
+    let retained = kept.len();
+    state["elements"] = json!(kept);
+    state["returned_element_count"] = json!(retained);
+    if total > retained {
+        state["truncated"] = json!(true);
+        state["hint"] = json!(
+            "Narrow get_window_state with query for omitted elements; refs keep their original indices."
+        );
+    }
+    if let Some(object) = state.as_object_mut() {
+        object.remove("tree_markdown");
+    }
+    if let Some(content) = result.get_mut("content").and_then(Value::as_array_mut) {
+        content.retain(|item| item["type"] != "text");
+    }
+    result
 }

@@ -52,7 +52,7 @@ Strict separation: `handlers/` -> `services/` -> `models/`
 - 12100 `AssistantTurnActive` (HTTP 409, `turn_active`): a persisted NyxAgent conversation already has an active turn.
 - 12200 `AdminUsageQueryTimeout` (HTTP 503): bounded admin usage aggregation timed out; retry with a narrower window or filters.
 - 12300 `WorkspaceDestinationsNotActivated` (HTTP 503): incomplete automatic Drive/Workspace editor reconciliation; excluded from proxy-fault telemetry
-- 12400-12413 machine nodes: 12400 `MachineCapabilityDisabled`, 12401 `MachineNotAllowed`, 12402 `MachinePathOutsideRoots`, 12403 `MachineJobNotFound`, 12404 `MachineConfirmationPending`, 12405 `MachineConfirmationDeclined`, 12406 `MachineComputerUnavailable`, 12407 `MachineLimitExceeded`, 12408 `MachineOwnerInControl`, 12409 `MachineNotIsolated`, 12410 `MachineLoginNotFound`, 12411 `MachineLoginOriginMismatch`, 12412 `MachineLoginWrongField`, 12413 `MachineBrowserUnavailable`.
+- 12400-12418 machine nodes: 12400 `MachineCapabilityDisabled`, 12401 `MachineNotAllowed`, 12402 `MachinePathOutsideRoots`, 12403 `MachineJobNotFound`, 12404 `MachineConfirmationPending`, 12405 `MachineConfirmationDeclined`, 12406 `MachineComputerUnavailable`, 12407 `MachineLimitExceeded`, 12408 `MachineOwnerInControl`, 12409 `MachineNotIsolated`, 12410 `MachineLoginNotFound`, 12411 `MachineLoginOriginMismatch`, 12412 `MachineLoginWrongField`, 12413 `MachineBrowserUnavailable`, 12414 `MachineDriverRestarting`, 12415 `MachineComputerPermissionMissing`, 12416 `MachineComputerToolUnsupported`, 12417 `MachineDisplayUnavailable`, 12418 `MachineTurnStopped`.
 
 ### 4. Frontend Patterns
 
@@ -633,3 +633,31 @@ standalone under `/assistant/machines/{id}/desktop`. Studio Nodes shows only a
 read-only machine summary linking to assistant settings; Developer → Triggers
 retains secrets/replay. `/automations` redirects with `setup` and `agent` intact.
 Server-generated browser URLs use `services::assistant_links::AssistantPage`.
+Machine web tasks use `nyx__machine_browser`; secure browser DevTools and arbitrary script evaluation are disabled. The separate dev browser is for debugging and has no saved-login access. Explicit NyxAgent budget/time errors continue the same session under `max_auto_continuations`; Stop must fence the turn and cancel node jobs/gateway work. Machine error codes 12413–12418 distinguish browser/driver/display/restart/stop states.
+
+Machine updates: `machine_update_service` owns durable policy/attempt/watch state;
+`handlers/machine_update` exposes human-only UI and mandatory owner-card tools.
+Granted specialists may request, never approve, updates. Keep reconnect watches
+bound to their attempt, and exclude jobs/turns/desktops/owner control from idle
+updates. Only signed supervisor commands write version-only private update
+mailboxes. The companion's Docker socket is host-root authority: fixed official
+repositories, digest-bound Publish Images attestations, inspected configuration
+preservation and rollback are mandatory. Never log Docker inspect environments
+or expose update-volume access to agent/browser users. Test-only local-image
+injection must remain behind `cfg(test)`; production has no trust bypass.
+Machine performance budgets belong in ignored benchmarks or explicit
+`NYXID_MACHINE_STRICT_BENCHMARK=1` runs on a quiet host. Shared-runner container
+CI prints the same measurements but uses sanity ceilings (8 fps minimum,
+500 ms input p95) so runner jitter cannot block image publication.
+
+Machine browser compatibility/security: secure and dev Linux browsers use separate
+Xvfb/Openbox displays and Xauthority cookies; cua remains secure-only. The owner's
+display switcher routes capture/input and control by display (macOS shares its
+physical desktop and locks both). Browser refs carry frame IDs; snapshots accept
+query/offset/scope and return bounded pagination markers. Trusted native input
+follows extension hit testing; explicit DOM fallback is labelled. Command isolation
+is an actual uid/filesystem access probe, separate from saved-login browser
+isolation; missing fields mean unknown. Continuation progress stores rolling MCP
+argument/result hashes only, never raw values or bounded activity labels. Docker
+migration/setup commands require the server's cached, attestation-verified updater
+digest, with no mutable-tag fallback.
