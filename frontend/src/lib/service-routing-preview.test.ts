@@ -1,12 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type { KeyInfo, CatalogEntry } from "@/types/keys";
-import {
-  buildRoutingGroups,
-  moveItem,
-  orderedIds,
-  readPreferences,
-  savePreferences,
-} from "./service-routing-preview";
+import { buildRoutingGroups } from "./service-routing-preview";
 
 function key(overrides: Partial<KeyInfo> = {}): KeyInfo {
   return {
@@ -193,33 +187,4 @@ describe("routing from actual connections", () => {
       expect(group([key(overrides)]).candidates[0]?.state).toBe("unverified");
     },
   );
-
-  it("only reorders members of the given pool, removing stale saved IDs", () => {
-    const order = orderedIds(["a", "b", "new"], ["b", "foreign", "a", "b"]);
-    expect(order).toEqual(["b", "a", "new"]);
-    expect(moveItem(order, "foreign", "a")).toEqual(order);
-    expect(moveItem(order, "new", "b")).toEqual(["new", "b", "a"]);
-  });
-
-  it("scopes pool preferences by account and pool without inheriting old global sorts", () => {
-    localStorage.setItem(
-      "nyxid-routing-preview-v2:alice",
-      JSON.stringify({
-        serviceOrder: ["b"],
-        connectionOrder: ["b"],
-        view: "services",
-      }),
-    );
-    expect(readPreferences("alice")).toEqual({
-      view: "connections",
-      pools: {},
-    });
-    savePreferences("alice", {
-      view: "services",
-      pools: { first: { priority: true, order: ["b", "a"] } },
-    });
-    expect(readPreferences("alice").pools.first?.order).toEqual(["b", "a"]);
-    expect(readPreferences("alice").pools.second).toBeUndefined();
-    expect(readPreferences("bob")).toEqual({ view: "connections", pools: {} });
-  });
 });

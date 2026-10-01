@@ -181,8 +181,9 @@ function ConnectionBillingPanel({
                   per request; the grant used is not reported in this preview.
                 </p>
                 <p className="mt-1 text-[11px] text-muted-foreground">
-                  If a request fails, NyxID does not retry the other connections
-                  in this service.
+                  A direct connection slug targets this connection. A priority
+                  pool slug can fail over according to its saved policy, with
+                  each attempted connection using its own billing rules.
                 </p>
               </div>
             )}

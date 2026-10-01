@@ -90,11 +90,34 @@ Card billing summaries keep each source separate even when the expected payer is
 the same. Personal credentials normally use the personal account, organization
 credentials use the owning organization's account, and a platform key uses the
 acting person's personal account. Each source opens its own inline billing panel.
-These groups do not configure execution order or credential-failure fallback;
-billing panels explain that a failed request does not retry another connection. Within a selected
-billing account, eligible allowances fund usage before credit grants and then wallet
-credits. That funding priority is shown in the billing panel and does not select
-another connection or payer.
+The service card's **Routing** row shows saved pools containing its connections.
+Grouping by catalog does not create a pool or change an individual connection slug.
+Open Routing to inspect the pool slug, strategy, priority/weight, credential supplier,
+billing account/rates, and operation-scoped eligibility/cooldown in a table inside
+the card. All members of the selected pool are shown, including members of other
+catalog services. Pool management inventory is currently personal or organization
+admin only; incomplete access is labeled instead of asserting there are no pools.
+
+Priority pools support bounded failover; round-robin and weighted pools select a
+single member per request. Omitted/null priority policies use server defaults, not
+"failover off". Disabled pools, disabled members and failed inspection remain
+explicit. Eligibility is metadata inspection, not proof of a successful upstream
+request. The Same API inspector applies the entered method/path on Inspect; AI
+chat inspection uses POST chat/completions. Reads refresh every 15 seconds while
+open. A failed read discards cached eligibility.
+
+The pool editor saves settings and membership in one revision-checked PUT. Dragging
+or using reorder arrows creates a strict priority sequence, preserving weights,
+models, enabled state and compatibility declarations. Equal numeric priorities
+configure rotation within a tier. The old local-storage-only priority preview is
+removed. The Service Pools routing view uses equal-height collapsed cards with
+one open route at a time and the same inline routing/billing table.
+
+Each pool attempt retains its own billing identity, credential class and payer.
+Known consumption can charge more than one attempt. Within a selected billing
+account, eligible allowances fund usage before credit grants and then wallet
+credits. This funding order does not select another connection or payer; local
+NyxID billing failures remain terminal. See [Service pools](SERVICE_POOLS.md).
 
 **Save as default** writes the current filters to the authenticated user's
 `users.profile_config.services_view` embedded blob. Search text is included.
@@ -184,16 +207,17 @@ graph TB
 
 ## Service-Pool Routing Boundary
 
-NyxID#974 was narrowed to a routing proof before adding a user-facing pool
-surface. The proof is recorded in
-[SERVICE_POOL_ROUTING_PROOF.md](SERVICE_POOL_ROUTING_PROOF.md).
+A `ServicePool` owns a stable slug and a set of concrete `UserService` members.
+Priority ingress captures the pool revision, plans eligible candidates without
+materializing credentials, and uses the exact selected member for authorization,
+approval, dispatch and per-attempt billing. Round-robin and weighted strategies
+retain single-member selection. See [Service pools](SERVICE_POOLS.md) and the
+[architecture proof](SERVICE_POOL_ROUTING_PROOF.md).
 
-The important boundary is that `UserService` remains the concrete proxy target
-member, while any future `ServicePool` must be selected inside
-`proxy_service::resolve_proxy_target_from_user_service()`. The existing
-`node_routing_service::resolve_node_route()` / `fallback_node_ids` layer remains
-node failover below a selected `UserService`; it is not sufficient by itself to
-balance multiple endpoint/credential instances behind one stable slug.
+Node routing selects transport below that concrete member. Node failover does
+not replace pool selection, change connection ownership, or combine billing
+accounts. The card presents these saved pool policies without changing the normal
+resolution behavior of individual connection slugs.
 
 ## Data Model Relationships
 

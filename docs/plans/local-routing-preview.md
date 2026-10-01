@@ -1,7 +1,8 @@
 # Local routing preview with production metadata
 
-Refreshed 28 September 2026 from main `bef3511b` (frontend v0.30.2), including
-the service icon registry and per-connection icon overrides from #1681.
+Refreshed 1 October 2026 from main `be1883bd` (frontend v0.39.0), including
+priority failover, round-robin/weighted rotation, operation-scoped pool health,
+and the latest service icon registry.
 Grouped cards and service overview headers show the catalog icon; a group with
 one connection also uses its custom icon. Each connection row shows its own icon
 override, with the service glyph as fallback. Auto-connected and custom services
@@ -31,6 +32,7 @@ The browser receives an opaque HttpOnly session. Restarting Vite or session expi
 requires signing in again. Do not use `?mock`; that is an unrelated fixture mode.
 
 The gateway accepts allowlisted metadata GETs, including `/service-pools`,
+UUID-addressed pool details, candidates and health, candidate discovery,
 service history and Codex connection metadata from current main. Key and node
 detail reads require UUID paths. Pool mutation requests, execution, credential
 reveal and other mutation endpoints are blocked, except for the authenticated,
@@ -58,8 +60,11 @@ cards and filter controls are also used by the normal production frontend.
 5. Organization and Service have separate named selectors. Search matches names,
    slugs and owners. Only matching rows appear in an expanded card; the full
    group count and Service details link preserve context.
-6. Pools keep the existing separate tab. Priority ordering there remains a local
-   preference preview; no production strategy change is implied by this UI edit.
+6. Each service card has a Routing row linked to its real saved pools. Opening it
+   shows priority/rotation, the pool slug, eligibility/cooldown and billing per
+   member inside the card. The Service Pools tab uses the same route table in
+   expandable cards. Configure opens the real revision-checked pool editor; this
+   production-data preview allows drafting but disables Save and mutations.
 
 The service-grid changes passed 98 focused frontend tests, TypeScript checking,
 targeted lint and the production build. The running Vite server serves the updated
@@ -90,24 +95,21 @@ inspection remains unavailable because no browser is connected.
 
 ## Readiness and execution boundary
 
-The current backend does not expose per-connection live readiness. `GET /keys`
-sets `connected: true` during response construction; `status: active`, a recent
-`last_used_at`, online node presence, and shared OAuth application credentials
-are not evidence of a working upstream credential. Even an expired OAuth token
-may be refreshable. The preview never upgrades these metadata facts to Ready.
+Pool health comes from the saved configuration and the selected operation. Eligible
+means the member passed metadata/admission inspection; it is not an upstream probe.
+Do not infer working credentials from `status: active`, recent credential preparation
+or node presence. Failed inspection shows unverified health, including when cached
+results previously said eligible.
 
-Production pools currently use round-robin or weighted selection. Their resolver
-filters enabled members and active services, but does not verify credential or
-provider health at member selection. The proposed Priority strategy and the
-shared readiness resolver described in `ai-service-connection-user-flow.md` are
-backend follow-up work. The local preference order is not an effective routing
-order until those checks exist.
+Priority pools use the saved failover policy and durable cooldown; round-robin and
+weighted pools select once. A null policy uses priority defaults. Direct connection
+slugs keep their normal semantics. The UI does not create a routing policy merely
+because multiple connections share a service card. See [Service pools](../SERVICE_POOLS.md)
+for retry safety, per-attempt billing and supported entrances.
 
-No live provider probes or execution requests are made by this preview. The
-current user session may also differ from an agent key's access. Final selection
-must check the execution caller, exact bindings, policy, approvals and funding,
-then report the actual selected source. It must not replay an already-dispatched
-request through a second identity.
+The production metadata gateway remains read-only for pools. Saving settings and
+resetting cooldowns use the normal backend endpoints outside this preview. The
+preview does not synthesize routes or use local storage as execution configuration.
 
 ## Connection tables and standalone selectors — 28 September 2026
 

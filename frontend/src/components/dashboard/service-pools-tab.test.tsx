@@ -383,3 +383,67 @@ it("keeps labels from page two and saved IDs when a new candidate query resets p
   expect(screen.getByText("Saved off-page member")).toBeVisible();
   expect(screen.queryByText(/Saved member;/)).not.toBeInTheDocument();
 });
+
+describe("pool member order in the routing editor", () => {
+  it("saves a reordered route atomically with its original revision and preserves member settings", async () => {
+    const user = userEvent.setup();
+    render(
+      <PoolEditor
+        pool={{
+          ...pool,
+          members: [
+            {
+              user_service_id: "first",
+              priority: 0,
+              weight: 2,
+              enabled: true,
+              model: null,
+              same_api_compatible: true,
+            },
+            {
+              user_service_id: "second",
+              priority: 10,
+              weight: 5,
+              enabled: false,
+              model: null,
+              same_api_compatible: true,
+            },
+          ],
+        }}
+        onClose={vi.fn()}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "Move member 2 up" }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Save" })).toBeEnabled(),
+    );
+    expect(mocks.update).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(mocks.update).toHaveBeenCalledTimes(1));
+    expect(mocks.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        poolId: "pool-id",
+        expected_revision: 17,
+        strategy: "priority",
+        members: [
+          {
+            user_service_id: "second",
+            priority: 0,
+            weight: 5,
+            enabled: false,
+            model: null,
+            same_api_compatible: true,
+          },
+          {
+            user_service_id: "first",
+            priority: 1,
+            weight: 2,
+            enabled: true,
+            model: null,
+            same_api_compatible: true,
+          },
+        ],
+      }),
+    );
+  });
+});

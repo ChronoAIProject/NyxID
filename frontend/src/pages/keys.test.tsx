@@ -1,20 +1,37 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
-import { render as renderDom, screen, waitFor, fireEvent, within } from "@testing-library/react";
+import {
+  render as renderDom,
+  screen,
+  waitFor,
+  fireEvent,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { KeyInfo } from "@/types/keys";
 
 function render(ui: ReactNode) {
-  const client = new QueryClient({ defaultOptions: { mutations: { retry: false }, queries: { retry: false } } });
-  return renderDom(ui, { wrapper: ({ children }) => <QueryClientProvider client={client}>{children}</QueryClientProvider> });
+  const client = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+  return renderDom(ui, {
+    wrapper: ({ children }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    ),
+  });
 }
 
 const { mockNavigate, state } = vi.hoisted(() => ({
   mockNavigate: vi.fn(),
   // Mutable containers populated per-test before render.
   state: {
-    search: {} as { tab?: string; slug?: string; action?: string; view?: string },
+    search: {} as {
+      tab?: string;
+      slug?: string;
+      action?: string;
+      view?: string;
+    },
     keys: [] as KeyInfo[],
     keysLoading: false,
     keysError: null as unknown,
@@ -35,7 +52,10 @@ vi.mock("@tanstack/react-router", () => ({
     readonly params?: Record<string, string>;
     readonly "aria-label"?: string;
   }) => (
-    <a aria-label={props["aria-label"]} href={params ? `${to}:${Object.values(params).join("/")}` : to}>
+    <a
+      aria-label={props["aria-label"]}
+      href={params ? `${to}:${Object.values(params).join("/")}` : to}
+    >
       {children}
     </a>
   ),
@@ -62,12 +82,35 @@ vi.mock("@/hooks/use-nodes", () => ({
 }));
 
 vi.mock("@/hooks/use-pools", () => ({
-  useServicePools: () => ({ data: [{
-    id: "pool-one", name: "My pool", slug: "my-pool", strategy: "round_robin",
-    members: [{ user_service_id: "key-1", enabled: true, weight: 1 }],
-    is_active: true,
-  }] }),
+  useUpdateServicePool: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  useDeleteServicePool: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  usePoolHealth: () => ({
+    data: { candidates: [] },
+    isError: false,
+    isLoading: false,
+  }),
+  useServicePools: () => ({
+    data: [
+      {
+        id: "pool-one",
+        name: "My pool",
+        slug: "my-pool",
+        strategy: "round_robin",
+        members: [{ user_service_id: "key-1", enabled: true, weight: 1 }],
+        is_active: true,
+      },
+    ],
+  }),
 }));
+
+vi.mock("@/hooks/use-service-routing-pools", () => ({
+  useServiceRoutingPools: () => ({
+    pools: [],
+    loading: false,
+    incomplete: false,
+  }),
+}));
+vi.mock("@/hooks/use-orgs", () => ({ useOrgs: () => ({ data: [] }) }));
 
 // Heavy children — stubbed to assert wiring (open state, presence), not driven.
 vi.mock("@/components/providers/codex-connection", () => ({
@@ -129,7 +172,10 @@ import { KeysPage } from "./keys";
 import { useServiceCardView } from "@/stores/service-card-view-store";
 
 function expandConnections() {
-  for (const button of screen.queryAllByRole("button", { name: /^Expand .+ connections$/ })) fireEvent.click(button);
+  for (const button of screen.queryAllByRole("button", {
+    name: /^Expand .+ connections$/,
+  }))
+    fireEvent.click(button);
 }
 
 function makeKey(overrides: Partial<KeyInfo> = {}): KeyInfo {
@@ -169,7 +215,11 @@ function makeKey(overrides: Partial<KeyInfo> = {}): KeyInfo {
 describe("KeysPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    useServiceCardView.setState({ accountId: undefined, expanded: [], filters: undefined });
+    useServiceCardView.setState({
+      accountId: undefined,
+      expanded: [],
+      filters: undefined,
+    });
     state.search = {};
     state.keys = [];
     state.keysLoading = false;
@@ -191,32 +241,60 @@ describe("KeysPage", () => {
     expandConnections();
     expect(within(group).getByText("openai")).toBeVisible();
     expect(within(group).getByText("openai-work")).toBeVisible();
-    expect(within(group).getByRole("link", { name: "View Personal OpenAI connection details (Personal)" })).toHaveAttribute("href", "/keys/$keyId:key-1");
-    expect(within(group).getByRole("link", { name: "View Work OpenAI connection details (Personal)" })).toHaveAttribute("href", "/keys/$keyId:key-2");
+    expect(
+      within(group).getByRole("link", {
+        name: "View Personal OpenAI connection details (Personal)",
+      }),
+    ).toHaveAttribute("href", "/keys/$keyId:key-1");
+    expect(
+      within(group).getByRole("link", {
+        name: "View Work OpenAI connection details (Personal)",
+      }),
+    ).toHaveAttribute("href", "/keys/$keyId:key-2");
   });
 
   it("uses the connection table and full detail navigation in the routing view", async () => {
     state.search = { view: "routing" };
-    state.keys = [makeKey({ label: "My preserved connection", slug: "my-openai", credential_source: { type: "personal" } })];
+    state.keys = [
+      makeKey({
+        label: "My preserved connection",
+        slug: "my-openai",
+        credential_source: { type: "personal" },
+      }),
+    ];
     render(<KeysPage />);
     await screen.findByRole("button", { name: "Expand OpenAI connections" });
     expandConnections();
     expect(screen.getByText("https://api.openai.com")).toBeVisible();
     expect(screen.getByText("my-openai")).toBeVisible();
-    expect(screen.queryByText("Details", { selector: "summary" })).not.toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Configure My preserved connection (Personal)" })).toHaveAttribute("href", "/keys/$keyId:key-1");
-    expect(screen.getByRole("link", { name: "View all OpenAI service details" })).toHaveAttribute("href", "/keys/services/$groupId:catalog:cat-1");
-    expect(screen.queryByRole("button", { name: "Individual cards" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Details", { selector: "summary" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("link", {
+        name: "Configure My preserved connection (Personal)",
+      }),
+    ).toHaveAttribute("href", "/keys/$keyId:key-1");
+    expect(
+      screen.getByRole("link", { name: "View all OpenAI service details" }),
+    ).toHaveAttribute("href", "/keys/services/$groupId:catalog:cat-1");
+    expect(
+      screen.queryByRole("button", { name: "Individual cards" }),
+    ).not.toBeInTheDocument();
   });
 
-  it("opens actual pool members with the original cards in the pool preview tab", async () => {
+  it("opens saved pool routing and members inside the expanded pool card", async () => {
     state.search = { view: "routing", tab: "pools" };
     state.keys = [makeKey({ credential_source: { type: "personal" } })];
     render(<KeysPage />);
     expect(await screen.findByText("My pool")).toBeInTheDocument();
-    expect(screen.getByText("https://api.openai.com")).toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: "Selection for My pool" })).toHaveValue("current");
-    expect(screen.queryByRole("button", { name: "Create Pool" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "View route" }));
+    expect(
+      screen.getByRole("table", { name: "My pool route members" }),
+    ).toBeVisible();
+    expect(screen.getByText("My OpenAI")).toBeVisible();
+    expect(screen.getByText("/api/v1/proxy/s/my-pool")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Create pool" })).toBeVisible();
   });
 
   it("omits oauth2 and api_key credential pills from service cards", () => {
@@ -284,34 +362,28 @@ describe("KeysPage", () => {
 
     render(<KeysPage />);
 
-    expect(
-      screen.getByText(/failed to load services/i),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/failed to load services/i)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
   });
 
-  it("filters auto-connected services and their rows inside a matching card", async () => {
-    const user = userEvent.setup();
+  it("keeps personal and platform counterparts visible together without the removed Filters menu", async () => {
     state.keys = [
-      makeKey({ id: "manual", label: "Manual Key", endpoint_url: "https://manual.example/v1" }),
-      makeKey({ id: "auto", label: "Auto Key", auto_connected: true, endpoint_url: "https://platform.internal/v1" }),
-      makeKey({ id: "auto-only", catalog_service_id: "auto-only", catalog_service_name: "Platform Only", auto_connected: true }),
+      makeKey(),
+      makeKey({
+        id: "platform",
+        label: "Platform counterpart",
+        slug: "platform-openai",
+        auto_connected: true,
+        credential_binding: "platform",
+      }),
     ];
     render(<KeysPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Service view: Personal" }));
-    expect(screen.getByRole("region", { name: "Platform Only" })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Filters" }));
-    await user.click(screen.getByRole("button", { name: "Auto-connected" }));
-    await user.click(screen.getByRole("button", { name: "Hidden" }));
-    await user.click(screen.getByRole("button", { name: "Apply filters" }));
-    expect(screen.queryByRole("region", { name: "Platform Only" })).not.toBeInTheDocument();
-    expect(screen.getByText("1 of 2 match")).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "Filters" }),
+    ).not.toBeInTheDocument();
     expandConnections();
-    expect(screen.getByText("Manual Key")).toBeVisible();
-    expect(screen.queryByText("Auto Key")).not.toBeInTheDocument();
-    expect(screen.queryByText("https://platform.internal/v1")).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Clear filters" }));
-    expect(screen.getByRole("region", { name: "Platform Only" })).toBeInTheDocument();
+    expect(screen.getByText("My OpenAI")).toBeVisible();
+    expect(screen.getByText("Platform counterpart")).toBeVisible();
   });
 
   it("hides auto-connected endpoint URLs in table rows without changing normal rows", async () => {
@@ -332,10 +404,16 @@ describe("KeysPage", () => {
 
     try {
       render(<KeysPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Service view: Personal" }));
+      fireEvent.click(
+        screen.getByRole("button", { name: "Service view: Personal" }),
+      );
 
-      expect(screen.getByText("https://manual-table.example/v1")).toBeInTheDocument();
-      expect(screen.queryByText("https://platform-table.internal/v1")).not.toBeInTheDocument();
+      expect(
+        screen.getByText("https://manual-table.example/v1"),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByText("https://platform-table.internal/v1"),
+      ).not.toBeInTheDocument();
       expect(screen.getAllByText("Platform managed").length).toBeGreaterThan(0);
     } finally {
       localStorage.removeItem("nyxid-view-mode:keys-services");
@@ -359,12 +437,13 @@ describe("KeysPage", () => {
     ];
 
     render(<KeysPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Service view: Personal" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Service view: Personal" }),
+    );
     expandConnections();
 
     expect(screen.getAllByText("Acme Org").length).toBeGreaterThan(0);
-    expect(screen.getByText("Organization · member")).toBeVisible();
-
+    expect(screen.getByTitle("Acme Org · Organization · member")).toBeVisible();
   });
 
   it("opens the Add Key dialog when the toolbar Connect Service button is clicked", async () => {
@@ -450,7 +529,9 @@ describe("KeysPage", () => {
     expandConnections();
 
     expect(screen.getByText("Reconnect needed")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /reconnect/i })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /reconnect/i }),
+    ).toBeInTheDocument();
   });
 
   it("labels pending OAuth service cards as continue authentication", async () => {
@@ -498,25 +579,42 @@ describe("KeysPage", () => {
     ];
 
     render(<KeysPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Service view: Personal" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Service view: Personal" }),
+    );
     expandConnections();
 
     expect(
       screen.queryByRole("button", { name: /reconnect/i }),
     ).not.toBeInTheDocument();
-    expect(screen.getByText("Organization · member")).toBeVisible();
+    expect(screen.getByTitle("Acme Org · Organization · member")).toBeVisible();
   });
 
   it("does not offer reconnect when organization access is denied despite an admin role", () => {
-    state.keys = [makeKey({
-      credential_type: "oauth2", auth_method: "oauth2", status: "failed",
-      credential_source: { type: "org", org_id: "denied-org", org_name: "Restricted", role: "admin", allowed: false, avatar_url: null },
-    })];
+    state.keys = [
+      makeKey({
+        credential_type: "oauth2",
+        auth_method: "oauth2",
+        status: "failed",
+        credential_source: {
+          type: "org",
+          org_id: "denied-org",
+          org_name: "Restricted",
+          role: "admin",
+          allowed: false,
+          avatar_url: null,
+        },
+      }),
+    ];
     render(<KeysPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Service view: Personal" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Service view: Personal" }),
+    );
     expandConnections();
     expect(screen.getByText("No access")).toBeVisible();
-    expect(screen.queryByRole("button", { name: /Reconnect/ })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Reconnect/ }),
+    ).not.toBeInTheDocument();
   });
 
   it("switches to the Agent Keys tab and mounts the API key table + usage dashboard", async () => {
@@ -586,10 +684,20 @@ describe("KeysPage", () => {
         screen.getByRole("columnheader", { name: "Connection / Slug" }),
       ).toBeInTheDocument();
 
-      await user.click(screen.getByRole("button", { name: "Details for My OpenAI (Personal)" }));
+      await user.click(
+        screen.getByRole("button", {
+          name: "Details for My OpenAI (Personal)",
+        }),
+      );
 
-      expect(screen.getByRole("button", { name: "Details for My OpenAI (Personal)" })).toHaveAttribute("aria-expanded", "true");
-      expect(screen.getByRole("link", { name: "Configure My OpenAI (Personal)" })).toHaveAttribute("href", "/keys/$keyId:key-1");
+      expect(
+        screen.getByRole("button", {
+          name: "Details for My OpenAI (Personal)",
+        }),
+      ).toHaveAttribute("aria-expanded", "true");
+      expect(
+        screen.getByRole("link", { name: "Configure My OpenAI (Personal)" }),
+      ).toHaveAttribute("href", "/keys/$keyId:key-1");
     } finally {
       localStorage.removeItem("nyxid-view-mode:keys-services");
     }
@@ -632,9 +740,10 @@ describe("KeysPage", () => {
     render(<KeysPage />);
 
     await waitFor(() => {
-      expect(
-        screen.getByTestId("api-key-create-dialog"),
-      ).toHaveAttribute("data-open", "true");
+      expect(screen.getByTestId("api-key-create-dialog")).toHaveAttribute(
+        "data-open",
+        "true",
+      );
     });
   });
 });

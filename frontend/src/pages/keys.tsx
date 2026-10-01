@@ -1,6 +1,5 @@
 import { ServiceConnectionTable } from "@/components/dashboard/service-connection-table";
-import { canEditConnection } from "@/lib/connection-access";
-import { ServiceAuthorshipFooter, ArchivedServiceHistory } from "@/components/dashboard/service-history";
+import { ArchivedServiceHistory } from "@/components/dashboard/service-history";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearch, useNavigate } from "@tanstack/react-router";
 import { useKeys, useCatalog } from "@/hooks/use-keys";
@@ -11,29 +10,22 @@ import { CodexConnectionSection } from "@/components/providers/codex-connection"
 import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { TeachingEmptyState } from "@/components/shared/teaching-empty-state";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Badge } from "@/components/ui/badge";
 import { Button, ButtonIcon } from "@/components/ui/button";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import {
-  Globe,
-  KeySquare,
-  Server,
-  Terminal,
-  RefreshCw,
-  Shield,
-} from "lucide-react";
+import { KeySquare, Terminal, RefreshCw, Shield } from "lucide-react";
 import { MagicKeyIcon } from "@/components/icons/empty-state";
-import { useNodes } from "@/hooks/use-nodes";
-import { ViewToggle, useViewMode, type ViewMode } from "@/components/shared/view-toggle";
-import { ServiceIcon } from "@/components/service-icon";
+import {
+  ViewToggle,
+  useViewMode,
+  type ViewMode,
+} from "@/components/shared/view-toggle";
 import { AddKeyDialog } from "@/components/dashboard/add-key-dialog";
 import { ApiKeyTable } from "@/components/dashboard/api-key-table";
 import { ApiKeyCreateDialog } from "@/components/dashboard/api-key-create-dialog";
 import { ApiKeyUsageDashboard } from "@/components/dashboard/api-key-usage-dashboard";
 import { ServicePoolsTab } from "@/components/dashboard/service-pools-tab";
-import { RoleBadge } from "@/components/orgs/role-badge";
 import type { KeyInfo } from "@/types/keys";
 import type { CredentialSource } from "@/schemas/orgs";
 import {
@@ -45,35 +37,6 @@ import {
   isValidTab,
   parseTab,
 } from "@/lib/url-tabs";
-
-function statusVariant(
-  status: string,
-): "success" | "secondary" | "destructive" {
-  switch (status) {
-    case "active":
-    case "online":
-      return "success";
-    case "expired":
-    case "inaccessible":
-    case "draining":
-      return "secondary";
-    case "revoked":
-    case "failed":
-    case "refresh_failed":
-    case "offline":
-    case "node_deleted":
-    case "unknown":
-      return "destructive";
-    default:
-      return "secondary";
-  }
-}
-
-interface KeyCardProps {
-  readonly keyInfo: KeyInfo;
-  /** Credential provenance; missing ownership hides configuration. */
-  readonly source: CredentialSource | undefined;
-}
 
 const RECONNECTABLE_STATUSES = new Set([
   "pending_auth",
@@ -94,9 +57,13 @@ function isReconnectableKey(
     keyInfo.auto_connected ||
     isNonAdminOrgSource(source) ||
     (source?.type === "org" && !source.allowed)
-  ) return false;
+  )
+    return false;
   const effectiveStatus = keyInfo.connection_status ?? keyInfo.status;
-  if (!keyInfo.credential_missing && !RECONNECTABLE_STATUSES.has(effectiveStatus)) {
+  if (
+    !keyInfo.credential_missing &&
+    !RECONNECTABLE_STATUSES.has(effectiveStatus)
+  ) {
     return false;
   }
   return (
@@ -107,223 +74,31 @@ function isReconnectableKey(
 }
 
 function reconnectLabel(status: string): string {
-  return status === "pending_auth"
-    ? "Continue authentication"
-    : "Reconnect";
+  return status === "pending_auth" ? "Continue authentication" : "Reconnect";
 }
 
-function ConnectionReconnect({ connection, onReconnect }: {
+function ConnectionReconnect({
+  connection,
+  onReconnect,
+}: {
   readonly connection: KeyInfo;
   readonly onReconnect?: (key: KeyInfo) => void;
 }) {
-  if (!onReconnect || !isReconnectableKey(connection, connection.credential_source)) return null;
+  if (
+    !onReconnect ||
+    !isReconnectableKey(connection, connection.credential_source)
+  )
+    return null;
   return (
-    <Button size="sm" variant="link" className="mt-1 flex h-auto p-0 text-[11px]" onClick={() => onReconnect(connection)}>
+    <Button
+      size="sm"
+      variant="link"
+      className="mt-1 flex h-auto p-0 text-[11px]"
+      onClick={() => onReconnect(connection)}
+    >
       <RefreshCw className="size-3" />
       {reconnectLabel(connection.status)}
     </Button>
-  );
-}
-
-function KeyCardContent({
-  keyInfo,
-  source,
-  onReconnect,
-}: KeyCardProps & {
-  readonly onReconnect?: (keyInfo: KeyInfo) => void;
-}) {
-  const isSsh = keyInfo.service_type === "ssh";
-  const hasSshCertificateAuth = isSsh && keyInfo.ssh_ca_public_key !== null;
-  // Issue #416: resolve the bound node's name so the list card shows
-  // "Via my-node" instead of bare "Via node". TanStack Query dedupes
-  // the request across all rendered cards.
-  const { data: nodes } = useNodes();
-  const nodeName = keyInfo.node_id
-    ? (nodes?.find((n) => n.id === keyInfo.node_id)?.name ??
-      keyInfo.node_id.slice(0, 8))
-    : null;
-  const endpointUrl = keyInfo.endpoint_url ?? "";
-  const displayUrl = !canEditConnection({ ...keyInfo, credential_source: source })
-    ? (keyInfo.auto_connected ? "Platform managed" : "Editors only")
-    : isSsh
-      ? `${keyInfo.ssh_host ?? "unknown"}:${keyInfo.ssh_port ?? 22}`
-      : endpointUrl.length > 50
-        ? `${endpointUrl.slice(0, 50)}...`
-        : endpointUrl;
-
-  const isOrgInherited = source?.type === "org";
-  // Viewers and out-of-scope members see the card with reduced opacity.
-  const isBlocked = source?.type === "org" && !source.allowed;
-  // Members can USE the credential (allowed=true) but cannot MODIFY it.
-  const isReadOnly =
-    source?.type === "org" && source.allowed && source.role !== "admin";
-
-  const displayStatus = keyInfo.connection_status === "expired"
-    ? "expired"
-    : keyInfo.node_id && keyInfo.node_status
-    ? (keyInfo.node_status === "unknown" ? "node_deleted" : keyInfo.node_status)
-    : keyInfo.status;
-
-  const displayStatusLabel =
-    displayStatus === "node_deleted"
-      ? "Node Deleted"
-      : displayStatus.charAt(0).toUpperCase() + displayStatus.slice(1);
-  const showReconnect = onReconnect && isReconnectableKey(keyInfo, source);
-  const autoAuthLabel = keyInfo.auth_method === "none"
-    ? "No auth required"
-    : "Platform managed";
-
-  return (
-    <Card
-      className={`h-full transition-colors duration-300 ${
-        isBlocked
-          ? "opacity-60"
-          : "hover:border-white/[0.15] hover:bg-accent/30"
-      }`}
-      aria-disabled={isBlocked ? true : undefined}
-    >
-      <CardContent className="flex h-full min-h-[140px] flex-col gap-3 p-4">
-        <div className="flex items-start gap-3 min-w-0">
-          <ServiceIcon
-            slug={keyInfo.catalog_service_slug ?? keyInfo.slug}
-            iconUrl={keyInfo.icon_url}
-            size="md"
-            className="mt-0.5"
-          />
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-[12px] font-medium text-foreground">
-              {keyInfo.label}
-            </p>
-            {keyInfo.catalog_service_name && (
-              <p className="truncate text-xs text-muted-foreground">
-                {keyInfo.catalog_service_name}
-              </p>
-            )}
-          </div>
-        </div>
-        <div className="flex flex-wrap items-center gap-1.5">
-          {isOrgInherited && (
-            <Badge variant="info">{source.org_name}</Badge>
-          )}
-          {isOrgInherited && (
-            <RoleBadge role={source.role} />
-          )}
-          {isBlocked && (
-            <Badge variant="secondary">Read-Only</Badge>
-          )}
-          {isReadOnly && !isBlocked && (
-            <Badge variant="secondary">View-Only</Badge>
-          )}
-          {keyInfo.admin_only && (
-            <Badge variant="secondary">Admin-only</Badge>
-          )}
-          <Badge variant={keyInfo.is_active ? statusVariant(displayStatus) : "secondary"}>
-            {keyInfo.is_active ? displayStatusLabel : "Disabled"}
-          </Badge>
-          {keyInfo.credential_missing && (
-            <Badge variant="warning">Credential Missing</Badge>
-          )}
-          {isSsh && <Badge variant="secondary">SSH</Badge>}
-          {(keyInfo.auto_connected ||
-            isSsh ||
-            (keyInfo.credential_type !== "oauth2" &&
-              keyInfo.credential_type !== "api_key")) && (
-            <Badge variant="secondary">
-              {keyInfo.auto_connected
-                ? autoAuthLabel
-                : isSsh
-                  ? hasSshCertificateAuth
-                    ? "certificate"
-                    : "ssh tunnel"
-                  : keyInfo.credential_type}
-            </Badge>
-          )}
-          {/* Routing pill — moved to top so it aligns across cards.
-              When routed via a node, the badge becomes a real Link so the
-              user can jump straight to the node detail page (deferred Wave B
-              cleanup, ships with C.1 canon sweep). */}
-          {nodeName && keyInfo.node_id ? (
-            <Link
-              to="/nodes/$nodeId"
-              params={{ nodeId: keyInfo.node_id }}
-              onClick={(e) => e.stopPropagation()}
-              className="inline-flex"
-            >
-              <Badge variant="secondary" className="cursor-pointer transition-colors hover:bg-muted/70">
-                → {nodeName}
-              </Badge>
-            </Link>
-          ) : (
-            <Badge variant="secondary">Direct</Badge>
-          )}
-          {keyInfo.auto_connected && (
-            <Badge variant="secondary">
-              {keyInfo.source_app_name
-                ? `Via ${keyInfo.source_app_name}`
-                : "Auto-connected"}
-            </Badge>
-          )}
-
-        </div>
-
-        {showReconnect && (
-          <Button
-            variant="outline"
-            className="w-fit"
-            onClick={(event) => {
-              event.preventDefault();
-              event.stopPropagation();
-              onReconnect(keyInfo);
-            }}
-          >
-            <ButtonIcon><RefreshCw className="h-3 w-3" /></ButtonIcon>
-            {reconnectLabel(keyInfo.status)}
-          </Button>
-        )}
-
-        <div className="mt-auto flex min-w-0 items-end justify-between gap-3">
-          <div className="min-w-0 flex-1 space-y-1.5 text-xs text-muted-foreground">
-            <div className="flex min-w-0 items-center gap-1.5">
-              {isSsh ? (
-                <Terminal className="h-3 w-3 shrink-0" />
-              ) : (
-                <Globe className="h-3 w-3 shrink-0" />
-              )}
-              <span className="truncate">{displayUrl}</span>
-            </div>
-            <div className="flex min-w-0 items-center gap-1.5">
-              <Server className="h-3 w-3 shrink-0" />
-              <span className="truncate">
-                {isSsh ? keyInfo.slug : `/proxy/s/${keyInfo.slug}`}
-              </span>
-            </div>
-          </div>
-          <ServiceAuthorshipFooter
-            authorship={keyInfo.authorship}
-            className="mt-0 max-w-[60%]"
-          />
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
-
-function KeyCard({
-  keyInfo,
-  source,
-  onReconnect,
-}: KeyCardProps & {
-  readonly onReconnect?: (keyInfo: KeyInfo) => void;
-}) {
-  // Connection metadata and history stay navigable; the detail page gates configuration.
-  return (
-    <Link to="/keys/$keyId" params={{ keyId: keyInfo.id }} className="h-full">
-      <KeyCardContent
-        keyInfo={keyInfo}
-        source={source}
-        onReconnect={onReconnect}
-      />
-    </Link>
   );
 }
 
@@ -377,29 +152,54 @@ function ExternalServicesTab({
 
   if (error) {
     return (
-      <ErrorBanner message="Failed to load services. Please try again." onRetry={refetch} />
+      <ErrorBanner
+        message="Failed to load services. Please try again."
+        onRetry={refetch}
+      />
     );
   }
 
   if (!keys?.length) return <ServicesEmptyState onAdd={onAdd} />;
 
-  return <GroupedServiceCards
-    keys={keys.map((keyInfo) => ({
-      ...keyInfo,
-      credential_source: keyInfo.credential_source ?? sourceById.get(keyInfo.id),
-    }))}
-    catalog={catalog}
-    actions={(compact) => <AddCtaButton label="Connect Service" onClick={onAdd} compact={compact} compactLabel="Connect" />}
-    renderTable={viewMode === "table" ? (filteredKeys) => (
-      <div className="overflow-hidden rounded-xl border border-border bg-card">
-        <ServiceConnectionTable connections={filteredKeys} serviceName="All services" renderActions={(key) => <ConnectionReconnect connection={key} onReconnect={onReconnect} />} />
-      </div>
-    ) : undefined}
-    renderConnectionActions={(keyInfo) => <ConnectionReconnect
-      connection={keyInfo}
-      onReconnect={onReconnect}
-    />}
-  />;
+  return (
+    <GroupedServiceCards
+      keys={keys.map((keyInfo) => ({
+        ...keyInfo,
+        credential_source:
+          keyInfo.credential_source ?? sourceById.get(keyInfo.id),
+      }))}
+      catalog={catalog}
+      actions={(compact) => (
+        <AddCtaButton
+          label="Connect Service"
+          onClick={onAdd}
+          compact={compact}
+          compactLabel="Connect"
+        />
+      )}
+      renderTable={
+        viewMode === "table"
+          ? (filteredKeys) => (
+              <div className="overflow-hidden rounded-xl border border-border bg-card">
+                <ServiceConnectionTable
+                  connections={filteredKeys}
+                  serviceName="All services"
+                  renderActions={(key) => (
+                    <ConnectionReconnect
+                      connection={key}
+                      onReconnect={onReconnect}
+                    />
+                  )}
+                />
+              </div>
+            )
+          : undefined
+      }
+      renderConnectionActions={(keyInfo) => (
+        <ConnectionReconnect connection={keyInfo} onReconnect={onReconnect} />
+      )}
+    />
+  );
 }
 
 function NyxIdApiKeysTab({
@@ -437,7 +237,9 @@ function NyxIdApiKeysTab({
             </div>
           </div>
           <Button className="shrink-0" onClick={onSetupAgent}>
-            <ButtonIcon><Terminal className="h-3 w-3" /></ButtonIcon>
+            <ButtonIcon>
+              <Terminal className="h-3 w-3" />
+            </ButtonIcon>
             Start Setup
           </Button>
         </CardContent>
@@ -445,7 +247,9 @@ function NyxIdApiKeysTab({
       <div className="space-y-3">
         <div className="flex items-center gap-2">
           <KeySquare className="h-4 w-4 text-muted-foreground" />
-          <h3 className="text-[13px] font-semibold text-foreground">Agent Keys</h3>
+          <h3 className="text-[13px] font-semibold text-foreground">
+            Agent Keys
+          </h3>
         </div>
         <ApiKeyTable viewMode={viewMode} />
       </div>
@@ -484,26 +288,36 @@ function AddButton({
 const RoutingPreview = import.meta.env.DEV
   ? lazy(() => import("@/components/dashboard/service-routing-preview"))
   : null;
-const PoolRoutingPreview = import.meta.env.DEV
-  ? lazy(() => import("@/components/dashboard/service-pool-routing-preview"))
-  : null;
 
 export function KeysPage() {
-  const search: { tab?: string; slug?: string; action?: string; service?: string; view?: string } = useSearch({ strict: false });
+  const search: {
+    tab?: string;
+    slug?: string;
+    action?: string;
+    service?: string;
+    view?: string;
+  } = useSearch({ strict: false });
   const navigate = useNavigate();
   const tab = parseTab(search.tab, KEYS_TABS, KEYS_TAB_DEFAULT);
-  const previewActive = Boolean(RoutingPreview && (search.view === "routing" || import.meta.env.VITE_ROUTING_PREVIEW === "1"));
+  const previewActive = Boolean(
+    RoutingPreview &&
+    (search.view === "routing" || import.meta.env.VITE_ROUTING_PREVIEW === "1"),
+  );
 
   const [addServiceOpen, setAddServiceOpen] = useState(false);
   const [createPoolOpen, setCreatePoolOpen] = useState(false);
   const [createKeyOpen, setCreateKeyOpen] = useState(false);
   const [createKeySetupMode, setCreateKeySetupMode] = useState(false);
-  const [initialSetupServiceId, setInitialSetupServiceId] = useState<string | null>(null);
+  const [initialSetupServiceId, setInitialSetupServiceId] = useState<
+    string | null
+  >(null);
   const [servicesViewMode, setServicesViewMode] = useViewMode("keys-services");
   const [agentKeysViewMode, setAgentKeysViewMode] = useViewMode("keys-agent");
   // Shared query with ExternalServicesTab; only decides header CTA placement.
   const { data: pageKeys } = useKeys();
-  const [pendingPrefillSlug, setPendingPrefillSlug] = useState<string | null>(null);
+  const [pendingPrefillSlug, setPendingPrefillSlug] = useState<string | null>(
+    null,
+  );
   const [reconnectKey, setReconnectKey] = useState<KeyInfo | null>(null);
   const appliedSlugRef = useRef<string | null>(null);
   const appliedActionRef = useRef<string | null>(null);
@@ -576,7 +390,11 @@ export function KeysPage() {
   }
 
   function setTab(value: string) {
-    void navigate({ to: "/keys", search: { tab: value, ...(previewActive ? { view: "routing" } : {}) }, replace: true });
+    void navigate({
+      to: "/keys",
+      search: { tab: value, ...(previewActive ? { view: "routing" } : {}) },
+      replace: true,
+    });
   }
 
   return (
@@ -584,7 +402,15 @@ export function KeysPage() {
       <PageHeader
         title="Services & Credentials"
         description="Manage your AI service credentials and agent keys."
-        actions={import.meta.env.DEV && !previewActive ? <Button variant="outline" asChild><Link to="/keys" search={{ view: "routing" }}>Routing preview</Link></Button> : undefined}
+        actions={
+          import.meta.env.DEV && !previewActive ? (
+            <Button variant="outline" asChild>
+              <Link to="/keys" search={{ view: "routing" }}>
+                Routing preview
+              </Link>
+            </Button>
+          ) : undefined
+        }
       />
 
       <Tabs value={tab} onValueChange={setTab}>
@@ -597,18 +423,26 @@ export function KeysPage() {
           <div className="flex shrink-0 items-center justify-between gap-4 sm:pb-1">
             {tab !== "pools" && !(tab === "services" && previewActive) && (
               <ViewToggle
-                viewMode={tab === "services" ? servicesViewMode : agentKeysViewMode}
-                onViewModeChange={tab === "services" ? setServicesViewMode : setAgentKeysViewMode}
+                viewMode={
+                  tab === "services" ? servicesViewMode : agentKeysViewMode
+                }
+                onViewModeChange={
+                  tab === "services"
+                    ? setServicesViewMode
+                    : setAgentKeysViewMode
+                }
               />
             )}
             {/* Services keep Connect Service inside the sticky filter toolbar;
                 the empty state has no toolbar, so the header button stays. */}
-            {(tab !== "services" || !pageKeys?.length) && !(previewActive && tab === "pools") && <AddButton
-              tab={tab}
-              onAddService={() => setAddServiceOpen(true)}
-              onCreatePool={() => setCreatePoolOpen(true)}
-              onCreateKey={() => setCreateKeyOpen(true)}
-            />}
+            {(tab === "nyxid" || (tab === "services" && !pageKeys?.length)) && (
+              <AddButton
+                tab={tab}
+                onAddService={() => setAddServiceOpen(true)}
+                onCreatePool={() => setCreatePoolOpen(true)}
+                onCreateKey={() => setCreateKeyOpen(true)}
+              />
+            )}
           </div>
         </div>
 
@@ -617,36 +451,44 @@ export function KeysPage() {
           {previewActive && RoutingPreview ? (
             <Suspense fallback={<Skeleton className="h-96 w-full" />}>
               <RoutingPreview
-                actions={(compact) => <AddCtaButton label="Connect Service" onClick={() => setAddServiceOpen(true)} compact={compact} compactLabel="Connect" />}
+                actions={(compact) => (
+                  <AddCtaButton
+                    label="Connect Service"
+                    onClick={() => setAddServiceOpen(true)}
+                    compact={compact}
+                    compactLabel="Connect"
+                  />
+                )}
                 renderConnectionActions={(connection) => (
-                  <ConnectionReconnect connection={connection} onReconnect={(keyInfo) => {
-                    setReconnectKey(keyInfo);
-                    setAddServiceOpen(true);
-                  }} />
-                )} />
+                  <ConnectionReconnect
+                    connection={connection}
+                    onReconnect={(keyInfo) => {
+                      setReconnectKey(keyInfo);
+                      setAddServiceOpen(true);
+                    }}
+                  />
+                )}
+              />
             </Suspense>
-          ) : <ExternalServicesTab
-            onAdd={() => setAddServiceOpen(true)}
-            onReconnect={(keyInfo) => {
-              setReconnectKey(keyInfo);
-              setAddServiceOpen(true);
-            }}
-            viewMode={servicesViewMode}
-          />}
+          ) : (
+            <ExternalServicesTab
+              onAdd={() => setAddServiceOpen(true)}
+              onReconnect={(keyInfo) => {
+                setReconnectKey(keyInfo);
+                setAddServiceOpen(true);
+              }}
+              viewMode={servicesViewMode}
+            />
+          )}
           <ArchivedServiceHistory />
         </TabsContent>
 
         <TabsContent value="pools" className="mt-6">
-          {previewActive && PoolRoutingPreview ? (
-            <Suspense fallback={<Skeleton className="h-96 w-full" />}>
-              <PoolRoutingPreview renderConnection={(candidate) => (
-                <KeyCard keyInfo={candidate.key} source={candidate.source} />
-              )} />
-            </Suspense>
-          ) : <ServicePoolsTab
+          <ServicePoolsTab
+            layout="cards"
             createOpen={createPoolOpen}
             onCreateOpenChange={setCreatePoolOpen}
-          />}
+          />
         </TabsContent>
 
         <TabsContent value="nyxid" className="mt-6">

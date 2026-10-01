@@ -14,6 +14,16 @@ import { ServiceViewToolbar } from "./service-view-toolbar";
 import { ServiceConnectionTable } from "./service-connection-table";
 import { ServiceAvatarStack } from "./service-avatar-stack";
 import { ServiceBillingSummary } from "./service-billing-summary";
+import { GitBranch } from "lucide-react";
+import {
+  useServiceRoutingPools,
+  type ServiceRoutingPools,
+} from "@/hooks/use-service-routing-pools";
+import { poolStrategyLabel } from "@/lib/service-pool-display";
+import type { ServicePool } from "@/schemas/pools";
+import { ServicePoolRoutingPanel } from "./service-pool-routing-panel";
+import { PoolEditor } from "./service-pools-tab";
+import { useAuthStore } from "@/stores/auth-store";
 import {
   connectionSourceLabel as sourceLabel,
   connectionSource,
@@ -47,7 +57,11 @@ function GroupCard({
   search,
   renderConnectionActions,
   filtersRef,
+  routing,
+  allConnections,
 }: {
+  readonly routing: ServiceRoutingPools;
+  readonly allConnections: readonly KeyInfo[];
   readonly group: ServiceConnectionGroup;
   readonly expanded: boolean;
   readonly onToggle: (card: HTMLElement | null) => void;
@@ -57,6 +71,30 @@ function GroupCard({
   readonly renderConnectionActions?: (key: KeyInfo) => ReactNode;
   readonly filtersRef: RefObject<HTMLDivElement | null>;
 }) {
+  const identity = useAuthStore((state) => state.user?.id);
+  const [routingOpen, setRoutingOpen] = useState(false);
+  const [requestedPanel, setRequestedPanel] = useState<{
+    id: string;
+    view: "billing" | "requests" | "access";
+    version: number;
+  } | null>(null);
+  const [routeId, setRouteId] = useState<string | null>(null);
+  const [editingPool, setEditingPool] = useState<ServicePool | null>(null);
+  const pools = routing.pools.filter((pool) =>
+    pool.members.some((member) =>
+      connections.some((key) => key.id === member.user_service_id),
+    ),
+  );
+  const selectedPool = pools.find((pool) => pool.id === routeId) ?? pools[0];
+  const routingLabel = routing.loading
+    ? "Loading routing…"
+    : pools.length === 1
+      ? `${poolStrategyLabel(pools[0]!)}${pools[0]!.is_active ? "" : " · disabled"}`
+      : pools.length
+        ? `${pools.length} pools`
+        : routing.incomplete
+          ? "Pool access incomplete"
+          : "Individual slugs";
   const contentId = useId();
   const headingId = useId();
   const cardRef = useRef<HTMLElement>(null);
@@ -108,7 +146,14 @@ function GroupCard({
       headerOffset.current = 0;
       header.style.translate = "";
     };
-  }, [expanded, filtersRef, connectionIds]);
+  }, [
+    expanded,
+    filtersRef,
+    connectionIds,
+    routingOpen,
+    selectedPool?.id,
+    requestedPanel?.version,
+  ]);
   const count = group.connections.length;
   const matchingCount = connections.length;
   const sources = [
@@ -203,10 +248,6 @@ function GroupCard({
     view: "billing" | "requests" | "access",
     connectionId?: string,
   ) => {
-    if (!expanded) {
-      onToggle(cardRef.current);
-      return;
-    }
     const lastConnection =
       view === "requests"
         ? connections
@@ -221,18 +262,15 @@ function GroupCard({
               b.request!.occurred_at.localeCompare(a.request!.occurred_at),
             )[0]?.id
         : undefined;
-    const buttons = [
-      ...(cardRef.current?.querySelectorAll<HTMLButtonElement>(
-        `[data-insight-view="${view}"]`,
-      ) ?? []),
-    ];
-    const button =
-      buttons.find(
-        (item) =>
-          item.dataset.connectionId === (connectionId ?? lastConnection),
-      ) ?? buttons[0];
-    button?.click();
-    button?.focus({ preventScroll: true });
+    const id = connectionId ?? lastConnection ?? connections[0]?.id;
+    if (!id) return;
+    setRequestedPanel((current) => ({
+      id,
+      view,
+      version: (current?.version ?? 0) + 1,
+    }));
+    setRoutingOpen(false);
+    if (!expanded) onToggle(cardRef.current);
   };
 
   return (
@@ -265,7 +303,7 @@ function GroupCard({
             expanded ? "rounded-t-xl shadow-sm" : "h-64 rounded-xl",
           )}
         >
-          <div className="flex min-h-0 flex-1 flex-col gap-2 p-4">
+          <div className="flex min-h-0 flex-1 flex-col gap-1 p-4">
             <div className="flex items-start gap-3">
               <div className="flex size-10 shrink-0 items-center justify-center rounded-lg border border-border bg-background/50">
                 <ServiceIcon
@@ -301,7 +339,7 @@ function GroupCard({
               )}
             </div>
             {!expanded && (
-              <p className="line-clamp-2 h-8 shrink-0 text-xs leading-4 text-muted-foreground">
+              <p className="line-clamp-1 h-4 shrink-0 text-xs leading-4 text-muted-foreground">
                 {search.trim()
                   ? `Matches: ${connections.map((key) => key.label).join(" · ")}`
                   : group.description}
@@ -310,9 +348,7 @@ function GroupCard({
             <div
               className={cn(
                 "mt-auto text-xs",
-                expanded
-                  ? "grid gap-x-6 gap-y-2 md:grid-cols-2"
-                  : "space-y-1.5",
+                expanded ? "grid gap-x-6 gap-y-2 md:grid-cols-2" : "space-y-1",
               )}
             >
               {!expanded && (
@@ -347,6 +383,28 @@ function GroupCard({
                   {agents.text}
                 </span>
               </button>
+              <button
+                type="button"
+                className="flex h-6 w-full min-w-0 items-center gap-2 rounded-sm text-left focus-visible:outline-2 focus-visible:outline-ring"
+                aria-label={`Show routing for ${group.name}`}
+                aria-expanded={expanded && routingOpen}
+                aria-controls={contentId}
+                onClick={() => {
+                  setRoutingOpen(true);
+                  if (!expanded) onToggle(cardRef.current);
+                }}
+              >
+                <span className="w-16 shrink-0 text-muted-foreground">
+                  Routing
+                </span>
+                <GitBranch
+                  className="size-3.5 shrink-0 text-muted-foreground"
+                  aria-hidden="true"
+                />
+                <span className="truncate" title={routingLabel}>
+                  {routingLabel}
+                </span>
+              </button>
               <ServiceBillingSummary
                 connections={connections}
                 insights={insights}
@@ -359,10 +417,16 @@ function GroupCard({
             <Button
               variant="ghost"
               size="sm"
-              onClick={() => onToggle(cardRef.current)}
-              aria-expanded={expanded}
+              onClick={() => {
+                if (expanded && routingOpen) setRoutingOpen(false);
+                else {
+                  setRoutingOpen(false);
+                  onToggle(cardRef.current);
+                }
+              }}
+              aria-expanded={expanded && !routingOpen}
               aria-controls={contentId}
-              aria-label={`${expanded ? "Collapse" : "Expand"} ${group.name} connections`}
+              aria-label={`${expanded && !routingOpen ? "Collapse" : "Expand"} ${group.name} connections`}
             >
               <ChevronRight
                 className={cn(
@@ -370,7 +434,7 @@ function GroupCard({
                   expanded && "rotate-90",
                 )}
               />
-              {expanded
+              {expanded && !routingOpen
                 ? "Hide connections"
                 : `View ${matchingCount} ${matchingCount === 1 ? "connection" : "connections"}`}
             </Button>
@@ -399,15 +463,74 @@ function GroupCard({
       >
         {expanded && (
           <div className="border-t border-border bg-background/30">
-            <ServiceConnectionTable
-              connections={connections}
-              insights={insights}
-              serviceName={group.name}
-              renderActions={renderConnectionActions}
-            />
+            {routingOpen ? (
+              <>
+                <div className="flex flex-wrap items-center gap-2 border-b px-4 py-3">
+                  {pools.map((pool) => (
+                    <Button
+                      key={pool.id}
+                      size="sm"
+                      variant={
+                        selectedPool?.id === pool.id ? "secondary" : "ghost"
+                      }
+                      onClick={() => setRouteId(pool.id)}
+                    >
+                      {pool.name}
+                    </Button>
+                  ))}
+                  <Link
+                    to="/keys"
+                    search={{ tab: "pools", view: "routing" }}
+                    className="ml-auto text-xs text-primary hover:underline"
+                  >
+                    Manage pools
+                  </Link>
+                </div>
+                {selectedPool ? (
+                  <ServicePoolRoutingPanel
+                    key={selectedPool.id}
+                    pool={selectedPool}
+                    connections={allConnections}
+                    insights={insights}
+                    onEdit={() => setEditingPool(selectedPool)}
+                  />
+                ) : (
+                  <p className="p-4 text-xs text-muted-foreground">
+                    {routing.loading
+                      ? "Loading saved pools…"
+                      : routing.incomplete
+                        ? "Some pools could not be inspected. Organization pool settings require admin access."
+                        : "These connections use their individual slugs. Create a pool to give compatible connections one route with rotation or priority failover."}
+                  </p>
+                )}
+                {selectedPool && routing.incomplete && (
+                  <p className="px-4 pb-4 text-xs text-muted-foreground">
+                    Additional organization pools may require admin access.
+                  </p>
+                )}
+              </>
+            ) : (
+              <ServiceConnectionTable
+                key={requestedPanel?.version ?? 0}
+                initialPanel={requestedPanel}
+                connections={connections}
+                insights={insights}
+                serviceName={group.name}
+                renderActions={renderConnectionActions}
+              />
+            )}
           </div>
         )}
       </div>
+      {editingPool && (
+        <PoolEditor
+          pool={editingPool}
+          orgId={
+            editingPool.user_id === identity ? undefined : editingPool.user_id
+          }
+          onClose={() => setEditingPool(null)}
+        />
+      )}
     </section>
   );
 }
@@ -491,6 +614,7 @@ export function GroupedServiceCards({
     .filter(({ matches }) => matches.length > 0);
   const matchingKeys = visible.flatMap(({ matches }) => matches);
   const insights = useServiceInsights(renderTable ? [] : keys);
+  const routing = useServiceRoutingPools(keys, !renderTable);
 
   return (
     <div ref={containerRef} className="space-y-6 [overflow-anchor:none]">
@@ -529,6 +653,8 @@ export function GroupedServiceCards({
                 group={group}
                 expanded={expanded.includes(group.id)}
                 insights={insights}
+                routing={routing}
+                allConnections={keys}
                 connections={matches}
                 search={filters.search}
                 onToggle={(card) =>

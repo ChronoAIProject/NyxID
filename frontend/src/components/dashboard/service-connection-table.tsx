@@ -141,17 +141,19 @@ export function ServiceConnectionTable({
   renderActions,
   onViewHistory,
   insights: suppliedInsights,
+  initialPanel = null,
 }: {
   readonly connections: readonly KeyInfo[];
   readonly serviceName: string;
   readonly renderActions?: (connection: KeyInfo) => ReactNode;
   readonly onViewHistory?: (connection: KeyInfo) => void;
   readonly insights?: ServiceInsightsState;
+  readonly initialPanel?: { id: string; view: InsightPanel } | null;
 }) {
   const [open, setOpen] = useState<{
     id: string;
     view: "details" | "history" | InsightPanel;
-  } | null>(null);
+  } | null>(initialPanel);
   const [observedAt] = useState(Date.now);
   const insights = useServiceInsights(connections, suppliedInsights);
   const toggle = (id: string, view: "details" | "history" | InsightPanel) =>

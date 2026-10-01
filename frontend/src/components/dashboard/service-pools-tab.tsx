@@ -1,7 +1,9 @@
 import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useWatch } from "react-hook-form";
-import { MoreVertical } from "lucide-react";
+import { ArrowDown, ArrowUp, GripVertical, MoreVertical } from "lucide-react";
+import { ServicePoolCards } from "./service-pool-cards";
+import { reorderPoolMembers } from "@/lib/service-pool-display";
 import { toast } from "sonner";
 import { ApiError } from "@/lib/api-client";
 import { firstNestedErrorMessage } from "@/lib/form-errors";
@@ -73,9 +75,12 @@ import {
 } from "@/schemas/pools";
 
 interface ServicePoolsTabProps {
+  readonly layout?: "cards" | "table";
   readonly createOpen: boolean;
   readonly onCreateOpenChange: (open: boolean) => void;
 }
+const readOnlyPreview =
+  import.meta.env.DEV && import.meta.env.VITE_ROUTING_PREVIEW === "1";
 const strategyLabels = {
   priority: "Priority",
   round_robin: "Round Robin",
@@ -329,6 +334,18 @@ export function PoolEditor({
   const members = values.members ?? [];
   const priority = values.strategy === "priority";
   const [search, setSearch] = useState("");
+  const [dragged, setDragged] = useState<string | null>(null);
+  const [orderAnnouncement, setOrderAnnouncement] = useState("");
+  function moveMember(from: string, to: string) {
+    if (from === to || form.getValues("strategy") !== "priority") return;
+    const next = reorderPoolMembers(
+      { strategy: "priority", members: form.getValues("members") },
+      from,
+      to,
+    );
+    form.setValue("members", next);
+    setOrderAnnouncement("Priority order updated. Save to apply this route.");
+  }
   const [candidateMethod, setCandidateMethod] = useState("POST");
   const [candidatePath, setCandidatePath] = useState("/");
   const candidates = usePoolCandidates({
@@ -388,6 +405,7 @@ export function PoolEditor({
     }
   }
   async function save(input: CreateServicePoolInput) {
+    if (readOnlyPreview) return;
     try {
       const normalized = {
         ...input,
@@ -524,6 +542,15 @@ export function PoolEditor({
             />
             <section className="space-y-3">
               <h3 className="text-[13px] font-semibold">Members</h3>
+              {priority && (
+                <p className="text-xs text-muted-foreground">
+                  Drag or use arrows to set a strict priority order. To rotate
+                  within a tier, give those members the same priority number.
+                </p>
+              )}
+              <span className="sr-only" aria-live="polite">
+                {orderAnnouncement}
+              </span>
               {members.map((member, index) => {
                 const id = member.user_service_id!;
                 const candidate = selectedRows.get(id);
@@ -531,9 +558,91 @@ export function PoolEditor({
                   <div
                     key={id}
                     className="space-y-3 rounded-xl border border-border/50 p-3"
+                    onDragOver={(event) => {
+                      if (priority && dragged) event.preventDefault();
+                    }}
+                    onDrop={(event) => {
+                      event.preventDefault();
+                      if (
+                        dragged &&
+                        event.dataTransfer.getData(
+                          "application/x-nyxid-pool",
+                        ) === (pool?.id ?? "new")
+                      )
+                        moveMember(dragged, id);
+                      setDragged(null);
+                    }}
                   >
                     <div className="flex items-center justify-between gap-3">
-                      <div>
+                      {priority && (
+                        <div className="flex shrink-0 items-center gap-1">
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="size-7 cursor-grab"
+                            draggable
+                            aria-label={`Drag member ${index + 1}`}
+                            onDragStart={(event) => {
+                              event.dataTransfer.setData(
+                                "application/x-nyxid-pool",
+                                pool?.id ?? "new",
+                              );
+                              event.dataTransfer.effectAllowed = "move";
+                              setDragged(id);
+                            }}
+                            onDragEnd={() => setDragged(null)}
+                            onKeyDown={(event) => {
+                              if (
+                                event.key !== "ArrowUp" &&
+                                event.key !== "ArrowDown"
+                              )
+                                return;
+                              event.preventDefault();
+                              const target =
+                                members[
+                                  index + (event.key === "ArrowUp" ? -1 : 1)
+                                ]?.user_service_id;
+                              if (target) moveMember(id, target);
+                            }}
+                          >
+                            <GripVertical className="size-3.5" />
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="size-7"
+                            aria-label={`Move member ${index + 1} up`}
+                            disabled={index === 0}
+                            onClick={() =>
+                              moveMember(
+                                id,
+                                members[index - 1]!.user_service_id!,
+                              )
+                            }
+                          >
+                            <ArrowUp className="size-3.5" />
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="size-7"
+                            aria-label={`Move member ${index + 1} down`}
+                            disabled={index === members.length - 1}
+                            onClick={() =>
+                              moveMember(
+                                id,
+                                members[index + 1]!.user_service_id!,
+                              )
+                            }
+                          >
+                            <ArrowDown className="size-3.5" />
+                          </Button>
+                        </div>
+                      )}
+                      <div className="min-w-0 flex-1">
                         <p className="text-[12px] font-medium">
                           {candidate?.slug ??
                             selectedLabels[id] ??
@@ -735,6 +844,12 @@ export function PoolEditor({
                 )}
               </section>
             )}
+            {readOnlyPreview && (
+              <p className="text-xs text-muted-foreground">
+                Production preview: inspect or draft settings here. Saving pool
+                changes is disabled.
+              </p>
+            )}
             {rootError && <ErrorBanner message={rootError} />}
             <DialogFooter>
               <Button type="button" variant="outline" onClick={onClose}>
@@ -744,7 +859,11 @@ export function PoolEditor({
                 type="submit"
                 variant="primary"
                 isLoading={create.isPending || update.isPending}
-                disabled={!form.formState.isDirty || !form.formState.isValid}
+                disabled={
+                  readOnlyPreview ||
+                  !form.formState.isDirty ||
+                  !form.formState.isValid
+                }
               >
                 Save
               </Button>
@@ -842,7 +961,7 @@ export function PoolHealthDialog({
                 onClick={() => {
                   void clear(row.user_service_id);
                 }}
-                disabled={reset.isPending}
+                disabled={readOnlyPreview || reset.isPending}
               >
                 Reset
               </Button>
@@ -858,6 +977,7 @@ export function PoolHealthDialog({
               void clear();
             }}
             isLoading={reset.isPending}
+            disabled={readOnlyPreview}
           >
             Reset all cooldowns
           </Button>
@@ -868,6 +988,7 @@ export function PoolHealthDialog({
 }
 
 export function ServicePoolsTab({
+  layout = "table",
   createOpen,
   onCreateOpenChange,
 }: ServicePoolsTabProps) {
@@ -911,6 +1032,7 @@ export function ServicePoolsTab({
           Health
         </DropdownMenuItem>
         <DropdownMenuItem
+          disabled={readOnlyPreview || update.isPending}
           onSelect={() => {
             void toggle(pool);
           }}
@@ -919,6 +1041,7 @@ export function ServicePoolsTab({
         </DropdownMenuItem>
         <DropdownMenuItem
           className="text-destructive"
+          disabled={readOnlyPreview}
           onSelect={() => setDeleting(pool)}
         >
           Delete
@@ -968,65 +1091,74 @@ export function ServicePoolsTab({
           connections.
         </div>
       )}
-      {(pools.data?.length ?? 0) > 0 && (
-        <>
-          <div className="hidden overflow-hidden rounded-xl border border-border/50 bg-card md:block">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Name</TableHead>
-                  <TableHead>Route</TableHead>
-                  <TableHead>Strategy / contract</TableHead>
-                  <TableHead>Members</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {pools.data?.map((pool) => (
-                  <TableRow key={pool.id}>
-                    <TableCell>{pool.name}</TableCell>
-                    <TableCell className="font-mono">{pool.slug}</TableCell>
-                    <TableCell>
-                      {strategyLabels[pool.strategy]} /{" "}
-                      {pool.member_contract === "ai_chat"
-                        ? "AI chat"
-                        : "Same API"}
-                    </TableCell>
-                    <TableCell>
-                      {pool.members.filter((m) => m.enabled).length} /{" "}
-                      {pool.members.length} enabled
-                    </TableCell>
-                    <TableCell>
-                      <Badge variant={pool.is_active ? "success" : "secondary"}>
-                        {pool.is_active ? "Enabled" : "Disabled"}
-                      </Badge>
-                    </TableCell>
-                    <TableCell>{actions(pool)}</TableCell>
+      {(pools.data?.length ?? 0) > 0 &&
+        (layout === "cards" ? (
+          <ServicePoolCards
+            pools={pools.data ?? []}
+            actions={actions}
+            onEdit={setEditing}
+          />
+        ) : (
+          <>
+            <div className="hidden overflow-hidden rounded-xl border border-border/50 bg-card md:block">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Name</TableHead>
+                    <TableHead>Route</TableHead>
+                    <TableHead>Strategy / contract</TableHead>
+                    <TableHead>Members</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead>Actions</TableHead>
                   </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
-          <div className="space-y-3 md:hidden">
-            {pools.data?.map((pool) => (
-              <div
-                key={pool.id}
-                className="flex items-center justify-between rounded-xl border border-border/50 bg-card p-4"
-              >
-                <div>
-                  <p className="text-[13px] font-medium">{pool.name}</p>
-                  <p className="text-[12px] text-muted-foreground">
-                    {pool.slug} · {strategyLabels[pool.strategy]} ·{" "}
-                    {pool.is_active ? "Enabled" : "Disabled"}
-                  </p>
+                </TableHeader>
+                <TableBody>
+                  {pools.data?.map((pool) => (
+                    <TableRow key={pool.id}>
+                      <TableCell>{pool.name}</TableCell>
+                      <TableCell className="font-mono">{pool.slug}</TableCell>
+                      <TableCell>
+                        {strategyLabels[pool.strategy]} /{" "}
+                        {pool.member_contract === "ai_chat"
+                          ? "AI chat"
+                          : "Same API"}
+                      </TableCell>
+                      <TableCell>
+                        {pool.members.filter((m) => m.enabled).length} /{" "}
+                        {pool.members.length} enabled
+                      </TableCell>
+                      <TableCell>
+                        <Badge
+                          variant={pool.is_active ? "success" : "secondary"}
+                        >
+                          {pool.is_active ? "Enabled" : "Disabled"}
+                        </Badge>
+                      </TableCell>
+                      <TableCell>{actions(pool)}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+            <div className="space-y-3 md:hidden">
+              {pools.data?.map((pool) => (
+                <div
+                  key={pool.id}
+                  className="flex items-center justify-between rounded-xl border border-border/50 bg-card p-4"
+                >
+                  <div>
+                    <p className="text-[13px] font-medium">{pool.name}</p>
+                    <p className="text-[12px] text-muted-foreground">
+                      {pool.slug} · {strategyLabels[pool.strategy]} ·{" "}
+                      {pool.is_active ? "Enabled" : "Disabled"}
+                    </p>
+                  </div>
+                  {actions(pool)}
                 </div>
-                {actions(pool)}
-              </div>
-            ))}
-          </div>
-        </>
-      )}
+              ))}
+            </div>
+          </>
+        ))}
       {createOpen && (
         <PoolEditor orgId={orgId} onClose={() => onCreateOpenChange(false)} />
       )}

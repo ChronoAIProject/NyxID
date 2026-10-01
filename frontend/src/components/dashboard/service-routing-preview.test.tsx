@@ -10,7 +10,6 @@ import {
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
-import type { RoutingCandidate } from "@/lib/service-routing-preview";
 import type { KeyInfo } from "@/types/keys";
 import type { ServicePool } from "@/schemas/pools";
 import type { ServiceInsight } from "@/schemas/service-insights";
@@ -83,7 +82,7 @@ const { records, account, poolState, insightConnections } = vi.hoisted(() => ({
 vi.mock("@tanstack/react-router", () => ({
   Link: ({
     children,
-    params,
+    params = {},
     ...props
   }: {
     children: ReactNode;
@@ -111,6 +110,18 @@ vi.mock("@/hooks/use-user-services", () => ({
 }));
 vi.mock("@/hooks/use-pools", () => ({
   useServicePools: () => ({ ...poolState, refetch: vi.fn() }),
+  usePoolHealth: () => ({
+    data: { candidates: [] },
+    isError: false,
+    isLoading: false,
+  }),
+}));
+vi.mock("@/hooks/use-service-routing-pools", () => ({
+  useServiceRoutingPools: () => ({
+    pools: poolState.error ? [] : poolState.data,
+    loading: false,
+    incomplete: !!poolState.error,
+  }),
 }));
 vi.mock("@/stores/auth-store", () => ({
   useAuthStore: (selector: (state: { user: { id: string } }) => unknown) =>
@@ -119,7 +130,6 @@ vi.mock("@/stores/auth-store", () => ({
 
 import ServiceRoutingPreview from "./service-routing-preview";
 import { useServiceCardView } from "@/stores/service-card-view-store";
-import ServicePoolRoutingPreview from "./service-pool-routing-preview";
 
 vi.mock("@/hooks/use-service-insights", () => ({
   useServiceInsights: () => ({
@@ -129,14 +139,8 @@ vi.mock("@/hooks/use-service-insights", () => ({
   }),
 }));
 vi.mock("@/hooks/use-nodes", () => ({ useNodes: () => ({ data: [] }) }));
-function renderConnection(candidate: RoutingCandidate) {
-  return <span>{candidate.key.label}</span>;
-}
 function preview() {
   return <ServiceRoutingPreview />;
-}
-function poolPreview() {
-  return <ServicePoolRoutingPreview renderConnection={renderConnection} />;
 }
 function pool(id: string, members = ["mine", "team"]): ServicePool {
   return {
@@ -262,7 +266,7 @@ describe("live grouped services", () => {
       }),
     ).toBeVisible();
     expect(
-      within(card).getByText(/If a request fails, NyxID does not retry/),
+      within(card).getByText(/A priority pool slug can fail over/),
     ).toBeVisible();
     expect(
       within(card).getByText(
@@ -1204,109 +1208,74 @@ describe("live grouped services", () => {
   });
 });
 
-describe("pool member ordering", () => {
-  it("never infers a pool from connections that share a catalog service", () => {
-    render(poolPreview());
-    expect(screen.getByText("No service pools in your account.")).toBeVisible();
+describe("saved routing in service cards", () => {
+  it("does not infer a pool from grouped connections", async () => {
+    render(preview());
+    expect(screen.getByText("Individual slugs")).toBeVisible();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Show routing for OpenAI" }),
+    );
     expect(
-      screen.queryByRole("button", { name: /Drag/ }),
+      screen.getByText(/Create a pool to give compatible connections/),
+    ).toBeVisible();
+  });
+  it("opens actual priority failover and the full pool member table inside the card", async () => {
+    poolState.data = [
+      { ...pool("Reliable"), strategy: "priority", failover: null },
+    ];
+    render(preview());
+    await userEvent.click(
+      screen.getByRole("button", { name: "Show routing for OpenAI" }),
+    );
+    const card = screen.getByRole("region", { name: "OpenAI" });
+    expect(within(card).getByText("/api/v1/proxy/s/reliable")).toBeVisible();
+    expect(within(card).getByText("Failover · up to 3 attempts")).toBeVisible();
+    expect(
+      within(card).getByRole("table", { name: "Reliable route members" }),
+    ).toBeVisible();
+    expect(within(card).getByText("Personal account")).toBeVisible();
+    expect(within(card).getByText("Team account")).toBeVisible();
+    expect(
+      within(card).queryByRole("table", { name: "OpenAI connections" }),
+    ).not.toBeInTheDocument();
+    await userEvent.click(
+      within(card).getByRole("button", { name: "Expand OpenAI connections" }),
+    );
+    expect(
+      within(card).getByRole("table", { name: "OpenAI connections" }),
+    ).toBeVisible();
+  });
+  it("opens connection billing in one click when switching from the route table", async () => {
+    poolState.data = [{ ...pool("Reliable"), strategy: "priority" }];
+    for (const connection of records)
+      insightConnections.set(connection.id, {
+        service_id: connection.id,
+        billing: configuredBilling(connection),
+        usage: null,
+      });
+    render(preview());
+    await userEvent.click(
+      screen.getByRole("button", { name: "Show routing for OpenAI" }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Show Personal billing for OpenAI" }),
+    );
+    expect(screen.getByText("Billing flow")).toBeVisible();
+    expect(
+      screen.queryByRole("table", { name: "Reliable route members" }),
     ).not.toBeInTheDocument();
   });
-
-  it("requires opting into priority, scopes drag to one actual pool, and preserves live records", async () => {
-    const user = userEvent.setup();
-    poolState.data = [pool("First"), pool("Second")];
-    const before = JSON.stringify(poolState.data);
-    render(poolPreview());
-    expect(
-      screen.queryByRole("button", { name: /Drag/ }),
-    ).not.toBeInTheDocument();
-    await user.selectOptions(
-      screen.getByRole("combobox", { name: "Selection for First" }),
-      "priority",
+  it("does not describe weighted rotation as failover", async () => {
+    poolState.data = [{ ...pool("Rotate"), strategy: "weighted" }];
+    render(preview());
+    await userEvent.click(
+      screen.getByRole("button", { name: "Show routing for OpenAI" }),
     );
-    await user.selectOptions(
-      screen.getByRole("combobox", { name: "Selection for Second" }),
-      "priority",
-    );
-    const transferData = new Map<string, string>();
-    const transfer = {
-      setData: (type: string, value: string) => transferData.set(type, value),
-      getData: (type: string) => transferData.get(type),
-      effectAllowed: "",
-      dropEffect: "",
-    };
-    fireEvent.dragStart(
-      screen.getByRole("button", { name: "Drag Team account in First" }),
-      { dataTransfer: transfer },
-    );
-    const foreign = screen
-      .getByRole("button", { name: "Drag Personal account in Second" })
-      .closest("li")!;
-    fireEvent.dragOver(foreign, { dataTransfer: transfer });
-    fireEvent.drop(foreign, { dataTransfer: transfer });
-    expect(
-      within(
-        within(
-          screen.getByRole("list", { name: "Members of Second" }),
-        ).getAllByRole("listitem")[0]!,
-      ).getByText("Personal account"),
-    ).toBeVisible();
-    const target = screen
-      .getByRole("button", { name: "Drag Personal account in First" })
-      .closest("li")!;
-    fireEvent.dragOver(target, { dataTransfer: transfer });
-    fireEvent.drop(target, { dataTransfer: transfer });
-    expect(
-      within(
-        within(
-          screen.getByRole("list", { name: "Members of First" }),
-        ).getAllByRole("listitem")[0]!,
-      ).getByText("Team account"),
-    ).toBeVisible();
-    expect(JSON.stringify(poolState.data)).toBe(before);
-    expect(
-      screen.queryByText(/Ready via|Selected connection/),
-    ).not.toBeInTheDocument();
+    expect(screen.getByText("Single attempt · no failover")).toBeVisible();
   });
-
-  it("supports keyboard ordering and persists independently for each pool and account", async () => {
-    const user = userEvent.setup();
-    poolState.data = [pool("First"), pool("Second")];
-    const mounted = render(poolPreview());
-    await user.selectOptions(
-      screen.getByRole("combobox", { name: "Selection for First" }),
-      "priority",
-    );
-    fireEvent.keyDown(
-      screen.getByRole("button", { name: "Drag Team account in First" }),
-      { key: "ArrowUp" },
-    );
-    mounted.unmount();
-    const next = render(poolPreview());
-    expect(
-      within(
-        within(
-          screen.getByRole("list", { name: "Members of First" }),
-        ).getAllByRole("listitem")[0]!,
-      ).getByText("Team account"),
-    ).toBeVisible();
-    expect(
-      screen.getByRole("combobox", { name: "Selection for Second" }),
-    ).toHaveValue("current");
-    account.id = "user-b";
-    next.rerender(poolPreview());
-    expect(
-      screen.getByRole("combobox", { name: "Selection for First" }),
-    ).toHaveValue("current");
-  });
-
-  it("shows excluded and missing members without selecting them or fabricating cards", async () => {
-    poolState.data = [pool("First", ["mine", "missing"])];
-    poolState.data[0]!.members[0]!.enabled = false;
-    render(poolPreview());
-    expect(screen.getByText("Excluded")).toBeVisible();
-    expect(screen.getByText("Service unavailable")).toBeVisible();
-    expect(screen.queryByText("Team account")).not.toBeInTheDocument();
+  it("reports pool read failures instead of claiming individual routes only", async () => {
+    poolState.error = new Error("Unavailable");
+    render(preview());
+    expect(screen.getByText("Pool access incomplete")).toBeVisible();
   });
 });

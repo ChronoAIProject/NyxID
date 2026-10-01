@@ -1,4 +1,3 @@
-import { z } from "zod";
 import type { KeyInfo, CatalogEntry } from "@/types/keys";
 import type { UserServiceResponse } from "@/schemas/keys";
 import type { CredentialSource } from "@/schemas/orgs";
@@ -124,66 +123,4 @@ export function buildRoutingGroups(
   // A catalog entry (including shared OAuth app credentials) is not a
   // connection. Only records returned by /keys create groups or options.
   return [...groups.values()].sort((a, b) => a.name.localeCompare(b.name));
-}
-
-export function moveItem(
-  order: readonly string[],
-  from: string,
-  to: string,
-): string[] {
-  if (from === to || !order.includes(from) || !order.includes(to))
-    return [...order];
-  const next = order.filter((id) => id !== from);
-  next.splice(order.indexOf(to), 0, from);
-  return next;
-}
-
-export function orderedIds(
-  current: readonly string[],
-  saved: readonly string[],
-): string[] {
-  return [
-    ...new Set([...saved.filter((id) => current.includes(id)), ...current]),
-  ];
-}
-
-const preferencesSchema = z.object({
-  view: z.enum(["services", "connections"]),
-  pools: z.record(
-    z.string(),
-    z.object({
-      priority: z.boolean(),
-      order: z.array(z.string()),
-    }),
-  ),
-});
-export type PreviewPreferences = z.infer<typeof preferencesSchema>;
-
-const storageKey = (userId: string) => `nyxid-routing-preview-v3:${userId}`;
-
-export function readPreferences(
-  userId: string | undefined,
-): PreviewPreferences {
-  const defaults: PreviewPreferences = { view: "connections", pools: {} };
-  if (!userId) return defaults;
-  try {
-    const parsed = preferencesSchema.safeParse(
-      JSON.parse(localStorage.getItem(storageKey(userId)) ?? "null"),
-    );
-    return parsed.success ? parsed.data : defaults;
-  } catch {
-    return defaults;
-  }
-}
-
-export function savePreferences(
-  userId: string | undefined,
-  value: PreviewPreferences,
-) {
-  if (!userId) return;
-  try {
-    localStorage.setItem(storageKey(userId), JSON.stringify(value));
-  } catch {
-    // The preview remains usable when browser storage is unavailable.
-  }
 }
