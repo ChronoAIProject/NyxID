@@ -2,6 +2,51 @@ use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[tokio::test]
+async fn machine_buffered_pool_request_fails_over_with_declared_pool_authority() {
+    for (strategy, first_status, expected_first, expected_second) in [
+        ("priority", StatusCode::SERVICE_UNAVAILABLE, 1, 1),
+        ("round_robin", StatusCode::OK, 1, 0),
+    ] {
+        let fixture = fixture("machine_pool_buffered", first_status, strategy, true).await;
+        let mut request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/proxy/s/review-route/perform")
+            .header("content-type", "application/json")
+            .body(Body::from("{\"input\":\"buffered\"}"))
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(BillingRoutePolicy::Metered(BillingIngress::Proxy));
+        request
+            .extensions_mut()
+            .insert(crate::services::machine_gateway_service::Ingress {
+                declared_id: fixture.pool_id.clone(),
+                git: None,
+            });
+        let response = super::super::proxy::proxy_request_by_slug(
+            State(fixture.state.clone()),
+            fixture.auth.clone(),
+            Default::default(),
+            Path(("review-route".into(), "perform".into())),
+            request,
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let _ = to_bytes(response.into_body(), 1024).await.unwrap();
+        assert_eq!(fixture.first.requests.lock().await.len(), expected_first);
+        assert_eq!(fixture.second.requests.lock().await.len(), expected_second);
+        if expected_second > 0 {
+            assert_eq!(
+                fixture.first.requests.lock().await[0].body,
+                fixture.second.requests.lock().await[0].body
+            );
+        }
+        fixture.state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn machine_gateway_stream_cannot_enter_pool_or_replay_on_another_member() {
     let fixture = fixture(
         "machine_pool_stream_refused",
@@ -28,7 +73,7 @@ async fn machine_gateway_stream_cannot_enter_pool_or_replay_on_another_member() 
     request
         .extensions_mut()
         .insert(crate::services::machine_gateway_service::Ingress {
-            declared_id: fixture.second_member_id.clone(),
+            declared_id: fixture.pool_id.clone(),
             git: None,
         });
     let result = super::super::proxy::proxy_request_by_slug(

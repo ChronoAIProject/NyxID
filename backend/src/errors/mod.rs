@@ -268,7 +268,7 @@ pub enum AppError {
     MachineOwnerInControl,
 
     #[error(
-        "Saved-login typing requires the owner to allow this single-user machine in Nodes settings or use an isolated machine"
+        "Saved-login typing requires the owner to allow this single-user machine in Assistant → Machines settings or use an isolated machine"
     )]
     MachineNotIsolated,
 

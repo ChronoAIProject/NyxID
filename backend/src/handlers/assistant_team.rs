@@ -1159,7 +1159,7 @@ async fn dispatch(
         }
         "settings_link" => {
             let area = text_arg(args, "area");
-            if area == "triggers" && args.get("instruction").is_some() {
+            if matches!(area, "triggers" | "automations") && args.get("instruction").is_some() {
                 let agent = target_agent(state, owner, args["agent"].as_str()).await?;
                 return Ok((
                     super::nyxbot::trigger_setup_link(

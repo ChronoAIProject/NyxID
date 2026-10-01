@@ -134,7 +134,7 @@ pub async fn run(command: Commands, config: Option<&str>, profile: Option<&str>)
             );
             if config.machine.agent_user.is_none() {
                 eprintln!(
-                    "Saved logins require managed browser policies and owner opt-in on the Nodes page. Commands run as the browser user, so a misbehaving or prompt-injected agent could read typed values. Prefer the machine container or a separated VM."
+                    "Saved logins require managed browser policies and owner opt-in on the Assistant → Machines page. Commands run as the browser user, so a misbehaving or prompt-injected agent could read typed values. Prefer the machine container or a separated VM."
                 );
             }
             if config.machine.shell && config.machine.agent_user.is_none() {

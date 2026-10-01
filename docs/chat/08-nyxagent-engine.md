@@ -701,7 +701,7 @@ proxy/MCP ACL resolver and gateway calls use the middleware's API-key identity.
 
 Recommend the container or `--separate-users`: a non-isolated shell can read
 the node token, signing secret and locally stored credentials. Explain the
-Nodes warning without refusing the owner's choice. The generated Docker
+machine isolation warning without refusing the owner's choice. The generated Docker
 command supplies NyxID's seccomp profile so Chromium remains sandboxed.
 
 Owner desktops use native capture (X11 on Linux, ScreenCaptureKit on macOS),
@@ -709,7 +709,7 @@ JPEG dirty rectangles at up to 30 Hz and independent owner input. Agent actions
 and observations still use cua. Takeover cancels active agent cua/command/file
 work immediately; late results are discarded. Pixel/input data never enters
 agent tools or transcripts during owner control. Frame-rate, latency and
-bandwidth measurements are in [MACHINE_NODES_VALIDATION.md](../MACHINE_NODES_VALIDATION.md).
+bandwidth measurements are in [validation and measurements](../MACHINE_NODES.md#validation-and-measurements).
 
 ## Trigger turns
 
@@ -775,3 +775,11 @@ file reads and job status pass the webhook read-only gate; machine-level `all`
 confirmation still applies to operations as configured. Both direct native
 calls and `nyx__call_tool` use these checks. Guests and developer OAuth tokens
 cannot use machine tools or the human desktop/control routes.
+
+Assistant workspace navigation places Automations (`/assistant/automations`) and
+Machines (`/assistant/machines`, Saved logins at `?tab=logins`) beside Plugins and
+Approvals for both engines. Setup/pairing stay in `AssistantShell`; the desktop is
+standalone under `/assistant/machines/{id}/desktop`. Studio Nodes shows only a
+read-only machine summary linking to assistant settings; Developer → Triggers
+retains secrets/replay. `/automations` redirects with `setup` and `agent` intact.
+Server-generated browser URLs use `services::assistant_links::AssistantPage`.

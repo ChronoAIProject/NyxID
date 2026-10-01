@@ -1,5 +1,10 @@
 import { parseAutomationSearch } from "@/lib/automation-search";
-import { AutomationsPage } from "@/pages/automations";
+import {
+  parseMachinesSearch,
+  parseMachineSetupSearch,
+  parseMachinePairSearch,
+  parseMachineDesktopSearch,
+} from "@/lib/machine-search";
 import { ChannelConnectLinkPage } from "@/pages/channel-connect-link";
 import { AdminOwnershipPage } from "@/pages/admin-ownership";
 import { normalizeAdminUsageSearch } from "@/schemas/admin-usage";
@@ -82,10 +87,7 @@ import {
   ApprovalHistoryPage,
   ApprovalGrantsPage,
   NodesPage,
-  MachineSetupPage,
   MachineDesktopPage,
-  MachinePairPage,
-  SavedLoginsPage,
   NodeDetailPage,
   AdminNodesPage,
   AdminAuditLogPage,
@@ -657,9 +659,32 @@ const developerAppDetailRoute = createRoute({
 
 const automationsRoute = createRoute({
   path: "/automations",
-  getParentRoute: () => dashboardLayout,
+  getParentRoute: () => rootRoute,
   validateSearch: parseAutomationSearch,
-  component: AutomationsPage,
+  beforeLoad: async (context) => {
+    await standaloneAuthBeforeLoad(context);
+    throw redirect({
+      to: "/assistant/automations",
+      search: parseAutomationSearch(context.search),
+      replace: true,
+    });
+  },
+});
+
+const assistantAutomationsRoute = createRoute({
+  path: "/assistant/automations",
+  getParentRoute: () => rootRoute,
+  beforeLoad: standaloneAuthBeforeLoad,
+  validateSearch: parseAutomationSearch,
+  component: () => <AssistantPage view="automations" />,
+});
+
+const assistantMachinesRoute = createRoute({
+  path: "/assistant/machines",
+  getParentRoute: () => rootRoute,
+  beforeLoad: standaloneAuthBeforeLoad,
+  validateSearch: parseMachinesSearch,
+  component: () => <AssistantPage view="machines" />,
 });
 
 const triggersRoute = createRoute({
@@ -720,38 +745,26 @@ const nodesRoute = createRoute({
 });
 
 const machineDesktopRoute = createRoute({
-  path: "/machines/$nodeId/desktop",
+  path: "/assistant/machines/$nodeId/desktop",
   getParentRoute: () => rootRoute,
   beforeLoad: standaloneAuthBeforeLoad,
   component: MachineDesktopPage,
-  validateSearch: (search: Record<string, unknown>) => ({
-    conversation_id:
-      typeof search.conversation_id === "string"
-        ? search.conversation_id
-        : undefined,
-  }),
+  validateSearch: parseMachineDesktopSearch,
 });
 
 const machineSetupRoute = createRoute({
-  path: "/machines/new",
-  getParentRoute: () => dashboardLayout,
-  component: MachineSetupPage,
-  validateSearch: (search: Record<string, unknown>) => ({
-    setup: typeof search.setup === "string" ? search.setup : undefined,
-  }),
+  path: "/assistant/machines/new",
+  getParentRoute: () => rootRoute,
+  beforeLoad: standaloneAuthBeforeLoad,
+  component: () => <AssistantPage view="machine-setup" />,
+  validateSearch: parseMachineSetupSearch,
 });
 const machinePairRoute = createRoute({
-  path: "/machines/pair",
-  getParentRoute: () => dashboardLayout,
-  component: MachinePairPage,
-  validateSearch: (search: Record<string, unknown>) => ({
-    code: typeof search.code === "string" ? search.code : undefined,
-  }),
-});
-const savedLoginsRoute = createRoute({
-  path: "/saved-logins",
-  getParentRoute: () => dashboardLayout,
-  component: SavedLoginsPage,
+  path: "/assistant/machines/pair",
+  getParentRoute: () => rootRoute,
+  beforeLoad: standaloneAuthBeforeLoad,
+  component: () => <AssistantPage view="machine-pair" />,
+  validateSearch: parseMachinePairSearch,
 });
 
 const nodeDetailRoute = createRoute({
@@ -1118,6 +1131,11 @@ const routeTree = rootRoute.addChildren([
   assistantRoute,
   assistantPluginsRoute,
   assistantApprovalsRoute,
+  assistantAutomationsRoute,
+  assistantMachinesRoute,
+  automationsRoute,
+  machineSetupRoute,
+  machinePairRoute,
   designSystemRoute,
   dashboardLayout.addChildren([
     dashboardIndexRoute,
@@ -1145,7 +1163,6 @@ const routeTree = rootRoute.addChildren([
     developerAppsRoute,
     developerAppDetailRoute,
     triggersRoute,
-    automationsRoute,
     integrationGuideRoute,
     aiSetupRoute,
     notificationSettingsRoute,
@@ -1156,9 +1173,6 @@ const routeTree = rootRoute.addChildren([
     keyDetailRoute,
     apiKeyDetailRoute,
     nodesRoute,
-    machineSetupRoute,
-    machinePairRoute,
-    savedLoginsRoute,
     nodeDetailRoute,
     channelBotsRoute,
     channelBotSetupLinksRoute,

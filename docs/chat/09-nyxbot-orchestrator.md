@@ -722,7 +722,7 @@ platform-key rules and node-held credential routing stay in the proxy pipeline.
 only human owner settings can change it. Images use owner-only conversation
 attachments, while tool results give the model accessibility text.
 
-Computer use opens a live desktop in the web conversation or Nodes page.
+Computer use opens a live desktop in the web conversation or Assistant → Machines page.
 `nyx__machine_request_control` asks the owner to take over, including a chat-app
 link and configured push notification. The turn ends while waiting. Owner
 control cancels jobs and locks out shell, file and computer tools on that node;
@@ -733,7 +733,7 @@ transient, never transcripts or audits.
 `saved_logins` to have the owner save a login; never ask for values in chat.
 `nyx__machine_fill_login` types one field into supervised Chromium after exact
 origin/input checks, with optional per-sign-in confirmation. On a single-user
-machine NyxBot relays the warning and Nodes settings link until the human owner
+machine NyxBot relays the warning and Assistant → Machines settings link until the human owner
 opts in; it cannot enable filling itself. A website that deliberately displays
 a password as text could expose it on screen; recommend owner takeover for the
 most sensitive accounts. See [MACHINE_NODES.md](../MACHINE_NODES.md) and
@@ -749,7 +749,7 @@ proxy/MCP ACL resolver and gateway calls use the middleware's API-key identity.
 
 Recommend the container or `--separate-users`: a non-isolated shell can read
 the node token, signing secret and locally stored credentials. Explain the
-Nodes warning without refusing the owner's choice. The generated Docker
+machine isolation warning without refusing the owner's choice. The generated Docker
 command supplies NyxID's seccomp profile so Chromium remains sandboxed.
 
 Owner desktops use native capture (X11 on Linux, ScreenCaptureKit on macOS),
@@ -757,7 +757,7 @@ JPEG dirty rectangles at up to 30 Hz and independent owner input. Agent actions
 and observations still use cua. Takeover cancels active agent cua/command/file
 work immediately; late results are discarded. Pixel/input data never enters
 agent tools or transcripts during owner control. Frame-rate, latency and
-bandwidth measurements are in [MACHINE_NODES_VALIDATION.md](../MACHINE_NODES_VALIDATION.md).
+bandwidth measurements are in [validation and measurements](../MACHINE_NODES.md#validation-and-measurements).
 
 ## 17. Scheduled and webhook automations
 
@@ -768,7 +768,7 @@ work, a reminder, or an external webhook event; target NyxBot or a specialist.
 Listing and updating also expose assistant webhook automations and their
 confirmation policies. Specialists ask NyxBot; guests cannot discover or execute
 these tools. The web
-Automations page (`/automations`) exposes the same configuration and run history,
+Automations page (`/assistant/automations`) exposes the same configuration and run history,
 and an agent's details show its automations.
 
 The create tool accepts `schedule` (`cron`, `every`, or `at`), an instruction,
@@ -804,9 +804,9 @@ without another run-budget charge. Browser and channel confirmation handlers do
 not start a second continuation for these cards. Confirmation expiry or a lost
 turn records failure, and a started turn is never replayed.
 
-For an assistant webhook, `nyxid__settings_link` with area `triggers`, `agent`,
+For an assistant webhook, `nyxid__settings_link` with area `automations`, `agent`,
 `label`, `instruction` and optional `confirmation_policy` stores the prefill on
-a watch and returns `/automations?setup=<watch-id>`. An owner-authenticated
+a watch and returns `/assistant/automations?setup=<watch-id>`. An owner-authenticated
 endpoint checks ownership, pending state and expiry; creation consumes the watch
 transactionally with the trigger insert. Only the
 page creates and reveals the inbound secret. The metadata-only change stream
@@ -839,3 +839,11 @@ file reads and job status pass the webhook read-only gate; machine-level `all`
 confirmation still applies to operations as configured. Both direct native
 calls and `nyx__call_tool` use these checks. Guests and developer OAuth tokens
 cannot use machine tools or the human desktop/control routes.
+
+Assistant workspace navigation places Automations (`/assistant/automations`) and
+Machines (`/assistant/machines`, Saved logins at `?tab=logins`) beside Plugins and
+Approvals for both engines. Setup/pairing stay in `AssistantShell`; the desktop is
+standalone under `/assistant/machines/{id}/desktop`. Studio Nodes shows only a
+read-only machine summary linking to assistant settings; Developer → Triggers
+retains secrets/replay. `/automations` redirects with `setup` and `agent` intact.
+Server-generated browser URLs use `services::assistant_links::AssistantPage`.

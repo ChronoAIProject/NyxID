@@ -1,4 +1,5 @@
 //! Human-only live relay. Only control metadata enters MongoDB or audit.
+use crate::services::assistant_links::AssistantPage;
 use crate::{
     AppState,
     errors::{AppError, AppResult},
@@ -530,12 +531,11 @@ pub async fn request_control(
     )
     .await?;
     watch(state, &row).await?;
-    let link = format!(
-        "{}/machines/{}/desktop?conversation_id={}",
-        state.config.frontend_url.trim_end_matches('/'),
-        node.id,
-        chat.conversation_id
-    );
+    let link = AssistantPage::MachineDesktop {
+        node: &node.id,
+        conversation: Some(&chat.conversation_id),
+    }
+    .url(&state.config.frontend_url);
     let message = format!(
         "NyxBot needs you on {}: {reason}\nTake control: {link}",
         node.name

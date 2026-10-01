@@ -1,9 +1,8 @@
 # Machine nodes: NyxBot and agents using the owner's machines
 
-Status: implemented on `nyxbot/machine-nodes`; repository version remains
-0.38.1. This document records the binding decisions and resulting behavior.
-See [MACHINE_NODES_VALIDATION.md](MACHINE_NODES_VALIDATION.md) for the
-per-decision test mapping, validation results and remaining measurement limits.
+This document describes the machine-node contract, setup and operation.
+[Validation and measurements](#validation-and-measurements) maps acceptance
+criteria to automated coverage and gives repeatable performance commands.
 
 ## What the user asked for
 
@@ -111,7 +110,7 @@ Nothing the server sends can enable a capability.
     apps it is decided with the card's 4-digit code, as today;
   - `all`: reads need a card too.
 
-  Only the owner changes it, on the Nodes page, through a human-only route.
+  Only the owner changes it, on the Assistant → Machines page, through a human-only route.
   NyxBot cannot change it; it can hand out the settings link.
 
 ### D4. Tools
@@ -252,19 +251,21 @@ model knows when to use them. Names:
 
   On first start it registers with `NYXID_NODE_TOKEN` and persists its identity
   in a volume. `nyxid node docker … --machine` uses it.
-- **Web (Nodes page):**
+- **Web (Assistant → Machines page):**
   - An "Add a machine" flow with tabs for this computer, a remote VM and Docker.
     It mints a registration token through the existing register-token API and
     shows the exact commands.
   - A plain safety note: use a VM or container, not your personal computer.
     Agents act with that user's full access, and prompt injection is possible.
     On a non-separated machine, commands can read the node token, signing
-    secret, config and locally stored credentials. Setup, Nodes and machine
+    secret, config and locally stored credentials. Setup, Assistant → Machines and machine
     status say so explicitly, with a persistent Not isolated badge when shell
     is enabled. Recommend the container or `--separate-users`; proceeding
     remains the owner's choice.
-  - Node details show machine capabilities, roots, computer mode, the
-    `machine_confirm` setting, and which agents may use the machine.
+  - Machine settings open in a sheet with capabilities, roots, computer mode,
+    `machine_confirm`, the single-user login opt-in and specialist grants.
+    Studio Nodes retains generic infrastructure management and a read-only
+    machine summary linking here.
 - **NyxBot:** leads the whole setup from chat (D13).
 
 ### D8a. Out of scope for this release
@@ -286,7 +287,7 @@ owner opens, or on the machine itself, never in tool results or the transcript.
 
 1. **Setup link.** NyxBot calls `nyxid__machine_setup_link`:
    - Arguments: `{name?, where: this_computer | vm | docker, capabilities?, grant_to?: specialist name or id}`.
-   - It returns a link to a one-page setup at `/machines/new?...` with the
+   - It returns a link to a one-page setup at `/assistant/machines/new?...` with the
      choices prefilled, like `nyxid__channel_bot_setup_link`.
    - On that page, the owner:
      - reviews the choices, including "let <specialist> use it" when `grant_to`
@@ -301,7 +302,7 @@ owner opens, or on the machine itself, never in tool results or the transcript.
 2. **Pairing code**, for a machine the owner is already logged in to, e.g.
    over SSH:
    - The owner runs `nyxid node setup --machine [--computer]` with no token.
-     The machine prints a short code and a link, `…/machines/pair?code=…`, as
+     The machine prints a short code and a link, `…/assistant/machines/pair?code=…`, as
      in the device-login flow (`docs/DEVICE_LOGIN_PROTOCOL.md`).
    - To approve, the owner opens the link (the page shows the machine's
      hostname, OS, IP and requested capabilities, and requires an explicit
@@ -449,7 +450,7 @@ logging to a website and then hand back the control to nyxbot".
   - it streams the machine's screen in near real time;
   - it shows the agent's cursor and actions as they happen;
   - it can be expanded or popped out.
-  The Nodes page can open the same view for any computer-capable machine.
+  The Assistant → Machines page can open the same view for any computer-capable machine.
 - **Controls:**
   - **Take control** switches the controller to the owner. The owner's mouse,
     keyboard (including typing and shortcuts), scroll and clipboard paste in the
@@ -646,7 +647,7 @@ machine's disk. Owner takeover (D15) stays available for everything else.
     without further steps.
   - **Single-user machines** (the owner's laptop, a plain VM). Saved-login
     typing is **off until the owner allows it for that machine**, through a
-    per-machine setting on the Nodes page (owner-only, human-only route; NyxBot
+    per-machine setting on the Assistant → Machines page (owner-only, human-only route; NyxBot
     cannot change it). Turning it on shows a plain warning: agent commands on
     this machine run as the same user as the browser, so a misbehaving or
     prompt-injected agent could read what is typed into it. It also recommends
@@ -656,7 +657,7 @@ machine's disk. Owner takeover (D15) stays available for everything else.
     apply.
   - **Until then,** `nyx__machine_fill_login` returns a clear result saying the
     machine is not isolated and how the owner can allow it or use an isolated
-    machine. NyxBot relays that with the Nodes settings link. The setup page
+    machine. NyxBot relays that with the Assistant → Machines settings link. The setup page
     (D13) and `nyxid node machine status` show the same warning and
     recommendation.
 - **What is guaranteed, precisely (trust model).** The approved website and
@@ -754,44 +755,8 @@ machine access is fast and does not slow anything else down:
 - **Benchmarks.** Add repeatable timing tests or benchmarks for the hot paths
   above. Report the numbers in the final report and in this document.
 
-#### Recorded measurements
-
-Measured on an Apple M2 / 16 GiB host, with the production Linux arm64 machine
-image in Docker Desktop at 1280×800. The desktop run passed during concurrent compilation on the shared host.
-The repeatable commands and detailed evidence are in
-[MACHINE_NODES_VALIDATION.md](MACHINE_NODES_VALIDATION.md#performance-measurements).
-
-| Backend measurement | Direct / budget | Through NyxID |
-|---|---:|---:|
-| Exec overhead over loopback WS, command runtime excluded | ≤ 50 ms p95 | **9.968 ms p50 / 34.132 ms p95** |
-| 100 MiB download | 0.196 s / 510.99 MiB/s | **0.178 s / 561.80 MiB/s** |
-| 12 MiB git clone | 0.656 s | **0.703 s** |
-| Capability report → durable NyxBot wake | < 10 s | **13.90 ms** |
-
-Exec uses 100 samples after 10 warmups through the actual CLI runtime. Gateway
-and git measurements use local HTTPS fixtures with streamed bodies; the same
-test verifies clone/fetch/pull/push. Direct runs first. Setup timing uses the
-real change stream and excludes download, installation and human approval.
-Backend benchmarks use the debug test binary on a shared development host.
-
-| Desktop scenario | Changed frames/s | Frame bytes/s |
-|---|---:|---:|
-| Idle | 0 | 0 |
-| Typing | 30.192 | 209,319 |
-| Scrolling | 29.374 | 2,046,233 |
-
-Owner input-to-frame latency: **28.560 ms p50 / 63.259 ms p95**.
-Takeover with a stalled cua action and a 5 MiB upload in flight: **0.772 ms**.
-A 4 MiB file transfer round trip: **204.487 ms**. Native capture targets 30 Hz;
-scrolling reverses every six actions to avoid an idle page boundary. JPEG dirty
-rectangles avoid full-frame encoding for text changes and need no video decoder
-startup; sequence checks recover dropped rectangles with a full frame.
-
-The macOS driver reports Screen Recording and Accessibility permission both
-missing on the validation host. Consequently macOS desktop fps, bandwidth and
-input latency are **unmeasured**. Enable those OS permissions for the launching
-app and rerun the documented desktop benchmark to close that validation gap;
-macOS policy-generation and RAM-only capture-volume tests pass.
+Measurements and reproduction commands are under
+[Validation and measurements](#validation-and-measurements).
 
 ### D9. Audit, logs and privacy
 
@@ -908,22 +873,7 @@ This document describes what shipped. Also update:
   tests and build, and `npm run build:wizard` if wizard sources change.
 
 - **Performance (D17).** The measurements are reported and meet the stated
-  budgets, or a stated reason why not with a plan the reviewer accepts.
-
-## Working rules for the implementer
-
-- Work only in this worktree. Do not commit, push or change versions; the
-  reviewer does that.
-- Backend tests need a replica-set MongoDB:
-  `NYXID_TEST_DATABASE_URL="mongodb://127.0.0.1:27020/?directConnection=true"`,
-  with `cargo test -p nyxid --bin nyxid-server -- <filter> --test-threads 2`.
-  Run the whole backend suite in chunks (`handlers::`, `services::`, the rest),
-  not all at once, to avoid memory exhaustion.
-- Follow CLAUDE.md (layering, Mongo model conventions, secrets never in logs or
-  audit or Debug, human-only routes for owner settings) and the existing code's
-  style and comment density.
-- When a decision here is impossible or clearly wrong on contact with the code,
-  stop and explain it in your report; do not silently diverge.
+  budgets, or document why not and the plan to meet them.
 
 ## Integration with NyxBot automations and service pools
 
@@ -941,10 +891,199 @@ confirmation still applies to operations as configured. Both direct native
 calls and `nyx__call_tool` use these checks. Guests and developer OAuth tokens
 cannot use machine tools or the human desktop/control routes.
 
-Machine gateway declarations bind exact connected services. A pool slug is not
-a machine service declaration, and a machine gateway upload cannot enter a
-pool or retry on another credential node. Normal proxy pool priority/AI routing
-and failover remain available to their existing callers. Streamed uploads use
-the shared HTTP cancellation path, including after their request body finishes.
+Machine gateway declarations bind service or pool IDs and slugs. A declared
+pool accepts bounded, buffered JSON/form requests with its normal priority or
+AI routing, per-member authorization and failover. Pool access confers no
+member grant: only members allowed by the chat key and the owner's live ACL
+can run. AI chat pools generate OpenAI SDK variables; same-API pools use their
+catalog protocol. Opaque streamed uploads, including git, require a concrete
+connection and cannot enter a pool or retry on another credential node.
+Uploads use the shared HTTP cancellation path through response completion.
 
-Merged-tree verification is recorded in [MACHINE_NODES_MERGE_VALIDATION.md](MACHINE_NODES_MERGE_VALIDATION.md).
+## Assistant workspace
+
+The assistant sidebar's Workspace group is Home, Automations, Machines,
+Plugins, Artifacts (coming soon), Approvals and Activity (coming soon), with
+the same active state in the mobile drawer. Both NyxAgent and legacy assistant
+engines use these workspace views inside `AssistantShell`.
+
+- `/assistant/automations` manages schedules and assistant webhooks; `setup`
+  and `agent` preserve setup watches and agent filters. The shipped
+  `/automations` URL redirects here with both parameters intact.
+- `/assistant/machines` lists usable personal and organization machines, their
+  connection and capability state, desktop access and settings. Its Saved
+  logins tab is `/assistant/machines?tab=logins`.
+- `/assistant/machines/new` and `/assistant/machines/pair` keep setup and
+  pairing inside the assistant; `/assistant/machines/{id}/desktop` opens a
+  standalone full-screen desktop.
+
+Studio retains Nodes, generic node details and Developer → Triggers for webhook
+secrets/replay. Machine settings are edited only in the assistant. Server tools,
+setup APIs and notifications use `services::assistant_links::AssistantPage`
+for browser links; API paths do not change. `settings_link` areas `automations`,
+`machines` and `saved_logins` open these views, while `triggers` still opens the
+developer page. Webhook prefill accepts both `automations` and the legacy
+`triggers` area. All new pages use the assistant's shared authentication guard
+and validated search parameters; backend human-only checks remain authoritative.
+
+## Validation and measurements
+
+| Acceptance criterion | Automated coverage |
+|---|---|
+| NyxBot-led setup and no credential in chat | `machine_setup_tools_and_owner_cards_never_contain_registration_credentials`, pairing approve/deny races, atomic grant application, durable watch dedupe, actual change-stream wake benchmark; setup page tests cover review and live progress. |
+| Owner commands, jobs, files, git, services and attachments | Production CLI through real loopback WS; command cancellation/output tests, anchored file operations, job-token reconnect/expiry tests, real smart-HTTP clone/fetch/pull/push plus service proxy fixture; screenshot attachment ownership/magic/turn limits and container file transfers. |
+| Specialist grant and guest exclusion | `machine_specialist_permission_is_explicit_durable_and_revocable`, `machine_authority_owner_guest_org_membership_offline_and_capabilities`, MCP discovery/call authority matrix and live specialist gateway scope. |
+| Computer use | Production-image test uses the pinned driver under Xvfb for observation, clicks, typing and screenshots. |
+| Owner takeover and hand-back | Durable controller race/recovery tests, exact revision fencing, owner takeover shell/file/computer lockout and wake note, browser WS authorization, cross-replica relay; frontend panel and real container input/hand-back tests. |
+| Saved login sign-in and privacy | Actual HTTPS username/password/TOTP sign-in in container Chromium; force-installed extension, policy denial, origin/field mismatch, password pinning, copy refusal, OS/socket isolation, encoded-output scrubbing and secret sweeps; backend storage/grant/org/card/opt-in tests and Saved logins form tests. |
+| Confirmation | `machine_confirmation_is_bound_to_parameters_and_consumed_once`, observation-versus-change classification and saved-login per-use confirmation. |
+| Compatibility and all decisions | CLI/backend/frontend regression suites cover additive models, legacy capabilities and D1–D17 authority boundaries. |
+| Namespace isolation and release artifacts | Agent children inherit NoNewPrivs and a namespace-denying seccomp filter; container tests assert syscall errors, git operation and renderer sandboxing. Frontend build tests enforce the canonical profile and server-version image tag. |
+| Declared pools | Buffered same-API/AI failover tests, declaration and SDK-variable tests, live member-scope denial, and streamed-body refusal before polling or dispatch. |
+| Assistant workspace | Production route-tree tests cover both engines, shell/mobile navigation and active state, parameter-preserving automation redirect and standalone desktop; machine settings/grants and shared server link outputs are tested. |
+| Performance | Indexed lookup/query-count tests, actual CLI loopback timing, 100 MiB gateway/git comparison, desktop scenarios and change-stream wake measurement. |
+
+Measured on an Apple M2 / 16 GiB host, with the production Linux arm64 machine
+image in Docker Desktop at 1280×800. The desktop run passed during concurrent
+compilation on the shared host.
+
+| Backend measurement | Direct / budget | Through NyxID |
+|---|---:|---:|
+| Exec overhead over loopback WS, command runtime excluded | ≤ 50 ms p95 | **7.036 ms p50 / 36.879 ms p95** |
+| In-process signed exec dispatch | 100 samples | **2.420 ms p50 / 2.590 ms p95** |
+| 100 MiB download | 0.197 s / 508.42 MiB/s | **0.193 s / 518.13 MiB/s** |
+| 12 MiB git clone | 0.676 s | **0.768 s** |
+| Capability report → durable NyxBot wake | < 10 s | **17.89 ms** |
+
+Exec uses 100 samples after 10 warmups through the actual CLI runtime. Gateway
+and git measurements use local HTTPS fixtures with streamed bodies; the same
+test verifies clone/fetch/pull/push. Direct runs first. Setup timing uses the
+real change stream and excludes download, installation and human approval.
+Backend benchmarks use the debug test binary on a shared development host.
+MongoDB 8 runs as a single-member replica set with a 4.5 GiB container memory
+limit and a 0.25 GiB WiredTiger cache. Direct/gateway throughput differences
+within a few milliseconds reflect local benchmark noise, not an acceleration
+claim.
+
+| Desktop scenario | Changed frames/s | Frame bytes/s |
+|---|---:|---:|
+| Idle | 0 | 0 |
+| Typing | 30.304 | 196,569 |
+| Scrolling | 29.329 | 2,026,690 |
+
+Owner input-to-frame latency: **30.927 ms p50 / 70.089 ms p95**.
+Takeover with a stalled cua action and a 5 MiB upload in flight: **0.790 ms**.
+A 4 MiB file transfer round trip: **147.859 ms**. Native capture targets 30 Hz;
+scrolling reverses every six actions to avoid an idle page boundary. JPEG dirty
+rectangles avoid full-frame encoding for text changes and need no video decoder
+startup; sequence checks recover dropped rectangles with a full frame.
+
+The macOS driver reports Screen Recording and Accessibility permission both
+missing on the validation host. Consequently macOS desktop fps, bandwidth and
+input latency are **unmeasured**. Enable those OS permissions for the launching
+app and rerun the documented desktop benchmark to close that validation gap;
+macOS policy-generation and RAM-only capture-volume tests pass.
+
+### Repeatable checks
+
+Use Rust 1.98.1 and a replica-set MongoDB. Run backend chunks sequentially:
+
+```sh
+export CARGO_INCREMENTAL=0
+export NYXID_TEST_DATABASE_URL='mongodb://127.0.0.1:27024/?directConnection=true'
+cargo +1.98.1 test -j 1 -p nyxid --bin nyxid-server -- handlers:: --test-threads 2 --skip curation_concurrent_writers_and_shared_budget
+cargo +1.98.1 test -j 1 -p nyxid --bin nyxid-server -- services:: --test-threads 2 --skip curation_concurrent_writers_and_shared_budget
+cargo +1.98.1 test -j 1 -p nyxid --bin nyxid-server -- --skip handlers:: --skip services:: --skip curation_concurrent_writers_and_shared_budget --test-threads 2
+cargo +1.98.1 test -j 1 -p nyxid-cli -p nyxid-machine
+cargo +1.98.1 fmt --all -- --check
+rustup run 1.98.1 rustfmt --edition 2024 --check cli/src/node/machine/runtime.rs
+git diff --check
+cargo +1.98.1 clippy -j 1 --workspace --all-targets -- -D warnings
+```
+
+In `frontend/`, run `npm run lint`, `npm test`, `npx tsc -b`, and `npm run build`.
+Run `node --test cli/tests/machine_filler.test.mjs` from the repository root.
+Run each benchmark alone after builds/tests stop:
+
+```sh
+cargo +1.98.1 test -j 1 -p nyxid --bin nyxid-server -- machine_loopback_exec_performance --ignored --nocapture --test-threads 1
+cargo +1.98.1 test -j 1 -p nyxid --bin nyxid-server -- machine_gateway_streaming_and_git_performance --ignored --nocapture --test-threads 1
+cargo +1.98.1 test -j 1 -p nyxid --bin nyxid-server -- machine_setup_change_stream_wakes_thread_without_sweep --nocapture --test-threads 1
+cargo +1.98.1 test -j 1 -p nyxid --bin nyxid-server -- machine_exec_dispatch_performance --ignored --nocapture --test-threads 1
+docker build -f cli/Dockerfile.machine -t nyxid-node-machine:local .
+docker build --build-arg MACHINE_IMAGE=nyxid-node-machine:local -f cli/tests/Dockerfile.machine -t nyxid-machine-e2e:local .
+docker run --rm --shm-size=256m --security-opt seccomp=cli/resources/machine-container/seccomp.json nyxid-machine-e2e:local
+```
+
+The container test uses the production CLI, signed extension, native host and
+pinned cua binary at 1280×800. Its output contains timings and frame byte counts;
+it does not write screenshots. Idle means a settled page with an unfocused text
+field. Typing and scrolling are continuous acknowledged input; scrolling
+reverses every six actions to avoid measuring an idle page boundary. Alternating
+scroll events then measure input-to-frame latency. Action counts accompany frame
+counts.
+
+The macOS benchmark requires a logged-in desktop, Google Chrome and Screen
+Recording/Accessibility permission for the app launching the test:
+
+```sh
+NYXID_MACHINE_BENCH_CUA="$HOME/.nyxid-node/cua/cua-driver-rs-0.30.4-darwin-universal/cua-driver" \
+  CARGO_INCREMENTAL=0 cargo +1.98.1 test -j 1 -p nyxid-cli --bin nyxid -- \
+  macos_desktop_performance --ignored --nocapture --test-threads 1
+```
+
+For a named profile, set the driver path under `~/.nyxid-node/profiles/NAME/`
+instead. Install computer support with `nyxid node machine enable --computer`
+first if needed. The test opens an isolated 1280×800 Chrome window on the main
+desktop, keeps captures in RAM, and prints the same scenario/fps/bytes/actions
+table as the container plus input p50/p95. The streamed canvas follows the
+screen size, capped at 1920×1200, so keep other windows idle during measurement.
+
+### Rollout and container upgrades
+
+Upgrade the server and web UI before enabling new machine capabilities; legacy
+nodes remain credential/SSH nodes until explicitly enabled. Setup reads the
+server's release from `/api/v1/public/config` and pins the Docker image to that
+exact tag. The web build serves `cli/resources/machine-container/seccomp.json`
+as `/machine-seccomp.json` and rejects a different published profile. No
+separately maintained frontend copy exists.
+
+To upgrade a machine container, finish or cancel its jobs, stop the container,
+then recreate it with the new server-matching image tag and the same identity
+and workspace volumes. Do not delete those volumes or mint a new setup token:
+the persisted identity reconnects the existing node. Download the seccomp
+profile from the upgraded web UI and retain `--security-opt seccomp=PATH`,
+`--shm-size=1g`, `NYXID_NODE_URL`, the selected capabilities and the restart
+policy. For a container created by the setup page as `my-machine`:
+
+```sh
+# Set these to the deployed server release and URLs.
+nyx_machine_release=0.39.0
+nyx_machine_web=https://nyxid.example
+nyx_machine_ws=wss://nyxid.example/api/v1/nodes/ws
+curl -fsSL "$nyx_machine_web/machine-seccomp.json" -o machine-seccomp.json
+docker pull "ghcr.io/chronoaiproject/nyxid/nyxid-node-machine:$nyx_machine_release"
+docker stop my-machine
+docker rm my-machine
+docker run -d --name my-machine --restart unless-stopped --shm-size=1g \
+  --security-opt seccomp=machine-seccomp.json \
+  -v my-machine-identity:/var/lib/nyxid-machine \
+  -v my-machine-workspace:/workspace \
+  -e "NYXID_NODE_URL=$nyx_machine_ws" \
+  "ghcr.io/chronoaiproject/nyxid/nyxid-node-machine:$nyx_machine_release" \
+  --shell --files --computer
+```
+
+On every Linux install, including separated VMs, command/file children apply
+`PR_SET_NO_NEW_PRIVS` followed by their own seccomp filter: `unshare`, `setns`
+and namespace-bearing `clone` return EPERM; `clone3` returns ENOSYS so libc can
+fall back to ordinary `clone`. Browser and cua children retain the namespace
+support required by Chromium's sandbox. This is defence in depth; use the
+container or `--separate-users` for browser/agent OS-user isolation.
+
+The pinned driver is `cua-driver-rs-v0.30.4`. Release archives were verified
+against the actual GitHub assets and their `checksums.txt`; exact URLs and
+SHA-256 pins are in `cli/resources/cua/release.json`. The signed extension's
+source, CRX, version, ID and checksum are in `cli/resources/machine-browser/`;
+CI checks deterministic packaging and its signature. No perception extension
+is installed, and telemetry is disabled.

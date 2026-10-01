@@ -142,8 +142,16 @@ try{
  try{await waitFor(()=>/remote debugging.*(disallowed|disabled)|DevTools.*(disallowed|disabled)/i.test(debugMessages),'managed policy rejects DevTools',15000);assert(!debugMessages.includes('DevTools listening'));assert.equal(await fs.access(`${debugProfile}/DevToolsActivePort`).then(()=>true,()=>false),false);}
  finally{try{process.kill(-debugProbe.pid,'SIGTERM');}catch{}}
  const boundary=await call('exec',{job_id:randomUUID(),conversation_id:randomUUID(),command:`python3 - <<'CHECK'
-import os,socket
+import os,socket,ctypes,errno,platform,subprocess
 assert 'NoNewPrivs:\t1' in open('/proc/self/status').read()
+libc=ctypes.CDLL(None,use_errno=True)
+unshare,setns,clone=(97,268,220) if platform.machine()=='aarch64' else (272,308,56)
+for number,arg,expected in [(unshare,0,errno.EPERM),(setns,-1,errno.EPERM),(435,0,errno.ENOSYS)]+[(clone,flag,errno.EPERM) for flag in [0x80,0x20000,0x2000000,0x4000000,0x8000000,0x10000000,0x20000000,0x40000000]]:
+ assert libc.syscall(number,arg,0,0,0,0)==-1
+ assert ctypes.get_errno()==expected,(number,ctypes.get_errno())
+assert subprocess.run(['unshare','-Ur','true'],capture_output=True).returncode!=0
+subprocess.run(['git','init','-q','/workspace/namespace-filter-git'],check=True)
+subprocess.run(['git','-C','/workspace/namespace-filter-git','-c','user.name=Test','-c','user.email=test@example.test','commit','--allow-empty','-qm','works'],check=True)
 for path in ['/etc/chromium/policies/managed/nyxid.json','/opt/nyxid/machine-browser/filler.crx','/etc/chromium/native-messaging-hosts/dev.nyxid.machine_filler.json']:
  assert not os.access(path,os.W_OK)
 assert not os.access('/var/lib/nyxid-machine/desktop/browser-profile',os.R_OK)
@@ -270,7 +278,7 @@ CHECK`,cwd:'/workspace',services:[],timeout_secs:10});
  for(const secret of [token,auth,signing.toString('hex')])assert(!output.join('').includes(secret),'node logs must not contain credentials');
  console.log('| Scenario | Changed frames/s | Frame bytes/s | Actions |\n|---|---:|---:|---:|');
  for(const sample of performanceSamples)console.log(`| ${sample.scenario} | ${sample.fps.toFixed(2)} | ${sample.bytes_per_second.toFixed(0)} | ${sample.actions} |`);
- console.log(JSON.stringify({passed:true,capabilities:profile,desktop_frames:frames.length,file_round_trip_mib:4,file_round_trip_ms:transferMs,takeover_ms:takeoverMs,renderer_sandbox:true,agent_no_new_privs:true,desktop_performance:performanceSamples,input_to_frame_ms:{p50:latencies[4],p95:latencies[9]}}));
+ console.log(JSON.stringify({passed:true,capabilities:profile,desktop_frames:frames.length,file_round_trip_mib:4,file_round_trip_ms:transferMs,takeover_ms:takeoverMs,renderer_sandbox:true,agent_no_new_privs:true,agent_namespace_filter:true,desktop_performance:performanceSamples,input_to_frame_ms:{p50:latencies[4],p95:latencies[9]}}));
 } catch(error){
  console.error(error.message);
  console.error('Node diagnostics:',output.join('').slice(-5000).replaceAll(token,'[redacted]').replaceAll(auth,'[redacted]').replaceAll(signing.toString('hex'),'[redacted]'));

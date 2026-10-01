@@ -103,7 +103,7 @@ impl Jobs {
             .try_acquire_owned()
             .context("maximum concurrent jobs reached")?;
         let mut command = Command::new("/bin/sh");
-        identity.prepare(&mut command)?;
+        identity.prepare_agent(&mut command)?;
         request_env(&mut command, &request.env)?;
         command.envs(gateway_env);
         pin_cwd(&mut command, roots.cwd(request.cwd.as_deref())?);

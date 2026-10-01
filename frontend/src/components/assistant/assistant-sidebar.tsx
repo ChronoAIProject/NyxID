@@ -25,7 +25,8 @@ import {
   MoreHorizontal,
   PencilLine,
   Plus,
-  Server,
+  Monitor,
+  CalendarClock,
   ShieldCheck,
   SlidersHorizontal,
   Trash2,
@@ -558,7 +559,7 @@ export function AssistantSidebar({
 }: {
   readonly conversations: readonly Conversation[];
   readonly activeConversationId: string | undefined;
-  readonly activeView?: "chat" | "plugins" | "approvals";
+  readonly activeView?: "chat" | "plugins" | "approvals" | "automations" | "machines";
   readonly deletingId?: string;
   readonly notice?: string;
   readonly onNewChat: () => void;
@@ -668,9 +669,56 @@ export function AssistantSidebar({
             />
             <span className="truncate">Home</span>
           </button>
-        ) : null}
+        ) : (
+          <Link
+            to="/assistant"
+            className="flex items-center gap-3 rounded-lg px-3 py-2 text-[13px] text-muted-foreground hover:bg-overlay hover:text-foreground"
+          >
+            <House className="h-4 w-4" />
+            Home
+          </Link>
+        )}
+        {(
+          [
+            {
+              view: "automations",
+              to: "/assistant/automations",
+              label: "Automations",
+              icon: CalendarClock,
+            },
+            {
+              view: "machines",
+              to: "/assistant/machines",
+              label: "Machines",
+              icon: Monitor,
+            },
+          ] as const
+        ).map((item) => (
+          <Link
+            key={item.view}
+            to={item.to}
+            aria-current={activeView === item.view ? "page" : undefined}
+            className={cn(
+              "flex w-full items-center gap-3 rounded-lg px-3 py-2 text-[13px] transition-colors",
+              activeView === item.view
+                ? "bg-overlay-strong font-medium text-foreground"
+                : "text-muted-foreground hover:bg-overlay hover:text-foreground",
+            )}
+          >
+            <item.icon
+              className={cn(
+                "h-4 w-4 shrink-0",
+                activeView === item.view
+                  ? "text-nyx-secondary-400"
+                  : "text-text-tertiary",
+              )}
+            />
+            <span className="truncate">{item.label}</span>
+          </Link>
+        ))}
         <Link
           to="/assistant/plugins"
+          aria-current={pluginsActive ? "page" : undefined}
           className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-[13px] transition-colors ${
             pluginsActive
               ? "bg-overlay-strong font-medium text-foreground"
@@ -693,6 +741,7 @@ export function AssistantSidebar({
         />
         <Link
           to="/assistant/approvals"
+          aria-current={approvalsActive ? "page" : undefined}
           className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-[13px] transition-colors ${
             approvalsActive
               ? "bg-overlay-strong font-medium text-foreground"
@@ -709,7 +758,6 @@ export function AssistantSidebar({
             </span>
           )}
         </Link>
-        <ComingSoonItem icon={Server} label="Devices & Nodes" />
         <ComingSoonItem icon={Activity} label="Activity" />
       </div>
 

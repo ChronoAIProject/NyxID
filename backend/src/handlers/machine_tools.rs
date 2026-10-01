@@ -1,4 +1,5 @@
 //! Native machine MCP adapter. No token, credential, output, or path is audited.
+use crate::services::assistant_links::AssistantPage;
 use crate::{
     AppState,
     errors::{AppError, AppResult},
@@ -139,9 +140,9 @@ pub async fn call(
             return Ok(json!({
                 "error":{
                     "code":12409,
-                    "message":"Saved-login typing is off on this single-user machine. Its commands run as the browser user and could read typed values. The owner can allow it in Nodes settings after reviewing the warning, or use the machine container or a separated VM."
+                    "message":"Saved-login typing is off on this single-user machine. Its commands run as the browser user and could read typed values. The owner can allow it in Assistant → Machines settings after reviewing the warning, or use the machine container or a separated VM."
                 },
-                "settings_path":"/nodes"
+                "settings_path": AssistantPage::Machines.path()
             }));
         }
         if !node.machine.as_ref().is_some_and(|p| p.saved_login_ready) {

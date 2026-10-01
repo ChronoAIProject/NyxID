@@ -12,6 +12,18 @@ pub struct Identity {
 }
 
 impl Identity {
+    /// Agent children inherit a namespace-denying filter. Browser/cua children
+    /// use `prepare` instead, so Chromium can establish its own sandbox.
+    pub fn prepare_agent(&self, command: &mut Command) -> Result<()> {
+        self.prepare(command)?;
+        #[cfg(target_os = "linux")]
+        unsafe {
+            // Runs after prepare's NO_NEW_PRIVS hook; only stack data/syscalls.
+            command.pre_exec(deny_agent_namespaces);
+        }
+        Ok(())
+    }
+
     pub fn resolve(name: Option<&str>) -> Result<Self> {
         let name = name.map(CString::new).transpose()?;
         let mut record: libc::passwd = unsafe { std::mem::zeroed() };
@@ -106,6 +118,73 @@ impl Identity {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn deny_agent_namespaces() -> std::io::Result<()> {
+    // seccomp_data: nr at 0, audit arch at 4, args[0] at 16. Supported Linux
+    // release architectures are little-endian x86_64 and aarch64. Checking arch
+    // also prevents a child switching syscall ABIs to bypass this filter.
+    #[cfg(target_arch = "x86_64")]
+    const ARCH: u32 = 0xc000003e;
+    #[cfg(target_arch = "aarch64")]
+    const ARCH: u32 = 0xc00000b7;
+    const NEW_NAMESPACES: u32 = 0x7e020080; // All CLONE_NEW*, including NEWTIME.
+    const fn ins(code: u16, jt: u8, jf: u8, k: u32) -> libc::sock_filter {
+        libc::sock_filter { code, jt, jf, k }
+    }
+    const LOAD: u16 = (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16;
+    const EQ: u16 = (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16;
+    const RET: u16 = (libc::BPF_RET | libc::BPF_K) as u16;
+    const DENY: u32 = libc::SECCOMP_RET_ERRNO | libc::EPERM as u32;
+    let mut filter = [
+        ins(LOAD, 0, 0, 4),
+        ins(EQ, 1, 0, ARCH),
+        ins(RET, 0, 0, DENY),
+        ins(LOAD, 0, 0, 0),
+        // Deny x32 syscall numbers as well as unsupported high-number ABIs.
+        ins(
+            (libc::BPF_JMP | libc::BPF_JGE | libc::BPF_K) as u16,
+            0,
+            1,
+            0x40000000,
+        ),
+        ins(RET, 0, 0, DENY),
+        ins(EQ, 0, 1, libc::SYS_unshare as u32),
+        ins(RET, 0, 0, DENY),
+        ins(EQ, 0, 1, libc::SYS_setns as u32),
+        ins(RET, 0, 0, DENY),
+        ins(EQ, 0, 1, libc::SYS_clone3 as u32),
+        ins(RET, 0, 0, libc::SECCOMP_RET_ERRNO | libc::ENOSYS as u32),
+        ins(EQ, 0, 3, libc::SYS_clone as u32),
+        ins(LOAD, 0, 0, 16),
+        ins(
+            (libc::BPF_JMP | libc::BPF_JSET | libc::BPF_K) as u16,
+            0,
+            1,
+            NEW_NAMESPACES,
+        ),
+        ins(RET, 0, 0, DENY),
+        ins(RET, 0, 0, libc::SECCOMP_RET_ALLOW),
+    ];
+    let program = libc::sock_fprog {
+        len: filter.len() as u16,
+        filter: filter.as_mut_ptr(),
+    };
+    // SAFETY: kernel copies the stack-owned BPF program during this syscall.
+    if unsafe {
+        libc::prctl(
+            libc::PR_SET_SECCOMP,
+            libc::SECCOMP_MODE_FILTER,
+            &program,
+            0,
+            0,
+        )
+    } != 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 pub fn request_env(command: &mut Command, values: &BTreeMap<String, String>) -> Result<()> {
     if values.len() > 64 || values.iter().map(|(k, v)| k.len() + v.len()).sum::<usize>() > 16384 {
         bail!("environment limit exceeded");
@@ -154,6 +233,45 @@ pub fn pin_cwd(command: &mut Command, directories: Vec<std::fs::File>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn agent_namespace_filter_is_inherited_and_allows_ordinary_children() {
+        let identity = Identity::resolve(None).unwrap();
+        let mut command = Command::new("/bin/sh");
+        identity.prepare_agent(&mut command).unwrap();
+        // Verify errno in the filtered child, without relying on the host's
+        // user-namespace setting. Invalid setns/clone3 normally return EBADF/EINVAL.
+        unsafe {
+            command.pre_exec(|| {
+                for (number, arg, expected) in [
+                    (libc::SYS_unshare, 0, libc::EPERM),
+                    (libc::SYS_setns, -1, libc::EPERM),
+                    (libc::SYS_clone3, 0, libc::ENOSYS),
+                    (
+                        libc::SYS_clone,
+                        libc::CLONE_NEWUSER as libc::c_long,
+                        libc::EPERM,
+                    ),
+                ] {
+                    if libc::syscall(number, arg, 0, 0, 0, 0) != -1
+                        || std::io::Error::last_os_error().raw_os_error() != Some(expected)
+                    {
+                        return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+                    }
+                }
+                Ok(())
+            });
+        }
+        let output = command
+            .args(["-c", "/bin/sh -c 'printf child-ok'"])
+            .output()
+            .await
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"child-ok");
+    }
+
     #[tokio::test]
     async fn children_do_not_inherit_node_environment_and_reject_reserved_input() {
         let identity = Identity::resolve(None).unwrap();

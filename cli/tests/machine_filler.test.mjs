@@ -125,9 +125,3 @@ sys.stdout.buffer.write(out.getvalue())`, root]);
   assert.equal(pin.extension_id,digest.toString('hex').replace(/[0-9a-f]/g,c=>String.fromCharCode(97+parseInt(c,16))));
   assert.equal(pin.version,JSON.parse(readFileSync(new URL('../resources/machine-browser/manifest.json',import.meta.url))).version);
 });
-
-// A real public asset is needed when the frontend is built without the CLI tree.
-test('setup seccomp download matches the CLI embedded profile', async () => {
- const root = new URL('../../', import.meta.url);
- assert.deepEqual(readFileSync(new URL('frontend/public/machine-seccomp.json', root)), readFileSync(new URL('cli/resources/machine-container/seccomp.json', root)));
-});

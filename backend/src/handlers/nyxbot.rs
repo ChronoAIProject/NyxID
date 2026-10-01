@@ -9,6 +9,7 @@
 //! orchestrator conversation per chat and sender, owned by the bot owner, with
 //! Full access. Only senders verified as the owner reach it; everyone else gets
 //! a short refusal and no turn.
+use crate::services::assistant_links::AssistantPage;
 use axum::{
     Json,
     body::{Body, Bytes},
@@ -4282,7 +4283,7 @@ pub(crate) async fn trigger_setup_link(
         })
         .await?;
     Ok(json!({
-        "url": format!("{}/automations?setup={id}",state.config.frontend_url.trim_end_matches('/')),
+        "url": AssistantPage::Automations { setup: Some(&id) }.url(&state.config.frontend_url),
         "note": "Open this page to create the webhook trigger and save its URL and one-time secret. Never paste the secret into chat. NyxID resumes this thread once it exists. Webhooks default to a dedicated thread. Choose home only with explicit owner consent: untrusted event text would remain in later full-authority owner turns, including private channel chats; webhook confirmation policy does not protect those later turns.",
     }))
 }

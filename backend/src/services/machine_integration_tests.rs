@@ -536,6 +536,109 @@ async fn machine_lookups_are_batched_and_gateway_binding_is_one_indexed_read() {
     db.drop().await.unwrap();
     f.state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn machine_catalog_discovery_projects_one_batch_of_referenced_and_allowed_ids() {
+    use crate::services::{assistant_authority_tests::connected, machine_gateway_service};
+    use mongodb::event::{EventHandler, command::CommandEvent};
+    use std::sync::{Arc, Mutex};
+    let f = orchestrator_fixture("machine_catalog_batch").await;
+    let connection = connected(
+        &f.state.db,
+        &f.owner,
+        "declared-model",
+        "https://model.invalid",
+    )
+    .await;
+    let mut catalog = crate::test_utils::test_auto_connected_catalog_service();
+    catalog.inference = Some(crate::models::downstream_service::ServiceInference {
+        wire_protocol: crate::models::downstream_service::InferenceWireProtocol::OpenaiCompletions,
+        model_list: false,
+        realtime: false,
+    });
+    let catalog_id = catalog.id.clone();
+    f.state
+        .db
+        .collection("downstream_services")
+        .insert_one(catalog)
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>("user_services")
+        .update_one(
+            doc! { "_id": &connection },
+            doc! { "$set": { "catalog_service_id": &catalog_id } },
+        )
+        .await
+        .unwrap();
+    let allowed_catalog = Uuid::new_v4().to_string();
+    f.state.db.collection::<bson::Document>("api_keys").update_one(
+        doc! { "_id": &f.chat.api_key_id },
+        doc! { "$set": { "allow_all_services": false, "allowed_service_ids": [&connection], "allowed_platform_service_ids": [&allowed_catalog] } },
+    ).await.unwrap();
+    // Unrelated active entries need not even have fields used by this listing.
+    f.state.db.collection::<bson::Document>("downstream_services").insert_many(
+        (0..64).map(|_| doc! { "_id": Uuid::new_v4().to_string(), "is_active": true, "description": "unrelated" }),
+    ).await.unwrap();
+    let commands = Arc::new(Mutex::new(Vec::new()));
+    let recorded = commands.clone();
+    let monitor = crate::test_utils::connect_test_database_with_command_handler(
+        "machine_catalog_monitor",
+        EventHandler::callback(move |event| {
+            if let CommandEvent::Started(event) = event {
+                recorded.lock().unwrap().push(event.command);
+            }
+        }),
+    )
+    .await
+    .unwrap();
+    let db = monitor.client().database(f.state.db.name());
+    commands.lock().unwrap().clear();
+    let rows = machine_gateway_service::services(&db, &f.owner, &f.chat.api_key_id)
+        .await
+        .unwrap();
+    assert!(
+        rows.iter()
+            .any(|row| row.id == connection && row.inference.is_some())
+    );
+    let reads: Vec<_> = commands
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|command| {
+            command.get_str("find") == Ok("downstream_services")
+                && command
+                    .get_document("projection")
+                    .is_ok_and(|projection| projection.contains_key("credential_present"))
+        })
+        .cloned()
+        .collect();
+    assert_eq!(reads.len(), 1);
+    let ids = reads[0]
+        .get_document("filter")
+        .unwrap()
+        .get_document("_id")
+        .unwrap()
+        .get_array("$in")
+        .unwrap();
+    assert_eq!(ids.len(), 2); // referenced catalog + explicitly allowed catalog
+    assert!(ids.contains(&bson::Bson::String(catalog_id)));
+    assert!(ids.contains(&bson::Bson::String(allowed_catalog)));
+    let projection = reads[0].get_document("projection").unwrap();
+    for field in [
+        "description",
+        "base_url",
+        "credential_encrypted",
+        "billing",
+        "token_exchange_config",
+    ] {
+        assert!(!projection.contains_key(field));
+    }
+    assert!(projection.contains_key("credential_present"));
+    monitor.drop().await.unwrap();
+    f.state.db.drop().await.unwrap();
+}
 #[tokio::test]
 async fn machine_saved_logins_are_encrypted_write_only_human_only_and_owner_scoped() {
     use crate::handlers::{
@@ -1139,7 +1242,7 @@ async fn machine_setup_tools_and_owner_cards_never_contain_registration_credenti
         link["url"]
             .as_str()
             .unwrap()
-            .contains("/machines/new?setup=")
+            .contains("/assistant/machines/new?setup=")
     );
     let pair = super::machine_setup_service::initiate(
         &f.state.db,

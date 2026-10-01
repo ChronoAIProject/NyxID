@@ -658,7 +658,7 @@ impl Runtime {
         }
         {
             let mut command = tokio::process::Command::new(std::env::current_exe()?);
-            self.identity.prepare(&mut command)?;
+            self.identity.prepare_agent(&mut command)?;
             command
                 .args(["node", "machine-worker"])
                 .kill_on_drop(true)

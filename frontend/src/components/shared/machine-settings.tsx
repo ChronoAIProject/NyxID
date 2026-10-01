@@ -2,7 +2,10 @@ import { useState } from "react";
 import { useAppForm } from "@/components/ui/form";
 import { Link } from "@tanstack/react-router";
 import { useMachineSettings } from "@/hooks/use-machines";
-import { useNyxBotAgents } from "@/hooks/use-nyxbot-agents";
+import {
+  useNyxBotAgents,
+  useSetNyxBotAgentGrants,
+} from "@/hooks/use-nyxbot-agents";
 import {
   MACHINE_SAFETY,
   SINGLE_USER_WARNING,
@@ -30,6 +33,7 @@ export function MachineSettings({
 }) {
   const settings = useMachineSettings(node.id);
   const agents = useNyxBotAgents();
+  const grants = useSetNyxBotAgentGrants();
   const form = useAppForm({
     defaultValues: {
       confirm: node.machine_confirm ?? "none",
@@ -91,7 +95,7 @@ export function MachineSettings({
         {machine.computer ? (
           <Button asChild>
             <Link
-              to="/machines/$nodeId/desktop"
+              to="/assistant/machines/$nodeId/desktop"
               params={{ nodeId: node.id }}
               search={{ conversation_id: undefined }}
             >
@@ -99,16 +103,51 @@ export function MachineSettings({
             </Link>
           </Button>
         ) : null}
-        <p>
-          Agents: NyxBot
-          {agents.data?.agents
-            .filter(
-              (agent) =>
-                agent.kind !== "nyxbot" && agent.machines?.includes(node.id),
-            )
-            .map((agent) => `, ${agent.name}`)
-            .join("")}
-        </p>
+        {canManage ? (
+          <fieldset
+            className="space-y-2"
+            disabled={!canManage || grants.isPending}
+          >
+            <legend className="mb-2 font-medium">Specialist access</legend>
+            <p className="text-muted-foreground">
+              NyxBot can use every machine you own or administer.
+            </p>
+            {agents.isPending ? (
+              <p role="status">Loading specialists…</p>
+            ) : null}
+            {agents.data?.agents
+              .filter(
+                (agent) =>
+                  agent.kind !== "nyxbot" && agent.status !== "destroyed",
+              )
+              .map((agent) => (
+                <label key={agent.id} className="flex items-center gap-2">
+                  <Checkbox
+                    checked={agent.machines?.includes(node.id) ?? false}
+                    onCheckedChange={(checked) =>
+                      grants.mutate({
+                        id: agent.id,
+                        services: agent.services,
+                        account_read: agent.account_read,
+                        machines:
+                          checked === true
+                            ? [...new Set([...(agent.machines ?? []), node.id])]
+                            : (agent.machines ?? []).filter(
+                                (id) => id !== node.id,
+                              ),
+                      })
+                    }
+                  />
+                  {agent.display_name ?? agent.name}
+                </label>
+              ))}
+            {agents.error || grants.error ? (
+              <p role="alert" className="text-destructive">
+                {agents.error?.message ?? grants.error?.message}
+              </p>
+            ) : null}
+          </fieldset>
+        ) : null}
         <p className="text-muted-foreground">{MACHINE_SAFETY}</p>
         {canManage ? (
           <>
@@ -181,7 +220,9 @@ export function MachineSettings({
           </>
         ) : null}
         <p>
-          <Link to="/saved-logins">Manage saved logins</Link>
+          <Link to="/assistant/machines" search={{ tab: "logins" }}>
+            Manage saved logins
+          </Link>
         </p>
       </div>
     </DetailSection>

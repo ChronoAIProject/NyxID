@@ -102,7 +102,7 @@ impl Runtime {
             };
             let header = Zeroizing::new(serde_json::to_vec(&request)?);
             let mut command = tokio::process::Command::new(std::env::current_exe()?);
-            self.identity.prepare(&mut command)?;
+            self.identity.prepare_agent(&mut command)?;
             command
                 .args(["node", "machine-transfer-worker"])
                 .stdin(std::process::Stdio::piped())
@@ -199,7 +199,7 @@ impl Runtime {
             bail!("file metadata limit exceeded");
         }
         let mut command = tokio::process::Command::new(std::env::current_exe()?);
-        self.identity.prepare(&mut command)?;
+        self.identity.prepare_agent(&mut command)?;
         command
             .args(["node", "machine-transfer-worker"])
             .kill_on_drop(true)

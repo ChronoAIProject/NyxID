@@ -1,6 +1,7 @@
 //! Native NyxBot tools in the reserved `nyxid__` namespace. Team and channel
 //! tools are listed and callable only with a NyxBot thread key; memory tools
 //! belong to every agent. Dispatch lives in `handlers::assistant_team`.
+use crate::services::assistant_links::AssistantPage;
 use serde_json::{Value, json};
 
 use crate::{
@@ -47,9 +48,11 @@ pub const TOOL_NAMES: &[&str] = &[
 /// the chats it answers that allow it.
 pub const AGENT_TOOL_NAMES: &[&str] = &["remember", "forget", "post_to_chat"];
 
-/// NyxID pages `nyxid__settings_link` can open, and their paths.
+/// NyxID and assistant workspace pages `nyxid__settings_link` can open, and their paths.
 pub const SETTINGS_AREAS: &[&str] = &[
     "saved_logins",
+    "automations",
+    "machines",
     "create_agent_key",
     "agent_keys",
     "add_service",
@@ -98,7 +101,9 @@ pub fn settings_path(area: &str, service: Option<&str>, org_id: Option<&str>) ->
         "profile" | "security" | "sessions" | "mcp" | "privacy" => {
             format!("/settings?tab={area}")
         }
-        "saved_logins" => "/saved-logins".into(),
+        "saved_logins" => AssistantPage::SavedLogins.path(),
+        "machines" => AssistantPage::Machines.path(),
+        "automations" => AssistantPage::Automations { setup: None }.path(),
         "billing" => "/billing".into(),
         "organizations" => match org_id {
             Some(id) => format!("/orgs/{}", encode(id)),
@@ -499,14 +504,14 @@ fn description(name: &str) -> &'static str {
         "settings_link" => {
             "Link the user to the exact NyxID page for a configuration you cannot or should not \
             do in chat: creating an agent key (its secret is shown there), security (password, \
-            MFA), profile, sessions, billing, organizations, triggers, developer apps, devices \
-            and more. Webhook prefill defaults to dedicated threads; choose home only with \
+            MFA), profile, sessions, billing, organizations, automations, machines, saved_logins, developer apps, devices \
+            and more. Automations, machines and saved logins live in the assistant workspace; triggers opens developer secrets and replay. Webhook prefill defaults to dedicated threads; choose home only with \
             explicit owner consent because untrusted event text persists into later \
             full-authority owner turns outside webhook confirmations. Use your nyxid__ tools \
             directly for what they cover."
         }
         "machine_setup_link" => {
-            "Help the owner set up a machine for coding, files or computer use. Returns a prefilled one-page setup link; credentials never enter chat. Recommend a VM or container. End the turn and wait for the connected event, then verify with machine_list and a harmless command and apply the requested specialist grant."
+            "Help the owner set up a machine for coding, files or computer use. Returns a prefilled Assistant → Machines setup link; credentials never enter chat. Recommend a VM or container. End the turn and wait for the connected event, then verify with machine_list and a harmless command and apply the requested specialist grant."
         }
         "machine_pair" => {
             "Pair a machine using the short code printed by nyxid node setup. Raises an owner-only confirmation card showing hostname, OS, IP and capabilities. The code alone authorizes nothing. Never ask for or accept a setup token in chat."
@@ -697,6 +702,15 @@ mod tests {
             assert!(settings_path(area, None, None).is_some(), "{area}");
         }
         assert_eq!(settings_path("unknown", None, None), None);
+        for (area, expected) in [
+            ("automations", "/assistant/automations"),
+            ("machines", "/assistant/machines"),
+            ("saved_logins", "/assistant/machines?tab=logins"),
+            ("triggers", "/triggers"),
+        ] {
+            assert_eq!(settings_path(area, None, None).as_deref(), Some(expected));
+        }
+
         assert_eq!(
             settings_path("add_service", Some("api-github"), None).as_deref(),
             Some("/keys?tab=services&action=add-service&slug=api-github")

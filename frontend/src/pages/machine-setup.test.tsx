@@ -26,7 +26,10 @@ vi.mock("@/components/shared/org-scope-select", () => ({
 }));
 vi.mock("@/hooks/use-public-config", () => ({
   usePublicConfig: () => ({
-    data: { node_ws_url: "wss://nyxid.example/api/v1/nodes/ws" },
+    data: {
+      node_ws_url: "wss://nyxid.example/api/v1/nodes/ws",
+      version: "0.39.0",
+    },
   }),
 }));
 vi.mock("@/hooks/use-nyxbot-agents", () => ({
@@ -76,6 +79,10 @@ it("shows one reviewed command only on the private setup page and removes it whe
     expect(screen.getByText(/docker run -d/)).toHaveTextContent(token),
   );
   expect(JSON.stringify(client.getQueryCache().getAll())).not.toContain(token);
+  expect(screen.getByText(/docker run -d/)).toHaveTextContent(
+    "nyxid-node-machine:0.39.0",
+  );
+  expect(screen.getByText(/docker run -d/)).not.toHaveTextContent(":latest");
   expect(screen.getByText(/Do not paste it into chat/)).toBeInTheDocument();
   mock.setup = {
     id: "intent",
@@ -132,4 +139,9 @@ it("quotes setup credentials and URLs, installs the CLI if missing and preserves
   expect(() =>
     machineSetupCommand(choices, "not-a-token", "wss://example.test"),
   ).toThrow();
+  for (const version of [undefined, "latest", "1.2.3; malicious"]) {
+    expect(() =>
+      machineSetupCommand(choices, token, "wss://example.test", version),
+    ).toThrow();
+  }
 });

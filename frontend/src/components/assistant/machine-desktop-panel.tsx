@@ -318,7 +318,7 @@ export function MachineDesktopPanel({
           aria-label="Pop out desktop"
           onClick={() =>
             window.open(
-              `/machines/${encodeURIComponent(nodeId)}/desktop${conversationId ? `?conversation_id=${encodeURIComponent(conversationId)}` : ""}`,
+              `/assistant/machines/${encodeURIComponent(nodeId)}/desktop${conversationId ? `?conversation_id=${encodeURIComponent(conversationId)}` : ""}`,
               "_blank",
               "noopener,noreferrer",
             )

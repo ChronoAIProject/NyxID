@@ -233,7 +233,7 @@ pub async fn run(mut args: Setup) -> Result<()> {
     }
     if !separated {
         eprintln!(
-            "Saved-login typing is off until the owner allows it in Nodes settings. Agent commands share the browser user's access and could read typed values. The machine container or separated VM is recommended."
+            "Saved-login typing is off until the owner allows it in Assistant → Machines settings. Agent commands share the browser user's access and could read typed values. The machine container or separated VM is recommended."
         );
     }
     if !args.no_daemon {
@@ -245,7 +245,7 @@ pub async fn run(mut args: Setup) -> Result<()> {
         }
     }
     eprintln!(
-        "Machine setup complete. The Nodes page shows connection progress; NyxBot resumes when capabilities are reported."
+        "Machine setup complete. The Assistant → Machines page shows connection progress; NyxBot resumes when capabilities are reported."
     );
     Ok(())
 }

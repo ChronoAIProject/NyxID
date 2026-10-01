@@ -1322,6 +1322,7 @@ struct PoolExactMember {
 
 #[derive(Clone)]
 struct PoolExecutionAuthority {
+    pool_id: String,
     scope: service_pool_health_service::HealthScope,
     member_slug: String,
 }
@@ -2349,6 +2350,7 @@ async fn proxy_request_by_selected_member(
     if let Some(mut resolved) = resolved {
         let mut request = request;
         if let Some(exact) = exact {
+            let pool_id = exact.selection.pool_id.clone();
             resolved.pool_selection = Some(exact.selection);
             let scope = pool_scope_for_resolution(
                 state,
@@ -2369,6 +2371,7 @@ async fn proxy_request_by_selected_member(
                 ));
             }
             request.extensions_mut().insert(PoolExecutionAuthority {
+                pool_id,
                 scope,
                 member_slug: slug.to_owned(),
             });
@@ -2506,14 +2509,20 @@ pub(crate) async fn proxy_request_by_slug_inner(
     }
 
     if let Some(pool) = selected_pool {
-        if request
+        if let Some(ingress) = request
             .extensions()
             .get::<crate::services::machine_gateway_service::Ingress>()
-            .is_some()
         {
-            return Err(AppError::ApiKeyScopeForbidden(
-                "Machine gateways require a declared service connection, not a pool".into(),
-            ));
+            if !ingress.buffered(request.headers()) {
+                return Err(AppError::ApiKeyScopeForbidden(
+                    "Streamed machine uploads cannot use a pool; declare a concrete service connection".into(),
+                ));
+            }
+            if ingress.declared_id != pool.id {
+                return Err(AppError::ApiKeyScopeForbidden(
+                    "Declare this pool in services on nyx__machine_exec".into(),
+                ));
+            }
         }
         if pool.strategy == crate::models::service_pool::PoolStrategy::Priority {
             return Box::pin(proxy_request_through_pool(
@@ -3179,12 +3188,13 @@ async fn execute_proxy_inner(
         .get::<pool_attempt::AttemptContext>()
         .cloned();
     let is_pool_attempt = request.extensions().get::<PoolAttemptMarker>().is_some();
-    if machine_ingress.is_some() && is_pool_attempt {
-        // A machine job declares an exact connection, not a pool. Its body can
-        // be a one-shot stream and must never be replayed on another member.
+    if is_pool_attempt
+        && machine_ingress
+            .as_ref()
+            .is_some_and(|ingress| !ingress.buffered(request.headers()))
+    {
         return Err(AppError::ApiKeyScopeForbidden(
-            "Machine gateways require a declared service connection, not a pool member attempt"
-                .into(),
+            "Streamed machine uploads cannot be replayed through pool members".into(),
         ));
     }
     if let Some(prepared) = pool_accounting
@@ -3544,9 +3554,18 @@ async fn execute_proxy_inner(
     };
 
     if let Some(ingress) = &machine_ingress {
-        let resolved_id = resolved_user_service_id
-            .as_deref()
-            .unwrap_or(&target.service.id);
+        let resolved_id = if let Some(authority) = &pool_authority {
+            if !ingress.buffered(request.headers()) {
+                return Err(AppError::ApiKeyScopeForbidden(
+                    "Streamed machine uploads cannot use a pool member".into(),
+                ));
+            }
+            authority.pool_id.as_str()
+        } else {
+            resolved_user_service_id
+                .as_deref()
+                .unwrap_or(&target.service.id)
+        };
         if resolved_id != ingress.declared_id {
             return Err(AppError::ApiKeyScopeForbidden(
                 "The gateway may only execute the service declared for this job".into(),

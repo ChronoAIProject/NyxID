@@ -45,7 +45,7 @@ export function AgentAutomations({ agentId }: { readonly agentId: string }) {
       ))}
       <Link
         className="text-[12px] text-primary underline"
-        to="/automations"
+        to="/assistant/automations"
         search={{ agent: agentId }}
       >
         Manage automations ({rows.length})

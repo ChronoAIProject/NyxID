@@ -88,7 +88,7 @@ jobs:
           # nested lists in js-yaml, which paths-filter does not flatten.
           filters: |
             machine:
-              - 'frontend/public/machine-seccomp.json'
+              - 'frontend/scripts/machine-seccomp.ts'
               - 'machine/**'
               - 'cli/src/node/machine/**'
               - 'cli/resources/machine-browser/**'

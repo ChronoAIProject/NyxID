@@ -340,7 +340,6 @@ export function NodesPage() {
         actions={
           <div className="flex items-center gap-3">
             <ViewToggle viewMode={viewMode} onViewModeChange={setViewMode} />
-            <AddCtaButton label="Add a machine" onClick={() => void navigate({ to: "/machines/new", search: { setup: undefined } })} />
             <RegisterNodeDialog onRegistered={handleRegistered} />
           </div>
         }

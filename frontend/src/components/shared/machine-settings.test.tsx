@@ -3,6 +3,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { MachineSettings } from "./machine-settings";
 import type { NodeInfo } from "@/types/nodes";
 const save = vi.hoisted(() => vi.fn());
+const grant = vi.hoisted(() => vi.fn());
 vi.mock("@tanstack/react-router", () => ({
   Link: ({ children }: { children: React.ReactNode }) => <a>{children}</a>,
 }));
@@ -10,6 +11,7 @@ vi.mock("@/hooks/use-machines", () => ({
   useMachineSettings: () => ({ mutate: save }),
 }));
 vi.mock("@/hooks/use-nyxbot-agents", () => ({
+  useSetNyxBotAgentGrants: () => ({ mutate: grant }),
   useNyxBotAgents: () => ({
     data: {
       agents: [
@@ -17,7 +19,9 @@ vi.mock("@/hooks/use-nyxbot-agents", () => ({
           id: "specialist",
           name: "Coder",
           kind: "specialist",
-          machines: ["node"],
+          machines: ["node", "other"],
+          services: ["github"],
+          account_read: true,
         },
       ],
     },
@@ -46,7 +50,7 @@ const node = {
 } as NodeInfo;
 it("requires the owner to acknowledge the single-user warning before enabling filling", () => {
   render(<MachineSettings node={node} canManage />);
-  expect(screen.getByText(/Agents: NyxBot, Coder/)).toBeInTheDocument();
+  expect(screen.getByRole("checkbox", { name: "Coder" })).toBeChecked();
   expect(
     screen.getByText(/prompt-injected agent could read/),
   ).toBeInTheDocument();
@@ -95,4 +99,17 @@ it("does not label separated machines as non-isolated", () => {
     />,
   );
   expect(screen.queryByText("Not isolated")).not.toBeInTheDocument();
+});
+
+it("changes one machine grant while preserving the specialist services and other machines", () => {
+  render(<MachineSettings node={node} canManage />);
+  fireEvent.click(screen.getByRole("checkbox", { name: "Coder" }));
+  expect(grant).toHaveBeenCalledWith({
+    id: "specialist",
+    services: ["github"],
+    account_read: true,
+    machines: ["other"],
+  });
+  expect(grant.mock.calls[0]?.[0]).not.toHaveProperty("logins");
+  expect(grant.mock.calls[0]?.[0]).not.toHaveProperty("guest_access");
 });

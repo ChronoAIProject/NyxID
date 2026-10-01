@@ -108,13 +108,19 @@ export function MachineSetupPage() {
     setError(undefined);
     setIssuing(true);
     try {
+      if (choices.where === "docker" && !config.data?.version)
+        throw new Error(
+          "Server release version is unavailable. Reload before creating the Docker command.",
+        );
       const row = id ? { id } : await create.mutateAsync(choices);
       setId(row.id);
       const issued = await issueMachineSetup(row.id, choices);
       const wsUrl =
         config.data?.node_ws_url ??
         `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/api/v1/nodes/ws`;
-      setCommand(machineSetupCommand(choices, issued.token, wsUrl));
+      setCommand(
+        machineSetupCommand(choices, issued.token, wsUrl, config.data?.version),
+      );
       issued.token = "";
     } catch (cause) {
       setError(
@@ -404,6 +410,11 @@ function SetupSafety() {
         The Docker command downloads NyxID’s seccomp profile and passes
         --security-opt seccomp to enable Chromium’s user-namespace sandbox. It
         grants no additional container capabilities.
+      </p>
+      <p className="text-[12px] text-muted-foreground">
+        The image is pinned to this server’s release. After a server upgrade,
+        recreate the container with the matching image and the same identity and
+        workspace volumes to keep this machine connected.
       </p>
     </div>
   );

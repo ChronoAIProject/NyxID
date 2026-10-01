@@ -3,7 +3,7 @@
 use crate::{
     errors::{AppError, AppResult},
     models::{
-        downstream_service::{DownstreamService, GitHttp, InferenceWireProtocol, ServiceInference},
+        downstream_service::{GitHttp, InferenceWireProtocol, ServiceInference},
         machine_job::DeclaredService,
     },
     services::{catalog_discovery_service, key_service, platform_key_service},
@@ -11,12 +11,63 @@ use crate::{
 use futures::TryStreamExt;
 use mongodb::{Database, bson::doc};
 use nyxid_machine::gateway::{Environment, GitRewrite, Variable};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+
+#[derive(serde::Deserialize)]
+struct CatalogMetadata {
+    #[serde(rename = "_id")]
+    id: String,
+    inference: Option<ServiceInference>,
+    git_http: Option<GitHttp>,
+    #[serde(flatten)]
+    access: platform_key_service::PlatformKeyMetadata,
+}
+
+fn catalog_projection() -> mongodb::bson::Document {
+    doc! {
+        "_id": 1,
+        "slug": 1,
+        "provider_config_id": 1,
+        "inference": 1,
+        "git_http": 1,
+        "platform_key": 1,
+        "is_active": 1,
+        "service_type": 1,
+        "visibility": 1,
+        "service_category": 1,
+        "auth_method": 1,
+        "requires_user_credential": 1,
+        "credential_present": { "$gt": [
+            { "$cond": [
+                { "$isArray": "$credential_encrypted" },
+                { "$size": "$credential_encrypted" },
+                { "$binarySize": { "$ifNull": ["$credential_encrypted", mongodb::bson::Binary {
+                    subtype: mongodb::bson::spec::BinarySubtype::Generic, bytes: Vec::new(),
+                }] } },
+            ] }, 0,
+        ] },
+    }
+}
 
 #[derive(Clone)]
 pub struct Ingress {
     pub declared_id: String,
     pub git: Option<GitHttp>,
+}
+
+impl Ingress {
+    /// Only bodies known to use bounded materialization can enter a pool.
+    /// Opaque uploads and git packs are one-shot streams, even for an AI pool.
+    pub fn buffered(&self, headers: &axum::http::HeaderMap) -> bool {
+        self.git.is_none() && structured_body(headers)
+    }
+}
+
+fn structured_body(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.contains("json") || value.contains("x-www-form-urlencoded"))
 }
 
 pub const GIT_MAX_BYTES: usize = 16 * 1024 * 1024 * 1024;
@@ -39,27 +90,66 @@ pub async fn services(
     let key = key_service::get_api_key(db, owner, key_id).await?;
     let allowed = key_service::effective_allowed_service_ids(db, &key).await?;
     let grants = platform_key_service::OwnerGrants::load_for_listing(db, owner).await?;
-    let rows = catalog_discovery_service::agent_services_with_memberships(
+    let mut rows = catalog_discovery_service::agent_services_with_memberships(
         db,
         owner,
         (!key.allow_all_services).then_some(allowed.as_slice()),
         grants.memberships(),
     )
     .await?;
-    let catalog: Vec<DownstreamService> = db
+    // The catalog's inventory snapshot includes admin-only org connections
+    // visible to members. Machine declarations require execution authority.
+    rows.retain(|row| {
+        row.user_id == owner
+            || grants.memberships().iter().any(|membership| {
+                membership.org_user_id == row.user_id
+                    && super::user_service_service::role_can_proxy_service(membership.role, row)
+            })
+    });
+    let instance_ids: HashSet<_> = rows.iter().map(|row| row.id.as_str()).collect();
+    let catalog_ids: HashSet<_> = rows
+        .iter()
+        .filter_map(|row| row.catalog_service_id.as_deref())
+        .chain(
+            allowed
+                .iter()
+                .map(String::as_str)
+                .filter(|id| !instance_ids.contains(id)),
+        )
+        .collect();
+    let catalog: Vec<CatalogMetadata> = db
         .collection(crate::models::downstream_service::COLLECTION_NAME)
-        .find(doc! { "is_active": true, "service_type": { "$ne": "ssh" } })
+        .find(doc! {
+            "_id": { "$in": catalog_ids.into_iter().collect::<Vec<_>>() },
+            "is_active": true,
+            "service_type": { "$ne": "ssh" },
+        })
+        .projection(catalog_projection())
         .await?
         .try_collect()
         .await?;
     let providers = platform_key_service::load_providers(db).await?;
-    let available = |service: &DownstreamService| {
+    let available = |service: &CatalogMetadata| {
         let provider = service
+            .access
             .provider_config_id
             .as_ref()
             .and_then(|id| providers.get(id));
-        platform_key_service::available_with_grants(service, provider, owner, &grants)
+        platform_key_service::available_metadata_with_grants(
+            &service.access,
+            provider,
+            owner,
+            &grants,
+        )
     };
+    let metadata_by_id: HashMap<_, _> = catalog.iter().map(|row| (row.id.as_str(), row)).collect();
+    let pools = super::service_pool_routing::agent_pools_with_services(
+        db,
+        owner,
+        &rows,
+        (!key.allow_all_nodes).then_some(key.allowed_node_ids.as_slice()),
+    )
+    .await?;
     let mut result = Vec::new();
     let mut seen = HashSet::new();
     let mut rows = rows;
@@ -71,7 +161,7 @@ pub async fn services(
         let metadata = row
             .catalog_service_id
             .as_ref()
-            .and_then(|id| catalog.iter().find(|entry| &entry.id == id));
+            .and_then(|id| metadata_by_id.get(id.as_str()).copied());
         let platform = platform_key_service::binding(&row) == "platform";
         if platform && !metadata.is_some_and(available) {
             continue;
@@ -94,17 +184,51 @@ pub async fn services(
     for entry in &catalog {
         if (key.allow_all_services || allowed.contains(&entry.id))
             && available(entry)
-            && !seen.contains(&entry.slug)
+            && !seen.contains(&entry.access.slug)
         {
-            seen.insert(entry.slug.clone());
+            seen.insert(entry.access.slug.clone());
             result.push(AvailableService {
                 user_service: false,
                 id: entry.id.clone(),
-                slug: entry.slug.clone(),
+                slug: entry.access.slug.clone(),
                 inference: entry.inference.clone(),
                 git: None,
             });
         }
+    }
+    for pool in pools {
+        if seen.contains(&pool.slug) {
+            continue;
+        }
+        // Members have already passed the shared instance ACL and key/node
+        // allowlists. Apply the same live platform ACL as ordinary declarations.
+        let members: Vec<_> = pool
+            .members
+            .iter()
+            .filter(|member| member.enabled)
+            .filter_map(|member| result.iter().find(|row| row.id == member.user_service_id))
+            .collect();
+        if members.is_empty() {
+            continue;
+        }
+        let inference =
+            if pool.member_contract == crate::models::service_pool::PoolMemberContract::AiChat {
+                Some(ServiceInference {
+                    wire_protocol: InferenceWireProtocol::OpenaiCompletions,
+                    model_list: false,
+                    realtime: false,
+                })
+            } else {
+                members.first().and_then(|row| row.inference.clone())
+            };
+        seen.insert(pool.slug.clone());
+        result.push(AvailableService {
+            user_service: false,
+            id: pool.id,
+            slug: pool.slug,
+            inference,
+            git: None,
+        });
     }
     Ok(result)
 }
@@ -275,11 +399,7 @@ pub fn can_stream(
     if git {
         return true;
     }
-    let structured = headers
-        .get("content-type")
-        .and_then(|h| h.to_str().ok())
-        .is_some_and(|v| v.contains("json") || v.contains("x-www-form-urlencoded"));
-    !structured
+    !structured_body(headers)
         && matches!(
             target.auth_method.as_str(),
             "none"

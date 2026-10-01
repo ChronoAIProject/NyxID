@@ -1,3 +1,4 @@
+use crate::services::assistant_links::AssistantPage;
 use crate::{
     AppState,
     errors::{AppError, AppResult},
@@ -162,11 +163,7 @@ pub async fn request_pair(
         body.capabilities,
     )
     .await?;
-    let url = format!(
-        "{}/machines/pair?code={}",
-        state.config.frontend_url.trim_end_matches('/'),
-        pair.code
-    );
+    let url = AssistantPage::MachinePair { code: &pair.code }.url(&state.config.frontend_url);
     Ok(Json(PairResponse {
         code: pair.code,
         device: pair.device,
@@ -296,7 +293,11 @@ pub async fn link_tool(
     )
     .await?;
     Ok((
-        json!({"url":format!("{}/machines/new?setup={}",state.config.frontend_url.trim_end_matches('/'),row.id),"choices":row.choices,"note":"Give the owner this link and end your turn. Recommend a VM or container. NyxID wakes this thread when the machine connects; then use nyx__machine_list and a harmless check such as git --version, apply the requested specialist grant, and continue. Setup credentials appear only on the owner's page, never in chat."}),
+        json!({
+            "url": AssistantPage::MachineSetup { setup: &row.id }.url(&state.config.frontend_url),
+            "choices": row.choices,
+            "note": "Give the owner this link and end your turn. Recommend a VM or container. NyxID wakes this thread when the machine connects; then use nyx__machine_list and a harmless check such as git --version, apply the requested specialist grant, and continue. Setup credentials appear only on the owner's page, never in chat."
+        }),
         false,
     ))
 }

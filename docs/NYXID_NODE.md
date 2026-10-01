@@ -664,9 +664,11 @@ frame to disk. Linux capture stays in memory.
 ### Container and separated Linux VM
 
 The published image is
-`ghcr.io/chronoaiproject/nyxid/nyxid-node-machine:latest`. The Nodes setup page
-provides the complete `docker run`. `nyxid node docker … --machine` also selects
-this image. Persist both `/workspace` and `/var/lib/nyxid-machine`; without
+`ghcr.io/chronoaiproject/nyxid/nyxid-node-machine:<server-version>`. The Assistant → Machines setup page
+reads the server release from public config and provides the complete, pinned
+`docker run`. The CLI `nyxid node docker … --machine` defaults to `latest`;
+use the setup page command to pin the deployed server release. See
+[container upgrades](MACHINE_NODES.md#rollout-and-container-upgrades) before updating. Persist both `/workspace` and `/var/lib/nyxid-machine`; without
 `NYXID_NODE_TOKEN` the first boot prints a pairing code in its logs. It contains
 Chromium, Xvfb, Openbox, git, curl, Python, Node.js, ripgrep and build tools.
 The supervisor drops privileges: shell/file tools use `agent`, while Chromium
@@ -741,7 +743,7 @@ common encodings are scrubbed from machine text, file and job outputs.
 Setup requests administrator access once for the policies. Declining (or using
 `--skip-browser-policy`) leaves filling unavailable and preserves other machine
 features. On single-user hosts, filling is additionally off until the owner
-acknowledges the warning and enables it in Nodes settings: agent commands run
+acknowledges the warning and enables it in Assistant → Machines settings: agent commands run
 as the same user as the browser and could read typed values. Prefer the
 container or a separated VM. Only the human owner can change this setting or
 `machine_confirm` (`none`, `changes`, `all`). A login can also require a card
@@ -778,7 +780,7 @@ Prefer the machine container or a VM installed with `--separate-users`. On a
 single-user machine with shell enabled, commands can read the node's config,
 stored credentials, signing secret and node token. Workspace limits apply to
 file tools and working directories, not the shell. Setup/status and the Nodes
-page show this warning; Nodes keeps a Not isolated badge. The owner may proceed.
+page show this warning; Machines keeps a Not isolated badge. The owner may proceed.
 
 Chromium runs with its renderer sandbox enabled. Docker's default seccomp
 profile blocks Chromium's namespace setup; use the versioned profile shipped at
@@ -804,5 +806,5 @@ and sends a JPEG dirty rectangle only when pixels change. Sequence-bound deltas
 recover with a full frame after loss; idle bandwidth is zero. Pixel buffers stay
 in memory and only reach owner browser sockets. Takeover cancels in-flight
 agent operations immediately, including file transfers, without capture locks.
-See [the validation report](MACHINE_NODES_VALIDATION.md) for measured frame rate,
+See [validation and measurements](MACHINE_NODES.md#validation-and-measurements) for measured frame rate,
 input latency, takeover latency and the exact macOS benchmark command.

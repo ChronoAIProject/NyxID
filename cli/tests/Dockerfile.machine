@@ -6,7 +6,5 @@ RUN apt-get update && apt-get install -y --no-install-recommends libnss3-tools n
 COPY cli/tests/machine_container_e2e.mjs /test/machine_container_e2e.mjs
 COPY cli/tests/machine_filler.test.mjs /test/machine_filler.test.mjs
 COPY cli/resources/machine-browser/ /resources/machine-browser/
-COPY frontend/public/machine-seccomp.json /frontend/public/machine-seccomp.json
-COPY cli/resources/machine-container/seccomp.json /cli/resources/machine-container/seccomp.json
 RUN node --test /test/machine_filler.test.mjs
 ENTRYPOINT ["node", "/test/machine_container_e2e.mjs"]

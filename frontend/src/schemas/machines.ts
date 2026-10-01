@@ -61,6 +61,7 @@ export function machineSetupCommand(
   choices: MachineChoices,
   token: string,
   wsUrl: string,
+  version?: string,
 ): string {
   if (!/^nyx_nreg_[a-f0-9]{64}$/.test(token))
     throw new Error("Invalid setup credential");
@@ -68,9 +69,13 @@ export function machineSetupCommand(
     .map((capability) => `--${capability}`)
     .join(" ");
   if (choices.where === "docker") {
+    if (!version || !/^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/.test(version))
+      throw new Error(
+        "Server release version is unavailable. Reload before creating the Docker command.",
+      );
     const profileUrl = new URL("/machine-seccomp.json", window.location.origin)
       .href;
-    return `(nyx_machine_dir=$(mktemp -d) && trap 'rm -rf "$nyx_machine_dir"' EXIT && curl -fsSL ${shellQuote(profileUrl)} -o "$nyx_machine_dir/seccomp.json" && docker run -d --security-opt "seccomp=$nyx_machine_dir/seccomp.json" --name ${shellQuote(choices.name)} --restart unless-stopped --shm-size=1g -v ${shellQuote(`${choices.name}-identity:/var/lib/nyxid-machine`)} -v ${shellQuote(`${choices.name}-workspace:/workspace`)} -e ${shellQuote(`NYXID_NODE_TOKEN=${token}`)} -e ${shellQuote(`NYXID_NODE_URL=${wsUrl}`)} ghcr.io/chronoaiproject/nyxid/nyxid-node-machine:latest ${args})`;
+    return `(nyx_machine_dir=$(mktemp -d) && trap 'rm -rf "$nyx_machine_dir"' EXIT && curl -fsSL ${shellQuote(profileUrl)} -o "$nyx_machine_dir/seccomp.json" && docker run -d --security-opt "seccomp=$nyx_machine_dir/seccomp.json" --name ${shellQuote(choices.name)} --restart unless-stopped --shm-size=1g -v ${shellQuote(`${choices.name}-identity:/var/lib/nyxid-machine`)} -v ${shellQuote(`${choices.name}-workspace:/workspace`)} -e ${shellQuote(`NYXID_NODE_TOKEN=${token}`)} -e ${shellQuote(`NYXID_NODE_URL=${wsUrl}`)} ghcr.io/chronoaiproject/nyxid/nyxid-node-machine:${version} ${args})`;
   }
   const installer =
     "https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/scripts/install.sh";
