@@ -29,6 +29,8 @@ pub struct ResourceItem {
     pub id: String,
     pub name: String,
     pub owner_user_id: String,
+    pub owner_name: Option<String>,
+    pub owner_email: Option<String>,
     pub platform: Option<String>,
     pub slug: Option<String>,
 }
@@ -102,7 +104,7 @@ pub async fn list_resources(
     )
     .await?;
     let next_offset = (rows.len() > 50).then_some(query.offset + 50);
-    let items = rows
+    let mut items: Vec<ResourceItem> = rows
         .into_iter()
         .take(50)
         .map(|row| {
@@ -114,11 +116,26 @@ pub async fn list_resources(
                     .or_else(|| field("user_id"))
                     .or_else(|| field("created_by"))
                     .unwrap_or_default(),
+                owner_name: None,
+                owner_email: None,
                 platform: field("platform"),
                 slug: field("slug"),
             }
         })
         .collect();
+    if !items.is_empty() {
+        let owner_ids: Vec<&str> = items
+            .iter()
+            .map(|item| item.owner_user_id.as_str())
+            .collect();
+        let owners = transfers::owner_identities(&state.db, &owner_ids).await?;
+        for item in &mut items {
+            if let Some(owner) = owners.get(&item.owner_user_id) {
+                item.owner_name = owner.name.clone();
+                item.owner_email = owner.email.clone();
+            }
+        }
+    }
     Ok(Json(ResourceListResponse { items, next_offset }))
 }
 
@@ -260,6 +277,8 @@ pub async fn authorization(
                 .unwrap_or_default()
                 .into(),
             owner_user_id: owner,
+            owner_name: None,
+            owner_email: None,
             platform: row.get_str("platform").ok().map(str::to_owned),
             slug: row.get_str("slug").ok().map(str::to_owned),
         }),
