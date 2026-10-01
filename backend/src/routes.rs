@@ -2366,6 +2366,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/oauth-protected-resource",
             get(handlers::oidc_discovery::oauth_protected_resource),
+        )
+        .route(
+            "/openai-apps-challenge",
+            get(handlers::oidc_discovery::openai_apps_challenge),
         );
 
     let public_oauth = Router::new()

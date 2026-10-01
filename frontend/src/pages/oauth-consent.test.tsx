@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { vi } from "vitest";
@@ -229,10 +235,40 @@ describe("OAuthConsentPage", () => {
 
     expect(screen.getByText("Authenticate your identity")).toBeInTheDocument();
     expect(screen.getByText("Long-lived access")).toBeInTheDocument();
+    const permissions = screen.getByRole("region", {
+      name: /This will allow/,
+    });
     const details = screen.getByText("App details").closest("details");
     expect(details).not.toBeNull();
     for (const scope of VALID.scope.split(" ")) {
+      expect(within(permissions).getByText(scope)).toBeVisible();
       expect(details).toHaveTextContent(scope);
+    }
+  });
+
+  it("identifies every scope requested by an MCP OAuth client", () => {
+    setSearch({
+      ...VALID,
+      scope: "openid profile email roles groups offline_access proxy",
+    });
+
+    render(<OAuthConsentPage />);
+
+    const permissions = screen.getByRole("region", {
+      name: /This will allow/,
+    });
+    expect(
+      within(permissions).getByText("Read your roles and permissions"),
+    ).toBeVisible();
+    expect(within(permissions).getByText("Read your groups")).toBeVisible();
+    expect(
+      within(permissions).getByText("Use your connected services"),
+    ).toBeVisible();
+    expect(
+      within(permissions).queryByText("Custom permission"),
+    ).not.toBeInTheDocument();
+    for (const scope of ["roles", "groups", "proxy"]) {
+      expect(within(permissions).getByText(scope)).toBeVisible();
     }
   });
 
@@ -319,13 +355,21 @@ describe("OAuthConsentPage", () => {
     expect(screen.getAllByText("client-abc").length).toBeGreaterThan(0);
   });
 
-  it("explains known and custom permissions without severity ratings", () => {
+  it("shows unknown scopes directly without a generic permission label", () => {
     setSearch(VALID);
 
     render(<OAuthConsentPage />);
 
     expect(screen.getByText("Long-lived access")).toBeInTheDocument();
-    expect(screen.getByText("Custom permission")).toBeInTheDocument();
+    const permissions = screen.getByRole("region", {
+      name: /This will allow/,
+    });
+    expect(within(permissions).getByText("custom:thing")).toHaveClass(
+      "font-mono",
+    );
+    expect(
+      within(permissions).queryByText("Custom permission"),
+    ).not.toBeInTheDocument();
     expect(
       screen.getByText(/refresh tokens without asking/i),
     ).toBeInTheDocument();
@@ -574,31 +618,40 @@ describe("OAuthConsentPage", () => {
     expect(screen.getByText("OpenAI · openai-x2")).toBeInTheDocument();
   });
 
-  it("pre-selects app default services from preselect_service_ids and grants them on plain approve", () => {
+  it("keeps app default services selected on plain approve", () => {
     setSearch({ ...VALID, preselect_service_ids: ["svc-openai"] });
 
     render(<OAuthConsentPage />);
 
-    // Summary lists the resolved default with the app-requested badge; the
+    // Summary lists the resolved default with the app-required badge; the
     // hidden inputs already carry the grant without any user interaction.
     expect(screen.getByText("My OpenAI")).toBeInTheDocument();
-    expect(screen.getByText("Requested by app")).toBeInTheDocument();
+    expect(screen.getByText("Required by app")).toBeInTheDocument();
     expect(hiddenInput("allow_all_services")?.value).toBe("false");
     expect(hiddenInputs("allowed_service_ids").map((i) => i.value)).toEqual([
       "svc-openai",
     ]);
   });
 
-  it("lets the user remove an app default via Customize", async () => {
+  it("does not let the user remove an app default via Customize", async () => {
     const user = userEvent.setup();
     setSearch({ ...VALID, preselect_service_ids: ["svc-openai"] });
 
     render(<OAuthConsentPage />);
 
     await user.click(screen.getByRole("button", { name: "Customize" }));
-    await user.click(screen.getByRole("checkbox", { name: /My OpenAI/i }));
+    const appDefault = screen.getByRole("checkbox", { name: /My OpenAI/i });
+    expect(appDefault).toBeChecked();
+    expect(appDefault).toBeDisabled();
+    expect(screen.getByText("Required by app")).toBeInTheDocument();
 
-    expect(hiddenInput("allowed_service_ids")).toBeNull();
+    await user.click(appDefault);
+    expect(appDefault).toBeChecked();
+    await user.click(screen.getByRole("checkbox", { name: /Org Service/i }));
+    expect(hiddenInputs("allowed_service_ids").map((i) => i.value)).toEqual([
+      "svc-openai",
+      "svc-org",
+    ]);
   });
 
   it("shows unmatched app defaults as informational rows", () => {
@@ -614,6 +667,7 @@ describe("OAuthConsentPage", () => {
   });
 
   it("preselects services for requested resource indicators", async () => {
+    const user = userEvent.setup();
     const resourceA = "https://nyx.example/api/v1/proxy/s/openai";
     const resourceB = "https://nyx.example/api/v1/proxy/s/unknown";
     setSearch({ ...VALID, resource: [resourceA, resourceB] });
@@ -629,6 +683,8 @@ describe("OAuthConsentPage", () => {
         "svc-openai",
       ]);
     });
+    await user.click(screen.getByRole("button", { name: "Customize" }));
+    expect(screen.getByRole("checkbox", { name: /My OpenAI/i })).toBeDisabled();
   });
 
   it("opens a Lark binding review with the current service grant visible", () => {

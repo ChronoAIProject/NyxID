@@ -374,6 +374,10 @@ pub struct AppConfig {
     /// Telegram bot username (without @) for link instructions.
     pub telegram_bot_username: Option<String>,
 
+    /// OpenAI plugin-portal domain verification token served verbatim at
+    /// `/.well-known/openai-apps-challenge`. Unset = route returns 404.
+    pub openai_apps_challenge_token: Option<String>,
+
     /// Interval in seconds between approval expiry sweeps (default: 5).
     pub approval_expiry_interval_secs: u64,
 
@@ -717,6 +721,10 @@ impl std::fmt::Debug for AppConfig {
             .field("telegram_webhook_secret", &"[REDACTED]")
             .field("telegram_webhook_url", &self.telegram_webhook_url)
             .field("telegram_bot_username", &self.telegram_bot_username)
+            .field(
+                "openai_apps_challenge_token",
+                &self.openai_apps_challenge_token,
+            )
             .field(
                 "approval_expiry_interval_secs",
                 &self.approval_expiry_interval_secs,
@@ -1199,6 +1207,10 @@ impl AppConfig {
 
             telegram_bot_username: env::var("TELEGRAM_BOT_USERNAME")
                 .ok()
+                .filter(|s| !s.is_empty()),
+            openai_apps_challenge_token: env::var("OPENAI_APPS_CHALLENGE_TOKEN")
+                .ok()
+                .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty()),
 
             approval_expiry_interval_secs: env::var("APPROVAL_EXPIRY_INTERVAL_SECS")
@@ -1946,6 +1958,7 @@ mod tests {
             telegram_webhook_secret: None,
             telegram_webhook_url: None,
             telegram_bot_username: None,
+            openai_apps_challenge_token: None,
             approval_expiry_interval_secs: 5,
             connect_link_expiry_sweep_interval_secs: 60,
             agent_key_login_sweep_interval_secs: 60,
