@@ -132,6 +132,15 @@ jobs:
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
             echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           fi
+      # Added by hand (allow-dirty = ["ci"]); reapply if dist init regenerates.
+      # Tag runs cannot share caches with each other, only with `main`, so this
+      # restores the dependency cache that release-cache.yml warms on `main`.
+      # Keep the key inputs in sync with that workflow.
+      - name: Restore Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: dist-${{ join(matrix.targets, '-') }}
+          save-if: false
       - name: Install dist
         run: ${{ matrix.install_dist.run }}
       # Get the dist-manifest
