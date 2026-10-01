@@ -37,6 +37,8 @@ pub enum TurnOrigin {
     /// A group chat addressed this member (a user message or another member's
     /// @mention). Its reply is posted to the group.
     Group,
+    /// Owner-authorized automation, with its own run budget.
+    Trigger,
 }
 
 /// A server-authored wake-up item waiting for the agent's next event turn.
@@ -103,6 +105,8 @@ pub struct TurnAttachment {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
+    #[serde(default)]
+    pub trigger_run_id: Option<String>,
     pub turn_id: String,
     #[serde(default)]
     pub origin: TurnOrigin,
@@ -167,6 +171,10 @@ pub struct AssistantConversation {
     /// rows written before agents existed; they belong to the owner's NyxBot.
     #[serde(default)]
     pub agent_id: Option<String>,
+    /// Dedicated/per-run automation threads never become an agent's home,
+    /// including when its previous home was deleted. Explicit home runs leave this false.
+    #[serde(default)]
+    pub automation_thread: bool,
     /// Specialist threads only: the NyxBot thread that assigned the current
     /// work, which receives its report and permission requests.
     #[serde(default)]

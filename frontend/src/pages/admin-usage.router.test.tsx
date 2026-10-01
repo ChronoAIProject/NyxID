@@ -65,7 +65,9 @@ it("keeps the dashboard and list on one route with a shared saved time range", a
   );
   await act(() => router.load());
   expect(
-    await screen.findByRole("combobox", { name: "Time range" }),
+    // The real lazy page imports the analytics bundle on a cold test worker.
+    // Allow that load to finish even while the backend compiler is running.
+    await screen.findByRole("combobox", { name: "Time range" }, { timeout: 10_000 }),
   ).toHaveTextContent("Last 7 days");
   expect(
     await screen.findByRole("combobox", { name: "Ranking sort" }),

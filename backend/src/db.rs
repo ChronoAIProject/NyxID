@@ -1597,6 +1597,7 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    crate::services::trigger_schedule::indexes(db).await?;
     // ── triggers ──
     let triggers = db.collection::<Trigger>(TRIGGERS);
     triggers

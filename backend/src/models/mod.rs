@@ -132,3 +132,6 @@ pub mod channel_activity;
 pub mod credits;
 
 pub mod billing_lago_carry;
+
+pub mod trigger_run;
+pub mod trigger_schedule;

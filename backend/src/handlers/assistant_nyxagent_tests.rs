@@ -1054,6 +1054,7 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
         summary: "Summary text that must not be echoed".into(),
         status: status.into(),
         requested_turn_id: None,
+        trigger_run_id: None,
         created_at: Utc::now(),
         decided_at: decided,
         expires_at: Utc::now() + chrono::Duration::minutes(10),

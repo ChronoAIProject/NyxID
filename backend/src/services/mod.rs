@@ -208,3 +208,5 @@ pub mod catalog_editor_service;
 
 pub mod channel_activity_callback_service;
 pub mod channel_activity_service;
+
+pub mod trigger_schedule;

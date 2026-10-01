@@ -1,3 +1,4 @@
+import { AgentAutomations } from "./automation-preferences";
 import { useState, type ReactNode } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useQueryClient } from "@tanstack/react-query";
@@ -169,6 +170,7 @@ export function AgentDetailsSheet({
                   description="NyxBot runs with full access to your connected services and account. Destructive actions follow your confirmation setting."
                 />
               )}
+              <AgentAutomations agentId={agent.id} />
               <MemoryList agent={agent} memory={detail.data?.memory ?? []} />
               {agent.status === "destroyed" ? null : (
                 <Section

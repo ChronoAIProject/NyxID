@@ -1340,6 +1340,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .layer(middleware::from_fn(reject_relay_tokens));
 
     let trigger_routes = Router::new()
+        .route("/setup/{id}", get(handlers::triggers::setup))
+        .route("/preview", post(handlers::triggers::preview))
+        .route("/{id}/runs", get(handlers::triggers::runs))
+        .route("/{id}/run", post(handlers::triggers::run_now))
         .route(
             "/",
             get(handlers::triggers::list_triggers).post(handlers::triggers::create_trigger),
@@ -2048,7 +2052,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             "/actions/org",
             handlers::assistant_action_effects_org::router(),
         )
-        .merge(assistant_proxy_routes);
+        .merge(assistant_proxy_routes)
+        .layer(middleware::from_fn(
+            crate::mw::auth::reject_oauth_client_tokens,
+        ));
 
     let ssh_billing_routes = ssh_billing_routes!(register_billing_routes, Router::new());
 

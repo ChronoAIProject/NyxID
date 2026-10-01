@@ -263,6 +263,12 @@ impl std::fmt::Debug for NyxbotEvent {
 pub struct NyxbotWatch {
     #[serde(rename = "_id")]
     pub id: String,
+    #[serde(default)]
+    pub trigger_prefill: Option<TriggerPrefill>,
+    /// Consumed transactionally with trigger insertion; the pending watch
+    /// still wakes its originating thread once the new trigger is observed.
+    #[serde(default)]
+    pub trigger_id: Option<String>,
     pub user_id: String,
     /// `channel_bot` (a bot created from a setup link) or `connect_link`
     /// (a hosted service connection).
@@ -294,4 +300,21 @@ pub struct NyxbotWatch {
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct TriggerPrefill {
+    pub label: String,
+    pub instruction: String,
+    pub agent_id: String,
+    #[serde(default)]
+    pub thread_policy: Option<super::trigger_schedule::ThreadPolicy>,
+    #[serde(default)]
+    pub confirmation_policy: super::trigger_schedule::ConfirmationPolicy,
+}
+
+impl std::fmt::Debug for TriggerPrefill {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TriggerPrefill { [REDACTED] }")
+    }
 }

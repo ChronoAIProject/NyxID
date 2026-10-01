@@ -1435,6 +1435,39 @@ pub async fn reject_service_account_tokens(
     Ok(next.run(request).await)
 }
 
+/// OAuth applications never inherit the owner's NyxAgent authority. Like the
+/// other rejection layers this is deny-only; the handler's verified extractor
+/// still authenticates every accepted request, including session revocation.
+pub async fn reject_oauth_client_tokens(
+    request: axum::http::Request<axum::body::Body>,
+    next: Next,
+) -> Result<impl IntoResponse, AppError> {
+    if request
+        .uri()
+        .path()
+        .split('/')
+        .any(|part| part == "nyxagent")
+        && let Some(token) = request
+            .headers()
+            .get("authorization")
+            .and_then(|header| header.to_str().ok())
+            .and_then(|header| {
+                header
+                    .strip_prefix("Bearer ")
+                    .or_else(|| header.strip_prefix("DPoP "))
+            })
+        && let Some(claims) = peek_jwt_claims(token)
+        && claims
+            .get("client_id")
+            .is_some_and(|value| !value.is_null())
+    {
+        return Err(AppError::Forbidden(
+            "A first-party human account session is required".into(),
+        ));
+    }
+    Ok(next.run(request).await)
+}
+
 /// Middleware that rejects API-key credentials from human-only endpoints.
 pub async fn reject_api_key_tokens(
     request: axum::http::Request<axum::body::Body>,

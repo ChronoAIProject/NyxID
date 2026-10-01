@@ -26,6 +26,7 @@ import {
   Server,
   Plug,
   Webhook,
+  CalendarClock,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/stores/auth-store";
@@ -48,6 +49,8 @@ export interface CommandItem {
 }
 
 export const ALL_ITEMS: readonly CommandItem[] = [
+  { icon: Bot, label: "Assistant", to: "/assistant", group: "navigation" },
+  { icon: CalendarClock, label: "Automations", to: "/automations", group: "navigation" },
   { icon: LayoutDashboard, label: "Dashboard", to: "/dashboard", group: "navigation" },
   { icon: Cable, label: "AI Services", to: "/keys", group: "navigation" },
   { icon: Building2, label: "Organizations", to: "/orgs", group: "navigation" },

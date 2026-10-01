@@ -9,6 +9,11 @@ use crate::{
 };
 
 pub const TOOL_NAMES: &[&str] = &[
+    "create_schedule",
+    "list_schedules",
+    "update_schedule",
+    "delete_schedule",
+    "run_schedule_now",
     "spawn_subagent",
     "message_subagent",
     "wait_for_subagents",
@@ -113,6 +118,32 @@ pub fn is_agent_tool(name: &str) -> bool {
     AGENT_TOOL_NAMES.contains(&name)
 }
 
+/// Native tool effects are an explicit, closed contract, never name heuristics.
+pub fn read_only(name: &str) -> bool {
+    matches!(
+        name,
+        "list_schedules"
+            | "wait_for_subagents"
+            | "list_subagents"
+            | "read_subagent"
+            | "list_groups"
+            | "list_channel_agents"
+            | "list_channel_chats"
+    )
+}
+
+pub fn destructive(name: &str) -> bool {
+    matches!(
+        name,
+        "delete_schedule"
+            | "revoke_subagent"
+            | "destroy_subagent"
+            | "delete_group"
+            | "disconnect_channel_bot"
+            | "forget"
+    )
+}
+
 fn string(max: usize) -> Value {
     json!({"type": "string", "minLength": 1, "maxLength": max})
 }
@@ -125,7 +156,40 @@ fn services() -> Value {
 pub fn schema(name: &str) -> Value {
     let subagent = json!({"type": "string", "minLength": 1, "maxLength": 64,
         "description": "Specialist agent name or id"});
-    let (properties, required): (Value, Vec<&str>) = match name {
+    let (mut properties, required): (Value, Vec<&str>) = match name {
+        "create_schedule" | "update_schedule" => {
+            let mut props = json!({
+                "id": string(64),
+                "label": string(128),
+                "agent": string(64),
+                "instruction": string(8192),
+                "schedule": schedule_schema(),
+                "deliver_to": delivery_schema(),
+                "overlap": {"type": "string", "enum": ["skip", "queue"]},
+                "paused": {"type": "boolean"},
+            });
+            if name == "create_schedule" {
+                props.as_object_mut().unwrap().remove("id");
+                props.as_object_mut().unwrap().remove("paused");
+                props.as_object_mut().unwrap().insert(
+                    "owner_timezone".into(),
+                    json!({
+                        "type": "string", "maxLength": 100,
+                        "description": "IANA timezone explicitly supplied by the owner when unknown; saves their timezone preference.",
+                    }),
+                );
+            }
+            (
+                props,
+                if name == "create_schedule" {
+                    vec!["label", "instruction", "schedule"]
+                } else {
+                    vec!["id"]
+                },
+            )
+        }
+        "list_schedules" => (json!({}), vec![]),
+        "delete_schedule" | "run_schedule_now" => (json!({"id":string(64)}), vec!["id"]),
         "spawn_subagent" => (
             json!({
                 "name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$",
@@ -279,6 +343,7 @@ pub fn schema(name: &str) -> Value {
         "delete_group" => (json!({"group": string(64)}), vec!["group"]),
         "settings_link" => (
             json!({"area": {"type": "string", "enum": SETTINGS_AREAS},
+                "agent": string(64), "label":string(128), "instruction":string(8192),
                 "service": {"type": "string", "minLength": 1, "maxLength": 100,
                     "description": "add_service only: catalog slug to preselect"},
                 "org_id": {"type": "string", "minLength": 1, "maxLength": 64,
@@ -312,12 +377,43 @@ pub fn schema(name: &str) -> Value {
         ),
         _ => (json!({}), vec![]),
     };
+    if !read_only(name) {
+        properties["acknowledgement_id"] = string(64);
+    }
+    if matches!(
+        name,
+        "create_schedule" | "update_schedule" | "settings_link"
+    ) {
+        properties["thread_policy"] = json!({
+            "type": "string", "enum": ["home", "dedicated", "new"],
+            "description": "Webhook default is dedicated for every agent. Choose home only if the owner explicitly accepts that untrusted event text persists into later full-authority owner turns, including private channel chats, outside the webhook confirmation policy. Schedules default to NyxBot home or specialist dedicated.",
+        });
+        properties["confirmation_policy"] = json!({
+            "type": "string", "enum": ["changes", "destructive"],
+            "description": "Webhook default changes asks the owner before every changing call. Set destructive only if the owner explicitly accepts that untrusted webhook content can cause changes without confirmation.",
+        });
+    }
     json!({"type": "object", "properties": properties, "required": required,
         "additionalProperties": false})
 }
 
 fn description(name: &str) -> &'static str {
     match name {
+        "create_schedule" => {
+            "Schedule owner-requested work for NyxBot or a specialist. Use the owner's timezone from settings; ask if unknown. Confirm the returned next runs in plain words. Prefer deliver_to for requested pushed results."
+        }
+        "list_schedules" => {
+            "List the owner's schedules and assistant webhook automations, including confirmation policy, timezone and next runs."
+        }
+        "update_schedule" => {
+            "Edit a schedule or assistant webhook automation, including confirmation_policy and thread_policy. Webhooks default to dedicated; home requires explicit owner acceptance of untrusted text persisting into later full-authority turns. Pause/resume with paused. Read back returned next runs."
+        }
+        "delete_schedule" => {
+            "Delete an owner-requested schedule; existing run threads remain available."
+        }
+        "run_schedule_now" => {
+            "Test an active schedule once now, under its normal authority, overlap and run budgets."
+        }
         "spawn_subagent" => {
             "Create a new agent: a persistent specialist with its own keys, memory and \
             threads. Use it whenever the user asks you to create, make or set up an agent, \
@@ -388,7 +484,10 @@ fn description(name: &str) -> &'static str {
             "Link the user to the exact NyxID page for a configuration you cannot or should not \
             do in chat: creating an agent key (its secret is shown there), security (password, \
             MFA), profile, sessions, billing, organizations, triggers, developer apps, devices \
-            and more. Use your nyxid__ tools directly for what they cover."
+            and more. Webhook prefill defaults to dedicated threads; choose home only with \
+            explicit owner consent because untrusted event text persists into later \
+            full-authority owner turns outside webhook confirmations. Use your nyxid__ tools \
+            directly for what they cover."
         }
         "channel_bot_setup_link" => {
             "Help the user create a new channel bot: returns NyxID's one-page setup link (for \
@@ -493,8 +592,53 @@ pub fn validate(name: &str, args: &Value) -> AppResult<()> {
     Ok(())
 }
 
+pub(crate) fn schedule_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "enum": ["cron", "every", "at"]},
+            "expression": string(256),
+            "timezone": string(100),
+            "amount": {"type": "integer", "minimum": 1, "maximum": 527040},
+            "unit": {"type": "string", "enum": ["minutes", "hours", "days"]},
+            "anchor": string(64),
+            "at": string(64),
+            "start": string(64),
+            "end": string(64),
+            "max_runs": {"type": "integer", "minimum": 1, "maximum": 1000000},
+            "grace_seconds": {"type": "integer", "minimum": 1, "maximum": 86400},
+        },
+        "required": ["kind"],
+        "additionalProperties": false,
+    })
+}
+
+pub(crate) fn delivery_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "type": {"type": "string", "enum": ["thread", "chat", "notification"]},
+            "chat_id": string(64),
+        },
+        "required": ["type"],
+        "additionalProperties": false,
+    })
+}
+
 fn matches_spec(value: &Value, spec: &Value) -> bool {
     match spec["type"].as_str() {
+        Some("object") => value.as_object().is_some_and(|object| {
+            let Some(properties) = spec["properties"].as_object() else {
+                return false;
+            };
+            spec["required"].as_array().is_none_or(|required| {
+                required
+                    .iter()
+                    .all(|k| object.contains_key(k.as_str().unwrap_or_default()))
+            }) && object
+                .iter()
+                .all(|(key, v)| properties.get(key).is_some_and(|s| matches_spec(v, s)))
+        }),
         Some("string") => value.as_str().is_some_and(|text| {
             let chars = text.chars().count() as u64;
             chars >= spec["minLength"].as_u64().unwrap_or(0)

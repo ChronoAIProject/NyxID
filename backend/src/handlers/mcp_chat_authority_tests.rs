@@ -1759,3 +1759,159 @@ async fn guests_never_ask_for_more_access() {
             .unwrap();
     assert!(request.is_some());
 }
+
+#[tokio::test]
+async fn webhook_calls_require_exact_action_cards_from_http_and_catalog_effects() {
+    use crate::models::trigger_schedule::ConfirmationPolicy;
+    let f = orchestrator_fixture("webhook_action_cards").await;
+    let service_id = connected(
+        &f.state.db,
+        &f.owner,
+        "webhook-target",
+        "http://127.0.0.1:9",
+    )
+    .await;
+    let mut auth = authenticate(&f).await;
+    auth.chat.as_mut().unwrap().confirmation_policy = Some(ConfirmationPolicy::Changes);
+    f.state
+        .db
+        .collection::<mongodb::bson::Document>(
+            crate::models::assistant_conversation::COLLECTION_NAME,
+        )
+        .update_one(
+            doc! {"_id": &f.row.id},
+            doc! {"$set": {"active_turn.trigger_run_id": "webhook-run"}},
+        )
+        .await
+        .unwrap();
+    let mut services = load_all_services_for_meta_tools(&f.state, &auth)
+        .await
+        .unwrap();
+    let service = services
+        .iter_mut()
+        .find(|candidate| candidate.service_id == service_id)
+        .unwrap();
+    let endpoint = service.endpoints.remove(0);
+    let tool = "webhook-target__proxy";
+    let args = json!({"method": "PATCH", "path": "/settings", "body": {"value": true}});
+    let prepared = mcp_service::prepare_proxy_tool_call(service, &endpoint, &args).unwrap();
+    let response = webhook_service_gate(
+        &f.state,
+        &auth,
+        service,
+        &endpoint,
+        &prepared,
+        tool,
+        &args,
+        Some(json!(1)),
+    )
+    .await
+    .unwrap();
+    let card = result(response, true).await;
+    assert_eq!(card["error"], "acknowledgement_required");
+    let id = card["acknowledgement_id"].as_str().unwrap();
+    let stored = acks::history(&f.state.db, &f.owner, &f.row.id)
+        .await
+        .unwrap();
+    assert_eq!(stored[0].status, "pending");
+    assert_eq!(stored[0].trigger_run_id.as_deref(), Some("webhook-run"));
+    let get = json!({"method": "GET", "path": "/settings"});
+    let prepared_get = mcp_service::prepare_proxy_tool_call(service, &endpoint, &get).unwrap();
+    assert!(
+        webhook_service_gate(
+            &f.state,
+            &auth,
+            service,
+            &endpoint,
+            &prepared_get,
+            tool,
+            &get,
+            None
+        )
+        .await
+        .is_none()
+    );
+    acks::decide(&f.state.db, &f.owner, &f.row.id, id, true)
+        .await
+        .unwrap();
+    let mut approved = args.clone();
+    approved["acknowledgement_id"] = json!(id);
+    assert_eq!(webhook_execution_arguments(&auth, &approved), args);
+    let schema = webhook_tool_schema(&auth, &json!({"type": "object", "properties": {}}));
+    assert_eq!(schema["properties"]["acknowledgement_id"]["type"], "string");
+    assert!(
+        webhook_service_gate(
+            &f.state, &auth, service, &endpoint, &prepared, tool, &approved, None
+        )
+        .await
+        .is_none()
+    );
+    assert!(
+        webhook_service_gate(
+            &f.state, &auth, service, &endpoint, &prepared, tool, &approved, None
+        )
+        .await
+        .is_some()
+    );
+    auth.chat.as_mut().unwrap().confirmation_policy = Some(ConfirmationPolicy::Destructive);
+    assert!(
+        webhook_service_gate(
+            &f.state, &auth, service, &endpoint, &prepared, tool, &args, None
+        )
+        .await
+        .is_none()
+    );
+    service
+        .durable_endpoint_metadata
+        .entry(endpoint.endpoint_id.clone())
+        .or_default()
+        .destructive = true;
+    assert!(
+        webhook_service_gate(
+            &f.state, &auth, service, &endpoint, &prepared, tool, &args, None
+        )
+        .await
+        .is_some()
+    );
+}
+
+#[tokio::test]
+async fn webhook_native_changes_require_owner_cards_even_with_skip_destructive() {
+    use crate::models::trigger_schedule::ConfirmationPolicy;
+    let f = orchestrator_fixture("webhook_native_cards").await;
+    let mut auth = authenticate(&f).await;
+    let chat = auth.chat.as_mut().unwrap();
+    chat.confirmation_policy = Some(ConfirmationPolicy::Changes);
+    crate::services::assistant_settings_service::update(
+        &f.state.db,
+        &f.owner,
+        crate::services::assistant_settings_service::Update {
+            skip_destructive_confirmation: Some(true),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let (card, refused) = crate::handlers::assistant_team::execute_tool(
+        &f.state,
+        chat,
+        "nyxid__remember",
+        &json!({"text": "Attacker supplied memory"}),
+    )
+    .await;
+    assert!(refused);
+    assert_eq!(card["error"], "acknowledgement_required");
+    let cards = acks::history(&f.state.db, &f.owner, &f.row.id)
+        .await
+        .unwrap();
+    assert_eq!(cards[0].decider, "user");
+    chat.confirmation_policy = Some(ConfirmationPolicy::Destructive);
+    let (result, refused) = crate::handlers::assistant_team::execute_tool(
+        &f.state,
+        chat,
+        "nyxid__remember",
+        &json!({"text": "Owner allowed ordinary changes"}),
+    )
+    .await;
+    assert!(!refused, "{result}");
+}

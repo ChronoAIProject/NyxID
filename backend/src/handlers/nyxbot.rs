@@ -1986,6 +1986,8 @@ pub(crate) async fn watch_connect_link(
     let now = Utc::now();
     db.collection::<NyxbotWatch>(WATCHES)
         .insert_one(NyxbotWatch {
+            trigger_prefill: None,
+            trigger_id: None,
             id: Uuid::new_v4().to_string(),
             user_id: owner.into(),
             kind: "connect_link".into(),
@@ -2076,6 +2078,7 @@ async fn resolve(state: &AppState, watch: &NyxbotWatch) {
     let result = match watch.kind.as_str() {
         "channel_bot" => channel_bot_watch(state, watch).await,
         "connect_link" => connect_link_watch(state, watch).await,
+        "trigger_created" => trigger_created_watch(state, watch).await,
         _ => Ok(()),
     };
     if let Err(error) = result {
@@ -2109,6 +2112,9 @@ pub fn spawn_live_dispatch(state: AppState) {
                     active: true,
                     ..
                 } => doc! {"user_id": user_id, "kind": "channel_bot"},
+                LiveEvent::TriggerCreated { user_id, watch_id } => {
+                    doc! {"_id":watch_id,"user_id":user_id,"kind":"trigger_created"}
+                }
                 LiveEvent::Resync => {
                     let state = state.clone();
                     tokio::spawn(async move {
@@ -2661,7 +2667,7 @@ async fn reply_decision(
     row: &NyxbotChannel,
     conversation_id: &str,
     text: &str,
-) -> AppResult<Option<bool>> {
+) -> AppResult<Option<(bool, bool)>> {
     use crate::services::assistant_acknowledgement_service as acks;
     if acks::parse_reply(text).is_none() {
         return Ok(None);
@@ -2697,7 +2703,10 @@ async fn reply_decision(
         &decided,
     )
     .await;
-    Ok(Some(decided.status == "allowed"))
+    Ok(Some((
+        decided.status == "allowed",
+        decided.trigger_run_id.is_some(),
+    )))
 }
 
 /// The platform's name as people write it.
@@ -2804,7 +2813,12 @@ async fn start_chat_turn(
     let mut answered = None;
     if exists && !guest {
         match reply_decision(state, row, &conversation_id, text).await {
-            Ok(decided) => answered = decided,
+            Ok(Some((_, true))) => {
+                return Ok(Inbound::Reply(
+                    "Decision saved. The automation will continue in its thread.".into(),
+                ));
+            }
+            Ok(decided) => answered = decided.map(|(allowed, _)| allowed),
             Err(error) => tracing::debug!(%error, "Chat confirmation not applied"),
         }
     }
@@ -2876,6 +2890,7 @@ async fn start_chat_turn(
         Some(looked_up.unwrap_or_else(|| format!("{} group", platform_name(&row.platform))))
     };
     let start = TurnStart {
+        trigger: None,
         conversation_id: exists.then(|| conversation_id.clone()),
         new_id: (!exists).then(|| conversation_id.clone()),
         text: message,
@@ -4063,3 +4078,73 @@ mod tests;
 #[path = "nyxbot_status.rs"]
 mod status;
 pub(crate) use status::{WaitingItem, check_deliveries, waiting};
+
+/// A secret-free webhook setup link. Only the page may mint its inbound secret.
+pub(crate) async fn trigger_setup_link(
+    state: &AppState,
+    owner: &str,
+    conversation: &str,
+    prefill: crate::models::nyxbot_channel::TriggerPrefill,
+) -> AppResult<Value> {
+    if prefill.instruction.trim().is_empty()
+        || prefill.instruction.len() > 8192
+        || prefill.label.trim().is_empty()
+        || prefill.label.len() > 128
+    {
+        return Err(AppError::ValidationError(
+            "Provide a label and an instruction of at most 8 KB".into(),
+        ));
+    }
+    let now = Utc::now();
+    let id = Uuid::new_v4().to_string();
+    state
+        .db
+        .collection::<NyxbotWatch>(WATCHES)
+        .insert_one(NyxbotWatch {
+            agent_id: Some(prefill.agent_id.clone()),
+            trigger_prefill: Some(prefill),
+            trigger_id: None,
+            id: id.clone(),
+            user_id: owner.into(),
+            kind: "trigger_created".into(),
+            conversation_id: conversation.into(),
+            status: "pending".into(),
+            platform: None,
+            channel_bot_id: None,
+            connect_link_id: None,
+            last_error: None,
+            checked_at: None,
+            created_at: now,
+            expires_at: now + ChronoDuration::minutes(120),
+        })
+        .await?;
+    Ok(json!({
+        "url": format!("{}/automations?setup={id}",state.config.frontend_url.trim_end_matches('/')),
+        "note": "Open this page to create the webhook trigger and save its URL and one-time secret. Never paste the secret into chat. NyxID resumes this thread once it exists. Webhooks default to a dedicated thread. Choose home only with explicit owner consent: untrusted event text would remain in later full-authority owner turns, including private channel chats; webhook confirmation policy does not protect those later turns.",
+    }))
+}
+
+async fn trigger_created_watch(state: &AppState, watch: &NyxbotWatch) -> AppResult<()> {
+    let row = state
+        .db
+        .collection::<crate::models::trigger::Trigger>(crate::models::trigger::COLLECTION_NAME)
+        .find_one(doc! { "user_id": &watch.user_id, "setup_watch_id": &watch.id })
+        .await?;
+    if let Some(trigger) = row
+        && claim(state, watch, doc! {}).await?
+    {
+        settle(state, watch, None).await;
+        wake_with(
+            state,
+            watch,
+            "trigger_created",
+            format!(
+                "The owner created webhook trigger {}. Its secret was shown on the \
+                 Automations page; never ask to see it. Explain how to configure their event source.",
+                trigger.id,
+            ),
+        )
+        .await;
+    }
+    Ok(())
+}

@@ -30,6 +30,8 @@ serde = { workspace = true }
 serde_json = { workspace = true, features = ["raw_value"] }
 uuid = { workspace = true }
 chrono = { workspace = true }
+chrono-tz = "0.10"
+croner = "4"
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 jsonwebtoken = { version = "10.3", default-features = false, features = ["use_pem", "aws_lc_rs"] }

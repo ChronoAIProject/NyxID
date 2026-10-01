@@ -1,3 +1,4 @@
+import { AutomationPreferences } from "./automation-preferences";
 import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { AlertTriangle, Settings2 } from "lucide-react";
@@ -86,6 +87,7 @@ export function NyxBotSettingsDialog({ onClose }: { readonly onClose: () => void
           ) : (
             <SettingsForm settings={settings.data} />
           )}
+          <AutomationPreferences />
           <ChannelBotsSection />
         </DialogBody>
       </DialogContent>
