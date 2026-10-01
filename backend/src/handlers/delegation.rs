@@ -437,6 +437,9 @@ mod tests {
         let requested_node_ids = vec![TEST_NODE_ID.to_string()];
         db.collection::<Node>(NODES)
             .insert_one(Node {
+                machine: None,
+                machine_confirm: Default::default(),
+                allow_single_user_saved_logins: false,
                 id: TEST_NODE_ID.to_string(),
                 user_id: TEST_USER_ID.to_string(),
                 name: "full-router-scope-node".to_string(),
@@ -2846,6 +2849,9 @@ mod tests {
             .db
             .collection::<Node>(NODES)
             .insert_one(Node {
+                machine: None,
+                machine_confirm: Default::default(),
+                allow_single_user_saved_logins: false,
                 id: TEST_OUT_OF_SCOPE_NODE_ID.to_string(),
                 user_id: TEST_USER_ID.to_string(),
                 name: "full-router-out-of-scope-node".to_string(),

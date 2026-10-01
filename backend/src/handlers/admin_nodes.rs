@@ -83,6 +83,7 @@ fn admin_node_info_from_model(
             capabilities_resolved: owner.capabilities_resolved,
             capabilities: NodeCapabilitiesFlags {
                 http_signature_v2: owner.http_signature_v2,
+                proxy_upload_v1: owner.proxy_upload_v1,
                 http_cancellation: owner.http_cancellation,
                 credential_ack_correlation: owner.credential_ack_correlation,
                 remote_credential_crypto_v1: owner.remote_credential_crypto_v1,
@@ -355,6 +356,9 @@ mod tests {
 
     fn make_test_node(user_id: &str) -> Node {
         Node {
+            machine: None,
+            machine_confirm: Default::default(),
+            allow_single_user_saved_logins: false,
             id: Uuid::new_v4().to_string(),
             user_id: user_id.to_string(),
             name: "test-node".to_string(),

@@ -1523,6 +1523,7 @@ async fn create_key_inner(
             issues_url: None,
             capabilities: None,
             inference: None,
+            git_http: None,
             inference_admin_modified: false,
             billing: None,
             auth_notes: None,
@@ -4949,6 +4950,7 @@ mod tests {
             issues_url: None,
             capabilities: None,
             inference: None,
+            git_http: None,
             inference_admin_modified: false,
             billing: None,
             auth_notes: None,
@@ -5000,6 +5002,9 @@ mod tests {
     async fn insert_active_node(db: &mongodb::Database, user_id: &str, node_id: &str) {
         let now = Utc::now();
         let node = Node {
+            machine: None,
+            machine_confirm: Default::default(),
+            allow_single_user_saved_logins: false,
             id: node_id.to_string(),
             user_id: user_id.to_string(),
             name: format!("node-{node_id}"),

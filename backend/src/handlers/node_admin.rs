@@ -165,6 +165,9 @@ pub struct NodeDispatchInfo {
 
 #[derive(Debug, Serialize)]
 pub struct NodeInfo {
+    pub machine: Option<nyxid_machine::MachineProfile>,
+    pub machine_confirm: nyxid_machine::Confirmation,
+    pub allow_single_user_saved_logins: bool,
     pub id: String,
     pub name: String,
     pub owner: node_service::NodeOwnerInfo,
@@ -430,6 +433,9 @@ fn node_info_from_model(
 ) -> NodeInfo {
     let session = node_session_info(node, ws_manager);
     NodeInfo {
+        machine: node.machine.clone(),
+        machine_confirm: node.machine_confirm,
+        allow_single_user_saved_logins: node.allow_single_user_saved_logins,
         id: node.id.clone(),
         name: node.name.clone(),
         owner,
@@ -457,6 +463,7 @@ fn node_session_info(
             capabilities_resolved: owner.capabilities_resolved,
             capabilities: crate::services::node_ws_manager::NodeCapabilitiesFlags {
                 http_signature_v2: owner.http_signature_v2,
+                proxy_upload_v1: owner.proxy_upload_v1,
                 http_cancellation: owner.http_cancellation,
                 credential_ack_correlation: owner.credential_ack_correlation,
                 remote_credential_crypto_v1: owner.remote_credential_crypto_v1,
@@ -2123,6 +2130,9 @@ mod tests {
     fn test_node(owner_id: &str, name: &str) -> Node {
         let now = Utc::now();
         Node {
+            machine: None,
+            machine_confirm: Default::default(),
+            allow_single_user_saved_logins: false,
             id: Uuid::new_v4().to_string(),
             user_id: owner_id.to_string(),
             name: name.to_string(),
@@ -3143,6 +3153,7 @@ mod tests {
             &first.id,
             &NodeCapabilitiesMsg {
                 http_signature_v2: false,
+                proxy_upload_v1: false,
                 http_cancellation: false,
                 remote_credential_crypto_v1: true,
                 ..NodeCapabilitiesMsg::default()
@@ -3549,6 +3560,7 @@ mod tests {
             &node.id,
             &NodeCapabilitiesMsg {
                 http_signature_v2: false,
+                proxy_upload_v1: false,
                 http_cancellation: false,
                 remote_credential_crypto_v1: true,
                 ..NodeCapabilitiesMsg::default()
@@ -3831,6 +3843,7 @@ mod tests {
                         &node.id,
                         &NodeCapabilitiesMsg {
                             http_signature_v2: false,
+                            proxy_upload_v1: false,
                             http_cancellation: false,
                             remote_credential_crypto_v1: true,
                             ..NodeCapabilitiesMsg::default()
@@ -5709,6 +5722,9 @@ mod tests {
     #[test]
     fn node_info_serialization_skips_none_optional_fields() {
         let info = NodeInfo {
+            machine: None,
+            machine_confirm: Default::default(),
+            allow_single_user_saved_logins: false,
             id: "node-1".to_string(),
             name: "test-node".to_string(),
             owner: node_service::NodeOwnerInfo {
@@ -5757,6 +5773,9 @@ mod tests {
     #[test]
     fn node_info_serialization_includes_all_fields_when_present() {
         let info = NodeInfo {
+            machine: None,
+            machine_confirm: Default::default(),
+            allow_single_user_saved_logins: false,
             id: "node-2".to_string(),
             name: "prod-node".to_string(),
             owner: node_service::NodeOwnerInfo {
@@ -5787,6 +5806,7 @@ mod tests {
             }),
             capabilities: NodeCapabilitiesFlags {
                 http_signature_v2: false,
+                proxy_upload_v1: false,
                 http_cancellation: false,
                 credential_ack_correlation: true,
                 remote_credential_crypto_v1: true,
@@ -6300,4 +6320,50 @@ mod tests {
         // Non-object values should be returned unchanged (no owner_user_id insertion possible)
         assert_eq!(result, serde_json::json!("scalar"));
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MachineSettingsRequest {
+    machine_confirm: nyxid_machine::Confirmation,
+    allow_single_user_saved_logins: bool,
+    #[serde(default)]
+    acknowledge_single_user_risk: bool,
+}
+
+pub async fn machine_settings(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(node_id): Path<String>,
+    Json(input): Json<MachineSettingsRequest>,
+) -> AppResult<StatusCode> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    let node = node_service::get_node_by_id(&state.db, &node_id)
+        .await?
+        .ok_or_else(|| AppError::NodeNotFound("Machine not found".into()))?;
+    if !org_service::resolve_owner_access(&state.db, &auth.user_id.to_string(), &node.user_id)
+        .await?
+        .can_write()
+    {
+        return Err(AppError::Forbidden(
+            "Only the owner or organization admin can change machine settings".into(),
+        ));
+    }
+    if input.allow_single_user_saved_logins
+        && !node.allow_single_user_saved_logins
+        && !node.machine.as_ref().is_some_and(|p| p.browser_isolated)
+        && !input.acknowledge_single_user_risk
+    {
+        return Err(AppError::ValidationError("Commands run as the browser user, so a misbehaving or prompt-injected agent could read typed values. Prefer the machine container or a separated VM; acknowledge this warning to allow saved-login typing.".into()));
+    }
+    state.db.collection::<Node>(crate::models::node::COLLECTION_NAME).update_one(doc! {"_id":&node_id,"user_id":&node.user_id},doc! {"$set":{"machine_confirm":mongodb::bson::to_bson(&input.machine_confirm).map_err(|_|AppError::Internal("Machine setting encoding failed".into()))?,"allow_single_user_saved_logins":input.allow_single_user_saved_logins,"updated_at":mongodb::bson::DateTime::now()}}).await?;
+    audit_service::log_for_user(
+        state.db.clone(),
+        &auth,
+        "machine_settings_changed",
+        Some(
+            serde_json::json!({"node_id":node_id,"machine_confirm":input.machine_confirm,"single_user_saved_logins":input.allow_single_user_saved_logins}),
+        ),
+    );
+    Ok(StatusCode::NO_CONTENT)
 }

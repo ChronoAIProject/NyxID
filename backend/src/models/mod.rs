@@ -135,6 +135,11 @@ pub mod credits;
 
 pub mod billing_lago_carry;
 
+pub mod machine_desktop;
+pub mod machine_job;
+pub mod saved_login;
+
+pub mod machine_setup;
 pub mod pool_recovery_diagnostic;
 pub mod trigger_run;
 pub mod trigger_schedule;

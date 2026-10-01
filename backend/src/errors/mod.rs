@@ -239,6 +239,53 @@ pub enum AppError {
     #[error("External provider not configured: {0}")]
     ExternalProviderNotConfigured(String),
 
+    // 12400–12413: machine access, controller privacy and saved-login filling.
+    #[error("Machine capability is disabled; the owner must enable it on the node")]
+    MachineCapabilityDisabled,
+
+    #[error("This caller may not use the machine")]
+    MachineNotAllowed,
+
+    #[error("Path is outside the configured machine roots")]
+    MachinePathOutsideRoots,
+
+    #[error("Machine job not found in this conversation")]
+    MachineJobNotFound,
+
+    #[error("Machine confirmation is pending; wait for the owner")]
+    MachineConfirmationPending,
+
+    #[error("The owner declined the machine operation")]
+    MachineConfirmationDeclined,
+
+    #[error("Computer use is unavailable; check the cua driver and permissions")]
+    MachineComputerUnavailable,
+
+    #[error("Machine output or transfer limit exceeded; request a smaller page")]
+    MachineLimitExceeded,
+
+    #[error("The owner controls this machine; wait for hand-back")]
+    MachineOwnerInControl,
+
+    #[error(
+        "Saved-login typing requires the owner to allow this single-user machine in Assistant → Machines settings or use an isolated machine"
+    )]
+    MachineNotIsolated,
+
+    #[error("Saved login not found or not usable")]
+    MachineLoginNotFound,
+
+    #[error("The focused browser origin is not approved for this login")]
+    MachineLoginOriginMismatch,
+
+    #[error("Focus a suitable input field for this login value")]
+    MachineLoginWrongField,
+
+    #[error(
+        "Managed browser filling is unavailable; install the protected browser policies during setup"
+    )]
+    MachineBrowserUnavailable,
+
     #[error("Node not found: {0}")]
     NodeNotFound(String),
 
@@ -692,6 +739,20 @@ impl AppError {
             Self::ExternalTokenInvalid(_) | Self::ExternalProviderNotConfigured(_) => {
                 StatusCode::BAD_REQUEST
             }
+            Self::MachineCapabilityDisabled => StatusCode::FORBIDDEN,
+            Self::MachineNotAllowed => StatusCode::FORBIDDEN,
+            Self::MachinePathOutsideRoots => StatusCode::FORBIDDEN,
+            Self::MachineJobNotFound => StatusCode::NOT_FOUND,
+            Self::MachineConfirmationPending => StatusCode::CONFLICT,
+            Self::MachineConfirmationDeclined => StatusCode::FORBIDDEN,
+            Self::MachineComputerUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            Self::MachineLimitExceeded => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::MachineOwnerInControl => StatusCode::CONFLICT,
+            Self::MachineNotIsolated => StatusCode::FORBIDDEN,
+            Self::MachineLoginNotFound => StatusCode::NOT_FOUND,
+            Self::MachineLoginOriginMismatch => StatusCode::FORBIDDEN,
+            Self::MachineLoginWrongField => StatusCode::BAD_REQUEST,
+            Self::MachineBrowserUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::NodeNotFound(_) => StatusCode::NOT_FOUND,
             Self::NodeOffline(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::NodeProxyTimeout => StatusCode::GATEWAY_TIMEOUT,
@@ -886,6 +947,20 @@ impl AppError {
             Self::ApprovalFailed { .. } => 7001,
             Self::ExternalTokenInvalid(_) => 6004,
             Self::ExternalProviderNotConfigured(_) => 6005,
+            Self::MachineCapabilityDisabled => 12400,
+            Self::MachineNotAllowed => 12401,
+            Self::MachinePathOutsideRoots => 12402,
+            Self::MachineJobNotFound => 12403,
+            Self::MachineConfirmationPending => 12404,
+            Self::MachineConfirmationDeclined => 12405,
+            Self::MachineComputerUnavailable => 12406,
+            Self::MachineLimitExceeded => 12407,
+            Self::MachineOwnerInControl => 12408,
+            Self::MachineNotIsolated => 12409,
+            Self::MachineLoginNotFound => 12410,
+            Self::MachineLoginOriginMismatch => 12411,
+            Self::MachineLoginWrongField => 12412,
+            Self::MachineBrowserUnavailable => 12413,
             Self::NodeNotFound(_) => 8000,
             Self::NodeOffline(_) => 8001,
             Self::NodeProxyTimeout => 8002,
@@ -1119,6 +1194,20 @@ impl AppError {
             Self::ApprovalFailed { .. } => "approval_failed",
             Self::ExternalTokenInvalid(_) => "external_token_invalid",
             Self::ExternalProviderNotConfigured(_) => "external_provider_not_configured",
+            Self::MachineCapabilityDisabled => "machine_capability_disabled",
+            Self::MachineNotAllowed => "machine_not_allowed",
+            Self::MachinePathOutsideRoots => "machine_path_outside_roots",
+            Self::MachineJobNotFound => "machine_job_not_found",
+            Self::MachineConfirmationPending => "machine_confirmation_pending",
+            Self::MachineConfirmationDeclined => "machine_confirmation_declined",
+            Self::MachineComputerUnavailable => "machine_computer_unavailable",
+            Self::MachineLimitExceeded => "machine_limit_exceeded",
+            Self::MachineOwnerInControl => "owner_in_control",
+            Self::MachineNotIsolated => "machine_not_isolated",
+            Self::MachineLoginNotFound => "machine_login_not_found",
+            Self::MachineLoginOriginMismatch => "machine_login_origin_mismatch",
+            Self::MachineLoginWrongField => "machine_login_wrong_field",
+            Self::MachineBrowserUnavailable => "machine_browser_unavailable",
             Self::NodeNotFound(_) => "node_not_found",
             Self::NodeOffline(_) => "node_offline",
             Self::NodeProxyTimeout => "node_proxy_timeout",

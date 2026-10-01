@@ -17,6 +17,7 @@ COPY frontend/ ./
 # Public docs site source. The docs-sync plugin resolves it relative to the
 # frontend dir (`../docs/site`), so it must land at /build/docs/site.
 COPY docs/ /build/docs/
+COPY cli/resources/machine-container/seccomp.json /build/cli/resources/machine-container/seccomp.json
 
 # Telemetry config (DSN, host, share-back flag) is fetched at runtime
 # from the backend's /api/v1/public/config endpoint — no build-time

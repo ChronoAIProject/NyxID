@@ -522,6 +522,10 @@ async fn delete_user_cascade_internal(
     let user_filter = doc! { "user_id": target_user_id };
 
     let user_scoped_collections = [
+        crate::models::saved_login::COLLECTION_NAME,
+        crate::models::machine_setup::COLLECTION_NAME,
+        crate::models::machine_job::COLLECTION_NAME,
+        crate::models::machine_desktop::COLLECTION_NAME,
         crate::models::channel_activity::NOTIFICATIONS_COLLECTION,
         crate::models::channel_email::SUBSCRIPTIONS,
         crate::models::channel_email::SENDS,

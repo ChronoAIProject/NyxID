@@ -105,6 +105,8 @@ async fn researcher(state: &AppState) -> AssistantAgent {
         &state.encryption_keys,
         OWNER,
         CreateRequest {
+            machines: None,
+            logins: None,
             name: "researcher".into(),
             description: "Summarizes notes".into(),
             display_name: None,

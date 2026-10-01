@@ -14,6 +14,7 @@ pub mod approval_service;
 pub mod assistant_action_execution_service;
 pub mod assistant_action_receipts;
 pub mod assistant_direct;
+pub mod assistant_links;
 pub mod assistant_readiness_service;
 pub mod assistant_service;
 pub mod assistant_wire_log_service;
@@ -212,6 +213,19 @@ pub mod catalog_editor_service;
 
 pub mod channel_activity_callback_service;
 pub mod channel_activity_service;
+pub mod machine_desktop_service;
+pub mod machine_gateway_service;
+pub mod machine_service;
+pub mod machine_tools;
+pub mod saved_login_service;
+
+pub mod machine_setup_service;
+
+#[cfg(test)]
+pub(crate) mod machine_integration_tests;
+
+#[cfg(test)]
+mod machine_transport_tests;
 
 pub mod trigger_schedule;
 

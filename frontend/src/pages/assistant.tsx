@@ -1,3 +1,6 @@
+import { AutomationsPage } from "@/pages/automations";
+import { MachinesPage } from "@/pages/machines";
+import { MachineSetupPage, MachinePairPage } from "@/pages/machine-setup";
 import {
   lazy,
   Suspense,
@@ -104,11 +107,55 @@ function sidebarConversation(
   };
 }
 
+type WorkspaceView =
+  | "plugins"
+  | "approvals"
+  | "automations"
+  | "machines"
+  | "machine-setup"
+  | "machine-pair";
+
+const workspaceTitles: Record<WorkspaceView, string> = {
+  plugins: "Plugins",
+  approvals: "Approvals",
+  automations: "Automations",
+  machines: "Machines",
+  "machine-setup": "Add a machine",
+  "machine-pair": "Pair a machine",
+};
+
+function workspaceActiveView(view: WorkspaceView) {
+  return view === "machine-setup" || view === "machine-pair"
+    ? "machines"
+    : view;
+}
+
+function WorkspaceContent({ view }: { readonly view: WorkspaceView }) {
+  if (view === "plugins") return <PluginsView />;
+  if (view === "approvals") return <ApprovalsView />;
+  return (
+    <div
+      className="h-full overflow-y-auto px-4 py-6 sm:px-6 lg:px-10"
+      style={{ paddingBottom: "max(2rem, var(--sab))" }}
+    >
+      {view === "automations" ? (
+        <AutomationsPage />
+      ) : view === "machines" ? (
+        <MachinesPage />
+      ) : view === "machine-setup" ? (
+        <MachineSetupPage />
+      ) : (
+        <MachinePairPage />
+      )}
+    </div>
+  );
+}
+
 function AssistantWorkspacePage({
   view,
   directEnabled,
 }: {
-  readonly view: "plugins" | "approvals";
+  readonly view: WorkspaceView;
   readonly directEnabled: boolean;
 }) {
   const navigate = useNavigate();
@@ -166,12 +213,12 @@ function AssistantWorkspacePage({
     }
   }
 
-  const title = view === "plugins" ? "Plugins" : "Approvals";
+  const title = workspaceTitles[view];
   const sidebar = (
     <AssistantEngineSidebar engine="actor"
       conversations={conversations}
       activeConversationId={undefined}
-      activeView={view}
+      activeView={workspaceActiveView(view)}
       notice={
         actorChat.listError
           ? `Could not load chats. ${actorChat.listError}`
@@ -189,37 +236,37 @@ function AssistantWorkspacePage({
       sidebar={sidebar}
       headerActions={<AssistantHeaderActions activeConversationId={null} />}
     >
-      {view === "plugins" ? <PluginsView /> : <ApprovalsView />}
+      <WorkspaceContent view={view} />
     </AssistantShell>
   );
 }
 
 /**
- * Plugins / Approvals for NyxAgent users: the NyxAgent sidebar (agents and
+ * Workspace views for NyxAgent users: the NyxAgent sidebar (agents and
  * groups), and none of the earlier engines' chat lists are fetched.
  */
-function NyxAgentWorkspacePage({ view }: { readonly view: "plugins" | "approvals" }) {
+function NyxAgentWorkspacePage({ view }: { readonly view: WorkspaceView }) {
   const navigate = useNavigate();
   function openAssistant(search: { c?: string } = {}) {
     void navigate({ to: "/assistant" as never, search: search as never });
   }
   return (
     <AssistantShell
-      title={view === "plugins" ? "Plugins" : "Approvals"}
+      title={workspaceTitles[view]}
       headerActions={<NyxBotSettingsButton />}
       sidebar={
         <AssistantEngineSidebar
           engine="nyxagent"
           conversations={[]}
           activeConversationId={undefined}
-          activeView={view}
+          activeView={workspaceActiveView(view)}
           onNewChat={() => openAssistant()}
           onSelect={(id) => openAssistant({ c: id })}
           onDelete={(id) => nyxAgentTransport.delete(id)}
         />
       }
     >
-      {view === "plugins" ? <PluginsView /> : <ApprovalsView />}
+      <WorkspaceContent view={view} />
     </AssistantShell>
   );
 }
@@ -227,7 +274,7 @@ function NyxAgentWorkspacePage({ view }: { readonly view: "plugins" | "approvals
 export function AssistantPage({
   view = "chat",
 }: {
-  readonly view?: "chat" | "plugins" | "approvals";
+  readonly view?: "chat" | WorkspaceView;
 }) {
   const directEnabled = useFeature(FEATURE_FLAG.DIRECT_CHAT_ENGINE);
   const nyxagentEnabled = useFeature(FEATURE_FLAG.NYXAGENT_ENGINE);

@@ -166,6 +166,7 @@ pub async fn claim(
         now + Duration::from_std(lease_ttl).unwrap_or_else(|_| Duration::seconds(i64::MAX / 4));
     let owner = NodeConnectionOwner {
         http_signature_v2: false,
+        proxy_upload_v1: false,
         http_cancellation: false,
         instance_name: identity.instance_name.clone(),
         generation_id: identity.generation_id.clone(),
@@ -255,6 +256,7 @@ pub async fn record_capabilities(
     fence: &NodeOwnerFence,
     capabilities: NodeCapabilitiesFlags,
     resolved: bool,
+    machine: Option<&nyxid_machine::MachineProfile>,
 ) -> AppResult<bool> {
     let now = bson::DateTime::from_chrono(Utc::now());
     let result = db
@@ -263,7 +265,9 @@ pub async fn record_capabilities(
             fence.filter(),
             doc! {
                 "$set": {
+                    "machine": bson::to_bson(&machine).map_err(|_| crate::errors::AppError::Internal("Machine profile encoding failed".into()))?,
                     "connection_owner.http_signature_v2": capabilities.http_signature_v2,
+                    "connection_owner.proxy_upload_v1": capabilities.proxy_upload_v1,
                     "connection_owner.http_cancellation": capabilities.http_cancellation,
                     "connection_owner.credential_ack_correlation": capabilities.credential_ack_correlation,
                     "connection_owner.remote_credential_crypto_v1": capabilities.remote_credential_crypto_v1,
@@ -321,6 +325,9 @@ mod tests {
     fn node(id: &str) -> Node {
         let now = Utc::now();
         Node {
+            machine: None,
+            machine_confirm: Default::default(),
+            allow_single_user_saved_logins: false,
             id: id.to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             name: "owner-test".to_string(),

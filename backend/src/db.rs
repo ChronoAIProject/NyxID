@@ -1382,6 +1382,64 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    db.collection::<bson::Document>(crate::models::machine_desktop::COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"user_id":1,"conversation_id":1,"updated_at":-1})
+                .build(),
+        )
+        .await?;
+    // Machine records carry metadata only; ephemeral setup proofs are HMACs.
+    let setups = db.collection::<bson::Document>(crate::models::machine_setup::COLLECTION_NAME);
+    for field in ["code_hmac", "device_hmac"] {
+        setups
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! {field:1})
+                    .options(
+                        IndexOptions::builder()
+                            .unique(true)
+                            .partial_filter_expression(doc! {field:{"$type":"string"}})
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await?;
+    }
+    setups
+        .create_indexes([
+            IndexModel::builder()
+                .keys(doc! {"user_id":1,"created_at":-1})
+                .build(),
+            IndexModel::builder()
+                .keys(doc! {"purge_at":1})
+                .options(IndexOptions::builder().expire_after(Duration::ZERO).build())
+                .build(),
+        ])
+        .await?;
+    db.collection::<bson::Document>(crate::models::machine_job::COLLECTION_NAME)
+        .create_indexes([
+            IndexModel::builder()
+                .keys(doc! {"user_id":1,"conversation_id":1,"state":1})
+                .build(),
+            IndexModel::builder()
+                .keys(doc! {"expires_at":1})
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(Duration::from_secs(3600))
+                        .build(),
+                )
+                .build(),
+        ])
+        .await?;
+    db.collection::<bson::Document>(crate::models::saved_login::COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"user_id":1,"label":1,"_id":1})
+                .build(),
+        )
+        .await?;
+
     // Agent Key login credentials and exchanges.
     let credentials = db.collection::<crate::models::api_key_credential::ApiKeyCredential>(
         crate::models::api_key_credential::COLLECTION_NAME,
@@ -5082,6 +5140,7 @@ mod tests {
             issues_url: None,
             capabilities: None,
             inference: None,
+            git_http: None,
             inference_admin_modified: false,
             billing: None,
             auth_notes: None,

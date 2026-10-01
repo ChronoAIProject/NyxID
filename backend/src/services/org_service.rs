@@ -750,6 +750,10 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
             .await?;
     }
     for collection in [
+        crate::models::saved_login::COLLECTION_NAME,
+        crate::models::machine_setup::COLLECTION_NAME,
+        crate::models::machine_job::COLLECTION_NAME,
+        crate::models::machine_desktop::COLLECTION_NAME,
         crate::models::channel_activity::NOTIFICATIONS_COLLECTION,
         crate::models::channel_email::SUBSCRIPTIONS,
         crate::models::channel_email::SENDS,

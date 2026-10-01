@@ -1,0 +1,30 @@
+{
+  "tag": "cua-driver-rs-v0.30.4",
+  "source": "bf6c76786d938070f4ecf1e44004752f69f518b8",
+  "assets": [
+    {
+      "name": "checksums.txt",
+      "sha256": "e9089053ef9421b52cdc0f617fdc94db4644c12b795baf40429cb69dce068b29",
+      "url": "https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.30.4/checksums.txt",
+      "size": 1742
+    },
+    {
+      "name": "cua-driver-rs-0.30.4-darwin-universal.tar.gz",
+      "sha256": "9c75a186f89352fb522dc67791575f8c9e8081a38795af2706e103d41fa72be4",
+      "url": "https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.30.4/cua-driver-rs-0.30.4-darwin-universal.tar.gz",
+      "size": 74332196
+    },
+    {
+      "name": "cua-driver-rs-0.30.4-linux-arm64.tar.gz",
+      "sha256": "21d00fa2fafe889e48a4e497fba95e6cd03de027753fc8799d5cf0695c30a8a1",
+      "url": "https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.30.4/cua-driver-rs-0.30.4-linux-arm64.tar.gz",
+      "size": 34061666
+    },
+    {
+      "name": "cua-driver-rs-0.30.4-linux-x86_64.tar.gz",
+      "sha256": "84445347ceb3039034ce30577b3b7c19a1f0c1f67639423f9da3a71be0418f90",
+      "url": "https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.30.4/cua-driver-rs-0.30.4-linux-x86_64.tar.gz",
+      "size": 33809003
+    }
+  ]
+}

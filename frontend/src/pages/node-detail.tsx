@@ -1,3 +1,4 @@
+import { MachineSummary } from "@/components/shared/machine-summary";
 import { useState } from "react";
 import { useParams, useNavigate } from "@tanstack/react-router";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -305,6 +306,7 @@ export function NodeDetailPage() {
         }
       />
 
+      {node.machine ? <MachineSummary node={node} /> : null}
       {/* Node Info */}
       <DetailSection title="Node Information">
         <DetailRow

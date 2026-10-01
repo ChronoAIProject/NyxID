@@ -1396,6 +1396,10 @@ async fn handle_tools_list(
         tool_defs.retain(|t| !SSH_META_TOOL_NAMES.contains(&t.name.as_str()));
     }
 
+    if auth.chat.as_ref().is_some_and(|chat| !chat.guest) {
+        tool_defs.extend(crate::services::machine_tools::definitions());
+    }
+
     let tools_json: Vec<serde_json::Value> = tool_defs
         .iter()
         .map(|t| {
@@ -1560,6 +1564,7 @@ async fn dispatch_tools_call(
     if let Some(refused) = guest_tool_refusal(auth, tool_name, request.id.clone()) {
         return refused;
     }
+
     if tool_name.starts_with("nyxid__") {
         return handle_account_tool(state, auth, tool_name, &arguments, request.id.clone()).await;
     }
@@ -1575,7 +1580,16 @@ async fn dispatch_tools_call(
                 | "nyx__oracle_pools"
                 | "nyx__oracle_result"
                 | "nyx__oracle_session"
+                | "nyx__machine_list"
+                | "nyx__saved_logins"
+                | "nyx__machine_list_files"
+                | "nyx__machine_read_file"
+                | "nyx__machine_job"
         )
+        // The machine adapter applies this gate after live grants, controller
+        // checks and argument normalization, sharing a card with machine_confirm.
+        // This also covers calls wrapped in nyx__call_tool.
+        && !crate::services::machine_tools::is_tool(tool_name)
         && let Some(chat) = auth
             .chat
             .as_ref()
@@ -1603,6 +1617,9 @@ async fn dispatch_tools_call(
             }
             Ok(None) => {}
         }
+    }
+    if crate::services::machine_tools::is_tool(tool_name) {
+        return handle_machine_tool(state, auth, tool_name, arguments, request.id.clone()).await;
     }
     // -- Meta-tools --
     match tool_name {
@@ -2392,6 +2409,38 @@ async fn handle_account_tool(
     tool_result(request_id, &result.value.to_string(), result.is_error)
 }
 
+async fn handle_machine_tool(
+    state: &AppState,
+    auth: &McpAuthContext,
+    tool_name: &str,
+    arguments: serde_json::Value,
+    request_id: Option<serde_json::Value>,
+) -> Response {
+    let Some(chat) = auth.chat.as_ref().filter(|chat| !chat.guest) else {
+        return tool_result(
+            request_id,
+            "Machines require an assistant chat key on an owner turn",
+            true,
+        );
+    };
+    // Keep the machine adapter's dispatch/confirmation future off the common
+    // MCP router stack. Unrelated callers do not allocate or enter this branch.
+    match Box::pin(super::machine_tools::call(
+        state, chat, tool_name, arguments,
+    ))
+    .await
+    {
+        Ok(value) => tool_result(request_id, &value.to_string(), value.get("error").is_some()),
+        Err(error) => tool_result(
+            request_id,
+            &crate::services::assistant_account_tools::error_result(error)
+                .value
+                .to_string(),
+            true,
+        ),
+    }
+}
+
 /// `nyx__call_tool` -- universal proxy that lets clients invoke any connected
 /// tool by name, bypassing the need for a `tools/list` refresh.  The AI
 /// discovers tools via `nyx__search_tools` and then calls them through this
@@ -2447,6 +2496,10 @@ async fn handle_meta_call_tool(
             }
             serde_json::Value::Object(flat)
         };
+
+    if crate::services::machine_tools::is_tool(tool_name) {
+        return handle_machine_tool(state, auth, tool_name, inner_args, request_id).await;
+    }
 
     if tool_name.starts_with("nyxid__") {
         return handle_account_tool(state, auth, tool_name, &inner_args, request_id).await;
@@ -2666,7 +2719,7 @@ async fn handle_meta_search(
     // to invoke discovered tools, which auto-activates on first call)
     let search_result = mcp_service::search_all_tools(&services, query);
 
-    let results: Vec<serde_json::Value> = search_result
+    let mut results: Vec<serde_json::Value> = search_result
         .matches
         .iter()
         .map(|t| {
@@ -2684,6 +2737,12 @@ async fn handle_meta_search(
         })
         .collect();
 
+    if auth.chat.as_ref().is_some_and(|chat| !chat.guest) {
+        let query = query.to_lowercase();
+        results.extend(crate::services::machine_tools::definitions().into_iter()
+            .filter(|tool| format!("{} {}",tool.name,tool.description).to_lowercase().contains(&query))
+            .map(|tool| serde_json::json!({"name":tool.name,"description":tool.description,"inputSchema":tool.input_schema,"hint":"Call this native tool directly by name."})));
+    }
     let mut response_json = serde_json::json!({
         "matches": results,
         "count": results.len(),
@@ -5666,3 +5725,7 @@ mod chat_authority_tests;
 #[cfg(test)]
 #[path = "mcp_config_routes_tests.rs"]
 mod config_routes_tests;
+
+#[cfg(test)]
+#[path = "machine_mcp_tests.rs"]
+mod machine_mcp_tests;

@@ -1322,6 +1322,7 @@ struct PoolExactMember {
 
 #[derive(Clone)]
 struct PoolExecutionAuthority {
+    pool_id: String,
     scope: service_pool_health_service::HealthScope,
     member_slug: String,
 }
@@ -2349,6 +2350,7 @@ async fn proxy_request_by_selected_member(
     if let Some(mut resolved) = resolved {
         let mut request = request;
         if let Some(exact) = exact {
+            let pool_id = exact.selection.pool_id.clone();
             resolved.pool_selection = Some(exact.selection);
             let scope = pool_scope_for_resolution(
                 state,
@@ -2369,6 +2371,7 @@ async fn proxy_request_by_selected_member(
                 ));
             }
             request.extensions_mut().insert(PoolExecutionAuthority {
+                pool_id,
                 scope,
                 member_slug: slug.to_owned(),
             });
@@ -2428,7 +2431,7 @@ async fn proxy_request_by_selected_member(
 
 // Box the shared execution future at each dispatch arm, as the UUID path does,
 // to bound stack growth when the router constructs nested handler futures.
-async fn proxy_request_by_slug_inner(
+pub(crate) async fn proxy_request_by_slug_inner(
     state: &AppState,
     auth_user: &AuthUser,
     slug: &str,
@@ -2506,6 +2509,21 @@ async fn proxy_request_by_slug_inner(
     }
 
     if let Some(pool) = selected_pool {
+        if let Some(ingress) = request
+            .extensions()
+            .get::<crate::services::machine_gateway_service::Ingress>()
+        {
+            if !ingress.buffered(request.headers()) {
+                return Err(AppError::ApiKeyScopeForbidden(
+                    "Streamed machine uploads cannot use a pool; declare a concrete service connection".into(),
+                ));
+            }
+            if ingress.declared_id != pool.id {
+                return Err(AppError::ApiKeyScopeForbidden(
+                    "Declare this pool in services on nyx__machine_exec".into(),
+                ));
+            }
+        }
         if pool.strategy == crate::models::service_pool::PoolStrategy::Priority {
             return Box::pin(proxy_request_through_pool(
                 state,
@@ -3154,6 +3172,13 @@ async fn execute_proxy_inner(
     mut extra_outbound_headers: Vec<(String, String)>,
     resolved_slug: &mut String,
 ) -> AppResult<Response> {
+    let machine_ingress = request
+        .extensions()
+        .get::<crate::services::machine_gateway_service::Ingress>()
+        .cloned();
+    let machine_git = machine_ingress
+        .as_ref()
+        .is_some_and(|ingress| ingress.git.is_some());
     let pool_authority = request
         .extensions()
         .get::<PoolExecutionAuthority>()
@@ -3163,6 +3188,15 @@ async fn execute_proxy_inner(
         .get::<pool_attempt::AttemptContext>()
         .cloned();
     let is_pool_attempt = request.extensions().get::<PoolAttemptMarker>().is_some();
+    if is_pool_attempt
+        && machine_ingress
+            .as_ref()
+            .is_some_and(|ingress| !ingress.buffered(request.headers()))
+    {
+        return Err(AppError::ApiKeyScopeForbidden(
+            "Streamed machine uploads cannot be replayed through pool members".into(),
+        ));
+    }
     if let Some(prepared) = pool_accounting
         .as_ref()
         .and_then(|context| context.prepared_chat.as_ref())
@@ -3296,14 +3330,15 @@ async fn execute_proxy_inner(
         if let Some(ref us_id) = pre.user_service_id
             && !auth_user.allow_all_services
             && !auth_user.allowed_service_ids.contains(us_id)
-            && !assistant_model_call(
-                state,
-                auth_user,
-                pre.catalog_service_slug
-                    .as_deref()
-                    .map(|slug| doc! {"slug": slug}),
-            )
-            .await?
+            && (machine_ingress.is_some()
+                || !assistant_model_call(
+                    state,
+                    auth_user,
+                    pre.catalog_service_slug
+                        .as_deref()
+                        .map(|slug| doc! {"slug": slug}),
+                )
+                .await?)
         {
             let err = AppError::ApiKeyScopeForbidden(
                 "API key does not have access to this service".to_string(),
@@ -3464,7 +3499,12 @@ async fn execute_proxy_inner(
         // Usage aggregation counts these failures
         // (see ChronoAIProject/NyxID#341).
         if !auth_user.allow_all_services
-            && !assistant_model_call(state, auth_user, Some(doc! {"_id": service_id})).await?
+            && !auth_user
+                .allowed_service_ids
+                .iter()
+                .any(|id| id == service_id)
+            && (machine_ingress.is_some()
+                || !assistant_model_call(state, auth_user, Some(doc! {"_id": service_id})).await?)
         {
             let err = AppError::ApiKeyScopeForbidden(
                 "Scoped API keys must use configured services".to_string(),
@@ -3513,6 +3553,26 @@ async fn execute_proxy_inner(
         )
     };
 
+    if let Some(ingress) = &machine_ingress {
+        let resolved_id = if let Some(authority) = &pool_authority {
+            if !ingress.buffered(request.headers()) {
+                return Err(AppError::ApiKeyScopeForbidden(
+                    "Streamed machine uploads cannot use a pool member".into(),
+                ));
+            }
+            authority.pool_id.as_str()
+        } else {
+            resolved_user_service_id
+                .as_deref()
+                .unwrap_or(&target.service.id)
+        };
+        if resolved_id != ingress.declared_id {
+            return Err(AppError::ApiKeyScopeForbidden(
+                "The gateway may only execute the service declared for this job".into(),
+            ));
+        }
+    }
+
     if is_pool_attempt && let Some(route) = &node_route {
         for node in std::iter::once(&route.node_id).chain(route.fallback_node_ids.iter()) {
             if !state
@@ -3549,6 +3609,27 @@ async fn execute_proxy_inner(
                 crate::services::chatgpt_translator::codex_user_agent(),
             ));
         }
+    }
+
+    if machine_git {
+        let git = machine_ingress
+            .as_ref()
+            .and_then(|ingress| ingress.git.as_ref())
+            .expect("machine git ingress");
+        let catalog = state
+            .db
+            .collection::<crate::models::downstream_service::DownstreamService>(
+                crate::models::downstream_service::COLLECTION_NAME,
+            )
+            .find_one(doc! { "_id": &target.service.id, "is_active": true })
+            .await?
+            .ok_or_else(|| AppError::Forbidden("Git catalog service unavailable".into()))?;
+        target.service.git_http = catalog.git_http;
+        crate::services::machine_gateway_service::apply_git_target(
+            &mut target,
+            master_credential,
+            git,
+        )?;
     }
 
     // Record the resolved service slug so the outer wrapper can attach it
@@ -3726,15 +3807,26 @@ async fn execute_proxy_inner(
     // For WebSocket upgrades, skip body buffering -- WS handshakes have no
     // meaningful body, and consuming it would prevent the protocol upgrade.
     // The request is kept intact for WebSocketUpgrade extraction later.
-    let (body_bytes, ws_request) = if is_ws {
-        (bytes::Bytes::new(), Some(request))
+    // Structured adapters inspect bounded JSON for approval, signing and billing.
+    // Opaque machine uploads (including git packfiles) retain backpressure all
+    // the way to the upstream connection instead of materializing the body.
+    let stream_upload = machine_ingress.is_some()
+        && !is_ws
+        && crate::services::machine_gateway_service::can_stream(&target, &all_headers, machine_git);
+    let (body_bytes, ws_request, mut streaming_body, upload_meter) = if is_ws {
+        (bytes::Bytes::new(), Some(request), None, None)
+    } else if stream_upload {
+        let limit = if machine_git {
+            crate::services::machine_gateway_service::GIT_MAX_BYTES
+        } else {
+            state.config.proxy_max_body_size
+        };
+        let (body, meter) =
+            crate::services::machine_gateway_service::stream_upload(request, limit)?;
+        (bytes::Bytes::new(), None, Some(body), Some(meter))
     } else {
-        // Always buffer proxy request bodies up to the configured limit.
-        //
-        // This preserves a hard cap for all proxy uploads, including raw
-        // Request<Body> handlers where DefaultBodyLimit alone would not apply.
         let bytes = read_proxy_request_body(request, state.config.proxy_max_body_size).await?;
-        (bytes, None)
+        (bytes, None, None, None)
     };
 
     proxy_service::validate_ifttt_request(
@@ -3750,7 +3842,7 @@ async fn execute_proxy_inner(
         node_route.is_some(),
     )?;
 
-    let operation = operation_descriptor::build_http_descriptor(
+    let mut operation = operation_descriptor::build_http_descriptor(
         &method_str,
         path,
         if body_bytes.is_empty() {
@@ -3759,6 +3851,12 @@ async fn execute_proxy_inner(
             Some(body_bytes.as_ref())
         },
     );
+
+    if machine_git && method_str == "POST" && path.ends_with("/git-upload-pack") {
+        // Smart-HTTP fetch uses POST for its negotiation body but cannot
+        // mutate repository refs. Receive-pack remains an ordinary write.
+        operation.verb = crate::models::service_approval_config::ApprovalVerb::Read;
+    }
 
     // Resolve approval policy with org-cascade. The "service owner" (the
     // user_id that owns the resolved UserService) determines whether an
@@ -4435,6 +4533,7 @@ async fn execute_proxy_inner(
         // Try primary node, then fallbacks
         let all_node_ids: Vec<&str> = std::iter::once(node_route.node_id.as_str())
             .chain(node_route.fallback_node_ids.iter().map(|s| s.as_str()))
+            .take(if stream_upload { 1 } else { usize::MAX })
             .collect();
 
         let mut last_error: Option<AppError> = None;
@@ -4448,7 +4547,7 @@ async fn execute_proxy_inner(
             // Resolve signing secret for this specific node. When HMAC signing is
             // enabled, unsigned requests are treated as a routing failure rather
             // than silently downgrading integrity guarantees.
-            let signing_secret = if state.config.node_hmac_signing_enabled {
+            let signing_secret = if state.config.node_hmac_signing_enabled || stream_upload {
                 match node_service::get_node_signing_secret(
                     &state.db,
                     state.encryption_keys.as_ref(),
@@ -4531,15 +4630,60 @@ async fn execute_proxy_inner(
             let target_admission_ms =
                 *first_dispatch_admission_ms.get_or_insert_with(|| elapsed_ms(exchange_started_at));
             let downstream_started_at = std::time::Instant::now();
-            let result = state
-                .node_dispatch
-                .send_proxy_request_classified(
-                    node_id,
-                    attempt_request,
-                    signing_secret.as_ref().map(|secret| secret.as_slice()),
-                    billing_egress_permit,
+            let result = if let Some(upload) = streaming_body.take() {
+                let mut parameters = serde_json::to_value(&attempt_request)
+                    .map_err(|_| AppError::Internal("Upload metadata encoding failed".into()))?;
+                parameters["headers"] = serde_json::to_value(
+                    attempt_request
+                        .headers
+                        .iter()
+                        .cloned()
+                        .collect::<std::collections::BTreeMap<_, _>>(),
                 )
-                .await;
+                .map_err(|_| AppError::Internal("Upload headers encoding failed".into()))?;
+                parameters["git"] = serde_json::json!(machine_git);
+                parameters["max_bytes"] = serde_json::json!(
+                    upload_meter
+                        .as_ref()
+                        .map_or(state.config.proxy_max_body_size, |meter| meter.limit)
+                );
+                let mut signed = nyxid_machine::Request {
+                    request_id: attempt_request.request_id,
+                    node_id: (*node_id).into(),
+                    operation: nyxid_machine::Operation::ProxyUpload,
+                    parameters,
+                    timestamp: chrono::Utc::now().timestamp(),
+                    nonce: uuid::Uuid::new_v4().to_string(),
+                    signature: String::new(),
+                };
+                signed.signature = nyxid_machine::signing::sign(
+                    &signed,
+                    signing_secret.as_ref().ok_or_else(|| {
+                        AppError::NodeOffline("Credential node signing is unavailable".into())
+                    })?,
+                );
+                state.node_dispatch.proxy_upload(signed, upload).await
+            } else {
+                state
+                    .node_dispatch
+                    .send_proxy_request_classified(
+                        node_id,
+                        attempt_request,
+                        signing_secret.as_ref().map(|secret| secret.as_slice()),
+                        billing_egress_permit,
+                    )
+                    .await
+            };
+            // A streamed body can exceed its limit after provider dispatch.
+            // Keep it on the normal failure path so durable grants record the
+            // uncertain outcome and the upload is never retried on another node.
+            let result = match upload_meter.as_ref().filter(|meter| meter.exceeded()) {
+                Some(meter) => Err(NodeProxyFailure::after_dispatch(meter.error())),
+                None => result,
+            };
+            let request_body_len = upload_meter
+                .as_ref()
+                .map_or(request_body_len, |meter| meter.bytes());
             let latency_ms = start.elapsed().as_millis() as u64;
 
             match result {
@@ -4917,7 +5061,7 @@ async fn execute_proxy_inner(
                             err
                         });
                     }
-                    if !should_retry_node_failure(&method, dispatched) {
+                    if stream_upload || !should_retry_node_failure(&method, dispatched) {
                         emit_preheader_diagnostics(
                             exchange_started_at,
                             target_admission_ms,
@@ -4963,7 +5107,7 @@ async fn execute_proxy_inner(
                         .await;
                         return Err(AppError::DurableOperationOutcomeUncertain);
                     }
-                    if !should_retry_node_failure(&method, dispatched) {
+                    if stream_upload || !should_retry_node_failure(&method, dispatched) {
                         emit_preheader_diagnostics(
                             exchange_started_at,
                             target_admission_ms,
@@ -5337,7 +5481,10 @@ async fn execute_proxy_inner(
             path,
             query.as_deref(),
             reqwest_headers,
-            proxy_service::ProxyBody::Buffered(body),
+            match streaming_body.take() {
+                Some(stream) => proxy_service::ProxyBody::Streaming(stream),
+                None => proxy_service::ProxyBody::Buffered(body),
+            },
             identity_headers,
             delegated,
             caller_token.as_deref(),
@@ -5348,6 +5495,13 @@ async fn execute_proxy_inner(
         ),
     )
     .await;
+    let downstream_result = match upload_meter.as_ref().filter(|meter| meter.exceeded()) {
+        Some(meter) => Ok(Err(proxy_service::ForwardRequestError::from(meter.error()))),
+        None => downstream_result,
+    };
+    let request_body_len = upload_meter
+        .as_ref()
+        .map_or(request_body_len, |meter| meter.bytes());
     let downstream_response = match downstream_result {
         Ok(Ok(response)) => response,
         Ok(Err(error)) => {
@@ -5436,7 +5590,8 @@ async fn execute_proxy_inner(
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .is_some_and(crate::mw::security_headers::is_sse_media_type);
-    let should_stream = should_stream_response(&downstream_response, status, is_sse);
+    let should_stream =
+        machine_ingress.is_some() || should_stream_response(&downstream_response, status, is_sse);
     let exchange_diagnostics = ProxyExchangeDiagnostics::new(
         exchange_started_at,
         target_admission_ms,
@@ -11155,6 +11310,9 @@ mod proxy_resolution_integration_tests {
         let now = Utc::now();
         let node_id = Uuid::new_v4().to_string();
         let node = Node {
+            machine: None,
+            machine_confirm: Default::default(),
+            allow_single_user_saved_logins: false,
             auth_token_hash: hash_token(&format!("test-node-auth-{node_id}")),
             id: node_id,
             user_id: owner_user_id.to_string(),
@@ -11438,6 +11596,141 @@ mod proxy_resolution_integration_tests {
             }
         }
         echo_server.abort();
+    }
+
+    #[tokio::test]
+    async fn machine_stream_upload_never_retries_a_fallback_node() {
+        use crate::services::node_ws_manager::{NodeCapabilitiesMsg, NodeOutboundMessage};
+        for dispatched in [false, true] {
+            let db = connect_test_database("machine_stream_no_node_retry")
+                .await
+                .unwrap();
+            let state = test_app_state(db.clone());
+            let owner = Uuid::new_v4().to_string();
+            db.collection::<crate::models::user::User>(USERS)
+                .insert_one(test_user(&owner, UserType::Person))
+                .await
+                .unwrap();
+            let primary = insert_online_node(&state, &owner, "primary").await;
+            let fallback = insert_online_node(&state, &owner, "fallback").await;
+            let mut service =
+                insert_user_service(&db, &owner, "stream-service", "https://example.com", None)
+                    .await;
+            service.node_id = Some(primary.id.clone());
+            db.collection::<UserService>(USER_SERVICES)
+                .replace_one(doc! { "_id": &service.id }, &service)
+                .await
+                .unwrap();
+            crate::services::node_service::create_binding(&db, &owner, &fallback.id, &service.id)
+                .await
+                .unwrap();
+            let (primary_tx, mut primary_rx) = tokio::sync::mpsc::channel(32);
+            let (fallback_tx, mut fallback_rx) = tokio::sync::mpsc::channel(32);
+            crate::test_utils::register_test_node_connection(&state, &primary.id, primary_tx).await;
+            crate::test_utils::register_test_node_connection(&state, &fallback.id, fallback_tx)
+                .await;
+            state.node_ws_manager.record_capabilities(
+                &primary.id,
+                &NodeCapabilitiesMsg {
+                    proxy_upload_v1: true,
+                    ..Default::default()
+                },
+            );
+            let route = super::build_pre_resolved_node_route(
+                &state,
+                &owner,
+                &service.id,
+                Some(&primary.id),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                route.fallback_node_ids.as_slice(),
+                std::slice::from_ref(&fallback.id)
+            );
+            if !dispatched {
+                db.collection::<Node>(NODES)
+                    .update_one(
+                        doc! { "_id": &primary.id },
+                        doc! { "$unset": { "signing_secret_encrypted": "" } },
+                    )
+                    .await
+                    .unwrap();
+            }
+            let manager = state.node_ws_manager.clone();
+            let primary_id = primary.id.clone();
+            let task = tokio::spawn(async move {
+                if dispatched {
+                    let NodeOutboundMessage::Text(message) = primary_rx.recv().await.unwrap()
+                    else {
+                        panic!("expected signed upload opening");
+                    };
+                    let opening: serde_json::Value = serde_json::from_str(&message).unwrap();
+                    assert_eq!(opening["type"], "proxy_upload");
+                    manager.deliver_proxy_error(
+                        &primary_id,
+                        opening["request_id"].as_str().unwrap(),
+                        "credential missing",
+                        502,
+                        true,
+                        Some("credential_missing"),
+                    );
+                }
+            });
+            let mut request = Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/proxy/s/stream-service/upload")
+                .header("content-type", "application/octet-stream")
+                .body(Body::from_stream(futures::stream::once(async {
+                    Ok::<_, std::io::Error>(bytes::Bytes::from_static(b"one-shot upload"))
+                })))
+                .unwrap();
+            request.extensions_mut().insert(
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Proxy,
+                ),
+            );
+            request
+                .extensions_mut()
+                .insert(crate::services::machine_gateway_service::Ingress {
+                    declared_id: service.id.clone(),
+                    git: None,
+                });
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                proxy_request_by_slug_inner(
+                    &state,
+                    &access_token_auth(&owner),
+                    &service.slug,
+                    "upload",
+                    request,
+                    &mut String::new(),
+                ),
+            )
+            .await
+            .unwrap();
+            if dispatched {
+                assert!(
+                    matches!(result, Err(AppError::NodeCredentialMissing(_))),
+                    "{result:?}"
+                );
+            } else {
+                assert!(
+                    matches!(result, Err(AppError::NodeOffline(_))),
+                    "{result:?}"
+                );
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                fallback_rx.try_recv().is_err(),
+                "stream must never reach the fallback"
+            );
+            db.drop().await.unwrap();
+        }
     }
 
     #[tokio::test]
@@ -13715,9 +14008,7 @@ pub async fn list_proxy_services(
 #[cfg(test)]
 mod discovery_tests {
     use super::{ProxyServicesQuery, list_proxy_services};
-    use crate::models::downstream_service::{
-        COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
-    };
+    use crate::models::downstream_service::DownstreamService;
     use crate::models::org_membership::{
         COLLECTION_NAME as ORG_MEMBERSHIPS, OrgMembership, OrgRole,
     };
@@ -13767,10 +14058,12 @@ mod discovery_tests {
             .unwrap();
 
         let catalog = catalog_service(&Uuid::new_v4().to_string());
-        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-            .insert_one(catalog.clone())
-            .await
-            .unwrap();
+        db.collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .insert_one(catalog.clone())
+        .await
+        .unwrap();
 
         let custom_endpoint = test_user_endpoint(
             &Uuid::new_v4().to_string(),

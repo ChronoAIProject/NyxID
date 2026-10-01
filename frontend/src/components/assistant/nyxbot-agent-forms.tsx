@@ -23,6 +23,7 @@ import {
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
+import { MachineGrantPicker } from "./machine-grant-picker";
 import { useKeys } from "@/hooks/use-keys";
 import { useCreateNyxBotAgent } from "@/hooks/use-nyxbot-agents";
 import {
@@ -256,6 +257,11 @@ export function NewAgentDialog({
                   </FormItem>
                 )}
               />
+              {(["machines", "logins"] as const).map((kind) => (
+                <FormField key={kind} control={form.control} name={kind} render={({ field }) => (
+                  <FormItem><MachineGrantPicker kind={kind} value={field.value ?? []} onChange={field.onChange} disabled={create.isPending} /><FormMessage /></FormItem>
+                )} />
+              ))}
               <FormField
                 control={form.control}
                 name="account_read"

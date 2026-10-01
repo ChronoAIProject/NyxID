@@ -459,6 +459,13 @@ upstream list available immediately. No new NyxID environment variable is introd
 
 ## Tool images
 
+Machine screenshots and shared images use this same owner-only attachment
+pipeline. Machine tool text stays within the 10,000-character result budget;
+desktop streams and owner input use a separate human-only socket and never
+enter tool results. Owner takeover ends the active turn; a durable machine watch
+wakes the conversation on hand-back. See [machine nodes](../MACHINE_NODES.md)
+and [NyxBot machines](09-nyxbot-orchestrator.md#machine-nodes-and-saved-logins).
+
 Tool execution used to decode every downstream body as lossy UTF-8, so a camera
 snapshot reached NyxAgent as garbled text it could neither see nor show.
 `mcp_service::execute_tool_response` now returns `ToolResponse {status, text,
@@ -684,6 +691,25 @@ specs were aligned to the descriptor-driven UI (`frontend/src/lib/channel-platfo
 and shared fixture (`frontend/src/test/fixtures/channel-platforms.ts`), so their
 label changes preserve the UI contract rather than weaken assertions.
 
+Machine exec requests explicitly declare `services` (connected service slugs or
+IDs); omitted/empty declarations grant none. The declaration is job-bound and
+rechecked against live key authority, appears on confirmation cards and audit,
+and controls the catalog-derived SDK/git environment. Declare `api-github`
+(or the connected GitHub PAT service) before plain git clone/fetch/pull/push.
+Gateway response compression is preserved end to end. Discovery shares the
+proxy/MCP ACL resolver and gateway calls use the middleware's API-key identity.
+
+Recommend the container or `--separate-users`: a non-isolated shell can read
+the node token, signing secret and locally stored credentials. Explain the
+machine isolation warning without refusing the owner's choice. The generated Docker
+command supplies NyxID's seccomp profile so Chromium remains sandboxed.
+
+Owner desktops use native capture (X11 on Linux, ScreenCaptureKit on macOS),
+JPEG dirty rectangles at up to 30 Hz and independent owner input. Agent actions
+and observations still use cua. Takeover cancels active agent cua/command/file
+work immediately; late results are discarded. Pixel/input data never enters
+agent tools or transcripts during owner control. Frame-rate, latency and
+bandwidth measurements are in [validation and measurements](../MACHINE_NODES.md#validation-and-measurements).
 
 ## Trigger turns
 
@@ -733,3 +759,27 @@ the trigger-insert transaction. Cron gaps collapse at the first valid instant;
 folds use the earlier instant. Recovery writes one missed-count/bounds summary
 and one audit. Busy/pool/overlap work backs off to 30 seconds; budget exhaustion
 waits for its next UTC budget window, all capped at the initial grace deadline.
+
+### Machines in automation turns
+
+Machine tools in scheduled turns retain the same live machine/login grants,
+owner-control lockout and `machine_confirm` rules as owner-initiated turns.
+Webhook turns add their per-run confirmation policy. One exact-argument,
+one-use owner action card satisfies both policies when both require approval.
+Exec, file writes/attachment saves, job cancellation and changing computer
+input are destructive because they can overwrite data or interrupt arbitrary
+work. Saved-login filling and requesting owner control are changing, but not
+destructive: they are restricted field insertion or an owner handoff rather
+than arbitrary execution. Machine listing, saved-login metadata, file listing,
+file reads and job status pass the webhook read-only gate; machine-level `all`
+confirmation still applies to operations as configured. Both direct native
+calls and `nyx__call_tool` use these checks. Guests and developer OAuth tokens
+cannot use machine tools or the human desktop/control routes.
+
+Assistant workspace navigation places Automations (`/assistant/automations`) and
+Machines (`/assistant/machines`, Saved logins at `?tab=logins`) beside Plugins and
+Approvals for both engines. Setup/pairing stay in `AssistantShell`; the desktop is
+standalone under `/assistant/machines/{id}/desktop`. Studio Nodes shows only a
+read-only machine summary linking to assistant settings; Developer → Triggers
+retains secrets/replay. `/automations` redirects with `setup` and `agent` intact.
+Server-generated browser URLs use `services::assistant_links::AssistantPage`.

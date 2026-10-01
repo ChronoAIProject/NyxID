@@ -203,3 +203,74 @@ fn docker_start_with_empty_ca_values_uses_original_run_arguments() {
         ]
     );
 }
+
+#[test]
+fn machine_docker_restart_validates_ca_before_touching_existing_container() {
+    for action in ["start", "restart"] {
+        let harness = DockerHarness::new();
+        let output = harness
+            .command(action)
+            .arg("--machine")
+            .env("NYXID_CA_CERT", "missing-ca")
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("NYXID_CA_CERT"));
+        assert_eq!(harness.calls(), vec![vec!["--version"]]);
+    }
+    let harness = DockerHarness::new();
+    let output = harness
+        .command("restart")
+        .arg("--machine")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        harness.calls().last().unwrap(),
+        &["restart", "nyxid-node-machine"]
+    );
+}
+
+#[test]
+fn machine_docker_creation_preserves_ca_mounts_and_sandbox_profile() {
+    let harness = DockerHarness::new();
+    let docker = harness.root.path().join("bin/docker");
+    std::fs::write(&docker,
+        "#!/bin/sh\nprintf '%s\\0' \"$@\" >> \"$DOCKER_CALL_LOG\"\nprintf '\\n' >> \"$DOCKER_CALL_LOG\"\n[ \"$1\" != inspect ]\n",
+    ).unwrap();
+    let path = harness.certificate("company.pem");
+    let output = harness
+        .command("start")
+        .arg("--machine")
+        .env("NYXID_CA_CERT", &path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let calls = harness.calls();
+    let run = calls.last().unwrap();
+    assert_eq!(
+        run.last().unwrap(),
+        "ghcr.io/chronoaiproject/nyxid/nyxid-node-machine:latest"
+    );
+    assert!(
+        run.windows(2)
+            .any(|args| args == ["-e", "NYXID_CA_CERT=/etc/nyxid/tls/ca.pem"])
+    );
+    let mount = format!(
+        "type=bind,source={},target=/etc/nyxid/tls/ca.pem,readonly",
+        path.display()
+    );
+    assert!(run.windows(2).any(|args| args == ["--mount", &mount]));
+    assert!(
+        run.windows(2)
+            .any(|args| args[0] == "--security-opt" && args[1].starts_with("seccomp="))
+    );
+    assert!(
+        run.iter()
+            .any(|arg| arg == "nyxid-node-machine-state:/var/lib/nyxid-machine")
+    );
+}
