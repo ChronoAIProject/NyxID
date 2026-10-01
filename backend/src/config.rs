@@ -5,6 +5,23 @@ use std::{
 
 pub const DEFAULT_CHANNEL_MEDIA_MAX_BYTES: u64 = 20 * 1024 * 1024;
 
+/// Sentinel `ORACLE_UPSTREAM_URL` value: hold every oracle request with
+/// 503 + `Retry-After` instead of forwarding it.
+pub const ORACLE_UPSTREAM_HOLD: &str = "hold";
+
+/// True when `ORACLE_UPSTREAM_URL` is the `hold` sentinel.
+pub fn is_oracle_hold(value: &str) -> bool {
+    value.eq_ignore_ascii_case(ORACLE_UPSTREAM_HOLD)
+}
+
+/// True for exactly 64 lowercase hexadecimal characters.
+pub fn is_lower_hex_64(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 const DEFAULT_INTERNAL_BIND_ADDR: &str = "127.0.0.1:3002";
 
 fn resolve_internal_advertise_url(
@@ -546,6 +563,15 @@ pub struct AppConfig {
     /// Days to retain terminal oracle tasks (prompt + response bodies)
     /// before MongoDB TTL expiry (default: 30).
     pub oracle_task_retention_days: u32,
+    /// Base URL of the standalone oracle service, or the literal `hold`.
+    /// When set, every `/api/v1/oracle` consumer and worker request is
+    /// proxied there instead of the in-process relay. `hold` answers every
+    /// oracle request with 503 + `Retry-After: 10` during cutover.
+    pub oracle_upstream_url: Option<String>,
+    /// Shared secret for the internal `/api/v1/internal/oracle/*`
+    /// endpoints on the private listener (64 lowercase hex chars). The
+    /// endpoints are mounted only when it is set.
+    pub oracle_internal_secret: Option<String>,
 
     /// Response-cache TTL (seconds) for the `aws_sigv4` proxy auth
     /// method. AWS Cost Explorer charges $0.01 per paginated request,
@@ -917,6 +943,15 @@ impl std::fmt::Debug for AppConfig {
             .field(
                 "oracle_task_retention_days",
                 &self.oracle_task_retention_days,
+            )
+            .field("oracle_upstream_url", &self.oracle_upstream_url)
+            .field(
+                "oracle_internal_secret",
+                if self.oracle_internal_secret.is_some() {
+                    &"Some([REDACTED])"
+                } else {
+                    &"None"
+                },
             )
             .field("billing_enabled", &self.billing_enabled)
             .field("lago_api_url", &self.lago_api_url)
@@ -1462,6 +1497,14 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(30),
+            oracle_upstream_url: env::var("ORACLE_UPSTREAM_URL")
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty()),
+            oracle_internal_secret: env::var("ORACLE_INTERNAL_SECRET")
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty()),
             cloud_response_cache_ttl_secs: env::var("CLOUD_RESPONSE_CACHE_TTL_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -1757,6 +1800,32 @@ impl AppConfig {
         }
     }
 
+    /// Validate the standalone oracle cutover settings.
+    ///
+    /// `ORACLE_UPSTREAM_URL` is either the literal `hold` or an absolute
+    /// http(s) URL. `ORACLE_INTERNAL_SECRET` is 64 lowercase hex characters
+    /// and is required whenever the upstream URL is set, because the
+    /// standalone service calls back into the internal endpoints with it.
+    pub fn validate_oracle_config(&self) {
+        if let Some(upstream) = self.oracle_upstream_url.as_deref()
+            && !is_oracle_hold(upstream)
+        {
+            let parsed = url::Url::parse(upstream)
+                .unwrap_or_else(|_| panic!("ORACLE_UPSTREAM_URL must be `hold` or a valid URL"));
+            if !matches!(parsed.scheme(), "http" | "https") || parsed.host().is_none() {
+                panic!("ORACLE_UPSTREAM_URL must use http or https and include a host");
+            }
+        }
+        if let Some(secret) = self.oracle_internal_secret.as_deref()
+            && !is_lower_hex_64(secret)
+        {
+            panic!("ORACLE_INTERNAL_SECRET must be 64 lowercase hex characters");
+        }
+        if self.oracle_upstream_url.is_some() && self.oracle_internal_secret.is_none() {
+            panic!("ORACLE_INTERNAL_SECRET is required when ORACLE_UPSTREAM_URL is set");
+        }
+    }
+
     pub fn validate_cluster_runtime_config(&self) {
         if self.instance_name.trim().is_empty() {
             panic!("INSTANCE_NAME must not be empty");
@@ -2018,6 +2087,8 @@ mod tests {
             trigger_payload_max_bytes: 256 * 1024,
             trigger_delivery_retention_hours: 72,
             oracle_task_retention_days: 30,
+            oracle_upstream_url: None,
+            oracle_internal_secret: None,
             cloud_response_cache_ttl_secs: 0,
             cloud_response_cache_max_entry_bytes:
                 crate::services::cloud_response_cache::DEFAULT_MAX_ENTRY_BYTES,
@@ -2388,6 +2459,47 @@ mod tests {
     fn validate_key_provider_local() {
         let cfg = make_config("http://localhost:3001", "dev", &"ab".repeat(32));
         cfg.validate_key_provider();
+    }
+
+    #[test]
+    fn validate_oracle_config_accepts_unset() {
+        let config = make_config("http://localhost:3001", "test", &"ab".repeat(32));
+        config.validate_oracle_config();
+    }
+
+    #[test]
+    fn validate_oracle_config_accepts_hold_and_url_with_secret() {
+        let mut config = make_config("http://localhost:3001", "test", &"ab".repeat(32));
+        config.oracle_internal_secret = Some("ab".repeat(32));
+        config.oracle_upstream_url = Some("hold".to_string());
+        config.validate_oracle_config();
+        config.oracle_upstream_url = Some("http://oracle.internal:8080".to_string());
+        config.validate_oracle_config();
+    }
+
+    #[test]
+    #[should_panic(expected = "ORACLE_INTERNAL_SECRET is required")]
+    fn validate_oracle_config_requires_secret_with_upstream() {
+        let mut config = make_config("http://localhost:3001", "test", &"ab".repeat(32));
+        config.oracle_upstream_url = Some("hold".to_string());
+        config.validate_oracle_config();
+    }
+
+    #[test]
+    #[should_panic(expected = "ORACLE_INTERNAL_SECRET must be 64 lowercase hex")]
+    fn validate_oracle_config_rejects_uppercase_secret() {
+        let mut config = make_config("http://localhost:3001", "test", &"ab".repeat(32));
+        config.oracle_internal_secret = Some("AB".repeat(32));
+        config.validate_oracle_config();
+    }
+
+    #[test]
+    #[should_panic(expected = "ORACLE_UPSTREAM_URL must use http or https")]
+    fn validate_oracle_config_rejects_non_http_upstream() {
+        let mut config = make_config("http://localhost:3001", "test", &"ab".repeat(32));
+        config.oracle_internal_secret = Some("ab".repeat(32));
+        config.oracle_upstream_url = Some("ftp://oracle.internal".to_string());
+        config.validate_oracle_config();
     }
 
     #[test]

@@ -1317,6 +1317,8 @@ mod tests {
             trigger_payload_max_bytes: 256 * 1024,
             trigger_delivery_retention_hours: 72,
             oracle_task_retention_days: 30,
+            oracle_upstream_url: None,
+            oracle_internal_secret: None,
             cloud_response_cache_ttl_secs: 0,
             cloud_response_cache_max_entry_bytes: 1024 * 1024,
             cloud_response_cache_max_entries: 256,

@@ -540,6 +540,8 @@ See [ORACLE_RELAY.md](ORACLE_RELAY.md) for the full design.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ORACLE_TASK_RETENTION_DAYS` | `30` | Days to retain terminal oracle tasks (prompt + response bodies) before MongoDB TTL expiry. Queued/dispatched tasks are never auto-expired. |
+| `ORACLE_UPSTREAM_URL` | unset | Base URL of the standalone oracle service, for example `http://oracle:8080`, or the literal `hold`. When set, every `/api/v1/oracle` consumer and worker request is proxied there and the in-process relay handlers are not mounted. `hold` answers every oracle request with `503` and `Retry-After: 10` during the cutover window. Unset keeps the in-process relay. Requires `ORACLE_INTERNAL_SECRET`. See [ORACLE_RELAY.md](ORACLE_RELAY.md#standalone-oracle-service). |
+| `ORACLE_INTERNAL_SECRET` | unset | Shared secret for the `/api/v1/internal/oracle/*` identity endpoints on the private listener (`INTERNAL_BIND_ADDR`). Exactly 64 lowercase hex characters; generate with `openssl rand -hex 32`. The endpoints are mounted only when it is set. The standalone oracle service uses the same value. |
 
 ## Logging
 
