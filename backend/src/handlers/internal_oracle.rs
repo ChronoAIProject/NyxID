@@ -780,7 +780,7 @@ mod tests {
             &db,
             &person.to_string(),
             "ci-bot",
-            "proxy:*",
+            "proxy",
             None,
             None,
             None,
@@ -807,7 +807,7 @@ mod tests {
             assert_eq!(json["api_key"]["id"], created.id);
             assert_eq!(json["api_key"]["name"], "ci-bot");
             assert_eq!(json["api_key"]["purpose"], "general");
-            assert_eq!(json["scope"], "proxy:*");
+            assert_eq!(json["scope"], "proxy");
             assert!(json["exp"].is_null());
             assert_eq!(json["memberships"].as_array().unwrap().len(), 2);
         }
