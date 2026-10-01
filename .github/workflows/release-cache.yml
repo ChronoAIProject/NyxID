@@ -20,6 +20,11 @@ on:
       - "**/Cargo.toml"
       - .github/workflows/release.yml
       - .github/workflows/release-cache.yml
+  # Pull requests that change this workflow build the matrix to verify it,
+  # without saving: caches from pull request refs are not visible to tags.
+  pull_request:
+    paths:
+      - .github/workflows/release-cache.yml
   schedule:
     - cron: "23 2 * * *"
   workflow_dispatch:
@@ -75,6 +80,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: dist-${{ join(matrix.targets, '-') }}
+          save-if: ${{ github.event_name != 'pull_request' }}
       - name: Install dist
         if: steps.cache.outputs.cache-hit != 'true'
         run: ${{ matrix.install_dist.run }}
