@@ -599,6 +599,18 @@ pub enum AppError {
     #[error("Installation credential expired; enroll with a fresh credential")]
     OracleWorkerCredentialRenewalRequired,
 
+    /// The standalone oracle service could not be reached (502).
+    #[error("Oracle service unavailable: {0}")]
+    OracleUpstreamUnavailable(String),
+
+    /// `ORACLE_UPSTREAM_URL=hold`: the oracle cutover is in progress and
+    /// every oracle request is held with 503 + `Retry-After: 10`. Shares
+    /// the `oracle_upstream_unavailable` key and code 11017 with
+    /// `OracleUpstreamUnavailable` on purpose so clients retry both the
+    /// same way.
+    #[error("Oracle service unavailable: cutover in progress, retry shortly")]
+    OracleUpstreamHold,
+
     #[error("Service pool not found: {0}")]
     ServicePoolNotFound(String),
 
@@ -814,6 +826,8 @@ impl AppError {
             Self::OracleWorkerLabelUnavailable(_) => StatusCode::CONFLICT,
             Self::OracleLoginSnapshotNotFound(_) => StatusCode::NOT_FOUND,
             Self::OracleWorkerCredentialRenewalRequired => StatusCode::CONFLICT,
+            Self::OracleUpstreamUnavailable(_) => StatusCode::BAD_GATEWAY,
+            Self::OracleUpstreamHold => StatusCode::SERVICE_UNAVAILABLE,
             Self::ServicePoolInfrastructureUnavailable | Self::ServicePoolCoolingDown => {
                 StatusCode::SERVICE_UNAVAILABLE
             }
@@ -1014,6 +1028,7 @@ impl AppError {
             Self::OracleWorkerLabelUnavailable(_) => 11014,
             Self::OracleLoginSnapshotNotFound(_) => 11015,
             Self::OracleWorkerCredentialRenewalRequired => 11016,
+            Self::OracleUpstreamUnavailable(_) | Self::OracleUpstreamHold => 11017,
             Self::ServicePoolUpstreamEncodingUnsupported => 11407,
             Self::ServicePoolInfrastructureUnavailable => 11404,
             Self::ServicePoolCoolingDown => 11405,
@@ -1249,6 +1264,9 @@ impl AppError {
             Self::OracleWorkerCredentialRenewalRequired => {
                 "oracle_worker_credential_renewal_required"
             }
+            Self::OracleUpstreamUnavailable(_) | Self::OracleUpstreamHold => {
+                "oracle_upstream_unavailable"
+            }
             Self::ServicePoolUpstreamEncodingUnsupported => {
                 "service_pool_upstream_encoding_unsupported"
             }
@@ -1348,9 +1366,19 @@ impl IntoResponse for AppError {
             AppError::DatabaseError(err) => tracing::error!(error = %err, "Database error"),
             _ => tracing::warn!(error = %self, "Client error"),
         }
-        (self.status_code(), axum::Json(self.response_body())).into_response()
+        let mut response = (self.status_code(), axum::Json(self.response_body())).into_response();
+        if matches!(self, AppError::OracleUpstreamHold) {
+            response.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from_static(ORACLE_HOLD_RETRY_AFTER_SECS),
+            );
+        }
+        response
     }
 }
+
+/// `Retry-After` value sent with every `OracleUpstreamHold` response.
+pub const ORACLE_HOLD_RETRY_AFTER_SECS: &str = "10";
 
 /// Convenience type alias for handler return types.
 pub type AppResult<T> = Result<T, AppError>;
@@ -1381,6 +1409,35 @@ mod tests {
         assert_eq!(payload["error"], "request_body_too_large");
         assert_eq!(payload["error_code"], 11700);
         assert!(payload["message"].as_str().unwrap().contains("2048 bytes"));
+    }
+
+    #[tokio::test]
+    async fn oracle_upstream_errors_share_key_and_code() {
+        let unavailable = AppError::OracleUpstreamUnavailable("connect failed".into());
+        assert_eq!(unavailable.status_code(), StatusCode::BAD_GATEWAY);
+        assert_eq!(unavailable.error_code(), 11017);
+        assert_eq!(unavailable.error_key(), "oracle_upstream_unavailable");
+        assert_eq!(
+            unavailable.to_string(),
+            "Oracle service unavailable: connect failed"
+        );
+        let response = unavailable.into_response();
+        assert!(response.headers().get("retry-after").is_none());
+
+        let hold = AppError::OracleUpstreamHold;
+        assert_eq!(hold.status_code(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(hold.error_code(), 11017);
+        assert_eq!(hold.error_key(), "oracle_upstream_unavailable");
+        let response = hold.into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.headers().get("retry-after").unwrap(),
+            ORACLE_HOLD_RETRY_AFTER_SECS
+        );
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["error"], "oracle_upstream_unavailable");
+        assert_eq!(payload["error_code"], 11017);
     }
 
     #[test]
@@ -1796,6 +1853,7 @@ mod tests {
             AppError::OracleWorkerLabelUnavailable("".into()).error_code(),
             AppError::OracleLoginSnapshotNotFound("".into()).error_code(),
             AppError::OracleWorkerCredentialRenewalRequired.error_code(),
+            AppError::OracleUpstreamUnavailable("".into()).error_code(),
             AppError::GrantCascadeConfirmationRequired(Box::new(GrantCascadePayload {
                 provider_slug: "github".into(),
                 provider_name: "GitHub".into(),
