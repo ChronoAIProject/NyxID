@@ -6,6 +6,11 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+# Shipped only as the nyxid-machine-updater container image, never as a
+# cargo-dist release binary.
+[package.metadata.dist]
+dist = false
+
 [dependencies]
 tokio = { workspace = true }
 serde = { workspace = true }
