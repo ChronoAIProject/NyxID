@@ -251,7 +251,7 @@ describe("live grouped services", () => {
       },
     });
     render(preview());
-    expect(screen.getByText(/Edited .* · Calvin/)).toBeVisible();
+    expect(screen.getByText(/Last edit .* · Calvin/)).toBeVisible();
     await userEvent.click(
       screen.getByRole("button", { name: "Show last edit for OpenAI" }),
     );
@@ -294,7 +294,7 @@ describe("live grouped services", () => {
       within(card).getByText("Billing unverified · 3 connections"),
     ).toBeVisible();
     expect(within(card).queryByText("Sources")).not.toBeInTheDocument();
-    for (const source of ["Personal", "Chrono", "NyxID platform"]) {
+    for (const source of ["Personal", "Chrono", "NyxID platform", "Personal"]) {
       await user.hover(
         screen.getByRole("button", {
           name: `${source} · Show sources for OpenAI`,
@@ -303,8 +303,16 @@ describe("live grouped services", () => {
       expect(
         within(await screen.findByRole("tooltip")).getByText(source),
       ).toBeVisible();
-      await user.keyboard("{Escape}");
     }
+    expect(screen.getAllByRole("tooltip")).toHaveLength(1);
+    expect(
+      within(screen.getByRole("tooltip")).getByText(
+        "Connections you own. Billing is shown separately.",
+      ),
+    ).toBeVisible();
+    await user.unhover(
+      screen.getByRole("button", { name: "Personal · Show sources for OpenAI" }),
+    );
     await user.click(
       within(card).getByRole("button", { name: "Expand OpenAI connections" }),
     );
@@ -370,11 +378,17 @@ describe("live grouped services", () => {
         },
       },
     });
+    const user = userEvent.setup();
     render(preview());
     expect(screen.getByText("1+ agent key")).toBeVisible();
     expect(screen.getByText("Last use not reported")).toBeVisible();
-    expect(screen.getByTitle(/Keys with access: Codex CI/)).toBeVisible();
-    await userEvent.hover(
+    await user.hover(
+      screen.getByRole("button", { name: "Show agent keys and use for OpenAI" }),
+    );
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      "Keys with access: Codex CI",
+    );
+    await user.hover(
       screen.getByRole("button", { name: "Show billing for OpenAI" }),
     );
     const tooltip = within(await screen.findByRole("tooltip"));
@@ -420,17 +434,20 @@ describe("live grouped services", () => {
     });
     render(preview());
     expect(screen.getByText("Agent keys unverified")).toBeVisible();
-    expect(screen.getByText(/Last used .*Codex worker/)).toBeVisible();
-    expect(
-      screen.getByTitle(/Last use: Codex worker · Release app/),
-    ).toBeVisible();
+    expect(screen.getByText(/^Last use /)).toBeVisible();
+    await user.hover(
+      screen.getByRole("button", { name: "Show agent keys and use for OpenAI" }),
+    );
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      /Last use: Codex worker · Release app/,
+    );
     await user.click(
       screen.getByRole("button", { name: "Expand OpenAI connections" }),
     );
     const summary = screen.getByRole("button", {
       name: "Show agent keys and use for OpenAI",
     });
-    expect(within(summary).getByText(/Codex worker/)).toBeVisible();
+    expect(within(summary).getByText(/^Last use /)).toBeVisible();
     await user.click(summary);
     expect(
       screen.getByRole("table", { name: "Recent connection requests" }),
@@ -652,6 +669,16 @@ describe("live grouped services", () => {
     expect(
       screen.getByRole("button", { name: "Connect Service" }),
     ).toHaveTextContent("Connect Service");
+    const personalToggle = screen.getByRole("button", {
+      name: "Service view: Personal",
+    });
+    await user.hover(personalToggle);
+    expect(
+      await screen.findByRole("tooltip", { name: /Switch to all services/ }),
+    ).toHaveTextContent(
+      /including their accessible organization and platform connections/,
+    );
+    await user.unhover(personalToggle);
     main.scrollTop = 120;
     fireEvent.scroll(main);
     expect(
@@ -689,12 +716,24 @@ describe("live grouped services", () => {
     expect(
       screen.getByRole("button", { name: "Service view: Personal" }),
     ).toBeVisible();
-    await user.click(
-      screen.getByRole("button", { name: "Service view: Personal" }),
-    );
+    const compactPersonalToggle = screen.getByRole("button", {
+      name: "Service view: Personal",
+    });
+    await user.hover(compactPersonalToggle);
     expect(
-      screen.getByRole("button", { name: "Service view: All services" }),
+      await screen.findByRole("tooltip", { name: /Switch to all services/ }),
     ).toBeVisible();
+    await user.click(compactPersonalToggle);
+    const allToggle = screen.getByRole("button", {
+      name: "Service view: All services",
+    });
+    expect(allToggle).toBeVisible();
+    await user.unhover(allToggle);
+    await user.hover(allToggle);
+    expect(
+      await screen.findByRole("tooltip", { name: /Switch to personal services/ }),
+    ).toHaveTextContent("Showing all accessible services.");
+    await user.unhover(allToggle);
     await user.click(screen.getByRole("button", { name: "Organization" }));
     await user.click(screen.getByRole("checkbox", { name: "Chrono" }));
     await user.click(screen.getByRole("button", { name: "Done" }));

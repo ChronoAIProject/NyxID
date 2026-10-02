@@ -141,7 +141,7 @@ export function ServiceViewToolbar({
     });
   };
   const sourceToggle = (
-    <TooltipProvider delayDuration={200}>
+    <TooltipProvider delayDuration={100} disableHoverableContent>
       <Tooltip>
         <TooltipTrigger asChild>
           <Button
@@ -174,10 +174,23 @@ export function ServiceViewToolbar({
             )}
           </Button>
         </TooltipTrigger>
-        <TooltipContent side="bottom" sideOffset={8} className="max-w-64">
-          {filters.source === "personal"
-            ? "Personal view includes your services and their organization/platform counterparts. Click to show all services."
-            : "All services. Click to show services with a personal connection."}
+        <TooltipContent
+          side="bottom"
+          align="end"
+          sideOffset={8}
+          collisionPadding={12}
+          className="max-w-[min(18rem,calc(100vw-2rem))] space-y-1 text-left leading-relaxed"
+        >
+          <p className="font-medium">
+            {filters.source === "personal"
+              ? "Switch to all services"
+              : "Switch to personal services"}
+          </p>
+          <p className="text-muted-foreground">
+            {filters.source === "personal"
+              ? "Showing services with a personal connection, including their accessible organization and platform connections."
+              : "Showing all accessible services. Switch to keep only services with a personal connection and their counterparts."}
+          </p>
         </TooltipContent>
       </Tooltip>
     </TooltipProvider>

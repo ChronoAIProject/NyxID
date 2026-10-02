@@ -29,7 +29,7 @@ export function ServiceAvatarStack({
   const [showAll, setShowAll] = useState(false);
   const visible = showAll ? items : items.slice(0, 4);
   return (
-    <TooltipProvider delayDuration={180}>
+    <TooltipProvider delayDuration={100} disableHoverableContent>
       <div
         role="group"
         aria-label={label}

@@ -7,7 +7,7 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
-import { ChevronRight, UsersRound, History } from "lucide-react";
+import { ChevronRight, Clock3, History } from "lucide-react";
 import { useServiceView } from "@/hooks/use-service-view";
 import { useServiceCardTransition } from "@/hooks/use-service-card-transition";
 import { ServiceViewToolbar } from "./service-view-toolbar";
@@ -30,6 +30,12 @@ import {
 import { ServiceIcon } from "@/components/service-icon";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { cn, formatRelativeTime } from "@/lib/utils";
 import {
   groupServiceConnections,
@@ -159,6 +165,12 @@ function GroupCard({
             type,
             name: sourceLabel(key),
             avatarUrl: org?.avatar_url,
+            description:
+              type === "personal"
+                ? "Connections you own. Billing is shown separately."
+                : type === "org"
+                  ? "Connections owned by this organization. Billing is shown separately."
+                  : "Connections using NyxID credentials. Billing is shown separately.",
           },
         ] as const;
       }),
@@ -205,9 +217,9 @@ function GroupCard({
       ? "Agent keys unverified"
       : "0 agent keys";
   const useText = latestUse
-    ? `${ownUseOnly ? "Your last use" : "Last used"} ${formatRelativeTime(latestUse.occurred_at)} · ${callerLabel(latestUse.caller)}`
+    ? `${ownUseOnly ? "Your last use" : "Last use"} ${formatRelativeTime(latestUse.occurred_at)}`
     : useTracked
-      ? "No recorded use in 30 days"
+      ? "No use recorded · 30d"
       : "Last use not reported";
   const agents =
     insights.status === "loading"
@@ -365,30 +377,45 @@ function GroupCard({
                   if (!expanded) onToggle(cardRef.current);
                 }}
               />
-              <button
-                type="button"
-                onClick={() => {
-                  openSummary(latestUse ? "requests" : "access");
-                }}
-                aria-expanded={expanded}
-                aria-controls={contentId}
-                aria-label={`Show agent keys and use for ${group.name}`}
-                className="flex h-8 w-full min-w-0 flex-col rounded-sm text-left text-xs leading-4 focus-visible:outline-2 focus-visible:outline-ring"
-                title={agents.title}
-              >
-                <span className="flex w-full min-w-0 items-center gap-2">
-                  <UsersRound
-                    className="size-3.5 shrink-0 text-muted-foreground"
-                    aria-hidden="true"
-                  />
-                  <span className="truncate">{agents.text}</span>
-                </span>
-                <span className="block w-full truncate pl-[22px] text-muted-foreground">
-                  {insights.status === "ready"
-                    ? useText
-                    : "Last use unavailable"}
-                </span>
-              </button>
+              <TooltipProvider delayDuration={100} disableHoverableContent>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        openSummary(latestUse ? "requests" : "access");
+                      }}
+                      aria-expanded={expanded}
+                      aria-controls={contentId}
+                      aria-label={`Show agent keys and use for ${group.name}`}
+                      className="flex h-6 w-full min-w-0 items-center gap-2 rounded-sm text-left text-xs focus-visible:outline-2 focus-visible:outline-ring"
+                    >
+                      <Clock3
+                        className="size-3.5 shrink-0 text-muted-foreground"
+                        aria-hidden="true"
+                      />
+                      <span className="truncate">{agents.text}</span>
+                      <span
+                        className="shrink-0 text-muted-foreground"
+                        aria-hidden="true"
+                      >
+                        ·
+                      </span>
+                      <span className="shrink-0 whitespace-nowrap text-muted-foreground">
+                        {insights.status === "ready"
+                          ? useText
+                          : "Last use unavailable"}
+                      </span>
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent
+                    collisionPadding={12}
+                    className="max-w-[min(22rem,calc(100vw-2rem))] whitespace-pre-line break-words leading-relaxed [overflow-wrap:anywhere]"
+                  >
+                    {agents.title}
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
               <div className="flex h-6 min-w-0 items-center justify-between gap-2">
                 <button
                   type="button"
@@ -410,7 +437,7 @@ function GroupCard({
                   />
                   <span className="truncate text-muted-foreground">
                     {lastEdit
-                      ? `Edited ${formatRelativeTime(lastEdit.edit.at)} · ${lastEdit.edit.actor.name}`
+                      ? `Last edit ${formatRelativeTime(lastEdit.edit.at)} · ${lastEdit.edit.actor.name}`
                       : "Last edit not recorded"}
                   </span>
                 </button>

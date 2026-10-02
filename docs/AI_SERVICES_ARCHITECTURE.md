@@ -78,8 +78,9 @@ invoices are separate. Clicking the summary opens the first billable connection'
 billing panel. Every table row exposes its own classification, payer and rates.
 
 Agent keys are counted once across the group's connections; partial inventories
-show a `+`. Last use is on its own line with a relative time and recorded caller.
-The lower-left **Edited** summary uses the latest `authorship.last_change` event,
+show a `+`. Agent key count and last-use time share one compact line. Hover or
+keyboard focus shows the key names, recorded caller/application and exact time.
+The lower-left **Last edit** summary uses the latest `authorship.last_change` event,
 including its actor, and opens that connection's history. Creation and credential
 preparation timestamps are not substituted for edits or usage.
 
