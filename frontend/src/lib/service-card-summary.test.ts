@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   connectionBillability,
+  connectionBillingCategory,
   latestServiceEdit,
 } from "./service-card-summary";
 import { configuredBilling } from "./service-insights-compat";
@@ -19,6 +20,73 @@ const lane = {
   credits_per_unit: "1",
   sync_status: "synced" as const,
 };
+describe("card billing categories", () => {
+  it("identifies NyxID's shared OAuth app without calling a personal OAuth login BYOK", () => {
+    const oauth = { ...connection, credential_type: "oauth2" };
+    const bill = configuredBilling(oauth);
+    expect(connectionBillingCategory(oauth, bill)).toBe("unknown");
+    expect(
+      connectionBillingCategory(oauth, {
+        ...bill,
+        credential_class: "nyxid_platform_oauth_app",
+      }),
+    ).toBe("platform");
+    expect(
+      connectionBillingCategory(oauth, {
+        ...bill,
+        credential_class: "user_owned",
+      }),
+    ).toBe("byok");
+  });
+  it("keeps a supplied key BYOK when NyxID charges apply or credits cover its usage", () => {
+    expect(
+      connectionBillingCategory(connection, {
+        ...configuredBilling(connection),
+        credit_billing_configured: true,
+        charge_status: "not_charged",
+      }),
+    ).toBe("byok");
+  });
+  it("does not call missing credentials, restricted data, or legacy charges not billable", () => {
+    const noAuth = { ...connection, auth_method: "none", api_key_id: null };
+    const bill = configuredBilling(noAuth);
+    expect(connectionBillingCategory(noAuth, bill)).toBe("unknown");
+    expect(
+      connectionBillingCategory(noAuth, {
+        ...bill,
+        credit_billing_configured: false,
+      }),
+    ).toBe("not_billable");
+    expect(
+      connectionBillingCategory(noAuth, {
+        ...bill,
+        credit_billing_configured: true,
+      }),
+    ).toBe("unknown");
+    expect(
+      connectionBillingCategory(connection, {
+        ...bill,
+        status: "restricted",
+        credential_class: "user_owned",
+      }),
+    ).toBe("unknown");
+    expect(
+      connectionBillingCategory({ ...connection, credential_missing: true }),
+    ).toBe("unknown");
+  });
+  it("uses the selected agent override instead of the platform connection default", () => {
+    const platform = { ...connection, credential_binding: "platform" as const };
+    const bill = { ...configuredBilling(platform), context: "agent_key" };
+    expect(
+      connectionBillingCategory(platform, {
+        ...bill,
+        credential_class: "agent_override_user_owned",
+      }),
+    ).toBe("byok");
+    expect(connectionBillingCategory(platform, bill)).toBe("unknown");
+  });
+});
+
 describe("card billing configuration", () => {
   it("counts only the billable connection across five personal apps and one platform connection, including disabled rows", () => {
     const catalog = {

@@ -41,7 +41,10 @@ import {
 import type { CatalogEntry, KeyInfo } from "@/types/keys";
 import type { ServicePool } from "@/schemas/pools";
 import { poolStrategyLabel } from "@/lib/service-pool-display";
-import { connectionBillability } from "@/lib/service-card-summary";
+import {
+  connectionBillingCategory,
+  connectionBillingLabels,
+} from "@/lib/service-card-summary";
 import type { ServiceInsight } from "@/schemas/service-insights";
 import {
   useServiceInsights,
@@ -53,7 +56,6 @@ import {
 } from "./service-insight-panels";
 import {
   billingAccountLabel,
-  billingModelLabel,
   billingExplanation,
   callerLabel,
   credentialLabel,
@@ -201,10 +203,10 @@ export function ServiceConnectionTable({
           {connections.map((key) => {
             const insight = insights.connections.get(key.id);
             const billing = insight?.billing;
-            const billable =
+            const billingCategory =
               insights.status === "ready"
-                ? connectionBillability(key, billing, catalog)
-                : undefined;
+                ? connectionBillingCategory(key, billing, catalog)
+                : "unknown";
             const memberships = pools.filter((pool) =>
               pool.members.some((member) => member.user_service_id === key.id),
             );
@@ -484,19 +486,12 @@ export function ServiceConnectionTable({
                           <span className="flex items-start gap-1.5 font-medium">
                             <CreditCard className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
                             <span className="truncate">
-                              {billable === true
-                                ? "Billable · NyxID usage"
-                                : billable === false
-                                  ? "No NyxID usage charge"
-                                  : billing
-                                    ? billingModelLabel(billing)
-                                    : insightStatusLabel(
-                                        insights.status,
-                                        "Billing",
-                                      )}
+                              {insights.status === "ready"
+                                ? connectionBillingLabels[billingCategory]
+                                : insightStatusLabel(insights.status, "Billing")}
                             </span>
                           </span>
-                          {billing && (
+                          {billing && billingCategory === "platform" && (
                             <>
                               <span
                                 className="mt-1 block truncate text-[11px] text-muted-foreground"

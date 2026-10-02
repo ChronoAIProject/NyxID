@@ -66,16 +66,24 @@ Source avatars sit at the bottom right of the card body without a visible label.
 Hovering or focusing a stationary circle brings it forward and shows its source
 name. Extra sources remain reachable through the overflow count.
 
-The body starts with the number of connections with configured NyxID usage
-charges, e.g. **1 of 6 connections billable**. Disabled connections count; grants,
-allowances, and caller rollout do not change configured billability. The additive
+The body starts with a credential-based billing summary, e.g. **1 NyxID · 5 BYOK**.
+NyxID means the platform supplies the key or developer app; BYOK means a person
+or organization supplies it. **Not billable** requires no provider credential and
+confirmed absence of configured NyxID usage charges. Unverified credential supply
+stays unverified, including OAuth app provenance on older servers. Disabled
+connections retain their classification. Clicking the summary opens the first
+NyxID connection's billing panel, or the first connection when there is none.
+Expanded rows use the same labels and show payer/rates directly for NyxID
+credentials; detailed billing remains available by opening any row.
+
+Detailed charge configuration is independent of these summary labels. The additive
 `billing.credit_billing_configured` insight field is true/false when known and null
 when unverifiable or restricted. It uses the selected credential class, positive
 primary/component prices, legacy charge configuration, and independent resale
 configuration. Older servers use permitted catalog/connection metadata where
 available; omitted pricing is unverified, never assumed free. External provider
-invoices are separate. Clicking the summary opens the first billable connection's
-billing panel. Every table row exposes its own classification, payer and rates.
+invoices are separate. Grants, allowances and caller rollout do not change the
+credential supplier or configured charges.
 
 Agent keys are counted once across the group's connections; partial inventories
 show a `+`. Agent key count and last-use time share one compact line. Hover or

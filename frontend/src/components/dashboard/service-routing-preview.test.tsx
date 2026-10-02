@@ -185,7 +185,7 @@ afterEach(() => {
 });
 
 describe("live grouped services", () => {
-  it("counts all configured charges including disabled connections and opens the billable member", async () => {
+  it("shows five supplied apps and one NyxID connection and opens the NyxID member", async () => {
     for (let i = 0; i < 4; i++)
       records.push({
         ...records[0]!,
@@ -193,6 +193,7 @@ describe("live grouped services", () => {
         label: `App ${i}`,
         slug: `app-${i}`,
         is_active: i !== 3,
+        credential_binding: i === 3 ? "platform" : "user",
       });
     for (const connection of records)
       insightConnections.set(connection.id, {
@@ -204,7 +205,7 @@ describe("live grouped services", () => {
         usage: null,
       });
     render(preview());
-    expect(screen.getByText("1 of 6 connections billable")).toBeVisible();
+    expect(screen.getByText("1 NyxID · 5 BYOK")).toBeVisible();
     expect(screen.getByText("1 disabled")).toBeVisible();
     await userEvent.click(
       screen.getByRole("button", { name: "Show billing for OpenAI" }),
@@ -213,9 +214,9 @@ describe("live grouped services", () => {
       screen.getByRole("region", { name: "Billing for App 3" }),
     ).toBeVisible();
     expect(screen.getByText("NyxID usage charges configured")).toBeVisible();
-    expect(screen.getByText("Billable · NyxID usage")).toBeVisible();
+    expect(screen.getByText("NyxID credentials")).toBeVisible();
   });
-  it("marks partial billability as a lower bound instead of counting missing billing as free", () => {
+  it("identifies supplied API keys without requiring published prices", () => {
     insightConnections.set("mine", {
       service_id: "mine",
       billing: {
@@ -225,7 +226,7 @@ describe("live grouped services", () => {
       usage: null,
     });
     render(preview());
-    expect(screen.getByText("1+ of 2 connections billable")).toBeVisible();
+    expect(screen.getByText("2 BYOK")).toBeVisible();
   });
   it("shows recorded last edit and opens that connection's history", async () => {
     records.push({
@@ -291,7 +292,7 @@ describe("live grouped services", () => {
     const card = screen.getByRole("region", { name: "OpenAI" });
     expect(within(card).getByText("3 connections")).toBeVisible();
     expect(
-      within(card).getByText("Billing unverified · 3 connections"),
+      within(card).getByText("1 NyxID · 2 BYOK"),
     ).toBeVisible();
     expect(within(card).queryByText("Sources")).not.toBeInTheDocument();
     for (const source of ["Personal", "Chrono", "NyxID platform", "Personal"]) {
@@ -348,7 +349,7 @@ describe("live grouped services", () => {
       screen.getByRole("region", { name: "Platform-only service" }),
     ).toBeVisible();
   });
-  it("shows configured agent associations and identifies unverified billing on hover", async () => {
+  it("shows configured agent associations and identifies credential supply on hover", async () => {
     insightConnections.set("mine", {
       service_id: "mine",
       billing: configuredBilling(records[0]!),
@@ -392,9 +393,9 @@ describe("live grouped services", () => {
       screen.getByRole("button", { name: "Show billing for OpenAI" }),
     );
     const tooltip = within(await screen.findByRole("tooltip"));
-    expect(tooltip.getByText("NyxID usage billing")).toBeInTheDocument();
+    expect(tooltip.getByText("Connection billing")).toBeInTheDocument();
     expect(
-      tooltip.getByText("Personal account: Unverified"),
+      tooltip.getByText("Personal account: BYOK"),
     ).toBeInTheDocument();
     expect(screen.queryByText("Latest request")).not.toBeInTheDocument();
     expect(screen.queryByText(/No recorded requests/)).not.toBeInTheDocument();
