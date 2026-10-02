@@ -46,7 +46,7 @@ use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 /// the `return Err(...)` sites in this file.
 fn proxy_error_telemetry_fields(err: &AppError) -> (u16, u32) {
     match err {
-        AppError::BadRequest(_) => (400, 1000),
+        AppError::BadRequest(_) | AppError::CredentialUnavailable(_) => (400, 1000),
         AppError::Unauthorized(_) => (401, 1001),
         AppError::Forbidden(_) => (403, 1002),
         AppError::NotFound(_) => (404, 1003),
@@ -9430,7 +9430,12 @@ mod tests {
     fn proxy_error_telemetry_fields_maps_common_errors() {
         use super::proxy_error_telemetry_fields;
         use crate::errors::AppError;
-
+        assert_eq!(
+            proxy_error_telemetry_fields(&AppError::CredentialUnavailable(
+                "API key is failed".into()
+            )),
+            (400, 1000),
+        );
         assert_eq!(
             proxy_error_telemetry_fields(&AppError::BadRequest("x".into())),
             (400, 1000)

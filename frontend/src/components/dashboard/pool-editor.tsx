@@ -54,7 +54,15 @@ export function PoolEditor({
   const create = useCreateServicePool();
   const update = useUpdateServicePool();
   const form = useAppForm<CreateServicePoolInput>({
-    resolver: zodResolver(createServicePoolSchema),
+    resolver: zodResolver(
+      createServicePoolSchema.refine(
+        (input) => Boolean(pool) || input.members.length > 0,
+        {
+          path: ["members"],
+          message: "Add at least one connection to create a pool.",
+        },
+      ),
+    ),
     mode: "onChange",
     defaultValues: {
       slug: pool?.slug ?? "",

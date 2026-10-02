@@ -260,6 +260,22 @@ Disable or cooldown state. Saved operation checks still report both. Legacy
 round-robin/weighted pools never use priority cooldown health. Health always uses
 the saved configuration and directly fetches its members, including unavailable rows.
 
+If a connection's credential is failed, inactive, or missing, inspection marks
+that connection `credential_unavailable` while keeping healthy connections
+available. Reconnect or update the affected connection in Services. Priority
+pools skip known unavailable credentials before sending a request, so a broken
+primary credential does not block a healthy backup. Inspection checks stored
+state; it does not test credentials against the provider.
+
+Use the dashboard's searchable multi-select dropdown to choose connections.
+Search matches connection names and slugs across the inventory.
+It stays open while selecting; select a checked connection again to remove it.
+The selected connections appear in the form with priority and model settings.
+Unavailable connections show a repair reason and cannot be added.
+The dashboard requires at least one selected connection when creating a pool.
+The CLI and API still support creating an empty draft and adding members later;
+existing empty drafts remain editable in the dashboard.
+
 Save settings and members together with `nyxid pool update <pool> --file update.json`:
 
 ```json
