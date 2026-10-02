@@ -1067,17 +1067,31 @@ on exit. A test-only Docker adapter substitutes the locally built, unpublished
 image; production has no verification bypass. The production scratch acceptance test runs real TUF and image-attestation
 verification, with no verification or temporary-filesystem mocks, both with the
 documented tmpfs and with no `/tmp`. It also executes the frontend's migration
-and companion commands unchanged against the published 0.41.0 updater:
+and companion commands and a watch-triggered replacement with the newly built
+production updater (`UPDATER_PRODUCTION_IMAGE`, or a local `production-test`
+build). An asserted transformation preserves every rendered flag verbatim,
+substituting only the image token and optionally adding `--env GITHUB_TOKEN`:
 
 ```sh
 npm ci --ignore-scripts --prefix frontend
 node cli/tests/machine_updater_production.mjs
 ```
 
-Use Node 24 or newer. CI supplies `GITHUB_TOKEN` to the preflight to avoid GitHub
-API rate limits; it is sent only to the GitHub attestation API, never to the TUF
-mirror or registry. The rendered owner commands need no token. Test containers
-and volumes are removed on exit. The release acceptance check must also run
+Use Node 24 or newer. CI requires and supplies `GITHUB_TOKEN` to the new updater
+for both preflight and rendered-command checks to avoid shared-IP GitHub API
+rate limits; it is sent only to the GitHub attestation API, never to the TUF
+mirror or registry. The rendered owner commands need no token. The published
+0.41.0 updater cannot use a token, so compatibility checks against that image
+are an explicit local pre-release opt-in:
+
+```sh
+NYXID_TEST_PUBLISHED_UPDATER=1 node cli/tests/machine_updater_production.mjs
+```
+
+This additionally runs the migration, companion and watch replacement with
+the published image and unchanged rendered commands. Without the opt-in, the
+test prints `SKIP (opt-in): published 0.41.0 updater uses unauthenticated GitHub API`.
+Test containers and volumes are removed on exit. The release acceptance check must also run
 against the attested tagged release once published. Regular tests cover
 attestation refusal, downgrade refusal, full configuration preservation, rollback
 and native service recovery. The live TUF mirror test verifies signed metadata,
