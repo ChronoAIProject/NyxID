@@ -165,6 +165,7 @@ impl McpBillingRouteContextBuilder {
 /// node allow-list enforcement. OAuth and session callers pass `api_key_id:
 /// None` and `allow_all_nodes: true`, preserving their existing behavior.
 pub struct McpExecContext<'a> {
+    pub operation_scopes: Option<&'a crate::models::agent_operation_scope::OperationScopes>,
     /// API key ID that is acting on behalf of the user. Enables per-agent
     /// credential override via [`proxy_service::resolve_agent_credential_override`].
     pub api_key_id: Option<&'a str>,
@@ -3427,6 +3428,51 @@ impl PreparedProxyCall {
         )
     }
 
+    pub(crate) fn authorize_agent_operations(
+        &self,
+        scopes: &crate::models::agent_operation_scope::OperationScopes,
+        service: &McpToolService,
+        endpoint: &McpToolEndpoint,
+    ) -> AppResult<()> {
+        use super::agent_operation_scope_service as operations;
+        if operations::applicable(
+            scopes,
+            &service.service_id,
+            operations::mcp_catalog_id(service),
+        )
+        .next()
+        .is_none()
+        {
+            return Ok(());
+        }
+        let path = if self.is_generic_proxy_endpoint {
+            super::proxy_authorization::CanonicalPath::from_mcp_literal(&self.path)?
+        } else {
+            super::proxy_authorization::CanonicalPath::from_mcp_built(&self.path)?
+        };
+        operations::authorize(
+            scopes,
+            &service.service_id,
+            operations::mcp_catalog_id(service),
+            (!self.is_generic_proxy_endpoint
+                && producer_operation_generation(service, endpoint).is_some())
+            .then_some(endpoint.endpoint_id.as_str()),
+            self.method.as_str(),
+            &path,
+            self.carries_override(true),
+            false,
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn canonical_path(&self) -> AppResult<super::proxy_authorization::CanonicalPath> {
+        if self.is_generic_proxy_endpoint {
+            super::proxy_authorization::CanonicalPath::from_mcp_literal(&self.path)
+        } else {
+            super::proxy_authorization::CanonicalPath::from_mcp_built(&self.path)
+        }
+    }
+
     /// The HTTP method this call is sent with.
     pub fn method(&self) -> &reqwest::Method {
         &self.method
@@ -3446,6 +3492,10 @@ impl PreparedProxyCall {
     /// server's parser may read it); a form body as a form (and JSON); text
     /// and binary bodies not at all. An empty body carries nothing.
     pub fn carries_method_override(&self) -> bool {
+        self.carries_override(false)
+    }
+
+    fn carries_override(&self, exact: bool) -> bool {
         fn normalized(key: &str) -> String {
             key.split(|c: char| c.is_control() || c == '[')
                 .next()
@@ -3468,7 +3518,12 @@ impl PreparedProxyCall {
             matches!(
                 key.as_str(),
                 "method" | "x_http_method_override" | "x_http_method" | "x_method_override"
-            ) && matches!(verb.as_str(), "POST" | "PUT" | "PATCH" | "DELETE" | "MERGE")
+            ) && (matches!(verb.as_str(), "POST" | "PUT" | "PATCH" | "DELETE" | "MERGE")
+                || (exact
+                    && matches!(
+                        verb.as_str(),
+                        "GET" | "HEAD" | "OPTIONS" | "CONNECT" | "TRACE"
+                    )))
                 && !verb.eq_ignore_ascii_case(sent)
         };
         let override_header = |name: &str| {
@@ -3518,6 +3573,40 @@ impl PreparedProxyCall {
                 }
             })
     }
+}
+
+pub(crate) fn http_carries_method_override(
+    method: &str,
+    headers: &axum::http::HeaderMap,
+    query: Option<&str>,
+    body: &[u8],
+) -> bool {
+    let Ok(method) = reqwest::Method::from_bytes(method.as_bytes()) else {
+        return true;
+    };
+    PreparedProxyCall {
+        endpoint_target: None,
+        method,
+        path: String::new(),
+        query: query.map(str::to_owned),
+        parameter_headers: headers
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.to_string(),
+                    value.to_str().unwrap_or_default().to_owned(),
+                )
+            })
+            .collect(),
+        server_owned_headers: Vec::new(),
+        body: Some(bytes::Bytes::copy_from_slice(body)),
+        body_content_type: headers
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned),
+        is_generic_proxy_endpoint: true,
+    }
+    .carries_override(true)
 }
 
 /// Build and authorize the exact request before any approval, billing, node,
@@ -4048,6 +4137,9 @@ pub async fn execute_tool_response(
     exec_ctx: &McpExecContext<'_>,
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> AppResult<ToolResponse> {
+    if let Some(scopes) = exec_ctx.operation_scopes {
+        prepared.authorize_agent_operations(scopes, service, endpoint)?;
+    }
     // Resolve the proxy target and node routing from the fresh resolver result
     // (not cached loader flags -- credential state may have changed).
     let (target, node_route, has_server_credential, billing_context_builder) = match &service.source
@@ -4478,6 +4570,23 @@ pub async fn execute_tool_resolved(
     has_server_credential: bool,
     billing_context_builder: McpBillingRouteContextBuilder,
 ) -> AppResult<McpToolExecutionOutcome> {
+    if let Some(scopes) = exec_ctx.operation_scopes {
+        prepared.authorize_agent_operations(scopes, service, endpoint)?;
+        if super::agent_operation_scope_service::applicable(
+            scopes,
+            &service.service_id,
+            super::agent_operation_scope_service::mcp_catalog_id(service),
+        )
+        .next()
+        .is_some()
+        {
+            super::agent_operation_scope_service::validate_target(
+                &target,
+                prepared.method().as_str(),
+            )?;
+        }
+    }
+
     use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
     use crate::models::user::{COLLECTION_NAME as USERS, User};
     use crate::services::node_ws_manager::{NodeProxyRequest, ProxyResponseType};
@@ -5816,6 +5925,7 @@ mod tests {
                     &state.token_exchange_cache,
                     &state.cloud_response_cache,
                     &McpExecContext {
+                        operation_scopes: None,
                         api_key_id: None,
                         allow_all_nodes: true,
                         allowed_node_ids: &[],

@@ -545,8 +545,28 @@ pub async fn list_openapi_endpoints(
     // no redirects, 60 s TTL.
     let spec = api_docs_service::fetch_spec_json_scoped(spec_url, &endpoint.user_id).await?;
     let parsed = openapi_parser::parse_openapi_spec_value(&spec)?;
+    let scoped_services = if auth_user.assistant_operation_scopes.is_empty() {
+        Vec::new()
+    } else {
+        use futures::TryStreamExt;
+        state.db.collection::<crate::models::user_service::UserService>(USER_SERVICES)
+            .find(doc! {"endpoint_id":&endpoint.id,"is_active":true,"_id":{"$in":&auth_user.allowed_service_ids}})
+            .await?.try_collect::<Vec<_>>().await?
+    };
     let operations = parsed
         .into_iter()
+        .filter(|operation| {
+            auth_user.assistant_operation_scopes.is_empty()
+                || scoped_services.iter().any(|service| {
+                    crate::services::agent_operation_scope_service::route_visible(
+                        &auth_user.assistant_operation_scopes,
+                        &service.id,
+                        service.catalog_service_id.as_deref(),
+                        &operation.method,
+                        &operation.path,
+                    )
+                })
+        })
         .map(parsed_endpoint_to_response)
         .collect();
 

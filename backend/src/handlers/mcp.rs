@@ -127,7 +127,7 @@ pub async fn get_mcp_config(
     } else {
         mcp_service::ServiceScope::Allowed(auth_user.allowed_service_ids.as_slice())
     };
-    let catalog = mcp_service::load_operation_catalog(
+    let mut catalog = mcp_service::load_operation_catalog(
         &state.db,
         state.node_ws_manager.as_ref(),
         &user_id,
@@ -136,6 +136,10 @@ pub async fn get_mcp_config(
     )
     .await?;
 
+    crate::services::agent_operation_scope_service::filter_catalog(
+        &auth_user.assistant_operation_scopes,
+        &mut catalog.services,
+    );
     let mcp_services = config_services(&catalog.services);
 
     let total_endpoints: usize = mcp_services.iter().map(|s| s.endpoints.len()).sum();

@@ -5691,6 +5691,7 @@ mod tests {
                 description: None,
                 allowed_service_ids: vec![],
                 allowed_platform_service_ids: Vec::new(),
+                assistant_operation_scopes: Default::default(),
                 allowed_node_ids: vec![],
                 allow_all_services: true,
                 allow_auto_connected_services: false,

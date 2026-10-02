@@ -2227,6 +2227,7 @@ pub(crate) async fn test_app_state_no_db() -> AppState {
 /// Build a permissive session-auth `AuthUser` for handler tests.
 pub(crate) fn test_auth_user(user_id: &str) -> AuthUser {
     AuthUser {
+        assistant_operation_scopes: Default::default(),
         user_id: Uuid::parse_str(user_id).expect("valid uuid user id"),
         session_id: None,
         scope: String::new(),
@@ -2654,6 +2655,23 @@ pub(crate) fn test_auto_connected_catalog_service()
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     }
+}
+
+/// Opt in explicitly; scope configuration must stay default-off in tests too.
+pub async fn set_agent_operation_scopes_enabled(
+    db: &mongodb::Database,
+    owner: &str,
+    enabled: bool,
+) {
+    crate::services::feature_flag_service::set_platform_override(
+        db,
+        crate::services::feature_flag_service::AGENT_OPERATION_SCOPES_FLAG_KEY,
+        &crate::services::feature_flag_service::FlagTarget::Global,
+        enabled,
+        owner,
+    )
+    .await
+    .unwrap();
 }
 
 #[cfg(test)]

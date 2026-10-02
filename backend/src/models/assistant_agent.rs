@@ -108,6 +108,12 @@ pub struct AssistantAgent {
     /// so writers of `grants` that predate it never erase it.
     #[serde(default)]
     pub guest_access: BTreeMap<String, GuestAccess>,
+    /// Stored beside grants so older grant writers cannot erase restrictions.
+    #[serde(default)]
+    pub operation_scopes: super::agent_operation_scope::OperationScopes,
+    /// Includes revisions for services returned to all operations.
+    #[serde(default)]
+    pub operation_scope_revisions: BTreeMap<String, i64>,
     /// Beside grants so older replicas rewriting service grants retain these.
     #[serde(default)]
     pub machine_node_ids: Vec<String>,

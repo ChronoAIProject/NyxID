@@ -20,6 +20,9 @@ pub struct AssistantAcknowledgement {
     pub platform: bool,
     pub tool_name: Option<String>,
     pub arguments_digest: Option<String>,
+    /// Operation permission proposal; IDs and templates only, never call arguments.
+    #[serde(default)]
+    pub operation_selection: Option<super::agent_operation_scope::OperationSelection>,
     pub summary: String,
     pub status: String,
     /// Denial is sticky for the user turn that requested it. A new user turn

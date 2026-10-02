@@ -114,6 +114,7 @@ describe("feature flag catalog", () => {
       INVITATION_CODE: "auth:invitation-code",
       AI_ASSISTANT: "experimental:ai-assistant",
       NYXAGENT_ENGINE: "assistant:nyxagent-engine",
+      AGENT_OPERATION_SCOPES: "assistant:operation-scopes",
       BILLING: "experimental:billing",
       AEVATAR_CHAT_WIRE_LOG: "experimental:aevatar-chat-wire-log",
       DIRECT_CHAT_ENGINE: "experimental:direct-chat-engine",

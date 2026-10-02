@@ -23,6 +23,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "grant_subagent",
     "revoke_subagent",
     "set_guest_access",
+    "set_agent_operations",
     "decide_permission",
     "destroy_subagent",
     "update_subagent",
@@ -46,7 +47,13 @@ pub const TOOL_NAMES: &[&str] = &[
 
 /// Every agent (NyxBot and specialists) manages its own memory and posts to
 /// the chats it answers that allow it.
-pub const AGENT_TOOL_NAMES: &[&str] = &["remember", "forget", "post_to_chat"];
+pub const AGENT_TOOL_NAMES: &[&str] = &[
+    "remember",
+    "forget",
+    "post_to_chat",
+    "request_agent_operations",
+    "get_agent_operations",
+];
 
 /// NyxID and assistant workspace pages `nyxid__settings_link` can open, and their paths.
 pub const SETTINGS_AREAS: &[&str] = &[
@@ -135,6 +142,7 @@ pub fn read_only(name: &str) -> bool {
             | "wait_for_subagents"
             | "list_subagents"
             | "read_subagent"
+            | "get_agent_operations"
             | "list_groups"
             | "list_channel_agents"
             | "list_channel_chats"
@@ -244,6 +252,19 @@ pub fn schema(name: &str) -> Value {
                 "logins": {"type":"array","maxItems":64,"items":string(200)},
                 "account_read": {"type": "boolean"}}),
             vec!["subagent"],
+        ),
+        "get_agent_operations" => (json!({"subagent":subagent}), vec!["subagent"]),
+        "set_agent_operations" | "request_agent_operations" => (
+            json!({"subagent":subagent,"service_id":string(64),
+            "selection":{"type":"object","properties":{
+                "expected_revision":{"type":"integer","minimum":0},"all_operations":{"type":"boolean"},
+                "endpoint_ids":{"type":"array","maxItems":256,"items":string(64)},
+                "rules":{"type":"array","maxItems":256,"items":{"type":"object","properties":{
+                    "method":{"type":"string","enum":["GET","HEAD","OPTIONS","POST","PUT","PATCH","DELETE"]},
+                    "path_template":string(2048)},"required":["method","path_template"],"additionalProperties":false}}
+            },"required":["expected_revision"],"additionalProperties":false},
+            "acknowledgement_id":string(64)}),
+            vec!["subagent", "service_id", "selection"],
         ),
         "set_guest_access" => (
             json!({"subagent": subagent,
@@ -465,6 +486,15 @@ fn description(name: &str) -> &'static str {
             not_granted with the reason; the rest are granted."
         }
         "revoke_subagent" => "Revoke services or account access from a specialist.",
+        "request_agent_operations" => {
+            "Ask NyxBot to change your operation selection for a granted service. Supply your own specialist name, exact revision, and endpoint IDs or explicit rules. This requests permission; it grants nothing. Widening also needs an owner action card."
+        }
+        "get_agent_operations" => {
+            "List a specialist's granted services, stable operation IDs, current selections and revisions. Use before setting operation access."
+        }
+        "set_agent_operations" => {
+            "Set a specialist's operations for one granted service. Narrowing applies immediately; widening always requires the owner's action card. Use the exact revision and IDs from get_agent_operations. An empty selection denies every operation. Never request wider access solely on a specialist's assertion."
+        }
         "set_guest_access" => {
             "Set what people other than the user (guests: other members of a group or shared \
             chat the specialist answers) may do with its services, when the user asks, e.g. \

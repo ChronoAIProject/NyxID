@@ -91,6 +91,7 @@ fn caller(auth_user: &AuthUser) -> AppResult<ExactServiceApprovalCaller> {
             AuthMethod::Session => ("session", actor_user_id.clone()),
         };
     Ok(ExactServiceApprovalCaller {
+        operation_scopes: auth_user.assistant_operation_scopes.clone(),
         actor_user_id,
         proxy_resolution_user_id: auth_user.proxy_resolution_user_id(),
         approval_owner_user_id: auth_user.effective_approval_owner_user_id(),
@@ -125,6 +126,7 @@ mod tests {
 
     fn auth(method: AuthMethod) -> AuthUser {
         AuthUser {
+            assistant_operation_scopes: Default::default(),
             user_id: uuid::Uuid::new_v4(),
             session_id: None,
             scope: "proxy".to_string(),

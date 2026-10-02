@@ -204,7 +204,7 @@ fn endpoint_to_response(e: crate::models::service_endpoint::ServiceEndpoint) -> 
 /// List all active endpoints for a service. Any authenticated user.
 pub async fn list_endpoints(
     State(state): State<AppState>,
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     Path(service_id): Path<String>,
 ) -> AppResult<Json<EndpointListResponse>> {
     // Verify service exists
@@ -212,7 +212,27 @@ pub async fn list_endpoints(
     require_http_service(&service)?;
 
     let endpoints = service_endpoint_service::list_endpoints(&state.db, &service_id).await?;
-    let items: Vec<EndpointResponse> = endpoints.into_iter().map(endpoint_to_response).collect();
+    let items: Vec<EndpointResponse> = endpoints
+        .into_iter()
+        .filter(|endpoint| {
+            crate::services::agent_operation_scope_service::applicable(
+                &auth_user.assistant_operation_scopes,
+                &service_id,
+                None,
+            )
+            .all(|scope| {
+                scope.operations.iter().any(|operation| {
+                    operation
+                        .endpoint_id
+                        .as_ref()
+                        .is_none_or(|id| id == &endpoint.id)
+                        && operation.rule.method == endpoint.method
+                        && operation.rule.path_template == endpoint.path
+                })
+            })
+        })
+        .map(endpoint_to_response)
+        .collect();
 
     Ok(Json(EndpointListResponse { endpoints: items }))
 }

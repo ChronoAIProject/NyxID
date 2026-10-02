@@ -373,6 +373,7 @@ struct McpAuthContext {
     /// Platform-provided catalog services an assistant chat key was allowed
     /// to use from a chat card. Empty for every other caller.
     allowed_platform_service_ids: Vec<String>,
+    assistant_operation_scopes: crate::models::agent_operation_scope::OperationScopes,
     allowed_node_ids: Vec<String>,
     rate_limit_per_second: Option<u32>,
     rate_limit_burst: Option<u32>,
@@ -396,6 +397,7 @@ impl McpAuthContext {
             allow_all_nodes: true,
             allowed_service_ids: Vec::new(),
             allowed_platform_service_ids: Vec::new(),
+            assistant_operation_scopes: Default::default(),
             allowed_node_ids: Vec::new(),
             rate_limit_per_second: None,
             rate_limit_burst: None,
@@ -556,6 +558,7 @@ async fn authenticate_mcp(
                         .await
                         .map_err(axum::response::IntoResponse::into_response)?,
                     allowed_platform_service_ids: platform_grants,
+                    assistant_operation_scopes: api_key.assistant_operation_scopes.clone(),
                     allowed_node_ids: api_key.allowed_node_ids.clone(),
                     rate_limit_per_second: api_key.rate_limit_per_second,
                     rate_limit_burst: api_key.rate_limit_burst,
@@ -586,11 +589,12 @@ async fn authenticate_mcp(
                 // without reading the relay scope claims, silently treating relay
                 // tokens as unrestricted (allow_all); route it through the same
                 // shared helper the HTTP middleware uses.
-                let relay_scope = if claims.relay == Some(true) {
-                    auth::ensure_relay_agent_key_active(&state.db, &claims)
-                        .await
-                        .map_err(|_| mcp_401(&state.config.base_url))?;
-                    Some(auth::relay_scope_from_claims(&claims))
+                let relay_key = if claims.relay == Some(true) {
+                    Some(
+                        auth::ensure_relay_agent_key_active(&state.db, &claims)
+                            .await
+                            .map_err(|_| mcp_401(&state.config.base_url))?,
+                    )
                 } else {
                     None
                 };
@@ -620,7 +624,7 @@ async fn authenticate_mcp(
                     let (sa_id, owner_id) = verify_service_account_active(state, &claims).await?;
                     (sa_id, Some(owner_id))
                 } else {
-                    (verify_user_active(state, claims.sub).await?, None)
+                    (verify_user_active(state, claims.sub.clone()).await?, None)
                 };
 
                 let auth_method = if claims.sa == Some(true) {
@@ -651,7 +655,9 @@ async fn authenticate_mcp(
                     allowed_node_ids,
                     api_key_id,
                     api_key_name,
-                )) = relay_scope
+                )) = relay_key
+                    .as_ref()
+                    .map(|_| auth::relay_scope_from_claims(&claims))
                 {
                     ctx.allow_all_services = allow_all_services;
                     ctx.allow_all_nodes = allow_all_nodes;
@@ -659,6 +665,18 @@ async fn authenticate_mcp(
                     ctx.allowed_node_ids = allowed_node_ids;
                     ctx.api_key_id = api_key_id;
                     ctx.api_key_name = api_key_name;
+                }
+                if let Some(key) = relay_key {
+                    ctx.assistant_operation_scopes = key.assistant_operation_scopes;
+                    if !ctx.assistant_operation_scopes.is_empty() {
+                        ctx.chat = crate::services::assistant_acknowledgement_service::for_key(
+                            &state.db,
+                            &ctx.user_id,
+                            ctx.api_key_id.as_deref(),
+                        )
+                        .await
+                        .map_err(|_| mcp_401(&state.config.base_url))?;
+                    }
                 }
                 ctx.acting_client_id = claims.act.map(|a| a.sub);
                 ctx.approval_owner_user_id = approval_owner_user_id;
@@ -787,7 +805,8 @@ async fn validate_session(
 /// service or node allow-list). Such callers must not reach SSH meta-tools,
 /// which have no per-service/per-node binding to enforce against.
 fn is_scoped_api_key(auth: &McpAuthContext) -> bool {
-    auth.is_api_key && (!auth.allow_all_services || !auth.allow_all_nodes)
+    !auth.assistant_operation_scopes.is_empty()
+        || (auth.is_api_key && (!auth.allow_all_services || !auth.allow_all_nodes))
 }
 
 fn mcp_service_scope(auth: &McpAuthContext) -> mcp_service::ServiceScope<'_> {
@@ -1369,6 +1388,10 @@ async fn handle_tools_list(
     };
 
     let mut services = catalog.services;
+    crate::services::agent_operation_scope_service::filter_catalog(
+        &auth.assistant_operation_scopes,
+        &mut services,
+    );
     if let Some(chat) = auth.chat.as_ref() {
         services.push(crate::services::assistant_account_tools::virtual_service(
             chat,
@@ -1566,7 +1589,14 @@ async fn dispatch_tools_call(
     }
 
     if tool_name.starts_with("nyxid__") {
-        return handle_account_tool(state, auth, tool_name, &arguments, request.id.clone()).await;
+        return Box::pin(handle_account_tool(
+            state,
+            auth,
+            tool_name,
+            &arguments,
+            request.id.clone(),
+        ))
+        .await;
     }
     if tool_name.starts_with("nyx__")
         && !matches!(
@@ -1663,7 +1693,7 @@ async fn dispatch_tools_call(
             .await;
         }
         "nyx__call_tool" => {
-            return handle_meta_call_tool(
+            return Box::pin(handle_meta_call_tool(
                 state,
                 auth,
                 session_id,
@@ -1671,7 +1701,7 @@ async fn dispatch_tools_call(
                 request.id.clone(),
                 client_accepts_sse,
                 billing_egress_permit,
-            )
+            ))
             .await;
         }
         "nyx__ssh_exec" | "nyx__ssh_list_services" => {
@@ -1805,6 +1835,11 @@ async fn dispatch_tools_call(
                 );
             }
         };
+    if let Err(error) =
+        prepared.authorize_agent_operations(&auth.assistant_operation_scopes, service, endpoint)
+    {
+        return tool_result(request.id.clone(), &error.to_string(), true);
+    }
     if let Some(refused) = guest_service_refusal(
         state,
         auth,
@@ -1902,6 +1937,7 @@ async fn dispatch_tools_call(
 /// the authenticated MCP caller -- API key identity + node scope.
 fn mcp_exec_context<'a>(auth: &'a McpAuthContext) -> mcp_service::McpExecContext<'a> {
     mcp_service::McpExecContext {
+        operation_scopes: Some(&auth.assistant_operation_scopes),
         api_key_id: auth.api_key_id.as_deref(),
         allow_all_nodes: auth.allow_all_nodes,
         allowed_node_ids: &auth.allowed_node_ids,
@@ -2355,6 +2391,7 @@ async fn handle_account_tool(
         return tool_result(request_id, "{\"error\":\"unauthorized\"}", true);
     };
     let user = auth::AuthUser {
+        assistant_operation_scopes: auth.assistant_operation_scopes.clone(),
         user_id,
         session_id: None,
         scope: String::new(),
@@ -2399,7 +2436,8 @@ async fn handle_account_tool(
                 true,
             );
         };
-        let (value, is_error) = super::assistant_team::execute_tool(state, chat, name, args).await;
+        let (value, is_error) =
+            Box::pin(super::assistant_team::execute_tool(state, chat, name, args)).await;
         return tool_result(request_id, &value.to_string(), is_error);
     }
     let result = tools.execute(&user, name, args).await;
@@ -2502,7 +2540,14 @@ async fn handle_meta_call_tool(
     }
 
     if tool_name.starts_with("nyxid__") {
-        return handle_account_tool(state, auth, tool_name, &inner_args, request_id).await;
+        return Box::pin(handle_account_tool(
+            state,
+            auth,
+            tool_name,
+            &inner_args,
+            request_id,
+        ))
+        .await;
     }
 
     // Load user tools with API-key node scope applied so
@@ -2559,6 +2604,11 @@ async fn handle_meta_call_tool(
                 return tool_result(request_id, &format!("Invalid tool arguments: {e}"), true);
             }
         };
+    if let Err(error) =
+        prepared.authorize_agent_operations(&auth.assistant_operation_scopes, service, endpoint)
+    {
+        return tool_result(request_id, &error.to_string(), true);
+    }
     if let Some(refused) = guest_service_refusal(
         state,
         auth,
@@ -2763,7 +2813,7 @@ async fn load_all_services_for_meta_tools(
     state: &AppState,
     auth: &McpAuthContext,
 ) -> crate::errors::AppResult<Vec<mcp_service::McpToolService>> {
-    let services = mcp_service::load_user_tools_all_scoped(
+    let mut services = mcp_service::load_user_tools_all_scoped(
         &state.db,
         state.node_ws_manager.as_ref(),
         &auth.user_id,
@@ -2774,6 +2824,10 @@ async fn load_all_services_for_meta_tools(
         },
     )
     .await?;
+    crate::services::agent_operation_scope_service::filter_catalog(
+        &auth.assistant_operation_scopes,
+        &mut services,
+    );
     if let Some(chat) = auth.chat.as_ref() {
         let mut services = services;
         // Reserve the native namespace against a connected service shadowing it.
@@ -4181,6 +4235,7 @@ mod tests {
             allow_all_nodes: false,
             allowed_service_ids,
             allowed_platform_service_ids: Vec::new(),
+            assistant_operation_scopes: Default::default(),
             allowed_node_ids: Vec::new(),
             rate_limit_per_second: None,
             rate_limit_burst: None,
@@ -4540,6 +4595,7 @@ mod tests {
         };
         let mcp_auth = McpAuthContext::user(actor_id.clone(), AuthMethod::AccessToken);
         let proxy_auth = AuthUser {
+            assistant_operation_scopes: Default::default(),
             user_id: uuid::Uuid::parse_str(&actor_id).unwrap(),
             session_id: None,
             scope: "proxy".to_string(),

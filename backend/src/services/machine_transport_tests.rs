@@ -347,7 +347,7 @@ async fn machine_gateway_uses_live_specialist_scope_and_server_credentials() {
         &f.owner,
         &f.chat.agent_id,
         GrantChange::Add(crate::models::assistant_agent::AgentGrants {
-            service_ids: vec![service],
+            service_ids: vec![service.clone()],
             ..Default::default()
         }),
     )
@@ -380,6 +380,46 @@ async fn machine_gateway_uses_live_specialist_scope_and_server_credentials() {
     assert_eq!(
         allowed["stdout"], "upstream accepted server credential",
         "declared service call should reach the upstream"
+    );
+    crate::test_utils::set_agent_operation_scopes_enabled(&f.state.db, &f.owner, true).await;
+    super::agent_operation_scope_service::set(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        &service,
+        &crate::models::agent_operation_scope::OperationSelection {
+            expected_revision: 0,
+            all_operations: false,
+            endpoint_ids: vec![],
+            rules: vec![crate::models::downstream_service::ProxyOperationRule {
+                method: "GET".into(),
+                path_template: "/allowed".into(),
+                ..Default::default()
+            }],
+        },
+        true,
+    )
+    .await
+    .unwrap();
+    let narrowed = call(
+        &f.state,
+        &chat,
+        "nyx__machine_exec",
+        json!({"machine":node.id,"command":command,"services":["test-machine-api"]}),
+    )
+    .await
+    .unwrap();
+    assert!(
+        narrowed["stdout"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Allowed operations")
+    );
+    assert!(
+        !narrowed["stdout"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("upstream accepted")
     );
     let env = call(
         &f.state,

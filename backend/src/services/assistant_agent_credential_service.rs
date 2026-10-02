@@ -26,14 +26,19 @@ use crate::{
 #[derive(Clone, Debug)]
 pub enum KeyAuthority {
     Orchestrator,
-    Subagent(AgentGrants),
+    Subagent(
+        AgentGrants,
+        crate::models::agent_operation_scope::OperationScopes,
+    ),
 }
 
 impl KeyAuthority {
     pub fn for_agent(agent: &AssistantAgent) -> Self {
         match agent.kind {
             AgentKind::Nyxbot => Self::Orchestrator,
-            AgentKind::Specialist => Self::Subagent(agent.grants.clone()),
+            AgentKind::Specialist => {
+                Self::Subagent(agent.grants.clone(), agent.operation_scopes.clone())
+            }
         }
     }
 
@@ -42,12 +47,14 @@ impl KeyAuthority {
     pub fn key_fields(&self) -> bson::Document {
         match self {
             Self::Orchestrator => doc! {
+                "assistant_operation_scopes": bson::Document::new(),
                 "allow_all_services": true,
                 "allow_all_nodes": true,
                 "allow_auto_connected_services": true,
                 "scopes": format!("{ASSISTANT_SCOPES} {ASSISTANT_ACCOUNT_SCOPE}"),
             },
-            Self::Subagent(grants) => doc! {
+            Self::Subagent(grants, scopes) => doc! {
+                "assistant_operation_scopes": bson::to_bson(scopes).expect("operation scope serialization"),
                 "allow_all_services": false,
                 "allow_all_nodes": true,
                 "allow_auto_connected_services": false,

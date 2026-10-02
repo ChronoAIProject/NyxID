@@ -3099,6 +3099,31 @@ async fn preflight_proxy_deny_before_resolution(
         return Ok(());
     };
 
+    if !auth_user.assistant_operation_scopes.is_empty() {
+        let catalog = catalog_service_id.filter(|id| *id != hint.service_id);
+        if crate::services::agent_operation_scope_service::applicable(
+            &auth_user.assistant_operation_scopes,
+            &hint.service_id,
+            catalog,
+        )
+        .next()
+        .is_some()
+        {
+            let canonical =
+                crate::services::proxy_authorization::CanonicalPath::from_rest_decoded(path)?;
+            crate::services::agent_operation_scope_service::authorize(
+                &auth_user.assistant_operation_scopes,
+                &hint.service_id,
+                catalog,
+                None,
+                method,
+                &canonical,
+                false,
+                false,
+            )?;
+        }
+    }
+
     let operation = operation_descriptor::build_http_descriptor(method, path, None);
     let denied = approval_service::evaluate_deny_only(
         &state.db,
@@ -3641,6 +3666,41 @@ async fn execute_proxy_inner(
     // REST method/path before approval, billing, credential injection, node
     // transport, or forwarding. Rows without a policy retain the legacy path
     // bytes and behavior unchanged.
+    let operation_target_id = target.service.id.clone();
+    let (operation_scope_id, operation_catalog_id) =
+        crate::services::agent_operation_scope_service::execution_identity(
+            auth_user,
+            resolved_user_service_id.as_deref(),
+            &operation_target_id,
+        );
+    let operation_scoped = crate::services::agent_operation_scope_service::applicable(
+        &auth_user.assistant_operation_scopes,
+        operation_scope_id,
+        operation_catalog_id,
+    )
+    .next()
+    .is_some();
+    let scoped_forward_path = if operation_scoped {
+        let canonical =
+            crate::services::proxy_authorization::CanonicalPath::from_rest_decoded(path)?;
+        crate::services::agent_operation_scope_service::authorize(
+            &auth_user.assistant_operation_scopes,
+            operation_scope_id,
+            operation_catalog_id,
+            None,
+            request.method().as_str(),
+            &canonical,
+            crate::services::mcp_service::http_carries_method_override(
+                request.method().as_str(),
+                request.headers(),
+                request.uri().query(),
+                &[],
+            ),
+            is_ws_upgrade_request(&request),
+        )?
+    } else {
+        None
+    };
     let pool_authority_path = path;
     let canonical_forward_path = if target.service.proxy_operation_policy.is_some()
         || !target.service.destination_targets.is_empty()
@@ -3656,7 +3716,10 @@ async fn execute_proxy_inner(
     } else {
         None
     };
-    let path = canonical_forward_path.as_deref().unwrap_or(path);
+    let path = canonical_forward_path
+        .as_deref()
+        .or(scoped_forward_path.as_deref())
+        .unwrap_or(path);
     let mut destination_audit = crate::services::destination_routing::DestinationAudit::new(
         &state.db,
         audit_service::AuditActor::from_auth_user(auth_user),
@@ -3829,6 +3892,33 @@ async fn execute_proxy_inner(
         (bytes, None, None, None)
     };
 
+    let operation_guest = if operation_scoped {
+        crate::services::agent_operation_scope_service::validate_target(&target, method.as_str())?;
+        if crate::services::mcp_service::http_carries_method_override(
+            method.as_str(),
+            &all_headers,
+            query.as_deref(),
+            &body_bytes,
+        ) {
+            return Err(AppError::ApiKeyScopeForbidden(
+                "Specialist operation scopes forbid method overrides".into(),
+            ));
+        }
+        Box::pin(
+            crate::services::agent_operation_scope_service::check_non_mcp_context(
+                &state.db,
+                auth_user,
+                operation_scope_id,
+                operation_catalog_id,
+                method.as_str(),
+                &crate::services::proxy_authorization::CanonicalPath::from_mcp_built(path)?,
+            ),
+        )
+        .await?
+    } else {
+        false
+    };
+
     proxy_service::validate_ifttt_request(
         &target,
         &method,
@@ -3879,6 +3969,10 @@ async fn execute_proxy_inner(
     )
     .await?;
 
+    crate::services::agent_operation_scope_service::check_guest_approval(
+        operation_guest,
+        &approval_outcome,
+    )?;
     let durable_candidate = scheduled_api_key_id.is_some();
     let enforce_approval = match &approval_outcome {
         approval_service::ApprovalOutcome::Allowed { required } => {
@@ -10937,6 +11031,7 @@ mod proxy_resolution_integration_tests {
 
     fn service_account_auth(service_account_id: &str, owner_user_id: &str) -> AuthUser {
         AuthUser {
+            assistant_operation_scopes: Default::default(),
             user_id: Uuid::parse_str(service_account_id).expect("valid service account id"),
             session_id: None,
             scope: "proxy".to_string(),
@@ -10963,6 +11058,7 @@ mod proxy_resolution_integration_tests {
 
     fn access_token_auth(user_id: &str) -> AuthUser {
         AuthUser {
+            assistant_operation_scopes: Default::default(),
             user_id: Uuid::parse_str(user_id).expect("valid user id"),
             session_id: None,
             scope: "proxy".to_string(),

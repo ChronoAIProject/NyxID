@@ -33,6 +33,7 @@ pub const DELEGATED_CATALOG_SCOPE_REQUIRED: &str = "delegated_catalog_scope_requ
 
 #[derive(Clone, Debug)]
 pub struct ExactServiceApprovalCaller {
+    pub operation_scopes: crate::models::agent_operation_scope::OperationScopes,
     pub actor_user_id: String,
     pub proxy_resolution_user_id: String,
     pub approval_owner_user_id: String,
@@ -468,6 +469,7 @@ pub async fn redeem_request(
             }
         };
         let exec_ctx = mcp_service::McpExecContext {
+            operation_scopes: Some(&caller.operation_scopes),
             api_key_id: caller.api_key_id.as_deref(),
             allow_all_nodes: caller.allow_all_nodes,
             allowed_node_ids: &caller.allowed_node_ids,
@@ -1161,7 +1163,7 @@ async fn resolve_exact_catalog(
     } else {
         mcp_service::ServiceScope::Allowed(caller.allowed_service_ids.as_slice())
     };
-    let catalog = mcp_service::load_operation_catalog(
+    let mut catalog = mcp_service::load_operation_catalog(
         &state.db,
         state.node_ws_manager.as_ref(),
         &caller.proxy_resolution_user_id,
@@ -1169,6 +1171,10 @@ async fn resolve_exact_catalog(
         service_scope,
     )
     .await?;
+    super::agent_operation_scope_service::filter_catalog(
+        &caller.operation_scopes,
+        &mut catalog.services,
+    );
     let service_index = catalog
         .services
         .iter()
@@ -1198,6 +1204,38 @@ async fn resolve_exact_catalog(
     let exact_view_digest = mcp_service::exact_operation_view_digest(&exact_view);
     let legacy_exact_view_digest = mcp_service::legacy_exact_operation_view_digest(&exact_view);
     let endpoint = &catalog.services[service_index].endpoints[endpoint_index];
+    if !caller.operation_scopes.is_empty() {
+        let service = &catalog.services[service_index];
+        let prepared = mcp_service::prepare_proxy_tool_call(service, endpoint, arguments)?;
+        prepared.authorize_agent_operations(&caller.operation_scopes, service, endpoint)?;
+        if super::agent_operation_scope_service::applicable(
+            &caller.operation_scopes,
+            &service.service_id,
+            super::agent_operation_scope_service::mcp_catalog_id(service),
+        )
+        .next()
+        .is_some()
+        {
+            let guest = Box::pin(
+                super::agent_operation_scope_service::check_non_mcp_key_context(
+                    &state.db,
+                    &caller.actor_user_id,
+                    caller.api_key_id.as_deref(),
+                    &caller.operation_scopes,
+                    &service.service_id,
+                    super::agent_operation_scope_service::mcp_catalog_id(service),
+                    prepared.method().as_str(),
+                    &prepared.canonical_path()?,
+                ),
+            )
+            .await?;
+            if guest {
+                return Err(AppError::ApiKeyScopeForbidden(
+                    "Guests cannot request or use exact owner approvals".into(),
+                ));
+            }
+        }
+    }
     let producer_operation_generation =
         mcp_service::producer_operation_generation(&catalog.services[service_index], endpoint);
     let operation_generation = producer_operation_generation.unwrap_or(0);
@@ -1765,6 +1803,7 @@ mod tests {
 
     fn caller() -> ExactServiceApprovalCaller {
         ExactServiceApprovalCaller {
+            operation_scopes: Default::default(),
             actor_user_id: "user-alpha".to_string(),
             proxy_resolution_user_id: "user-alpha".to_string(),
             approval_owner_user_id: "user-alpha".to_string(),

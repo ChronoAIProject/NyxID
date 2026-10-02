@@ -123,6 +123,13 @@ const NYXAGENT_ENGINE_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: true,
 };
 
+pub const AGENT_OPERATION_SCOPES_FLAG_KEY: &str = "assistant:operation-scopes";
+const AGENT_OPERATION_SCOPES_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: AGENT_OPERATION_SCOPES_FLAG_KEY,
+    description: "Allows configuring specialist operation scopes after every replica supports enforcement. Existing scopes are always enforced.",
+    default_enabled: false,
+};
+
 pub const INVITATION_CODE_FLAG_KEY: &str = "auth:invitation-code";
 const INVITATION_CODE_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: INVITATION_CODE_FLAG_KEY,
@@ -191,6 +198,7 @@ const NYXBOT_GATEWAY_FLAG_DEFS: [FeatureFlagDef; 7] = [
 pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     INVITATION_CODE_FLAG,
     NYXAGENT_ENGINE_FLAG,
+    AGENT_OPERATION_SCOPES_FLAG,
     AI_ASSISTANT_FLAG,
     BILLING_FLAG,
     AEVATAR_CHAT_WIRE_LOG_FLAG,
@@ -210,6 +218,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
 pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     INVITATION_CODE_FLAG,
     NYXAGENT_ENGINE_FLAG,
+    AGENT_OPERATION_SCOPES_FLAG,
     AI_ASSISTANT_FLAG,
     BILLING_FLAG_TEST,
     AEVATAR_CHAT_WIRE_LOG_FLAG,
@@ -1731,6 +1740,7 @@ mod tests {
             vec![
                 "auth:invitation-code",
                 "assistant:nyxagent-engine",
+                "assistant:operation-scopes",
                 "experimental:ai-assistant",
                 "experimental:billing",
                 "experimental:aevatar-chat-wire-log",

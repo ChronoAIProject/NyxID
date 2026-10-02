@@ -72,6 +72,7 @@ pub struct AuthUser {
     pub allow_all_nodes: bool,
     /// List of UserService IDs this key can access (only checked when allow_all_services is false).
     pub allowed_service_ids: Vec<String>,
+    pub assistant_operation_scopes: crate::models::agent_operation_scope::OperationScopes,
     /// RFC 8707 resource URI restrictions carried by OAuth bearer tokens.
     pub resource_uris: Option<Vec<String>>,
     /// List of Node IDs this key can route through (only checked when allow_all_nodes is false).
@@ -720,6 +721,7 @@ pub(crate) async fn api_key_auth_user(
         allow_all_nodes: key.allow_all_nodes,
         allowed_service_ids: crate::services::key_service::effective_allowed_service_ids(db, key)
             .await?,
+        assistant_operation_scopes: key.assistant_operation_scopes.clone(),
         resource_uris: None,
         allowed_node_ids: key.allowed_node_ids.clone(),
         api_key_id: Some(key.id.clone()),
@@ -869,6 +871,7 @@ impl FromRequestParts<AppState> for AuthUser {
                         })?;
 
                         return Ok(AuthUser {
+                            assistant_operation_scopes: Default::default(),
                             user_id: sa_uuid,
                             session_id: None,
                             scope: claims.scope.clone(),
@@ -974,9 +977,11 @@ impl FromRequestParts<AppState> for AuthUser {
                     // check is the revocation lever the relay branch previously
                     // lacked, so deleting/deactivating the agent key immediately
                     // kills its relay tokens (matching the ApiKey path).
-                    if auth_method == AuthMethod::Relay {
-                        ensure_relay_agent_key_active(&state.db, &claims).await?;
-                    }
+                    let assistant_operation_scopes = if auth_method == AuthMethod::Relay {
+                        ensure_relay_agent_key_active(&state.db, &claims).await?.assistant_operation_scopes
+                    } else {
+                        Default::default()
+                    };
 
                     // Relay tokens inherit the originating agent key's scope.
                     // OAuth access tokens, including delegated tokens, carry
@@ -1028,6 +1033,7 @@ impl FromRequestParts<AppState> for AuthUser {
                         None
                     };
                     return Ok(AuthUser {
+                        assistant_operation_scopes,
                         user_id,
                         session_id,
                         scope: claims.scope.clone(),
@@ -1100,6 +1106,7 @@ impl FromRequestParts<AppState> for AuthUser {
                                 // those scopes. Session users can retrieve RBAC
                                 // data via the /oauth/userinfo endpoint instead.
                                 return Ok(AuthUser {
+                                    assistant_operation_scopes: Default::default(),
                                     user_id,
                                     session_id: Some(session_id),
                                     scope: String::new(),
@@ -1236,25 +1243,20 @@ pub fn relay_scope_from_claims(
 pub async fn ensure_relay_agent_key_active(
     db: &mongodb::Database,
     claims: &crate::crypto::jwt::Claims,
-) -> Result<(), AppError> {
+) -> Result<ApiKey, AppError> {
     let api_key_id = claims.relay_api_key_id.as_deref().ok_or_else(|| {
         AppError::Unauthorized("Relay token is missing its agent key binding".to_string())
     })?;
 
-    let active = db
+    let key = db
         .collection::<ApiKey>(API_KEYS)
         .find_one(doc! { "_id": api_key_id, "is_active": true })
         .await
         .map_err(|e| AppError::Internal(format!("Relay agent key lookup failed: {e}")))?
-        .is_some();
-
-    if !active {
-        return Err(AppError::Unauthorized(
-            "Relay token's agent key is inactive or revoked".to_string(),
-        ));
-    }
-
-    Ok(())
+        .ok_or_else(|| {
+            AppError::Unauthorized("Relay token's agent key is inactive or revoked".to_string())
+        })?;
+    Ok(key)
 }
 
 /// Middleware that rejects relay access tokens from non-proxy endpoints.
@@ -1597,6 +1599,7 @@ mod tests {
 
     fn test_auth_user(auth_method: AuthMethod, scope: &str) -> AuthUser {
         AuthUser {
+            assistant_operation_scopes: Default::default(),
             user_id: Uuid::new_v4(),
             session_id: None,
             scope: scope.to_string(),
@@ -2304,6 +2307,7 @@ mod tests {
             description: None,
             allowed_service_ids: Vec::new(),
             allowed_platform_service_ids: Vec::new(),
+            assistant_operation_scopes: Default::default(),
             allowed_node_ids: Vec::new(),
             allow_all_services: true,
             allow_auto_connected_services: false,
@@ -3092,6 +3096,7 @@ mod tests {
     #[test]
     fn api_key_auth_includes_key_identity() {
         let user = AuthUser {
+            assistant_operation_scopes: Default::default(),
             user_id: Uuid::new_v4(),
             session_id: None,
             scope: "read proxy".to_string(),

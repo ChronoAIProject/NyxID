@@ -3472,6 +3472,7 @@ mod tests {
 
     fn api_key_auth_user(api_key: &ApiKey) -> AuthUser {
         AuthUser {
+            assistant_operation_scopes: Default::default(),
             user_id: Uuid::parse_str(&api_key.user_id).expect("valid api key user id"),
             session_id: None,
             scope: api_key.scopes.clone(),
@@ -3498,6 +3499,7 @@ mod tests {
 
     fn auth_user_with_method(method: crate::mw::auth::AuthMethod) -> AuthUser {
         AuthUser {
+            assistant_operation_scopes: Default::default(),
             user_id: Uuid::new_v4(),
             session_id: None,
             scope: "openid profile email proxy".to_string(),
@@ -3626,6 +3628,7 @@ mod tests {
             description: None,
             allowed_service_ids: vec![],
             allowed_platform_service_ids: Vec::new(),
+            assistant_operation_scopes: Default::default(),
             allowed_node_ids: vec![],
             allow_all_services: true,
             allow_auto_connected_services: false,
