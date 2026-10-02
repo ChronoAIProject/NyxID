@@ -51,6 +51,7 @@ pub(crate) fn owner_auth(owner: &str) -> AppResult<AuthUser> {
     let user_id =
         Uuid::parse_str(owner).map_err(|_| AppError::NotFound("Conversation not found".into()))?;
     Ok(AuthUser {
+        assistant_operation_scopes: Default::default(),
         user_id,
         session_id: None,
         scope: String::new(),
@@ -376,6 +377,10 @@ pub(crate) async fn permission_requested(
             "service {}",
             identifier(request.service_slug.as_deref().unwrap_or_default())
         ),
+        "operations" => format!(
+            "operation scope for service {}",
+            identifier(request.service_id.as_deref().unwrap_or_default())
+        ),
         "machine" | "saved_login" => format!(
             "{} {}",
             request.kind,
@@ -423,6 +428,7 @@ pub(crate) async fn permission_decided(
             "service {}",
             identifier(request.service_slug.as_deref().unwrap_or_default())
         ),
+        "operations" => "operation scope".into(),
         _ => "read-only account access".into(),
     };
     let by = match request.decided_by.as_deref() {
@@ -698,24 +704,35 @@ pub(crate) async fn execute_tool(
     }
     let result = async {
         assistant_team_tools::validate(name, args)?;
+        if matches!(name, "set_agent_operations" | "request_agent_operations") {
+            Box::pin(
+                crate::services::agent_operation_scope_service::require_configuration_enabled(
+                    &state.db,
+                    &chat.user_id,
+                ),
+            )
+            .await?;
+        }
         // Machine updates always consume their own owner card, bound to the
         // resolved version and inspected Docker identity. It is at least as
         // strict as either webhook policy; do not consume a second digest.
-        if name != "machine_update"
-            && let Some(refusal) = acks::webhook_action_gate(
-                &state.db,
-                chat,
-                tool_name,
-                args,
-                assistant_team_tools::read_only(name),
-                assistant_team_tools::destructive(name),
-            )
-            .await?
+        if !matches!(
+            name,
+            "set_agent_operations" | "decide_permission" | "machine_update"
+        ) && let Some(refusal) = acks::webhook_action_gate(
+            &state.db,
+            chat,
+            tool_name,
+            args,
+            assistant_team_tools::read_only(name),
+            assistant_team_tools::destructive(name),
+        )
+        .await?
         {
             return Ok((refusal, true));
         }
         engine::require_enabled(&state.db, &chat.user_id).await?;
-        // The dispatcher includes large cold provisioning futures. Keep them
+        // The dispatcher includes large provisioning and scope-edit futures. Keep them
         // off the caller's stack, including tests and ordinary specialist turns.
         Box::pin(dispatch(state, chat, name, args)).await
     }
@@ -916,6 +933,139 @@ async fn dispatch(
             }
             (result, false)
         }
+        "request_agent_operations" => {
+            let agent = team::live_specialist(db, owner, &chat.agent_id).await?;
+            if text_arg(args, "subagent") != agent.name && text_arg(args, "subagent") != agent.id {
+                return Err(AppError::Forbidden(
+                    "A specialist may request only its own operation scope".into(),
+                ));
+            }
+            let selection: crate::models::agent_operation_scope::OperationSelection =
+                serde_json::from_value(args["selection"].clone())
+                    .map_err(|_| AppError::ValidationError("Invalid operation selection".into()))?;
+            let service = text_arg(args, "service_id");
+            if !agent
+                .grants
+                .service_ids
+                .iter()
+                .chain(&agent.grants.platform_service_ids)
+                .any(|id| id == service)
+            {
+                return Err(AppError::Forbidden(
+                    "Request a service grant before an operation scope".into(),
+                ));
+            }
+            let summary = Box::pin(
+                crate::services::agent_operation_scope_service::selection_summary(
+                    db,
+                    &state.node_ws_manager,
+                    owner,
+                    &agent.id,
+                    service,
+                    &selection,
+                ),
+            )
+            .await?;
+            let (card, created) = Box::pin(acks::request_tracked(
+                db,
+                chat,
+                acks::Request {
+                    kind: "operations",
+                    service: Some((service, service, service)),
+                    tool: None,
+                    arguments: Some(&args["selection"]),
+                    summary: &summary,
+                    platform: agent
+                        .grants
+                        .platform_service_ids
+                        .iter()
+                        .any(|id| id == service),
+                },
+            ))
+            .await?;
+            if created {
+                Box::pin(permission_requested(state, chat, &card)).await;
+            }
+            (acks::refusal(&card), true)
+        }
+        "get_agent_operations" => {
+            let agent = team::live_specialist(db, owner, text_arg(args, "subagent")).await?;
+            if !chat.is_orchestrator() && agent.id != chat.agent_id {
+                return Err(AppError::Forbidden(
+                    "Specialists may read only their own operation scopes".into(),
+                ));
+            }
+            (
+                json!({"services": Box::pin(crate::services::agent_operation_scope_service::options(db, &state.node_ws_manager, owner, &agent.id)).await?}),
+                false,
+            )
+        }
+        "set_agent_operations" => {
+            let agent = team::live_specialist(db, owner, text_arg(args, "subagent")).await?;
+            let service = text_arg(args, "service_id");
+            let selection: crate::models::agent_operation_scope::OperationSelection =
+                serde_json::from_value(args["selection"].clone())
+                    .map_err(|_| AppError::ValidationError("Invalid operation selection".into()))?;
+            let confirmed = if let Some(id) = args["acknowledgement_id"].as_str() {
+                if !acks::consume_action(db, chat, id, "nyxid__set_agent_operations", args).await? {
+                    return Ok((json!({"error":"acknowledgement_invalid"}), true));
+                }
+                true
+            } else {
+                false
+            };
+            if !confirmed && acks::webhook_confirmation_required(chat, false, false) {
+                return operation_owner_card(
+                    db,
+                    chat,
+                    "nyxid__set_agent_operations",
+                    args,
+                    &format!(
+                        "Confirm operation selection for {} service {} at revision {}.",
+                        agent.name, service, selection.expected_revision
+                    ),
+                )
+                .await;
+            }
+            match Box::pin(crate::services::agent_operation_scope_service::set(
+                db, owner, &agent.id, service, &selection, confirmed,
+            ))
+            .await
+            {
+                Ok(updated) => (
+                    json!({"agent_id":updated.id,"service_id":service,"revision":updated.operation_scope_revisions.get(service)}),
+                    false,
+                ),
+                Err(AppError::Forbidden(_)) if !confirmed => {
+                    let summary = Box::pin(
+                        crate::services::agent_operation_scope_service::selection_summary(
+                            db,
+                            &state.node_ws_manager,
+                            owner,
+                            &agent.id,
+                            service,
+                            &selection,
+                        ),
+                    )
+                    .await?;
+                    let card = Box::pin(acks::request(
+                        db,
+                        chat,
+                        acks::Request {
+                            kind: "action",
+                            service: None,
+                            tool: Some("nyxid__set_agent_operations"),
+                            arguments: Some(args),
+                            summary: &summary,
+                            platform: false,
+                        },
+                    ))
+                    .await?;
+                    (acks::refusal(&card), true)
+                }
+                Err(error) => return Err(error),
+            }
+        }
         "set_guest_access" => {
             let agent = team::live_specialist(db, owner, text_arg(args, "subagent")).await?;
             let access = args["access"]
@@ -1022,16 +1172,55 @@ async fn dispatch(
             if Uuid::parse_str(request_id).is_err() {
                 return Err(AppError::NotFound("Request not found".into()));
             }
-            let row = acks::decide_as(
+            let confirmed = if let Some(id) = args["acknowledgement_id"].as_str() {
+                if !acks::consume_action(db, chat, id, "nyxid__decide_permission", args).await? {
+                    return Ok((json!({"error":"acknowledgement_invalid"}), true));
+                }
+                true
+            } else {
+                false
+            };
+            if !confirmed && acks::webhook_confirmation_required(chat, false, false) {
+                return operation_owner_card(
+                    db,
+                    chat,
+                    "nyxid__decide_permission",
+                    args,
+                    &format!("Confirm specialist permission decision {request_id}."),
+                )
+                .await;
+            }
+            let row = match Box::pin(acks::decide_as(
                 db,
                 owner,
                 None,
                 request_id,
                 allow,
-                Decider::Nyxbot,
+                if confirmed {
+                    Decider::NyxbotOwnerConfirmed
+                } else {
+                    Decider::Nyxbot
+                },
                 Some(text_arg(args, "reason")),
-            )
-            .await?;
+            ))
+            .await
+            {
+                Ok(row) => row,
+                Err(AppError::Forbidden(_)) if !confirmed => {
+                    let pending = db.collection::<AssistantAcknowledgement>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
+                        .find_one(mongodb::bson::doc!{"_id":request_id,"user_id":owner,"kind":"operations","decider":"orchestrator","status":"pending"}).await?
+                        .ok_or_else(|| AppError::NotFound("Operation request not found".into()))?;
+                    return operation_owner_card(
+                        db,
+                        chat,
+                        "nyxid__decide_permission",
+                        args,
+                        &format!("Widen specialist operations: {}", pending.summary),
+                    )
+                    .await;
+                }
+                Err(error) => return Err(error),
+            };
             acks::audit_decision(
                 db,
                 &crate::services::audit_service::AuditActor {
@@ -1979,6 +2168,69 @@ pub fn spawn_sweeps(state: AppState) {
             }
         }
     });
+}
+
+pub async fn agent_operations(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+) -> AppResult<Json<Vec<crate::services::agent_operation_scope_service::ServiceOptions>>> {
+    let owner = auth.user_id.to_string();
+    engine::require_enabled(&state.db, &owner).await?;
+    Ok(Json(
+        Box::pin(crate::services::agent_operation_scope_service::options(
+            &state.db,
+            &state.node_ws_manager,
+            &owner,
+            &id,
+        ))
+        .await?,
+    ))
+}
+
+pub async fn set_agent_operations(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((id, service_id)): Path<(String, String)>,
+    Json(body): Json<crate::models::agent_operation_scope::OperationSelection>,
+) -> AppResult<Json<Value>> {
+    let owner = auth.user_id.to_string();
+    engine::require_enabled(&state.db, &owner).await?;
+    let agent = Box::pin(crate::services::agent_operation_scope_service::set(
+        &state.db,
+        &owner,
+        &id,
+        &service_id,
+        &body,
+        true,
+    ))
+    .await?;
+    Ok(Json(
+        json!({"agent_id":agent.id,"service_id":service_id,"revision":agent.operation_scope_revisions.get(&service_id)}),
+    ))
+}
+
+async fn operation_owner_card(
+    db: &mongodb::Database,
+    chat: &ChatAuthority,
+    tool: &str,
+    args: &Value,
+    summary: &str,
+) -> AppResult<(Value, bool)> {
+    let card = Box::pin(acks::request(
+        db,
+        chat,
+        acks::Request {
+            kind: "action",
+            service: None,
+            tool: Some(tool),
+            arguments: Some(args),
+            summary,
+            platform: false,
+        },
+    ))
+    .await?;
+    Ok((acks::refusal(&card), true))
 }
 
 #[cfg(test)]

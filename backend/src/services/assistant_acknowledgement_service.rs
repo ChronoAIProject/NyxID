@@ -387,10 +387,25 @@ pub async fn request_tracked(
     chat: &ChatAuthority,
     request: Request<'_>,
 ) -> AppResult<(AssistantAcknowledgement, bool)> {
+    if request.kind == "operations" {
+        Box::pin(
+            super::agent_operation_scope_service::require_configuration_enabled(db, &chat.user_id),
+        )
+        .await?;
+    }
     expire(db, &chat.user_id, &chat.conversation_id).await?;
     let now = Utc::now();
     let orchestrated = !chat.is_orchestrator() && request.kind != "action";
     let candidate = AssistantAcknowledgement {
+        operation_selection: if request.kind == "operations" {
+            Some(
+                serde_json::from_value(request.arguments.cloned().ok_or_else(not_found)?).map_err(
+                    |_| AppError::ValidationError("Invalid operation permission request".into()),
+                )?,
+            )
+        } else {
+            None
+        },
         id: Uuid::new_v4().to_string(),
         conversation_id: chat.conversation_id.clone(),
         user_id: chat.user_id.clone(),
@@ -712,6 +727,8 @@ pub enum Decider {
     User,
     /// The owner's NyxBot deciding a specialist's request.
     Nyxbot,
+    /// NyxBot has consumed an owner action card bound to this exact decision.
+    NyxbotOwnerConfirmed,
 }
 
 /// Decide a card as the owner from its own conversation.
@@ -742,7 +759,8 @@ pub async fn decide_as(
     let user = user.to_owned();
     let conversation = conversation.map(str::to_owned);
     let id = id.to_owned();
-    let by_nyxbot = decider == Decider::Nyxbot;
+    let by_nyxbot = decider != Decider::User;
+    let allow_operation_widening = matches!(decider, Decider::User | Decider::NyxbotOwnerConfirmed);
     let reason = reason.map(|reason| super::assistant_nyxagent::excerpt(reason, 300));
     let mut session = db.client().start_session().await?;
     let row = session
@@ -867,6 +885,18 @@ pub async fn decide_as(
                             return Err(not_found());
                         }
                     }
+                }
+                if allow && subagent && row.kind == "operations" {
+                    Box::pin(super::agent_operation_scope_service::apply_in_session(
+                        &db,
+                        &user,
+                        target.agent_id.as_deref().ok_or_else(not_found)?,
+                        row.service_id.as_deref().ok_or_else(not_found)?,
+                        row.operation_selection.as_ref().ok_or_else(not_found)?,
+                        allow_operation_widening,
+                        session,
+                    ))
+                    .await?;
                 }
                 if allow && subagent {
                     // A specialist's grant lives on its agent and converges on

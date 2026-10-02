@@ -470,6 +470,7 @@ pub async fn forward_trigger_event(
     let user_id =
         uuid::Uuid::parse_str(owner_user_id).map_err(|_| AppError::TriggerDeliveryUnsupported)?;
     let auth_user = AuthUser {
+        assistant_operation_scopes: Default::default(),
         user_id,
         session_id: None,
         scope: String::new(),
@@ -783,6 +784,7 @@ mod tests {
             allow_all_nodes: true,
             allowed_service_ids: Vec::new(),
             allowed_platform_service_ids: Vec::new(),
+            assistant_operation_scopes: Default::default(),
             allowed_node_ids: Vec::new(),
             rate_limit_per_second: None,
             rate_limit_burst: None,

@@ -1,4 +1,5 @@
 pub mod agent_key_login_request;
+pub mod agent_operation_scope;
 pub mod agent_service_binding;
 pub mod anonymous_endpoint_usage;
 pub mod api_key;

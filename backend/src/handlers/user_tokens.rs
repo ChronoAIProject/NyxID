@@ -1635,6 +1635,7 @@ mod tests {
 
     fn test_auth_user() -> AuthUser {
         AuthUser {
+            assistant_operation_scopes: Default::default(),
             user_id: Uuid::new_v4(),
             session_id: None,
             scope: String::new(),

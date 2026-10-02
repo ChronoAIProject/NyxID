@@ -2228,6 +2228,7 @@ pub(crate) async fn test_app_state_no_db() -> AppState {
 /// Build a permissive session-auth `AuthUser` for handler tests.
 pub(crate) fn test_auth_user(user_id: &str) -> AuthUser {
     AuthUser {
+        assistant_operation_scopes: Default::default(),
         user_id: Uuid::parse_str(user_id).expect("valid uuid user id"),
         session_id: None,
         scope: String::new(),
@@ -2655,6 +2656,104 @@ pub(crate) fn test_auto_connected_catalog_service()
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     }
+}
+
+/// Opt in explicitly; scope configuration must stay default-off in tests too.
+pub async fn set_agent_operation_scopes_enabled(
+    db: &mongodb::Database,
+    owner: &str,
+    enabled: bool,
+) {
+    crate::services::feature_flag_service::set_platform_override(
+        db,
+        crate::services::feature_flag_service::AGENT_OPERATION_SCOPES_FLAG_KEY,
+        &crate::services::feature_flag_service::FlagTarget::Global,
+        enabled,
+        owner,
+    )
+    .await
+    .unwrap();
+}
+
+/// Create a live specialist and read its mirrored scopes through real key auth.
+pub async fn scoped_specialist_auth(
+    state: &AppState,
+    owner: &str,
+    selections: &[(
+        String,
+        Vec<crate::models::downstream_service::ProxyOperationRule>,
+    )],
+) -> AuthUser {
+    use crate::services::{
+        agent_operation_scope_service as scopes, assistant_nyxagent as engine,
+        assistant_team_service as team,
+    };
+    engine::ensure_indexes(&state.db).await.unwrap();
+    let (agent, home) = team::create_specialist(
+        &state.db,
+        &state.encryption_keys,
+        owner,
+        team::CreateRequest {
+            machines: None,
+            logins: None,
+            name: "scoped-worker".into(),
+            description: "Exercise member operation permissions".into(),
+            display_name: None,
+            persona: None,
+            targets: team::GrantTargets {
+                service_ids: selections.iter().map(|(id, _)| id.clone()).collect(),
+                ..Default::default()
+            },
+            account_read: false,
+            specialty: None,
+            created_by: "user",
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let row = engine::begin_turn(
+        &state.db,
+        owner,
+        &engine::TurnRequest {
+            agent_id: None,
+            conversation_id: Some(home.id),
+            text: "Exercise service operations".into(),
+            model: None,
+            access_mode: None,
+        },
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    set_agent_operation_scopes_enabled(&state.db, owner, true).await;
+    for (id, rules) in selections {
+        scopes::set(
+            &state.db,
+            owner,
+            &agent.id,
+            id,
+            &crate::models::agent_operation_scope::OperationSelection {
+                expected_revision: 0,
+                all_operations: false,
+                endpoint_ids: vec![],
+                rules: rules.clone(),
+            },
+            true,
+        )
+        .await
+        .unwrap();
+    }
+    let key = state
+        .db
+        .collection::<crate::models::api_key::ApiKey>("api_keys")
+        .find_one(doc! {"_id":row.credential_api_key_id})
+        .await
+        .unwrap()
+        .unwrap();
+    crate::mw::auth::api_key_auth_user(&state.db, &key, None, None, None)
+        .await
+        .unwrap()
 }
 
 #[cfg(test)]

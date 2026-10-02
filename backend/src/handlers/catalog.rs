@@ -506,6 +506,15 @@ pub async fn list_catalog_endpoints(
         let parsed = openapi_parser::parse_openapi_spec_value(&spec)?;
         let endpoints: Vec<CatalogEndpointResponse> = parsed
             .into_iter()
+            .filter(|endpoint| {
+                crate::services::agent_operation_scope_service::route_visible(
+                    &auth_user.assistant_operation_scopes,
+                    &svc.id,
+                    None,
+                    &endpoint.method,
+                    &endpoint.path,
+                )
+            })
             .map(parsed_endpoint_to_response)
             .collect();
 
@@ -566,6 +575,15 @@ pub async fn list_catalog_endpoints(
     let parsed = openapi_parser::parse_openapi_spec_value(&spec)?;
     let endpoints: Vec<CatalogEndpointResponse> = parsed
         .into_iter()
+        .filter(|endpoint| {
+            crate::services::agent_operation_scope_service::route_visible(
+                &auth_user.assistant_operation_scopes,
+                &user_service.id,
+                user_service.catalog_service_id.as_deref(),
+                &endpoint.method,
+                &endpoint.path,
+            )
+        })
         .map(parsed_endpoint_to_response)
         .collect();
 

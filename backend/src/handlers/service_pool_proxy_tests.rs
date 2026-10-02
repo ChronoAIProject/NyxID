@@ -30,6 +30,9 @@ mod inspection;
 #[path = "service_pool_runtime_tests.rs"]
 mod runtime;
 
+#[path = "service_pool_operation_scope_tests.rs"]
+mod operation_scopes;
+
 #[derive(Clone, Debug)]
 struct ReceivedRequest {
     method: Method,

@@ -519,6 +519,7 @@ pub(crate) async fn mcp_call(
         &state.token_exchange_cache,
         &state.cloud_response_cache,
         &mcp_service::McpExecContext {
+            operation_scopes: None,
             api_key_id: None,
             allow_all_nodes: true,
             allowed_node_ids: &[],

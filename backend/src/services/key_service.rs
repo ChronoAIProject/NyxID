@@ -633,6 +633,7 @@ pub(crate) async fn create_api_key_with_security_class_and_id(
         description: description.map(|s| s.to_string()),
         allowed_service_ids: svc_ids.clone(),
         allowed_platform_service_ids: Vec::new(),
+        assistant_operation_scopes: Default::default(),
         allowed_node_ids: node_ids.clone(),
         allow_all_services: all_svcs,
         allow_auto_connected_services: allow_auto_connected_services.unwrap_or(false),
@@ -1141,6 +1142,7 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                     description: old_key.description.clone(),
                     allowed_service_ids: old_key.allowed_service_ids.clone(),
                     allowed_platform_service_ids: Vec::new(),
+                    assistant_operation_scopes: Default::default(),
                     allowed_node_ids: old_key.allowed_node_ids.clone(),
                     allow_all_services: old_key.allow_all_services,
                     allow_auto_connected_services: old_key.allow_auto_connected_services,
@@ -1223,12 +1225,15 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                     match &authority {
                         super::assistant_agent_credential_service::KeyAuthority::Subagent(
                             grants,
+                            scopes,
                         ) => {
+                            successor.assistant_operation_scopes = scopes.clone();
                             successor.allowed_service_ids = grants.service_ids.clone();
                             successor.allowed_platform_service_ids =
                                 grants.platform_service_ids.clone();
                         }
                         super::assistant_agent_credential_service::KeyAuthority::Orchestrator => {
+                            successor.assistant_operation_scopes.clear();
                             successor.allowed_service_ids.clear();
                             successor.allowed_platform_service_ids.clear();
                         }

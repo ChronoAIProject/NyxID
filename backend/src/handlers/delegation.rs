@@ -1123,6 +1123,7 @@ mod tests {
 
     fn catalog_auth(method: AuthMethod) -> AuthUser {
         AuthUser {
+            assistant_operation_scopes: Default::default(),
             user_id: uuid::Uuid::new_v4(),
             session_id: None,
             scope: catalog_delegation_service::MCP_CATALOG_READ_SCOPE.to_string(),
@@ -1592,6 +1593,7 @@ mod tests {
         let claims = jwt::verify_token(&state.jwt_keys, &state.config, token)
             .expect("verify minted delegated token");
         AuthUser {
+            assistant_operation_scopes: Default::default(),
             user_id: Uuid::parse_str(&claims.sub).expect("delegated subject is a UUID"),
             session_id: None,
             scope: claims.scope,

@@ -154,6 +154,8 @@ pub async fn ensure_nyxbot(db: &Database, owner: &str) -> AppResult<AssistantAge
         specialty: None,
         grants: AgentGrants::default(),
         guest_access: BTreeMap::new(),
+        operation_scopes: Default::default(),
+        operation_scope_revisions: Default::default(),
         created_by: "user".into(),
         model: routing::model_for(db, RouteRole::Orchestrator, engine::DEFAULT_MODEL).await,
         home_conversation_id: None,
@@ -657,6 +659,8 @@ pub async fn create_specialist(
             account_read: request.account_read,
         },
         guest_access: BTreeMap::new(),
+        operation_scopes: Default::default(),
+        operation_scope_revisions: Default::default(),
         created_by: request.created_by.into(),
         model,
         home_conversation_id: None,
@@ -960,7 +964,7 @@ impl GrantChange {
 /// Every key a set of threads may hold: the credential row's key, which is
 /// authoritative after rotation or an in-turn replacement, and the key the
 /// thread recorded at its last turn start.
-async fn thread_key_ids(
+pub(crate) async fn thread_key_ids(
     db: &Database,
     owner: &str,
     rows: &[AssistantConversation],
@@ -1480,6 +1484,7 @@ pub struct RequestSummary {
     pub agent_id: Option<String>,
     pub conversation_id: String,
     pub kind: String,
+    pub operation_selection: Option<crate::models::agent_operation_scope::OperationSelection>,
     pub service_slug: Option<String>,
     pub summary: String,
     pub requested_by: Option<String>,
@@ -1496,6 +1501,7 @@ pub fn request_summary(
         agent_id: agent.map(|agent| agent.id.clone()),
         conversation_id: row.conversation_id.clone(),
         kind: row.kind.clone(),
+        operation_selection: row.operation_selection.clone(),
         service_slug: row.service_slug.clone(),
         summary: row.summary.clone(),
         requested_by: row.request_excerpt.clone(),

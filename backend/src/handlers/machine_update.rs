@@ -336,14 +336,14 @@ pub async fn tool(
         && acks::consume_action(&state.db, chat, id, "nyxid__machine_update", &canonical).await?
     {
         if let Some(host) = host {
-            let row = updates::begin(
+            let row = Box::pin(updates::begin(
                 &state.db,
                 node,
                 &chat.user_id,
                 Some(&chat.conversation_id),
                 false,
                 true,
-            )
+            ))
             .await?;
             canonical["version"] = json!(updates::TARGET);
             canonical["conversation_id"] = json!(chat.conversation_id);
@@ -360,13 +360,13 @@ pub async fn tool(
             ));
         }
         return Ok((
-            begin(
+            Box::pin(begin(
                 state,
                 node,
                 &chat.user_id,
                 Some(&chat.conversation_id),
                 false,
-            )
+            ))
             .await?,
             false,
         ));
@@ -385,7 +385,9 @@ pub async fn tool(
     } else {
         format!("Update machine {} from {} to {}. {} This restarts the target and interrupts its work. Docker socket access gives the updater host-root authority; it installs only attested official images.",node.name,updates::current(node),updates::TARGET,host.map(|h|format!("Run the migration on owner-identified host machine {} after its successful Docker inspection.",h.name)).unwrap_or_else(||"Guide the one-time host command if no updater is installed.".into()))
     };
-    let card = acks::request(
+    // The owner-card transaction is large in debug builds and this tool also
+    // runs beneath universal MCP dispatch on the default thread stack.
+    let card = Box::pin(acks::request(
         &state.db,
         chat,
         acks::Request {
@@ -396,7 +398,7 @@ pub async fn tool(
             summary: &summary,
             platform: false,
         },
-    )
+    ))
     .await?;
     let mut result = acks::refusal(&card);
     let previous = updates::get(&state.db, node).await?;

@@ -1,3 +1,4 @@
+import { AgentOperationScopes } from "./agent-operation-scopes";
 import { MachineGrantPicker } from "./machine-grant-picker";
 import { AgentAutomations } from "./automation-preferences";
 import { useState, type ReactNode } from "react";
@@ -459,6 +460,7 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
           )}
         </form>
       </Form>
+      <AgentOperationScopes agentId={agent.id} disabled={readOnly} />
     </Section>
   );
 }

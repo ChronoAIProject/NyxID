@@ -56,6 +56,8 @@ export function continuationText(acknowledgement: NyxAgentAcknowledgement): stri
       return `Approved: this chat may use ${
         acknowledgement.service_name ?? acknowledgement.service_slug ?? "the service"
       }. Continue.`;
+    case "operations":
+      return `Approved: ${acknowledgement.summary} Continue within the updated operation scope.`;
     case "account":
       return "Approved: account management for this chat. Continue.";
     case "action":
