@@ -1380,10 +1380,14 @@ fn mark_pool_attempt_dispatched(state: Option<&PoolAttemptDispatchState>) {
 
 fn pool_no_redirect_http_client() -> &'static reqwest::Client {
     static CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
-        reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .expect("pool HTTP client")
+        let builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
+        // Tests share this process-wide client while starting and dropping many
+        // local mock servers whose ports the OS reuses. A pooled idle socket to
+        // a dropped server would then fail after dispatch and look like an
+        // upstream transport error, so tests never keep idle connections.
+        #[cfg(test)]
+        let builder = builder.pool_max_idle_per_host(0);
+        builder.build().expect("pool HTTP client")
     });
     &CLIENT
 }
