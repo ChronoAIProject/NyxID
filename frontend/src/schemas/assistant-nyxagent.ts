@@ -75,6 +75,7 @@ export const nyxAgentConversationSchema = z.object({
   active_turn: z
     .object({
       turn_id: z.string(),
+      continuations: z.number().int().nonnegative().optional(),
       started_at: z.string(),
       activities: z.array(nyxAgentTurnActivitySchema).default([]),
       attachments: z.array(nyxAgentAttachmentSchema).default([]),
@@ -177,6 +178,7 @@ export const nyxAgentEventSchema = z.discriminatedUnion("event", [
     turn_id: z.string(),
     status: z.enum(["running", "waiting"]),
   }),
+  base.extend({ event: z.literal("turn.continuing"), turn_id: z.string(), continuation: z.number().int().positive() }),
   base.extend({
     event: z.literal("turn.notice"),
     code: z.literal("context_reset"),
@@ -216,6 +218,8 @@ export const nyxAgentSettingsSchema = z.object({
     .optional(),
   trigger_runs_per_hour: z.number().int().positive().optional(),
   trigger_runs_per_day: z.number().int().positive().optional(),
+  max_auto_continuations: z.number().int().min(0).max(32).optional(),
+  max_auto_continuations_limit: z.number().int().positive().optional(),
   skip_destructive_confirmation: z.boolean(),
   max_live_subagents: z.number().int().nonnegative(),
   max_concurrent_subagent_turns: z.number().int().nonnegative(),
@@ -241,6 +245,7 @@ export type NyxAgentSettingsUpdate = Partial<
     | "trigger_runs_per_hour"
     | "trigger_runs_per_day"
     | "skip_destructive_confirmation"
+    | "max_auto_continuations"
     | "max_live_subagents"
     | "max_concurrent_subagent_turns"
     | "max_group_handoffs"
@@ -262,6 +267,7 @@ export function nyxAgentSettingsFormSchema(limits: {
       .min(min, `Must be at least ${String(min)}`)
       .max(max, `Must be at most ${String(max)}`);
   return z.object({
+    max_auto_continuations: whole(0, 32),
     confirm_destructive: z.boolean(),
     max_live_subagents: whole(0, limits.max_live_subagents_limit),
     max_concurrent_subagent_turns: whole(1, limits.max_concurrent_subagent_turns_limit),

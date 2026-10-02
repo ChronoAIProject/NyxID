@@ -41,6 +41,7 @@ struct Binding {
     report: Option<(String, Instant)>,
 }
 struct Pending {
+    job_id: String,
     start: Option<oneshot::Sender<Value>>,
     body: mpsc::Sender<Result<Vec<u8>, std::io::Error>>,
     sequence: u64,
@@ -147,6 +148,46 @@ impl Gateway {
             .await
             .retain(|_, binding| binding.job_id != job_id);
     }
+    pub async fn cancel_jobs(&self, jobs: &[String]) {
+        self.tokens
+            .lock()
+            .await
+            .retain(|_, binding| !jobs.contains(&binding.job_id));
+        let cancelled = {
+            let mut pending = self.pending.lock().await;
+            let ids: Vec<_> = pending
+                .iter()
+                .filter(|(_, call)| jobs.contains(&call.job_id))
+                .map(|(id, _)| *id)
+                .collect();
+            for id in &ids {
+                pending.remove(id);
+            }
+            ids
+        };
+        if let Some(sender) = self.sender.read().await.as_ref() {
+            // One bound for the entire batch, independent of the number of
+            // streams. Dropped response channels already wake local clients.
+            let _ = tokio::time::timeout(Duration::from_millis(250), async {
+                for id in cancelled {
+                    if let Ok(frame) = (Frame {
+                        kind: Kind::GatewayCancel,
+                        end: true,
+                        id,
+                        sequence: 0,
+                        bytes: &[],
+                    })
+                    .encode()
+                        && sender.send(NodeWsMessage::Binary(frame)).await.is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+            .await;
+        }
+    }
+
     pub async fn connect(&self, sender: mpsc::Sender<NodeWsMessage>) {
         *self.sender.write().await = Some(sender);
     }
@@ -414,12 +455,22 @@ async fn forward_inner(
     let (body_tx, body_rx) = mpsc::channel(16);
     {
         let mut pending = gateway.pending.lock().await;
+        // Cancellation removes tokens before locking pending. Revalidate
+        // admission under this lock so it cannot miss a newly inserted call.
+        if !jobs.running(&job_id).await {
+            return Ok((
+                StatusCode::UNAUTHORIZED,
+                axum::Json(json!({"error":{"code":12403,"message":"job_ended"}})),
+            )
+                .into_response());
+        }
         if pending.len() >= 32 {
             bail!("gateway concurrency limit exceeded");
         }
         pending.insert(
             id,
             Pending {
+                job_id: job_id.clone(),
                 start: Some(start_tx),
                 body: body_tx,
                 sequence: 0,
@@ -625,6 +676,7 @@ mod tests {
             .unwrap();
         jobs.start(
             Exec {
+                scope: Default::default(),
                 job_id: id.clone(),
                 command: "sleep 30".into(),
                 cwd: None,

@@ -134,7 +134,9 @@ pub mod options;
 pub mod service_history;
 
 pub mod channel_activities;
+pub mod machine_cancel;
 pub mod machine_tools;
+pub mod machine_update;
 pub mod saved_logins;
 
 pub mod machine_desktop;

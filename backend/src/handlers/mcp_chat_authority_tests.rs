@@ -872,6 +872,11 @@ async fn chat_tool_calls_are_recorded_as_metadata_only_turn_activity() {
     let row = crate::services::assistant_nyxagent::get(&f.state.db, &f.owner, &f.row.id)
         .await
         .unwrap();
+    let progress = &row.active_turn.as_ref().unwrap().tool_progress;
+    assert_eq!(progress.calls, 3);
+    assert_eq!(progress.digest.len(), 64);
+    let encoded_progress = serde_json::to_string(progress).unwrap();
+    assert!(!encoded_progress.contains("do_not_record") && !encoded_progress.contains("issues"));
     let activities = row.active_turn.as_ref().unwrap().activities.clone();
     let labels: Vec<_> = activities.iter().map(|a| a.label.as_str()).collect();
     assert_eq!(
@@ -895,6 +900,7 @@ async fn chat_tool_calls_are_recorded_as_metadata_only_turn_activity() {
     let row = crate::services::assistant_nyxagent::get(&f.state.db, &f.owner, &f.row.id)
         .await
         .unwrap();
+    assert_eq!(row.active_turn.as_ref().unwrap().tool_progress.calls, 3);
     assert_eq!(row.active_turn.unwrap().activities.len(), 3);
 }
 
@@ -2402,6 +2408,20 @@ async fn assistant_operation_scopes_hide_typed_tools_and_preserve_guest_and_webh
             .iter()
             .any(|tool| tool["name"] == "scoped-catalog__write")
     );
+    for query in ["scoped catalog", "write", "DELETE items"] {
+        let searched = result(
+            direct_call(&f, &auth, "nyx__search_tools", json!({"query":query})).await,
+            false,
+        )
+        .await;
+        assert!(
+            searched["matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|tool| tool["name"] != "scoped-catalog__write")
+        );
+    }
     for universal in [true, false] {
         let denied = if universal {
             call(&f, &auth, "scoped-catalog__write", json!({})).await
@@ -2775,4 +2795,76 @@ async fn assistant_operation_scopes_rollout_gate_blocks_configuration_and_pendin
         .unwrap();
     assert_eq!(key.assistant_operation_scopes, agent.operation_scopes);
     f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn specialist_machine_update_dispatch_preserves_one_owner_card() {
+    use crate::services::assistant_team_service as team;
+    for universal in [false, true] {
+        let f = fixture("mcp_specialist_update_card").await;
+        let node = crate::services::machine_integration_tests::node(&f, &f.owner).await;
+        team::set_grants(
+            &f.state.db,
+            &f.owner,
+            &f.chat.agent_id,
+            team::GrantChange::Machine {
+                base: Box::new(team::GrantChange::Add(Default::default())),
+                machines: Some(vec![node.id.clone()]),
+                logins: None,
+                mode: team::MachineGrantMode::Add,
+            },
+        )
+        .await
+        .unwrap();
+        crate::services::assistant_settings_service::update(
+            &f.state.db,
+            &f.owner,
+            crate::services::assistant_settings_service::Update {
+                skip_destructive_confirmation: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let mut auth = authenticate(&f).await;
+        auth.chat.as_mut().unwrap().confirmation_policy =
+            Some(crate::models::trigger_schedule::ConfirmationPolicy::Changes);
+        let invoke = |args| async {
+            if universal {
+                call(&f, &auth, "nyxid__machine_update", args).await
+            } else {
+                direct_call(&f, &auth, "nyxid__machine_update", args).await
+            }
+        };
+        let card = result(invoke(json!({"machine":node.id})).await, true).await;
+        assert_eq!(card["kind"], "action");
+        assert_eq!(card["decider"], "user");
+        let id = card["acknowledgement_id"].as_str().unwrap();
+        assert_eq!(
+            acks::history(&f.state.db, &f.owner, &f.row.id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        acks::decide(&f.state.db, &f.owner, &f.row.id, id, true)
+            .await
+            .unwrap();
+        let finished = result(
+            invoke(json!({"machine":node.id,"acknowledgement_id":id})).await,
+            false,
+        )
+        .await;
+        assert_eq!(finished["status"], "manual_step");
+        // The tool's exact card satisfies the webhook gate as well; dispatch
+        // must not add a second generic confirmation before or after it.
+        assert_eq!(
+            acks::history(&f.state.db, &f.owner, &f.row.id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        f.state.db.drop().await.unwrap();
+    }
 }

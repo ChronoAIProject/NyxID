@@ -1,3 +1,5 @@
+mod machine_updater;
+use commands::update_attestation;
 mod api;
 mod auth;
 mod browser;

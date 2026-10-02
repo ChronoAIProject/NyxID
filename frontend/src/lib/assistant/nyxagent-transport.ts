@@ -69,6 +69,9 @@ function path(id: string): string {
 }
 
 function storedError(code: string | null): string {
+  if (code === "tool_budget_exhausted" || code === "turn_timeout") return "This task reached its automatic continuation limit. Its context is saved; resume to continue, or adjust the limit in NyxBot settings.";
+  if (code === "continuation_no_progress") return "Paused because the task repeated without progress. Its context is saved; give it new guidance.";
+  if (code === "idle_timeout") return "The assistant stopped responding. Try again.";
   if (code === "outcome_unknown") {
     return "The previous operation may have taken effect. Check its result before trying again.";
   }
@@ -361,6 +364,10 @@ export class NyxAgentTransport {
     const history = this.histories.get(key);
     if (history) return history.conversation.active_turn?.turn_id ?? undefined;
     return this.index.get(key)?.active_turn?.turn_id ?? undefined;
+  }
+
+  continuations(id?: string): number {
+    return this.live.get(id ?? "draft")?.state.activeTurn?.continuations ?? this.getHistory(id)?.conversation.active_turn?.continuations ?? 0;
   }
 
   session(id?: string): ChatSessionState {

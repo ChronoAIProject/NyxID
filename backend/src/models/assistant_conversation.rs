@@ -103,8 +103,26 @@ pub struct TurnAttachment {
     pub label: String,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ToolProgress {
+    pub started: i64,
+    pub calls: i64,
+    pub digest: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
+    /// Nodes admitted by this turn; Stop uses the durable list across replicas.
+    #[serde(default)]
+    pub machine_node_ids: Vec<String>,
+    #[serde(default)]
+    pub continuations: u32,
+    /// Rolling hashes only; never persist tool arguments or results. Reset per continuation.
+    #[serde(default)]
+    pub tool_progress: ToolProgress,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub lease_expires_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub trigger_run_id: Option<String>,
     pub turn_id: String,

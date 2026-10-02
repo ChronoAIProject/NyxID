@@ -5186,6 +5186,38 @@ const FILLER_WORDS: &[&str] = &[
     "i", "you", "with", "that", "this", "can", "please",
 ];
 
+/// Shared word matching and ranking for service and native tool discovery.
+pub struct ToolSearch {
+    tokens: Vec<String>,
+}
+impl ToolSearch {
+    pub fn new(query: &str) -> Self {
+        let tokens: Vec<String> = query
+            .to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|token| !token.is_empty())
+            .map(str::to_owned)
+            .collect();
+        Self { tokens }
+    }
+    pub fn rank(&self, name: &str, description: &str) -> Option<(usize, usize)> {
+        let haystack = format!("{name}\n{description}").to_lowercase();
+        let matched = self
+            .tokens
+            .iter()
+            .filter(|token| haystack.contains(token.as_str()))
+            .count();
+        let lowered_name = name.to_lowercase();
+        let in_name = self
+            .tokens
+            .iter()
+            .filter(|token| !FILLER_WORDS.contains(&token.as_str()))
+            .filter(|token| lowered_name.contains(token.as_str()))
+            .count();
+        (self.tokens.is_empty() || matched > 0).then_some((matched, in_name))
+    }
+}
+
 /// Search ALL user tools (regardless of activation state) and return matches
 /// plus the service IDs they belong to.
 pub fn search_all_tools(services: &[McpToolService], query: &str) -> SearchResult {
@@ -5194,12 +5226,7 @@ pub fn search_all_tools(services: &[McpToolService], query: &str) -> SearchResul
     // service identity and the description, then rank tools that contain
     // every word above partial matches. Words are substrings so concatenated
     // operation names such as `getentitystate` still match "entity state".
-    let tokens: Vec<String> = query
-        .to_lowercase()
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|token| !token.is_empty())
-        .map(str::to_owned)
-        .collect();
+    let matcher = ToolSearch::new(query);
     let mut candidates: Vec<(
         usize,
         usize,
@@ -5217,21 +5244,7 @@ pub fn search_all_tools(services: &[McpToolService], query: &str) -> SearchResul
                 service.service_name,
                 endpoint.description.as_deref().unwrap_or(&endpoint.name),
             );
-            let haystack = format!("{name}\n{description}").to_lowercase();
-            let matched = tokens
-                .iter()
-                .filter(|token| haystack.contains(token.as_str()))
-                .count();
-            // Among equally complete matches, a tool whose own name holds the
-            // words ("create agent" -> `spawn_subagent`) beats one that only
-            // mentions them in passing.
-            let lowered_name = name.to_lowercase();
-            let in_name = tokens
-                .iter()
-                .filter(|token| !FILLER_WORDS.contains(&token.as_str()))
-                .filter(|token| lowered_name.contains(token.as_str()))
-                .count();
-            if tokens.is_empty() || matched > 0 {
+            if let Some((matched, in_name)) = matcher.rank(&name, &description) {
                 let order = candidates.len();
                 candidates.push((
                     matched,
@@ -7456,6 +7469,28 @@ mod tests {
 
         assert!(
             matches!(error, AppError::BadRequest(msg) if msg.contains("Unsupported HTTP method for MCP endpoint"))
+        );
+    }
+
+    #[test]
+    fn native_machine_search_reuses_word_matching_and_full_match_ranking() {
+        for query in ["browser screenshot", "web page navigate"] {
+            let matcher = ToolSearch::new(query);
+            let mut matches: Vec<_> = crate::services::machine_tools::definitions()
+                .into_iter()
+                .filter_map(|tool| {
+                    matcher
+                        .rank(&tool.name, &tool.description)
+                        .map(|rank| (rank, tool.name))
+                })
+                .collect();
+            matches.sort_by_key(|(rank, _)| std::cmp::Reverse(*rank));
+            assert_eq!(matches[0].1, "nyx__machine_browser", "{query}");
+        }
+        let matcher = ToolSearch::new("browser screenshot");
+        assert!(
+            matcher.rank("browser", "screenshot").unwrap()
+                > matcher.rank("browser", "other").unwrap()
         );
     }
 

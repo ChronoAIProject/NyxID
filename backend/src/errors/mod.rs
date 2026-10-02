@@ -88,6 +88,11 @@ pub enum AppError {
     #[error("Bad request: {0}")]
     BadRequest(String),
 
+    /// Known unusable stored credential, distinct from malformed requests or
+    /// infrastructure failures. Keep the established public bad-request contract.
+    #[error("Bad request: {0}")]
+    CredentialUnavailable(String),
+
     #[error("{context} request body exceeds the configured limit of {max_bytes} bytes")]
     RequestBodyTooLarge { max_bytes: usize, context: String },
 
@@ -239,7 +244,7 @@ pub enum AppError {
     #[error("External provider not configured: {0}")]
     ExternalProviderNotConfigured(String),
 
-    // 12400–12413: machine access, controller privacy and saved-login filling.
+    // 12400–12418: machine access, controller privacy and saved-login filling.
     #[error("Machine capability is disabled; the owner must enable it on the node")]
     MachineCapabilityDisabled,
 
@@ -285,6 +290,19 @@ pub enum AppError {
         "Managed browser filling is unavailable; install the protected browser policies during setup"
     )]
     MachineBrowserUnavailable,
+
+    #[error(
+        "Computer driver is restarting; retry after a short delay and observe before repeating an action"
+    )]
+    MachineDriverRestarting,
+    #[error("Enable Accessibility and Screen Recording for this node")]
+    MachineComputerPermissionMissing,
+    #[error("This computer tool is not supported; choose an advertised tool or browser action")]
+    MachineComputerToolUnsupported,
+    #[error("The machine display is unavailable; start its desktop session")]
+    MachineDisplayUnavailable,
+    #[error("The owner stopped this turn; wait for a new turn")]
+    MachineTurnStopped,
 
     #[error("Node not found: {0}")]
     NodeNotFound(String),
@@ -695,7 +713,9 @@ pub enum AppError {
 impl AppError {
     fn status_code(&self) -> StatusCode {
         match self {
-            Self::BadRequest(_) | Self::ValidationError(_) => StatusCode::BAD_REQUEST,
+            Self::BadRequest(_) | Self::CredentialUnavailable(_) | Self::ValidationError(_) => {
+                StatusCode::BAD_REQUEST
+            }
             Self::RequestBodyTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             Self::Unauthorized(_) | Self::AuthenticationFailed(_) | Self::TokenExpired => {
                 StatusCode::UNAUTHORIZED
@@ -753,6 +773,12 @@ impl AppError {
             Self::MachineLoginOriginMismatch => StatusCode::FORBIDDEN,
             Self::MachineLoginWrongField => StatusCode::BAD_REQUEST,
             Self::MachineBrowserUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            Self::MachineDriverRestarting | Self::MachineDisplayUnavailable => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+            Self::MachineComputerPermissionMissing => StatusCode::FORBIDDEN,
+            Self::MachineComputerToolUnsupported => StatusCode::BAD_REQUEST,
+            Self::MachineTurnStopped => StatusCode::CONFLICT,
             Self::NodeNotFound(_) => StatusCode::NOT_FOUND,
             Self::NodeOffline(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::NodeProxyTimeout => StatusCode::GATEWAY_TIMEOUT,
@@ -900,7 +926,7 @@ impl AppError {
 
     pub(crate) fn error_code(&self) -> u32 {
         match self {
-            Self::BadRequest(_) => 1000,
+            Self::BadRequest(_) | Self::CredentialUnavailable(_) => 1000,
             Self::RequestBodyTooLarge { .. } => 11700,
             Self::Unauthorized(_) => 1001,
             Self::Forbidden(_) => 1002,
@@ -961,6 +987,11 @@ impl AppError {
             Self::MachineLoginOriginMismatch => 12411,
             Self::MachineLoginWrongField => 12412,
             Self::MachineBrowserUnavailable => 12413,
+            Self::MachineDriverRestarting => 12414,
+            Self::MachineComputerPermissionMissing => 12415,
+            Self::MachineComputerToolUnsupported => 12416,
+            Self::MachineDisplayUnavailable => 12417,
+            Self::MachineTurnStopped => 12418,
             Self::NodeNotFound(_) => 8000,
             Self::NodeOffline(_) => 8001,
             Self::NodeProxyTimeout => 8002,
@@ -1144,7 +1175,7 @@ impl AppError {
 
     pub(crate) fn error_key(&self) -> &str {
         match self {
-            Self::BadRequest(_) => "bad_request",
+            Self::BadRequest(_) | Self::CredentialUnavailable(_) => "bad_request",
             Self::RequestBodyTooLarge { .. } => "request_body_too_large",
             Self::Unauthorized(_) => "unauthorized",
             Self::Forbidden(_) => "forbidden",
@@ -1208,6 +1239,11 @@ impl AppError {
             Self::MachineLoginOriginMismatch => "machine_login_origin_mismatch",
             Self::MachineLoginWrongField => "machine_login_wrong_field",
             Self::MachineBrowserUnavailable => "machine_browser_unavailable",
+            Self::MachineDriverRestarting => "driver_restarting",
+            Self::MachineComputerPermissionMissing => "computer_permission_missing",
+            Self::MachineComputerToolUnsupported => "computer_tool_not_supported",
+            Self::MachineDisplayUnavailable => "display_unavailable",
+            Self::MachineTurnStopped => "machine_turn_stopped",
             Self::NodeNotFound(_) => "node_not_found",
             Self::NodeOffline(_) => "node_offline",
             Self::NodeProxyTimeout => "node_proxy_timeout",
@@ -1470,6 +1506,23 @@ mod tests {
         assert_eq!(payload["error"], "request_body_too_large");
         assert_eq!(payload["error_code"], 11700);
         assert!(payload["message"].as_str().unwrap().contains("2048 bytes"));
+    }
+
+    #[tokio::test]
+    async fn credential_unavailable_preserves_bad_request_wire_contract() {
+        let error = AppError::CredentialUnavailable("API key is failed".into());
+        assert_eq!(error.oauth_error_code(), "invalid_request");
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let payload: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        let previous =
+            serde_json::to_value(AppError::BadRequest("API key is failed".into()).response_body())
+                .unwrap();
+        assert_eq!(payload, previous);
+        assert_eq!(payload["error_code"], 1000);
+        assert_eq!(payload["error"], "bad_request");
+        assert_eq!(payload["message"], "Bad request: API key is failed");
     }
 
     #[test]

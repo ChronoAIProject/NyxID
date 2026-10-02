@@ -713,22 +713,27 @@ pub(crate) async fn execute_tool(
             )
             .await?;
         }
-        if !matches!(name, "set_agent_operations" | "decide_permission")
-            && let Some(refusal) = acks::webhook_action_gate(
-                &state.db,
-                chat,
-                tool_name,
-                args,
-                assistant_team_tools::read_only(name),
-                assistant_team_tools::destructive(name),
-            )
-            .await?
+        // Machine updates always consume their own owner card, bound to the
+        // resolved version and inspected Docker identity. It is at least as
+        // strict as either webhook policy; do not consume a second digest.
+        if !matches!(
+            name,
+            "set_agent_operations" | "decide_permission" | "machine_update"
+        ) && let Some(refusal) = acks::webhook_action_gate(
+            &state.db,
+            chat,
+            tool_name,
+            args,
+            assistant_team_tools::read_only(name),
+            assistant_team_tools::destructive(name),
+        )
+        .await?
         {
             return Ok((refusal, true));
         }
         engine::require_enabled(&state.db, &chat.user_id).await?;
-        // Native dispatch includes transactional scope edits. Keep that large
-        // future off the common MCP/assistant handler stack in debug builds.
+        // The dispatcher includes large provisioning and scope-edit futures. Keep them
+        // off the caller's stack, including tests and ordinary specialist turns.
         Box::pin(dispatch(state, chat, name, args)).await
     }
     .await;
@@ -1347,6 +1352,32 @@ async fn dispatch(
             crate::services::assistant_group_service::delete(db, owner, &group.id).await?;
             (json!({"deleted": group.name}), false)
         }
+        "update_settings" => {
+            let before = settings::get(&state.db, &chat.user_id).await?;
+            let maximum = args["max_auto_continuations"]
+                .as_i64()
+                .and_then(|v| i32::try_from(v).ok())
+                .ok_or_else(|| {
+                    AppError::ValidationError(
+                        "max_auto_continuations must be an integer from 0 to 32".into(),
+                    )
+                })?;
+            let after = settings::update(
+                &state.db,
+                &chat.user_id,
+                settings::Update {
+                    max_auto_continuations: Some(maximum),
+                    ..Default::default()
+                },
+            )
+            .await?;
+            settings::audit(&state.db, &chat.user_id, &before, &after).await;
+            (
+                serde_json::to_value(SettingsResponse::from(after))
+                    .map_err(|_| AppError::Internal("Settings response failed".into()))?,
+                false,
+            )
+        }
         "settings_link" => {
             let area = text_arg(args, "area");
             if matches!(area, "triggers" | "automations") && args.get("instruction").is_some() {
@@ -1397,6 +1428,9 @@ async fn dispatch(
             )
         }
         "machine_setup_link" => super::machine_setup::link_tool(state, chat, args).await?,
+        // Keep the cold update/inspection/transaction future out of the shared
+        // dispatcher frame used by every specialist and ordinary NyxBot tool.
+        "machine_update" => Box::pin(super::machine_update::tool(state, chat, args)).await?,
         "machine_pair" => super::machine_setup::pair_tool(state, chat, args).await?,
         "channel_bot_setup_link" => {
             let agent = target_agent(state, owner, args["agent"].as_str()).await?;
@@ -1909,6 +1943,8 @@ pub async fn delete_memory(
 
 #[derive(Serialize)]
 pub struct SettingsResponse {
+    max_auto_continuations: i32,
+    max_auto_continuations_limit: i32,
     trigger_runs_per_day: i32,
     trigger_runs_per_hour: i32,
     schedule_minimum_minutes: i32,
@@ -1926,6 +1962,8 @@ pub struct SettingsResponse {
 impl From<crate::models::assistant_settings::AssistantSettings> for SettingsResponse {
     fn from(row: crate::models::assistant_settings::AssistantSettings) -> Self {
         Self {
+            max_auto_continuations: row.max_auto_continuations,
+            max_auto_continuations_limit: crate::services::assistant_continuation::HARD_MAX,
             timezone: row.timezone,
             schedule_minimum_minutes: row.schedule_minimum_minutes,
             trigger_runs_per_hour: row.trigger_runs_per_hour,
@@ -1958,6 +1996,7 @@ pub async fn get_settings(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SettingsRequest {
+    max_auto_continuations: Option<i32>,
     trigger_runs_per_day: Option<i32>,
     trigger_runs_per_hour: Option<i32>,
     schedule_minimum_minutes: Option<i32>,
@@ -1984,6 +2023,7 @@ pub async fn update_settings(
         &state.db,
         &owner,
         settings::Update {
+            max_auto_continuations: body.max_auto_continuations,
             timezone: body.timezone,
             schedule_minimum_minutes: body.schedule_minimum_minutes,
             trigger_runs_per_hour: body.trigger_runs_per_hour,

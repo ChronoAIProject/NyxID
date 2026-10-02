@@ -201,7 +201,7 @@ model knows when to use them. Names:
 - **What it is.** The cua driver (MIT, Rust, `libs/cua-driver` in trycua/cua)
   exposes GUI tools over MCP stdio (`cua-driver mcp`): screenshots/desktop
   state, window state with snapshot-bound elements, click, type, keys, scroll,
-  drag, apps, windows, clipboard and so on (28 tools in the pinned 0.30.4 contract).
+  drag, apps, windows, clipboard and so on (28 tools in the pinned 0.31.0 contract).
   It has no shell tools; ours cover that.
 - **Managed install.**
   - `nyxid node machine enable --computer` installs a pinned cua driver release
@@ -933,50 +933,80 @@ and validated search parameters; backend human-only checks remain authoritative.
 | NyxBot-led setup and no credential in chat | `machine_setup_tools_and_owner_cards_never_contain_registration_credentials`, pairing approve/deny races, atomic grant application, durable watch dedupe, actual change-stream wake benchmark; setup page tests cover review and live progress. |
 | Owner commands, jobs, files, git, services and attachments | Production CLI through real loopback WS; command cancellation/output tests, anchored file operations, job-token reconnect/expiry tests, real smart-HTTP clone/fetch/pull/push plus service proxy fixture; screenshot attachment ownership/magic/turn limits and container file transfers. |
 | Specialist grant and guest exclusion | `machine_specialist_permission_is_explicit_durable_and_revocable`, `machine_authority_owner_guest_org_membership_offline_and_capabilities`, MCP discovery/call authority matrix and live specialist gateway scope. |
-| Computer use | Production-image test uses the pinned driver under Xvfb for observation, clicks, typing and screenshots. |
-| Owner takeover and hand-back | Durable controller race/recovery tests, exact revision fencing, owner takeover shell/file/computer lockout and wake note, browser WS authorization, cross-replica relay; frontend panel and real container input/hand-back tests. |
+| Computer use and recovery | Production-image test verifies page text and indexed clicks through AT-SPI, warm cua actions, four driver crash/restart cycles without capability loss, and namespace-sandboxed renderers without the unsupported-flag infobar. |
+| Secure and developer browser paths | Extension tests cover stable refs, frame identity, bounded/paginated 500-row snapshots, protected-field refusal and deterministic CRX freshness. Container tests verify trusted popup/tab/file-chooser activation, overlay refusal, secure and dev cross-origin forms, dev CDP/console/network/attachments, local-file and secure-profile denial, and saved-login refusal in the dev browser. |
+| Automatic continuation and Stop | Backend tests exercise both upstream limits on the same bound session, 40-call windows with changed arguments/results, identical-sequence termination, text-only progress, atomic digest updates without raw data, retained context and diagnostic codes; quiet-stream Stop interrupts without waiting for a chunk. Container tests cancel a 30-second cua call, foreground command and gateway stream, fence late calls and prove the next turn works. |
+| Owner takeover and hand-back | Durable controller race/recovery tests, exact revision fencing, owner takeover shell/file/computer lockout and wake note, browser WS authorization, cross-replica relay; frontend display-switcher tests, independent controller state and legacy row migration, mutual X11 authentication denial, both display streams and real container input/hand-back tests. |
 | Saved login sign-in and privacy | Actual HTTPS username/password/TOTP sign-in in container Chromium; force-installed extension, policy denial, origin/field mismatch, password pinning, copy refusal, OS/socket isolation, encoded-output scrubbing and secret sweeps; backend storage/grant/org/card/opt-in tests and Saved logins form tests. |
 | Confirmation | `machine_confirmation_is_bound_to_parameters_and_consumed_once`, observation-versus-change classification and saved-login per-use confirmation. |
 | Compatibility and all decisions | CLI/backend/frontend regression suites cover additive models, legacy capabilities and D1–D17 authority boundaries. |
-| Namespace isolation and release artifacts | Agent children inherit NoNewPrivs and a namespace-denying seccomp filter; container tests assert syscall errors, git operation and renderer sandboxing. Frontend build tests enforce the canonical profile and server-version image tag. |
+| Namespace isolation and release artifacts | Agent children inherit NoNewPrivs and a namespace-denying seccomp filter; container tests assert syscall errors, git operation and renderer sandboxing. Actual UID/access probes distinguish container and separated shell-only installations from single-user commands; legacy nodes report unknown isolation. Frontend build tests enforce the canonical profile and server-version image tag. |
 | Declared pools | Buffered same-API/AI failover tests, declaration and SDK-variable tests, live member-scope denial, and streamed-body refusal before polling or dispatch. |
 | Assistant workspace | Production route-tree tests cover both engines, shell/mobile navigation and active state, parameter-preserving automation redirect and standalone desktop; machine settings/grants and shared server link outputs are tested. |
-| Performance | Indexed lookup/query-count tests, actual CLI loopback timing, 100 MiB gateway/git comparison, desktop scenarios and change-stream wake measurement. |
+| Guided and verified updates | Human-route/card/grant tests; real change-stream update wake and expiry; per-attempt history/owner-transfer tests; idle admission fences; registry manifest hashing, failed-attestation/positive/negative cache tests, digest-only setup/migration commands, attestation/downgrade refusals; native rollback; disposable 0.40.0 Docker migration, cookie/identity/config retention, signed upgrade, mailbox isolation and real rollback. |
+| Performance | Indexed lookup/query-count tests, actual CLI loopback timing, 100 MiB gateway/git comparison, desktop scenarios and change-stream wake measurement. Shared-runner CI uses generous sanity ceilings; explicit strict mode enforces product budgets on a quiet host. |
 
 Measured on an Apple M2 / 16 GiB host, with the production Linux arm64 machine
-image in Docker Desktop at 1280×800. The desktop run passed during concurrent
-compilation on the shared host.
+image in Docker Desktop at 1280×800. The strict container benchmark ran without
+concurrent builds or test suites. Browser and desktop figures below use cua
+0.31.0 and the browser accessibility bus enabled.
 
 | Backend measurement | Direct / budget | Through NyxID |
 |---|---:|---:|
-| Exec overhead over loopback WS, command runtime excluded | ≤ 50 ms p95 | **7.036 ms p50 / 36.879 ms p95** |
-| In-process signed exec dispatch | 100 samples | **2.420 ms p50 / 2.590 ms p95** |
-| 100 MiB download | 0.197 s / 508.42 MiB/s | **0.193 s / 518.13 MiB/s** |
-| 12 MiB git clone | 0.676 s | **0.768 s** |
-| Capability report → durable NyxBot wake | < 10 s | **17.89 ms** |
+| Exec overhead over loopback WS, command runtime excluded | ≤ 50 ms p95 | **10.007 ms p50 / 30.445 ms p95** |
+| In-process signed exec dispatch | 100 samples | **5.058 ms p50 / 7.217 ms p95** |
+| 100 MiB download | 0.211 s / 473.00 MiB/s | **0.312 s / 320.51 MiB/s** |
+| 12 MiB git clone | 0.982 s | **1.041 s** |
+| Capability report → durable NyxBot wake | < 10 s | **30.22 ms** |
 
 Exec uses 100 samples after 10 warmups through the actual CLI runtime. Gateway
 and git measurements use local HTTPS fixtures with streamed bodies; the same
 test verifies clone/fetch/pull/push. Direct runs first. Setup timing uses the
 real change stream and excludes download, installation and human approval.
-Backend benchmarks use the debug test binary on a shared development host.
-MongoDB 8 runs as a single-member replica set with a 4.5 GiB container memory
-limit and a 0.25 GiB WiredTiger cache. Direct/gateway throughput differences
-within a few milliseconds reflect local benchmark noise, not an acceleration
-claim.
+Backend benchmarks use the debug test binary on a shared development host;
+another worktree's tests were running during this measurement.
+MongoDB 8 runs as a single-member replica set with a 7 GiB container memory
+limit and a 0.25 GiB WiredTiger cache. As in repository CI,
+`minSnapshotHistoryWindowInSeconds=0` promptly releases dropped test snapshots.
+Throughput comparisons include local scheduling and fixture overhead.
 
 | Desktop scenario | Changed frames/s | Frame bytes/s |
 |---|---:|---:|
 | Idle | 0 | 0 |
-| Typing | 30.304 | 196,569 |
-| Scrolling | 29.329 | 2,026,690 |
+| Typing | 29.57 | 264,806 |
+| Scrolling | 30.14 | 2,293,306 |
 
-Owner input-to-frame latency: **30.927 ms p50 / 70.089 ms p95**.
-Takeover with a stalled cua action and a 5 MiB upload in flight: **0.790 ms**.
-A 4 MiB file transfer round trip: **147.859 ms**. Native capture targets 30 Hz;
+Owner input-to-frame latency: **32.10 ms p50 / 37.09 ms p95**.
+Takeover with a stalled cua action and a 5 MiB upload in flight: **0.80 ms**.
+A 4 MiB file transfer round trip: **132.26 ms**. Native capture targets 30 Hz;
 scrolling reverses every six actions to avoid an idle page boundary. JPEG dirty
 rectangles avoid full-frame encoding for text changes and need no video decoder
 startup; sequence checks recover dropped rectangles with a full frame.
+The 2 MiB/s bandwidth budget refills continuously, with a bounded initial burst;
+the five-second scrolling sample can therefore exceed the sustained rate.
+It no longer stalls until a fixed one-second window rolls over.
+
+The local fixture task navigates to a project form, fills its title, selects a
+priority, saves, then verifies the persisted result. With accessibility working,
+cua plus separate observations takes **18 calls / 15,003 ms**; the secure browser
+tool takes **6 calls / 619 ms** for the same result (67% fewer calls, about 24×
+less wall time). The browser path uses trusted OS input and verifies focus and
+presentation readiness. These are local fixture timings, excluding model and
+network latency. The production-image e2e prints both paths on every run.
+
+| Warm cua action (10 samples) | 0.30.4 p50 / p95 ms | 0.31.0 with AX p50 / p95 ms |
+|---|---:|---:|
+| `click` | 45.48 / 1,041.23 | 53.89 / 822.12 |
+| `type_text` | 1,106.14 / 1,114.48 | 1,111.98 / 1,125.03 |
+| `get_window_state` | 474.06 / 489.93 | 543.24 / 617.62 |
+
+The old image returned only one window-title element and logged an AT-SPI
+connection warning. The repaired image returns **33 elements**, including page
+text and interactive controls, without that warning. Its fuller AX observation
+does more work; cua typing is not faster. The browser path supplies the task
+speedup. Stop at the signed node boundary takes **0.55 ms** during cua,
+**0.68 ms** during foreground exec and **0.81 ms** during a gateway stream;
+the backend separately tests aborting a quiet upstream stream within one second.
 
 The macOS driver reports Screen Recording and Accessibility permission both
 missing on the validation host. Consequently macOS desktop fps, bandwidth and
@@ -994,7 +1024,7 @@ export NYXID_TEST_DATABASE_URL='mongodb://127.0.0.1:27024/?directConnection=true
 cargo +1.98.1 test -j 1 -p nyxid --bin nyxid-server -- handlers:: --test-threads 2 --skip curation_concurrent_writers_and_shared_budget
 cargo +1.98.1 test -j 1 -p nyxid --bin nyxid-server -- services:: --test-threads 2 --skip curation_concurrent_writers_and_shared_budget
 cargo +1.98.1 test -j 1 -p nyxid --bin nyxid-server -- --skip handlers:: --skip services:: --skip curation_concurrent_writers_and_shared_budget --test-threads 2
-cargo +1.98.1 test -j 1 -p nyxid-cli -p nyxid-machine
+cargo +1.98.1 test -j 1 -p nyxid-cli -p nyxid-machine -p nyxid-machine-updater
 cargo +1.98.1 fmt --all -- --check
 rustup run 1.98.1 rustfmt --edition 2024 --check cli/src/node/machine/runtime.rs
 git diff --check
@@ -1003,21 +1033,73 @@ cargo +1.98.1 clippy -j 1 --workspace --all-targets -- -D warnings
 
 In `frontend/`, run `npm run lint`, `npm test`, `npx tsc -b`, and `npm run build`.
 Run `node --test cli/tests/machine_filler.test.mjs` from the repository root.
-Run each benchmark alone after builds/tests stop:
+Shared-runner CI enforces correctness and generous timing sanity ceilings:
+desktop activity must exceed **8 fps** (catching the former 5 fps path), and
+input-to-frame p95 must stay below **500 ms**. Stop has a 5-second ceiling and
+takeover a 2-second ceiling, both well below the deliberately stalled 30-second
+action. Every run prints its timings. These are CI ceilings, not product targets.
+Frontend animation tests use fake clocks; their deterministic timing assertions
+remain unchanged. Throughput and exec budgets run only in ignored benchmarks.
+
+Run each benchmark alone after builds/tests stop. Explicit strict mode enforces
+D17's **≥15 fps / ≤100 ms p95**, **≤150 ms takeover**, **≤1 s Stop**, and
+**<10 s setup wake** budgets on a quiet host:
 
 ```sh
+export NYXID_MACHINE_STRICT_BENCHMARK=1
 cargo +1.98.1 test -j 1 -p nyxid --bin nyxid-server -- machine_loopback_exec_performance --ignored --nocapture --test-threads 1
 cargo +1.98.1 test -j 1 -p nyxid --bin nyxid-server -- machine_gateway_streaming_and_git_performance --ignored --nocapture --test-threads 1
 cargo +1.98.1 test -j 1 -p nyxid --bin nyxid-server -- machine_setup_change_stream_wakes_thread_without_sweep --nocapture --test-threads 1
 cargo +1.98.1 test -j 1 -p nyxid --bin nyxid-server -- machine_exec_dispatch_performance --ignored --nocapture --test-threads 1
 docker build -f cli/Dockerfile.machine -t nyxid-node-machine:local .
 docker build --build-arg MACHINE_IMAGE=nyxid-node-machine:local -f cli/tests/Dockerfile.machine -t nyxid-machine-e2e:local .
-docker run --rm --shm-size=256m --security-opt seccomp=cli/resources/machine-container/seccomp.json nyxid-machine-e2e:local
+docker run --rm -e NYXID_MACHINE_STRICT_BENCHMARK=1 --shm-size=256m --security-opt seccomp=cli/resources/machine-container/seccomp.json nyxid-machine-e2e:local
 ```
+
+The updater migration test is also repeatable:
+
+```sh
+MACHINE_IMAGE=nyxid-node-machine:local sh cli/tests/machine_updater_e2e.sh
+```
+
+It creates disposable 0.40.0-style containers and deletes its containers/volumes
+on exit. A test-only Docker adapter substitutes the locally built, unpublished
+image; production has no verification bypass. The production scratch acceptance test runs real TUF and image-attestation
+verification, with no verification or temporary-filesystem mocks, both with the
+documented tmpfs and with no `/tmp`. It also executes the frontend's migration
+and companion commands and a watch-triggered replacement with the newly built
+production updater (`UPDATER_PRODUCTION_IMAGE`, or a local `production-test`
+build). An asserted transformation preserves every rendered flag verbatim,
+substituting only the image token and optionally adding `--env GITHUB_TOKEN`:
+
+```sh
+npm ci --ignore-scripts --prefix frontend
+node cli/tests/machine_updater_production.mjs
+```
+
+Use Node 24 or newer. CI requires and supplies `GITHUB_TOKEN` to the new updater
+for both preflight and rendered-command checks to avoid shared-IP GitHub API
+rate limits; it is sent only to the GitHub attestation API, never to the TUF
+mirror or registry. The rendered owner commands need no token. The published
+0.41.0 updater cannot use a token, so compatibility checks against that image
+are an explicit local pre-release opt-in:
+
+```sh
+NYXID_TEST_PUBLISHED_UPDATER=1 node cli/tests/machine_updater_production.mjs
+```
+
+This additionally runs the migration, companion and watch replacement with
+the published image and unchanged rendered commands. Without the opt-in, the
+test prints `SKIP (opt-in): published 0.41.0 updater uses unauthenticated GitHub API`.
+Test containers and volumes are removed on exit. The release acceptance check must also run
+against the attested tagged release once published. Regular tests cover
+attestation refusal, downgrade refusal, full configuration preservation, rollback
+and native service recovery. The live TUF mirror test verifies signed metadata,
+root rotation, target hashes and expiry independently.
 
 The container test uses the production CLI, signed extension, native host and
 pinned cua binary at 1280×800. Its output contains timings and frame byte counts;
-it does not write screenshots. Idle means a settled page with an unfocused text
+it writes no screenshots by default. An optional `NYXID_TEST_SCREENSHOT_DIR` captures only the known, non-secret fixture pages for UI review, outside owner control. Idle means a settled page with an unfocused text
 field. Typing and scrolling are continuous acknowledged input; scrolling
 reverses every six actions to avoid measuring an idle page boundary. Alternating
 scroll events then measure input-to-frame latency. Action counts accompany frame
@@ -1027,7 +1109,7 @@ The macOS benchmark requires a logged-in desktop, Google Chrome and Screen
 Recording/Accessibility permission for the app launching the test:
 
 ```sh
-NYXID_MACHINE_BENCH_CUA="$HOME/.nyxid-node/cua/cua-driver-rs-0.30.4-darwin-universal/cua-driver" \
+NYXID_MACHINE_BENCH_CUA="$HOME/.nyxid-node/cua/cua-driver-rs-0.31.0-darwin-universal/cua-driver" \
   CARGO_INCREMENTAL=0 cargo +1.98.1 test -j 1 -p nyxid-cli --bin nyxid -- \
   macos_desktop_performance --ignored --nocapture --test-threads 1
 ```
@@ -1048,31 +1130,134 @@ exact tag. The web build serves `cli/resources/machine-container/seccomp.json`
 as `/machine-seccomp.json` and rejects a different published profile. No
 separately maintained frontend copy exists.
 
-To upgrade a machine container, finish or cancel its jobs, stop the container,
-then recreate it with the new server-matching image tag and the same identity
-and workspace volumes. Do not delete those volumes or mint a new setup token:
-the persisted identity reconnects the existing node. Download the seccomp
-profile from the upgraded web UI and retain `--security-opt seccomp=PATH`,
-`--shm-size=1g`, `NYXID_NODE_URL`, the selected capabilities and the restart
-policy. For a container created by the setup page as `my-machine`:
+Assistant → Machines shows the node's installed version and the server's supported
+release. The settings sheet offers an explicit human Update action, progress and
+recovery instructions. `nyxid__machine_update` lets NyxBot or a specialist with a
+machine grant request the same operation; it always raises an owner action card,
+including for webhook runs. An ungranted specialist uses the existing permission
+request to NyxBot. No tool response or transcript contains a setup token.
 
-```sh
-# Set these to the deployed server release and URLs.
-nyx_machine_release=0.39.0
-nyx_machine_web=https://nyxid.example
-nyx_machine_ws=wss://nyxid.example/api/v1/nodes/ws
-curl -fsSL "$nyx_machine_web/machine-seccomp.json" -o machine-seccomp.json
-docker pull "ghcr.io/chronoaiproject/nyxid/nyxid-node-machine:$nyx_machine_release"
-docker stop my-machine
-docker rm my-machine
-docker run -d --name my-machine --restart unless-stopped --shm-size=1g \
-  --security-opt seccomp=machine-seccomp.json \
-  -v my-machine-identity:/var/lib/nyxid-machine \
-  -v my-machine-workspace:/workspace \
-  -e "NYXID_NODE_URL=$nyx_machine_ws" \
-  "ghcr.io/chronoaiproject/nyxid/nyxid-node-machine:$nyx_machine_release" \
-  --shell --files --computer
-```
+New setup and pairing reviews recommend **Update automatically when idle**, checked
+by default: retaining browser/security fixes without interrupting work is safer
+and easier than accumulating old images. This is explicit owner consent; existing
+machines remain off until the owner enables it. Both server and node check that
+there are no running jobs, active turns, desktop sessions or owner control before
+an automatic upgrade. The owner receives update and outcome notifications.
+
+The official Docker setup command includes the optional shell-free
+`nyxid-machine-updater` companion. It mounts the Docker socket and one private
+update volume shared only with its labelled machine's supervisor. **The Docker
+socket grants host-root authority**: this helper is trusted host software, not a
+Docker security boundary. Its narrow production interface accepts only a validated
+release version from a root-only mailbox, written after verification of a signed
+NyxID upgrade request. It cannot accept an image name, arguments, environment or a
+shell command. It resolves the fixed official repository's tag to a digest, verifies
+GitHub artifact provenance for that digest from this repository's tagged Publish
+Images workflow, and pulls that exact digest. Downgrades require a separately
+owner-confirmed rollback request. Its read-only scratch image has no shell; the
+controller's HTTPS client permits GitHub attestation/trust endpoints only, while
+image traffic goes through the host Docker daemon to the official registry.
+Both bootstrap and watch use an explicit `tuf/` datastore inside the private
+0700 update volume, checked without following symlinks and serialized by the
+controller lock. They require no writable system temporary directory. The
+rendered migration and companion commands nevertheless include
+`--tmpfs /tmp:rw,noexec,nosuid,size=16m` for compatibility with the published
+0.41.0 helper while the 0.41.1 image is being published. Native `nyxid update`
+keeps its normal temporary datastore: it installs into a writable native host,
+and container image updates use the companion instead.
+
+Preflight failures print only a fixed stage and reason, for example
+`machine_update failed at verify_updater_image: trust_root_unavailable`.
+`progress.code` retains `verify_updater_image:trust_root_unavailable`; Machines,
+NyxBot and specialist update results/wakes include the code and recovery guidance.
+Bootstrap prints exactly one failure line, matching the persisted classification.
+Preflight checks distinguish unofficial images, `--rm`, changed/missing container
+names, unknown versions, companion-name conflicts, mismatched update volumes and
+downgrades. A Docker socket connection failure is distinguished from inspect 404;
+other Docker API failures retain a generic code without response metadata.
+Unknown node diagnostics are replaced by a fixed fallback, never relayed as
+Docker metadata or upstream text. `verify VERSION` runs the companion's real
+registry/TUF/provenance preflight without replacing a container.
+
+The controller copies the inspected container configuration, including environment,
+arguments, volumes (resolved anonymous volumes too), networks, seccomp/security
+options, shared memory and restart policy. It retains the old container stopped
+and renamed until the replacement is healthy **and** has authenticated to NyxID
+on the target version. A failed replacement or pre-commit controller crash restores
+the old container without deleting volumes. Completion is journaled before the
+rollback copy is removed; recovery after commitment finishes cleanup without
+replaying the request or reverting a successful update. Containers created with `--rm` must first be
+recreated without that option: Docker would otherwise delete the rollback copy.
+The updater never prints the inspected environment or node credentials.
+
+The companion also keeps itself current. At startup and after a machine reaches
+`connected` on release V, it verifies the official updater:V through the same
+Sigstore/TUF path, pulls its digest, and copies its own inspected configuration
+with only the image changed. An owner update request on an already-current
+machine retries an older companion without restarting that machine. Companions
+never downgrade, even during an owner-confirmed machine rollback.
+
+Self-update keeps the predecessor alive as a rollback monitor. A durable journal
+records the temporary successor before Docker creates it. The successor waits
+for the controller lock, checks that its actual image matches the attested digest
+and release recorded in the private journal, and writes a fenced heartbeat before
+commit. Only the controller-lock holder processes machine requests. A separate
+handoff lock serializes commit and timeout rollback; a pre-commit failure restores
+the predecessor after a 60-second heartbeat deadline. Once committed, recovery completes the rename
+and old-container removal rather than reverting it. Neither handoff nor rollback
+deletes the shared update volume. The Docker socket, volume, read-only root,
+`/tmp` tmpfs, capabilities, no-new-privileges, restart policy and labels survive.
+
+Machines and `nyxid__machine_update` report the companion's version, digest and
+pending/failed state separately from machine progress. Fixed diagnostics such as
+`update_companion:attestation_invalid` or `update_companion:successor_unhealthy`
+include retry guidance; a failed companion update does not hide a successful
+machine update. Companions that predate self-update cannot acquire this behavior on their own.
+Nodes with companion reporting (0.41.4+) detect a live mailbox without valid
+`updater.json` as `legacy`; older node versions remain unknown. Machines shows
+“Updater predates self-update. Replace it once” and a pinned, copyable host
+command: `docker rm -f <name>-updater && <current companion command>`. It retains
+the update volume and machine container. NyxBot and granted specialists offer
+the guided step or run it on an owner-identified, different native Docker host
+after inspecting both containers and receiving an owner card. The durable watch
+wakes the thread when valid companion metadata arrives, without requiring a
+machine restart, or reports an actionable timeout. Subsequent releases update the companion
+automatically. The one-time migration command is unchanged.
+
+An existing 0.40.0 container has no companion. Its machine page supplies one
+prefilled command using its container name and the server release; the helper
+inspects and preserves the actual volumes, so no re-pairing/token is needed.
+NyxBot and granted specialists explain: open a terminal on the computer running
+Docker, paste the command, and wait. A durable `machine_update` watch wakes the
+same thread on reconnection, failure or expiry using the change stream and sweep
+backstop. The resumed agent verifies the version, AX window state and browser
+snapshot before continuing the task. Delayed watches retain the outcome of their
+own attempt even when a subsequent update starts.
+
+If the owner identifies another granted native/VM machine on the Docker host,
+the agent can run migration there: a read-only metadata-only Docker inspection
+must first find the target, and the owner card binds both machines, the inspected
+container ID and target release. A container can never migrate itself. No host is
+guessed. Once authorized, replacement is a durable controller operation: stopping
+an assistant turn does not interrupt the controller's commit/rollback recovery.
+
+Native setup installs an independent launchd/systemd update service. It downloads
+the attested CLI release into a versioned directory, atomically changes the active
+binary, restarts the node service and rolls back if it fails to reconnect within
+180 seconds. Existing native nodes can install it with
+`nyxid node machine-updater install` (use `--profile`, `--config` or `--system`
+for a named profile, custom config directory or separated VM). Run as the node
+supervisor user. Managed browser policy installation still requires administrator
+access; its native host remains a framing-only bridge compatible across these
+updates. A supervisor-owned package hash refreshes only the force-installed
+extension cache on browser startup, preserving the profile and cookies even when
+a signed package is refreshed without changing its extension version.
+
+Existing official-container identity volumes automatically adopt the separate
+`devbrowser` identity. On a separated Linux VM, rerun `nyxid node setup --machine
+--computer --separate-users` against the existing profile to provision the new
+developer user and browser D-Bus/display services; the saved node identity is
+reused without pairing again.
 
 On every Linux install, including separated VMs, command/file children apply
 `PR_SET_NO_NEW_PRIVS` followed by their own seccomp filter: `unshare`, `setns`
@@ -1081,9 +1266,205 @@ fall back to ordinary `clone`. Browser and cua children retain the namespace
 support required by Chromium's sandbox. This is defence in depth; use the
 container or `--separate-users` for browser/agent OS-user isolation.
 
-The pinned driver is `cua-driver-rs-v0.30.4`. Release archives were verified
+The pinned driver is `cua-driver-rs-v0.31.0`. Release archives were verified
 against the actual GitHub assets and their `checksums.txt`; exact URLs and
 SHA-256 pins are in `cli/resources/cua/release.json`. The signed extension's
 source, CRX, version, ID and checksum are in `cli/resources/machine-browser/`;
 CI checks deterministic packaging and its signature. No perception extension
 is installed, and telemetry is disabled.
+
+## Browser use, recovery and stopping
+
+`nyx__machine_browser` is the preferred web tool. Its advertised `browser_tools`
+capability remains stable across transient failures; older nodes without it receive
+a guided-update result before dispatch, not a timeout. `snapshot` returns the URL,
+title, headings, visible text and labelled interactive elements with document-bound
+refs. `click`, `type`, `select`, `press`, `scroll`, `find`, `navigate`, `back`,
+`forward`, `tabs`, `tabs_new`, `tabs_switch`, `tabs_close` and `wait` return the
+updated compact snapshot in the same call. Navigation never replays an uncertain
+click. Password, current-password, new-password and one-time-code input values
+are excluded; `type` refuses those fields. Use `machine_fill_login` in the secure
+browser instead. Snapshots include visible child frames (including cross-origin
+frames), with frame-prefixed refs routed back to their owning document. Input
+values remain excluded in every frame. `query` accepts a substring or a
+`{text, role, label}` filter; `offset` pages elements and `scope` restricts the
+snapshot to a ref's subtree. `more`, `next_offset`, and per-frame markers explain
+truncation. Pages retain a bounded result budget even with hundreds of rows.
+
+Click/type/select/press use trusted OS input: the extension hit-tests the target
+with `elementFromPoint`, confirms keyboard focus and presentation readiness, and maps its rectangle through parent frames, browser UI
+and pixel scaling, and the supervisor sends XTest (Linux) or native cua input
+(macOS). Covered targets are refused. Actions still return a compact observation
+in the same call, including after a popup or native file chooser. An explicit
+`input_mode: "dom_fallback"` is available for compatibility and is labelled in
+the result; it cannot provide user activation. Owner control and Stop fence every
+input event. All text output passes through the machine redactor. Cua remains
+available for other applications and browser fallback; its window observations
+prioritize actionable elements and visible text within the tool-result budget.
+
+The secure browser keeps DevTools and JavaScript URLs disabled. Never use DevTools
+shortcuts there. Web development uses `browser: "dev"`, which adds `evaluate`
+(JavaScript), `console`, `network` and `screenshot`. Screenshots become owner-only
+attachments, not model input. The developer browser has no filler extension or
+native-messaging access, and `fill_login` refuses it. The live desktop's
+**Secure browser / Dev browser** switcher selects capture and owner input.
+On Linux each view has its own Xvfb, window manager and 0600 Xauthority cookie;
+neither browser user can authenticate to the other's display. Cua always observes
+and controls the secure display; dev actions use the supervisor CDP pipe. Taking
+control locks the selected browser and cancels command/file work (which could
+otherwise interfere with either display). Hand back before switching views.
+
+On Linux the developer browser runs as `devbrowser` (or `nyxdev-PROFILE` on a
+separated VM), with its own 0700 profile. It cannot read the secure browser user's
+0700 profile, cookies or home directory. Chromium's `--password-store=basic`
+makes profile files sensitive: preserve that OS-user separation and protect
+volume backups. Supervisor-owned managed policies block `file://`. Native Linux
+uses bubblewrap to mount the developer policy over Chromium's policy directory
+in a private user and mount namespace. In the official container, Docker's
+AppArmor profile can deny those mounts. The supervisor instead launches Chromium
+directly as `devbrowser`, retaining its own namespace/seccomp renderer sandbox.
+Secure and dev policy files are root-owned, mode 0640, and readable only by the
+`browser` and `devbrowser` groups respectively; neither browser can read the
+other's policy or change either file. No extra capabilities, privileged mode or
+AppArmor exception is needed. The developer user cannot read/write the secure
+profile or node identity/credential directory, write `/workspace`, or reach the
+saved-login native host (whose executable, manifest and socket are restricted to
+the secure browser). Saved-login storage remains server-side. The agent's
+namespace-denying filter and the secure browser's sandbox/policies are unchanged.
+CDP uses only a supervisor-owned pipe; there is no TCP
+DevTools endpoint and no job receives its descriptors. Agent commands and file
+workers retain their own namespace/mount-denying seccomp filter. On macOS, Chrome
+is the secure browser and Chrome Beta is the developer browser, with separate
+managed-policy domains. Single-user machines retain the explicit warning that
+commands run as the browser's user and may read its data; an isolated container
+or separated VM is recommended. macOS Chrome and Chrome Beta share the same
+physical desktop and OS user, so display/profile separation is not a security
+boundary there; takeover locks both views. Single-user Linux starts a private
+Xvfb for dev with its own cookie but the shared OS user can still read both
+cookies; the same warning and recommendation apply.
+
+Developer-browser setup, spawn, process and pipe failures return
+`machine_browser_unavailable` (12413) with fixed, actionable guidance. The node
+logs only the failure classification and available exit status, never child
+stderr, URLs, cookies or page content. An unavailable browser is discarded so
+the next call can launch a fresh process. Frame navigation retries must not
+swallow transport failures or return an empty successful snapshot.
+
+The container e2e runs with both the shipped seccomp profile and a stricter
+mount-denying profile, emulating AppArmor on Docker Desktop. To reproduce:
+
+```sh
+python3 cli/tests/machine_mount_denied_profile.py cli/resources/machine-container/seccomp.json /tmp/nyxid-machine-deny-mount.json
+docker run --rm --shm-size=256m --security-opt seccomp=/tmp/nyxid-machine-deny-mount.json nyxid-machine-e2e:local
+MACHINE_IMAGE=nyxid-node-machine:local MACHINE_TEST_SECCOMP=/tmp/nyxid-machine-deny-mount.json sh cli/tests/machine_updater_e2e.sh
+```
+
+These checks retain all browser, frame, display, attachment and update-migration
+assertions, including both renderer sandboxes and actual filesystem/socket
+access attempts as `devbrowser`. PR and Publish Images runs use the same profiles.
+
+The Linux image installs `at-spi2-core`, starts a D-Bus/AT-SPI session as the
+secure `browser` user, and enables Chromium renderer accessibility. Its bus
+address is provided only to Chromium and cua, never to agent commands. Separated
+VM setup creates the same display/session services; install `xvfb`, `xauth`,
+`openbox`, `dbus-x11`, `at-spi2-core`, `bubblewrap` and Chromium first. On single-user
+Linux, install `at-spi2-core`, `dbus-x11`, `bubblewrap`, `xvfb`, `xauth` and `openbox`, and start the node from the logged-in
+graphical D-Bus session (or `dbus-run-session -- nyxid node start` with DISPLAY
+and XAUTHORITY set). macOS continues to use native AX. The container removes the
+setuid Chromium helper and uses the namespace sandbox without the unsupported
+`--disable-setuid-sandbox` flag.
+
+Cua 0.31.0 stays warm between calls. `CUA_DRIVER_RS_UPDATE_CHECK=false` suppresses
+per-start update checks/notices; `CUA_DRIVER_RS_TELEMETRY_ENABLED=false` disables
+telemetry. A cancelled call drops and kills its driver process; the next turn
+starts a fresh one with bounded exponential backoff, without a restart-count
+lockout or withdrawing advertised capabilities. Results distinguish
+`driver_restarting` (12414, with `retry_after_ms`),
+`computer_permission_missing` (12415), `computer_tool_not_supported` (12416),
+`display_unavailable` (12417), and `machine_turn_stopped` (12418).
+NyxBot retries transient recovery itself, observing before repeating a changing
+action whose result is uncertain. `machine_browser_unavailable` remains 12413.
+Driver spawn, pipe write/read, EOF, malformed response, timeout and process-exit
+failures share a typed transport-error path: discard the session, schedule
+backoff and return 12414. Recognised permission, display and unsupported-tool
+refusals retain their specific error codes and healthy session. Other tool errors
+keep cua's explanation intact for runtime redaction and agent correction; neither
+kind schedules a restart. JSON-RPC errors retain their typed refusal mapping.
+Unit tests inject these failures, and the container crash loop checks recovery at
+0, 10 and 100 ms after SIGKILL.
+
+Explicit NyxAgent `tool_budget_exhausted` and `turn_timeout` failures continue the
+same session automatically. The owner setting `max_auto_continuations` defaults
+to 8, accepts 0–32, and is editable in NyxBot settings and the settings tool.
+For each completed MCP call, NyxID stores only a rolling digest of the tool
+name, canonical argument digest and result digest on the active turn. It resets
+this accumulator for each continuation. Issued/completed counters exclude incomplete
+windows from the loop check. A loop stops only when the whole
+call/result sequence repeats and the reply text is unchanged; forty calls to
+the same tool with different arguments are progress. Turn/window fencing and
+atomic append protect concurrent and late completions; raw arguments/results
+are never persisted by this check. Continuations keep one NyxID turn,
+message, channel delivery and TriggerRun/budget, with only a small "Continuing
+task…" note. Exhausting the bound preserves context and reports a specific
+message; sanitized upstream error identifiers are stored on failed messages and
+logged without upstream prose or credentials.
+
+Chat Stop and desktop Stop persist a turn fence, abort the upstream stream and
+send signed cancellation to the machine. Jobs, process groups and gateway streams
+are cancelled; late results and new calls from that stopped turn are refused.
+A standalone desktop Stop cancels all agent activity on its machine. A new turn
+can use it normally. The live panel can collapse to machine/controller/action
+status, remembers this per conversation and collapses when the turn ends; the
+owner can still expand, fullscreen or pop out.
+
+Command and browser isolation are separate capabilities. `commands_isolated`
+is true only when the command uid differs from the daemon uid and a child with
+the command's exact uid/gid/groups cannot read or traverse the node's config and
+credential directories. Setup configuration alone is not proof. The shell badge
+uses this verified field, while saved-login warnings use `browser_isolated`.
+Older nodes with no command probe show **Isolation unknown: update to check**.
+A non-isolated node shows one concise stored-credentials warning with Details;
+the owner may still proceed.
+
+Before displaying any Docker setup, migration or companion command, NyxID resolves
+the updater tag for its own release through GHCR, hashes the manifest and verifies
+the digest's GitHub Publish Images attestation through the shared CLI verifier.
+Only `nyxid-machine-updater@sha256:…` is rendered or signed for agent-run migration.
+Verification is single-flight, cached for one hour on success and thirty seconds
+on transient failure. Failure shows **Verifying the updater image, try again
+shortly**; there is no mutable-tag fallback. Reconnection and rollback still use
+the durable update watch. The machine settings sheet labels the target **Latest**
+and keeps its copy command and guided update action outside the collapsed
+explanation.
+
+
+### Secure browser recovery (0.41.1)
+
+The signed MV3 extension registers startup and installation listeners before any
+asynchronous work. Its native messaging port keeps the worker alive; disconnects
+reconnect with 500 ms–4 s backoff without replaying a lost action. Only an inbound
+native-host message resets the backoff: sending hello can precede an asynchronous
+connection failure. Extension update
+metadata uses the signed manifest's version. When the package hash changes, or an
+installed package is missing, a helper running as the browser user repairs only
+that managed extension's registration in Preferences and Secure Preferences and
+removes its installed files before Chromium starts. Deleting files alone is
+insufficient: Chromium retains the policy-installed registration and does not
+reinstall the same version. Cookie stores, website storage and unrelated settings
+are preserved. This also repairs profiles damaged by 0.41.0 on their first launch.
+
+The supervisor waits 12 seconds for the extension handshake per attempt and gives
+a still-running browser another five seconds to reconnect before one automatic
+repair/relaunch. Ordinary native-host reconnections preserve Chromium and its tabs.
+Persistent failure returns 12413 with
+specific extension recovery guidance; diagnostics contain fixed metadata only.
+A process lock prevents a second supervisor from replacing the live socket.
+`nyxid node machine status` reads the daemon's cached capabilities (with observation
+time) and checks OS file access; it never starts Chromium/cua or binds sockets.
+
+Machine-tool search shares service-tool word matching and ranks complete matches
+first. Unsupported computer calls (12416) include a bounded `computer_tools` list
+and direct the agent to `nyx__machine_browser` snapshot for page content or the dev
+browser screenshot action for owner attachments. Persisted-profile container and
+migration tests cover relaunch, container restart, hash changes, missing packages,
+saved-login filling and harmless status reads under both seccomp profiles.

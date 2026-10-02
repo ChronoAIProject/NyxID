@@ -60,7 +60,7 @@ pub fn parse_openapi_spec_value(spec: &serde_json::Value) -> AppResult<Vec<Parse
     parse_endpoints_from_spec(spec, is_openapi3)
 }
 
-/// Fetch and parse an OpenAPI 3.x or Swagger 2.0 spec from a URL.
+/// Fetch and parse an OpenAPI 3.x or Swagger 2.0 spec (JSON or YAML) from a URL.
 ///
 /// For each path+operation, extracts the operationId (or generates one from
 /// method+path), summary/description, parameters, and requestBody schema.
@@ -83,19 +83,11 @@ pub async fn parse_openapi_spec(
     }
 
     let body = resp
-        .text()
+        .bytes()
         .await
         .map_err(|e| AppError::BadRequest(format!("Failed to read OpenAPI spec body: {e}")))?;
 
-    let spec: serde_json::Value = if body.trim_start().starts_with('{') {
-        serde_json::from_str(&body)
-            .map_err(|e| AppError::BadRequest(format!("Invalid JSON in OpenAPI spec: {e}")))?
-    } else {
-        // Try YAML parsing via serde_json (only JSON supported for now)
-        return Err(AppError::BadRequest(
-            "Only JSON OpenAPI specs are supported".to_string(),
-        ));
-    };
+    let spec = crate::services::api_docs_service::parse_spec_body(body).await?;
 
     // Determine spec version
     let is_openapi3 = spec.get("openapi").is_some();
@@ -2952,5 +2944,47 @@ mod mcp_projection_tests {
             bad["paths"]["/files/{id}"]["post"]["requestBody"] = sibling;
             assert!(parse_openapi_spec_value(&bad).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod spec_format_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn discovery_fetches_yaml_and_json_specs() {
+        let server = wiremock::MockServer::start().await;
+        let yaml = "openapi: 3.0.0\ninfo: {title: n8n, version: 1.1.1}\npaths:\n  /workflows:\n    get:\n      operationId: getWorkflows\n      responses:\n        200: {description: ok}\n";
+        let json = r#"{"openapi":"3.0.0","info":{"title":"n8n","version":"1.1.1"},"paths":{"/workflows":{"get":{"operationId":"getWorkflows","responses":{"200":{"description":"ok"}}}}}}"#;
+        for (path, body) in [
+            ("/api/v1/openapi.yml", yaml),
+            ("/api/v1/openapi.json", json),
+            ("/api/v1/not-a-spec", "<html><body>Not found</body></html>"),
+        ] {
+            wiremock::Mock::given(wiremock::matchers::path(path))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_string(body))
+                .mount(&server)
+                .await;
+        }
+        let client = reqwest::Client::new();
+
+        for path in ["/api/v1/openapi.yml", "/api/v1/openapi.json"] {
+            let endpoints = parse_openapi_spec(&client, &format!("{}{path}", server.uri()))
+                .await
+                .unwrap_or_else(|err| panic!("{path}: {err:?}"));
+            assert_eq!(endpoints.len(), 1, "{path}");
+            assert_eq!(endpoints[0].method, "GET");
+            assert_eq!(endpoints[0].path, "/workflows");
+        }
+
+        let Err(AppError::BadRequest(message)) =
+            parse_openapi_spec(&client, &format!("{}/api/v1/not-a-spec", server.uri())).await
+        else {
+            panic!("an HTML page is not a spec");
+        };
+        assert!(
+            message.starts_with("Spec was not valid JSON or YAML"),
+            "{message}"
+        );
     }
 }

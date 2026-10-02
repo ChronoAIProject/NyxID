@@ -12,6 +12,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
+use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -77,6 +78,7 @@ impl From<crate::models::assistant_conversation::TurnAttachment> for AttachmentR
 }
 #[derive(Serialize)]
 pub struct ActiveTurnResponse {
+    continuations: u32,
     turn_id: String,
     started_at: DateTime<Utc>,
     activities: Vec<ActivityResponse>,
@@ -161,6 +163,7 @@ impl ConversationResponse {
 impl From<AssistantConversation> for ConversationResponse {
     fn from(row: AssistantConversation) -> Self {
         let active_turn = engine::live_turn(&row, Utc::now()).map(|turn| ActiveTurnResponse {
+            continuations: turn.continuations,
             turn_id: turn.turn_id.clone(),
             started_at: turn.started_at,
             activities: turn
@@ -581,6 +584,7 @@ pub async fn stop(
     let user_id = auth.user_id.to_string();
     engine::require_enabled(&state.db, &user_id).await?;
     engine::request_stop(&state.db, &user_id, &id).await?;
+    super::machine_cancel::conversation(&state, &user_id, &id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1037,7 +1041,7 @@ async fn run_turn(
             result = &mut execution => result,
             () = permit.cancelled() => Err(TurnError::new("assistant_unavailable")),
             error = watch_stop(&state, &row, &turn_id) => Err(error),
-            () = tokio::time::sleep(Duration::from_secs(engine::TURN_EXECUTION_SECS)) => {
+            () = tokio::time::sleep(Duration::from_secs(610 * (crate::services::assistant_continuation::HARD_MAX as u64 + 1))) => {
                 Err(TurnError::new("turn_timeout"))
             }
         }
@@ -1048,6 +1052,13 @@ async fn run_turn(
         response_id: None,
         error: Some(error),
     });
+    if result
+        .error
+        .as_ref()
+        .is_some_and(|error| error.code == "cancelled")
+    {
+        let _ = super::machine_cancel::conversation(&state, &row.user_id, &row.id).await;
+    }
     // Never echo the system-managed credential, even if an upstream reflects it.
     result.text = result
         .text
@@ -1250,8 +1261,21 @@ async fn execute_turn(
     } else {
         engine::base_prompt(row, agent.as_ref())
     } + &decisions;
+    let settings = crate::services::assistant_settings_service::get(&state.db, &row.user_id)
+        .await
+        .map_err(|_| TurnError::new("assistant_unavailable"))?;
+    let mut continuations = crate::services::assistant_continuation::Continuations::new(
+        settings.max_auto_continuations,
+    );
+    let mut completed = String::new();
+    let mut input = text;
     let mut recovery = engine::Recovery::default();
     loop {
+        let request_key = if continuations.count == 0 {
+            turn_id.clone()
+        } else {
+            format!("{turn_id}:continuation:{}", continuations.count)
+        };
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         let response = tokio::time::timeout_at(
             deadline,
@@ -1263,11 +1287,11 @@ async fn execute_turn(
                 "v1/responses",
                 Some(engine::upstream_body(
                     &row.model,
-                    text,
+                    input,
                     binding.as_deref(),
                     &prompt,
                 )),
-                Some(turn_id),
+                Some(&request_key),
                 policy,
             ),
         )
@@ -1288,6 +1312,41 @@ async fn execute_turn(
                 .and_then(|bytes| serde_json::from_slice(bytes).ok())
                 .unwrap_or(Value::Null);
             let code = upstream_error_code(status, &envelope);
+            if matches!(code, "tool_budget_exhausted" | "turn_timeout") {
+                let error = TurnError::new(code);
+                match continue_turn(
+                    state,
+                    row,
+                    events,
+                    &mut continuations,
+                    binding.as_deref(),
+                    &error,
+                    partial,
+                )
+                .await
+                {
+                    Ok(true) => {
+                        input = crate::services::assistant_continuation::INSTRUCTION;
+                        continue;
+                    }
+                    Ok(false) => {
+                        return Ok(TurnResult {
+                            text: partial.clone(),
+                            session_id: binding,
+                            response_id: None,
+                            error: Some(error),
+                        });
+                    }
+                    Err(error) => {
+                        return Ok(TurnResult {
+                            text: partial.clone(),
+                            session_id: binding,
+                            response_id: None,
+                            error: Some(error),
+                        });
+                    }
+                }
+            }
             match recovery.decide(status, code, binding.is_some()) {
                 RecoveryAction::Rebind => {
                     engine::clear_binding(
@@ -1344,7 +1403,7 @@ async fn execute_turn(
         let mut body = response.into_body().into_data_stream();
         let mut decoder = ResponseStream::default();
         let mut first = true;
-        let mut emitted_bytes = 0;
+        let mut emitted_bytes = completed.len();
         loop {
             let timeout = if first {
                 deadline.saturating_duration_since(tokio::time::Instant::now())
@@ -1366,9 +1425,13 @@ async fn execute_turn(
             };
             let chunk = chunk.map_err(|_| TurnError::new("invalid_stream"))?;
             let decoded = decoder.push(&chunk);
-            *partial = decoder
-                .text
-                .replace(credential.raw_key.as_str(), "[redacted]");
+            *partial = completed.clone()
+                + &decoder
+                    .text
+                    .replace(credential.raw_key.as_str(), "[redacted]");
+            if partial.len() > engine::MAX_OUTPUT_BYTES {
+                return Err(TurnError::new("output_too_large"));
+            }
             decoded?;
             if decoder.terminal.is_some() {
                 break;
@@ -1395,8 +1458,88 @@ async fn execute_turn(
         result.text = result
             .text
             .replace(credential.raw_key.as_str(), "[redacted]");
+        binding = result.session_id.clone().or(binding);
+        if let Some(error) = &result.error {
+            match continue_turn(
+                state,
+                row,
+                events,
+                &mut continuations,
+                binding.as_deref(),
+                error,
+                &result.text,
+            )
+            .await
+            {
+                Ok(true) => {
+                    if partial.len() > emitted_bytes {
+                        events.emit(
+                            "block.delta",
+                            json!({"block_id":block_id,"text":&partial[emitted_bytes..]}),
+                        );
+                    }
+                    if !partial.is_empty() {
+                        events.emit("block.delta", json!({"block_id":block_id,"text":"\n\n"}));
+                    }
+                    completed = if partial.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{partial}\n\n")
+                    };
+                    input = crate::services::assistant_continuation::INSTRUCTION;
+                    continue;
+                }
+                Err(error) => result.error = Some(error),
+                Ok(false) => {}
+            }
+        }
+        result.text = completed + &result.text;
+        result.session_id = binding;
         return Ok(result);
     }
+}
+
+async fn continue_turn(
+    state: &AppState,
+    row: &AssistantConversation,
+    events: &mut Events,
+    continuations: &mut crate::services::assistant_continuation::Continuations,
+    binding: Option<&str>,
+    error: &TurnError,
+    text: &str,
+) -> Result<bool, TurnError> {
+    if !matches!(error.code, "tool_budget_exhausted" | "turn_timeout") {
+        return Ok(false);
+    }
+    let current = engine::get(&state.db, &row.user_id, &row.id)
+        .await
+        .map_err(|_| TurnError::new("assistant_unavailable"))?;
+    let active = current
+        .active_turn
+        .as_ref()
+        .filter(|t| {
+            !t.stop_requested && Some(&t.turn_id) == row.active_turn.as_ref().map(|t| &t.turn_id)
+        })
+        .ok_or_else(|| TurnError::new("cancelled"))?;
+    let progress =
+        crate::services::assistant_continuation::window_digest(text, &active.tool_progress);
+    if !continuations.next(error.code, binding.is_some(), progress)? {
+        return Ok(false);
+    }
+    let lease = chrono::Utc::now() + chrono::Duration::seconds(engine::ACTIVE_TURN_TTL_SECS);
+    let updated = state.db.collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .update_one(doc! {"_id":&row.id,"user_id":&row.user_id,"active_turn.turn_id":&active.turn_id,"active_turn.stop_requested":false},
+            doc! {"$set":{"nyxagent_session_id":binding,"active_turn.continuations":continuations.count,"active_turn.tool_progress": {"started": 0_i64, "calls": 0_i64, "digest": ""},"active_turn.lease_expires_at":mongodb::bson::DateTime::from_chrono(lease)}})
+        .await.map_err(|_|TurnError::new("assistant_unavailable"))?;
+    if updated.matched_count != 1 {
+        return Err(TurnError::new("cancelled"));
+    }
+    tracing::info!(conversation_id = %row.id, upstream_error_code = error.code, continuation = continuations.count, "Continuing assistant task on its existing session");
+    events.emit(
+        "turn.continuing",
+        json!({"turn_id":active.turn_id,"continuation":continuations.count}),
+    );
+    Ok(true)
 }
 
 #[cfg(test)]

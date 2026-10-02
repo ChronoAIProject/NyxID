@@ -46,7 +46,7 @@ use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 /// the `return Err(...)` sites in this file.
 fn proxy_error_telemetry_fields(err: &AppError) -> (u16, u32) {
     match err {
-        AppError::BadRequest(_) => (400, 1000),
+        AppError::BadRequest(_) | AppError::CredentialUnavailable(_) => (400, 1000),
         AppError::Unauthorized(_) => (401, 1001),
         AppError::Forbidden(_) => (403, 1002),
         AppError::NotFound(_) => (404, 1003),
@@ -1380,10 +1380,14 @@ fn mark_pool_attempt_dispatched(state: Option<&PoolAttemptDispatchState>) {
 
 fn pool_no_redirect_http_client() -> &'static reqwest::Client {
     static CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
-        reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .expect("pool HTTP client")
+        let builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
+        // Tests share this process-wide client while starting and dropping many
+        // local mock servers whose ports the OS reuses. A pooled idle socket to
+        // a dropped server would then fail after dispatch and look like an
+        // upstream transport error, so tests never keep idle connections.
+        #[cfg(test)]
+        let builder = builder.pool_max_idle_per_host(0);
+        builder.build().expect("pool HTTP client")
     });
     &CLIENT
 }
@@ -1885,6 +1889,7 @@ async fn proxy_request_through_pool(
             ticket: ticket.clone(),
             policy: policy.clone(),
             lease_lost: Default::default(),
+            settling: Default::default(),
             timed_out: Default::default(),
             status: std::sync::Arc::new(std::sync::atomic::AtomicU16::new(0)),
             node_dispatched: Default::default(),
@@ -3100,10 +3105,18 @@ async fn preflight_proxy_deny_before_resolution(
     };
 
     if !auth_user.assistant_operation_scopes.is_empty() {
-        let catalog = catalog_service_id.filter(|id| *id != hint.service_id);
+        // Approval hints use catalog identity. An explicitly selected instance
+        // (including a pool member) must keep its own scope, without intersecting
+        // unrelated sibling connections to the same catalog.
+        let (scope_id, catalog) =
+            crate::services::agent_operation_scope_service::execution_identity(
+                auth_user,
+                via_service,
+                &hint.service_id,
+            );
         if crate::services::agent_operation_scope_service::applicable(
             &auth_user.assistant_operation_scopes,
-            &hint.service_id,
+            scope_id,
             catalog,
         )
         .next()
@@ -3113,7 +3126,7 @@ async fn preflight_proxy_deny_before_resolution(
                 crate::services::proxy_authorization::CanonicalPath::from_rest_decoded(path)?;
             crate::services::agent_operation_scope_service::authorize(
                 &auth_user.assistant_operation_scopes,
-                &hint.service_id,
+                scope_id,
                 catalog,
                 None,
                 method,
@@ -9524,7 +9537,12 @@ mod tests {
     fn proxy_error_telemetry_fields_maps_common_errors() {
         use super::proxy_error_telemetry_fields;
         use crate::errors::AppError;
-
+        assert_eq!(
+            proxy_error_telemetry_fields(&AppError::CredentialUnavailable(
+                "API key is failed".into()
+            )),
+            (400, 1000),
+        );
         assert_eq!(
             proxy_error_telemetry_fields(&AppError::BadRequest("x".into())),
             (400, 1000)

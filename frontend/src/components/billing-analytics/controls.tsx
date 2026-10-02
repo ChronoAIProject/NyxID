@@ -73,7 +73,7 @@ function AnalyticsFilterPicker({
   const [search, setSearch] = useState("");
   const deferred = useDeferredValue(search);
   const label = FILTER_FIELDS.find((field) => field.key === kind)!.label;
-  const query = useAnalyticsOptions(kind, deferred, open, sample);
+  const query = useAnalyticsOptions(kind, deferred, true, sample);
   return (
     <FilterPicker
       label={label}
@@ -307,6 +307,20 @@ export function PanelControls({
             combo: "Combined bar + line",
           }[value],
         }))}
+      />
+      <AnalyticsSelect
+        label="Data table"
+        value={panel.table_display ?? "always"}
+        onChange={(table_display) =>
+          onChange({
+            ...panel,
+            table_display: table_display as AnalyticsPanel["table_display"],
+          })
+        }
+        options={[
+          { value: "always", label: "Always open" },
+          { value: "accordion", label: "Accordion" },
+        ]}
       />
       <AnalyticsSelect
         label="Break down by"

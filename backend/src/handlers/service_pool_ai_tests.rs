@@ -19,6 +19,9 @@ use crate::test_utils::{
 };
 use crate::{AppState, mw::auth::AuthUser};
 
+#[path = "service_pool_ai_operation_scope_tests.rs"]
+mod operation_scopes;
+
 struct Fixture {
     state: AppState,
     auth: AuthUser,

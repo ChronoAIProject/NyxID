@@ -754,6 +754,8 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
         crate::models::machine_setup::COLLECTION_NAME,
         crate::models::machine_job::COLLECTION_NAME,
         crate::models::machine_desktop::COLLECTION_NAME,
+        crate::models::machine_update::COLLECTION_NAME,
+        crate::models::machine_update::ATTEMPTS_COLLECTION_NAME,
         crate::models::channel_activity::NOTIFICATIONS_COLLECTION,
         crate::models::channel_email::SUBSCRIPTIONS,
         crate::models::channel_email::SENDS,

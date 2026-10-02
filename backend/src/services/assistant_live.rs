@@ -82,6 +82,10 @@ pub enum LiveEvent {
         id: String,
         user_id: String,
     },
+    MachineUpdate {
+        id: String,
+        user_id: String,
+    },
     MachineSetup {
         id: String,
         user_id: String,
@@ -104,6 +108,7 @@ impl LiveEvent {
             | Self::ConnectLink { user_id, .. }
             | Self::ChannelBot { user_id, .. }
             | Self::Machine { user_id, .. }
+            | Self::MachineUpdate { user_id, .. }
             | Self::MachineSetup { user_id, .. }
             | Self::MachineDesktop { user_id, .. }
             | Self::TriggerCreated { user_id, .. } => Some(user_id),
@@ -301,6 +306,10 @@ fn pipeline() -> Vec<Document> {
             "operationType": {"$in": ["insert", "update", "replace"]},
             "$or": [
                 {"ns.coll": {"$in": [CONVERSATIONS, GROUPS, GROUP_MESSAGES]}},
+                {"ns.coll": crate::models::machine_update::COLLECTION_NAME, "fullDocument.attempt_id": {"$type":"string"}},
+                // Replacing an already-online socket can leave status unchanged.
+                // Update watches still need the authenticated reconnect event.
+                {"ns.coll": MACHINES, "updateDescription.updatedFields.connected_at": {"$exists": true}},
                 {"ns.coll": crate::models::trigger::COLLECTION_NAME, "operationType": "insert", "fullDocument.setup_watch_id": {"$type":"string"}},
                 // Links and bots matter only when created or when their
                 // status or activation changes, not on every bookkeeping write.
@@ -317,6 +326,7 @@ fn pipeline() -> Vec<Document> {
             "fullDocument.user_id": 1, "fullDocument.group_id": 1,
             "fullDocument.status": 1, "fullDocument.is_active": 1,
             "fullDocument.setup_watch_id": 1,
+            "fullDocument.attempt_id": 1, "fullDocument.requested_by": 1,
             "fullDocument.active_turn.turn_id": 1, "fullDocument.message_count": 1,
         }},
     ]
@@ -357,6 +367,10 @@ fn decode(change: &ChangeStreamEvent<Document>) -> Option<LiveEvent> {
         GROUP_MESSAGES => LiveEvent::Group {
             id: full.get_str("group_id").ok()?.to_owned(),
             user_id,
+        },
+        crate::models::machine_update::COLLECTION_NAME => LiveEvent::MachineUpdate {
+            id: full.get_str("attempt_id").ok()?.into(),
+            user_id: full.get_str("requested_by").unwrap_or(&user_id).into(),
         },
         MACHINES => LiveEvent::Machine { id: key, user_id },
         MACHINE_DESKTOPS => LiveEvent::MachineDesktop { id: key, user_id },

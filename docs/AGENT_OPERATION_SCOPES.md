@@ -46,7 +46,10 @@ count. They point to MCP search/list discovery for the complete allowed list.
 
 Raw UUID/slug proxy, LLM, pools, node, exact-approval redemption and machine gateway dispatch enforce the
 same rules before service dispatch and billing admission. Pools check the actual member service;
-pool admission never substitutes for member authorization. The assistant model
+pool admission never substitutes for member authorization. Explicit member hints
+retain instance identity; scopes on sibling connections do not intersect. AI pool aliases are
+visible only when a viable member permits its translated native chat operation;
+discovery checks the loaded candidates without additional database reads. The assistant model
 inference exception does not bypass a configured scope. Machine jobs retain
 the live thread key restriction as well as their explicit service declaration.
 

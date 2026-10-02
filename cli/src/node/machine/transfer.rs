@@ -159,13 +159,25 @@ impl Runtime {
         upload: VerifiedUpload,
         sender: &mpsc::Sender<NodeWsMessage>,
     ) -> Result<()> {
+        let _admission = self.operation_admission.read().await;
+        if self.upgrading.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(super::MachineError::TurnStopped.into());
+        }
+        let scope: super::cancellation::Scope = serde_json::from_value(metadata.clone())?;
+        let mut stopped = self.turns.subscribe(&scope);
+        if *stopped.borrow_and_update() {
+            return Err(super::MachineError::TurnStopped.into());
+        }
         let mut control = self.owner_control.subscribe();
-        if *control.borrow_and_update() & 1 != 0 {
+        let mut dev_control = self.dev_owner_control.subscribe();
+        if *control.borrow_and_update() & 1 != 0 || *dev_control.borrow_and_update() & 1 != 0 {
             return Err(super::MachineError::OwnerInControl.into());
         }
         tokio::select! {
             biased;
+            _ = stopped.changed() => Err(super::MachineError::TurnStopped.into()),
             _ = control.changed() => Err(super::MachineError::OwnerInControl.into()),
+            _ = dev_control.changed() => Err(super::MachineError::OwnerInControl.into()),
             result = self.transfer_inner(metadata, upload, sender) => result,
         }
     }

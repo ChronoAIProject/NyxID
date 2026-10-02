@@ -9,16 +9,23 @@ use mongodb::{
     bson::{self, doc},
     options::ReturnDocument,
 };
+use nyxid_machine::desktop::Display;
 
 pub async fn get(db: &Database, node: &str) -> AppResult<Option<MachineDesktop>> {
-    Ok(db
+    let mut row = db
         .collection::<MachineDesktop>(COLLECTION_NAME)
         .find_one(doc! {"_id":node})
-        .await?)
+        .await?;
+    if let Some(row) = &mut row
+        && row.node_id.is_empty()
+    {
+        row.node_id = row.id.clone();
+    }
+    Ok(row)
 }
 
-pub async fn agent_allowed(db: &Database, node: &str) -> AppResult<()> {
-    if get(db, node).await?.is_some_and(|row| {
+pub async fn agent_display_allowed(db: &Database, node: &str, display: Display) -> AppResult<()> {
+    if get(db, &display.key(node)).await?.is_some_and(|row| {
         matches!(
             row.status.as_str(),
             "owner" | "requested" | "taking" | "returning"
@@ -29,13 +36,32 @@ pub async fn agent_allowed(db: &Database, node: &str) -> AppResult<()> {
     Ok(())
 }
 
+pub async fn agent_allowed(db: &Database, node: &str) -> AppResult<()> {
+    agent_display_allowed(db, node, Display::Secure).await?;
+    agent_display_allowed(db, node, Display::Dev).await
+}
+
+#[cfg(test)]
 pub async fn open(
     db: &Database,
     owner: &str,
     node: &str,
     conversation: Option<&str>,
 ) -> AppResult<MachineDesktop> {
+    open_display(db, owner, node, conversation, Display::Secure).await
+}
+
+pub async fn open_display(
+    db: &Database,
+    owner: &str,
+    node: &str,
+    conversation: Option<&str>,
+    display: Display,
+) -> AppResult<MachineDesktop> {
+    let id = display.key(node);
     let fresh = MachineDesktop {
+        id: id.clone(),
+        display,
         node_id: node.into(),
         session_id: uuid::Uuid::new_v4().to_string(),
         user_id: owner.into(),
@@ -51,14 +77,14 @@ pub async fn open(
     let encoded = bson::to_document(&fresh)
         .map_err(|_| AppError::Internal("Desktop state encoding failed".into()))?;
     db.collection::<MachineDesktop>(COLLECTION_NAME)
-        .update_one(doc! {"_id":node}, doc! {"$setOnInsert":encoded})
+        .update_one(doc! {"_id":&id}, doc! {"$setOnInsert":encoded})
         .upsert(true)
         .await?;
     // A previous owner's idle session may be retired; active owner control
     // never expires into agent access without an explicit hand-back.
     db.collection::<MachineDesktop>(COLLECTION_NAME).update_one(
         doc!{
-            "_id":node,
+            "_id":&id,
             "status":{
                 "$in":["agent","closed"]
             },
@@ -70,7 +96,7 @@ pub async fn open(
             "$set":bson::to_document(&fresh).map_err(|_|AppError::Internal("Desktop metadata encoding failed".into()))?
         },
     ).await?;
-    let mut row = get(db, node)
+    let mut row = get(db, &id)
         .await?
         .ok_or(AppError::MachineBrowserUnavailable)?;
     if row.user_id != owner {
@@ -83,7 +109,7 @@ pub async fn open(
         }
         db.collection::<MachineDesktop>(COLLECTION_NAME)
             .update_one(
-                doc! {"_id":node,"session_id":&row.session_id,"status":"agent"},
+                doc! {"_id":&id,"session_id":&row.session_id,"status":"agent"},
                 doc! {"$set":set},
             )
             .await?;
@@ -117,13 +143,19 @@ pub async fn list(
     if let Some(conversation) = conversation {
         filter.insert("conversation_id", conversation);
     }
-    Ok(db
+    let mut rows: Vec<MachineDesktop> = db
         .collection::<MachineDesktop>(COLLECTION_NAME)
         .find(filter)
         .limit(32)
         .await?
         .try_collect()
-        .await?)
+        .await?;
+    for row in &mut rows {
+        if row.node_id.is_empty() {
+            row.node_id = row.id.clone();
+        }
+    }
+    Ok(rows)
 }
 
 pub async fn request(
@@ -229,7 +261,7 @@ pub async fn touch(db: &Database, row: &MachineDesktop) -> AppResult<()> {
     db.collection::<MachineDesktop>(COLLECTION_NAME)
         .update_one(
             doc! {
-                "_id":&row.node_id,
+                "_id":&row.id,
                 "session_id":&row.session_id,
                 "user_id":&row.user_id
             },
@@ -241,7 +273,7 @@ pub async fn touch(db: &Database, row: &MachineDesktop) -> AppResult<()> {
 
 pub async fn refresh(db: &Database, row: &MachineDesktop, viewer: &str) -> AppResult<()> {
     db.collection::<MachineDesktop>(COLLECTION_NAME).update_one(doc!{
-        "_id":&row.node_id,
+        "_id":&row.id,
         "session_id":&row.session_id,
         "controller":viewer,
         "status":"owner"
@@ -260,7 +292,7 @@ async fn transition(
     mut filter: bson::Document,
     mut set: bson::Document,
 ) -> AppResult<MachineDesktop> {
-    filter.insert("_id", &row.node_id);
+    filter.insert("_id", &row.id);
     filter.insert("session_id", &row.session_id);
     filter.insert("user_id", &row.user_id);
     set.insert("updated_at", bson::DateTime::now());
@@ -280,7 +312,7 @@ async fn acknowledge(
     mut filter: bson::Document,
     mut set: bson::Document,
 ) -> AppResult<MachineDesktop> {
-    filter.insert("_id", &row.node_id);
+    filter.insert("_id", &row.id);
     filter.insert("session_id", &row.session_id);
     filter.insert("user_id", &row.user_id);
     filter.insert("revision", row.revision);
@@ -295,6 +327,43 @@ async fn acknowledge(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn display_control_is_independent_and_legacy_rows_keep_node_identity() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("machine_display_control").await;
+        let secure = open(&db, "owner", "machine", Some("thread")).await.unwrap();
+        let dev = open_display(&db, "owner", "machine", Some("thread"), Display::Dev)
+            .await
+            .unwrap();
+        assert_ne!(secure.session_id, dev.session_id);
+        assert_eq!(dev.node_id, "machine");
+        let taken = take(&db, &dev, "viewer").await.unwrap();
+        controlled(&db, &taken, "viewer").await.unwrap();
+        agent_display_allowed(&db, "machine", Display::Secure)
+            .await
+            .unwrap();
+        assert!(
+            agent_display_allowed(&db, "machine", Display::Dev)
+                .await
+                .is_err()
+        );
+        assert!(
+            agent_allowed(&db, "machine").await.is_err(),
+            "shell/files must protect both desktops"
+        );
+        db.collection::<MachineDesktop>(COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":"machine"},
+                doc! {"$unset":{"node_id":"","display":""}},
+            )
+            .await
+            .unwrap();
+        let rows = list(&db, "owner", Some("thread")).await.unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| row.node_id == "machine"));
+        db.drop().await.unwrap();
+    }
+
     #[tokio::test]
     async fn controller_races_recover_without_releasing_agent_authority() {
         let db =

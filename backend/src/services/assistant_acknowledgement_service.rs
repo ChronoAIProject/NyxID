@@ -30,6 +30,8 @@ pub const ACTION_SECONDS: i64 = 10 * 60;
 
 #[derive(Clone)]
 pub struct ChatAuthority {
+    pub turn_id: Option<String>,
+    pub turn_stopped: bool,
     pub machine_node_ids: Vec<String>,
     pub saved_login_ids: Vec<String>,
     pub conversation_id: String,
@@ -134,6 +136,11 @@ pub async fn for_key(
         None
     };
     Ok(Some(ChatAuthority {
+        turn_id: conversation.active_turn.as_ref().map(|t| t.turn_id.clone()),
+        turn_stopped: conversation
+            .active_turn
+            .as_ref()
+            .is_none_or(|t| t.stop_requested),
         machine_node_ids: agent.machine_node_ids.clone(),
         saved_login_ids: agent.saved_login_ids.clone(),
         user_id: user.into(),
@@ -785,6 +792,8 @@ pub async fn decide_as(
                     .await?
                     .ok_or_else(not_found)?;
                 let chat = ChatAuthority {
+                    turn_id: target.active_turn.as_ref().map(|t| t.turn_id.clone()),
+                    turn_stopped: target.active_turn.as_ref().is_none_or(|t| t.stop_requested),
                     machine_node_ids: Vec::new(),
                     saved_login_ids: Vec::new(),
                     confirmation_policy: None,

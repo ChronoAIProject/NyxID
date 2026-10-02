@@ -104,6 +104,7 @@ export function desktopUrl(
   node: string,
   conversation?: string,
   backend?: string,
+  display: "secure" | "dev" = "secure",
 ): string {
   const url = new URL(backend || window.location.origin);
   url.protocol =
@@ -112,6 +113,7 @@ export function desktopUrl(
   url.search = conversation
     ? new URLSearchParams({ conversation_id: conversation }).toString()
     : "";
+  if (display === "dev") url.searchParams.set("display", display);
   url.hash = "";
   return url.toString();
 }

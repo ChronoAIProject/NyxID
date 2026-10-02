@@ -971,6 +971,10 @@ async fn connect_and_serve(
         }
     };
 
+    if let Some(machine) = &machine {
+        machine.report_connected();
+    }
+
     // Derive the idle watchdog from the server's heartbeat cadence so
     // installations that customize NODE_HEARTBEAT_INTERVAL_SECS don't trigger
     // spurious reconnects. None when the server didn't advertise: we leave
@@ -1042,7 +1046,7 @@ async fn connect_and_serve(
             tracing::warn!("Machine gateway could not start");
         }
     }
-    let caps_msg = serde_json::json!({
+    let mut caps_msg = serde_json::json!({
         "type": "status_update",
         "agent_version": env!("CARGO_PKG_VERSION"),
         "capabilities": capabilities,
@@ -1131,6 +1135,19 @@ async fn connect_and_serve(
 
         match parsed["type"].as_str() {
             Some("heartbeat_ping") => {
+                if let Some(machine) = &machine {
+                    machine.report_connected();
+                    let ready = machine.updater_ready();
+                    let updater = serde_json::json!(machine.updater_status());
+                    if caps_msg["capabilities"]["machine"]["updater_ready"] != ready
+                        || caps_msg["capabilities"]["machine"]["updater"] != updater
+                    {
+                        caps_msg["capabilities"]["machine"]["updater"] = updater;
+                        caps_msg["capabilities"]["machine"]["updater_ready"] =
+                            serde_json::json!(ready);
+                        let _ = send_ws_message(&tx, caps_msg.to_string()).await;
+                    }
+                }
                 let pong = serde_json::json!({
                     "type": "heartbeat_pong",
                     "timestamp": chrono::Utc::now().to_rfc3339(),
@@ -1165,13 +1182,15 @@ async fn connect_and_serve(
                     tokio::spawn(async move {
                         let request_id = request.request_id.clone();
                         let operation = request.operation;
-                        let revision = machine.control_revision();
+                        let revision =
+                            machine.control_revision(request.operation, &request.parameters);
+                        let parameters = request.parameters.clone();
                         let signing_bytes = zeroize::Zeroizing::new(
                             hex::decode(secret.as_str()).unwrap_or_default(),
                         );
                         let result = machine.handle(request, &signing_bytes).await;
                         machine
-                            .send_result(&tx, &request_id, operation, revision, result)
+                            .send_result(&tx, &request_id, operation, revision, &parameters, result)
                             .await;
                     });
                 }

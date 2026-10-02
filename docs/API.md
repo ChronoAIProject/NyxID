@@ -33,6 +33,7 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
   - [Sessions](#sessions)
   - [Service Endpoints](#service-endpoints)
   - [MCP Config](#mcp-config)
+  - [Service Pools](#service-pools)
   - [Proxy](#proxy)
   - [Proxy Service Discovery](#proxy-service-discovery)
   - [LLM Gateway](#llm-gateway)
@@ -3738,6 +3739,54 @@ curl http://localhost:3001/api/v1/sessions \
 ```
 
 ---
+
+### Service Pools
+
+Service pools group owned connections under one proxy slug. Management and
+inspection require authentication and owner access. Organization management
+requires an owner or admin membership. The full routing, member, and retry
+contracts are documented in [Service pools](SERVICE_POOLS.md).
+
+| Method | Path under `/api/v1` | Purpose |
+|---|---|---|
+| GET / POST | `/service-pools` | List or create pools; optional `org_id` selects an organization owner |
+| GET / PUT / DELETE | `/service-pools/{pool_id}` | Read, update, or delete a pool |
+| PUT / POST | `/service-pools/{pool_id}/members` | Replace all members or add a member |
+| DELETE | `/service-pools/{pool_id}/members/{user_service_id}` | Remove a member |
+| GET | `/service-pools/candidates` | Inspect connections for a new pool |
+| GET | `/service-pools/{pool_id}/candidates` | Inspect connections for an existing pool or draft |
+| GET | `/service-pools/{pool_id}/health` | Inspect all saved members, including unavailable members |
+| POST | `/service-pools/{pool_id}/health/reset` | Reset cooldowns for one member or the whole pool |
+
+Updates accept `expected_revision`; a stale revision returns HTTP 409. Settings
+and members can be saved in the same update. Health reset accepts
+`{"user_service_id":"<connection-id>"}` for one member or `{}` for all members.
+
+Candidate and health inspection accept these query parameters:
+
+| Parameter | Behavior |
+|---|---|
+| `check_operation` | Defaults to `true`. Set `false` to browse connection inventory without checking operation permissions or cooldowns. |
+| `method`, `path` | Checked operation, defaulting to `POST /` for Same API or `POST chat/completions` for AI chat. Paths follow proxy canonical-path validation. |
+| `strategy`, `member_contract` | Draft routing strategy and contract for candidate inspection. Health uses the saved configuration. |
+| `peer_ids`, `declared_peer_ids` | Comma-separated draft connection UUIDs and Same API compatibility declarations, capped at 50 IDs each. |
+| `selected_only` | With `true`, candidate inspection returns the selected `peer_ids` independently of search and pagination. |
+| `search`, `limit`, `after` | Case-insensitive name or slug search, applied before candidate pagination. `limit` defaults to 100 and is clamped to 1–100. |
+| `org_id` | Organization owner for new-pool candidate inspection. Existing-pool routes resolve the owner from the pool. |
+
+Responses contain `operation_checked`, `method`, `path`, `candidates`,
+`has_more`, and `next_cursor`. Explicit inventory mode returns
+`operation_checked: false` and null method/path values. Each candidate includes
+its connection ID, `name`, `slug`, eligibility and reason, credential binding,
+protocol, compatibility requirements, and cooldown metadata. Inventory results
+do not establish that a particular operation can execute. Inspection is
+read-only and never decrypts credentials or sends a request to a provider.
+
+A connection with an inactive stored credential or missing credential material
+returns `eligible: false` with `reason: "credential_unavailable"`; other
+connections remain in the response. Repair that connection before selecting it.
+Priority execution skips such members before dispatch. Database and data
+integrity errors still fail the request.
 
 ### Proxy
 

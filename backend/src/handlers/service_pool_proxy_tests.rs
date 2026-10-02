@@ -8,7 +8,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::any,
 };
-use futures::StreamExt;
+use futures::{StreamExt, TryStreamExt};
 use mongodb::bson::{Document, doc};
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -24,8 +24,14 @@ use crate::{AppState, mw::auth::AuthUser};
 #[path = "service_pool_billing_tests.rs"]
 mod billing;
 
+#[path = "service_pool_inspection_tests.rs"]
+mod inspection;
+
 #[path = "service_pool_runtime_tests.rs"]
 mod runtime;
+
+#[path = "service_pool_operation_scope_tests.rs"]
+mod operation_scopes;
 
 #[derive(Clone, Debug)]
 struct ReceivedRequest {
@@ -225,6 +231,41 @@ async fn pool_proxy_retries_429_replays_body_and_respects_cooldown() {
         assert_eq!(requests[0].headers["x-trace-id"], "review-request");
         assert_eq!(requests[0].headers["content-type"], "application/json");
     }
+    let events = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let events: Vec<crate::models::audit_log::AuditLog> = fixture
+                .state
+                .db
+                .collection("audit_log")
+                .find(doc! {"event_type":"service_pool_attempt"})
+                .sort(doc! {"event_data.attempt":1})
+                .await
+                .unwrap()
+                .try_collect()
+                .await
+                .unwrap();
+            if events.len() >= 2 {
+                break events;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("429 fallback records both attempted members");
+    assert_eq!(events.len(), 2);
+    for (index, event) in events.iter().enumerate() {
+        let data = event.event_data.as_ref().unwrap();
+        assert_eq!(data["pool_id"], fixture.pool_id);
+        assert_eq!(data["attempt"], index + 1);
+        assert_eq!(data["priority"], index);
+        assert_eq!(data["upstream_status"], if index == 0 { 429 } else { 200 });
+        assert!(event.seq.is_some() && event.entry_hash.is_some());
+        assert!(!data.to_string().contains("127.0.0.1"));
+    }
+    assert_ne!(
+        events[0].event_data.as_ref().unwrap()["user_service_id"],
+        events[1].event_data.as_ref().unwrap()["user_service_id"]
+    );
     let response = call(&fixture, "{\"value\":8}").await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()["x-nyxid-pool-attempts"], "1");
@@ -312,6 +353,45 @@ async fn pool_proxy_legacy_round_robin_remains_single_attempt() {
     to_bytes(response.into_body(), 1024).await.unwrap();
     assert_eq!(fixture.first.requests.lock().await.len(), 2);
     assert_eq!(fixture.second.requests.lock().await.len(), 1);
+    fixture.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn pool_proxy_legacy_weighted_remains_single_attempt_without_cooldown() {
+    let fixture = fixture(
+        "pool_proxy_legacy_weighted",
+        StatusCode::TOO_MANY_REQUESTS,
+        "weighted",
+        false,
+    )
+    .await;
+    fixture
+        .state
+        .db
+        .collection::<Document>("service_pools")
+        .update_one(
+            doc! {"_id": &fixture.pool_id},
+            doc! {"$set":{"members.0.weight":2}},
+        )
+        .await
+        .unwrap();
+    for expected in [429, 429, 200, 429] {
+        let response = call(&fixture, "{}").await;
+        assert_eq!(response.status().as_u16(), expected);
+        to_bytes(response.into_body(), 1024).await.unwrap();
+    }
+    assert_eq!(fixture.first.requests.lock().await.len(), 3);
+    assert_eq!(fixture.second.requests.lock().await.len(), 1);
+    assert_eq!(
+        fixture
+            .state
+            .db
+            .collection::<Document>("service_pool_member_health")
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
     fixture.state.db.drop().await.unwrap();
 }
 

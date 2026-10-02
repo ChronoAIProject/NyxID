@@ -1013,6 +1013,7 @@ async fn main() {
     // Live assistant changes: one change stream for this process, and the
     // NyxBot reaction to finished links and new bots.
     handlers::nyxbot::spawn_live_dispatch(state.clone());
+    handlers::machine_update::spawn(state.clone());
     {
         let live = state.assistant_live.clone();
         let db = state.db.clone();

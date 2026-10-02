@@ -38,8 +38,9 @@ struct CaptureState {
     revision: u64,
 }
 impl Runtime {
-    pub(super) async fn desktop_activity(&self, tool: &str) {
-        let mut session = self.desktop.session.lock().await;
+    pub(super) async fn desktop_activity(&self, tool: &str, display: Display) {
+        let desktop = self.desktop_for(display);
+        let mut session = desktop.session.lock().await;
         let Some(active) = session.as_mut().filter(|s| s.controller.is_none()) else {
             return;
         };
@@ -60,7 +61,7 @@ impl Runtime {
         .encode();
         drop(session);
         if let Ok(frame) = frame
-            && let Some(sender) = self.desktop.sender.lock().await.as_ref()
+            && let Some(sender) = desktop.sender.lock().await.as_ref()
         {
             let _ = sender.try_send(crate::node::ws_client::NodeWsMessage::Binary(frame));
         }
@@ -68,8 +69,14 @@ impl Runtime {
 
     pub(super) async fn desktop_open(&self, parameters: &Value) -> Result<Value> {
         let id = Uuid::parse_str(string(parameters, "session_id")?)?;
-        self.ensure_browser().await?;
-        let mut session = self.desktop.session.lock().await;
+        let display = Display::from_parameters(parameters).map_err(anyhow::Error::msg)?;
+        if display == Display::Secure {
+            self.ensure_browser().await?;
+        } else {
+            self.ensure_dev_browser().await?;
+        }
+        let desktop = self.desktop_for(display);
+        let mut session = desktop.session.lock().await;
         if session
             .as_ref()
             .is_some_and(|s| s.controller.is_none() && s.refreshed.elapsed() > IDLE_TIMEOUT)
@@ -103,7 +110,9 @@ impl Runtime {
     }
 
     pub(super) async fn desktop_input(&self, parameters: &Value) -> Result<Value> {
-        let mut session = self.desktop.session.lock().await;
+        let display = Display::from_parameters(parameters).map_err(anyhow::Error::msg)?;
+        let desktop = self.desktop_for(display);
+        let mut session = desktop.session.lock().await;
         let active = session.as_mut().context("desktop session closed")?;
         if parameters["session_id"] != active.id.to_string()
             || active.controller.as_deref() != parameters["viewer_id"].as_str()
@@ -143,7 +152,7 @@ impl Runtime {
             text = Some(std::mem::take(&mut active.owner_text));
         }
         active.refreshed = Instant::now();
-        let control = self.owner_control.subscribe();
+        let control = self.control_for(display).subscribe();
         let revision = *control.borrow();
         drop(session);
         if let Some(text) = text.filter(|text| !text.is_empty()) {
@@ -155,7 +164,7 @@ impl Runtime {
         }
         #[cfg(target_os = "linux")]
         {
-            let input = self.desktop.input.clone();
+            let input = desktop.input.clone();
             tokio::task::spawn_blocking(move || -> Result<()> {
                 let mut input = input
                     .lock()
@@ -164,7 +173,7 @@ impl Runtime {
                     bail!("desktop controller changed");
                 }
                 if input.is_none() {
-                    *input = Some(native_desktop::Input::new()?);
+                    *input = Some(native_desktop::Input::for_display(display)?);
                 }
                 input
                     .as_mut()
@@ -193,9 +202,9 @@ impl Runtime {
         Ok(json!({"accepted":true}))
     }
 
-    pub(super) fn start_capture(self: &Arc<Self>) {
+    pub(super) fn start_capture(self: &Arc<Self>, display: Display) {
         let weak = Arc::downgrade(self);
-        self.desktop.capture.get_or_init(|| {
+        self.desktop_for(display).capture.get_or_init(|| {
             tokio::spawn(async move {
                 let state = Arc::new(std::sync::Mutex::new(None));
                 let mut interval = tokio::time::interval(FRAME_INTERVAL);
@@ -205,15 +214,20 @@ impl Runtime {
                     let Some(runtime) = weak.upgrade() else {
                         break;
                     };
-                    let _ = runtime.capture_once(state.clone()).await;
+                    let _ = runtime.capture_once(display, state.clone()).await;
                 }
             })
         });
     }
 
-    async fn capture_once(&self, state: Arc<std::sync::Mutex<Option<CaptureState>>>) -> Result<()> {
+    async fn capture_once(
+        &self,
+        display: Display,
+        state: Arc<std::sync::Mutex<Option<CaptureState>>>,
+    ) -> Result<()> {
+        let desktop = self.desktop_for(display);
         let snapshot = {
-            let mut session = self.desktop.session.lock().await;
+            let mut session = desktop.session.lock().await;
             if let Some(active) = session.as_ref()
                 && active.refreshed.elapsed() > IDLE_TIMEOUT
                 && active.controller.is_none()
@@ -228,7 +242,7 @@ impl Runtime {
                         s.id,
                         s.frame_revision,
                         s.frame_sequence,
-                        *self.owner_control.borrow(),
+                        *self.control_for(display).borrow(),
                     )
                 })
         };
@@ -241,8 +255,7 @@ impl Runtime {
             .await?;
             return Ok(());
         };
-        let sender = self
-            .desktop
+        let sender = desktop
             .sender
             .lock()
             .await
@@ -258,7 +271,7 @@ impl Runtime {
                 .map_err(|_| anyhow::anyhow!("capture stopped"))?;
             if state.is_none() {
                 *state = Some(CaptureState {
-                    capture: native_desktop::Capture::new()?,
+                    capture: native_desktop::Capture::for_display(display)?,
                     encoder: native_desktop::Encoder::new(),
                     session: id,
                     revision,
@@ -277,11 +290,11 @@ impl Runtime {
         let Some((bytes, screen)) = encoded else {
             return Ok(());
         };
-        let mut session = self.desktop.session.lock().await;
+        let mut session = desktop.session.lock().await;
         let Some(active) = session.as_mut().filter(|s| s.id == id) else {
             return Ok(());
         };
-        if *self.owner_control.borrow() != control || active.frame_revision != revision {
+        if *self.control_for(display).borrow() != control || active.frame_revision != revision {
             active.frame_revision += 1;
             return Ok(());
         }

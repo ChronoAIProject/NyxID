@@ -62,18 +62,31 @@ struct JsonRpcError {
 // Response helpers
 // ---------------------------------------------------------------------------
 
+#[derive(Clone)]
+struct ToolResultDigest(String);
+
+fn result_digest(value: &serde_json::Value) -> ToolResultDigest {
+    ToolResultDigest(crate::services::assistant_continuation::canonical_digest(
+        value,
+    ))
+}
+
 fn rpc_success(id: Option<serde_json::Value>, result: serde_json::Value) -> Response {
-    axum::Json(JsonRpcResponse {
+    let digest = result_digest(&result);
+    let mut response = axum::Json(JsonRpcResponse {
         jsonrpc: JSONRPC_VERSION.into(),
         id,
         result: Some(result),
         error: None,
     })
-    .into_response()
+    .into_response();
+    response.extensions_mut().insert(digest);
+    response
 }
 
 fn rpc_error(id: Option<serde_json::Value>, code: i32, message: &str) -> Response {
-    axum::Json(JsonRpcResponse {
+    let digest = result_digest(&serde_json::json!({"code": code, "message": message}));
+    let mut response = axum::Json(JsonRpcResponse {
         jsonrpc: JSONRPC_VERSION.into(),
         id,
         result: None,
@@ -83,7 +96,9 @@ fn rpc_error(id: Option<serde_json::Value>, code: i32, message: &str) -> Respons
             data: None,
         }),
     })
-    .into_response()
+    .into_response();
+    response.extensions_mut().insert(digest);
+    response
 }
 
 /// MCP tool result (success or error are conveyed via `isError`, not JSON-RPC error).
@@ -255,7 +270,10 @@ fn content_result_with_notifications(
             .data(serde_json::to_string(&notification).unwrap_or_default())));
     }
 
-    Sse::new(tokio_stream::iter(events)).into_response()
+    let digest = result_digest(result.result.as_ref().expect("tool result"));
+    let mut response = Sse::new(tokio_stream::iter(events)).into_response();
+    response.extensions_mut().insert(digest);
+    response
 }
 
 /// MCP-formatted 401 with `WWW-Authenticate` pointing to the protected-resource
@@ -328,17 +346,7 @@ fn mcp_403_api_key_insufficient_scope() -> Response {
 
 /// JSON-RPC-style forbidden response for scope/binding violations.
 fn rpc_scope_forbidden(id: Option<serde_json::Value>, message: &str) -> Response {
-    axum::Json(JsonRpcResponse {
-        jsonrpc: JSONRPC_VERSION.into(),
-        id,
-        result: None,
-        error: Some(JsonRpcError {
-            code: -32003,
-            message: message.into(),
-            data: None,
-        }),
-    })
-    .into_response()
+    rpc_error(id, -32003, message)
 }
 
 // ---------------------------------------------------------------------------
@@ -1476,6 +1484,26 @@ async fn handle_tools_call(
     client_accepts_sse: bool,
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> Response {
+    let window = if let Some(chat) = &auth.chat {
+        match crate::services::assistant_continuation::started(
+            &state.db,
+            &chat.user_id,
+            &chat.conversation_id,
+        )
+        .await
+        {
+            Ok(window) => window,
+            Err(_) => {
+                return rpc_error(
+                    request.id.clone(),
+                    -32603,
+                    "Tool execution could not be recorded; retry shortly",
+                );
+            }
+        }
+    } else {
+        None
+    };
     let activity = match (auth.chat.as_ref(), request.params.as_ref()) {
         (Some(chat), Some(params)) => crate::services::assistant_nyxagent::activity_started(
             &state.db,
@@ -1489,15 +1517,44 @@ async fn handle_tools_call(
         .map(|id| (chat, id)),
         _ => None,
     };
-    let response = dispatch_tools_call(
+    // Keep native dispatch out of the progress-tracking wrapper's frame.
+    // Universal calls add another dispatch layer before transactional cards.
+    let response = Box::pin(dispatch_tools_call(
         state,
         auth,
         session_id,
         request,
         client_accepts_sse,
         billing_egress_permit,
-    )
+    ))
     .await;
+    if let (Some(chat), Some(window), Some(params), Some(digest)) = (
+        auth.chat.as_ref(),
+        window.as_ref(),
+        request.params.as_ref(),
+        response.extensions().get::<ToolResultDigest>(),
+    ) {
+        let call = crate::services::assistant_continuation::call_digest(
+            params
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default(),
+            params.get("arguments").unwrap_or(&serde_json::Value::Null),
+            &digest.0,
+        );
+        if crate::services::assistant_continuation::completed(
+            &state.db,
+            &chat.user_id,
+            &chat.conversation_id,
+            window,
+            &call,
+        )
+        .await
+        .is_err()
+        {
+            tracing::warn!(conversation_id = %chat.conversation_id, "Could not record tool progress digest");
+        }
+    }
     if let Some((chat, id)) = activity {
         let _ = crate::services::assistant_nyxagent::activity_finished(
             &state.db,
@@ -2788,10 +2845,24 @@ async fn handle_meta_search(
         .collect();
 
     if auth.chat.as_ref().is_some_and(|chat| !chat.guest) {
-        let query = query.to_lowercase();
-        results.extend(crate::services::machine_tools::definitions().into_iter()
-            .filter(|tool| format!("{} {}",tool.name,tool.description).to_lowercase().contains(&query))
-            .map(|tool| serde_json::json!({"name":tool.name,"description":tool.description,"inputSchema":tool.input_schema,"hint":"Call this native tool directly by name."})));
+        let matcher = mcp_service::ToolSearch::new(query);
+        let mut tools: Vec<_> = crate::services::machine_tools::definitions()
+            .into_iter()
+            .filter_map(|tool| {
+                matcher
+                    .rank(&tool.name, &tool.description)
+                    .map(|rank| (rank, tool))
+            })
+            .collect();
+        tools.sort_by_key(|(rank, _)| std::cmp::Reverse(*rank));
+        results.extend(tools.into_iter().map(|(_, tool)| {
+            serde_json::json!({
+                "name": tool.name,
+                "description": tool.description,
+                "inputSchema": tool.input_schema,
+                "hint": "Call this native tool directly by name.",
+            })
+        }));
     }
     let mut response_json = serde_json::json!({
         "matches": results,

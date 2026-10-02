@@ -302,7 +302,38 @@ pub async fn pool_aliases(
         )
         .await;
         let available = match plan {
-            Ok(plan) => !plan.candidates.is_empty(),
+            Ok(plan) => {
+                if !auth.assistant_operation_scopes.is_empty()
+                    && !plan.candidates.iter().any(|candidate| {
+                        let Some(chat) = candidate.chat_plan.as_ref() else {
+                            return false;
+                        };
+                        let Ok(path) =
+                            crate::services::proxy_authorization::CanonicalPath::from_rest_decoded(
+                                &chat.path,
+                            )
+                        else {
+                            return false;
+                        };
+                        // Discovery uses the same translated member operation as
+                        // execution, using only the already-loaded candidate.
+                        crate::services::agent_operation_scope_service::authorize(
+                            &auth.assistant_operation_scopes,
+                            &candidate.service.id,
+                            candidate.service.catalog_service_id.as_deref(),
+                            None,
+                            "POST",
+                            &path,
+                            false,
+                            false,
+                        )
+                        .is_ok()
+                    })
+                {
+                    continue;
+                }
+                !plan.candidates.is_empty()
+            }
             Err(
                 AppError::ServicePoolNoViableMember(_)
                 | AppError::ServicePoolMemberInvalid(_)

@@ -630,6 +630,7 @@ pub fn member_unavailable(error: &AppError) -> bool {
             | AppError::ApiKeyScopeForbidden(_)
             | AppError::Forbidden(_)
             | AppError::RequiredServiceNotConnected { .. }
+            | AppError::CredentialUnavailable(_)
     )
 }
 
@@ -923,14 +924,19 @@ pub async fn plan_candidates_with_allowlist(
         }
         let override_identity = match actor_api_key_id {
             Some(agent_key_id) => {
-                crate::services::proxy_service::read_agent_credential_override_identity(
+                match crate::services::proxy_service::read_agent_credential_override_identity(
                     db,
                     actor_user_id,
                     agent_key_id,
                     &service.id,
                     &resolution.target,
                 )
-                .await?
+                .await
+                {
+                    Ok(identity) => identity,
+                    Err(AppError::CredentialUnavailable(_)) => continue,
+                    Err(error) => return Err(error),
+                }
             }
             None => None,
         };

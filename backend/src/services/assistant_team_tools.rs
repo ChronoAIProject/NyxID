@@ -33,6 +33,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "update_group",
     "delete_group",
     "settings_link",
+    "update_settings",
     "channel_bot_setup_link",
     "machine_setup_link",
     "machine_pair",
@@ -51,6 +52,7 @@ pub const AGENT_TOOL_NAMES: &[&str] = &[
     "remember",
     "forget",
     "post_to_chat",
+    "machine_update",
     "request_agent_operations",
     "get_agent_operations",
 ];
@@ -152,7 +154,8 @@ pub fn read_only(name: &str) -> bool {
 pub fn destructive(name: &str) -> bool {
     matches!(
         name,
-        "delete_schedule"
+        "machine_update"
+            | "delete_schedule"
             | "revoke_subagent"
             | "destroy_subagent"
             | "delete_group"
@@ -375,6 +378,10 @@ pub fn schema(name: &str) -> Value {
             vec!["group"],
         ),
         "delete_group" => (json!({"group": string(64)}), vec!["group"]),
+        "update_settings" => (
+            json!({"max_auto_continuations":{"type":"integer","minimum":0,"maximum":32,"description":"Owner-requested automatic continuations after upstream tool/time budgets; default 8, 0 disables. Ordinary usage billing still applies."}}),
+            vec!["max_auto_continuations"],
+        ),
         "settings_link" => (
             json!({"area": {"type": "string", "enum": SETTINGS_AREAS},
                 "agent": string(64), "label":string(128), "instruction":string(8192),
@@ -387,6 +394,10 @@ pub fn schema(name: &str) -> Value {
         "machine_setup_link" => (
             json!({"name":string(64),"where":{"type":"string","enum":["this_computer","vm","docker"]},"capabilities":{"type":"array","minItems":1,"maxItems":3,"items":{"type":"string","enum":["shell","files","computer"]}},"grant_to":string(64)}),
             vec!["where"],
+        ),
+        "machine_update" => (
+            json!({"machine":string(128),"host_machine":string(128),"container":string(128)}),
+            vec!["machine"],
         ),
         "machine_pair" => (
             json!({"code":string(16),"acknowledgement_id":string(64)}),
@@ -531,6 +542,9 @@ fn description(name: &str) -> &'static str {
         }
         "update_group" => "Rename a group or add/remove members.",
         "delete_group" => "Delete a group chat and its transcript.",
+        "update_settings" => {
+            "Change NyxBot settings only when the owner asks. Automatic continuations preserve context and the same logical task; higher limits may use more credits."
+        }
         "settings_link" => {
             "Link the user to the exact NyxID page for a configuration you cannot or should not \
             do in chat: creating an agent key (its secret is shown there), security (password, \
@@ -542,6 +556,9 @@ fn description(name: &str) -> &'static str {
         }
         "machine_setup_link" => {
             "Help the owner set up a machine for coding, files or computer use. Returns a prefilled Assistant → Machines setup link; credentials never enter chat. Recommend a VM or container. End the turn and wait for the connected event, then verify with machine_list and a harmless command and apply the requested specialist grant."
+        }
+        "machine_update" => {
+            "Offer an update when machine_list shows update_available or old machines lack browser/AX capabilities. NyxBot and granted specialists always request an owner action card. If no updater exists or updater.phase is legacy, relay the credential-free link and pinned host terminal command. Legacy repair replaces only the companion, retaining machine and volumes; end the turn and wait for companion version metadata or expiry. Otherwise wait for reconnect/expiry. If the owner identifies another granted native machine on the Docker host, pass host_machine and their container name: Docker is inspected before the card names both machines. Never guess a host or migrate inside the target container. Surface any previous_update code and guidance; on failure follow the fixed recovery guidance rather than guessing at credentials or Docker metadata. After wake verify version, AX and browser snapshot, then resume."
         }
         "machine_pair" => {
             "Pair a machine using the short code printed by nyxid node setup. Raises an owner-only confirmation card showing hostname, OS, IP and capabilities. The code alone authorizes nothing. Never ask for or accept a setup token in chat."

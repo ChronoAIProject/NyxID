@@ -2079,6 +2079,7 @@ async fn resolve(state: &AppState, watch: &NyxbotWatch) {
     let result = match watch.kind.as_str() {
         "channel_bot" => channel_bot_watch(state, watch).await,
         "connect_link" => connect_link_watch(state, watch).await,
+        "machine_update" => machine_update_watch(state, watch).await,
         "machine_setup" => machine_setup_watch(state, watch).await,
         "machine_control" => machine_control_watch(state, watch).await,
         "trigger_created" => trigger_created_watch(state, watch).await,
@@ -2102,7 +2103,24 @@ pub fn spawn_live_dispatch(state: AppState) {
                 Err(broadcast::error::RecvError::Lagged(_)) => LiveEvent::Resync,
                 Err(broadcast::error::RecvError::Closed) => break,
             };
+            if let LiveEvent::Machine { ref id, .. } = event {
+                let state = state.clone();
+                let id = id.clone();
+                tokio::spawn(async move {
+                    if let Ok(Some(node)) =
+                        crate::services::node_service::get_node_by_id(&state.db, &id).await
+                    {
+                        let _ = crate::services::machine_update_service::observe(
+                            &state.db, &node, None,
+                        )
+                        .await;
+                    }
+                });
+            }
             let filter = match event {
+                LiveEvent::MachineUpdate { id, user_id } => {
+                    doc! {"kind":"machine_update","connect_link_id":id,"user_id":user_id}
+                }
                 LiveEvent::MachineDesktop { id, user_id } => {
                     doc! {"kind":"machine_control","connect_link_id":id,"user_id":user_id}
                 }
@@ -4090,6 +4108,67 @@ mod tests;
 mod status;
 pub(crate) use status::{WaitingItem, check_deliveries, waiting};
 
+pub(crate) async fn machine_update_watch(state: &AppState, watch: &NyxbotWatch) -> AppResult<()> {
+    use crate::services::machine_update_service as updates;
+    let Some(id) = watch.connect_link_id.as_deref() else {
+        return Ok(());
+    };
+    let Some(row) = updates::watched(&state.db, id).await? else {
+        return Ok(());
+    };
+    if row.requested_by.as_deref() != Some(watch.user_id.as_str()) {
+        return Ok(());
+    }
+    if let Some(node) = updates::node_for_record(&state.db, &row).await? {
+        updates::observe(&state.db, &node, None).await?;
+    } else {
+        updates::finish(&state.db, &row, "failed", Some("machine_unavailable")).await?;
+    }
+    let Some(row) = updates::watched(&state.db, id).await? else {
+        return Ok(());
+    };
+    if row.pending() {
+        return Ok(());
+    }
+    let successful = row.phase == "connected";
+    let message = if successful && row.replace_companion {
+        format!(
+            "Machine {} now reports valid companion version metadata. The legacy updater replacement completed without restarting the machine. Verify the updater status in nyx__machine_list, then continue the interrupted task; offer a machine update if still needed.",
+            row.node_id
+        )
+    } else if successful {
+        format!(
+            "Machine {} reconnected on {}. Verify nyx__machine_list reports the target version, run a computer get_window_state AX check and nyx__machine_browser snapshot, then continue the interrupted task. Report a specific health failure and offer recovery if a check fails.",
+            row.node_id,
+            row.target_version.as_deref().unwrap_or_default()
+        )
+    } else {
+        format!(
+            "Machine {} update ended: {} ({}). Explain this outcome and offer the prefilled host recovery command or another owner-identified granted Docker host. Do not claim the upgrade succeeded.",
+            row.node_id,
+            row.phase,
+            row.code.as_deref().unwrap_or("update_failed")
+        ) + " "
+            + row
+                .code
+                .as_deref()
+                .and_then(nyxid_machine::update::failure_guidance)
+                .unwrap_or("")
+    };
+    machine_wake(
+        state,
+        watch,
+        "machine_update_finished",
+        message,
+        if successful {
+            None
+        } else {
+            Some(row.code.as_deref().unwrap_or("update_failed"))
+        },
+    )
+    .await
+}
+
 async fn machine_setup_watch(state: &AppState, watch: &NyxbotWatch) -> AppResult<()> {
     use crate::models::{
         machine_setup::{COLLECTION_NAME as SETUPS, MachineSetup},
@@ -4224,7 +4303,11 @@ async fn machine_control_watch(state: &AppState, watch: &NyxbotWatch) -> AppResu
     {
         return Ok(());
     }
-    machine_wake(state,watch,"machine_control_returned",format!("The owner handed machine {node} back. Observe its state fresh, then continue. Owner note: {}",row.handback_note.unwrap_or_default()),None).await?;
+    let display = match row.display {
+        nyxid_machine::desktop::Display::Secure => "secure browser",
+        nyxid_machine::desktop::Display::Dev => "dev browser",
+    };
+    machine_wake(state,watch,"machine_control_returned",format!("The owner handed machine {} ({display}) back. Observe its state fresh, then continue. Owner note: {}",row.node_id,row.handback_note.unwrap_or_default()),None).await?;
     Ok(())
 }
 

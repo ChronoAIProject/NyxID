@@ -1,4 +1,10 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { MachineSettings } from "./machine-settings";
 import type { NodeInfo } from "@/types/nodes";
@@ -8,10 +14,19 @@ vi.mock("@tanstack/react-router", () => ({
   Link: ({ children }: { children: React.ReactNode }) => <a>{children}</a>,
 }));
 vi.mock("@/hooks/use-machines", () => ({
-  useMachineSettings: () => ({ mutate: save }),
+  useVerifiedUpdaterImage: () => ({
+    data: {
+      version: "0.41.0",
+      image:
+        "ghcr.io/chronoaiproject/nyxid/nyxid-machine-updater@sha256:" +
+        "ab".repeat(32),
+    },
+  }),
+  useMachineSettings: () => ({ mutateAsync: save }),
+  useMachineUpdatePolicy: () => ({ mutateAsync: vi.fn() }),
 }));
 vi.mock("@/hooks/use-nyxbot-agents", () => ({
-  useSetNyxBotAgentGrants: () => ({ mutate: grant }),
+  useSetNyxBotAgentGrants: () => ({ mutateAsync: grant }),
   useNyxBotAgents: () => ({
     data: {
       agents: [
@@ -43,12 +58,13 @@ const node = {
     os: "macos",
     arch: "arm64",
     browser_isolated: false,
+    commands_isolated: false,
     computer_ready: true,
     cua_version: "0.30.4",
     computer_mode: "standard",
   },
 } as NodeInfo;
-it("requires the owner to acknowledge the single-user warning before enabling filling", () => {
+it("requires the owner to acknowledge the single-user warning before enabling filling", async () => {
   render(<MachineSettings node={node} canManage />);
   expect(screen.getByRole("checkbox", { name: "Coder" })).toBeChecked();
   expect(
@@ -70,11 +86,13 @@ it("requires the owner to acknowledge the single-user warning before enabling fi
   fireEvent.click(
     screen.getByRole("button", { name: "Save machine settings" }),
   );
-  expect(save).toHaveBeenCalledWith({
-    machine_confirm: "none",
-    allow_single_user_saved_logins: true,
-    acknowledge_single_user_risk: true,
-  });
+  await waitFor(() =>
+    expect(save).toHaveBeenCalledWith({
+      machine_confirm: "none",
+      allow_single_user_saved_logins: true,
+      acknowledge_single_user_risk: true,
+    }),
+  );
 });
 it("does not expose owner settings to a reader", () => {
   render(<MachineSettings node={node} canManage={false} />);
@@ -94,22 +112,35 @@ it("keeps the non-isolated shell warning visible to readers", () => {
 it("does not label separated machines as non-isolated", () => {
   render(
     <MachineSettings
-      node={{ ...node, machine: { ...node.machine!, browser_isolated: true } }}
+      node={{
+        ...node,
+        machine: {
+          ...node.machine!,
+          browser_isolated: true,
+          commands_isolated: true,
+        },
+      }}
       canManage
     />,
   );
   expect(screen.queryByText("Not isolated")).not.toBeInTheDocument();
 });
 
-it("changes one machine grant while preserving the specialist services and other machines", () => {
+it("changes one machine grant while preserving the specialist services and other machines", async () => {
   render(<MachineSettings node={node} canManage />);
   fireEvent.click(screen.getByRole("checkbox", { name: "Coder" }));
-  expect(grant).toHaveBeenCalledWith({
-    id: "specialist",
-    services: ["github"],
-    account_read: true,
-    machines: ["other"],
-  });
+  expect(grant).not.toHaveBeenCalled();
+  fireEvent.click(
+    screen.getByRole("button", { name: "Save machine settings" }),
+  );
+  await waitFor(() =>
+    expect(grant).toHaveBeenCalledWith({
+      id: "specialist",
+      services: ["github"],
+      account_read: true,
+      machines: ["other"],
+    }),
+  );
   expect(grant.mock.calls[0]?.[0]).not.toHaveProperty("logins");
   expect(grant.mock.calls[0]?.[0]).not.toHaveProperty("guest_access");
 });

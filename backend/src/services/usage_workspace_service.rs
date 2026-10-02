@@ -34,6 +34,8 @@ pub struct WorkspacePanel {
     pub height: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interval: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table_display: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -133,8 +135,14 @@ pub fn validate(config: &WorkspaceConfig) -> AppResult<()> {
                     .height
                     .as_deref()
                     .is_some_and(|height| !["compact", "standard", "tall"].contains(&height))
+                || panel
+                    .table_display
+                    .as_deref()
+                    .is_some_and(|display| !["always", "accordion"].contains(&display))
             {
-                return Err(invalid("Choose 1 to 3 columns and a valid panel height"));
+                return Err(invalid(
+                    "Choose a valid panel layout and data table display",
+                ));
             }
             AnalyticsQuery {
                 period: (filters.period != "custom").then(|| filters.period.clone()),

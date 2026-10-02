@@ -300,6 +300,7 @@ export function useNyxAgentAssistantChat({
     /** The selected thread's row, once loaded. */
     conversation: selected,
     session: nyxAgentTransport.session(selectedConversationId),
+    continuations: nyxAgentTransport.continuations(selectedConversationId),
     isStreaming: nyxAgentTransport.isRunning(selectedConversationId),
     isLoading: history.isLoading,
     error: history.error?.message ?? threads.error?.message ?? agents.error?.message,

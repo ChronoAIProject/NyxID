@@ -125,3 +125,231 @@ sys.stdout.buffer.write(out.getvalue())`, root]);
   assert.equal(pin.extension_id,digest.toString('hex').replace(/[0-9a-f]/g,c=>String.fromCharCode(97+parseInt(c,16))));
   assert.equal(pin.version,JSON.parse(readFileSync(new URL('../resources/machine-browser/manifest.json',import.meta.url))).version);
 });
+
+function browserFixture() {
+  class Element {
+    isConnected = true; disabled = false; readOnly = false; labels = [];
+    tagName = 'INPUT'; autocomplete = ''; type = 'text'; id = randomUUID();
+    get value() { throw new Error('input values must never be read'); }
+    getClientRects() { return [{}]; }
+    getBoundingClientRect() { return {left:10,top:10,right:110,bottom:40}; }
+    scrollIntoView() {}
+    contains(element) { return element === this; }
+    closest() { return null; }
+    getAttribute(name) { return name === 'aria-label' ? this.id : null; }
+    matches(selector) { return selector.includes('input'); }
+    focus() { document.activeElement = this; }
+    select() {}
+  }
+  const rows = [new Element(), new Element(), new Element(), new Element()];
+  rows[1].type = 'password'; rows[2].autocomplete = 'section-login current-password'; rows[3].autocomplete = 'one-time-code';
+  let typed = 0;
+  const document = {title: 'Fixture', readyState: 'complete', body: {}, activeElement: rows[0],
+    querySelectorAll(selector) { return selector.includes('h1') ? [] : rows; },
+    getElementById() {}, createTreeWalker() { return {nextNode() {return null;}}; },
+    execCommand() { typed++; return true; },
+  };
+  document.body.querySelectorAll = document.querySelectorAll;
+  document.elementFromPoint = () => document.activeElement;
+  let painted = 0;
+  const context = vm.createContext({document, crypto:{randomUUID}, HTMLInputElement:Element, HTMLSelectElement:class {},
+    TextEncoder, NodeFilter:{SHOW_TEXT:4}, location:{href:origin}, getComputedStyle:()=>({}),
+    setTimeout, clearTimeout, requestAnimationFrame:callback=>{painted++;queueMicrotask(callback);},
+    innerWidth:1280,innerHeight:720,outerWidth:1280,outerHeight:800,devicePixelRatio:1,screenX:0,screenY:0,scrollX:0,scrollY:0,
+    Event:class {}, window:{},
+  });
+  vm.runInContext(source('browser-actions'), context);
+  return {api:context.NyxIdBrowser, rows, document, typed:()=>typed, painted:()=>painted};
+}
+
+test('browser refs remain stable, protected inputs cannot be typed or read, and snapshots are bounded', async () => {
+  const f = browserFixture();
+  const first = f.api.snapshot(), second = f.api.snapshot();
+  assert.equal(first.elements[0].ref, second.elements[0].ref);
+  assert(!JSON.stringify(first).includes('value'));
+  for (const row of first.elements.slice(1)) {
+    assert.equal(row.protected,true);
+    await assert.rejects(f.api.act({action:'type',ref:row.ref,text:'forbidden'}), /protected_input/);
+  }
+  assert.equal(f.typed(),0);
+  f.rows[0].isConnected=false;
+  await assert.rejects(f.api.act({action:'click',ref:first.elements[0].ref}), /stale_ref/);
+  await assert.rejects(f.api.act({action:'evaluate',expression:'document.cookie'}), /action_not_supported/);
+  for(let n=0;n<100;n++) { const row=new f.rows[0].constructor(); row.id='long label '.repeat(50); f.rows.push(row); }
+  assert(Buffer.byteLength(JSON.stringify(f.api.snapshot()))<=6000);
+});
+
+test('trusted keyboard preparation confirms focus and presentation without reading field values', async () => {
+  const fixture=browserFixture();
+  const ref=fixture.api.snapshot().elements[0].ref;
+  fixture.document.activeElement=fixture.rows[1];
+  const prepared=await fixture.api.act({action:'_prepare',input_action:'type',ref,text:'ordinary text'});
+  assert.equal(prepared.focused,true);
+  assert.equal(fixture.document.activeElement,fixture.rows[0]);
+  assert.equal(fixture.painted(),2);
+  assert.equal(fixture.typed(),0,'preflight does not dispatch input');
+});
+
+test('partially visible tall frames retain their visible intersection', () => {
+  const fixture=browserFixture();
+  const frame={clientLeft:0,clientTop:0,clientWidth:800,clientHeight:1600,offsetWidth:800,offsetHeight:1600,
+    getBoundingClientRect:()=>({left:10,top:-1200,width:800,height:1600})};
+  fixture.document.activeElement=frame;
+  const point=fixture.api.framePoint(frame,{x:400,y:800,width:800,height:1600,
+    visible_rect:{left:0,top:0,right:800,bottom:1600}});
+  assert.equal(point.x,410);assert.equal(point.y,200);
+  assert.equal(point.visible_rect.top,0);assert.equal(point.visible_rect.bottom,400);
+});
+
+test('browser navigation waits for a loaded document and never replays a click whose response is lost', async () => {
+  let clicks=0, snapshots=0, polls=0;
+  const tab={id:12,title:'Fixture',url:origin,active:true};
+  const chrome={webNavigation:{getAllFrames:async()=>[{frameId:0,parentFrameId:-1}]},tabs:{
+    query:async()=>[tab], get:async()=>({...tab,status:++polls===1?'loading':'complete'}),
+    update:async()=>tab,
+    sendMessage:async(_id,request)=>{
+      if(request.action==='click'){clicks++;throw new Error('document replaced');}
+      snapshots++;return {status:'ok',snapshot:{text:'new document',ready:'complete'}};
+    },
+  }};
+  const context=vm.createContext({chrome,URL,TextEncoder,Date,setTimeout:callback=>callback()});
+  const api=vm.runInContext(source('browser-background')+'\nNyxIdBrowserBackground',context);
+  const result=await api.perform({action:'click',ref:'old'});
+  assert.equal(clicks,1);assert.equal(snapshots,1);assert.equal(polls,2);
+  assert.equal(result.status,'ok');assert.equal(result.snapshot.tab_id,'12');
+  assert.equal(result.snapshot.tabs[0].id,'12');
+  await assert.rejects(api.perform({action:'navigate',url:'file:///etc/passwd'}),/invalid_url/);
+});
+
+test('large pages paginate every element and queries narrow labels without reading values', () => {
+  const f=browserFixture();const Input=f.rows[0].constructor;f.rows.splice(0);
+  for(let n=0;n<500;n++){const row=new Input();row.id=`Row ${String(n).padStart(3,'0')}`;f.rows.push(row);}
+  let offset=0;const refs=[];
+  do {
+    const page=f.api.snapshot({offset});
+    assert(Buffer.byteLength(JSON.stringify(page))<=6000);
+    assert(page.elements.length>0);refs.push(...page.elements.map(e=>e.ref));
+    if(!page.more.elements)break;
+    assert(page.next_offset>offset);offset=page.next_offset;
+  } while(offset<500);
+  assert.equal(refs.length,500);assert.equal(new Set(refs).size,500);
+  const filtered=f.api.snapshot({query:{role:'textbox',label:'Row 499'}});
+  assert.equal(filtered.elements.length,1);assert.equal(filtered.elements[0].label,'Row 499');
+});
+
+test('visible frames aggregate with prefixed refs, route actions, and preserve pagination bounds', async () => {
+  const tab={id:12,title:'Frames',url:origin,active:true,status:'complete'};
+  const calls=[];
+  const chrome={windows:{update:async()=>{}},webNavigation:{getAllFrames:async()=>Array.from({length:12},(_,i)=>({frameId:i,parentFrameId:i?0:-1}))},tabs:{
+    query:async()=>[tab],get:async()=>tab,update:async()=>tab,
+    sendMessage:async(_tab,request,{frameId})=>{
+      calls.push({request,frameId});
+      if(request.action==='_visibility')return {visible:true,point:{x:10,y:10,width:100,height:100}};
+      if(request.action==='_frame_parent')return {status:'ok',point:request.point};
+      if(request.action==='_frame_signal'||request.action==='_frame_assert')return {status:'ok'};
+      if(request.action==='click')return {status:'ok'};
+      if(request.action==='type')return {status:'refused',reason:'protected_input'};
+      const count=100,offset=request.offset||0;
+      return {snapshot:{url:origin+'/frame'+frameId,title:'Frame',ready:'complete',headings:['Heading'],text:'visible '.repeat(190),total:count,
+        more:{elements:offset+60<count,text:true},elements:Array.from({length:Math.max(0,Math.min(60,count-offset))},(_,i)=>({ref:`item${offset+i}`,label:`Frame ${frameId} row ${offset+i}`}))}};
+    },
+  }};
+  const context=vm.createContext({chrome,URL,TextEncoder,Date,crypto:{randomUUID},setTimeout:callback=>callback()});
+  const api=vm.runInContext(source('browser-background')+'\nNyxIdBrowserBackground',context);
+  const first=await api.perform({action:'snapshot'});
+  assert(first.snapshot.more.elements);assert(first.snapshot.more.text);
+  assert(first.snapshot.frames.length>1);assert(first.snapshot.elements.every(e=>e.ref.startsWith('f0:')),'do not skip a truncated frame tail');
+  assert(Buffer.byteLength(JSON.stringify(first))<=9000);
+  const next=await api.perform({action:'snapshot',offset:100});
+  assert(next.snapshot.elements[0].ref.startsWith('f1:'));
+  const scoped=await api.perform({action:'snapshot',scope:'f3:item1'});
+  assert(scoped.snapshot.elements.every(e=>e.ref.startsWith('f3:')));
+  await api.perform({action:'click',ref:'f7:item2'});
+  assert(calls.some(c=>c.frameId===7&&c.request.action==='click'&&c.request.ref==='item2'));
+  const protected_=await api.perform({action:'type',ref:'f7:secret',text:'never'});
+  assert.equal(protected_.reason,'protected_input');
+});
+
+test('a spoofed frame rendezvous cannot redirect trusted input into a sibling', async () => {
+  const tab={id:1,url:origin,windowId:1};const seen=[];
+  const chrome={windows:{update:async()=>{}},webNavigation:{getAllFrames:async()=>[{frameId:0,parentFrameId:-1},{frameId:7,parentFrameId:0}]},tabs:{
+    query:async()=>[tab],update:async()=>tab,
+    sendMessage:async(_tab,request,{frameId})=>{
+      seen.push([request.action,frameId]);
+      if(request.action==='_prepare')return {status:'ok',snapshot:{point:{x:10,y:10,width:100,height:100}}};
+      if(request.action==='_frame_parent')return {status:'ok',index:3,point:request.point};
+      if(request.action==='_frame_assert'){assert.equal(frameId,7);assert.equal(request.index,3);return {status:'refused'};}
+      return {status:'ok'};
+    },
+  }};
+  const context=vm.createContext({chrome,URL,TextEncoder,Date,crypto:{randomUUID},setTimeout:callback=>callback()});
+  const api=vm.runInContext(source('browser-background')+'\nNyxIdBrowserBackground',context);
+  const result=await api.perform({action:'_prepare',input_action:'click',ref:'f7:button'});
+  assert.equal(result.status,'refused');assert.equal(result.reason,'overlay_mismatch');
+  assert(seen.some(([action])=>action==='_frame_assert'));
+  assert(!seen.some(([action])=>action==='click'));
+});
+
+
+function nativeFixture() {
+  const events = {}, timers = [], ports = [];
+  let failures = 0;
+  const event = name => ({addListener(callback) { events[name] = callback; }});
+  const context = vm.createContext({
+    importScripts() {}, Date, Map,
+    setTimeout(callback, ms) { timers.push({callback,ms}); return timers.length; },
+    chrome: {
+      management: {async getSelf() { if(failures-- > 0)throw new Error('temporary failure');return {installType:'admin',mayDisable:false}; }},
+      runtime: {
+        id:'pinned', onStartup:event('startup'), onInstalled:event('installed'),
+        connectNative(name) {
+          assert.equal(name,'dev.nyxid.machine_filler');
+          const sent=[];
+          const port = {sent,onDisconnect:event(`disconnect${ports.length}`),onMessage:event(`message${ports.length}`),postMessage(message) { sent.push(message); }};
+          ports.push(port);return port;
+        },
+      },
+    },
+  });
+  vm.runInContext(source('background'),context);
+  return {events,timers,ports,failNext(count) { failures=count; }};
+}
+const flushNative = () => new Promise(setImmediate);
+const incomingNative = () => ({operation:'browser',nonce:randomUUID(),expires_at_ms:Date.now()-1});
+
+test('MV3 wake listeners keep one native port and inbound messages reset reconnect backoff', async () => {
+  const {events,timers,ports}=nativeFixture();
+  assert.equal(typeof events.startup,'function','listener registration must be synchronous');
+  assert.equal(typeof events.installed,'function');
+  events.startup();events.installed();await flushNative();
+  assert.equal(ports.length,1,'top-level and startup/install must not duplicate connections');
+  for(let i=0;i<8;i++){
+    await events[`message${i}`](incomingNative());
+    events[`disconnect${i}`]();assert.equal(timers.length,1);
+    const timer=timers.shift();assert.equal(timer.ms,500);
+    timer.callback();await flushNative();assert.equal(ports.length,i+2);
+  }
+  events.startup();await flushNative();assert.equal(ports.length,9);
+});
+
+test('asynchronous native-host failures after hello back off to 4 seconds until an inbound message', async () => {
+  const f=nativeFixture(), {events,timers,ports}=f;
+  await flushNative();
+  // connectNative and postMessage both succeed; the actual connection failure
+  // arrives later through onDisconnect, as with an unreachable filler.sock.
+  for(const [i,ms] of [500,1000,2000,4000,4000,4000].entries()){
+    assert.equal(ports[i].sent[0].type,'hello');
+    events[`disconnect${i}`]();assert.equal(timers.length,1);
+    const timer=timers.shift();assert.equal(timer.ms,ms);
+    timer.callback();await flushNative();assert.equal(ports.length,i+2);
+  }
+  await events.message6(incomingNative());
+  events.disconnect6();assert.equal(timers[0].ms,500,'a proven connection resets the backoff');
+  // Synchronous failures also keep backing off; neither failure path resets it.
+  f.failNext(6);
+  for(const ms of [500,1000,2000,4000,4000,4000,4000]){
+    const timer=timers.shift();assert.equal(timer.ms,ms);
+    timer.callback();await flushNative();
+  }
+  events.disconnect7();assert.equal(timers.shift().ms,4000,'hello alone never resets the backoff');
+});

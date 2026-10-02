@@ -52,7 +52,7 @@ Strict separation: `handlers/` -> `services/` -> `models/`
 - 12100 `AssistantTurnActive` (HTTP 409, `turn_active`): a persisted NyxAgent conversation already has an active turn.
 - 12200 `AdminUsageQueryTimeout` (HTTP 503): bounded admin usage aggregation timed out; retry with a narrower window or filters.
 - 12300 `WorkspaceDestinationsNotActivated` (HTTP 503): incomplete automatic Drive/Workspace editor reconciliation; excluded from proxy-fault telemetry
-- 12400-12413 machine nodes: 12400 `MachineCapabilityDisabled`, 12401 `MachineNotAllowed`, 12402 `MachinePathOutsideRoots`, 12403 `MachineJobNotFound`, 12404 `MachineConfirmationPending`, 12405 `MachineConfirmationDeclined`, 12406 `MachineComputerUnavailable`, 12407 `MachineLimitExceeded`, 12408 `MachineOwnerInControl`, 12409 `MachineNotIsolated`, 12410 `MachineLoginNotFound`, 12411 `MachineLoginOriginMismatch`, 12412 `MachineLoginWrongField`, 12413 `MachineBrowserUnavailable`.
+- 12400-12418 machine nodes: 12400 `MachineCapabilityDisabled`, 12401 `MachineNotAllowed`, 12402 `MachinePathOutsideRoots`, 12403 `MachineJobNotFound`, 12404 `MachineConfirmationPending`, 12405 `MachineConfirmationDeclined`, 12406 `MachineComputerUnavailable`, 12407 `MachineLimitExceeded`, 12408 `MachineOwnerInControl`, 12409 `MachineNotIsolated`, 12410 `MachineLoginNotFound`, 12411 `MachineLoginOriginMismatch`, 12412 `MachineLoginWrongField`, 12413 `MachineBrowserUnavailable`, 12414 `MachineDriverRestarting`, 12415 `MachineComputerPermissionMissing`, 12416 `MachineComputerToolUnsupported`, 12417 `MachineDisplayUnavailable`, 12418 `MachineTurnStopped`.
 
 ### 4. Frontend Patterns
 
@@ -164,7 +164,7 @@ Key files: `models/agent_service_binding.rs`, `services/agent_binding_service.rs
 Rich metadata on `DownstreamService` so agents can discover service docs, repos, capabilities, and API endpoints without guessing (issue #148; details: `docs/API_DISCOVERY.md`).
 
 - Fields: `homepage_url` / `repository_url` / `issues_url` (validated URLs); `capabilities` (`ServiceCapabilities` boolean flags: `supports_proxy_read`, `supports_proxy_write`, `supports_proxy_binary_upload`, `supports_direct_downstream_auth`, `supports_authoring_via_nyx`, `supports_websocket`, `supports_streaming`); `auth_notes` / `known_limitations` (max 4096 chars); `required_permissions` (max 100 entries, 256 chars each)
-- API: catalog GETs require authentication and accept general API keys without proxy scope; service accounts remain rejected because catalog detail requires a User actor for restricted platform-grant membership lookup; delegated `account:read` parity is unchanged. Template metadata/live grants never include instance overrides; instance-backed private access and mounted-spec fallback use effective API-key inventory scope. `GET /api/v1/catalog?include_all=true` includes system services that require no downstream credentials (default filters to connectable); `GET /api/v1/catalog/{slug}/endpoints` fetches + parses the OpenAPI spec via hardened `api_docs_service::fetch_spec_json` (DNS pinning, 5MB limit, 60s cache); admin `POST/PUT /services` accepts all metadata fields with URL validation and length limits
+- API: catalog GETs require authentication and accept general API keys without proxy scope; service accounts remain rejected because catalog detail requires a User actor for restricted platform-grant membership lookup; delegated `account:read` parity is unchanged. Template metadata/live grants never include instance overrides; instance-backed private access and mounted-spec fallback use effective API-key inventory scope. `GET /api/v1/catalog?include_all=true` includes system services that require no downstream credentials (default filters to connectable); `GET /api/v1/catalog/{slug}/endpoints` fetches + parses the OpenAPI spec (JSON, or YAML with bounded alias expansion) via hardened `api_docs_service::fetch_spec_json` (DNS pinning, 5MB limit, 60s cache); admin `POST/PUT /services` accepts all metadata fields with URL validation and length limits
 - CLI: `nyxid catalog list --all`, `nyxid catalog show <slug>`, `nyxid catalog endpoints <slug>`. Frontend: "Service Metadata" sections on the service edit and detail pages.
 - Legacy: `migrate_legacy_api_spec_url()` runs at startup to rename `api_spec_url` -> `openapi_spec_url` and remove duplicates; the update handler also includes `$unset: { api_spec_url: "" }`.
 - Hosted overlay specs: hand-curated OpenAPI 3.1 overlays with `x-aevatar-tool` annotations live in `backend/specs/catalog/` and are served publicly at `/api/v1/catalog-specs/{spec_key}/openapi.json` (`services/catalog_spec_registry.rs`; several slugs may share one overlay, e.g. github / lark-feishu pairs). Seeded rows get `openapi_spec_url` from the registry (insert-time + null-guarded backfill; admin-set URLs never overwritten). `services/catalog_spec_sync.rs` runs at startup and additively upserts `ServiceEndpoint` rows from the overlays (matched by name; admin-added endpoints never soft-deleted) so `/api/v1/mcp/config` publishes concrete `service_id` + `endpoint_id` operations for catalog-backed user services (issue #1290 / Aevatar v4 workflow admission).
@@ -633,3 +633,49 @@ standalone under `/assistant/machines/{id}/desktop`. Studio Nodes shows only a
 read-only machine summary linking to assistant settings; Developer → Triggers
 retains secrets/replay. `/automations` redirects with `setup` and `agent` intact.
 Server-generated browser URLs use `services::assistant_links::AssistantPage`.
+Machine web tasks use `nyx__machine_browser`; secure browser DevTools and arbitrary script evaluation are disabled. The separate dev browser is for debugging and has no saved-login access. Explicit NyxAgent budget/time errors continue the same session under `max_auto_continuations`; Stop must fence the turn and cancel node jobs/gateway work. Machine error codes 12413–12418 distinguish browser/driver/display/restart/stop states.
+
+Machine updates: `machine_update_service` owns durable policy/attempt/watch state;
+`handlers/machine_update` exposes human-only UI and mandatory owner-card tools.
+Granted specialists may request, never approve, updates. Keep reconnect watches
+bound to their attempt, and exclude jobs/turns/desktops/owner control from idle
+updates. Only signed supervisor commands write version-only private update
+mailboxes. The companion's Docker socket is host-root authority: fixed official
+repositories, digest-bound Publish Images attestations, inspected configuration
+preservation and rollback are mandatory. Never log Docker inspect environments
+or expose update-volume access to agent/browser users. Test-only local-image
+injection must remain behind `cfg(test)`; production has no trust bypass.
+Companion self-update uses `companion-journal.json`, a fenced heartbeat and separate
+controller/handoff locks. Keep the predecessor alive until commit; recover
+post-commit by finishing cleanup, never rolling back. Successors check the exact
+attested image and release. Report companion outcomes separately from machine
+progress, and never downgrade the companion.
+Machine performance budgets belong in ignored benchmarks or explicit
+`NYXID_MACHINE_STRICT_BENCHMARK=1` runs on a quiet host. Shared-runner container
+CI prints the same measurements but uses sanity ceilings (8 fps minimum,
+500 ms input p95) so runner jitter cannot block image publication.
+
+Machine browser compatibility/security: secure and dev Linux browsers use separate
+Xvfb/Openbox displays and Xauthority cookies; cua remains secure-only. The owner's
+display switcher routes capture/input and control by display (macOS shares its
+physical desktop and locks both). Browser refs carry frame IDs; snapshots accept
+query/offset/scope and return bounded pagination markers. Trusted native input
+follows extension hit testing; explicit DOM fallback is labelled. Command isolation
+is an actual uid/filesystem access probe, separate from saved-login browser
+isolation; missing fields mean unknown. Continuation progress stores rolling MCP
+argument/result hashes only, never raw values or bounded activity labels. Docker
+migration/setup commands require the server's cached, attestation-verified updater
+digest, with no mutable-tag fallback.
+
+
+Machine 0.41.1 recovery: MV3 startup/install listeners and reconnecting native ports
+are required on persisted profiles. A missing/changed managed package must clear
+its own Preferences/Secure Preferences install registration before signed policy
+reinstallation; deleting Extensions files alone does not repair Chromium. Never
+start browsers/cua or bind sockets from `machine status`: read daemon snapshots.
+12416 includes advertised tool names and browser snapshot/screenshot guidance;
+machine discovery uses the shared `ToolSearch` ranker. Container updater TUF
+stores live inside its private locked update volume; keep tmpfs flags in both
+rendered commands for 0.41.0 compatibility. Failures expose fixed stage/reason
+codes and guidance only. Production-image verification tests must exercise real
+TUF and attestation code under read-only/cap-drop/no-new-privileges restrictions.
