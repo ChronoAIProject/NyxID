@@ -367,6 +367,7 @@ fn refresh_controller(root: &Path) -> Result<()> {
 async fn attempt(root: &Path, native: &mut Native, target: &str, rollback: bool) -> Result<()> {
     update::validate_target(&native.version, target, rollback).map_err(anyhow::Error::msg)?;
     let mut progress = Progress {
+        updater: None,
         target: target.into(),
         phase: Phase::Verifying,
         started_at_ms: mailbox::now_ms(),
@@ -436,6 +437,7 @@ async fn watch(config: PathBuf) -> Result<()> {
                 mailbox::report(
                     &root,
                     &Progress {
+                        updater: None,
                         target,
                         phase: Phase::Failed,
                         started_at_ms: mailbox::now_ms(),
@@ -471,6 +473,7 @@ mod tests {
         let journal = Journal {
             previous: root.path().join("previous"),
             progress: Progress {
+                updater: None,
                 target: "0.41.0".into(),
                 phase: Phase::Connected,
                 started_at_ms: 1,
@@ -510,6 +513,7 @@ mod tests {
         let journal = Journal {
             previous: previous.clone(),
             progress: Progress {
+                updater: None,
                 target: "0.41.0".into(),
                 phase: Phase::Restarting,
                 started_at_ms: 1,

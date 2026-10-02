@@ -645,6 +645,11 @@ repositories, digest-bound Publish Images attestations, inspected configuration
 preservation and rollback are mandatory. Never log Docker inspect environments
 or expose update-volume access to agent/browser users. Test-only local-image
 injection must remain behind `cfg(test)`; production has no trust bypass.
+Companion self-update uses `companion-journal.json`, a fenced heartbeat and separate
+controller/handoff locks. Keep the predecessor alive until commit; recover
+post-commit by finishing cleanup, never rolling back. Successors check the exact
+attested image and release. Report companion outcomes separately from machine
+progress, and never downgrade the companion.
 Machine performance budgets belong in ignored benchmarks or explicit
 `NYXID_MACHINE_STRICT_BENCHMARK=1` runs on a quiet host. Shared-runner container
 CI prints the same measurements but uses sanity ceilings (8 fps minimum,

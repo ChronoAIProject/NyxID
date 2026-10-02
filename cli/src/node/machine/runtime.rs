@@ -326,6 +326,7 @@ impl Runtime {
         let profile = MachineProfile {
             installation: Some(update::installation(&self.config)),
             updater_ready: update::ready(&self.update_directory),
+            updater: self.updater_status(),
             version: nyxid_machine::PROTOCOL_VERSION,
             runtime_id: self.runtime_id.clone(),
             shell: self.config.shell,
@@ -456,6 +457,10 @@ impl Runtime {
 
     pub fn updater_ready(&self) -> bool {
         update::ready(&self.update_directory)
+    }
+
+    pub fn updater_status(&self) -> Option<nyxid_machine::update::CompanionStatus> {
+        update::reported_companion(&self.update_directory, update::installation(&self.config))
     }
 
     pub fn report_connected(&self) {
@@ -615,7 +620,7 @@ impl Runtime {
                         .store(false, std::sync::atomic::Ordering::Release);
                 }
                 Ok(
-                    json!({"progress":progress,"updater_ready":update::ready(&self.update_directory)}),
+                    json!({"progress":progress,"updater_ready":update::ready(&self.update_directory), "updater": self.updater_status()}),
                 )
             }
             Operation::Upgrade => {

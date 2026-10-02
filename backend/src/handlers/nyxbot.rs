@@ -4131,7 +4131,12 @@ pub(crate) async fn machine_update_watch(state: &AppState, watch: &NyxbotWatch) 
         return Ok(());
     }
     let successful = row.phase == "connected";
-    let message = if successful {
+    let message = if successful && row.replace_companion {
+        format!(
+            "Machine {} now reports valid companion version metadata. The legacy updater replacement completed without restarting the machine. Verify the updater status in nyx__machine_list, then continue the interrupted task; offer a machine update if still needed.",
+            row.node_id
+        )
+    } else if successful {
         format!(
             "Machine {} reconnected on {}. Verify nyx__machine_list reports the target version, run a computer get_window_state AX check and nyx__machine_browser snapshot, then continue the interrupted task. Report a specific health failure and offer recovery if a check fails.",
             row.node_id,

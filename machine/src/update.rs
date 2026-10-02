@@ -59,6 +59,54 @@ pub struct Progress {
     pub started_at_ms: u64,
     /// A fixed local identifier; never an upstream response or Docker config.
     pub code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updater: Option<CompanionStatus>,
+}
+
+/// Public, bounded metadata only. Kept separately from the machine outcome.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CompanionStatus {
+    pub version: String,
+    pub digest: Option<String>,
+    pub target_version: Option<String>,
+    pub phase: String,
+    pub code: Option<String>,
+}
+
+impl CompanionStatus {
+    /// A live mailbox without version metadata. Do not invent an installed version.
+    pub fn legacy() -> Self {
+        Self {
+            phase: "legacy".into(),
+            code: Some("update_companion:legacy_companion".into()),
+            ..Default::default()
+        }
+    }
+
+    pub fn valid(&self) -> bool {
+        if self.phase == "legacy" {
+            return self == &Self::legacy();
+        }
+        version(&self.version).is_ok()
+            && self.digest.as_deref().is_none_or(valid_digest)
+            && self
+                .target_version
+                .as_deref()
+                .is_none_or(|v| version(v).is_ok())
+            && matches!(self.phase.as_str(), "current" | "pending" | "failed")
+            && self.code.as_deref().is_none_or(|code| {
+                code.starts_with("update_companion:") && failure_guidance(code).is_some()
+            })
+    }
+}
+
+pub fn valid_digest(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|v| {
+        v.len() == 64
+            && v.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    })
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -82,6 +130,7 @@ pub fn failure_guidance(code: &str) -> Option<&'static str> {
                 | "startup"
                 | "install_companion"
                 | "download_image"
+                | "update_companion"
         ) {
             return None;
         }
@@ -90,6 +139,20 @@ pub fn failure_guidance(code: &str) -> Option<&'static str> {
         code
     };
     Some(match reason {
+        "legacy_companion" => {
+            "Updater predates self-update. Replace it once using the pinned host command in Machines. Keep the machine container and update volume; wait for the new updater to report its version."
+        }
+        "companion_replacement_timeout" => {
+            "The replacement updater has not reported its version. Check that the pinned companion command completed on the Docker host, then start guided update again. Keep the machine and its volumes."
+        }
+        "successor_unhealthy" => {
+            "The previous updater retained control. Retry the update from Machines; inspect Docker health if it fails again."
+        }
+        "successor_image_mismatch"
+        | "companion_identity_unavailable"
+        | "companion_config_invalid" => {
+            "The updater could not verify its container identity, image or protected mounts. Check Docker and reinstall its companion using the Machines command."
+        }
         "docker_socket_unavailable" => {
             "Start Docker and check that /var/run/docker.sock is mounted into the updater, then retry the command from Machines."
         }
@@ -192,9 +255,66 @@ pub fn migration_args(name: &str, target: &str, image: &str) -> Result<Vec<Strin
     ])
 }
 
+/// The owner-approved legacy repair replaces only the companion, never volumes.
+pub fn companion_args(name: &str, target: &str, image: &str) -> Result<Vec<String>, &'static str> {
+    let mut args = migration_args(name, target, image)?;
+    args.splice(
+        1..2,
+        [
+            "-d".into(),
+            "--name".into(),
+            format!("{name}-updater"),
+            "--restart".into(),
+            "unless-stopped".into(),
+            "--label".into(),
+            format!("dev.nyxid.machine.updater={name}"),
+        ],
+    );
+    args.truncate(args.len() - 3);
+    args.extend(["watch".into(), name.into()]);
+    Ok(args)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn companion_replacement_args_preserve_security_and_never_remove_volumes() {
+        let image = format!("{UPDATER_IMAGE}@sha256:{}", "ab".repeat(32));
+        let args = companion_args("work", "0.41.4", &image).unwrap();
+        assert_eq!(
+            args,
+            vec![
+                "run",
+                "-d",
+                "--name",
+                "work-updater",
+                "--restart",
+                "unless-stopped",
+                "--label",
+                "dev.nyxid.machine.updater=work",
+                "--read-only",
+                "--tmpfs",
+                "/tmp:rw,noexec,nosuid,size=16m",
+                "--cap-drop=ALL",
+                "--security-opt=no-new-privileges",
+                "--mount",
+                "type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock",
+                "--mount",
+                "type=volume,src=work-nyxid-update,dst=/var/lib/nyxid-machine-update",
+                &image,
+                "watch",
+                "work",
+            ]
+        );
+        assert!(companion_args("work;false", "0.41.4", &image).is_err());
+        assert!(companion_args("work", "0.41.4", "unverified:latest").is_err());
+        let mut legacy = CompanionStatus::legacy();
+        assert!(legacy.valid());
+        legacy.version = "made-up version".into();
+        assert!(!legacy.valid());
+    }
 
     #[test]
     fn migration_mounts_tmpfs_for_already_published_updaters() {

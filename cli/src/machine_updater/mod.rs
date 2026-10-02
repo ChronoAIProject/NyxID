@@ -8,6 +8,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+mod companion;
 pub mod docker;
 
 /// Only these fixed classifications leave the controller. Never format an
@@ -108,6 +109,7 @@ fn report_failure(
     report(
         root,
         &Progress {
+            updater: None,
             target: target.into(),
             phase: Phase::Failed,
             started_at_ms: now_ms(),
@@ -170,7 +172,7 @@ pub fn private_directory(root: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn lock(root: &Path) -> Result<std::fs::File> {
+fn try_lock(root: &Path, name: &str) -> Result<Option<std::fs::File>> {
     use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt};
     private_directory(root)?;
     let file = std::fs::OpenOptions::new()
@@ -180,12 +182,21 @@ pub(crate) fn lock(root: &Path) -> Result<std::fs::File> {
         .truncate(false)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(root.join("controller.lock"))?;
-    ensure!(
-        unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0,
-        "Another updater owns this mailbox"
-    );
-    Ok(file)
+        .open(root.join(name))?;
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        Ok(Some(file))
+    } else {
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::WouldBlock {
+            Ok(None)
+        } else {
+            Err(error.into())
+        }
+    }
+}
+
+pub(crate) fn lock(root: &Path) -> Result<std::fs::File> {
+    try_lock(root, "controller.lock")?.context("Another updater owns this mailbox")
 }
 
 pub fn write(root: &Path, name: &str, value: &[u8]) -> Result<()> {
@@ -214,7 +225,9 @@ pub fn read(root: &Path, name: &str, limit: u64) -> Result<Vec<u8>> {
 }
 
 pub fn report(root: &Path, progress: &Progress) -> Result<()> {
-    write(root, "progress.json", &serde_json::to_vec(progress)?)
+    let mut progress = progress.clone();
+    progress.updater = companion::status(root);
+    write(root, "progress.json", &serde_json::to_vec(&progress)?)
 }
 
 pub fn heartbeat(root: &Path) -> Result<()> {
@@ -336,6 +349,7 @@ pub async fn replace(
     let current = docker::source_version(&inspect)?;
     docker::validate_target(current, target, owner_rollback)?;
     let mut progress = Progress {
+        updater: None,
         target: target.into(),
         phase: Phase::Verifying,
         started_at_ms: now_ms(),
@@ -428,37 +442,15 @@ pub(crate) fn heartbeat_task(root: &Path) -> Heartbeat {
 }
 
 pub async fn run(root: PathBuf, name: String) -> Result<()> {
-    private_directory(&root)?;
-    let _lock = lock(&root)?;
-    let _heartbeat = heartbeat_task(&root);
-    docker::valid_name(&name)?;
-    let api = docker::Docker::new()?;
-    recover_pending(&api, &root, &name).await?;
-    loop {
-        heartbeat(&root)?;
-        match request(&root) {
-            Ok(Some((target, rollback))) => {
-                if let Err(error) = replace(&api, &root, &name, &target, rollback, false).await {
-                    ensure!(
-                        !root.join("journal.json").exists(),
-                        "Update recovery pending"
-                    );
-                    eprintln!("{}", report_failure(&root, &target, &error, "watch")?);
-                }
-                for file in ["request", "rollback-request"] {
-                    let _ = std::fs::remove_file(root.join(file));
-                }
-            }
-            Err(_) => {
-                for file in ["request", "rollback-request"] {
-                    let _ = std::fs::remove_file(root.join(file));
-                }
-                eprintln!("machine_update invalid_request");
-            }
-            Ok(None) => {}
-        }
-        tokio::time::sleep(Duration::from_secs(2)).await;
-    }
+    companion::run(root, name, docker::Docker::new()?)
+        .await
+        .map_err(|error| {
+            Failure::new(
+                "update_companion",
+                Failure::classify(&error, "update_companion").reason,
+            )
+            .into()
+        })
 }
 
 /// Explicit owner-run migration. Existing identity/workspace/config are inspected
@@ -488,6 +480,7 @@ async fn bootstrap_with_api(
     report(
         &root,
         &Progress {
+            updater: None,
             target: reported_target.into(),
             phase: Phase::Verifying,
             started_at_ms: now_ms(),
@@ -661,6 +654,7 @@ mod tests {
         report(
             root.path(),
             &Progress {
+                updater: None,
                 target: "0.41.0".into(),
                 phase: Phase::RolledBack,
                 started_at_ms: 1,
@@ -977,6 +971,7 @@ mod tests {
                 new_id: Some("new".into()),
                 networks: json!({}),
                 progress: Progress {
+                    updater: None,
                     target: "0.41.0".into(),
                     phase: Phase::Connected,
                     started_at_ms: 1,

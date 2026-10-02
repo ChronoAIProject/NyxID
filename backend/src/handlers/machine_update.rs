@@ -58,6 +58,8 @@ pub struct Status {
     target_version: &'static str,
     update_available: bool,
     updater_ready: bool,
+    updater: Option<nyxid_machine::update::CompanionStatus>,
+    updater_guidance: Option<&'static str>,
     installation: nyxid_machine::update::Installation,
     automatic: bool,
     phase: String,
@@ -67,7 +69,14 @@ pub struct Status {
 }
 impl Status {
     fn new(node: &Node, row: MachineUpdate) -> Self {
+        let updater = companion_status(node);
+        let updater_guidance = updater
+            .as_ref()
+            .and_then(|s| s.code.as_deref())
+            .and_then(nyxid_machine::update::failure_guidance);
         Self {
+            updater,
+            updater_guidance,
             node_id: node.id.clone(),
             current_version: updates::current(node).into(),
             target_version: updates::TARGET,
@@ -84,6 +93,10 @@ impl Status {
             settings_path: AssistantPage::MachineSettings { node: &node.id }.path(),
         }
     }
+}
+
+fn companion_status(node: &Node) -> Option<nyxid_machine::update::CompanionStatus> {
+    updates::companion_status(node)
 }
 
 pub async fn list(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Vec<Status>>> {
@@ -158,12 +171,28 @@ pub async fn begin(
     conversation: Option<&str>,
     automatic: bool,
 ) -> AppResult<Value> {
-    let manual = !node.machine.as_ref().is_some_and(|m| m.updater_ready);
+    let legacy = updates::legacy_companion(node);
+    let manual = legacy || !node.machine.as_ref().is_some_and(|m| m.updater_ready);
     let row = updates::begin(&state.db, node, actor, conversation, automatic, manual).await?;
     let path = AssistantPage::MachineSettings { node: &node.id }.path();
+    if legacy {
+        return Ok(json!({
+            "status": "manual_step",
+            "updater": companion_status(node),
+            "machine": node.id,
+            "target_version": updates::TARGET,
+            "url": AssistantPage::MachineSettings { node: &node.id }.url(&state.config.frontend_url),
+            "steps": [
+                "Open a terminal on the computer running Docker.",
+                "Open the machine link and paste its pinned Replace updater command. It keeps the machine container and update volume.",
+                "Wait for the companion to report its version; this thread resumes automatically."
+            ],
+            "note": "Updater predates self-update. Replace it once. End your turn now; NyxID watches companion metadata and expiry. If the owner identifies another granted native machine on the same Docker host, offer to run the replacement there after Docker inspection and an owner card. Never guess a host or run inside the target container."
+        }));
+    }
     if manual {
         return Ok(
-            json!({"status":"manual_step","machine":node.id,"target_version":updates::TARGET,
+            json!({"status":"manual_step","updater":companion_status(node),"machine":node.id,"target_version":updates::TARGET,
             "url":AssistantPage::MachineSettings{node:&node.id}.url(&state.config.frontend_url),
             "steps":["Open a terminal on the computer running Docker (or the native machine).","Open the machine link and paste its prefilled update command into that terminal.","Wait for the machine to reconnect; this thread resumes automatically."],
             "note":"End your turn now. NyxID watches reconnection and expiry. If the owner identifies a different granted machine on the Docker host, offer to run the migration there after Docker inspection and an owner card. Never guess a host or run inside the container being updated."}),
@@ -183,7 +212,7 @@ pub async fn begin(
         );
     }
     Ok(
-        json!({"status":"queued","machine":node.id,"target_version":updates::TARGET,"settings_path":path,"note":"End your turn now. This thread wakes on reconnect or failure. Then verify the version, AX computer state and browser snapshot before continuing."}),
+        json!({"status":"queued","updater":companion_status(node),"machine":node.id,"target_version":updates::TARGET,"settings_path":path,"note":"End your turn now. This thread wakes on reconnect or failure. Then verify the version, AX computer state and browser snapshot before continuing."}),
     )
 }
 
@@ -242,12 +271,24 @@ pub async fn tool(
                 "Use a native machine on the Docker host with shell access".into(),
             ));
         }
+        if updates::legacy_companion(node)
+            && !nyxid_machine::update::version(updates::current(host))
+                .is_ok_and(|v| v >= nyxid_machine::update::version("0.41.4").expect("release"))
+        {
+            return Err(AppError::ValidationError(
+                "Update the Docker host machine node to 0.41.4 or newer before agent-run companion replacement, or use the guided host command".into(),
+            ));
+        }
         updates::owner_node(&state.db, &chat.user_id, &host.id).await?;
         Some(host)
     } else {
         None
     };
+    let legacy = updates::legacy_companion(node);
     let mut canonical = json!({"machine":node.id,"target_version":updates::TARGET});
+    if legacy {
+        canonical["replace_companion"] = json!(true);
+    }
     if let Some(host) = host {
         let Some(image) = verified_updater_image().await else {
             return Ok((
@@ -268,7 +309,7 @@ pub async fn tool(
             state,
             host,
             Operation::ContainerInspect,
-            json!({"container":container,"conversation_id":chat.conversation_id,"turn_id":chat.turn_id.clone().unwrap_or_default()}),
+            json!({"container":container,"replace_companion":legacy,"conversation_id":chat.conversation_id,"turn_id":chat.turn_id.clone().unwrap_or_default()}),
         )
         .await?;
         if inspect["docker_access"] != true {
@@ -279,6 +320,17 @@ pub async fn tool(
         canonical["host_machine"] = json!(host.id);
         canonical["container"] = json!(container);
         canonical["container_id"] = inspect["container_id"].clone();
+        if legacy {
+            let companion_id = inspect["companion_id"]
+                .as_str()
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| {
+                    AppError::ValidationError(
+                        "Updater container verification failed on that host".into(),
+                    )
+                })?;
+            canonical["companion_id"] = json!(companion_id);
+        }
     }
     if let Some(id) = args["acknowledgement_id"].as_str()
         && acks::consume_action(&state.db, chat, id, "nyxid__machine_update", &canonical).await?
@@ -303,7 +355,7 @@ pub async fn tool(
                 updates::finish(&state.db, &row, "failed", Some("host_migration_failed")).await?;
             }
             return Ok((
-                json!({"status":if result["accepted"]==true {"migrating"}else{"failed"},"note":"End your turn; the target machine reconnect or expiry watch resumes this thread. Verify version, AX and browser health before continuing."}),
+                json!({"status":if result["accepted"]==true {"migrating"}else{"failed"},"updater":companion_status(node),"note":if legacy {"End your turn; companion version metadata or expiry resumes this thread. The machine and its volumes are retained."} else {"End your turn; the target machine reconnect or expiry watch resumes this thread. Verify version, AX and browser health before continuing."}}),
                 false,
             ));
         }
@@ -319,15 +371,41 @@ pub async fn tool(
             false,
         ));
     }
-    let card=acks::request(&state.db,chat,acks::Request {
-        kind:"action",service:Some((&node.id,&node.id,&node.name)),tool:Some("nyxid__machine_update"),arguments:Some(&canonical),
-        summary:&format!("Update machine {} from {} to {}. {} This restarts the target and interrupts its work. Docker socket access gives the updater host-root authority; it installs only attested official images.",node.name,updates::current(node),updates::TARGET,host.map(|h|format!("Run the migration on owner-identified host machine {} after its successful Docker inspection.",h.name)).unwrap_or_else(||"Guide the one-time host command if no updater is installed.".into())),platform:false
-    }).await?;
+    let summary = if legacy {
+        format!(
+            "Replace the legacy updater for machine {} with the attested updater for {}. {} Keep the machine container and update volume. Docker socket access gives the updater host-root authority.",
+            node.name,
+            updates::TARGET,
+            host.map(|h| format!(
+                "Run on owner-identified host machine {} after its successful Docker inspection.",
+                h.name
+            ))
+            .unwrap_or_else(|| "Guide the one-time pinned host command.".into())
+        )
+    } else {
+        format!("Update machine {} from {} to {}. {} This restarts the target and interrupts its work. Docker socket access gives the updater host-root authority; it installs only attested official images.",node.name,updates::current(node),updates::TARGET,host.map(|h|format!("Run the migration on owner-identified host machine {} after its successful Docker inspection.",h.name)).unwrap_or_else(||"Guide the one-time host command if no updater is installed.".into()))
+    };
+    let card = acks::request(
+        &state.db,
+        chat,
+        acks::Request {
+            kind: "action",
+            service: Some((&node.id, &node.id, &node.name)),
+            tool: Some("nyxid__machine_update"),
+            arguments: Some(&canonical),
+            summary: &summary,
+            platform: false,
+        },
+    )
+    .await?;
     let mut result = acks::refusal(&card);
     let previous = updates::get(&state.db, node).await?;
-    if previous.code.is_some() {
-        result["previous_update"] = serde_json::to_value(Status::new(node, previous))
-            .map_err(|_| AppError::Internal("Could not encode update status".into()))?;
+    result["previous_update"] = serde_json::to_value(Status::new(node, previous))
+        .map_err(|_| AppError::Internal("Could not encode update status".into()))?;
+    if legacy {
+        result["guidance"] = json!(
+            "Updater predates self-update. Replace it once. After owner approval, guide the pinned host command in Machines, or use an owner-identified different granted native machine on the Docker host. End your turn and wait for companion metadata or expiry."
+        );
     }
     Ok((result, true))
 }
@@ -442,6 +520,284 @@ mod tests {
     };
 
     #[tokio::test]
+    async fn legacy_detection_requires_reporting_node_and_live_container_companion() {
+        let f = orchestrator_fixture("legacy_detection").await;
+        let mut node = node(&f, &f.owner).await;
+        node.machine.as_mut().unwrap().installation =
+            Some(nyxid_machine::update::Installation::Container);
+        node.machine.as_mut().unwrap().updater_ready = true;
+        for (version, legacy) in [
+            ("0.41.0", false),
+            ("0.41.3", false),
+            ("unknown", false),
+            ("0.41.4", true),
+            ("0.42.0", true),
+        ] {
+            node.metadata = Some(crate::models::node::NodeMetadata {
+                agent_version: Some(version.into()),
+                os: None,
+                arch: None,
+                ip_address: None,
+                provisioning_source: None,
+            });
+            assert_eq!(updates::legacy_companion(&node), legacy, "{version}");
+        }
+        node.machine.as_mut().unwrap().updater_ready = false;
+        assert!(companion_status(&node).is_none());
+        node.machine.as_mut().unwrap().updater_ready = true;
+        node.machine.as_mut().unwrap().updater = Some(nyxid_machine::update::CompanionStatus {
+            version: "0.41.4".into(),
+            phase: "current".into(),
+            ..Default::default()
+        });
+        assert!(!updates::legacy_companion(&node));
+        assert_eq!(companion_status(&node).unwrap().version, "0.41.4");
+        node.machine
+            .as_mut()
+            .unwrap()
+            .updater
+            .as_mut()
+            .unwrap()
+            .code = Some("private diagnostic".into());
+        let response = serde_json::to_value(Status::new(
+            &node,
+            MachineUpdate::new(&node.id, &node.user_id),
+        ))
+        .unwrap();
+        assert_eq!(response["updater"]["phase"], "legacy");
+        assert!(
+            response["updater_guidance"]
+                .as_str()
+                .unwrap()
+                .contains("Replace it once")
+        );
+        assert!(!response.to_string().contains("private diagnostic"));
+        node.machine.as_mut().unwrap().installation =
+            Some(nyxid_machine::update::Installation::Native);
+        assert!(companion_status(&node).is_none());
+        f.state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn legacy_guided_specialist_card_wakes_on_metadata_without_machine_restart() {
+        let mut f = fixture("legacy_guided").await;
+        let mut node = node(&f, &f.owner).await;
+        node.machine.as_mut().unwrap().installation =
+            Some(nyxid_machine::update::Installation::Container);
+        node.machine.as_mut().unwrap().updater_ready = true;
+        node.machine.as_mut().unwrap().updater =
+            Some(nyxid_machine::update::CompanionStatus::legacy());
+        f.state
+            .db
+            .collection::<Node>(crate::models::node::COLLECTION_NAME)
+            .replace_one(doc! {"_id": &node.id}, &node)
+            .await
+            .unwrap();
+        let (denied, _) = tool(&f.state, &f.chat, &json!({"machine": node.id}))
+            .await
+            .unwrap();
+        let denied = f
+            .state
+            .db
+            .collection::<AssistantAcknowledgement>(ACKS)
+            .find_one(doc! {"_id": denied["acknowledgement_id"].as_str().unwrap()})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(denied.kind, "machine");
+        f.chat.machine_node_ids.push(node.id.clone());
+        let (card, _) = tool(&f.state, &f.chat, &json!({"machine": node.id}))
+            .await
+            .unwrap();
+        assert_eq!(card["previous_update"]["updater"]["phase"], "legacy");
+        assert!(
+            card["guidance"]
+                .as_str()
+                .unwrap()
+                .contains("different granted native machine")
+        );
+        let id = card["acknowledgement_id"].as_str().unwrap();
+        acks::decide(&f.state.db, &f.owner, &f.row.id, id, true)
+            .await
+            .unwrap();
+        let (result, error) = tool(
+            &f.state,
+            &f.chat,
+            &json!({"machine": node.id, "acknowledgement_id": id}),
+        )
+        .await
+        .unwrap();
+        assert!(!error);
+        assert_eq!(result["status"], "manual_step");
+        assert_eq!(result["updater"]["phase"], "legacy");
+        assert!(
+            result["url"]
+                .as_str()
+                .unwrap()
+                .contains("/assistant/machines")
+        );
+        assert!(result.to_string().contains("End your turn"));
+        let row = updates::get(&f.state.db, &node).await.unwrap();
+        assert!(row.replace_companion);
+        // Even a fresh machine-connected progress report cannot complete this goal.
+        updates::observe(
+            &f.state.db,
+            &node,
+            Some(&nyxid_machine::update::Progress {
+                target: updates::TARGET.into(),
+                phase: nyxid_machine::update::Phase::Connected,
+                started_at_ms: chrono::Utc::now().timestamp_millis() as u64,
+                code: None,
+                updater: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(updates::get(&f.state.db, &node).await.unwrap().pending());
+        let watch = f
+            .state
+            .db
+            .collection::<NyxbotWatch>(WATCHES)
+            .find_one(doc! {"connect_link_id": &row.attempt_id})
+            .await
+            .unwrap()
+            .unwrap();
+        let original_connection = node.connected_at;
+        node.machine.as_mut().unwrap().updater = Some(nyxid_machine::update::CompanionStatus {
+            version: "0.41.4".into(),
+            phase: "current".into(),
+            ..Default::default()
+        });
+        f.state
+            .db
+            .collection::<Node>(crate::models::node::COLLECTION_NAME)
+            .replace_one(doc! {"_id": &node.id}, &node)
+            .await
+            .unwrap();
+        super::super::nyxbot::machine_update_watch(&f.state, &watch)
+            .await
+            .unwrap();
+        assert_eq!(node.connected_at, original_connection);
+        assert_eq!(
+            updates::get(&f.state.db, &node).await.unwrap().phase,
+            "connected"
+        );
+        let conversation =
+            crate::services::assistant_nyxagent::get(&f.state.db, &f.owner, &f.row.id)
+                .await
+                .unwrap();
+        let transcript = serde_json::to_string(&conversation).unwrap();
+        assert!(transcript.contains("legacy updater replacement completed"));
+        assert!(transcript.contains("machine_update_finished"));
+        // Retry/expiry remains durable and offers fixed, actionable guidance.
+        node.machine.as_mut().unwrap().updater =
+            Some(nyxid_machine::update::CompanionStatus::legacy());
+        f.state
+            .db
+            .collection::<Node>(crate::models::node::COLLECTION_NAME)
+            .replace_one(doc! {"_id": &node.id}, &node)
+            .await
+            .unwrap();
+        begin(&f.state, &node, &f.owner, Some(&f.row.id), false)
+            .await
+            .unwrap();
+        f.state.db.collection::<bson::Document>(COLLECTION_NAME)
+            .update_one(doc! {"_id": &node.id}, doc! {"$set": {"deadline": bson::DateTime::from_chrono(chrono::Utc::now() - chrono::Duration::seconds(1))}}).await.unwrap();
+        updates::observe(&f.state.db, &node, None).await.unwrap();
+        assert_eq!(
+            updates::get(&f.state.db, &node)
+                .await
+                .unwrap()
+                .code
+                .as_deref(),
+            Some("update_companion:companion_replacement_timeout")
+        );
+        f.state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn companion_outcomes_reach_status_and_nyxbot_without_hiding_machine_success() {
+        let f = orchestrator_fixture("companion_update_status").await;
+        let mut node = node(&f, &f.owner).await;
+        node.machine.as_mut().unwrap().installation =
+            Some(nyxid_machine::update::Installation::Container);
+        node.machine.as_mut().unwrap().updater = Some(nyxid_machine::update::CompanionStatus {
+            version: "0.41.0".into(),
+            digest: Some(format!("sha256:{}", "a".repeat(64))),
+            target_version: Some(updates::TARGET.into()),
+            phase: "failed".into(),
+            code: Some("update_companion:attestation_invalid".into()),
+        });
+        f.state
+            .db
+            .collection::<Node>(crate::models::node::COLLECTION_NAME)
+            .replace_one(doc! {"_id": &node.id}, &node)
+            .await
+            .unwrap();
+        let mut row = MachineUpdate::new(&node.id, &node.user_id);
+        row.phase = "connected".into();
+        let response = serde_json::to_value(Status::new(&node, row)).unwrap();
+        assert_eq!(response["phase"], "connected");
+        assert_eq!(response["updater"]["version"], "0.41.0");
+        assert_eq!(
+            response["updater"]["code"],
+            "update_companion:attestation_invalid"
+        );
+        assert!(
+            response["updater_guidance"]
+                .as_str()
+                .unwrap()
+                .contains("do not bypass")
+        );
+        let (result, refused) = tool(&f.state, &f.chat, &json!({"machine": node.id}))
+            .await
+            .unwrap();
+        assert!(refused, "Updates still require an owner card");
+        assert_eq!(result["previous_update"]["updater"], response["updater"]);
+        node.machine
+            .as_mut()
+            .unwrap()
+            .updater
+            .as_mut()
+            .unwrap()
+            .code = Some("SECRET".into());
+        assert!(companion_status(&node).is_none());
+    }
+
+    #[tokio::test]
+    async fn signed_fresh_connected_progress_settles_companion_only_retry_without_reconnect() {
+        let f = orchestrator_fixture("companion_only_retry").await;
+        let mut node = node(&f, &f.owner).await;
+        node.metadata = Some(crate::models::node::NodeMetadata {
+            agent_version: Some(updates::TARGET.into()),
+            os: None,
+            arch: None,
+            ip_address: None,
+            provisioning_source: None,
+        });
+        updates::begin(&f.state.db, &node, &f.owner, None, false, false)
+            .await
+            .unwrap();
+        updates::observe(
+            &f.state.db,
+            &node,
+            Some(&nyxid_machine::update::Progress {
+                target: updates::TARGET.into(),
+                phase: nyxid_machine::update::Phase::Connected,
+                started_at_ms: chrono::Utc::now().timestamp_millis() as u64,
+                code: None,
+                updater: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            updates::get(&f.state.db, &node).await.unwrap().phase,
+            "connected"
+        );
+    }
+
+    #[tokio::test]
     async fn updater_failure_codes_reach_status_tool_and_thread_with_guidance() {
         let f = orchestrator_fixture("machine_update_diagnostics").await;
         let node = node(&f, &f.owner).await;
@@ -456,6 +812,7 @@ mod tests {
                 &f.state.db,
                 &node,
                 Some(&nyxid_machine::update::Progress {
+                    updater: None,
                     target: updates::TARGET.into(),
                     phase: nyxid_machine::update::Phase::Failed,
                     started_at_ms: chrono::Utc::now().timestamp_millis() as u64,
@@ -659,14 +1016,30 @@ mod tests {
                     nyxid_machine::update::UPDATER_IMAGE,
                     "ab".repeat(32)
                 ),
-                migration_with_verified_image(),
+                async {
+                    migration_with_verified_image(false).await;
+                    migration_with_verified_image(true).await;
+                },
             )
             .await;
     }
 
-    async fn migration_with_verified_image() {
+    async fn migration_with_verified_image(legacy: bool) {
         let mut f = fixture("machine_update_host").await;
-        let target = node(&f, &f.owner).await;
+        let mut target = node(&f, &f.owner).await;
+        if legacy {
+            target.machine.as_mut().unwrap().installation =
+                Some(nyxid_machine::update::Installation::Container);
+            target.machine.as_mut().unwrap().updater_ready = true;
+            target.machine.as_mut().unwrap().updater =
+                Some(nyxid_machine::update::CompanionStatus::legacy());
+            f.state
+                .db
+                .collection::<Node>(crate::models::node::COLLECTION_NAME)
+                .replace_one(doc! {"_id": &target.id}, &target)
+                .await
+                .unwrap();
+        }
         f.state
             .db
             .collection::<Node>(crate::models::node::COLLECTION_NAME)
@@ -676,12 +1049,25 @@ mod tests {
             )
             .await
             .unwrap();
-        let host = node(&f, &f.owner).await;
+        let mut host = node(&f, &f.owner).await;
+        host.metadata = Some(crate::models::node::NodeMetadata {
+            agent_version: Some("0.41.4".into()),
+            os: None,
+            arch: None,
+            ip_address: None,
+            provisioning_source: None,
+        });
+        f.state
+            .db
+            .collection::<Node>(crate::models::node::COLLECTION_NAME)
+            .replace_one(doc! {"_id": &host.id}, &host)
+            .await
+            .unwrap();
         f.chat.machine_node_ids = vec![target.id.clone(), host.id.clone()];
         let (task, mut seen) = peer(
             &f,
             &host,
-            json!({"docker_access":true,"container_id":"checked-id","accepted":true}),
+            json!({"docker_access":true,"container_id":"checked-id","companion_id":"updater-checked-id","accepted":true}),
         )
         .await;
         assert!(
@@ -714,6 +1100,16 @@ mod tests {
         let migration = seen.recv().await.unwrap();
         assert_eq!(migration.operation, Operation::ContainerMigrate);
         assert_eq!(migration.parameters["container_id"], "checked-id");
+        if legacy {
+            assert_eq!(migration.parameters["replace_companion"], true);
+            assert_eq!(migration.parameters["companion_id"], "updater-checked-id");
+            assert!(
+                updates::get(&f.state.db, &target)
+                    .await
+                    .unwrap()
+                    .replace_companion
+            );
+        }
         assert_eq!(
             migration.parameters["updater_image"],
             TEST_UPDATER_IMAGE.with(Clone::clone)

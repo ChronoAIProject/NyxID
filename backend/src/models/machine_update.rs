@@ -17,6 +17,8 @@ pub struct MachineUpdate {
     pub previous_version: Option<String>,
     pub target_version: Option<String>,
     pub phase: String,
+    #[serde(default)]
+    pub replace_companion: bool,
     pub code: Option<String>,
     pub notify_pending: bool,
     #[serde(default, with = "super::bson_datetime::optional")]
@@ -38,6 +40,7 @@ impl MachineUpdate {
             previous_version: None,
             target_version: None,
             phase: "idle".into(),
+            replace_companion: false,
             code: None,
             notify_pending: false,
             requested_at: None,

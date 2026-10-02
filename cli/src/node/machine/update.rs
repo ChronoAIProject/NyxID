@@ -1,6 +1,6 @@
 //! Supervisor-only mailbox. Only a verified machine command reaches request().
 use anyhow::{Context, Result, bail};
-use nyxid_machine::update::{Connected, Installation, Progress};
+use nyxid_machine::update::{CompanionStatus, Connected, Installation, Progress};
 use std::{
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -64,13 +64,13 @@ fn write(root: &Path, name: &str, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-pub fn progress(root: &Path) -> Option<Progress> {
+fn metadata<T: serde::de::DeserializeOwned>(root: &Path, name: &str) -> Option<T> {
     use std::{io::Read, os::unix::fs::OpenOptionsExt};
     protected(root).ok()?;
     let mut file = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW)
-        .open(root.join("progress.json"))
+        .open(root.join(name))
         .ok()?;
     if !file.metadata().ok()?.is_file() {
         return None;
@@ -81,6 +81,24 @@ pub fn progress(root: &Path) -> Option<Progress> {
         return None;
     }
     serde_json::from_slice(&bytes).ok()
+}
+
+pub fn companion(root: &Path) -> Option<CompanionStatus> {
+    metadata::<CompanionStatus>(root, "updater.json")
+        .filter(|status| status.valid() && status.phase != "legacy")
+}
+
+pub fn reported_companion(root: &Path, installation: Installation) -> Option<CompanionStatus> {
+    if installation != Installation::Container {
+        return None;
+    }
+    companion(root).or_else(|| ready(root).then(CompanionStatus::legacy))
+}
+
+pub fn progress(root: &Path) -> Option<Progress> {
+    let mut progress: Progress = metadata(root, "progress.json")?;
+    progress.updater = companion(root);
+    Some(progress)
 }
 
 pub fn request(root: &Path, target: &str, owner_rollback: bool) -> Result<()> {
@@ -127,6 +145,25 @@ pub fn connected(root: &Path) -> Result<()> {
     .context("Could not report machine reconnection to updater")
 }
 
+fn verified_companion_id(bytes: &[u8], name: &str) -> Result<String> {
+    let fields = serde_json::Deserializer::from_slice(bytes)
+        .into_iter::<String>()
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    if fields.len() != 5
+        || fields[0].is_empty()
+        || fields[1] != format!("/{name}-updater")
+        || !(fields[2].starts_with(&format!("{}:", nyxid_machine::update::UPDATER_IMAGE))
+            || fields[2].starts_with(&format!("{}@sha256:", nyxid_machine::update::UPDATER_IMAGE)))
+        // Early setup commands omitted the label. The exact official image,
+        // container name and dedicated update volume still bind that companion.
+        || (!fields[3].is_empty() && fields[3] != name)
+        || fields[4] != format!("{name}-nyxid-update")
+    {
+        bail!("Updater container ownership verification failed");
+    }
+    Ok(fields[0].clone())
+}
+
 /// Docker access uses the agent command identity, never supervisor privileges.
 pub async fn container_operation(
     identity: &super::process::Identity,
@@ -169,9 +206,26 @@ pub async fn container_operation(
     {
         bail!("Target is not the named official machine container");
     }
+    let replace_companion = parameters["replace_companion"] == true;
+    let companion_id = if replace_companion {
+        let mut inspect = tokio::process::Command::new("docker");
+        identity.prepare_agent(&mut inspect)?;
+        inspect.args([
+            "inspect", "--type=container", "--format",
+            r#"{{json .Id}} {{json .Name}} {{json .Config.Image}} {{json (or (index .Config.Labels "dev.nyxid.machine.updater") "")}} {{range .Mounts}}{{if eq .Destination "/var/lib/nyxid-machine-update"}}{{json .Name}}{{end}}{{end}}"#,
+            &format!("{name}-updater"),
+        ]).kill_on_drop(true);
+        let output = tokio::time::timeout(Duration::from_secs(10), inspect.output()).await??;
+        if !output.status.success() || output.stdout.len() > 4096 {
+            bail!("Updater container inspection failed");
+        }
+        Some(verified_companion_id(&output.stdout, name)?)
+    } else {
+        None
+    };
     if !migrate {
         return Ok(
-            json!({"container_id":fields[0],"name":name,"image":fields[2],"docker_access":true}),
+            json!({"container_id":fields[0],"companion_id":companion_id,"name":name,"image":fields[2],"docker_access":true}),
         );
     }
     if parameters["container_id"].as_str() != Some(fields[0].as_str()) {
@@ -183,8 +237,30 @@ pub async fn container_operation(
     let image = parameters["updater_image"]
         .as_str()
         .context("Verified updater image required")?;
-    let args =
-        nyxid_machine::update::migration_args(name, target, image).map_err(anyhow::Error::msg)?;
+    let args = if replace_companion {
+        nyxid_machine::update::companion_args(name, target, image)
+    } else {
+        nyxid_machine::update::migration_args(name, target, image)
+    }
+    .map_err(anyhow::Error::msg)?;
+    if let Some(id) = companion_id {
+        if parameters["companion_id"].as_str() != Some(&id) {
+            bail!("Updater changed since owner approval; inspect and confirm again");
+        }
+        let mut remove = tokio::process::Command::new("docker");
+        identity.prepare_agent(&mut remove)?;
+        remove
+            .args(["rm", "-f", &id])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        if !tokio::time::timeout(Duration::from_secs(10), remove.status())
+            .await??
+            .success()
+        {
+            bail!("Could not remove the verified legacy updater");
+        }
+    }
     let mut command = tokio::process::Command::new("docker");
     identity.prepare_agent(&mut command)?;
     command
@@ -199,7 +275,7 @@ pub async fn container_operation(
         let _ = tokio::time::timeout(Duration::from_secs(1200), child.wait()).await;
     });
     Ok(
-        json!({"accepted":true,"note":"Verified host migration started; watch the target machine reconnect."}),
+        json!({"accepted":true,"note":if replace_companion {"Verified companion replacement started; watch for its version metadata."} else {"Verified host migration started; watch the target machine reconnect."}}),
     )
 }
 
@@ -207,6 +283,115 @@ pub async fn container_operation(
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn legacy_requires_a_live_container_mailbox_without_valid_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(reported_companion(dir.path(), Installation::Container).is_none());
+        write(dir.path(), "heartbeat", b"").unwrap();
+        assert_eq!(
+            reported_companion(dir.path(), Installation::Container),
+            Some(CompanionStatus::legacy())
+        );
+        assert!(reported_companion(dir.path(), Installation::Native).is_none());
+        write(dir.path(), "updater.json", b"not valid metadata").unwrap();
+        assert_eq!(
+            reported_companion(dir.path(), Installation::Container),
+            Some(CompanionStatus::legacy())
+        );
+        let status = CompanionStatus {
+            version: "0.41.4".into(),
+            phase: "current".into(),
+            ..Default::default()
+        };
+        write(
+            dir.path(),
+            "updater.json",
+            &serde_json::to_vec(&status).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            reported_companion(dir.path(), Installation::Container),
+            Some(status)
+        );
+        std::fs::remove_file(dir.path().join("updater.json")).unwrap();
+        std::fs::remove_file(dir.path().join("heartbeat")).unwrap();
+        assert!(reported_companion(dir.path(), Installation::Container).is_none());
+    }
+
+    #[test]
+    fn companion_inspection_binds_official_image_name_owner_and_volume() {
+        let fields = [
+            "immutable-id",
+            "/work-updater",
+            "ghcr.io/chronoaiproject/nyxid/nyxid-machine-updater:0.41.0",
+            "work",
+            "work-nyxid-update",
+        ];
+        let encode = |values: &[&str]| {
+            values
+                .iter()
+                .map(|v| serde_json::to_string(v).unwrap())
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        assert_eq!(
+            verified_companion_id(encode(&fields).as_bytes(), "work").unwrap(),
+            "immutable-id"
+        );
+        let mut unlabeled = fields;
+        unlabeled[3] = "";
+        assert_eq!(
+            verified_companion_id(encode(&unlabeled).as_bytes(), "work").unwrap(),
+            "immutable-id"
+        );
+        for index in 0..fields.len() {
+            let mut bad = fields;
+            bad[index] = if index == 0 { "" } else { "unrelated" };
+            assert!(verified_companion_id(encode(&bad).as_bytes(), "work").is_err());
+        }
+    }
+
+    #[test]
+    fn companion_metadata_is_live_bounded_and_optional_for_old_updaters() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(companion(dir.path()).is_none());
+        let mut status = CompanionStatus {
+            version: "0.41.0".into(),
+            digest: Some(format!("sha256:{}", "a".repeat(64))),
+            target_version: Some("0.41.3".into()),
+            phase: "pending".into(),
+            code: None,
+        };
+        write(
+            dir.path(),
+            "updater.json",
+            &serde_json::to_vec(&status).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(companion(dir.path()), Some(status.clone()));
+        status.phase = "failed".into();
+        status.code = Some("update_companion:attestation_invalid".into());
+        write(
+            dir.path(),
+            "updater.json",
+            &serde_json::to_vec(&status).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(companion(dir.path()), Some(status.clone()));
+        status.code = Some("SECRET_RESPONSE".into());
+        write(
+            dir.path(),
+            "updater.json",
+            &serde_json::to_vec(&status).unwrap(),
+        )
+        .unwrap();
+        assert!(companion(dir.path()).is_none());
+        write(dir.path(), "updater.json", &[b' '; 4097]).unwrap();
+        assert!(companion(dir.path()).is_none());
+    }
 
     #[test]
     fn request_contains_only_a_version_and_requires_a_private_live_companion() {

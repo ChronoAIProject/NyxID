@@ -172,6 +172,7 @@ pub fn metadata(node: &Node) -> Value {
         "agent_version":super::machine_update_service::current(node),
         "supported_version":super::machine_update_service::TARGET,
         "update_available":super::machine_update_service::update_available(node),
+        "updater":super::machine_update_service::companion_status(node),
         "allow_single_user_saved_logins":node.allow_single_user_saved_logins
     })
 }

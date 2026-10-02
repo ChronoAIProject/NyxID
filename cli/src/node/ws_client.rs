@@ -1138,7 +1138,11 @@ async fn connect_and_serve(
                 if let Some(machine) = &machine {
                     machine.report_connected();
                     let ready = machine.updater_ready();
-                    if caps_msg["capabilities"]["machine"]["updater_ready"] != ready {
+                    let updater = serde_json::json!(machine.updater_status());
+                    if caps_msg["capabilities"]["machine"]["updater_ready"] != ready
+                        || caps_msg["capabilities"]["machine"]["updater"] != updater
+                    {
+                        caps_msg["capabilities"]["machine"]["updater"] = updater;
                         caps_msg["capabilities"]["machine"]["updater_ready"] =
                             serde_json::json!(ready);
                         let _ = send_ws_message(&tx, caps_msg.to_string()).await;
