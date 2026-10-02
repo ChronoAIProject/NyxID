@@ -262,12 +262,23 @@ pub async fn delete(db: &Database, owner: &str, id: &str) -> AppResult<()> {
             Err(error) => return Err(error),
         }
     }
-    db.collection::<GroupMessage>(MESSAGES)
-        .delete_many(doc! {"group_id": id, "user_id": owner})
-        .await?;
+    // Commit the parent deletion and upload cleanup together. Upload admission
+    // writes the same parent, so an in-flight parser cannot leave orphan files.
+    let mut session = db.client().start_session().await?;
+    session.start_transaction().await?;
     db.collection::<AssistantGroup>(GROUPS)
         .delete_one(owner_filter(owner, id)?)
+        .session(&mut session)
         .await?;
+    db.collection::<bson::Document>(crate::models::assistant_attachment::COLLECTION_NAME)
+        .delete_many(doc! {"group_id": id, "user_id": owner})
+        .session(&mut session)
+        .await?;
+    db.collection::<GroupMessage>(MESSAGES)
+        .delete_many(doc! {"group_id": id, "user_id": owner})
+        .session(&mut session)
+        .await?;
+    session.commit_transaction().await?;
     Ok(())
 }
 
@@ -293,6 +304,7 @@ pub async fn append(
         .await?
         .ok_or_else(not_found)?;
     let message = GroupMessage {
+        attachments: Vec::new(),
         id: Uuid::new_v4().to_string(),
         group_id: group_id.into(),
         user_id: owner.into(),
@@ -306,6 +318,61 @@ pub async fn append(
     db.collection::<GroupMessage>(MESSAGES)
         .insert_one(&message)
         .await?;
+    Ok(message)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn append_with_uploads(
+    db: &Database,
+    owner: &str,
+    group_id: &str,
+    role: &str,
+    agent: Option<&AssistantAgent>,
+    text: &str,
+    ids: &[String],
+) -> AppResult<GroupMessage> {
+    if ids.is_empty() {
+        return append(db, owner, group_id, role, agent, text).await;
+    }
+    if role != "user" {
+        return Err(AppError::Forbidden("Only the owner uploads files".into()));
+    }
+    let mut session = db.client().start_session().await?;
+    session.start_transaction().await?;
+    let now = Utc::now();
+    let group = db
+        .collection::<AssistantGroup>(GROUPS)
+        .find_one_and_update(
+            owner_filter(owner, group_id)?,
+            doc! {"$inc": {"message_count": 1},
+            "$set": {"last_message_at": bson::DateTime::from_chrono(now),
+            "updated_at": bson::DateTime::from_chrono(now)}},
+        )
+        .return_document(ReturnDocument::After)
+        .session(&mut session)
+        .await?
+        .ok_or_else(not_found)?;
+    let message_id = Uuid::new_v4().to_string();
+    let attachments =
+        super::assistant_upload_service::bind(db, owner, group_id, &message_id, ids, &mut session)
+            .await?;
+    let message = GroupMessage {
+        attachments,
+        id: message_id,
+        group_id: group_id.into(),
+        user_id: owner.into(),
+        seq: group.message_count,
+        role: role.into(),
+        agent_id: agent.map(|agent| agent.id.clone()),
+        agent_name: agent.map(|agent| agent.name.clone()),
+        text: text.into(),
+        created_at: now,
+    };
+    db.collection::<GroupMessage>(MESSAGES)
+        .insert_one(&message)
+        .session(&mut session)
+        .await?;
+    session.commit_transaction().await?;
     Ok(message)
 }
 

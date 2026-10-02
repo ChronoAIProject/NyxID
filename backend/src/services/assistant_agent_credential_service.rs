@@ -631,6 +631,7 @@ mod tests {
             &state.db,
             owner,
             &engine::TurnRequest {
+                attachment_ids: Vec::new(),
                 agent_id: None,
                 conversation_id: None,
                 text: "hello".into(),

@@ -9,6 +9,8 @@ pub const COLLECTION_NAME: &str = "assistant_attachments";
 pub struct AssistantAttachment {
     #[serde(rename = "_id")]
     pub id: String,
+    #[serde(default = "tool_origin")]
+    pub origin: String,
     pub user_id: String,
     pub conversation_id: String,
     pub turn_id: String,
@@ -28,4 +30,8 @@ impl std::fmt::Debug for AssistantAttachment {
             .field("size", &self.size)
             .finish_non_exhaustive()
     }
+}
+
+fn tool_origin() -> String {
+    "tool".into()
 }

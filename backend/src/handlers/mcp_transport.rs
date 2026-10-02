@@ -1429,6 +1429,7 @@ async fn handle_tools_list(
 
     if auth.chat.as_ref().is_some_and(|chat| !chat.guest) {
         tool_defs.extend(crate::services::machine_tools::definitions());
+        tool_defs.push(crate::services::assistant_upload_service::definition());
     }
 
     let tools_json: Vec<serde_json::Value> = tool_defs
@@ -1667,6 +1668,7 @@ async fn dispatch_tools_call(
                 | "nyx__oracle_pools"
                 | "nyx__oracle_result"
                 | "nyx__oracle_session"
+                | "nyx__attachment_read"
                 | "nyx__machine_list"
                 | "nyx__saved_logins"
                 | "nyx__machine_list_files"
@@ -1707,6 +1709,9 @@ async fn dispatch_tools_call(
     }
     if crate::services::machine_tools::is_tool(tool_name) {
         return handle_machine_tool(state, auth, tool_name, arguments, request.id.clone()).await;
+    }
+    if tool_name == "nyx__attachment_read" {
+        return handle_attachment_read(state, auth, &arguments, request.id.clone()).await;
     }
     // -- Meta-tools --
     match tool_name {
@@ -2504,6 +2509,38 @@ async fn handle_account_tool(
     tool_result(request_id, &result.value.to_string(), result.is_error)
 }
 
+async fn handle_attachment_read(
+    state: &AppState,
+    auth: &McpAuthContext,
+    arguments: &serde_json::Value,
+    id: Option<serde_json::Value>,
+) -> Response {
+    let Some(chat) = auth.chat.as_ref().filter(|c| !c.guest) else {
+        return tool_result(
+            id,
+            "Uploads require this thread's key on an owner turn",
+            true,
+        );
+    };
+    match crate::services::assistant_upload_service::read(
+        &state.db,
+        &state.encryption_keys,
+        chat,
+        arguments,
+    )
+    .await
+    {
+        Ok(value) => tool_result(id, &value.to_string(), value.get("error").is_some()),
+        Err(error) => tool_result(
+            id,
+            &crate::services::assistant_account_tools::error_result(error)
+                .value
+                .to_string(),
+            true,
+        ),
+    }
+}
+
 async fn handle_machine_tool(
     state: &AppState,
     auth: &McpAuthContext,
@@ -2596,6 +2633,9 @@ async fn handle_meta_call_tool(
         return handle_machine_tool(state, auth, tool_name, inner_args, request_id).await;
     }
 
+    if tool_name == "nyx__attachment_read" {
+        return handle_attachment_read(state, auth, &inner_args, request_id).await;
+    }
     if tool_name.starts_with("nyxid__") {
         return Box::pin(handle_account_tool(
             state,
@@ -2848,6 +2888,9 @@ async fn handle_meta_search(
         let matcher = mcp_service::ToolSearch::new(query);
         let mut tools: Vec<_> = crate::services::machine_tools::definitions()
             .into_iter()
+            .chain(std::iter::once(
+                crate::services::assistant_upload_service::definition(),
+            ))
             .filter_map(|tool| {
                 matcher
                     .rank(&tool.name, &tool.description)

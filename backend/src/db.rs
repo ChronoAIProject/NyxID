@@ -118,6 +118,24 @@ pub async fn require_transactions(db: &Database) -> Result<(), mongodb::error::E
 /// Uses `create_index` which is idempotent -- if the index already exists
 /// with the same specification it is a no-op.
 pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
+    for collection in ["assistant_attachments", "assistant_upload_limits"] {
+        db.collection::<Document>(collection)
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! {"expires_at": 1})
+                    .options(IndexOptions::builder().expire_after(Duration::ZERO).build())
+                    .build(),
+            )
+            .await?;
+    }
+    db.collection::<Document>("assistant_attachments")
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"parent_attachment_id": 1, "chunk_index": 1})
+                .options(IndexOptions::builder().unique(true).sparse(true).build())
+                .build(),
+        )
+        .await?;
     crate::services::service_history::relay::ensure_indexes(db).await?;
     crate::services::catalog_skill_service::ensure_indexes(db).await?;
     crate::services::assistant_nyxagent::ensure_indexes(db).await?;

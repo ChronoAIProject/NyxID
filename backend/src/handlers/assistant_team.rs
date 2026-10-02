@@ -159,6 +159,8 @@ pub(crate) async fn team_pool_limit(state: &AppState, owner: &str) -> u32 {
 
 fn event_turn(conversation_id: &str) -> TurnStart {
     TurnStart {
+        attachment_ids: Vec::new(),
+        group_attachments: Vec::new(),
         trigger: None,
         conversation_id: Some(conversation_id.to_owned()),
         text: String::new(),
@@ -647,6 +649,8 @@ pub(crate) async fn assign(
         state,
         owner,
         TurnStart {
+            attachment_ids: Vec::new(),
+            group_attachments: Vec::new(),
             trigger: None,
             conversation_id: Some(home.id),
             text: text.to_owned(),

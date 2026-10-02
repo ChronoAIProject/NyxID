@@ -61,6 +61,9 @@ impl From<crate::models::assistant_conversation::TurnActivity> for ActivityRespo
 }
 #[derive(Serialize)]
 pub struct AttachmentResponse {
+    image_input: Option<String>,
+    origin: String,
+    pages: Option<usize>,
     id: String,
     content_type: String,
     size: i64,
@@ -69,6 +72,9 @@ pub struct AttachmentResponse {
 impl From<crate::models::assistant_conversation::TurnAttachment> for AttachmentResponse {
     fn from(row: crate::models::assistant_conversation::TurnAttachment) -> Self {
         Self {
+            image_input: row.image_input,
+            origin: row.origin,
+            pages: row.pages,
             id: row.id,
             content_type: row.content_type,
             size: row.size,
@@ -822,6 +828,9 @@ pub async fn turns(
     let bytes =
         super::body_limit::read_body(body, engine::MAX_REQUEST_BYTES, "Assistant turn").await?;
     let input = engine::parse_turn(&bytes)?;
+    if !input.attachment_ids.is_empty() {
+        super::login_client_context::require_first_party_human(&auth)?;
+    }
     // Ownership is checked before provisioning or touching a credential.
     if let Some(id) = &input.conversation_id {
         engine::get(&state.db, &user_id, id).await?;
@@ -1261,6 +1270,112 @@ async fn execute_turn(
     } else {
         engine::base_prompt(row, agent.as_ref())
     } + &decisions;
+    let attachments = crate::services::assistant_upload_service::turn_attachments(
+        &state.db,
+        &row.user_id,
+        &row.id,
+        turn_id,
+    )
+    .await
+    .map_err(|_| TurnError::new("assistant_unavailable"))?;
+    let mut listing = crate::services::assistant_upload_service::listing(&attachments);
+    let capabilities = if attachments
+        .iter()
+        .any(|a| a.origin == "user_upload" && a.content_type.starts_with("image/"))
+    {
+        let lookup = async {
+            let response = proxy(
+                state,
+                auth,
+                credential,
+                "GET",
+                "v1/capabilities",
+                None,
+                None,
+                policy,
+            )
+            .await
+            .ok()?;
+            if !response.status().is_success() {
+                return None;
+            }
+            let bytes = axum::body::to_bytes(response.into_body(), 16384)
+                .await
+                .ok()?;
+            serde_json::from_slice::<Value>(&bytes).ok()
+        };
+        tokio::time::timeout(Duration::from_secs(5), lookup)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(Value::Null)
+    } else {
+        Value::Null
+    };
+    let (image_parts, omitted) = crate::services::assistant_upload_service::image_plan(
+        &attachments,
+        &capabilities,
+        &state.config.base_url,
+    );
+    if !omitted.is_empty() {
+        let notice = crate::services::assistant_upload_service::IMAGE_FALLBACK;
+        listing.push_str(&format!(
+            "\n{notice} Unviewable attachment IDs: {}",
+            json!(omitted)
+        ));
+    }
+    prompt.push_str(&listing);
+    // Persist the delivery outcome on metadata, so a reload does not hide the fallback.
+    for item in attachments
+        .iter()
+        .filter(|a| a.origin == "user_upload" && a.content_type.starts_with("image/"))
+    {
+        let status = if omitted.contains(&item.id) {
+            "unavailable"
+        } else {
+            "sent"
+        };
+        state
+            .db
+            .collection::<mongodb::bson::Document>(
+                crate::models::assistant_message::COLLECTION_NAME,
+            )
+            .update_one(
+                doc! {
+                    "user_id": &row.user_id,
+                    "conversation_id": &row.id,
+                    "turn_id": turn_id,
+                    "attachments.id": &item.id,
+                },
+                doc! {"$set": {"attachments.$.image_input": status}},
+            )
+            .await
+            .map_err(|_| TurnError::new("assistant_unavailable"))?;
+        if let Some(group_id) = &row.group_id {
+            state
+                .db
+                .collection::<mongodb::bson::Document>(
+                    crate::models::assistant_group::MESSAGES_COLLECTION_NAME,
+                )
+                .update_one(
+                    doc! {"user_id": &row.user_id,"group_id": group_id,"attachments.id": &item.id},
+                    doc! {"$set": {"attachments.$.image_input":status}},
+                )
+                .await
+                .map_err(|_| TurnError::new("assistant_unavailable"))?;
+        }
+    }
+    // The notice prompts a transcript refresh; publish only after the fallback
+    // metadata is durable, so that refresh cannot miss the explanation.
+    if !omitted.is_empty() {
+        events.emit(
+            "turn.notice",
+            json!({
+                "code": "image_input_unavailable",
+                "message": crate::services::assistant_upload_service::IMAGE_FALLBACK,
+            }),
+        );
+    }
     let settings = crate::services::assistant_settings_service::get(&state.db, &row.user_id)
         .await
         .map_err(|_| TurnError::new("assistant_unavailable"))?;
@@ -1268,7 +1383,11 @@ async fn execute_turn(
         settings.max_auto_continuations,
     );
     let mut completed = String::new();
-    let mut input = text;
+    let mut input = if text.trim().is_empty() {
+        "Please discuss the attachments in this message."
+    } else {
+        text
+    };
     let mut recovery = engine::Recovery::default();
     loop {
         let request_key = if continuations.count == 0 {
@@ -1285,12 +1404,16 @@ async fn execute_turn(
                 credential,
                 "POST",
                 "v1/responses",
-                Some(engine::upstream_body(
-                    &row.model,
-                    input,
-                    binding.as_deref(),
-                    &prompt,
-                )),
+                Some({
+                    let mut body =
+                        engine::upstream_body(&row.model, input, binding.as_deref(), &prompt);
+                    if continuations.count == 0 && !image_parts.is_empty() {
+                        let mut content = vec![json!({"type":"input_text", "text":input})];
+                        content.extend(image_parts.clone());
+                        body["input"] = json!([{"role":"user", "content":content}]);
+                    }
+                    body
+                }),
                 Some(&request_key),
                 policy,
             ),
@@ -1359,7 +1482,8 @@ async fn execute_turn(
                     .await
                     .map_err(|_| TurnError::new("assistant_unavailable"))?;
                     binding = None;
-                    prompt = engine::instructions(row, agent.as_ref(), &history) + &decisions;
+                    prompt =
+                        engine::instructions(row, agent.as_ref(), &history) + &decisions + &listing;
                     events.notice();
                 }
                 RecoveryAction::ReplaceCredential => {
@@ -1373,7 +1497,8 @@ async fn execute_turn(
                     .await
                     .map_err(|_| TurnError::new("agent_key_required"))?;
                     binding = None;
-                    prompt = engine::instructions(row, agent.as_ref(), &history) + &decisions;
+                    prompt =
+                        engine::instructions(row, agent.as_ref(), &history) + &decisions + &listing;
                     events.notice();
                 }
                 RecoveryAction::Backoff => {

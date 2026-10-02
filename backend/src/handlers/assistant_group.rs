@@ -59,6 +59,7 @@ pub struct GroupAgentRef {
 
 #[derive(Serialize)]
 pub struct GroupMessageResponse {
+    attachments: Vec<super::assistant_nyxagent::AttachmentResponse>,
     id: String,
     seq: i64,
     role: String,
@@ -81,6 +82,7 @@ fn message_response(row: GroupMessage, agents: &[AssistantAgent]) -> GroupMessag
         }
     });
     GroupMessageResponse {
+        attachments: row.attachments.into_iter().map(Into::into).collect(),
         id: row.id,
         seq: row.seq,
         role: row.role,
@@ -214,6 +216,11 @@ async fn run_member(
         return Ok(());
     }
     let start = TurnStart {
+        attachment_ids: Vec::new(),
+        group_attachments: crate::services::assistant_upload_service::group_attachments(
+            &state.db, owner, &group.id, since,
+        )
+        .await?,
         trigger: None,
         conversation_id: thread.as_ref().map(|row| row.id.clone()),
         text: engine::excerpt(
@@ -360,8 +367,19 @@ pub(crate) async fn post(
     text: &str,
     author: Option<&AssistantAgent>,
 ) -> AppResult<(GroupMessage, Vec<String>)> {
+    post_with_uploads(state, owner, group_id, text, author, &[]).await
+}
+
+async fn post_with_uploads(
+    state: &AppState,
+    owner: &str,
+    group_id: &str,
+    text: &str,
+    author: Option<&AssistantAgent>,
+    ids: &[String],
+) -> AppResult<(GroupMessage, Vec<String>)> {
     let text = text.trim();
-    if text.is_empty() || text.chars().count() > MAX_MESSAGE_CHARS {
+    if (text.is_empty() && ids.is_empty()) || text.chars().count() > MAX_MESSAGE_CHARS {
         return Err(AppError::ValidationError(format!(
             "A message has 1 to {MAX_MESSAGE_CHARS} characters"
         )));
@@ -391,13 +409,14 @@ pub(crate) async fn post(
     {
         addressed.push(group.lead_agent_id.clone());
     }
-    let message = groups::append(
+    let message = groups::append_with_uploads(
         &state.db,
         owner,
         group_id,
         if author.is_some() { "agent" } else { "user" },
         author,
         text,
+        ids,
     )
     .await?;
     // A new request (the owner's, or NyxBot's from outside the group; it
@@ -666,6 +685,8 @@ pub async fn list_messages(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PostMessageRequest {
+    #[serde(default)]
+    attachment_ids: Vec<String>,
     text: String,
 }
 
@@ -677,7 +698,11 @@ pub async fn post_message(
 ) -> AppResult<(StatusCode, Json<Value>)> {
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
-    let (message, addressed) = post(&state, &owner, &id, &body.text, None).await?;
+    if !body.attachment_ids.is_empty() {
+        super::login_client_context::require_first_party_human(&auth)?;
+    }
+    let (message, addressed) =
+        post_with_uploads(&state, &owner, &id, &body.text, None, &body.attachment_ids).await?;
     let agents = team::agents(&state.db, &owner, true).await?;
     Ok((
         StatusCode::ACCEPTED,

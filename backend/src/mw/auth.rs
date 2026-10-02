@@ -524,6 +524,7 @@ fn delegated_read_denied_path(path: &str) -> bool {
                 | "ownership"
                 | "ssh"
                 | "assistant"
+                | "assistant-attachments"
                 | "auth"
                 | "devices"
                 | "cli-pairings"

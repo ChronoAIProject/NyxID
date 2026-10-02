@@ -11,7 +11,8 @@ import { toast } from "sonner";
 import { AssistantShell } from "@/components/assistant/assistant-shell";
 import { AssistantLinkModalHost } from "@/components/assistant/assistant-link-modals";
 import { AssistantEngineSidebar } from "@/components/assistant/assistant-engine-sidebar";
-import { ChatComposer } from "@/components/assistant/chat-composer";
+import { UploadComposer } from "@/components/assistant/upload-composer";
+import { ToolImage } from "@/components/assistant/blocks/tool-image";
 import { TextBlock } from "@/components/assistant/blocks/text-block";
 import { AgentAvatar } from "@/components/assistant/nyxbot-agent-avatar";
 import { AgentDetailsSheet } from "@/components/assistant/nyxbot-agent-details";
@@ -72,10 +73,12 @@ function UserText({ text, names }: { readonly text: string; readonly names: read
 }
 
 function GroupMessageRow({
+  groupId,
   message,
   names,
   onOpenAgent,
 }: {
+  readonly groupId: string;
   readonly message: AssistantGroupMessage;
   readonly names: readonly string[];
   readonly onOpenAgent: (agentId: string) => void;
@@ -92,6 +95,18 @@ function GroupMessageRow({
       <div className="ml-[30px] flex justify-end">
         <div className="max-w-[78%] whitespace-pre-wrap break-words rounded-lg bg-overlay-strong px-3 py-2 text-[12px] leading-relaxed text-foreground">
           <UserText text={message.text} names={names} />
+          {message.attachments?.map((item) => (
+            <ToolImage
+              key={item.id}
+              image={{
+                id: item.id,
+                label: item.label,
+                contentType: item.content_type,
+                imageInput: item.image_input ?? undefined,
+                endpoint: `/assistant/nyxagent/groups/${groupId}/attachments/${item.id}`,
+              }}
+            />
+          ))}
         </div>
       </div>
     );
@@ -218,6 +233,7 @@ function GroupTranscript({
           <GroupMessageRow
             key={message.id}
             message={message}
+            groupId={group.id}
             names={names}
             onOpenAgent={onOpenAgent}
           />
@@ -517,7 +533,9 @@ export function NyxAgentGroupPage({
               }
             }}
           />
-          <ChatComposer
+          <UploadComposer
+            key={`${user?.id}:${groupId}`}
+            scope={{ kind: "groups", id: groupId }}
             active={false}
             sending={transcript.post.isPending}
             // Read-only once every member is gone (destroyed or removed).
@@ -526,9 +544,11 @@ export function NyxAgentGroupPage({
             draftKey={`group:${groupId}`}
             placeholder={GROUP_COMPOSER_PLACEHOLDER}
             mentions={mentions}
-            onSend={async (text) => {
+            onSend={async (text, uploads) => {
               try {
-                await transcript.post.mutateAsync(text);
+                await transcript.post.mutateAsync(
+                  uploads ? { text, attachmentIds: uploads.attachmentIds } : text,
+                );
               } catch (error) {
                 toast.error(
                   error instanceof Error ? error.message : "The message was not delivered.",

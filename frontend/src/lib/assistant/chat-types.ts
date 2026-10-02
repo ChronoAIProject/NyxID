@@ -43,6 +43,7 @@ export interface ChatMessage {
 }
 
 export interface ChatImage {
+  readonly imageInput?: "sent" | "unavailable";
   readonly id: string;
   /** Assistant API endpoint, relative to the API root. */
   readonly endpoint: string;

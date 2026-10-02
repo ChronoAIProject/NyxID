@@ -2917,6 +2917,8 @@ async fn start_chat_turn(
         Some(looked_up.unwrap_or_else(|| format!("{} group", platform_name(&row.platform))))
     };
     let start = TurnStart {
+        attachment_ids: Vec::new(),
+        group_attachments: Vec::new(),
         trigger: None,
         conversation_id: exists.then(|| conversation_id.clone()),
         new_id: (!exists).then(|| conversation_id.clone()),

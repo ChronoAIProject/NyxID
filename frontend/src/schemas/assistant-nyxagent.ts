@@ -15,11 +15,17 @@ export const nyxAgentTurnActivitySchema = z.object({
 });
 export type NyxAgentTurnActivity = z.infer<typeof nyxAgentTurnActivitySchema>;
 
-/// An image a tool returned during a turn, fetched from the owner-only
-/// attachment route.
+/// A tool image or human upload, fetched from the owner-only attachment route.
 export const nyxAgentAttachmentSchema = z.object({
   id: z.string(),
-  content_type: z.enum(["image/png", "image/jpeg", "image/gif", "image/webp"]),
+  content_type: z.enum([
+    "image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "text/plain", "text/markdown", "text/csv", "application/json",
+  ]),
+  origin: z.enum(["tool", "user_upload", ""]).optional(),
+  pages: z.number().int().nonnegative().nullable().optional(),
+  image_input: z.enum(["sent", "unavailable"]).nullable().optional(),
   size: z.number().int().nonnegative(),
   label: z.string(),
 });
@@ -181,7 +187,7 @@ export const nyxAgentEventSchema = z.discriminatedUnion("event", [
   base.extend({ event: z.literal("turn.continuing"), turn_id: z.string(), continuation: z.number().int().positive() }),
   base.extend({
     event: z.literal("turn.notice"),
-    code: z.literal("context_reset"),
+    code: z.enum(["context_reset", "image_input_unavailable"]),
     message: z.string(),
   }),
   base.extend({
@@ -601,6 +607,7 @@ export type AssistantGroup = z.infer<typeof assistantGroupSchema>;
 export const assistantGroupListSchema = z.object({ groups: z.array(assistantGroupSchema) });
 
 export const assistantGroupMessageSchema = z.object({
+  attachments: z.array(nyxAgentAttachmentSchema).optional(),
   id: z.string(),
   seq: z.number().int().positive(),
   /** `notice` is a NyxID-authored system line (members joined, renamed, ...). */

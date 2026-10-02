@@ -79,3 +79,5 @@ against Aevatar commit `e7ba2e6eb`. Its primary anchors are the console's chat p
 event accumulator, actor-state reducer, history decoders, and the typed actor's
 `NyxIdChatSseWriter`, `NyxIdChatProjectionSession`, and
 `NyxIdChatCompletionAguiFrameBuilder`.
+
+- [10 — Assistant uploads](10-uploads.md): owner document/image uploads, extraction, thread scope, image protocol compatibility and retention.

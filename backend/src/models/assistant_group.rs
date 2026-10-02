@@ -47,6 +47,8 @@ pub struct AssistantGroup {
 /// One message in a group transcript.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GroupMessage {
+    #[serde(default)]
+    pub attachments: Vec<super::assistant_conversation::TurnAttachment>,
     #[serde(rename = "_id")]
     pub id: String,
     pub group_id: String,
