@@ -41,8 +41,11 @@ jobs:
   ci-gate:
     name: CI Gate
     uses: ./.github/workflows/ci.yml
+    # Must cover every scope a ci.yml job requests, or this workflow fails to
+    # start (checked on PRs by scripts/check-reusable-workflow-permissions.py).
     permissions:
       contents: read
+      attestations: read
     with:
       # The publish gate is a release validation, not a PR check, so path
       # filtering must not skip anything. Force the full suite to run

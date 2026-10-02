@@ -201,6 +201,27 @@ jobs:
               - '.github/scripts/**'
 
   # ---------------------------------------------------------------------------
+  # Reusable workflow permissions: a ci.yml job requesting a scope that the
+  # Publish Images `ci-gate` call does not grant passes on PRs but makes Publish
+  # Images fail to start on main and tags. Cheap enough to run every time.
+  # ---------------------------------------------------------------------------
+  workflow-permissions:
+    name: Workflow Permissions
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install PyYAML
+        run: pip install pyyaml==6.0.2
+      - name: Check reusable workflow permissions against their callers
+        run: python3 scripts/check-reusable-workflow-permissions.py
+
+  # ---------------------------------------------------------------------------
   # Cursor plugin: manifest, component, MCP variable, and marketplace checks.
   # ---------------------------------------------------------------------------
   cursor-plugin-validate:
@@ -1110,6 +1131,7 @@ jobs:
     if: always()
     needs:
       - changes
+      - workflow-permissions
       - cursor-plugin-validate
       - oracle-worker-test
       - rust-fmt
@@ -1137,6 +1159,7 @@ jobs:
           # coverage drops below the enforced threshold.
           RESULTS: |
             changes=${{ needs.changes.result }}
+            workflow-permissions=${{ needs.workflow-permissions.result }}
             cursor-plugin-validate=${{ needs.cursor-plugin-validate.result }}
             oracle-worker-test=${{ needs.oracle-worker-test.result }}
             rust-fmt=${{ needs.rust-fmt.result }}
