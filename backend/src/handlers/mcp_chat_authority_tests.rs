@@ -2868,3 +2868,261 @@ async fn specialist_machine_update_dispatch_preserves_one_owner_card() {
         f.state.db.drop().await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn assistant_skills_card_is_one_use_and_cannot_be_bypassed() {
+    use crate::models::catalog_skill_revision::SkillReference;
+    use sha2::{Digest, Sha256};
+    use std::io::{Cursor, Write};
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path, query_param},
+    };
+    let f = fixture("assistant_skills_cards").await;
+    let upstream = MockServer::start().await;
+    let mut catalog = crate::test_utils::test_auto_connected_catalog_service();
+    catalog.slug = "ornn-api".into();
+    catalog.base_url = upstream.uri();
+    catalog.identity_propagation_mode = "jwt".into();
+    f.state
+        .db
+        .collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .insert_one(&catalog)
+        .await
+        .unwrap();
+    let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    zip.start_file("SKILL.md", zip::write::SimpleFileOptions::default())
+        .unwrap();
+    zip.write_all(b"Pinned guidance only").unwrap();
+    let bytes = zip.finish().unwrap().into_inner();
+    let id = uuid::Uuid::new_v4().to_string();
+    let pin = SkillReference {
+        source: "ornn".into(),
+        skill_id: id.clone(),
+        name: "card-skill".into(),
+        version: "1.0".into(),
+        sha256: hex::encode(Sha256::digest(&bytes)),
+        dependencies: vec![],
+    };
+    Mock::given(method("GET")).and(path(format!("/api/v1/skills/{id}"))).and(query_param("version","1.0"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":{"guid":id,"name":pin.name,"version":"1.0","description":"Bounded guidance","skillHash":pin.sha256}}))).mount(&upstream).await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/v1/skills/{id}/closure")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":{"items":[]}})))
+        .mount(&upstream)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/v1/skills/{id}/versions/1.0/download")))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes))
+        .mount(&upstream)
+        .await;
+    crate::services::assistant_settings_service::update(
+        &f.state.db,
+        &f.owner,
+        crate::services::assistant_settings_service::Update {
+            skip_destructive_confirmation: Some(true),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let auth = authenticate_id(&f, &f.nyxbot_thread).await;
+    let args = json!({"agent":f.chat.agent_id,"selection":{"expected_revision":0,"skills":[pin]}});
+    let card = result(
+        call(&f, &auth, "nyxid__set_agent_skills", args.clone()).await,
+        true,
+    )
+    .await;
+    assert_eq!(card["kind"], "action");
+    assert_eq!(card["decider"], "user");
+    let ack = card["acknowledgement_id"].as_str().unwrap();
+    acks::decide(&f.state.db, &f.owner, &f.nyxbot_thread, ack, true)
+        .await
+        .unwrap();
+    let mut confirmed = args.clone();
+    confirmed["acknowledgement_id"] = json!(ack);
+    let mut tampered = confirmed.clone();
+    tampered["selection"]["skills"][0]["version"] = json!("2.0");
+    let invalid = result(
+        direct_call(&f, &auth, "nyxid__set_agent_skills", tampered).await,
+        true,
+    )
+    .await;
+    assert_eq!(invalid["error"], "acknowledgement_invalid");
+    let applied = result(
+        call(&f, &auth, "nyxid__set_agent_skills", confirmed.clone()).await,
+        false,
+    )
+    .await;
+    assert_eq!(applied["revision"], 1);
+    let replay = result(
+        call(&f, &auth, "nyxid__set_agent_skills", confirmed).await,
+        true,
+    )
+    .await;
+    assert!(replay.get("error").is_some());
+    let specialist = authenticate(&f).await;
+    let read = result(
+        call(&f, &specialist, "nyxid__skill_read", json!({"skill":id})).await,
+        false,
+    )
+    .await;
+    assert_eq!(read["content"], "Pinned guidance only");
+    let other = result(
+        direct_call(&f, &auth, "nyxid__skill_read", json!({"skill":id})).await,
+        true,
+    )
+    .await;
+    assert!(other.get("error").is_some());
+    let own = result(
+        call(
+            &f,
+            &specialist,
+            "nyxid__set_agent_skills",
+            json!({"agent":f.chat.agent_id,"selection":{"expected_revision":1,"skills":[]}}),
+        )
+        .await,
+        true,
+    )
+    .await;
+    assert!(own.get("error").is_some());
+    let mut guest = authenticate(&f).await;
+    guest.chat.as_mut().unwrap().guest = true;
+    let refusal = result(
+        direct_call(&f, &guest, "nyxid__skill_read", json!({"skill":id})).await,
+        true,
+    )
+    .await;
+    assert!(refusal.get("error").is_some());
+    let mut scopes = std::collections::BTreeMap::from([(
+        catalog.id.clone(),
+        crate::models::agent_operation_scope::AgentOperationScope {
+            revision: 1,
+            catalog_service_id: Some(catalog.id.clone()),
+            operations: vec![crate::models::agent_operation_scope::ScopedOperation {
+                rule: crate::models::downstream_service::ProxyOperationRule {
+                    method: "GET".into(),
+                    path_template: format!("/api/v1/skills/{id}/versions/1.0/download"),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+        },
+    )]);
+    f.state
+        .db
+        .collection::<mongodb::bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &f.chat.agent_id},
+            doc! {"$set": {"operation_scopes": mongodb::bson::to_bson(&scopes).unwrap()}},
+        )
+        .await
+        .unwrap();
+    let allowed = result(
+        call(&f, &specialist, "nyxid__skill_read", json!({"skill": id})).await,
+        false,
+    )
+    .await;
+    assert_eq!(allowed["content"], "Pinned guidance only");
+    let before_scope = upstream.received_requests().await.unwrap().len();
+    scopes.get_mut(&catalog.id).unwrap().operations.clear();
+    f.state
+        .db
+        .collection::<mongodb::bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &f.chat.agent_id},
+            doc! {"$set": {"operation_scopes": mongodb::bson::to_bson(&scopes).unwrap()}},
+        )
+        .await
+        .unwrap();
+    let scoped = result(
+        call(&f, &specialist, "nyxid__skill_read", json!({"skill": id})).await,
+        true,
+    )
+    .await;
+    assert!(scoped.get("error").is_some());
+    assert_eq!(
+        upstream.received_requests().await.unwrap().len(),
+        before_scope
+    );
+    // Removing needs neither an owner card nor an available Ornn.
+    upstream.reset().await;
+    let removed = result(
+        call(
+            &f,
+            &auth,
+            "nyxid__set_agent_skills",
+            json!({"agent":f.chat.agent_id,"selection":{"expected_revision":1,"skills":[]}}),
+        )
+        .await,
+        false,
+    )
+    .await;
+    assert_eq!(removed["revision"], 2);
+    assert_eq!(removed["skills"], json!([]));
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn assistant_skills_specialist_permission_is_advisory_and_agent_scoped() {
+    let f = fixture("assistant_skill_request").await;
+    let specialist = authenticate(&f).await;
+    let args = json!({"agent":f.chat.agent_id,"selection":{"expected_revision":0,"skills":[]}});
+    let request = result(
+        call(&f, &specialist, "nyxid__request_agent_skills", args).await,
+        true,
+    )
+    .await;
+    assert_eq!(request["decider"], "orchestrator");
+    let ack = request["acknowledgement_id"].as_str().unwrap();
+    acks::decide_as(
+        &f.state.db,
+        &f.owner,
+        None,
+        ack,
+        true,
+        acks::Decider::Nyxbot,
+        None,
+    )
+    .await
+    .unwrap();
+    let agent =
+        crate::services::assistant_team_service::agent(&f.state.db, &f.owner, &f.chat.agent_id)
+            .await
+            .unwrap();
+    assert!(agent.skills.is_empty());
+    assert_eq!(agent.skills_revision, 0);
+    let by_name = result(
+        call(
+            &f,
+            &specialist,
+            "nyxid__request_agent_skills",
+            json!({"agent": f.chat.agent_id, "skill": "research-guide", "version": "1.0"}),
+        )
+        .await,
+        true,
+    )
+    .await;
+    assert_eq!(by_name["decider"], "orchestrator");
+    assert!(
+        by_name["summary"]
+            .as_str()
+            .unwrap()
+            .contains("research-guide")
+    );
+    let denied = result(
+        call(
+            &f,
+            &specialist,
+            "nyxid__get_agent_skills",
+            json!({"agent":"nyxbot"}),
+        )
+        .await,
+        true,
+    )
+    .await;
+    assert!(denied.get("error").is_some());
+    f.state.db.drop().await.unwrap();
+}

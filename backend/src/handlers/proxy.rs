@@ -990,7 +990,7 @@ pub async fn proxy_request(
     result
 }
 
-async fn proxy_request_inner(
+pub(crate) async fn proxy_request_inner(
     state: &AppState,
     auth_user: &AuthUser,
     service_id: &str,
@@ -1044,7 +1044,7 @@ async fn proxy_request_inner(
             )
             .await?;
             let slug = target.service.slug.clone();
-            return execute_proxy_inner(
+            return Box::pin(execute_proxy_inner(
                 state,
                 auth_user,
                 service_id,
@@ -1066,7 +1066,7 @@ async fn proxy_request_inner(
                 TargetMode::CallerAddressed,
                 Vec::new(),
                 resolved_slug,
-            )
+            ))
             .await;
         }
     }
@@ -1074,7 +1074,7 @@ async fn proxy_request_inner(
     let user_id_str = auth_user.proxy_resolution_user_id();
     let via_service = extract_via_service(&request);
 
-    preflight_proxy_deny_before_resolution(
+    Box::pin(preflight_proxy_deny_before_resolution(
         state,
         auth_user,
         via_service.as_deref(),
@@ -1082,7 +1082,7 @@ async fn proxy_request_inner(
         Some(service_id),
         path,
         request.method().as_str(),
-    )
+    ))
     .await?;
 
     // Direct resolution by UserService ID if ?_nyxid_via= is present.
@@ -2317,7 +2317,7 @@ async fn proxy_request_by_selected_member(
     us_id: &str,
 ) -> AppResult<Response> {
     let user_id_str = auth_user.proxy_resolution_user_id();
-    preflight_proxy_deny_before_resolution(
+    Box::pin(preflight_proxy_deny_before_resolution(
         state,
         auth_user,
         Some(us_id),
@@ -2325,7 +2325,7 @@ async fn proxy_request_by_selected_member(
         None,
         path,
         request.method().as_str(),
-    )
+    ))
     .await?;
     let exact = request.extensions().get::<PoolExactMember>().cloned();
     let resolved = if exact.is_some() {
@@ -2597,7 +2597,7 @@ pub(crate) async fn proxy_request_by_slug_inner(
         .await;
     }
 
-    preflight_proxy_deny_before_resolution(
+    Box::pin(preflight_proxy_deny_before_resolution(
         state,
         auth_user,
         via_service.as_deref(),
@@ -2605,7 +2605,7 @@ pub(crate) async fn proxy_request_by_slug_inner(
         None,
         path,
         request.method().as_str(),
-    )
+    ))
     .await?;
 
     // Direct resolution by UserService ID if ?_nyxid_via= is present.
@@ -3063,21 +3063,23 @@ async fn preflight_proxy_deny_before_resolution(
 ) -> AppResult<()> {
     let approval_owner_user_id = auth_user.effective_approval_owner_user_id();
     let hint = if let Some(user_service_id) = via_service {
-        proxy_service::find_approval_resolution_hint_by_user_service_id(
-            &state.db,
-            &approval_owner_user_id,
-            user_service_id,
-            slug,
-            catalog_service_id,
+        Box::pin(
+            proxy_service::find_approval_resolution_hint_by_user_service_id(
+                &state.db,
+                &approval_owner_user_id,
+                user_service_id,
+                slug,
+                catalog_service_id,
+            ),
         )
         .await?
     } else {
-        proxy_service::find_approval_resolution_hint(
+        Box::pin(proxy_service::find_approval_resolution_hint(
             &state.db,
             &approval_owner_user_id,
             slug,
             catalog_service_id,
-        )
+        ))
         .await?
     };
 
@@ -3254,9 +3256,13 @@ async fn execute_proxy_inner(
         .unwrap_or_else(std::time::Instant::now);
     let downstream_cancellation = request_cancellation(&request);
     let billing_egress_permit = enforce_proxy_billing_classification(&request)?;
-    let require_identity_assertion = pre_resolved
-        .as_ref()
-        .is_some_and(|target| target.require_identity_assertion);
+    let require_identity_assertion = request
+        .extensions()
+        .get::<super::agent_skills::OrnnSkillRead>()
+        .is_some()
+        || pre_resolved
+            .as_ref()
+            .is_some_and(|target| target.require_identity_assertion);
 
     let user_id_str = auth_user.user_id.to_string();
 
@@ -3668,6 +3674,23 @@ async fn execute_proxy_inner(
             master_credential,
             git,
         )?;
+    }
+
+    // Dedicated skill reads must retain the person's signed Ornn identity and
+    // must never dispatch with a shared catalog credential, even after fallback.
+    if request
+        .extensions()
+        .get::<super::agent_skills::OrnnSkillRead>()
+        .is_some()
+        && (master_credential
+            || proxy_service::uses_server_held_master(&target)
+            || catalog_service_slug.as_deref() != Some("ornn-api")
+            || !matches!(
+                target.service.identity_propagation_mode.as_str(),
+                "jwt" | "both"
+            ))
+    {
+        return Err(AppError::Forbidden("Ornn skills require your own signed identity; shared master credentials are not supported".into()));
     }
 
     // Record the resolved service slug so the outer wrapper can attach it

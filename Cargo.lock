@@ -4255,6 +4255,7 @@ dependencies = [
  "validator",
  "wiremock",
  "zeroize",
+ "zip 3.0.0",
 ]
 
 [[package]]

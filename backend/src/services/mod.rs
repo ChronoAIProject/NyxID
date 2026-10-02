@@ -245,3 +245,5 @@ pub mod service_pool_routing;
 
 #[cfg(test)]
 mod agent_operation_scope_tests;
+
+pub mod agent_skill_service;

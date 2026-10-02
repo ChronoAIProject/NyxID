@@ -377,6 +377,10 @@ pub(crate) async fn permission_requested(
             "service {}",
             identifier(request.service_slug.as_deref().unwrap_or_default())
         ),
+        "skills" => format!(
+            "skill proposal: {}. Approval is advisory; use nyxid__set_agent_skills afterward with the exact proposal, which requires the owner's card for additions",
+            request.summary
+        ),
         "operations" => format!(
             "operation scope for service {}",
             identifier(request.service_id.as_deref().unwrap_or_default())
@@ -429,6 +433,7 @@ pub(crate) async fn permission_decided(
             identifier(request.service_slug.as_deref().unwrap_or_default())
         ),
         "operations" => "operation scope".into(),
+        "skills" => "skill proposal (NyxBot must still attach it with an owner action card)".into(),
         _ => "read-only account access".into(),
     };
     let by = match request.decided_by.as_deref() {
@@ -670,7 +675,7 @@ pub(crate) async fn assign(
 }
 
 /// Resolve `nyxbot` or a live specialist name/ID to an agent.
-async fn target_agent(
+pub(crate) async fn target_agent(
     state: &AppState,
     owner: &str,
     name: Option<&str>,
@@ -718,7 +723,7 @@ pub(crate) async fn execute_tool(
         // strict as either webhook policy; do not consume a second digest.
         if !matches!(
             name,
-            "set_agent_operations" | "decide_permission" | "machine_update"
+            "set_agent_operations" | "set_agent_skills" | "decide_permission" | "machine_update"
         ) && let Some(refusal) = acks::webhook_action_gate(
             &state.db,
             chat,
@@ -732,6 +737,26 @@ pub(crate) async fn execute_tool(
             return Ok((refusal, true));
         }
         engine::require_enabled(&state.db, &chat.user_id).await?;
+        // Skill reads and cards have their own dispatcher. Enter it here so
+        // nested MCP calls do not retain the large team dispatch stack frame
+        // while polling Ornn/proxy or acknowledgement transactions.
+        if matches!(
+            name,
+            "get_agent_skills"
+                | "set_agent_skills"
+                | "request_agent_skills"
+                | "search_agent_skills"
+                | "agent_skill_versions"
+                | "preview_agent_skill"
+                | "skill_read"
+        ) {
+            return Box::pin(super::agent_skills::dispatch(state, chat, name, args)).await;
+        }
+        // The machine update card has the same nested transaction stack; it
+        // also keeps the common authority gates and audit wrapper above/below.
+        if name == "machine_update" {
+            return Box::pin(super::machine_update::tool(state, chat, args)).await;
+        }
         // The dispatcher includes large provisioning and scope-edit futures. Keep them
         // off the caller's stack, including tests and ordinary specialist turns.
         Box::pin(dispatch(state, chat, name, args)).await
@@ -1236,7 +1261,8 @@ async fn dispatch(
             permission_decided(state, owner, &row).await;
             (
                 json!({"request_id": row.id, "status": row.status,
-                    "note": "The specialist was resumed with your decision."}),
+                    "skill_selection": row.skill_selection,
+                    "note": if row.kind == "skills" && allow { "Skill proposal approved for review. Preview the requested skill in Ornn (or retain the exact supplied pins), then call set_agent_skills for the requesting specialist; additions still need the owner's card." } else { "The specialist was resumed with your decision." }}),
                 false,
             )
         }
@@ -1428,9 +1454,6 @@ async fn dispatch(
             )
         }
         "machine_setup_link" => super::machine_setup::link_tool(state, chat, args).await?,
-        // Keep the cold update/inspection/transaction future out of the shared
-        // dispatcher frame used by every specialist and ordinary NyxBot tool.
-        "machine_update" => Box::pin(super::machine_update::tool(state, chat, args)).await?,
         "machine_pair" => super::machine_setup::pair_tool(state, chat, args).await?,
         "channel_bot_setup_link" => {
             let agent = target_agent(state, owner, args["agent"].as_str()).await?;
@@ -2210,7 +2233,7 @@ pub async fn set_agent_operations(
     ))
 }
 
-async fn operation_owner_card(
+pub(crate) async fn operation_owner_card(
     db: &mongodb::Database,
     chat: &ChatAuthority,
     tool: &str,

@@ -1,3 +1,4 @@
+import { AgentSkills } from "./agent-skills";
 import { AgentOperationScopes } from "./agent-operation-scopes";
 import { MachineGrantPicker } from "./machine-grant-picker";
 import { AgentAutomations } from "./automation-preferences";
@@ -172,6 +173,7 @@ export function AgentDetailsSheet({
                   description="NyxBot runs with full access to your connected services and account. Destructive actions follow your confirmation setting."
                 />
               )}
+              <AgentSkills agentId={agent.id} readOnly={agent.status === "destroyed"} />
               <AgentAutomations agentId={agent.id} />
               <MemoryList agent={agent} memory={detail.data?.memory ?? []} />
               {agent.status === "destroyed" ? null : (

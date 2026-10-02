@@ -1997,6 +1997,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 .delete(handlers::assistant_team::delete_agent),
         )
         .route(
+            "/nyxagent/skills/catalog",
+            get(handlers::agent_skills::catalog),
+        )
+        .route(
+            "/nyxagent/agents/{id}/skills",
+            get(handlers::agent_skills::get).put(handlers::agent_skills::set),
+        )
+        .route(
             "/nyxagent/agents/{id}/operations",
             get(handlers::assistant_team::agent_operations),
         )

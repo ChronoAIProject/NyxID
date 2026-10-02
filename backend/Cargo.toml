@@ -18,6 +18,7 @@ name = "nyxid-server"
 path = "src/main.rs"
 
 [dependencies]
+zip = { version = "3.0.0", default-features = false, features = ["deflate"] }
 mime = "0.3.17"
 axum = { workspace = true }
 tower = "0.5.3"

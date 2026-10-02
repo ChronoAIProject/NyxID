@@ -144,6 +144,9 @@ pub async fn ensure_nyxbot(db: &Database, owner: &str) -> AppResult<AssistantAge
     }
     let now = Utc::now();
     let agent = AssistantAgent {
+        skills: Vec::new(),
+        skills_revision: 0,
+        skill_metadata: BTreeMap::new(),
         machine_node_ids: Vec::new(),
         saved_login_ids: Vec::new(),
         id: Uuid::new_v4().to_string(),
@@ -645,6 +648,9 @@ pub async fn create_specialist(
     .await;
     let now = Utc::now();
     let agent = AssistantAgent {
+        skills: Vec::new(),
+        skills_revision: 0,
+        skill_metadata: BTreeMap::new(),
         machine_node_ids,
         saved_login_ids,
         id: Uuid::new_v4().to_string(),
@@ -1485,6 +1491,7 @@ pub struct RequestSummary {
     pub conversation_id: String,
     pub kind: String,
     pub operation_selection: Option<crate::models::agent_operation_scope::OperationSelection>,
+    pub skill_selection: Option<crate::models::assistant_agent::SkillSelection>,
     pub service_slug: Option<String>,
     pub summary: String,
     pub requested_by: Option<String>,
@@ -1502,6 +1509,7 @@ pub fn request_summary(
         conversation_id: row.conversation_id.clone(),
         kind: row.kind.clone(),
         operation_selection: row.operation_selection.clone(),
+        skill_selection: row.skill_selection.clone(),
         service_slug: row.service_slug.clone(),
         summary: row.summary.clone(),
         requested_by: row.request_excerpt.clone(),
