@@ -93,6 +93,119 @@ beforeEach(() => {
 });
 
 describe("pool atomic editor", () => {
+  it("explains an unavailable credential while allowing a healthy connection to create the pool", async () => {
+    const user = userEvent.setup();
+    mocks.candidates.mockReturnValue(
+      page([
+        {
+          ...candidate,
+          user_service_id: "failed-id",
+          name: "Failed connection",
+          eligible: false,
+          reason: "credential_unavailable",
+        },
+        candidate,
+      ]),
+    );
+    render(<PoolEditor onClose={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText("Name"), {
+      target: { value: "Usable pool" },
+    });
+    const create = screen.getByRole("button", { name: "Create pool" });
+    expect(create).toBeDisabled();
+    expect(
+      screen.getByText("Add at least one connection to create a pool."),
+    ).toBeVisible();
+    await user.click(
+      screen.getByRole("button", { name: "Choose connections" }),
+    );
+    expect(
+      screen.getByText(
+        "Credentials unavailable. Reconnect or update this connection in Services.",
+      ),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("option", { name: "Failed connection" }),
+    ).toHaveAttribute("aria-disabled", "true");
+    await user.click(screen.getByRole("option", { name: "Failed connection" }));
+    expect(create).toBeDisabled();
+    await user.click(screen.getByRole("option", { name: "My connection" }));
+    await user.click(screen.getByRole("button", { name: "Done" }));
+    await waitFor(() => expect(create).toBeEnabled());
+    await user.click(create);
+    expect(mocks.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        members: [expect.objectContaining({ user_service_id: "member-id" })],
+      }),
+    );
+  });
+  it("keeps empty existing drafts editable while new pools wait for a connection", async () => {
+    const user = userEvent.setup();
+    mocks.candidates.mockReturnValue({ isLoading: true });
+    const view = render(<PoolEditor onClose={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText("Name"), {
+      target: { value: "New pool" },
+    });
+    expect(screen.getByRole("button", { name: "Create pool" })).toBeDisabled();
+    view.unmount();
+    render(<PoolEditor pool={{ ...pool, members: [] }} onClose={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText("Name"), {
+      target: { value: "Empty draft renamed" },
+    });
+    await waitFor(() => expect(saveButton()).toBeEnabled());
+    await user.click(saveButton());
+    expect(mocks.update).toHaveBeenCalledWith(
+      expect.objectContaining({ members: [], name: "Empty draft renamed" }),
+    );
+  });
+  it("keeps configured routing and models when searching and reopening the picker", async () => {
+    const user = userEvent.setup();
+    const configured = {
+      ...pool.members[0]!,
+      priority: 7,
+      weight: 11,
+      model: "provider model",
+      same_api_compatible: true,
+    };
+    render(
+      <PoolEditor
+        pool={{
+          ...pool,
+          member_contract: "ai_chat",
+          tier_balance: "weighted",
+          members: [configured],
+        }}
+        onClose={vi.fn()}
+      />,
+    );
+    const trigger = screen.getByRole("button", { name: "Choose connections" });
+    await user.click(trigger);
+    await user.type(
+      screen.getByRole("combobox", { name: "Search candidate services" }),
+      "provider model",
+    );
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(trigger).toHaveFocus());
+    await user.click(trigger);
+    expect(
+      screen.getByRole("combobox", { name: "Search candidate services" }),
+    ).toHaveValue("provider model");
+    await user.click(screen.getByRole("button", { name: "Done" }));
+    expect(screen.getByLabelText("Priority for member 1")).toHaveValue(7);
+    expect(screen.getByLabelText("Weight for member 1")).toHaveValue(11);
+    expect(screen.getByLabelText("Model for member 1")).toHaveValue(
+      "provider model",
+    );
+    expect(saveButton()).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("Name"), {
+      target: { value: "Configured pool" },
+    });
+    await waitFor(() => expect(saveButton()).toBeEnabled());
+    await user.click(saveButton());
+    expect(mocks.update).toHaveBeenCalledWith(
+      expect.objectContaining({ members: [configured] }),
+    );
+  });
   it("keeps displayed member numbers and edits aligned after priority reordering", async () => {
     const user = userEvent.setup();
     const second = {
@@ -271,9 +384,12 @@ describe("pool atomic editor", () => {
         onClose={vi.fn()}
       />,
     );
-    await user.click(screen.getByRole("button", { name: "Add" }));
+    await user.click(
+      screen.getByRole("button", { name: "Choose connections" }),
+    );
+    await user.click(screen.getByRole("option", { name: "Custom connection" }));
     await user.type(
-      screen.getByRole("textbox", { name: "Search candidate services" }),
+      screen.getByRole("combobox", { name: "Search candidate services" }),
       "hide selected",
     );
     await waitFor(() =>
@@ -281,6 +397,7 @@ describe("pool atomic editor", () => {
         screen.getByText("No connections match this search."),
       ).toBeVisible(),
     );
+    await user.click(screen.getByRole("button", { name: "Done" }));
     for (const n of [1, 2]) {
       const checkbox = screen.getByLabelText(
         `Confirm API compatibility for member ${n}`,
@@ -316,10 +433,15 @@ describe("pool atomic editor", () => {
     });
     const user = userEvent.setup();
     render(<PoolEditor pool={pool} onClose={vi.fn()} />);
+    await user.click(
+      screen.getByRole("button", { name: "Choose connections" }),
+    );
     expect(
       screen.getByText("Protocol is incompatible with this pool"),
     ).toBeVisible();
-    expect(screen.getByRole("button", { name: "Add" })).toBeDisabled();
+    expect(
+      screen.getByRole("option", { name: "Different API" }),
+    ).toHaveAttribute("aria-disabled", "true");
     await user.click(
       screen.getByRole("button", { name: "Load more connections" }),
     );
@@ -478,7 +600,11 @@ describe("pool management", () => {
     view.rerender(<ServicePoolsTab createOpen onCreateOpenChange={change} />);
     await user.type(screen.getByLabelText("Name"), "Research routing");
     expect(screen.getByLabelText("Pool slug")).toHaveValue("research-routing");
-    await user.click(screen.getByRole("button", { name: "Add" }));
+    await user.click(
+      screen.getByRole("button", { name: "Choose connections" }),
+    );
+    await user.click(screen.getByRole("option", { name: "My connection" }));
+    await user.click(screen.getByRole("button", { name: "Done" }));
     await user.click(screen.getByRole("button", { name: "Create pool" }));
     expect(mocks.create).toHaveBeenCalledWith(
       expect.objectContaining({ org_id: "org-id", slug: "research-routing" }),
@@ -492,7 +618,7 @@ describe("pool management", () => {
     await waitFor(() =>
       expect(screen.getByLabelText("Pool slug")).toHaveValue("a".repeat(79)),
     );
-    expect(screen.getByRole("button", { name: "Create pool" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Create pool" })).toBeDisabled();
   });
 
   it("hides the owner selector without manageable organizations", () => {

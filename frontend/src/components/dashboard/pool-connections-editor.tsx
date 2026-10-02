@@ -4,7 +4,6 @@ import { ErrorBanner } from "@/components/shared/error-banner";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
-import { Skeleton } from "@/components/ui/skeleton";
 import { usePoolCandidates, usePoolHealth } from "@/hooks/use-pools";
 import type {
   CreateServicePoolInput,
@@ -13,7 +12,8 @@ import type {
   ServicePoolMember,
 } from "@/schemas/pools";
 import { NumberInput, Toggle } from "./pool-controls";
-import { bindingLabel, message, protocolLabel, reason } from "./pool-labels";
+import { bindingLabel, reason } from "./pool-labels";
+import { PoolConnectionPicker } from "./pool-connection-picker";
 import { PoolOperationCheck, type PoolOperation } from "./pool-operation-check";
 
 function newMember(id: string): ServicePoolMember {
@@ -100,9 +100,37 @@ export function PoolConnectionsEditor({
         .map((m) => (m.user_service_id === id ? { ...m, ...patch } : m)),
     );
   }
-  const available = rows.filter(
-    (row) => !members.some((m) => m.user_service_id === row.user_service_id),
-  );
+  function toggleMember(row: PoolCandidate) {
+    const current = form.getValues("members");
+    if (
+      current.some((member) => member.user_service_id === row.user_service_id)
+    ) {
+      form.setValue(
+        "members",
+        current.filter(
+          (member) => member.user_service_id !== row.user_service_id,
+        ),
+      );
+      return;
+    }
+    if (
+      current.length >= 50 ||
+      (!row.eligible && row.reason !== "compatibility_declaration_required")
+    )
+      return;
+    setSelectedLabels((labels) => ({ ...labels, [row.user_service_id]: row }));
+    const nextPriority =
+      priority && current.length
+        ? Math.min(
+            4294967295,
+            Math.max(...current.map((member) => member.priority ?? 0)) + 1,
+          )
+        : 0;
+    form.setValue("members", [
+      ...current,
+      { ...newMember(row.user_service_id), priority: nextPriority },
+    ]);
+  }
   const orderedMembers = members
     .map((member, index) => ({ member, index }))
     .sort((a, b) =>
@@ -124,6 +152,7 @@ export function PoolConnectionsEditor({
       </div>
       {members.length === 0 && (
         <div className="rounded-xl border border-dashed border-border p-4 text-[12px] text-muted-foreground">
+          {!pool && <p>Add at least one connection to create a pool.</p>}
           {priority
             ? "Add a primary connection below, then a backup."
             : "Add the connections that should share traffic."}{" "}
@@ -247,106 +276,29 @@ export function PoolConnectionsEditor({
         );
       })}
       <div className="space-y-2 rounded-xl border border-border/50 p-3">
-        <label className="block space-y-2 text-[12px] font-medium">
-          <span>Add a connection</span>
-          <Input
-            aria-label="Search candidate services"
-            placeholder="Search your connections"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-          />
-        </label>
-        {candidates.isError && (
-          <ErrorBanner
-            message={message(candidates.error)}
-            onRetry={() => {
-              void candidates.refetch();
-            }}
-          />
-        )}
-        {candidates.isLoading && <Skeleton className="h-12" />}
-        {!candidates.isLoading &&
-          !candidates.isError &&
-          available.length === 0 && (
-            <p className="py-3 text-[12px] text-muted-foreground">
-              {search
-                ? "No connections match this search."
-                : members.length > 0
-                  ? "All connections on this page have been added."
-                  : "No connections yet. Connect a service in the Services tab first, then return here."}
-            </p>
-          )}
-        <div className="max-h-52 space-y-1 overflow-y-auto">
-          {available.map((row) => (
-            <div
-              key={row.user_service_id}
-              className="flex items-center justify-between gap-3 rounded-lg px-2 py-2 hover:bg-white/[0.03]"
-            >
-              <div className="min-w-0">
-                <p className="break-words text-[12px]">
-                  {row.name || row.slug}
-                </p>
-                <p className="break-words text-[11px] text-muted-foreground">
-                  {row.slug} · {bindingLabel(row.credential_binding)}
-                  {row.protocol ? ` · ${protocolLabel(row.protocol)}` : ""}
-                </p>
-                {row.reason && (
-                  <p className="mt-0.5 text-[11px] text-muted-foreground">
-                    {reason(row)}
-                  </p>
-                )}
-              </div>
-              <Button
-                type="button"
-                size="sm"
-                disabled={
-                  members.length >= 50 ||
-                  (!row.eligible &&
-                    row.reason !== "compatibility_declaration_required")
-                }
-                onClick={() => {
-                  setSelectedLabels((labels) => ({
-                    ...labels,
-                    [row.user_service_id]: row,
-                  }));
-                  const current = form.getValues("members");
-                  const nextPriority =
-                    priority && current.length
-                      ? Math.min(
-                          4294967295,
-                          Math.max(...current.map((m) => m.priority ?? 0)) + 1,
-                        )
-                      : 0;
-                  form.setValue("members", [
-                    ...current,
-                    {
-                      ...newMember(row.user_service_id),
-                      priority: nextPriority,
-                    },
-                  ]);
-                }}
-              >
-                Add
-              </Button>
-            </div>
-          ))}
-        </div>
-        {candidates.hasNextPage && (
-          <Button
-            type="button"
-            isLoading={candidates.isFetchingNextPage}
-            onClick={() => {
-              void candidates.fetchNextPage();
-            }}
-          >
-            Load more connections
-          </Button>
-        )}
-        {members.length >= 50 && (
-          <p className="text-[11px] text-muted-foreground">
-            A pool supports up to 50 connections.
-          </p>
-        )}
+        <h4 className="text-[12px] font-medium">Select connections</h4>
+        <PoolConnectionPicker
+          rows={rows}
+          selectedIds={members.map((member) => member.user_service_id!)}
+          search={search}
+          onSearch={setSearch}
+          onToggle={toggleMember}
+          isLoading={candidates.isLoading}
+          isSearching={
+            search !== settledSearch ||
+            (candidates.isFetching && !candidates.isFetchingNextPage)
+          }
+          isError={candidates.isError}
+          error={candidates.error}
+          onRetry={() => {
+            void candidates.refetch();
+          }}
+          hasNextPage={candidates.hasNextPage}
+          isFetchingNextPage={candidates.isFetchingNextPage}
+          onLoadMore={() => {
+            void candidates.fetchNextPage();
+          }}
+        />
       </div>
       {!aiChat && (
         <details className="rounded-xl border border-border/50 p-3">

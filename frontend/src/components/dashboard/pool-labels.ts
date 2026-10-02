@@ -8,6 +8,8 @@ export const strategyLabels = {
 };
 const reasonLabels: Record<string, string> = {
   unavailable: "Connection unavailable",
+  credential_unavailable:
+    "Credentials unavailable. Reconnect or update this connection in Services.",
   inactive: "Service disabled",
   disabled: "Member disabled",
   cooldown: "Cooling down",

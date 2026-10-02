@@ -2,7 +2,7 @@
 use super::{proxy_service, service_pool_health_service as health, service_pool_service};
 use crate::{
     crypto::aes::EncryptionKeys,
-    errors::AppResult,
+    errors::{AppError, AppResult},
     models::{
         service_pool::{PoolMemberContract, PoolStrategy, ServicePool},
         user_service::UserService,
@@ -112,32 +112,27 @@ pub async fn inspect(
         filter.insert("_id", doc! { "$in": pool.map(|p| p.members.iter().filter(|m| allowed_services.is_none_or(|a| a.contains(&m.user_service_id))).map(|m| m.user_service_id.clone()).collect::<Vec<_>>()).unwrap_or_default() });
     } else if query.selected_only {
         filter.insert("_id", doc! {"$in": query.peer_ids.unwrap_or_default().iter().filter(|id| allowed_services.is_none_or(|allowed| allowed.contains(*id))).cloned().collect::<Vec<_>>()});
-    } else {
-        if let Some(search) = query.search.filter(|s| !s.is_empty()) {
-            filter.insert(
-                "slug",
-                doc! { "$regex": regex::escape(search), "$options":"i" },
-            );
-        }
     }
     let limit = if query.members_only || query.selected_only {
         50
     } else {
         query.limit.clamp(1, 100) as usize
     };
-    let mut services: Vec<UserService> =
+    let search = query
+        .search
+        .filter(|search| !query.members_only && !query.selected_only && !search.is_empty());
+    let mut services: Vec<UserService> = if let Some(search) = search {
+        search_services(db, filter, search, offset, limit + 1).await?
+    } else {
         crate::services::service_history::collection(db, "user_services")
             .find(filter)
             .sort(doc! {"_id":1})
-            .skip(if query.members_only || query.selected_only {
-                0
-            } else {
-                offset
-            })
+            .skip(offset)
             .limit((limit + 1) as i64)
             .await?
             .try_collect()
-            .await?;
+            .await?
+    };
     let has_more = services.len() > limit;
     services.truncate(limit);
     let next_cursor = has_more.then(|| (offset + limit as u64).to_string());
@@ -282,54 +277,64 @@ pub async fn inspect(
                             row.reason = Some("operation_unsupported".into());
                         }
                     }
-                    if saved_operation && priority && row.reason.is_none() {
-                        let credential_override = if let Some(agent) = agent_key {
-                            proxy_service::read_agent_credential_override_identity(
-                                db,
-                                actor,
-                                agent,
-                                &service.id,
-                                &resolution.target,
-                            )
-                            .await?
-                        } else {
-                            None
-                        };
-                        if let Some(pool) = pool {
-                            let scope = health::scope_from_resolution(
-                                db,
-                                &pool.id,
-                                owner,
-                                pool.config_revision,
-                                &resolution,
-                                member.and_then(|m| m.model.clone()),
-                                credential_override.as_ref(),
-                                method,
-                                &native_path,
-                            )
-                            .await;
-                            match scope {
-                                Ok(scope) => {
-                                    if let Some(current) =
-                                        health::load_for_scope(db, &scope).await?
-                                    {
-                                        row.cooldown_until = current
-                                            .cooldown_until
-                                            .filter(|until| *until > chrono::Utc::now());
-                                        row.consecutive_failures =
-                                            current.consecutive_failures as i64;
-                                        row.last_status = current.last_status;
-                                    }
-                                }
-                                Err(error) if service_pool_service::member_unavailable(&error) => {
-                                    row.reason = Some("operation_unsupported".into())
-                                }
-                                Err(error) => return Err(error),
+                    let credential_override = if let Some(agent) = agent_key {
+                        match proxy_service::read_agent_credential_override_identity(
+                            db,
+                            actor,
+                            agent,
+                            &service.id,
+                            &resolution.target,
+                        )
+                        .await
+                        {
+                            Ok(identity) => identity,
+                            Err(AppError::CredentialUnavailable(_)) => {
+                                row.reason = Some("credential_unavailable".into());
+                                None
                             }
+                            Err(error) => return Err(error),
+                        }
+                    } else {
+                        None
+                    };
+                    if saved_operation
+                        && priority
+                        && row.reason.is_none()
+                        && let Some(pool) = pool
+                    {
+                        let scope = health::scope_from_resolution(
+                            db,
+                            &pool.id,
+                            owner,
+                            pool.config_revision,
+                            &resolution,
+                            member.and_then(|m| m.model.clone()),
+                            credential_override.as_ref(),
+                            method,
+                            &native_path,
+                        )
+                        .await;
+                        match scope {
+                            Ok(scope) => {
+                                if let Some(current) = health::load_for_scope(db, &scope).await? {
+                                    row.cooldown_until = current
+                                        .cooldown_until
+                                        .filter(|until| *until > chrono::Utc::now());
+                                    row.consecutive_failures = current.consecutive_failures as i64;
+                                    row.last_status = current.last_status;
+                                }
+                            }
+                            Err(error) if service_pool_service::member_unavailable(&error) => {
+                                row.reason = Some("operation_unsupported".into())
+                            }
+                            Err(error) => return Err(error),
                         }
                     }
                 }
                 Ok(None) => row.reason = Some("unavailable".into()),
+                Err(AppError::CredentialUnavailable(_)) => {
+                    row.reason = Some("credential_unavailable".into())
+                }
                 Err(error) if service_pool_service::member_unavailable(&error) => {
                     row.reason = Some("unavailable".into())
                 }
@@ -431,4 +436,35 @@ pub async fn inspect(
         candidates: result,
         next_cursor,
     })
+}
+
+/// Search before pagination, projecting only the referenced endpoint label.
+/// Both personal and platform resolution use this label as the displayed name.
+async fn search_services(
+    db: &mongodb::Database,
+    filter: mongodb::bson::Document,
+    search: &str,
+    offset: u64,
+    limit: usize,
+) -> AppResult<Vec<UserService>> {
+    let pattern = doc! {"$regex":regex::escape(search),"$options":"i"};
+    Ok(db
+        .collection::<UserService>("user_services")
+        .aggregate([
+            doc! {"$match":filter},
+            doc! {"$sort":{"_id":1}},
+            doc! {"$lookup":{
+                "from":"user_endpoints","localField":"endpoint_id","foreignField":"_id",
+                "pipeline":[{"$project":{"_id":0,"label":1}}],"as":"search_endpoint",
+            }},
+            doc! {"$match":{"$or":[{"slug":&pattern},{"search_endpoint.label":pattern}]}},
+            doc! {"$skip":offset as i64},
+            doc! {"$limit":limit as i64},
+            doc! {"$unset":"search_endpoint"},
+        ])
+        .max_time(std::time::Duration::from_secs(5))
+        .await?
+        .with_type::<UserService>()
+        .try_collect()
+        .await?)
 }

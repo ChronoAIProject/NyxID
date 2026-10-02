@@ -3771,7 +3771,7 @@ Candidate and health inspection accept these query parameters:
 | `strategy`, `member_contract` | Draft routing strategy and contract for candidate inspection. Health uses the saved configuration. |
 | `peer_ids`, `declared_peer_ids` | Comma-separated draft connection UUIDs and Same API compatibility declarations, capped at 50 IDs each. |
 | `selected_only` | With `true`, candidate inspection returns the selected `peer_ids` independently of search and pagination. |
-| `search`, `limit`, `after` | Candidate inventory search and pagination. `limit` defaults to 100 and is clamped to 1–100. |
+| `search`, `limit`, `after` | Case-insensitive name or slug search, applied before candidate pagination. `limit` defaults to 100 and is clamped to 1–100. |
 | `org_id` | Organization owner for new-pool candidate inspection. Existing-pool routes resolve the owner from the pool. |
 
 Responses contain `operation_checked`, `method`, `path`, `candidates`,
@@ -3781,6 +3781,12 @@ its connection ID, `name`, `slug`, eligibility and reason, credential binding,
 protocol, compatibility requirements, and cooldown metadata. Inventory results
 do not establish that a particular operation can execute. Inspection is
 read-only and never decrypts credentials or sends a request to a provider.
+
+A connection with an inactive stored credential or missing credential material
+returns `eligible: false` with `reason: "credential_unavailable"`; other
+connections remain in the response. Repair that connection before selecting it.
+Priority execution skips such members before dispatch. Database and data
+integrity errors still fail the request.
 
 ### Proxy
 

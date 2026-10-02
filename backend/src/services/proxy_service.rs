@@ -3037,7 +3037,7 @@ async fn finish_resolution(
     }
 
     if api_key.status != "active" {
-        return Err(AppError::BadRequest(format!(
+        return Err(AppError::CredentialUnavailable(format!(
             "API key is {}",
             api_key.status
         )));
@@ -3347,7 +3347,7 @@ pub async fn read_agent_credential_override_identity(
     )
     .await?;
     if api_key.status != "active" || !credential_is_materializable(db, &api_key).await? {
-        return Err(AppError::BadRequest(
+        return Err(AppError::CredentialUnavailable(
             "Bound credential is not executable".to_string(),
         ));
     }
@@ -3407,7 +3407,7 @@ pub async fn resolve_agent_credential_override_identity(
     .await?;
 
     if api_key.status != "active" {
-        return Err(AppError::BadRequest(format!(
+        return Err(AppError::CredentialUnavailable(format!(
             "Override credential is {}",
             api_key.status
         )));
@@ -3636,11 +3636,13 @@ pub(crate) async fn credential_is_materializable(
 
 fn missing_user_api_key_credential_error(api_key: &UserApiKey) -> AppError {
     match api_key.credential_type.as_str() {
-        "oauth2" if api_key.provider_config_id.is_some() => AppError::BadRequest(
+        "oauth2" if api_key.provider_config_id.is_some() => AppError::CredentialUnavailable(
             "OAuth connection is not complete. Connect your account first.".to_string(),
         ),
-        "oauth2" => AppError::BadRequest("OAuth token has no credential stored".to_string()),
-        _ => AppError::BadRequest(
+        "oauth2" => {
+            AppError::CredentialUnavailable("OAuth token has no credential stored".to_string())
+        }
+        _ => AppError::CredentialUnavailable(
             "No credential stored. Add a credential or route through a node.".to_string(),
         ),
     }
@@ -8514,7 +8516,9 @@ mod tests {
             credential_epoch: 1,
         };
         let err = missing_user_api_key_credential_error(&key);
-        assert!(matches!(err, AppError::BadRequest(m) if m.contains("OAuth connection")));
+        assert!(
+            matches!(err, AppError::CredentialUnavailable(m) if m.contains("OAuth connection"))
+        );
     }
 
     #[test]
@@ -8546,7 +8550,7 @@ mod tests {
             credential_epoch: 1,
         };
         let err = missing_user_api_key_credential_error(&key);
-        assert!(matches!(err, AppError::BadRequest(m) if m.contains("No credential")));
+        assert!(matches!(err, AppError::CredentialUnavailable(m) if m.contains("No credential")));
     }
 
     // ---- forward header: AWS and GCP prefixes ----
