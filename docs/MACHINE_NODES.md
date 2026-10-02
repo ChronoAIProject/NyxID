@@ -1190,6 +1190,40 @@ replaying the request or reverting a successful update. Containers created with 
 recreated without that option: Docker would otherwise delete the rollback copy.
 The updater never prints the inspected environment or node credentials.
 
+The companion also keeps itself current. At startup and after a machine reaches
+`connected` on release V, it verifies the official updater:V through the same
+Sigstore/TUF path, pulls its digest, and copies its own inspected configuration
+with only the image changed. An owner update request on an already-current
+machine retries an older companion without restarting that machine. Companions
+never downgrade, even during an owner-confirmed machine rollback.
+
+Self-update keeps the predecessor alive as a rollback monitor. A durable journal
+records the temporary successor before Docker creates it. The successor waits
+for the controller lock, checks that its actual image matches the attested digest
+and release recorded in the private journal, and writes a fenced heartbeat before
+commit. Only the controller-lock holder processes machine requests. A separate
+handoff lock serializes commit and timeout rollback; a pre-commit failure restores
+the predecessor after a 60-second heartbeat deadline. Once committed, recovery completes the rename
+and old-container removal rather than reverting it. Neither handoff nor rollback
+deletes the shared update volume. The Docker socket, volume, read-only root,
+`/tmp` tmpfs, capabilities, no-new-privileges, restart policy and labels survive.
+
+Machines and `nyxid__machine_update` report the companion's version, digest and
+pending/failed state separately from machine progress. Fixed diagnostics such as
+`update_companion:attestation_invalid` or `update_companion:successor_unhealthy`
+include retry guidance; a failed companion update does not hide a successful
+machine update. Companions that predate self-update cannot acquire this behavior on their own.
+Nodes with companion reporting (0.41.4+) detect a live mailbox without valid
+`updater.json` as `legacy`; older node versions remain unknown. Machines shows
+“Updater predates self-update. Replace it once” and a pinned, copyable host
+command: `docker rm -f <name>-updater && <current companion command>`. It retains
+the update volume and machine container. NyxBot and granted specialists offer
+the guided step or run it on an owner-identified, different native Docker host
+after inspecting both containers and receiving an owner card. The durable watch
+wakes the thread when valid companion metadata arrives, without requiring a
+machine restart, or reports an actionable timeout. Subsequent releases update the companion
+automatically. The one-time migration command is unchanged.
+
 An existing 0.40.0 container has no companion. Its machine page supplies one
 prefilled command using its container name and the server release; the helper
 inspects and preserves the actual volumes, so no re-pairing/token is needed.

@@ -169,6 +169,21 @@ impl Docker {
         )
         .await
     }
+    pub(super) async fn image_id(&self, image: &str) -> Result<String> {
+        #[cfg(test)]
+        let image = self.test_image.as_deref().unwrap_or(image);
+        let value = self
+            .call(
+                Method::GET,
+                &format!("/images/{}/json", urlencoding::encode(image)),
+                None,
+            )
+            .await?;
+        Ok(value["Id"]
+            .as_str()
+            .context("Missing image identity")?
+            .into())
+    }
     pub async fn stop(&self, id: &str) -> Result<()> {
         self.call(
             Method::POST,
@@ -453,14 +468,39 @@ pub fn replacement_config(
     migration: bool,
 ) -> Result<Value> {
     valid_digest(digest)?;
-    let mut config = inspect["Config"].clone();
-    ensure!(config.is_object(), "Missing container config");
+    let mut config = copy_config(inspect)?;
     config["Image"] = json!(format!("{}@{digest}", update::MACHINE_IMAGE));
-    config["HostConfig"] = inspect["HostConfig"].clone();
     if config["Labels"].is_null() {
         config["Labels"] = json!({});
     }
     config["Labels"]["dev.nyxid.machine.version"] = json!(target);
+    if migration {
+        ensure!(
+            !inspect["Mounts"]
+                .as_array()
+                .context("Missing mount metadata")?
+                .iter()
+                .any(|m| m["Destination"] == update::UPDATE_VOLUME),
+            "An update volume is already attached; repair its companion instead"
+        );
+        config["HostConfig"]["Binds"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!(format!(
+                "{name}-nyxid-update:{}",
+                update::UPDATE_VOLUME
+            )));
+        config["Labels"][update::CONTAINER_LABEL] = json!(name);
+    }
+    Ok(config)
+}
+
+/// Preserve owner configuration, including resolved anonymous volumes. Runtime
+/// network IDs are not create parameters; configured endpoint options are.
+pub(super) fn copy_config(inspect: &Value) -> Result<Value> {
+    let mut config = inspect["Config"].clone();
+    ensure!(config.is_object(), "Missing container config");
+    config["HostConfig"] = inspect["HostConfig"].clone();
     // Pin anonymous mounts by their resolved volume name too. Docker otherwise
     // allocates fresh anonymous volumes and silently loses the node's identity.
     let mounts = inspect["Mounts"]
@@ -493,22 +533,6 @@ pub fn replacement_config(
                 if mount["RW"] == true { "rw" } else { "ro" }
             )));
         }
-    }
-    if migration {
-        ensure!(
-            !mounts
-                .iter()
-                .any(|m| m["Destination"] == update::UPDATE_VOLUME),
-            "An update volume is already attached; repair its companion instead"
-        );
-        binds.push(json!(format!(
-            "{name}-nyxid-update:{}",
-            update::UPDATE_VOLUME
-        )));
-        if config["Labels"].is_null() {
-            config["Labels"] = json!({});
-        }
-        config["Labels"][update::CONTAINER_LABEL] = json!(name);
     }
     config["HostConfig"]["Binds"] = json!(binds);
     // Preserve configured network endpoint settings, excluding daemon runtime IDs.

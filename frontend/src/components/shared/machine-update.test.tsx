@@ -4,6 +4,7 @@ import { MachineUpdate } from "./machine-update";
 import {
   machineMigrationCommand,
   machineCompanionCommand,
+  machineCompanionReplacementCommand,
   type MachineUpdateStatus,
 } from "@/schemas/machines";
 
@@ -33,7 +34,10 @@ const status: MachineUpdateStatus = {
   code: null,
   settings_path: "/assistant/machines?machine=machine",
 };
-beforeEach(() => start.mockReset());
+beforeEach(() => {
+  start.mockReset();
+  image.value = "ghcr.io/chronoaiproject/nyxid/nyxid-machine-updater@sha256:" + "ab".repeat(32);
+});
 it("requires explicit human confirmation before sending update and shows progress", () => {
   const { rerender } = render(
     <MachineUpdate name="work-machine" status={status} />,
@@ -127,4 +131,55 @@ it("shows the fixed failure code and actionable server guidance", () => {
   );
   expect(screen.getByRole("status")).toHaveTextContent("verify_updater_image:trust_root_unavailable");
   expect(screen.getByRole("alert")).toHaveTextContent("required /tmp tmpfs");
+});
+
+it("shows companion progress separately from a connected machine and allows retry after failure", () => {
+  const updater = {
+    version: "0.41.0", digest: `sha256:${"ab".repeat(32)}`,
+    target_version: "0.41.3", phase: "pending" as const, code: null,
+  };
+  const { rerender } = render(<MachineUpdate name="work-machine" status={{ ...status, phase: "connected", updater }} />);
+  expect(screen.getByText("Updater: 0.41.0")).toBeVisible();
+  expect(screen.getByText(/Updater update pending/)).toBeVisible();
+  expect(screen.getByText(updater.digest)).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Update machine" })).toBeDisabled();
+  rerender(<MachineUpdate name="work-machine" status={{ ...status, phase: "connected",
+    updater: { ...updater, phase: "failed", code: "update_companion:successor_unhealthy" },
+    updater_guidance: "The previous updater retained control. Retry from Machines.",
+  }} />);
+  expect(screen.getByText(/Updater update failed/)).toHaveTextContent("update_companion:successor_unhealthy");
+  expect(screen.getByRole("alert")).toHaveTextContent("previous updater retained control");
+  expect(screen.getByRole("button", { name: "Update machine" })).toBeEnabled();
+});
+
+
+it("shows unknown version for legacy companions without inventing an installed release", () => {
+  render(<MachineUpdate name="work-machine" status={status} />);
+  expect(screen.getByText("Updater: version unavailable")).toBeVisible();
+});
+
+it("offers the exact pinned legacy companion replacement while keeping the machine and volume", () => {
+  const legacy = { version: "", digest: null, target_version: null, phase: "legacy" as const, code: "update_companion:legacy_companion" };
+  render(<MachineUpdate name="work-machine" status={{ ...status, updater: legacy }} />);
+  expect(screen.getByText("Updater predates self-update. Replace it once")).toBeVisible();
+  const expected = "docker rm -f 'work-machine-updater' && docker run -d --name 'work-machine-updater' --restart unless-stopped --label 'dev.nyxid.machine.updater=work-machine' --read-only --tmpfs /tmp:rw,noexec,nosuid,size=16m --cap-drop=ALL --security-opt=no-new-privileges --mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock --mount 'type=volume,src=work-machine-nyxid-update,dst=/var/lib/nyxid-machine-update' " + image.value + " watch 'work-machine'";
+  expect(screen.getByText(expected)).toBeInTheDocument();
+  expect(machineCompanionReplacementCommand("work-machine", "0.41.0", image.value!)).toBe(expected);
+  for (const invalid of ["bad;name", "$(touch bad)", "-work"]) {
+    expect(() => machineCompanionReplacementCommand(invalid, "0.41.0", image.value!)).toThrow();
+  }
+  expect(() => machineCompanionReplacementCommand("work-machine", "0.41.0")).toThrow();
+  fireEvent.click(screen.getByRole("button", { name: "Start guided update" }));
+  expect(screen.getByText(/machine stays running/)).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "Confirm update" }));
+  expect(start).toHaveBeenCalledTimes(1);
+});
+
+it("withholds the legacy replacement command until the pinned image is verified", () => {
+  image.value = null;
+  render(<MachineUpdate name="work-machine" status={{ ...status, updater: {
+    version: "", digest: null, target_version: null, phase: "legacy", code: "update_companion:legacy_companion",
+  } }} />);
+  expect(screen.getByText("Verifying the updater image, try again shortly.")).toBeVisible();
+  expect(screen.queryByText(/docker rm/)).not.toBeInTheDocument();
 });

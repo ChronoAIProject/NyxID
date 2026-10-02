@@ -97,7 +97,9 @@ try {
     // Publish Images passes a pushed digest that is not local yet. Pull it
     // first: an implicit pull would print progress on the stderr that the
     // single-line failure checks below compare exactly.
-    docker('pull', '--quiet', updater);
+    if (spawnSync('docker', ['image', 'inspect', updater], { stdio: 'ignore' }).status !== 0) {
+      docker('pull', '--quiet', updater);
+    }
   }
   // Run the actual entry point: one fixed stderr line, identical to progress,
   // including a connect failure and a 404 (never Docker response metadata).

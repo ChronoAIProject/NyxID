@@ -93,6 +93,14 @@ export interface MachineUpdateStatus {
   target_version: string;
   update_available: boolean;
   updater_ready: boolean;
+  updater?: {
+    version: string;
+    digest: string | null;
+    target_version: string | null;
+    phase: "current" | "pending" | "failed" | "legacy";
+    code: string | null;
+  } | null;
+  updater_guidance?: string | null;
   installation: "container" | "native";
   automatic: boolean;
   phase: string;
@@ -119,7 +127,12 @@ function verifiedUpdaterImage(image?: string) {
 
 export function machineCompanionCommand(name: string, version: string, image?: string) {
   validateUpdate(name, version);
-  return `docker run -d --name ${shellQuote(`${name}-updater`)} --restart unless-stopped --read-only --tmpfs /tmp:rw,noexec,nosuid,size=16m --cap-drop=ALL --security-opt=no-new-privileges --mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock --mount ${shellQuote(`type=volume,src=${name}-nyxid-update,dst=/var/lib/nyxid-machine-update`)} ${verifiedUpdaterImage(image)} watch ${shellQuote(name)}`;
+  return `docker run -d --name ${shellQuote(`${name}-updater`)} --restart unless-stopped --label ${shellQuote(`dev.nyxid.machine.updater=${name}`)} --read-only --tmpfs /tmp:rw,noexec,nosuid,size=16m --cap-drop=ALL --security-opt=no-new-privileges --mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock --mount ${shellQuote(`type=volume,src=${name}-nyxid-update,dst=/var/lib/nyxid-machine-update`)} ${verifiedUpdaterImage(image)} watch ${shellQuote(name)}`;
+}
+
+export function machineCompanionReplacementCommand(name: string, version: string, image?: string) {
+  const companion = machineCompanionCommand(name, version, image);
+  return `docker rm -f ${shellQuote(`${name}-updater`)} && ${companion}`;
 }
 
 export function machineMigrationCommand(name: string, version: string, image?: string) {

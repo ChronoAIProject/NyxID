@@ -69,6 +69,7 @@ pub struct MachineProfile {
     pub browser_tools: bool,
     pub installation: Option<update::Installation>,
     pub updater_ready: bool,
+    pub updater: Option<update::CompanionStatus>,
 }
 
 impl MachineProfile {

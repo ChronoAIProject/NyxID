@@ -1,6 +1,6 @@
 [package]
 name = "nyxid"
-version = "0.41.3"
+version = "0.41.4"
 edition = "2024"
 rust-version.workspace = true
 license.workspace = true

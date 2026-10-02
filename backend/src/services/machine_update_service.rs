@@ -52,6 +52,30 @@ pub fn installation(node: &Node) -> Installation {
         })
 }
 
+pub fn companion_status(node: &Node) -> Option<nyxid_machine::update::CompanionStatus> {
+    use nyxid_machine::update::CompanionStatus;
+    if installation(node) != Installation::Container {
+        return None;
+    }
+    let machine = node.machine.as_ref()?;
+    machine
+        .updater
+        .clone()
+        .filter(CompanionStatus::valid)
+        .or_else(|| {
+            // Before 0.41.4 the node cannot read companion metadata. An absent field
+            // on those nodes means unknown, not evidence of an old companion.
+            (machine.updater_ready
+                && nyxid_machine::update::version(current(node))
+                    .is_ok_and(|v| v >= nyxid_machine::update::version("0.41.4").expect("release")))
+            .then(CompanionStatus::legacy)
+        })
+}
+
+pub fn legacy_companion(node: &Node) -> bool {
+    companion_status(node).is_some_and(|status| status.phase == "legacy")
+}
+
 pub async fn owner_node(db: &Database, actor: &str, id: &str) -> AppResult<Node> {
     let node = super::node_service::get_node_by_id(db, id)
         .await?
@@ -167,6 +191,7 @@ pub async fn begin(
         "previous_version": current(node),
         "target_version": TARGET,
         "phase": if manual {"manual_step"} else {"queued"},
+        "replace_companion": manual && legacy_companion(node),
         "code": null,
         "notify_pending": true,
         "requested_at": bson::DateTime::from_chrono(now),
@@ -272,6 +297,27 @@ pub async fn observe(db: &Database, node: &Node, report: Option<&Progress>) -> A
     if !row.pending() {
         return Ok(());
     }
+    if row.replace_companion {
+        // Companion replacement never restarts the machine. A fresh capabilities
+        // report with real updater metadata is the completion signal, not an old
+        // Connected progress file or an unrelated node reconnect.
+        if node.status == crate::models::node::NodeStatus::Online
+            && node.machine.as_ref().is_some_and(|m| m.updater_ready)
+            && companion_status(node).is_some_and(|s| s.phase != "legacy")
+        {
+            return finish(db, &row, "connected", None).await;
+        }
+        if row.deadline.is_some_and(|deadline| deadline <= Utc::now()) {
+            return finish(
+                db,
+                &row,
+                "failed",
+                Some("update_companion:companion_replacement_timeout"),
+            )
+            .await;
+        }
+        return Ok(());
+    }
     if let Some(report) =
         report.filter(|p| Some(p.target.as_str()) == row.target_version.as_deref())
     {
@@ -316,7 +362,15 @@ pub async fn observe(db: &Database, node: &Node, report: Option<&Progress>) -> A
                         )
                         .await?;
                 }
-                Phase::Connected => {}
+                Phase::Connected => {
+                    // A signed status response can acknowledge an updater-only
+                    // retry while the already-current node stays connected.
+                    if node.status == crate::models::node::NodeStatus::Online
+                        && current(node) == report.target
+                    {
+                        return finish(db, &row, "connected", None).await;
+                    }
+                }
             }
         }
     }
