@@ -185,6 +185,72 @@ afterEach(() => {
 });
 
 describe("live grouped services", () => {
+  it.each([
+    {
+      name: "Twitter / X API",
+      slug: "api-twitter",
+      type: "oauth2",
+      metric: "requests",
+      price: "0.05",
+      rate: "0.05 credits / request",
+    },
+    {
+      name: "DeepSeek API",
+      slug: "llm-deepseek",
+      type: "api_key",
+      metric: "tokens",
+      price: "0.000001",
+      rate: "0.000001 credits / token",
+    },
+  ])(
+    "uses $name platform billing configuration despite its user binding",
+    async ({ name, slug, type, metric, price, rate }) => {
+      const connection: KeyInfo = {
+        ...records[0]!,
+        id: slug,
+        label: name,
+        slug,
+        catalog_service_id: slug,
+        catalog_service_slug: slug,
+        catalog_service_name: name,
+        credential_binding: "user",
+        credential_type: type,
+        platform_key_pricing: {
+          metric,
+          credits_per_unit: price,
+          sync_status: "synced",
+        },
+        byok_pricing: null,
+      };
+      records.push(connection);
+      insightConnections.set(connection.id, {
+        service_id: connection.id,
+        billing: configuredBilling(connection),
+        usage: null,
+      });
+      const user = userEvent.setup();
+      render(preview());
+      const card = within(screen.getByRole("region", { name }));
+      const summary = card.getByRole("button", {
+        name: `Show billing for ${name}`,
+      });
+      expect(summary).toHaveTextContent("NyxID platform billing");
+      await user.hover(summary);
+      expect(await screen.findByRole("tooltip")).toHaveTextContent(rate);
+      await user.click(summary);
+      const panel = card.getByRole("region", { name: `Billing for ${name}` });
+      expect(
+        within(panel).getByText("NyxID platform billing configured"),
+      ).toBeVisible();
+      expect(within(panel).getByText(rate)).toBeVisible();
+      expect(
+        card.getByText(
+          `Connection: ${type === "oauth2" ? "Connected account · app unverified" : "Stored API key · supplier unverified"}`,
+        ),
+      ).toBeVisible();
+    },
+  );
+
   it("shows five supplied apps and one NyxID connection and opens the NyxID member", async () => {
     for (let i = 0; i < 4; i++)
       records.push({
@@ -291,9 +357,7 @@ describe("live grouped services", () => {
     ).not.toBeInTheDocument();
     const card = screen.getByRole("region", { name: "OpenAI" });
     expect(within(card).getByText("3 connections")).toBeVisible();
-    expect(
-      within(card).getByText("1 NyxID · 2 BYOK"),
-    ).toBeVisible();
+    expect(within(card).getByText("1 NyxID · 2 BYOK")).toBeVisible();
     expect(within(card).queryByText("Sources")).not.toBeInTheDocument();
     for (const source of ["Personal", "Chrono", "NyxID platform", "Personal"]) {
       await user.hover(
@@ -312,7 +376,9 @@ describe("live grouped services", () => {
       ),
     ).toBeVisible();
     await user.unhover(
-      screen.getByRole("button", { name: "Personal · Show sources for OpenAI" }),
+      screen.getByRole("button", {
+        name: "Personal · Show sources for OpenAI",
+      }),
     );
     await user.click(
       within(card).getByRole("button", { name: "Expand OpenAI connections" }),
@@ -384,7 +450,9 @@ describe("live grouped services", () => {
     expect(screen.getByText("1+ agent key")).toBeVisible();
     expect(screen.getByText("Last use not reported")).toBeVisible();
     await user.hover(
-      screen.getByRole("button", { name: "Show agent keys and use for OpenAI" }),
+      screen.getByRole("button", {
+        name: "Show agent keys and use for OpenAI",
+      }),
     );
     expect(await screen.findByRole("tooltip")).toHaveTextContent(
       "Keys with access: Codex CI",
@@ -394,9 +462,7 @@ describe("live grouped services", () => {
     );
     const tooltip = within(await screen.findByRole("tooltip"));
     expect(tooltip.getByText("Connection billing")).toBeInTheDocument();
-    expect(
-      tooltip.getByText("Personal account: BYOK"),
-    ).toBeInTheDocument();
+    expect(tooltip.getByText("Personal account: BYOK")).toBeInTheDocument();
     expect(screen.queryByText("Latest request")).not.toBeInTheDocument();
     expect(screen.queryByText(/No recorded requests/)).not.toBeInTheDocument();
   });
@@ -437,7 +503,9 @@ describe("live grouped services", () => {
     expect(screen.getByText("Agent keys unverified")).toBeVisible();
     expect(screen.getByText(/^Last use /)).toBeVisible();
     await user.hover(
-      screen.getByRole("button", { name: "Show agent keys and use for OpenAI" }),
+      screen.getByRole("button", {
+        name: "Show agent keys and use for OpenAI",
+      }),
     );
     expect(await screen.findByRole("tooltip")).toHaveTextContent(
       /Last use: Codex worker · Release app/,
@@ -732,7 +800,9 @@ describe("live grouped services", () => {
     await user.unhover(allToggle);
     await user.hover(allToggle);
     expect(
-      await screen.findByRole("tooltip", { name: /Switch to personal services/ }),
+      await screen.findByRole("tooltip", {
+        name: /Switch to personal services/,
+      }),
     ).toHaveTextContent("Showing all accessible services.");
     await user.unhover(allToggle);
     await user.click(screen.getByRole("button", { name: "Organization" }));

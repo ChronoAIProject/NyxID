@@ -6,6 +6,8 @@ import {
   type ConnectionBillingCategory,
 } from "@/lib/service-card-summary";
 import { insightStatusLabel } from "@/lib/service-insights";
+import { configuredPlatformPrice } from "@/lib/service-billing-config";
+import { lanePriceLabel } from "@/schemas/platform-keys";
 import type { CatalogEntry, KeyInfo } from "@/types/keys";
 import {
   Tooltip,
@@ -29,6 +31,7 @@ export function ServiceBillingSummary({
 }) {
   const rows = connections.map((connection) => ({
     connection,
+    platformPrice: configuredPlatformPrice(connection, catalog),
     category:
       insights.status === "ready"
         ? connectionBillingCategory(
@@ -38,8 +41,13 @@ export function ServiceBillingSummary({
           )
         : ("unknown" as const),
   }));
+  const platformRow = rows.find((row) => row.platformPrice);
+  const platformPrice = platformRow?.platformPrice;
   const categories: ConnectionBillingCategory[] = [
-    "platform", "byok", "not_billable", "unknown",
+    "platform",
+    "byok",
+    "not_billable",
+    "unknown",
   ];
   const countLabels = {
     platform: "NyxID",
@@ -47,8 +55,9 @@ export function ServiceBillingSummary({
     not_billable: "not billable",
     unknown: "unverified",
   };
-  const label =
-    insights.status !== "ready"
+  const label = platformPrice
+    ? "NyxID platform billing"
+    : insights.status !== "ready"
       ? insightStatusLabel(insights.status, "Billing")
       : rows.length === 1
         ? connectionBillingLabels[rows[0]!.category]
@@ -68,7 +77,9 @@ export function ServiceBillingSummary({
             className="flex h-6 w-full min-w-0 items-center gap-2 rounded-sm text-left text-xs focus-visible:outline-2 focus-visible:outline-ring"
             onClick={() => {
               const first =
-                rows.find((row) => row.category === "platform") ?? rows[0];
+                rows.find((row) => row.category === "platform") ??
+                platformRow ??
+                rows[0];
               if (first) onOpen(first.connection.id);
             }}
           >
@@ -84,6 +95,16 @@ export function ServiceBillingSummary({
           className="max-w-[min(22rem,calc(100vw-2rem))] space-y-1 break-words [overflow-wrap:anywhere]"
         >
           <p className="font-medium">Connection billing</p>
+          {platformPrice && (
+            <div className="space-y-1 border-b border-border pb-2">
+              <p className="font-medium">NyxID platform billing configured</p>
+              <p>{lanePriceLabel(platformPrice)}</p>
+              <p className="text-muted-foreground">
+                From this service's billing configuration. The credential selected
+                for each request determines which rate applies.
+              </p>
+            </div>
+          )}
           {rows.map(({ connection, category }) => (
             <p key={connection.id}>
               {connection.label}:{" "}

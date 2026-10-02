@@ -1,6 +1,18 @@
 import type { ConfiguredCatalogEntry } from "@/schemas/service-insights";
 import type { KeyInfo } from "@/types/keys";
 
+/** Catalog pricing describes the service's platform offering, not the selected credential. */
+export function configuredPlatformPrice(
+  connection: KeyInfo,
+  catalog?: ConfiguredCatalogEntry,
+) {
+  return (
+    connection.platform_key_pricing ??
+    catalog?.platform_key?.pricing ??
+    catalog?.billing?.platform_key_pricing
+  );
+}
+
 export function positiveUsageRate(rate: string): boolean {
   return /^\d+(?:\.\d+)?$/.test(rate) && /[1-9]/.test(rate);
 }
@@ -26,10 +38,7 @@ export function configuredUsageCharge(
   const billing = catalog?.billing;
   const byok =
     connection.byok_pricing ?? catalog?.byok_pricing ?? billing?.byok_pricing;
-  const pk =
-    connection.platform_key_pricing ??
-    catalog?.platform_key?.pricing ??
-    billing?.platform_key_pricing;
+  const pk = configuredPlatformPrice(connection, catalog);
   const lane = noAuth ? undefined : platform ? pk : byok;
   const legacy =
     Boolean(billing?.platform_billable) &&

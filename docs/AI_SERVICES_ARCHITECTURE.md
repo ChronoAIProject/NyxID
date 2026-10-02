@@ -66,11 +66,22 @@ Source avatars sit at the bottom right of the card body without a visible label.
 Hovering or focusing a stationary circle brings it forward and shows its source
 name. Extra sources remain reachable through the overflow count.
 
-The body starts with a credential-based billing summary, e.g. **1 NyxID · 5 BYOK**.
+The body checks the service billing configuration first. A configured platform-key
+price shows **NyxID platform billing**, with its rate and sync state on hover, in
+the expanded table and in the billing panel. Pricing is joined through the catalog
+service, including `/catalog?include_all=true`, and also read from the published
+connection price. The configuration stays visible even when a legacy connection
+reports a `user` binding. A configured platform price is not evidence that a
+specific request selected the platform credential.
+
+When no platform price is configured, the summary uses credential categories,
+e.g. **1 NyxID · 5 BYOK**.
 NyxID means the platform supplies the key or developer app; BYOK means a person
 or organization supplies it. **Not billable** requires no provider credential and
 confirmed absence of configured NyxID usage charges. Unverified credential supply
-stays unverified, including OAuth app provenance on older servers. Disabled
+stays unverified, including OAuth app provenance and user-key rows alongside
+platform pricing on older servers. A resolved backend credential class remains
+authoritative. Disabled
 connections retain their classification. Clicking the summary opens the first
 NyxID connection's billing panel, or the first connection when there is none.
 Expanded rows use the same labels and show payer/rates directly for NyxID

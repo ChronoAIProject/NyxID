@@ -37,6 +37,18 @@ The backend now reports configured billing separately from execution availabilit
 the production-data preview uses published inventory metadata until that backend
 change is deployed. Missing data remains unverified.
 
+Updated 2 October: the billing summary now checks the published service billing
+configuration before the connection label. A live metadata check confirmed
+Twitter (`api-twitter`) has synced platform pricing of 0.05 credits/request and
+DeepSeek (`llm-deepseek`) has synced platform pricing of 0.000001 credits/token.
+Both connections currently report a user binding. Their cards now show NyxID
+platform billing, and hover/expanded details show the configured price. The UI
+preserves the reported binding and leaves the credential supplier unverified
+where the server has not identified it; a key row alone does not prove BYOK.
+This display fix does not change stored bindings or execution pricing. The
+compatibility catalog read now includes all services so platform services do
+not disappear from billing lookup.
+
 Run from `frontend/`:
 
 ```sh

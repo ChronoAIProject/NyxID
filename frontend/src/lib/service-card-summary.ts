@@ -5,6 +5,7 @@ import type {
 import type { KeyInfo } from "@/types/keys";
 import {
   configuredUsageCharge,
+  configuredPlatformPrice,
   positiveUsageRate,
 } from "./service-billing-config";
 
@@ -47,6 +48,9 @@ export function connectionBillingCategory(
   if (billing?.context === "agent_key") return "unknown";
   if (connection.credential_binding === "platform") return "platform";
   if (billing?.provider_billing === "nyxid_credential") return "platform";
+  // A stored user-key row can coexist with platform billing. It does not
+  // establish who supplied that credential on an older server.
+  if (configuredPlatformPrice(connection, catalog)) return "unknown";
   if (connection.node_id || connection.has_node_binding) return "unknown";
   if (connection.auth_method === "none")
     return connectionBillability(connection, billing, catalog) === false

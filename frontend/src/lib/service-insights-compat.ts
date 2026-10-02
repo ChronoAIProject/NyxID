@@ -10,7 +10,10 @@ import {
   type ServiceInsight,
 } from "@/schemas/service-insights";
 import type { KeyInfo } from "@/types/keys";
-import { configuredUsageCharge } from "./service-billing-config";
+import {
+  configuredUsageCharge,
+  configuredPlatformPrice,
+} from "./service-billing-config";
 
 // Read only metadata from the deployed inventory APIs. This projection describes
 // configuration; the execution resolver remains authoritative for ACLs and costs.
@@ -39,6 +42,7 @@ export function configuredBilling(
       ? connection.credential_source
       : null;
   const oauth = ["oauth2", "device_code"].includes(connection.credential_type);
+  const platformPrice = configuredPlatformPrice(connection, catalog);
   const billing = catalog?.billing;
   const configuredLane = platform
     ? (connection.platform_key_pricing ??
@@ -80,9 +84,11 @@ export function configuredBilling(
         ? "No credential"
         : oauth
           ? "Connected account · app unverified"
-          : ownApiKey
+          : ownApiKey && !platformPrice
             ? `${org ? "Organization" : "Your"} API key (BYOK)`
-            : "Credential supplier unverified";
+            : userCredential && connection.credential_type === "api_key"
+              ? "Stored API key · supplier unverified"
+              : "Credential supplier unverified";
   return {
     status: "conditional",
     credential_class: null,
@@ -123,7 +129,7 @@ export function configuredBilling(
       ? "nyxid_credential"
       : connection.auth_method === "none"
         ? "no_credential"
-        : ownApiKey
+        : ownApiKey && !platformPrice
           ? "separate_provider_account"
           : "unknown",
     context: "configuration",
@@ -202,7 +208,7 @@ export async function loadConfiguredServiceInsights(
       .get<unknown>("/orgs")
       .then((data) => configuredOrgListSchema.parse(data).orgs),
     api
-      .get<unknown>("/catalog")
+      .get<unknown>("/catalog?include_all=true")
       .then((data) => configuredCatalogSchema.parse(data).entries),
   ]);
   const relevantOrgs = new Set(

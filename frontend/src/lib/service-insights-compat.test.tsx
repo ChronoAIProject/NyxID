@@ -70,7 +70,7 @@ beforeEach(() => {
   responses.set("/api-keys?org_id=org", {
     keys: [{ ...key, id: "org-key", allow_all_services: true }],
   });
-  responses.set("/catalog", {
+  responses.set("/catalog?include_all=true", {
     entries: [
       {
         slug: "openai",
@@ -117,7 +117,7 @@ describe("deployed service insight compatibility", () => {
   });
 
   it("reads legacy catalog credit billing without claiming the caller has been charged", async () => {
-    responses.set("/catalog", {
+    responses.set("/catalog?include_all=true", {
       entries: [
         {
           slug: "openai",

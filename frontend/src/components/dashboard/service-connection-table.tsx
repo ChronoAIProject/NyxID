@@ -45,6 +45,8 @@ import {
   connectionBillingCategory,
   connectionBillingLabels,
 } from "@/lib/service-card-summary";
+import { configuredPlatformPrice } from "@/lib/service-billing-config";
+import { lanePriceLabel } from "@/schemas/platform-keys";
 import type { ServiceInsight } from "@/schemas/service-insights";
 import {
   useServiceInsights,
@@ -203,6 +205,7 @@ export function ServiceConnectionTable({
           {connections.map((key) => {
             const insight = insights.connections.get(key.id);
             const billing = insight?.billing;
+            const platformPrice = configuredPlatformPrice(key, catalog);
             const billingCategory =
               insights.status === "ready"
                 ? connectionBillingCategory(key, billing, catalog)
@@ -486,11 +489,23 @@ export function ServiceConnectionTable({
                           <span className="flex items-start gap-1.5 font-medium">
                             <CreditCard className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
                             <span className="truncate">
-                              {insights.status === "ready"
-                                ? connectionBillingLabels[billingCategory]
-                                : insightStatusLabel(insights.status, "Billing")}
+                              {platformPrice
+                                ? "NyxID platform billing"
+                                : insights.status === "ready"
+                                  ? connectionBillingLabels[billingCategory]
+                                  : insightStatusLabel(insights.status, "Billing")}
                             </span>
                           </span>
+                          {platformPrice && (
+                            <>
+                              <span className="mt-1 block truncate text-[11px] text-muted-foreground">
+                                Configured: {lanePriceLabel(platformPrice)}
+                              </span>
+                              <span className="mt-1 block truncate text-[11px] text-muted-foreground">
+                                Connection: {credentialLabel(key, billing)}
+                              </span>
+                            </>
+                          )}
                           {billing && billingCategory === "platform" && (
                             <>
                               <span
@@ -616,6 +631,7 @@ export function ServiceConnectionTable({
                         />
                       ) : (
                         <ConnectionInsightPanel
+                          catalog={catalog}
                           key={`${key.id}:${open.view}`}
                           connection={key}
                           insight={insight}

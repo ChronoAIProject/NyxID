@@ -6,6 +6,7 @@ import {
 } from "./service-card-summary";
 import { configuredBilling } from "./service-insights-compat";
 import type { KeyInfo } from "@/types/keys";
+import { configuredPlatformPrice } from "./service-billing-config";
 
 const connection = {
   id: "personal",
@@ -88,6 +89,19 @@ describe("card billing categories", () => {
 });
 
 describe("card billing configuration", () => {
+  it("reads platform prices from service billing even when the connection uses its own credential", () => {
+    const catalog = {
+      slug: "llm-deepseek",
+      billing: { platform_key_pricing: lane },
+    };
+    expect(configuredPlatformPrice(connection, catalog)).toEqual(lane);
+    const bill = configuredBilling(connection, catalog);
+    expect(connectionBillingCategory(connection, bill, catalog)).toBe(
+      "unknown",
+    );
+    expect(bill.credential_label).toBe("Stored API key · supplier unverified");
+    expect(bill.provider_billing).toBe("unknown");
+  });
   it("counts only the billable connection across five personal apps and one platform connection, including disabled rows", () => {
     const catalog = {
       slug: "twitter",
