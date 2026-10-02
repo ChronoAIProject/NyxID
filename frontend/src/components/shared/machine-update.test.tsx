@@ -71,6 +71,7 @@ it("shows an exact token-free host migration with preserved volume inspection", 
       "ab".repeat(32),
   );
   expect(command).toContain("work-machine-nyxid-update");
+  expect(command).toContain("--tmpfs /tmp:rw,noexec,nosuid,size=16m");
   expect(command).not.toMatch(/token|nyx_nreg|latest/);
   expect(
     machineCompanionCommand(
@@ -79,7 +80,7 @@ it("shows an exact token-free host migration with preserved volume inspection", 
       "ghcr.io/chronoaiproject/nyxid/nyxid-machine-updater@sha256:" +
         "ab".repeat(32),
     ),
-  ).toContain("--read-only");
+  ).toContain("--read-only --tmpfs /tmp:rw,noexec,nosuid,size=16m");
   expect(() => machineMigrationCommand("machine; evil", "0.41.0")).toThrow();
 });
 
@@ -114,4 +115,16 @@ it("never offers an unpinned command while attestation verification is unavailab
   image.value =
     "ghcr.io/chronoaiproject/nyxid/nyxid-machine-updater@sha256:" +
     "ab".repeat(32);
+});
+
+
+it("shows the fixed failure code and actionable server guidance", () => {
+  render(
+    <MachineUpdate name="work-machine" status={{
+      ...status, phase: "failed", code: "verify_updater_image:trust_root_unavailable",
+      guidance: "Copy the current Machines command, which includes the required /tmp tmpfs.",
+    }} />,
+  );
+  expect(screen.getByRole("status")).toHaveTextContent("verify_updater_image:trust_root_unavailable");
+  expect(screen.getByRole("alert")).toHaveTextContent("required /tmp tmpfs");
 });

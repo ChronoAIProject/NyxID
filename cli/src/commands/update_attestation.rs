@@ -63,16 +63,30 @@ pub(crate) async fn verify_release_attestation(
     );
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ImageVerificationError {
+    #[error("attestation_unavailable")]
+    AttestationUnavailable,
+    #[error("trust_root_unavailable")]
+    TrustRootUnavailable,
+    #[error("attestation_invalid")]
+    AttestationInvalid,
+}
+
 /// Image updates use the same certificate, Rekor, DSSE and digest verifier as
 /// CLI releases, with TUF metadata mirrored on GitHub (no third-party egress).
 pub(crate) async fn verify_image_attestation(
     client: &reqwest::Client,
     digest: &str,
     version: &str,
-) -> Result<()> {
-    let attestations =
-        fetch_github_attestations(client, "ChronoAIProject", "NyxID", digest).await?;
-    let root = trust::load_github(client.clone()).await?;
+    datastore: Option<&std::path::Path>,
+) -> Result<(), ImageVerificationError> {
+    let attestations = fetch_github_attestations(client, "ChronoAIProject", "NyxID", digest)
+        .await
+        .map_err(|_| ImageVerificationError::AttestationUnavailable)?;
+    let root = trust::load_github(client.clone(), datastore)
+        .await
+        .map_err(|_| ImageVerificationError::TrustRootUnavailable)?;
     let identity = format!(
         "https://github.com/ChronoAIProject/NyxID/.github/workflows/publish-images.yml@refs/tags/v{version}"
     );
@@ -81,7 +95,7 @@ pub(crate) async fn verify_image_attestation(
             return Ok(());
         }
     }
-    anyhow::bail!("Official release image attestation missing or invalid")
+    Err(ImageVerificationError::AttestationInvalid)
 }
 
 async fn fetch_github_attestations(
@@ -91,9 +105,14 @@ async fn fetch_github_attestations(
     digest: &str,
 ) -> Result<Vec<Attestation>> {
     let url = format!("{GITHUB_API_URL}/repos/{owner}/{repo}/attestations/sha256:{digest}");
-    let response = client
+    let mut request = client
         .get(&url)
-        .query(&[("per_page", MAX_ATTESTATIONS.to_string())])
+        .query(&[("per_page", MAX_ATTESTATIONS.to_string())]);
+    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+        let token = zeroize::Zeroizing::new(token);
+        request = request.bearer_auth(token.as_str());
+    }
+    let response = request
         .send()
         .await
         .with_context(|| format!("Failed to query GitHub attestation API: {url}"))?;

@@ -2,6 +2,61 @@ use super::*;
 use futures::StreamExt;
 use reqwest::Method;
 
+/// Fixed local checks, without Docker response bodies, names or credentials.
+#[derive(Clone, Copy, Debug, thiserror::Error)]
+pub(super) enum CheckFailure {
+    #[error("docker_socket_unavailable")]
+    DockerSocketUnavailable,
+    #[error("container_not_found")]
+    ContainerNotFound,
+    #[error("invalid_container_name")]
+    InvalidContainerName,
+    #[error("source_name_changed")]
+    SourceNameChanged,
+    #[error("source_not_official_image")]
+    SourceNotOfficialImage,
+    #[error("source_auto_remove")]
+    SourceAutoRemove,
+    #[error("source_owner_mismatch")]
+    SourceOwnerMismatch,
+    #[error("source_version_unknown")]
+    SourceVersionUnknown,
+    #[error("companion_name_taken")]
+    CompanionNameTaken,
+    #[error("update_volume_mismatch")]
+    UpdateVolumeMismatch,
+    #[error("downgrade_refused")]
+    DowngradeRefused,
+    #[error("invalid_target_version")]
+    InvalidTargetVersion,
+}
+impl CheckFailure {
+    pub(super) fn code(self) -> &'static str {
+        match self {
+            Self::DockerSocketUnavailable => "docker_socket_unavailable",
+            Self::ContainerNotFound => "container_not_found",
+            Self::InvalidContainerName => "invalid_container_name",
+            Self::SourceNameChanged => "source_name_changed",
+            Self::SourceNotOfficialImage => "source_not_official_image",
+            Self::SourceAutoRemove => "source_auto_remove",
+            Self::SourceOwnerMismatch => "source_owner_mismatch",
+            Self::SourceVersionUnknown => "source_version_unknown",
+            Self::CompanionNameTaken => "companion_name_taken",
+            Self::UpdateVolumeMismatch => "update_volume_mismatch",
+            Self::DowngradeRefused => "downgrade_refused",
+            Self::InvalidTargetVersion => "invalid_target_version",
+        }
+    }
+}
+
+fn transport_failure(error: reqwest::Error) -> anyhow::Error {
+    if error.is_connect() {
+        CheckFailure::DockerSocketUnavailable.into()
+    } else {
+        error.into()
+    }
+}
+
 pub struct Docker {
     client: reqwest::Client,
     #[cfg(test)]
@@ -69,13 +124,18 @@ impl Docker {
         let operation = format!("{method} {path}");
         let already_in_state =
             method == Method::POST && (path.ends_with("/start") || path.contains("/stop?"));
+        let inspecting =
+            method == Method::GET && path.starts_with("/containers/") && path.ends_with("/json");
         let mut request = self
             .client
             .request(method, format!("{}/v1.45{path}", self.endpoint()));
         if let Some(body) = body {
             request = request.json(body);
         }
-        let mut response = request.send().await?;
+        let mut response = request.send().await.map_err(transport_failure)?;
+        if inspecting && response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(CheckFailure::ContainerNotFound.into());
+        }
         #[cfg(test)]
         if !response.status().is_success() {
             eprintln!("Docker test operation {operation}: {}", response.status());
@@ -149,7 +209,8 @@ impl Docker {
                 urlencoding::encode(id)
             ))
             .send()
-            .await?;
+            .await
+            .map_err(transport_failure)?;
         // A committed update may have removed the retained container before a
         // crash. Cleanup must be idempotent, without hiding other Docker errors.
         ensure!(
@@ -215,7 +276,12 @@ impl Docker {
         }
         Ok(())
     }
-    pub async fn verified_digest(&self, image: &str, target: &str) -> Result<String> {
+    pub async fn verified_digest(
+        &self,
+        image: &str,
+        target: &str,
+        datastore: Option<&Path>,
+    ) -> Result<String> {
         ensure!(
             [update::MACHINE_IMAGE, update::UPDATER_IMAGE].contains(&image),
             "Only official NyxID images can be installed"
@@ -246,6 +312,7 @@ impl Docker {
             &client,
             digest.trim_start_matches("sha256:"),
             target,
+            datastore,
         )
         .await?;
         Ok(digest.into())
@@ -261,7 +328,8 @@ impl Docker {
             .query(&[("fromImage", image)])
             .timeout(Duration::from_secs(900))
             .send()
-            .await?
+            .await
+            .map_err(transport_failure)?
             .error_for_status()?;
         let mut stream = response.bytes_stream();
         let mut line = Vec::new();
@@ -313,7 +381,10 @@ fn allowed_https(url: &url::Url) -> bool {
         )
 }
 pub fn valid_name(name: &str) -> Result<()> {
-    ensure!(!name.is_empty() && name.len()<=128 && name.bytes().enumerate().all(|(i,b)| b.is_ascii_alphanumeric() || i>0 && matches!(b,b'_'|b'-'|b'.')),"Invalid container name");
+    ensure!(
+        update::container_name(name),
+        CheckFailure::InvalidContainerName
+    );
     Ok(())
 }
 fn valid_digest(digest: &str) -> Result<()> {
@@ -328,38 +399,48 @@ fn valid_digest(digest: &str) -> Result<()> {
 pub fn source_version(inspect: &Value) -> Result<&str> {
     let image = inspect["Config"]["Image"]
         .as_str()
-        .context("Missing image")?;
+        .ok_or(CheckFailure::SourceVersionUnknown)?;
     if let Some(target) = image.strip_prefix(&format!("{}:", update::MACHINE_IMAGE)) {
-        update::version(target).map_err(anyhow::Error::msg)?;
+        update::version(target).map_err(|_| CheckFailure::SourceVersionUnknown)?;
         return Ok(target);
     }
     let target = inspect["Config"]["Labels"]["dev.nyxid.machine.version"]
         .as_str()
-        .context("Machine version unknown; owner migration requires a versioned official image")?;
-    update::version(target).map_err(anyhow::Error::msg)?;
+        .ok_or(CheckFailure::SourceVersionUnknown)?;
+    update::version(target).map_err(|_| CheckFailure::SourceVersionUnknown)?;
     Ok(target)
 }
 pub fn validate_source(inspect: &Value, name: &str, migration: bool) -> Result<()> {
     valid_name(name)?;
     ensure!(
         inspect["Name"] == format!("/{name}"),
-        "Container name changed"
+        CheckFailure::SourceNameChanged
     );
     let image = inspect["Config"]["Image"]
         .as_str()
-        .context("Missing image")?;
+        .ok_or(CheckFailure::SourceNotOfficialImage)?;
     ensure!(
         image.starts_with(&format!("{}:", update::MACHINE_IMAGE))
             || image.starts_with(&format!("{}@sha256:", update::MACHINE_IMAGE)),
-        "Container is not an official machine image"
+        CheckFailure::SourceNotOfficialImage
     );
     ensure!(
         migration || inspect["Config"]["Labels"][update::CONTAINER_LABEL] == name,
-        "Companion may update only its labelled machine"
+        CheckFailure::SourceOwnerMismatch
     );
     ensure!(
         inspect["HostConfig"]["AutoRemove"] != true,
-        "Remove --rm before enabling rollback-capable updates"
+        CheckFailure::SourceAutoRemove
+    );
+    Ok(())
+}
+
+pub(super) fn validate_target(current: &str, target: &str, rollback: bool) -> Result<()> {
+    let current = update::version(current).map_err(|_| CheckFailure::SourceVersionUnknown)?;
+    let target = update::version(target).map_err(|_| CheckFailure::InvalidTargetVersion)?;
+    ensure!(
+        target >= current || rollback,
+        CheckFailure::DowngradeRefused
     );
     Ok(())
 }

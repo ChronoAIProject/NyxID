@@ -19,17 +19,25 @@ pub(super) async fn load() -> Result<SigstoreTrustRoot> {
     load_from(client, METADATA.parse()?, TARGETS.parse()?).await
 }
 
-pub(super) async fn load_github(client: reqwest::Client) -> Result<SigstoreTrustRoot> {
+pub(super) async fn load_github(
+    client: reqwest::Client,
+    datastore: Option<&std::path::Path>,
+) -> Result<SigstoreTrustRoot> {
     let base = "https://raw.githubusercontent.com/sigstore/root-signing/main/";
-    let repository = tough::RepositoryLoader::new(
+    let loader = tough::RepositoryLoader::new(
         &ROOT,
         format!("{base}metadata/").parse()?,
         format!("{base}targets/").parse()?,
     )
     .transport(GithubTransport(CliTransport(client)))
-    .expiration_enforcement(tough::ExpirationEnforcement::Safe)
-    .load()
-    .await?;
+    .expiration_enforcement(tough::ExpirationEnforcement::Safe);
+    // Scratch/read-only companions supply their private update-volume store.
+    // Native CLI/server callers retain tough's temporary datastore behavior.
+    let loader = match datastore {
+        Some(path) => loader.datastore(path),
+        None => loader,
+    };
+    let repository = loader.load().await?;
     let bytes = repository
         .read_target(&tough::TargetName::new("trusted_root.json")?)
         .await?
@@ -236,7 +244,7 @@ mod tests {
             .user_agent("nyxid-update-validation")
             .build()
             .unwrap();
-        load_github(client).await.unwrap();
+        load_github(client, None).await.unwrap();
     }
 
     #[tokio::test]

@@ -26,7 +26,7 @@ RUN --mount=type=cache,id=nyxid-machine-updater-target-${TARGETARCH},target=/bui
     cargo test --release -p nyxid-machine-updater --no-run --message-format=json > /tmp/tests.json \
     && python3 -c 'import json,shutil; [shutil.copy(v["executable"],"/updater-tests") for l in open("/tmp/tests.json") if (v:=json.loads(l)).get("executable") and v.get("profile",{}).get("test") and v.get("target",{}).get("kind")==["bin"]]'
 FROM alpine:3.22 AS e2e
-RUN apk add --no-cache nodejs npm && npm install --prefix /test ws
+RUN apk add --no-cache nodejs npm openssl && npm install --prefix /test ws
 COPY --from=tests-build /updater-tests /updater-tests
 COPY cli/tests/machine_updater_fixture.mjs /test/fixture.mjs
 COPY cli/resources/machine-container/seccomp.json /test/seccomp.json

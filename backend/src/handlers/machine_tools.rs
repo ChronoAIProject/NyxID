@@ -125,7 +125,14 @@ pub async fn call(
                 .is_some_and(|tool| profile.computer_tools.iter().any(|allowed| allowed == tool))
         })
     {
-        return Err(AppError::MachineComputerToolUnsupported);
+        return Ok(json!({
+            "error": {
+                "code": AppError::MachineComputerToolUnsupported.error_code(),
+                "message": "computer_tool_not_supported: choose a tool from computer_tools below. For page content use nyx__machine_browser action=snapshot; owner screenshot attachments use browser=dev action=screenshot.",
+                "computer_tools": node.machine.as_ref().map(|p| p.computer_tools.iter()
+                    .take(64).map(|tool| tool.chars().take(128).collect::<String>()).collect::<Vec<_>>()).unwrap_or_default(),
+            },
+        }));
     }
     if name != "nyx__machine_request_control" {
         if matches!(

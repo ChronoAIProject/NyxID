@@ -874,3 +874,13 @@ is refused. Secure and dev Linux displays have independent control, selected
 from the desktop panel. macOS shares a physical desktop and locks both views
 on takeover. Update guidance never supplies an unverified updater tag: the
 server publishes only an attested digest or a temporary verification state.
+
+
+Machine updates (0.41.1) preserve fixed updater stage/reason codes in status,
+`previous_update` tool results and reconnect-watch failures, with actionable
+guidance. Relay that guidance without asking for tokens or dumping Docker
+metadata. Both host migration and companion commands include a private `/tmp`
+tmpfs for the published 0.41.0 helper; new helpers keep TUF state inside the update
+volume. Secure browser actions and saved-login fills automatically recover after
+persisted-profile relaunches and package repair. Follow 12413 recovery guidance;
+12416 lists supported computer tools and points to the browser snapshot action.

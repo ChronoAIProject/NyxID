@@ -10,6 +10,134 @@ use std::{
 
 pub mod docker;
 
+/// Only these fixed classifications leave the controller. Never format an
+/// anyhow chain: Docker errors may contain environment or credential metadata.
+#[derive(Clone, Copy, Debug, thiserror::Error)]
+#[error("machine_update failed at {stage}: {reason}")]
+pub struct Failure {
+    stage: &'static str,
+    reason: &'static str,
+}
+impl Failure {
+    fn new(stage: &'static str, reason: &'static str) -> Self {
+        Self { stage, reason }
+    }
+    pub fn classify(error: &anyhow::Error, stage: &'static str) -> Self {
+        error.downcast_ref::<Self>().copied().unwrap_or_else(|| {
+            let reason = error
+                .downcast_ref::<docker::CheckFailure>()
+                .map(|failure| failure.code())
+                .unwrap_or("operation_failed");
+            Self::new(stage, reason)
+        })
+    }
+    fn code(self) -> String {
+        format!("{}:{}", self.stage, self.reason)
+    }
+}
+
+/// Reuse tough's expiry/rollback datastore under the controller lock. Open the
+/// directory without following a symlink and verify its owner and mode before
+/// giving tough the path. Neither bootstrap nor watch needs a system temp dir.
+fn trust_datastore(root: &Path) -> Result<PathBuf> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    private_directory(root)?;
+    let path = root.join("tuf");
+    private_directory(&path)?;
+    let dir = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC)
+        .open(&path)?;
+    let metadata = dir.metadata()?;
+    ensure!(
+        metadata.uid() == unsafe { libc::geteuid() } && metadata.mode() & 0o077 == 0,
+        "Trust datastore is not private"
+    );
+    Ok(path)
+}
+
+async fn verified_image(
+    api: &docker::Docker,
+    root: &Path,
+    image: &str,
+    version: &str,
+) -> Result<String> {
+    use crate::update_attestation::ImageVerificationError;
+    let stage = if image == update::UPDATER_IMAGE {
+        "verify_updater_image"
+    } else {
+        "verify_machine_image"
+    };
+    let datastore =
+        trust_datastore(root).map_err(|_| Failure::new(stage, "trust_store_unavailable"))?;
+    api.verified_digest(image, version, Some(&datastore))
+        .await
+        .map_err(|error| {
+            let reason = match error.downcast_ref::<ImageVerificationError>() {
+                Some(ImageVerificationError::TrustRootUnavailable) => "trust_root_unavailable",
+                Some(ImageVerificationError::AttestationUnavailable) => "attestation_unavailable",
+                Some(ImageVerificationError::AttestationInvalid) => "attestation_invalid",
+                None => error
+                    .downcast_ref::<docker::CheckFailure>()
+                    .map(|failure| failure.code())
+                    .unwrap_or("image_resolution_failed"),
+            };
+            Failure::new(stage, reason).into()
+        })
+}
+
+fn report_failure(
+    root: &Path,
+    target: &str,
+    error: &anyhow::Error,
+    stage: &'static str,
+) -> Result<Failure> {
+    let failure = Failure::classify(error, stage);
+    // Preserve a rollback's terminal phase and use its reason in both channels.
+    if stage == "bootstrap"
+        && let Some(mut progress) = read(root, "progress.json", 4096)
+            .ok()
+            .and_then(|data| serde_json::from_slice::<Progress>(&data).ok())
+            .filter(|p| p.target == target && p.phase == Phase::RolledBack)
+    {
+        let failure = Failure::new(stage, "replacement_did_not_reconnect");
+        progress.code = Some(failure.code());
+        report(root, &progress)?;
+        return Ok(failure);
+    }
+    report(
+        root,
+        &Progress {
+            target: target.into(),
+            phase: Phase::Failed,
+            started_at_ms: now_ms(),
+            code: Some(failure.code()),
+        },
+    )?;
+    Ok(failure)
+}
+
+/// Read-only production preflight, also useful to diagnose registry/provenance
+/// access without replacing a machine. Uses exactly the bootstrap/watch store.
+#[allow(dead_code)]
+pub async fn verify(root: PathBuf, version: String) -> Result<()> {
+    let _lock = lock(&root)?;
+    update::version(&version).map_err(anyhow::Error::msg)?;
+    let api = docker::Docker::new()?;
+    let result = async {
+        verified_image(&api, &root, update::UPDATER_IMAGE, &version).await?;
+        verified_image(&api, &root, update::MACHINE_IMAGE, &version).await?;
+        Ok(())
+    }
+    .await;
+    if let Err(error) = &result {
+        return Err(report_failure(&root, &version, error, "verify_images")?.into());
+    } else {
+        println!("machine_update verified updater and machine image provenance");
+    }
+    result
+}
+
 pub fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -206,7 +334,7 @@ pub async fn replace(
     let inspect = api.inspect(name).await?;
     docker::validate_source(&inspect, name, migration)?;
     let current = docker::source_version(&inspect)?;
-    update::validate_target(current, target, owner_rollback).map_err(anyhow::Error::msg)?;
+    docker::validate_target(current, target, owner_rollback)?;
     let mut progress = Progress {
         target: target.into(),
         phase: Phase::Verifying,
@@ -214,11 +342,12 @@ pub async fn replace(
         code: None,
     };
     report(root, &progress)?;
-    let digest = api.verified_digest(update::MACHINE_IMAGE, target).await?;
+    let digest = verified_image(api, root, update::MACHINE_IMAGE, target).await?;
     progress.phase = Phase::Downloading;
     report(root, &progress)?;
     api.pull(&format!("{}@{digest}", update::MACHINE_IMAGE))
-        .await?;
+        .await
+        .map_err(|error| Failure::classify(&error, "download_image"))?;
     let config = docker::replacement_config(&inspect, &digest, name, target, migration)?;
     let mut journal = Journal {
         original_id: inspect["Id"]
@@ -309,23 +438,12 @@ pub async fn run(root: PathBuf, name: String) -> Result<()> {
         heartbeat(&root)?;
         match request(&root) {
             Ok(Some((target, rollback))) => {
-                if replace(&api, &root, &name, &target, rollback, false)
-                    .await
-                    .is_err()
-                {
+                if let Err(error) = replace(&api, &root, &name, &target, rollback, false).await {
                     ensure!(
                         !root.join("journal.json").exists(),
                         "Update recovery pending"
                     );
-                    report(
-                        &root,
-                        &Progress {
-                            target,
-                            phase: Phase::Failed,
-                            started_at_ms: now_ms(),
-                            code: Some("verification_or_update_failed".into()),
-                        },
-                    )?;
+                    eprintln!("{}", report_failure(&root, &target, &error, "watch")?);
                 }
                 for file in ["request", "rollback-request"] {
                     let _ = std::fs::remove_file(root.join(file));
@@ -347,7 +465,9 @@ pub async fn run(root: PathBuf, name: String) -> Result<()> {
 /// through Docker and passed back to Docker, never printed or returned to an agent.
 #[allow(dead_code)] // Used by the companion binary; native CLI shares this module.
 pub async fn bootstrap(root: PathBuf, name: String, version: String) -> Result<()> {
-    bootstrap_with_api(root, name, version, docker::Docker::new()?).await
+    bootstrap_with_api(root, name, version, docker::Docker::new()?)
+        .await
+        .map_err(|error| Failure::classify(&error, "bootstrap").into())
 }
 
 async fn bootstrap_with_api(
@@ -359,22 +479,71 @@ async fn bootstrap_with_api(
     private_directory(&root)?;
     let _lock = lock(&root)?;
     let _heartbeat = heartbeat_task(&root);
-    docker::valid_name(&name)?;
-    update::version(&version).map_err(anyhow::Error::msg)?;
-    recover_pending(&api, &root, &name).await?;
-    let inspect = api.inspect(&name).await?;
-    docker::validate_source(&inspect, &name, true)?;
+    // Never persist arbitrary command-line input as a release identifier.
+    let reported_target = if update::version(&version).is_ok() {
+        version.as_str()
+    } else {
+        ""
+    };
+    report(
+        &root,
+        &Progress {
+            target: reported_target.into(),
+            phase: Phase::Verifying,
+            started_at_ms: now_ms(),
+            code: None,
+        },
+    )?;
+    let result = async {
+        docker::valid_name(&name)?;
+        update::version(&version).map_err(|_| docker::CheckFailure::InvalidTargetVersion)?;
+        bootstrap_locked(&root, &name, &version, &api).await
+    }
+    .await;
+    if let Err(error) = &result {
+        return Err(report_failure(&root, reported_target, error, "bootstrap")?.into());
+    }
+    // Release the controller lock before starting the watch process.
+    drop(_lock);
+    if let Some(companion) = result?
+        && let Err(error) = api.start(&companion).await
+    {
+        return Err(report_failure(&root, &version, &error, "install_companion")?.into());
+    }
+    println!("Machine updated; identity and workspace retained; automatic updater installed.");
+    Ok(())
+}
+
+async fn bootstrap_locked(
+    root: &Path,
+    name: &str,
+    version: &str,
+    api: &docker::Docker,
+) -> Result<Option<String>> {
+    recover_pending(api, root, name).await?;
+    let inspect = api.inspect(name).await?;
+    docker::validate_source(&inspect, name, true)?;
+    let current = docker::source_version(&inspect)?;
+    docker::validate_target(current, version, false)?;
     let companion = format!("{name}-updater");
-    let existing_companion = api.inspect(&companion).await.ok();
+    let existing_companion = match api.inspect(&companion).await {
+        Ok(existing) => Some(existing),
+        Err(error)
+            if matches!(
+                error.downcast_ref::<docker::CheckFailure>(),
+                Some(docker::CheckFailure::ContainerNotFound)
+            ) =>
+        {
+            None
+        }
+        Err(error) => return Err(error),
+    };
     if let Some(existing) = &existing_companion {
         ensure!(
             existing["Config"]["Labels"]["dev.nyxid.machine.updater"] == name,
-            "Companion name belongs to another container"
+            docker::CheckFailure::CompanionNameTaken
         );
     }
-    let updater_digest = api.verified_digest(update::UPDATER_IMAGE, &version).await?;
-    api.pull(&format!("{}@{updater_digest}", update::UPDATER_IMAGE))
-        .await?;
     let mounted = inspect["Mounts"].as_array().and_then(|mounts| {
         mounts
             .iter()
@@ -385,18 +554,20 @@ async fn bootstrap_with_api(
             mount["Type"] == "volume"
                 && mount["Name"] == format!("{name}-nyxid-update")
                 && inspect["Config"]["Labels"][update::CONTAINER_LABEL] == name,
-            "Update volume does not belong to this labelled machine"
+            docker::CheckFailure::UpdateVolumeMismatch
         );
     }
-    if mounted.is_none() || docker::source_version(&inspect)? != version {
-        replace(&api, &root, &name, &version, false, mounted.is_none()).await?;
-        let progress: Progress = serde_json::from_slice(&read(&root, "progress.json", 4096)?)?;
+    let updater_digest = verified_image(api, root, update::UPDATER_IMAGE, version).await?;
+    api.pull(&format!("{}@{updater_digest}", update::UPDATER_IMAGE))
+        .await
+        .map_err(|error| Failure::classify(&error, "download_image"))?;
+    if mounted.is_none() || current != version {
+        replace(api, root, name, version, false, mounted.is_none()).await?;
+        let progress: Progress = serde_json::from_slice(&read(root, "progress.json", 4096)?)?;
         ensure!(progress.phase == Phase::Connected, "Migration rolled back");
     }
     if existing_companion.is_some() {
-        drop(_lock);
-        api.start(&companion).await?;
-        return Ok(());
+        return Ok(Some(companion));
     }
     let config = json!({
         "Image":format!("{}@{updater_digest}",update::UPDATER_IMAGE),
@@ -410,10 +581,7 @@ async fn bootstrap_with_api(
         }
     });
     let id = api.create(&companion, &config).await?;
-    drop(_lock);
-    api.start(&id).await?;
-    println!("Machine updated; identity and workspace retained; automatic updater installed.");
-    Ok(())
+    Ok(Some(id))
 }
 
 #[cfg(test)]
@@ -427,6 +595,240 @@ mod tests {
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path},
     };
+
+    #[test]
+    fn trust_store_is_private_reusable_and_cannot_follow_a_symlink() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let root = tempfile::tempdir().unwrap();
+        let guard = lock(root.path()).unwrap();
+        let path = trust_datastore(root.path()).unwrap();
+        assert_eq!(path, root.path().join("tuf"));
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        std::fs::write(path.join("marker"), "retained").unwrap();
+        assert_eq!(trust_datastore(root.path()).unwrap(), path);
+        assert!(path.join("marker").exists());
+        assert!(
+            lock(root.path()).is_err(),
+            "bootstrap and watch must serialize"
+        );
+        drop(guard);
+        let _next = lock(root.path()).unwrap();
+        std::fs::remove_dir_all(&path).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        symlink(outside.path(), &path).unwrap();
+        assert!(trust_datastore(root.path()).is_err());
+        assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn failure_output_and_progress_contain_only_fixed_diagnostics() {
+        let root = tempfile::tempdir().unwrap();
+        for (error, expected) in [
+            (
+                anyhow::anyhow!("SECRET_DOCKER_ENV_AND_CREDENTIAL"),
+                "bootstrap:operation_failed",
+            ),
+            (
+                anyhow::anyhow!("SECRET_UPSTREAM_BODY").context(Failure::new(
+                    "verify_updater_image",
+                    "trust_root_unavailable",
+                )),
+                "verify_updater_image:trust_root_unavailable",
+            ),
+        ] {
+            let reported = report_failure(root.path(), "0.41.0", &error, "bootstrap").unwrap();
+            let bytes = read(root.path(), "progress.json", 4096).unwrap();
+            let progress: Progress = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(progress.phase, Phase::Failed);
+            assert_eq!(progress.code.as_deref(), Some(expected));
+            // Main classifies with startup, but must retain exactly what was
+            // persisted. report_failure does not print: the caller prints once.
+            assert_eq!(
+                Failure::classify(&reported.into(), "startup").code(),
+                expected
+            );
+            assert!(update::failure_guidance(expected).is_some());
+            assert!(!String::from_utf8(bytes).unwrap().contains("SECRET"));
+            assert!(
+                !Failure::classify(&error, "bootstrap")
+                    .to_string()
+                    .contains("SECRET")
+            );
+        }
+        report(
+            root.path(),
+            &Progress {
+                target: "0.41.0".into(),
+                phase: Phase::RolledBack,
+                started_at_ms: 1,
+                code: Some("replacement_did_not_reconnect".into()),
+            },
+        )
+        .unwrap();
+        let failure = report_failure(
+            root.path(),
+            "0.41.0",
+            &anyhow::anyhow!("Migration rolled back"),
+            "bootstrap",
+        )
+        .unwrap();
+        let progress: Progress =
+            serde_json::from_slice(&read(root.path(), "progress.json", 4096).unwrap()).unwrap();
+        assert_eq!(progress.phase, Phase::RolledBack);
+        assert_eq!(progress.code.as_deref(), Some(failure.code().as_str()));
+        assert_eq!(failure.reason, "replacement_did_not_reconnect");
+    }
+
+    #[tokio::test]
+    async fn bootstrap_checks_persist_actionable_codes_before_any_mutation() {
+        for reason in [
+            "invalid_container_name",
+            "container_not_found",
+            "source_not_official_image",
+            "source_auto_remove",
+            "source_name_changed",
+            "source_version_unknown",
+            "companion_name_taken",
+            "update_volume_mismatch",
+            "downgrade_refused",
+            "invalid_target_version",
+            "operation_failed",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let server = MockServer::start().await;
+            let mut source = original();
+            let mut name = "test-machine";
+            let mut target = "0.41.1";
+            let mut status = 200;
+            match reason {
+                "invalid_container_name" => name = "SECRET/invalid",
+                "container_not_found" => status = 404,
+                "source_not_official_image" => source["Config"]["Image"] = json!("SECRET/image"),
+                "source_auto_remove" => source["HostConfig"]["AutoRemove"] = json!(true),
+                "source_name_changed" => source["Name"] = json!("/SECRET-renamed"),
+                "source_version_unknown" => {
+                    source["Config"]["Image"] = json!(format!(
+                        "{}@sha256:{}",
+                        update::MACHINE_IMAGE,
+                        "a".repeat(64)
+                    ))
+                }
+                "update_volume_mismatch" => {
+                    source["Mounts"] = json!([{
+                        "Destination": update::UPDATE_VOLUME,
+                        "Type": "volume",
+                        "Name": "SECRET-other",
+                    }])
+                }
+                "downgrade_refused" => target = "0.39.0",
+                "invalid_target_version" => target = "not-a-version",
+                _ => {}
+            }
+            Mock::given(method("GET"))
+                .and(path("/v1.45/containers/test-machine/json"))
+                .respond_with(ResponseTemplate::new(status).set_body_json(source))
+                .mount(&server)
+                .await;
+            let companion_status = match reason {
+                "companion_name_taken" => 200,
+                "operation_failed" => 500,
+                _ => 404,
+            };
+            Mock::given(method("GET"))
+                .and(path("/v1.45/containers/test-machine-updater/json"))
+                .respond_with(
+                    ResponseTemplate::new(companion_status).set_body_json(json!({
+                        "Config": {
+                            "Labels": {"dev.nyxid.machine.updater": "SECRET-other"},
+                        },
+                    })),
+                )
+                .mount(&server)
+                .await;
+            let api = docker::Docker::fixture(server.uri(), Err("must not verify or mutate"));
+            let error = bootstrap_with_api(root.path().into(), name.into(), target.into(), api)
+                .await
+                .unwrap_err();
+            let failure = Failure::classify(&error, "startup");
+            assert_eq!(failure.code(), format!("bootstrap:{reason}"));
+            assert!(!failure.to_string().contains("SECRET"));
+            let progress: Progress =
+                serde_json::from_slice(&read(root.path(), "progress.json", 4096).unwrap()).unwrap();
+            assert_eq!(progress.code.as_deref(), Some(failure.code().as_str()));
+            assert!(update::failure_guidance(&failure.code()).is_some());
+            assert!(
+                server
+                    .received_requests()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .all(|r| r.method == "GET")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn docker_connection_failure_is_not_a_missing_container_or_raw_error() {
+        let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = socket.local_addr().unwrap();
+        drop(socket);
+        let root = tempfile::tempdir().unwrap();
+        let api = docker::Docker::fixture(format!("http://{address}"), Err("must not verify"));
+        let error = bootstrap_with_api(root.path().into(), "machine".into(), "0.41.1".into(), api)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            Failure::classify(&error, "startup").code(),
+            "bootstrap:docker_socket_unavailable"
+        );
+        let progress: Progress =
+            serde_json::from_slice(&read(root.path(), "progress.json", 4096).unwrap()).unwrap();
+        assert_eq!(
+            progress.code.as_deref(),
+            Some("bootstrap:docker_socket_unavailable")
+        );
+    }
+
+    #[tokio::test]
+    async fn bootstrap_preflight_failure_is_reported_before_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1.45/containers/test-machine/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(original()))
+            .mount(&server)
+            .await;
+        let api = docker::Docker::fixture(server.uri(), Err("SECRET_VERIFICATION_DETAIL"));
+        let error = bootstrap_with_api(
+            root.path().into(),
+            "test-machine".into(),
+            "0.41.0".into(),
+            api,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            Failure::classify(&error, "bootstrap").code(),
+            "verify_updater_image:image_resolution_failed"
+        );
+        let progress: Progress =
+            serde_json::from_slice(&read(root.path(), "progress.json", 4096).unwrap()).unwrap();
+        assert_eq!(
+            progress.code.as_deref(),
+            Some("verify_updater_image:image_resolution_failed")
+        );
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|r| r.method == "GET")
+        );
+    }
 
     fn original() -> Value {
         json!({"Id":"old","Name":"/test-machine","Config":{"Image":format!("{}:0.40.0",update::MACHINE_IMAGE),"Env":["NYXID_NODE_URL=wss://example.test","SECRET=kept-not-logged"],"Labels":{"dev.nyxid.machine":"test-machine"}},"HostConfig":{"Binds":["identity:/identity"],"ShmSize":1073741824},"Mounts":[],"NetworkSettings":{"Networks":{}}})
@@ -704,6 +1106,93 @@ mod container_e2e {
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
     }
+    async fn exec_fixture(api: &docker::Docker, name: &str, command: Vec<&str>) -> Result<()> {
+        let exec = api
+            .call(
+                Method::POST,
+                &format!("/containers/{name}/exec"),
+                Some(&json!({"Cmd":command,"AttachStdout":false,"AttachStderr":false})),
+            )
+            .await?;
+        let id = exec["Id"].as_str().context("fixture exec id")?;
+        api.call(
+            Method::POST,
+            &format!("/exec/{id}/start"),
+            Some(&json!({"Detach":true})),
+        )
+        .await?;
+        for _ in 0..100 {
+            let state = api
+                .call(Method::GET, &format!("/exec/{id}/json"), None)
+                .await?;
+            if state["Running"] == false {
+                ensure!(
+                    state["ExitCode"] == 0,
+                    "fixture command failed (exit {})",
+                    state["ExitCode"]
+                );
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        bail!("fixture command timed out")
+    }
+
+    async fn secure_health(client: &reqwest::Client) -> Result<()> {
+        let before = status(client).await?["loginInputs"].as_u64().unwrap_or(0);
+        let page = call(
+            client,
+            "browser",
+            json!({"action":"navigate","url":"https://127.0.0.1:33444/login"}),
+        )
+        .await?;
+        ensure!(
+            page["status"] == "ok" && page.to_string().contains("Saved login recovery"),
+            "Secure browser unavailable: {page}"
+        );
+        for field in ["username", "password"] {
+            let snapshot = call(client, "browser", json!({"action":"snapshot"})).await?;
+            let label = if field == "username" {
+                "Username"
+            } else {
+                "Password"
+            };
+            let target = snapshot["snapshot"]["elements"]
+                .as_array()
+                .context("login elements")?
+                .iter()
+                .find(|element| element["label"] == label)
+                .context("login field ref")?;
+            let clicked = call(
+                client,
+                "browser",
+                json!({"action":"click","ref":target["ref"]}),
+            )
+            .await?;
+            ensure!(
+                clicked["status"] == "ok",
+                "Login field focus failed: {clicked}"
+            );
+            let value = format!("fixture-{}-{field}", now_ms());
+            let filled = call(
+                client,
+                "fill_login",
+                json!({"field":field,"allowed_origins":["https://127.0.0.1:33444"],"value":value}),
+            )
+            .await?;
+            ensure!(
+                filled["status"] == "filled",
+                "Saved login {field} unavailable: {filled}"
+            );
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+        ensure!(
+            status(client).await?["loginInputs"].as_u64().unwrap_or(0) >= before + 2,
+            "Trusted saved-login events missing"
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     #[ignore = "real Docker migration; cli/tests/machine_updater_e2e.sh"]
     async fn real_container_migration_signed_upgrade_and_rollback() -> Result<()> {
@@ -729,7 +1218,7 @@ mod container_e2e {
             "Cmd":["--machine","--computer"],"Labels":{"test":"preserved"},
             "HostConfig":{"NetworkMode":format!("container:{driver}"),"ShmSize":268435456,
                 "RestartPolicy":{"Name":"unless-stopped"},"SecurityOpt":[format!("seccomp={seccomp}")],
-                "Binds":[format!("{name}-identity:/var/lib/nyxid-machine"),format!("{name}-workspace:/workspace")]}
+                "Binds":[format!("{name}-identity:/var/lib/nyxid-machine"),format!("{name}-workspace:/workspace"),format!("{name}-browser-trust:/home/browser/.pki")]}
         });
         let original = api.create(&name, &config).await?;
         api.start(&original).await?;
@@ -796,6 +1285,64 @@ mod container_e2e {
             status(&client).await?["cookieVisits"].as_u64().unwrap_or(0) > 0,
             "Browser cookie did not survive migration"
         );
+        exec_fixture(
+            &api,
+            &name,
+            vec!["chown", "-R", "browser:browser", "/home/browser/.pki"],
+        )
+        .await?;
+        println!("Importing local test CA into migrated browser NSS store");
+        exec_fixture(
+            &api,
+            &name,
+            vec![
+                "curl",
+                "-fsS",
+                "http://127.0.0.1:33443/ca",
+                "-o",
+                "/tmp/nyxid-fixture-ca.pem",
+            ],
+        )
+        .await?;
+        exec_fixture(&api, &name, vec!["runuser", "-u", "browser", "--", "sh", "-c",
+            "mkdir -p /home/browser/.pki/nssdb; certutil -N --empty-password -d sql:/home/browser/.pki/nssdb; certutil -A -d sql:/home/browser/.pki/nssdb -n fixture -t C,, -i /tmp/nyxid-fixture-ca.pem"]).await?;
+        // A real container restart (including Chromium/NSS) on the migrated profile.
+        let connections = status(&client).await?["connections"].as_u64().unwrap();
+        api.stop(&name).await?;
+        api.start(&name).await?;
+        ready(&client, connections + 1).await?;
+        secure_health(&client).await?;
+        println!("Persisted secure browser and saved logins after container restart: passed");
+        for mode in ["plain", "hash", "missing"] {
+            let script = format!(
+                r#"
+import os,signal,json,shutil
+base='/var/lib/nyxid-machine/desktop'
+for pid in os.listdir('/proc'):
+ if not pid.isdigit(): continue
+ try: args=open('/proc/'+pid+'/cmdline','rb').read().split(b'\0')
+ except OSError: continue
+ if ('--user-data-dir='+base+'/browser-profile').encode() in args and not any(a.startswith(b'--type=') for a in args): os.kill(int(pid),signal.SIGKILL)
+mode='{mode}'
+if mode=='hash': open(base+'/browser-run/extension-package-sha256','w').write('previous-package')
+if mode=='missing':
+ policy=json.load(open('/etc/chromium/policies/managed/nyxid.json'))
+ extension=policy['ExtensionInstallForcelist'][0].split(';')[0]
+ shutil.rmtree(base+'/browser-profile/Default/Extensions/'+extension,ignore_errors=True)
+"#
+            );
+            exec_fixture(&api, &name, vec!["python3", "-c", &script]).await?;
+            secure_health(&client).await?;
+            println!("Migrated profile {mode} relaunch: secure action and saved login passed");
+        }
+        exec_fixture(&api, &name, vec!["python3", "-c", r#"
+import os,subprocess
+p='/var/lib/nyxid-machine/desktop/browser-run/filler.sock'
+before=os.stat(p).st_ino
+subprocess.run(['nyxid','node','machine','--config','/var/lib/nyxid-machine/node','status'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+assert os.stat(p).st_ino==before
+"#]).await?;
+        secure_health(&client).await?;
         let dev = call(
             &client,
             "browser",
@@ -806,7 +1353,8 @@ mod container_e2e {
             dev["status"] == "ok" && dev.to_string().contains("Identity and profile retained"),
             "Developer browser unavailable after migration: {dev}"
         );
-        let denied=call(&client,"exec",json!({"runtime_id":migrated["machine"]["runtime_id"],"job_id":"2ad5f1c8-3105-4985-88eb-2c7711be40d5","conversation_id":"fixture","command":"test ! -w /var/lib/nyxid-machine-update","cwd":"/workspace","services":[],"timeout_secs":10})).await?;
+        let live = status(&client).await?;
+        let denied=call(&client,"exec",json!({"runtime_id":live["machine"]["runtime_id"],"job_id":"2ad5f1c8-3105-4985-88eb-2c7711be40d5","conversation_id":"fixture","command":"test ! -w /var/lib/nyxid-machine-update","cwd":"/workspace","services":[],"timeout_secs":10})).await?;
         ensure!(
             denied["exit_code"] == 0,
             "Agent update-volume boundary failed: {denied}"
@@ -826,13 +1374,16 @@ mod container_e2e {
             read(root, "request", 80)? == target.as_bytes(),
             "Mailbox contains more than version"
         );
+        let connections = status(&client).await?["connections"].as_u64().unwrap();
         replace(&api, root, &name, &target, false, false).await?;
-        ready(&client, 3).await?;
+        ready(&client, connections + 1).await?;
+        secure_health(&client).await?;
         ensure!(
             request(root)?.is_none(),
             "Committed request must not replay"
         );
         let known = api.inspect(&name).await?["Id"].clone();
+        let connections = status(&client).await?["connections"].as_u64().unwrap();
         api.test_failed_replacement = true;
         replace(&api, root, &name, &target, false, false).await?;
         let rolled: Progress = serde_json::from_slice(&read(root, "progress.json", 4096)?)?;
@@ -844,14 +1395,19 @@ mod container_e2e {
             api.inspect(&name).await?["Id"] == known,
             "Rollback lost old container"
         );
-        ready(&client, 4).await?;
+        ready(&client, connections + 1).await?;
+        secure_health(&client).await?;
         ensure!(
             status(&client).await?["registrations"] == 1,
             "Rollback re-paired node"
         );
         // Cleanup is duplicated in the shell's EXIT trap for assertion failures.
         api.remove(&name).await?;
-        for volume in [format!("{name}-identity"), format!("{name}-workspace")] {
+        for volume in [
+            format!("{name}-identity"),
+            format!("{name}-workspace"),
+            format!("{name}-browser-trust"),
+        ] {
             api.call(Method::DELETE, &format!("/volumes/{volume}"), None)
                 .await?;
         }

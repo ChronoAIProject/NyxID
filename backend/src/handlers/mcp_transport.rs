@@ -2793,10 +2793,24 @@ async fn handle_meta_search(
         .collect();
 
     if auth.chat.as_ref().is_some_and(|chat| !chat.guest) {
-        let query = query.to_lowercase();
-        results.extend(crate::services::machine_tools::definitions().into_iter()
-            .filter(|tool| format!("{} {}",tool.name,tool.description).to_lowercase().contains(&query))
-            .map(|tool| serde_json::json!({"name":tool.name,"description":tool.description,"inputSchema":tool.input_schema,"hint":"Call this native tool directly by name."})));
+        let matcher = mcp_service::ToolSearch::new(query);
+        let mut tools: Vec<_> = crate::services::machine_tools::definitions()
+            .into_iter()
+            .filter_map(|tool| {
+                matcher
+                    .rank(&tool.name, &tool.description)
+                    .map(|rank| (rank, tool))
+            })
+            .collect();
+        tools.sort_by_key(|(rank, _)| std::cmp::Reverse(*rank));
+        results.extend(tools.into_iter().map(|(_, tool)| {
+            serde_json::json!({
+                "name": tool.name,
+                "description": tool.description,
+                "inputSchema": tool.input_schema,
+                "hint": "Call this native tool directly by name.",
+            })
+        }));
     }
     let mut response_json = serde_json::json!({
         "matches": results,

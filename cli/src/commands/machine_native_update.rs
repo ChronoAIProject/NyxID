@@ -100,7 +100,7 @@ pub async fn run(command: Command) -> Result<()> {
         Command::Watch { config } => watch(config).await,
         Command::MigrateContainer { container, version } => {
             let digest = mailbox::docker::Docker::new()?
-                .verified_digest(update::UPDATER_IMAGE, &version)
+                .verified_digest(update::UPDATER_IMAGE, &version, None)
                 .await?;
             let image = format!("{}@{digest}", update::UPDATER_IMAGE);
             let args =

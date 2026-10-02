@@ -284,10 +284,12 @@ pub fn install(system_root: &Path, binary: &Path, update_url: &str, macos: bool)
     Ok(())
 }
 
-/// Runs as the browser user, with Chromium stopped. Removing only this managed
-/// extension's installed package makes force-install policy repair it, including
-/// same-version signed-package changes. Never run profile traversal as root.
-pub fn refresh_extension(profile: &Path) -> Result<()> {
+/// Runs as the browser user, with Chromium stopped. Deleting the package alone
+/// leaves Chromium's policy-install registration intact: it will not reinstall
+/// the same version. Clear only this extension's registration and integrity MAC
+/// in both preference stores, so force-install starts a fresh signed download.
+/// Cookies, website storage and every unrelated preference remain untouched.
+pub fn refresh_extension(profile: &Path, force: bool) -> Result<()> {
     if unsafe { libc::geteuid() } == 0 {
         bail!("Extension cache refresh must run as the browser user");
     }
@@ -300,14 +302,80 @@ pub fn refresh_extension(profile: &Path) -> Result<()> {
         if !entry.file_type()?.is_dir() {
             continue;
         }
-        let path = entry.path().join("Extensions").join(&id);
-        match std::fs::remove_dir_all(&path) {
+        let directory = entry.path();
+        let installed = directory.join("Extensions").join(&id);
+        let present = std::fs::read_dir(&installed).ok().is_some_and(|entries| {
+            entries.filter_map(Result::ok).any(|version| {
+                version.file_type().is_ok_and(|kind| kind.is_dir())
+                    && std::fs::read(version.path().join("background.js")).is_ok_and(|bytes| {
+                        bytes == include_bytes!("../../../resources/machine-browser/background.js")
+                    })
+            })
+        });
+        if !force && present {
+            continue;
+        }
+        for filename in ["Preferences", "Secure Preferences"] {
+            let path = directory.join(filename);
+            let mut input = match std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&path)
+            {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            anyhow::ensure!(
+                input.metadata()?.len() <= 32 * 1024 * 1024,
+                "Browser preferences exceed limit"
+            );
+            let mut bytes = Zeroizing::new(Vec::new());
+            use std::io::Read;
+            input.read_to_end(&mut bytes)?;
+            let mut preferences: Value =
+                serde_json::from_slice(&bytes).context("Invalid browser preferences")?;
+            for pointer in [
+                "/extensions/settings",
+                "/protection/macs/extensions/settings",
+            ] {
+                if let Some(settings) = preferences
+                    .pointer_mut(pointer)
+                    .and_then(Value::as_object_mut)
+                {
+                    settings.remove(&id);
+                }
+            }
+            let bytes = Zeroizing::new(serde_json::to_vec(&preferences)?);
+            write_owned(&path, &bytes, 0o600)?;
+        }
+        match std::fs::remove_dir_all(&installed) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
     }
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug, thiserror::Error)]
+pub enum Failure {
+    #[error("secure_browser_extension_unavailable")]
+    ExtensionUnavailable,
+    #[error("secure_browser_already_running")]
+    AlreadyRunning,
+}
+impl Failure {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::ExtensionUnavailable => {
+                "machine_browser_unavailable: secure browser extension did not connect after automatic repair; retry once, then offer a machine update or reinstall managed browser policies"
+            }
+            Self::AlreadyRunning => {
+                "machine_browser_unavailable: another supervisor owns this secure browser; use the running daemon instead of starting a second node"
+            }
+        }
+    }
 }
 
 pub struct Browser {
@@ -317,6 +385,7 @@ pub struct Browser {
     accept: tokio::task::JoinHandle<()>,
     updates: tokio::task::JoinHandle<()>,
     socket: PathBuf,
+    _lock: std::fs::File,
 }
 
 impl Browser {
@@ -326,10 +395,23 @@ impl Browser {
         binary: &Path,
         port: u16,
         container: bool,
+        repair: bool,
     ) -> Result<Self> {
         protected_runtime_parent(directory)?;
         let run = directory.join("browser-run");
         runtime_directory(&run, unsafe { libc::geteuid() }, identity.gid, 0o750)?;
+        use std::os::fd::AsRawFd;
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(run.join("supervisor.lock"))?;
+        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            return Err(Failure::AlreadyRunning.into());
+        }
         let socket = run.join("filler.sock");
         if socket.exists() {
             std::fs::remove_file(&socket)?;
@@ -347,8 +429,12 @@ impl Browser {
             .as_str()
             .context("invalid extension pin")?
             .to_owned();
+        let version = pin()["version"]
+            .as_str()
+            .context("extension version")?
+            .to_owned();
         let xml = format!(
-            "<?xml version=\"1.0\"?><gupdate xmlns=\"http://www.google.com/update2/response\" protocol=\"2.0\"><app appid=\"{id}\"><updatecheck codebase=\"http://127.0.0.1:{actual_port}/filler.crx\" version=\"1.0.0\"/></app></gupdate>"
+            "<?xml version=\"1.0\"?><gupdate xmlns=\"http://www.google.com/update2/response\" protocol=\"2.0\"><app appid=\"{id}\"><updatecheck codebase=\"http://127.0.0.1:{actual_port}/filler.crx\" version=\"{version}\"/></app></gupdate>"
         );
         let router = axum::Router::new()
             .route(
@@ -373,22 +459,28 @@ impl Browser {
         runtime_directory(&profile, identity.uid, identity.gid, 0o700)?;
         let package_hash = hex::encode(Sha256::digest(PACKAGE));
         let marker = run.join("extension-package-sha256");
-        if std::fs::read_to_string(&marker).ok().as_deref() != Some(&package_hash) {
-            let mut refresh = Command::new(std::env::current_exe()?);
-            identity.prepare(&mut refresh)?;
-            let result = refresh
-                .args(["node", "machine-browser-refresh"])
-                .arg(&profile)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .await?;
-            if !result.success() {
-                bail!("Managed extension refresh failed");
-            }
-            write_owned(&marker, package_hash.as_bytes(), 0o600)?;
+        let force =
+            repair || std::fs::read_to_string(&marker).ok().as_deref() != Some(&package_hash);
+        // Always check for a missing installed directory, even with a current
+        // package marker (including profiles damaged by the old refresh path).
+        let mut refresh = Command::new(std::env::current_exe()?);
+        identity.prepare(&mut refresh)?;
+        refresh
+            .args(["node", "machine-browser-refresh"])
+            .arg(&profile);
+        if force {
+            refresh.arg("--force");
         }
+        let result = refresh
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await?;
+        if !result.success() {
+            bail!("Managed extension refresh failed");
+        }
+        write_owned(&marker, package_hash.as_bytes(), 0o600)?;
         let mut command = Command::new(binary);
         identity.prepare(&mut command)?;
         identity.desktop_env(&mut command);
@@ -450,11 +542,16 @@ impl Browser {
             accept,
             updates,
             socket,
+            _lock: lock,
         })
     }
 
     pub async fn ready(&self) -> bool {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        self.wait_ready(Duration::from_secs(12)).await
+    }
+
+    pub async fn wait_ready(&self, grace: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + grace;
         loop {
             let ready = self.ready.notified();
             if self.connection.lock().await.is_some() {
@@ -463,6 +560,13 @@ impl Browser {
             if tokio::time::timeout_at(deadline, ready).await.is_err() {
                 return false;
             }
+        }
+    }
+
+    pub async fn stop(&self) {
+        if let Some(mut child) = self.child.lock().await.take() {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
         }
     }
 
@@ -666,6 +770,53 @@ pub fn create_xauthority(path: &Path, browser: &str, display: u16) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn missing_package_and_forced_refresh_clear_only_managed_registration() {
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        } // real non-root helper covered in container
+        let root = tempfile::tempdir().unwrap();
+        let profile = root.path().join("Default");
+        std::fs::create_dir(&profile).unwrap();
+        let id = pin()["extension_id"].as_str().unwrap().to_owned();
+        for force in [false, true] {
+            let prefs = json!({
+                "extensions":{"settings":{&id:{"location":7},"unrelated":{"keep":true}}},
+                "protection":{"macs":{"extensions":{"settings":{&id:"old-mac"}}}},
+                "other":{"keep":"website preferences"},
+            });
+            for file in ["Preferences", "Secure Preferences"] {
+                std::fs::write(profile.join(file), serde_json::to_vec(&prefs).unwrap()).unwrap();
+            }
+            let installed = profile.join("Extensions").join(&id).join("1.0.1_0");
+            if force {
+                std::fs::create_dir_all(&installed).unwrap();
+                std::fs::write(
+                    installed.join("background.js"),
+                    include_bytes!("../../../resources/machine-browser/background.js"),
+                )
+                .unwrap();
+            }
+            refresh_extension(root.path(), force).unwrap();
+            for file in ["Preferences", "Secure Preferences"] {
+                let repaired: Value =
+                    serde_json::from_slice(&std::fs::read(profile.join(file)).unwrap()).unwrap();
+                assert!(repaired["extensions"]["settings"].get(&id).is_none());
+                assert!(
+                    repaired["protection"]["macs"]["extensions"]["settings"]
+                        .get(&id)
+                        .is_none()
+                );
+                assert_eq!(
+                    repaired["extensions"]["settings"]["unrelated"],
+                    prefs["extensions"]["settings"]["unrelated"]
+                );
+                assert_eq!(repaired["other"], prefs["other"]);
+            }
+            assert!(!installed.exists());
+        }
+    }
+
     #[test]
     fn runtime_directories_reject_symlinked_profiles_and_shared_parents() {
         let root = tempfile::tempdir().unwrap();

@@ -64,7 +64,8 @@ async fn resolve_verified(version: &str) -> Result<String> {
         .timeout(Duration::from_secs(30))
         .build()?;
     let digest = manifest_digest(&client, "https://ghcr.io", version).await?;
-    crate::update_attestation::verify_image_attestation(&client, &digest[7..], version).await?;
+    crate::update_attestation::verify_image_attestation(&client, &digest[7..], version, None)
+        .await?;
     Ok(format!("{}@{digest}", nyxid_machine::update::UPDATER_IMAGE))
 }
 

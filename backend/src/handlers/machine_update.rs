@@ -62,6 +62,7 @@ pub struct Status {
     automatic: bool,
     phase: String,
     code: Option<String>,
+    guidance: Option<&'static str>,
     settings_path: String,
 }
 impl Status {
@@ -75,6 +76,10 @@ impl Status {
             installation: updates::installation(node),
             automatic: row.automatic,
             phase: row.phase,
+            guidance: row
+                .code
+                .as_deref()
+                .and_then(nyxid_machine::update::failure_guidance),
             code: row.code,
             settings_path: AssistantPage::MachineSettings { node: &node.id }.path(),
         }
@@ -318,7 +323,13 @@ pub async fn tool(
         kind:"action",service:Some((&node.id,&node.id,&node.name)),tool:Some("nyxid__machine_update"),arguments:Some(&canonical),
         summary:&format!("Update machine {} from {} to {}. {} This restarts the target and interrupts its work. Docker socket access gives the updater host-root authority; it installs only attested official images.",node.name,updates::current(node),updates::TARGET,host.map(|h|format!("Run the migration on owner-identified host machine {} after its successful Docker inspection.",h.name)).unwrap_or_else(||"Guide the one-time host command if no updater is installed.".into())),platform:false
     }).await?;
-    Ok((acks::refusal(&card), true))
+    let mut result = acks::refusal(&card);
+    let previous = updates::get(&state.db, node).await?;
+    if previous.code.is_some() {
+        result["previous_update"] = serde_json::to_value(Status::new(node, previous))
+            .map_err(|_| AppError::Internal("Could not encode update status".into()))?;
+    }
+    Ok((result, true))
 }
 
 pub fn spawn(state: AppState) {
@@ -429,6 +440,65 @@ mod tests {
         assistant_authority_tests::{fixture, orchestrator_fixture},
         machine_integration_tests::{node, peer},
     };
+
+    #[tokio::test]
+    async fn updater_failure_codes_reach_status_tool_and_thread_with_guidance() {
+        let f = orchestrator_fixture("machine_update_diagnostics").await;
+        let node = node(&f, &f.owner).await;
+        for code in [
+            "verify_updater_image:trust_root_unavailable",
+            "SECRET_UPSTREAM_BODY",
+        ] {
+            updates::begin(&f.state.db, &node, &f.owner, Some(&f.row.id), false, true)
+                .await
+                .unwrap();
+            updates::observe(
+                &f.state.db,
+                &node,
+                Some(&nyxid_machine::update::Progress {
+                    target: updates::TARGET.into(),
+                    phase: nyxid_machine::update::Phase::Failed,
+                    started_at_ms: chrono::Utc::now().timestamp_millis() as u64,
+                    code: Some(code.into()),
+                }),
+            )
+            .await
+            .unwrap();
+            let row = updates::get(&f.state.db, &node).await.unwrap();
+            let expected = if code.starts_with("SECRET") {
+                "update_failed_or_rolled_back"
+            } else {
+                code
+            };
+            assert_eq!(row.code.as_deref(), Some(expected));
+            let response = serde_json::to_value(Status::new(&node, row.clone())).unwrap();
+            assert_eq!(response["code"], expected);
+            assert!(response["guidance"].is_string());
+            let (tool_result, _) = tool(&f.state, &f.chat, &json!({"machine":node.id}))
+                .await
+                .unwrap();
+            assert_eq!(tool_result["previous_update"]["code"], expected);
+            let watch = f
+                .state
+                .db
+                .collection::<NyxbotWatch>(WATCHES)
+                .find_one(doc! {"connect_link_id":&row.attempt_id})
+                .await
+                .unwrap()
+                .unwrap();
+            super::super::nyxbot::machine_update_watch(&f.state, &watch)
+                .await
+                .unwrap();
+            let conversation =
+                crate::services::assistant_nyxagent::get(&f.state.db, &f.owner, &f.row.id)
+                    .await
+                    .unwrap();
+            let transcript = serde_json::to_string(&conversation).unwrap();
+            assert!(transcript.contains(expected));
+            assert!(!transcript.contains("SECRET_UPSTREAM_BODY"));
+        }
+        f.state.db.drop().await.unwrap();
+    }
 
     #[tokio::test]
     async fn update_specialists_need_grant_then_always_owner_card_and_guided_watch() {

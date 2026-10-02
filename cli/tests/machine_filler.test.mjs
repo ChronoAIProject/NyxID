@@ -289,3 +289,67 @@ test('a spoofed frame rendezvous cannot redirect trusted input into a sibling', 
   assert(seen.some(([action])=>action==='_frame_assert'));
   assert(!seen.some(([action])=>action==='click'));
 });
+
+
+function nativeFixture() {
+  const events = {}, timers = [], ports = [];
+  let failures = 0;
+  const event = name => ({addListener(callback) { events[name] = callback; }});
+  const context = vm.createContext({
+    importScripts() {}, Date, Map,
+    setTimeout(callback, ms) { timers.push({callback,ms}); return timers.length; },
+    chrome: {
+      management: {async getSelf() { if(failures-- > 0)throw new Error('temporary failure');return {installType:'admin',mayDisable:false}; }},
+      runtime: {
+        id:'pinned', onStartup:event('startup'), onInstalled:event('installed'),
+        connectNative(name) {
+          assert.equal(name,'dev.nyxid.machine_filler');
+          const sent=[];
+          const port = {sent,onDisconnect:event(`disconnect${ports.length}`),onMessage:event(`message${ports.length}`),postMessage(message) { sent.push(message); }};
+          ports.push(port);return port;
+        },
+      },
+    },
+  });
+  vm.runInContext(source('background'),context);
+  return {events,timers,ports,failNext(count) { failures=count; }};
+}
+const flushNative = () => new Promise(setImmediate);
+const incomingNative = () => ({operation:'browser',nonce:randomUUID(),expires_at_ms:Date.now()-1});
+
+test('MV3 wake listeners keep one native port and inbound messages reset reconnect backoff', async () => {
+  const {events,timers,ports}=nativeFixture();
+  assert.equal(typeof events.startup,'function','listener registration must be synchronous');
+  assert.equal(typeof events.installed,'function');
+  events.startup();events.installed();await flushNative();
+  assert.equal(ports.length,1,'top-level and startup/install must not duplicate connections');
+  for(let i=0;i<8;i++){
+    await events[`message${i}`](incomingNative());
+    events[`disconnect${i}`]();assert.equal(timers.length,1);
+    const timer=timers.shift();assert.equal(timer.ms,500);
+    timer.callback();await flushNative();assert.equal(ports.length,i+2);
+  }
+  events.startup();await flushNative();assert.equal(ports.length,9);
+});
+
+test('asynchronous native-host failures after hello back off to 4 seconds until an inbound message', async () => {
+  const f=nativeFixture(), {events,timers,ports}=f;
+  await flushNative();
+  // connectNative and postMessage both succeed; the actual connection failure
+  // arrives later through onDisconnect, as with an unreachable filler.sock.
+  for(const [i,ms] of [500,1000,2000,4000,4000,4000].entries()){
+    assert.equal(ports[i].sent[0].type,'hello');
+    events[`disconnect${i}`]();assert.equal(timers.length,1);
+    const timer=timers.shift();assert.equal(timer.ms,ms);
+    timer.callback();await flushNative();assert.equal(ports.length,i+2);
+  }
+  await events.message6(incomingNative());
+  events.disconnect6();assert.equal(timers[0].ms,500,'a proven connection resets the backoff');
+  // Synchronous failures also keep backing off; neither failure path resets it.
+  f.failNext(6);
+  for(const ms of [500,1000,2000,4000,4000,4000,4000]){
+    const timer=timers.shift();assert.equal(timer.ms,ms);
+    timer.callback();await flushNative();
+  }
+  events.disconnect7();assert.equal(timers.shift().ms,4000,'hello alone never resets the backoff');
+});

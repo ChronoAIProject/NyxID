@@ -25,8 +25,8 @@ pub async fn run(command: NodeCommands) -> Result<()> {
         NodeCommands::MachineUpdater { command } => {
             crate::commands::machine_native_update::run(command).await
         }
-        NodeCommands::MachineBrowserRefresh { profile } => {
-            crate::node::machine::browser::refresh_extension(&profile)
+        NodeCommands::MachineBrowserRefresh { profile, force } => {
+            crate::node::machine::browser::refresh_extension(&profile, force)
         }
         NodeCommands::MachineWorker => crate::node::machine::worker().await,
         NodeCommands::MachineTransferWorker => crate::node::machine::transfer::worker(),

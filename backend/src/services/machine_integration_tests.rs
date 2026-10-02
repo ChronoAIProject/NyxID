@@ -1324,6 +1324,32 @@ async fn machine_setup_tools_and_owner_cards_never_contain_registration_credenti
 }
 
 #[tokio::test]
+async fn unsupported_computer_tools_return_advertised_names_and_browser_guidance() {
+    let f = orchestrator_fixture("machine_unsupported_tool_help").await;
+    let node = node(&f, &f.owner).await;
+    let result = call(
+        &f.state,
+        &f.chat,
+        "nyx__machine_computer",
+        json!({"machine":node.id,"tool":"screenshot","arguments":{}}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["error"]["code"], 12416);
+    assert_eq!(
+        result["error"]["computer_tools"],
+        json!(["get_window_state", "click"])
+    );
+    assert!(
+        result["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("nyx__machine_browser action=snapshot")
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn machine_screenshots_use_owner_attachments_with_magic_and_turn_limits() {
     use base64::Engine;
     let f = orchestrator_fixture("machine_image_attachments").await;

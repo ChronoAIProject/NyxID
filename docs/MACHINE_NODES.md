@@ -1064,8 +1064,35 @@ MACHINE_IMAGE=nyxid-node-machine:local sh cli/tests/machine_updater_e2e.sh
 
 It creates disposable 0.40.0-style containers and deletes its containers/volumes
 on exit. A test-only Docker adapter substitutes the locally built, unpublished
-image; production has no verification bypass. The release acceptance check must
-also run against the attested tagged release once published. Regular tests cover
+image; production has no verification bypass. The production scratch acceptance test runs real TUF and image-attestation
+verification, with no verification or temporary-filesystem mocks, both with the
+documented tmpfs and with no `/tmp`. It also executes the frontend's migration
+and companion commands and a watch-triggered replacement with the newly built
+production updater (`UPDATER_PRODUCTION_IMAGE`, or a local `production-test`
+build). An asserted transformation preserves every rendered flag verbatim,
+substituting only the image token and optionally adding `--env GITHUB_TOKEN`:
+
+```sh
+npm ci --ignore-scripts --prefix frontend
+node cli/tests/machine_updater_production.mjs
+```
+
+Use Node 24 or newer. CI requires and supplies `GITHUB_TOKEN` to the new updater
+for both preflight and rendered-command checks to avoid shared-IP GitHub API
+rate limits; it is sent only to the GitHub attestation API, never to the TUF
+mirror or registry. The rendered owner commands need no token. The published
+0.41.0 updater cannot use a token, so compatibility checks against that image
+are an explicit local pre-release opt-in:
+
+```sh
+NYXID_TEST_PUBLISHED_UPDATER=1 node cli/tests/machine_updater_production.mjs
+```
+
+This additionally runs the migration, companion and watch replacement with
+the published image and unchanged rendered commands. Without the opt-in, the
+test prints `SKIP (opt-in): published 0.41.0 updater uses unauthenticated GitHub API`.
+Test containers and volumes are removed on exit. The release acceptance check must also run
+against the attested tagged release once published. Regular tests cover
 attestation refusal, downgrade refusal, full configuration preservation, rollback
 and native service recovery. The live TUF mirror test verifies signed metadata,
 root rotation, target hashes and expiry independently.
@@ -1130,6 +1157,27 @@ Images workflow, and pulls that exact digest. Downgrades require a separately
 owner-confirmed rollback request. Its read-only scratch image has no shell; the
 controller's HTTPS client permits GitHub attestation/trust endpoints only, while
 image traffic goes through the host Docker daemon to the official registry.
+Both bootstrap and watch use an explicit `tuf/` datastore inside the private
+0700 update volume, checked without following symlinks and serialized by the
+controller lock. They require no writable system temporary directory. The
+rendered migration and companion commands nevertheless include
+`--tmpfs /tmp:rw,noexec,nosuid,size=16m` for compatibility with the published
+0.41.0 helper while the 0.41.1 image is being published. Native `nyxid update`
+keeps its normal temporary datastore: it installs into a writable native host,
+and container image updates use the companion instead.
+
+Preflight failures print only a fixed stage and reason, for example
+`machine_update failed at verify_updater_image: trust_root_unavailable`.
+`progress.code` retains `verify_updater_image:trust_root_unavailable`; Machines,
+NyxBot and specialist update results/wakes include the code and recovery guidance.
+Bootstrap prints exactly one failure line, matching the persisted classification.
+Preflight checks distinguish unofficial images, `--rm`, changed/missing container
+names, unknown versions, companion-name conflicts, mismatched update volumes and
+downgrades. A Docker socket connection failure is distinguished from inspect 404;
+other Docker API failures retain a generic code without response metadata.
+Unknown node diagnostics are replaced by a fixed fallback, never relayed as
+Docker metadata or upstream text. `verify VERSION` runs the companion's real
+registry/TUF/provenance preflight without replacing a container.
 
 The controller copies the inspected container configuration, including environment,
 arguments, volumes (resolved anonymous volumes too), networks, seccomp/security
@@ -1354,3 +1402,35 @@ shortly**; there is no mutable-tag fallback. Reconnection and rollback still use
 the durable update watch. The machine settings sheet labels the target **Latest**
 and keeps its copy command and guided update action outside the collapsed
 explanation.
+
+
+### Secure browser recovery (0.41.1)
+
+The signed MV3 extension registers startup and installation listeners before any
+asynchronous work. Its native messaging port keeps the worker alive; disconnects
+reconnect with 500 ms–4 s backoff without replaying a lost action. Only an inbound
+native-host message resets the backoff: sending hello can precede an asynchronous
+connection failure. Extension update
+metadata uses the signed manifest's version. When the package hash changes, or an
+installed package is missing, a helper running as the browser user repairs only
+that managed extension's registration in Preferences and Secure Preferences and
+removes its installed files before Chromium starts. Deleting files alone is
+insufficient: Chromium retains the policy-installed registration and does not
+reinstall the same version. Cookie stores, website storage and unrelated settings
+are preserved. This also repairs profiles damaged by 0.41.0 on their first launch.
+
+The supervisor waits 12 seconds for the extension handshake per attempt and gives
+a still-running browser another five seconds to reconnect before one automatic
+repair/relaunch. Ordinary native-host reconnections preserve Chromium and its tabs.
+Persistent failure returns 12413 with
+specific extension recovery guidance; diagnostics contain fixed metadata only.
+A process lock prevents a second supervisor from replacing the live socket.
+`nyxid node machine status` reads the daemon's cached capabilities (with observation
+time) and checks OS file access; it never starts Chromium/cua or binds sockets.
+
+Machine-tool search shares service-tool word matching and ranks complete matches
+first. Unsupported computer calls (12416) include a bounded `computer_tools` list
+and direct the agent to `nyx__machine_browser` snapshot for page content or the dev
+browser screenshot action for owner attachments. Persisted-profile container and
+migration tests cover relaunch, container restart, hash changes, missing packages,
+saved-login filling and harmless status reads under both seccomp profiles.

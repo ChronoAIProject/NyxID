@@ -55,11 +55,12 @@ export function MachineUpdate({
         </Badge>
       ) : null}
       {status.phase !== "idle" ? (
-        <p role="status">
+        <p role="status" className="break-words">
           Update: {status.phase.replaceAll("_", " ")}
-          {status.code ? ` — ${status.code.replaceAll("_", " ")}` : ""}
+          {status.code ? ` — ${status.code}` : ""}
         </p>
       ) : null}
+      {status.guidance ? <p role="alert" className="break-words">{status.guidance}</p> : null}
       {!status.updater_ready ? (
         <div className="min-w-0 space-y-3 text-muted-foreground">
           {status.installation === "container" ? (

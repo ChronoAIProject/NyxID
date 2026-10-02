@@ -14,17 +14,20 @@ async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let root = nyxid_machine::update::UPDATE_VOLUME.into();
     let result = match args.as_slice() {
+        [action, version] if action == "verify" => {
+            machine_updater::verify(root, version.clone()).await
+        }
         [action, name] if action == "watch" => machine_updater::run(root, name.clone()).await,
         [action, name, version] if action == "bootstrap" => {
             machine_updater::bootstrap(root, name.clone(), version.clone()).await
         }
         _ => Err(anyhow::anyhow!(
-            "usage: nyxid-machine-updater watch NAME | bootstrap NAME VERSION"
+            "usage: nyxid-machine-updater watch NAME | bootstrap NAME VERSION | verify VERSION"
         )),
     };
-    if result.is_err() {
+    if let Err(error) = result {
         // Neither Docker metadata nor environment/credentials appear in errors.
-        eprintln!("machine_update failed; inspect the machine update status");
+        eprintln!("{}", machine_updater::Failure::classify(&error, "startup"));
         std::process::exit(1);
     }
 }

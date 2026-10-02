@@ -1,16 +1,26 @@
 // Loopback protocol fixture. Secrets are generated in memory and never logged.
 import http from 'node:http';
+import https from 'node:https';
+import {readFileSync} from 'node:fs';
+import {execFileSync} from 'node:child_process';
 import {createHash,createHmac,randomBytes,randomUUID} from 'node:crypto';
 import {createRequire} from 'node:module';
 const {WebSocketServer}=createRequire(import.meta.url)('ws');
 const key=randomBytes(32), id=randomUUID(), token=`nyx_nauth_${randomBytes(32).toString('hex')}`;
-let socket, machine, registrations=0, connections=0, cookieVisits=0, pageVisits=0;
+let socket, machine, registrations=0, connections=0, cookieVisits=0, pageVisits=0, loginInputs=0;
+execFileSync('openssl',['req','-x509','-newkey','rsa:2048','-nodes','-days','1','-keyout','/tmp/login.key','-out','/tmp/login.crt','-subj','/CN=NyxID test','-addext','subjectAltName=IP:127.0.0.1','-addext','basicConstraints=critical,CA:TRUE'],{stdio:'ignore'});
 const replies=new Map();
 const hash=value=>createHash('sha256').update(value).digest();
 function canonical(v){if(Array.isArray(v))return `[${v.map(canonical).join(',')}]`;if(v&&typeof v==='object')return `{${Object.keys(v).sort().map(k=>`${JSON.stringify(k)}:${canonical(v[k])}`).join(',')}}`;return JSON.stringify(v);}
-const server=http.createServer(async(req,res)=>{
+const handler=async(req,res)=>{
  res.setHeader('content-type','application/json');
- if(req.url==='/health'){res.end(JSON.stringify({id,registrations,connections,machine,cookieVisits,pageVisits}));return;}
+ if(req.url==='/health'){res.end(JSON.stringify({id,registrations,connections,machine,cookieVisits,pageVisits,loginInputs}));return;}
+ if(req.url==='/ca'){res.end(readFileSync('/tmp/login.crt'));return;}
+ if(req.url==='/filled'){loginInputs++;res.end('ok');return;}
+ if(req.url==='/login'){
+  res.setHeader('content-type','text/html');
+  res.end('<title>Saved login recovery</title><label>Username<input id="username" autofocus></label><label>Password<input id="password" type="password"></label><script>document.addEventListener("input",e=>{if(e.isTrusted&&e.target.value.length){fetch("/filled");if(e.target.id==="username")document.querySelector("#password").focus();}})</script>');return;
+ }
  if(req.url==='/page'){
   pageVisits++;
   if(req.headers.cookie?.includes('nyxid_fixture=retained'))cookieVisits++;
@@ -27,7 +37,9 @@ const server=http.createServer(async(req,res)=>{
  r.signature=mac.digest('hex');
  const timer=setTimeout(()=>{replies.delete(r.request_id);res.statusCode=504;res.end('{}');},45000);
  replies.set(r.request_id,result=>{clearTimeout(timer);res.end(JSON.stringify(result));});socket.send(JSON.stringify(r));
-});
+};
+const server=http.createServer(handler);
+https.createServer({key:readFileSync('/tmp/login.key'),cert:readFileSync('/tmp/login.crt')},handler).listen(33444,'127.0.0.1');
 const wss=new WebSocketServer({server});
 wss.on('connection',ws=>ws.on('message',(bytes,binary)=>{
  if(binary)return;
