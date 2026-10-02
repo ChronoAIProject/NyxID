@@ -165,6 +165,9 @@ export interface PoolCandidate {
   credential_binding: string;
   protocol: string | null;
   catalog_service_id: string | null;
+  /** Original catalog metadata used to group connected accounts in the picker. */
+  group_name?: string | null;
+  group_slug?: string | null;
   requires_compatibility_declaration: boolean;
   cooldown_until: string | null;
   consecutive_failures: number;

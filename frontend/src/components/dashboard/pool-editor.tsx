@@ -149,7 +149,7 @@ export function PoolEditor({
       <DialogContent
         onCloseAutoFocus={onCloseAutoFocus}
         scrollMode="body"
-        className="md:max-w-2xl [&_input:focus-visible]:border-primary [&_input:focus-visible]:ring-1 [&_input:focus-visible]:ring-primary/40"
+        className="data-[state=open]:!animate-none md:data-[state=open]:!animate-none md:max-w-2xl [&_input:focus-visible]:border-primary [&_input:focus-visible]:ring-1 [&_input:focus-visible]:ring-primary/40"
       >
         <DialogHeader>
           <DialogTitle>
@@ -303,20 +303,6 @@ export function PoolEditor({
                   />
                   {priority && (
                     <>
-                      <Choice
-                        label="Connections with the same priority"
-                        value={values.tier_balance ?? "round_robin"}
-                        options={[
-                          ["round_robin", "Take turns"],
-                          ["weighted", "Share by weight"],
-                        ]}
-                        onChange={(v) =>
-                          form.setValue(
-                            "tier_balance",
-                            v as "round_robin" | "weighted",
-                          )
-                        }
-                      />
                       <Toggle
                         label="Customize retry settings"
                         checked={values.failover != null}

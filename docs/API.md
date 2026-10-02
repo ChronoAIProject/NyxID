@@ -3771,7 +3771,7 @@ Candidate and health inspection accept these query parameters:
 | `strategy`, `member_contract` | Draft routing strategy and contract for candidate inspection. Health uses the saved configuration. |
 | `peer_ids`, `declared_peer_ids` | Comma-separated draft connection UUIDs and Same API compatibility declarations, capped at 50 IDs each. |
 | `selected_only` | With `true`, candidate inspection returns the selected `peer_ids` independently of search and pagination. |
-| `search`, `limit`, `after` | Case-insensitive name or slug search, applied before candidate pagination. `limit` defaults to 100 and is clamped to 1–100. |
+| `search`, `limit`, `after` | Literal, case-insensitive search over connection and original catalog service names and slugs, applied before candidate pagination. `limit` defaults to 100 and is clamped to 1–100. |
 | `org_id` | Organization owner for new-pool candidate inspection. Existing-pool routes resolve the owner from the pool. |
 
 Responses contain `operation_checked`, `method`, `path`, `candidates`,
@@ -3781,6 +3781,14 @@ its connection ID, `name`, `slug`, eligibility and reason, credential binding,
 protocol, compatibility requirements, and cooldown metadata. Inventory results
 do not establish that a particular operation can execute. Inspection is
 read-only and never decrypts credentials or sends a request to a provider.
+
+Candidates also carry `catalog_service_id`, `group_name`, and `group_slug` for
+grouped connection selectors. Catalog-backed connections use the original
+service's name and slug; group them by `catalog_service_id`, since different
+services can share a display name. Custom connections have a null catalog ID,
+`group_name: "Custom connections"`, and a null `group_slug`. Group metadata
+describes only the returned connections; pagination still counts connections,
+and one service's connections may span multiple pages.
 
 A connection with an inactive stored credential or missing credential material
 returns `eligible: false` with `reason: "credential_unavailable"`; other
