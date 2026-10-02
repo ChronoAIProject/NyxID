@@ -93,6 +93,11 @@ try {
   if (!testPublished) console.log('SKIP (opt-in): published 0.41.0 updater uses unauthenticated GitHub API');
   if (!process.env.UPDATER_PRODUCTION_IMAGE) {
     execFileSync('docker', ['build', '--target', 'production', '-f', 'cli/Dockerfile.machine-updater', '-t', updater, '.'], { stdio: 'inherit' });
+  } else {
+    // Publish Images passes a pushed digest that is not local yet. Pull it
+    // first: an implicit pull would print progress on the stderr that the
+    // single-line failure checks below compare exactly.
+    docker('pull', '--quiet', updater);
   }
   // Run the actual entry point: one fixed stderr line, identical to progress,
   // including a connect failure and a 404 (never Docker response metadata).

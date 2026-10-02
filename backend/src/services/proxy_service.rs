@@ -3939,6 +3939,10 @@ fn target_http_client() -> Client {
 }
 
 fn build_target_http_client(builder: reqwest::ClientBuilder) -> Client {
+    // See `pool_no_redirect_http_client`: reused mock-server ports make idle
+    // sockets in this process-wide client fail after dispatch in tests.
+    #[cfg(test)]
+    let builder = builder.pool_max_idle_per_host(0);
     builder
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(std::time::Duration::from_secs(10))
