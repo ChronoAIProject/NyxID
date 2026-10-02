@@ -290,7 +290,15 @@ pub async fn observe(db: &Database, node: &Node, report: Option<&Progress>) -> A
                         } else {
                             "failed"
                         },
-                        Some("update_failed_or_rolled_back"),
+                        Some(
+                            report
+                                .code
+                                .as_deref()
+                                .filter(|code| {
+                                    nyxid_machine::update::failure_guidance(code).is_some()
+                                })
+                                .unwrap_or("update_failed_or_rolled_back"),
+                        ),
                     )
                     .await;
                 }

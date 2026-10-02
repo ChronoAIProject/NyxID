@@ -661,3 +661,16 @@ isolation; missing fields mean unknown. Continuation progress stores rolling MCP
 argument/result hashes only, never raw values or bounded activity labels. Docker
 migration/setup commands require the server's cached, attestation-verified updater
 digest, with no mutable-tag fallback.
+
+
+Machine 0.41.1 recovery: MV3 startup/install listeners and reconnecting native ports
+are required on persisted profiles. A missing/changed managed package must clear
+its own Preferences/Secure Preferences install registration before signed policy
+reinstallation; deleting Extensions files alone does not repair Chromium. Never
+start browsers/cua or bind sockets from `machine status`: read daemon snapshots.
+12416 includes advertised tool names and browser snapshot/screenshot guidance;
+machine discovery uses the shared `ToolSearch` ranker. Container updater TUF
+stores live inside its private locked update volume; keep tmpfs flags in both
+rendered commands for 0.41.0 compatibility. Failures expose fixed stage/reason
+codes and guidance only. Production-image verification tests must exercise real
+TUF and attestation code under read-only/cap-drop/no-new-privileges restrictions.

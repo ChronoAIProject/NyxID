@@ -275,6 +275,76 @@ CHECK`,cwd:'/workspace',services:[],timeout_secs:10});
   if(which==='dev'&&result.error)console.error('Developer browser error:',JSON.stringify(result.error));
   return result;
  };
+ // Persisted-profile recovery: do not use a new user-data-dir for any case.
+ const secureProfile='/var/lib/nyxid-machine/desktop/browser-profile';
+ const secureSocket='/var/lib/nyxid-machine/desktop/browser-run/filler.sock';
+ const extensionId=policy.ExtensionInstallForcelist[0].split(';')[0];
+ async function securePids(){
+  const pids=[];
+  for(const pid of await fs.readdir('/proc')){
+   if(!/^\d+$/.test(pid))continue;
+   const args=await fs.readFile(`/proc/${pid}/cmdline`).then(b=>b.toString().split('\0'),()=>[]);
+   if(args.includes(`--user-data-dir=${secureProfile}`)&&!args.some(a=>a.startsWith('--type=')))pids.push(Number(pid));
+  }
+  return pids;
+ }
+ async function healthySecure(label){
+  const before=siteEvents.length;
+  const state=await browser('navigate',{url:origin});
+  assert.equal(state.status,'ok',`${label}: ${JSON.stringify(state)}`);
+  await waitFor(()=>siteEvents.slice(before).some(e=>e.ready),`${label} page ready`);
+  for(const field of ['username','password']){
+   const start=siteEvents.length;
+   const filled=await call('fill_login',{field,allowed_origins:[origin],value:values[field]});
+   assert.equal(filled.status,'filled',`${label} fill ${field}: ${JSON.stringify(filled)}`);
+   await waitFor(()=>siteEvents.slice(start).some(e=>e.field===field&&e.valueHash===hash(values[field])),`${label} trusted fill`);
+  }
+  console.log(`Secure persisted profile: ${label} browser action + fill_login passed`);
+ }
+ const socketBefore=await fs.stat(secureSocket),pidsBefore=await securePids();
+ const statusReport=JSON.parse(run('nyxid',['node','machine','--config','/var/lib/nyxid-machine/node','status']));
+ assert.equal(statusReport.saved_login_ready,true);
+ assert.equal((await fs.stat(secureSocket)).ino,socketBefore.ino,'status cannot replace the supervisor socket');
+ assert.deepEqual(await securePids(),pidsBefore,'status cannot launch another Chromium');
+ await healthySecure('read-only machine status');
+ // Repeated idle native-host disconnects must preserve Chromium and its tabs.
+ async function nativePids(){
+  const pids=[];
+  for(const pid of await fs.readdir('/proc')){
+   if(!/^\d+$/.test(pid))continue;
+   const args=await fs.readFile(`/proc/${pid}/cmdline`).then(b=>b.toString().split('\0'),()=>[]);
+   if(args.includes('machine-native-host'))pids.push(Number(pid));
+  }
+  return pids;
+ }
+ for(let cycle=0;cycle<5;cycle++){
+  const killed=await nativePids();
+  assert(killed.length>0,'connected native host exists');
+  for(const pid of killed)process.kill(pid,'SIGKILL');
+  // Let the extension reconnect without any request resetting its backoff.
+  const deadline=Date.now()+10000;
+  while(!(await nativePids()).some(pid=>!killed.includes(pid))){
+   assert(Date.now()<deadline,'native host reconnects before supervisor repair');
+   await delay(50);
+  }
+  await delay(250); // allow hello to reach the supervisor before the next kill
+  assert.deepEqual(await securePids(),pidsBefore,'native reconnect must not relaunch Chromium');
+ }
+ const reconnected=await browser('snapshot');
+ assert.equal(reconnected.status,'ok',JSON.stringify(reconnected));
+ assert.deepEqual(await securePids(),pidsBefore,'first request after reconnect preserves Chromium');
+ console.log('Repeated native reconnects preserve the secure Chromium PID: passed');
+ for(const scenario of ['plain relaunch','package hash change','missing package']){
+  // Freeze only the daemon while arranging the crash; no profile writes race Chromium.
+  process.kill(child.pid,'SIGSTOP');
+  try{
+   for(const pid of await securePids())process.kill(pid,'SIGKILL');
+   await delay(150);
+   if(scenario==='package hash change')await fs.writeFile('/var/lib/nyxid-machine/desktop/browser-run/extension-package-sha256','old-package');
+   if(scenario==='missing package')await fs.rm(`${secureProfile}/Default/Extensions/${extensionId}`,{recursive:true,force:true});
+  } finally {process.kill(child.pid,'SIGCONT');}
+  await healthySecure(scenario);
+ }
  let observed=await browser('navigate',{url:browserUrl});
  assert.equal(observed.status,'ok',JSON.stringify(observed));
  assert.match(observed.snapshot.text,/Project catalog/);

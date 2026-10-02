@@ -11,12 +11,12 @@ local_image="ghcr.io/chronoaiproject/nyxid/nyxid-node-machine:$target_version-e2
 cleanup() {
     docker rm -f -v "$driver" "$name" >/dev/null 2>&1 || true
     for old in $(docker ps -a --filter "name=$name-nyxid-rollback-" --format '{{.ID}}'); do docker rm -f -v "$old" >/dev/null 2>&1 || true; done
-    docker volume rm "$name-identity" "$name-workspace" "$name-nyxid-update" >/dev/null 2>&1 || true
+    docker volume rm "$name-identity" "$name-workspace" "$name-browser-trust" "$name-nyxid-update" >/dev/null 2>&1 || true
     docker image rm "$local_image" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
 docker image inspect ghcr.io/chronoaiproject/nyxid/nyxid-node-machine:0.40.0 >/dev/null 2>&1 || docker pull ghcr.io/chronoaiproject/nyxid/nyxid-node-machine:0.40.0
-docker tag "$machine_image" "$local_image"
+docker build --build-arg "MACHINE_IMAGE=$machine_image" -f cli/tests/Dockerfile.updater-browser -t "$local_image" .
 updater_image="${UPDATER_E2E_IMAGE:-nyxid-machine-updater-e2e:local}"
 docker build --target e2e -f cli/Dockerfile.machine-updater -t "$updater_image" .
 set --

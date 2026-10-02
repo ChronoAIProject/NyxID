@@ -53,6 +53,8 @@ enum MachineError {
     Browser,
     #[error(transparent)]
     DevBrowser(#[from] dev_browser::Failure),
+    #[error(transparent)]
+    SecureBrowser(#[from] browser::Failure),
     #[error("saved logins require the secure browser")]
     SecureBrowserRequired,
     #[error("machine operation refused")]
@@ -63,6 +65,9 @@ impl From<anyhow::Error> for MachineError {
     fn from(error: anyhow::Error) -> Self {
         if let Some(driver) = error.downcast_ref::<cua::DriverError>() {
             return Self::Driver(driver.clone());
+        }
+        if let Some(browser) = error.downcast_ref::<browser::Failure>() {
+            return Self::SecureBrowser(*browser);
         }
         if let Some(browser) = error.downcast_ref::<dev_browser::Failure>() {
             return Self::DevBrowser(*browser);
@@ -112,6 +117,7 @@ impl MachineError {
                 "managed browser unavailable; complete browser policy setup and restart the node",
             ),
             Self::DevBrowser(error) => (12413, error.message()),
+            Self::SecureBrowser(error) => (12413, error.message()),
             Self::SecureBrowserRequired => (
                 12413,
                 "saved logins require the secure browser; use browser=secure",
@@ -124,8 +130,25 @@ impl MachineError {
     }
 }
 
+fn cache_status(
+    directory: &std::path::Path,
+    profile: &nyxid_machine::MachineProfile,
+) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    let mut file = tempfile::NamedTempFile::new_in(directory)?;
+    file.as_file()
+        .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    let mut value = serde_json::to_value(profile)?;
+    value["observed_at_ms"] = serde_json::json!(chrono::Utc::now().timestamp_millis());
+    file.write_all(&serde_json::to_vec(&value)?)?;
+    file.persist(directory.join("machine-status.json"))?;
+    Ok(())
+}
+
 pub struct Runtime {
     update_directory: PathBuf,
+    status_directory: PathBuf,
     upgrading: std::sync::atomic::AtomicBool,
     operation_admission: tokio::sync::RwLock<()>,
     config: Config,
@@ -181,6 +204,7 @@ impl Runtime {
         let redactor = Arc::new(Mutex::new(Redactor::default()));
         Ok(Arc::new(Self {
             update_directory: update::directory(config, config_dir),
+            status_directory: config_dir.to_owned(),
             upgrading: std::sync::atomic::AtomicBool::new(false),
             operation_admission: tokio::sync::RwLock::new(()),
             config: config.clone(),
@@ -299,7 +323,7 @@ impl Runtime {
         } else {
             false
         };
-        MachineProfile {
+        let profile = MachineProfile {
             installation: Some(update::installation(&self.config)),
             updater_ready: update::ready(&self.update_directory),
             version: nyxid_machine::PROTOCOL_VERSION,
@@ -324,7 +348,11 @@ impl Runtime {
             commands_isolated: Some(self.identity.commands_isolated(&self.excluded).await),
             saved_login_ready,
             browser_tools: self.config.computer,
+        };
+        if cache_status(&self.status_directory, &profile).is_err() {
+            tracing::warn!("machine_status_snapshot_unavailable");
         }
+        profile
     }
 
     fn desktop_for(&self, display: nyxid_machine::desktop::Display) -> &desktop::Desktop {
@@ -476,6 +504,24 @@ impl Runtime {
             Err(error) => {
                 let (code, message) = error.public();
                 let mut result = json!({"error":{"code":code,"message":message}});
+                if matches!(
+                    error,
+                    MachineError::Driver(cua::DriverError::ToolUnsupported)
+                ) {
+                    result["error"]["computer_tools"] = json!(
+                        self.driver
+                            .as_ref()
+                            .map(|d| d
+                                .advertised_tools()
+                                .into_iter()
+                                .take(64)
+                                .collect::<Vec<_>>())
+                            .unwrap_or_default()
+                    );
+                    result["error"]["browser_hint"] = json!(
+                        "Use nyx__machine_browser action=snapshot for page content; browser=dev action=screenshot attaches an owner screenshot."
+                    );
+                }
                 if let MachineError::Driver(cua::DriverError::Restarting { retry_after_ms }) = error
                 {
                     result["error"]["retry_after_ms"] = json!(retry_after_ms);
@@ -1011,24 +1057,44 @@ impl Runtime {
             return Ok(());
         };
         let mut browser = self.browser.lock().await;
-        if let Some(active) = browser.as_ref()
-            && !active.alive().await
-        {
+        for attempt in 0..2 {
+            if let Some(active) = browser.as_ref()
+                && !active.alive().await
+            {
+                active.stop().await;
+                *browser = None;
+            }
+            if browser.is_none() {
+                *browser = Some(
+                    browser::Browser::launch(
+                        &config.data_dir,
+                        &process::Identity::resolve(self.config.browser_user.as_deref())?,
+                        &config.binary,
+                        config.update_port,
+                        config.container,
+                        attempt > 0,
+                    )
+                    .await?,
+                );
+            }
+            let active = browser.as_ref().expect("launched");
+            if active.ready().await {
+                return Ok(());
+            }
+            // A live browser may be reconnecting its native host. Preserve its
+            // tabs for another full (at most 4 s) extension retry before repair.
+            if active.alive().await && active.wait_ready(std::time::Duration::from_secs(5)).await {
+                return Ok(());
+            }
+            active.stop().await;
             *browser = None;
+            tracing::warn!("secure_browser_restarting_extension_handshake");
         }
-        if browser.is_none() {
-            *browser = Some(
-                browser::Browser::launch(
-                    &config.data_dir,
-                    &process::Identity::resolve(self.config.browser_user.as_deref())?,
-                    &config.binary,
-                    config.update_port,
-                    config.container,
-                )
-                .await?,
-            );
+        if let Some(active) = browser.take() {
+            active.stop().await;
         }
-        Ok(())
+        tracing::warn!("secure_browser_extension_recovery_failed");
+        Err(browser::Failure::ExtensionUnavailable.into())
     }
 
     async fn file_operation(&self, operation: Operation, parameters: Value) -> Result<Value> {

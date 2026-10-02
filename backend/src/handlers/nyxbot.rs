@@ -4143,7 +4143,12 @@ pub(crate) async fn machine_update_watch(state: &AppState, watch: &NyxbotWatch) 
             row.node_id,
             row.phase,
             row.code.as_deref().unwrap_or("update_failed")
-        )
+        ) + " "
+            + row
+                .code
+                .as_deref()
+                .and_then(nyxid_machine::update::failure_guidance)
+                .unwrap_or("")
     };
     machine_wake(
         state,

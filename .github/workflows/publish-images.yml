@@ -152,6 +152,20 @@ jobs:
           python3 cli/tests/machine_mount_denied_profile.py cli/resources/machine-container/seccomp.json /tmp/nyxid-machine-deny-mount.json
           docker run --rm --shm-size=256m --security-opt seccomp=/tmp/nyxid-machine-deny-mount.json nyxid-machine-e2e:ci
 
+      - uses: actions/setup-node@v6
+        if: matrix.component == 'nyxid-machine-updater'
+        with:
+          node-version: '24'
+      - name: Verify production updater under documented restrictions
+        if: matrix.component == 'nyxid-machine-updater'
+        timeout-minutes: 10
+        env:
+          UPDATER_PRODUCTION_IMAGE: ${{ steps.repo.outputs.image }}@${{ steps.build.outputs.digest }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          npm ci --ignore-scripts --prefix frontend
+          node cli/tests/machine_updater_production.mjs
+
       - name: Attest published image digest
         uses: actions/attest-build-provenance@v3
         with:

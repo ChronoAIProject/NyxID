@@ -2292,7 +2292,11 @@ pub enum NodeCommands {
     #[command(hide = true)]
     MachineWorker,
     #[command(hide = true)]
-    MachineBrowserRefresh { profile: std::path::PathBuf },
+    MachineBrowserRefresh {
+        profile: std::path::PathBuf,
+        #[arg(long)]
+        force: bool,
+    },
     /// Install or run the independent verified machine updater.
     MachineUpdater {
         #[command(subcommand)]

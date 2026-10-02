@@ -815,3 +815,12 @@ paging. Trusted native input follows extension hit-testing; explicit DOM fallbac
 is labelled. Secure and dev Linux desktops have separate X servers and cookies,
 with a live-panel display switcher and per-display owner control. On macOS the
 physical desktop is shared and takeover locks both views.
+
+
+Machine browser recovery (0.41.1): secure-browser extension startup is event-driven
+on persisted profiles, with automatic handshake repair/relaunch and a specific
+12413 recovery message if it fails. The status CLI reads cached daemon state and
+never launches another browser. A 12416 unsupported computer call includes the
+bounded advertised `computer_tools`; use `nyx__machine_browser` snapshot for page
+content, or dev screenshot for an owner attachment. Machine discovery shares
+service-tool word matching, including full-match-first ranking.
