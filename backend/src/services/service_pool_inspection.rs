@@ -4,13 +4,30 @@ use crate::{
     crypto::aes::EncryptionKeys,
     errors::{AppError, AppResult},
     models::{
+        downstream_service::COLLECTION_NAME as DOWNSTREAM_SERVICES,
         service_pool::{PoolMemberContract, PoolStrategy, ServicePool},
         user_service::UserService,
     },
 };
 use futures::TryStreamExt;
 use mongodb::bson::doc;
+use serde::Deserialize;
 use std::collections::HashSet;
+
+#[derive(Debug, Deserialize)]
+struct CatalogDisplayMetadata {
+    #[serde(rename = "_id")]
+    id: String,
+    name: String,
+    slug: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct EndpointDisplayMetadata {
+    #[serde(rename = "_id")]
+    id: String,
+    label: String,
+}
 
 pub struct CandidateInspection {
     pub user_service_id: String,
@@ -22,6 +39,8 @@ pub struct CandidateInspection {
     pub credential_binding: String,
     pub protocol: Option<crate::models::downstream_service::InferenceWireProtocol>,
     pub catalog_service_id: Option<String>,
+    pub group_name: String,
+    pub group_slug: Option<String>,
     pub requires_compatibility_declaration: bool,
     pub cooldown_until: Option<chrono::DateTime<chrono::Utc>>,
     pub consecutive_failures: i64,
@@ -122,7 +141,7 @@ pub async fn inspect(
         .search
         .filter(|search| !query.members_only && !query.selected_only && !search.is_empty());
     let mut services: Vec<UserService> = if let Some(search) = search {
-        search_services(db, filter, search, offset, limit + 1).await?
+        search_services(db, filter, owner, search, offset, limit + 1).await?
     } else {
         crate::services::service_history::collection(db, "user_services")
             .find(filter)
@@ -136,6 +155,47 @@ pub async fn inspect(
     let has_more = services.len() > limit;
     services.truncate(limit);
     let next_cursor = has_more.then(|| (offset + limit as u64).to_string());
+
+    // Resolve only the bounded page's safe display metadata. This keeps a
+    // failed credential from hiding its connection label and lets the picker
+    // group by the authoritative catalog identity without materializing any
+    // credential or broadening the inventory ACL.
+    let catalog_ids: Vec<String> = services
+        .iter()
+        .filter_map(|service| service.catalog_service_id.clone())
+        .collect();
+    let catalog_metadata: std::collections::HashMap<String, (String, String)> =
+        if catalog_ids.is_empty() {
+            std::collections::HashMap::new()
+        } else {
+            db.collection::<CatalogDisplayMetadata>(DOWNSTREAM_SERVICES)
+                .find(doc! {"_id": {"$in": &catalog_ids}})
+                .projection(doc! {"_id": 1, "name": 1, "slug": 1})
+                .await?
+                .try_collect::<Vec<_>>()
+                .await?
+                .into_iter()
+                .map(|service| (service.id, (service.name, service.slug)))
+                .collect()
+        };
+    let endpoint_ids: Vec<String> = services
+        .iter()
+        .map(|service| service.endpoint_id.clone())
+        .filter(|id| !id.is_empty())
+        .collect();
+    let endpoint_labels: std::collections::HashMap<String, String> = if endpoint_ids.is_empty() {
+        std::collections::HashMap::new()
+    } else {
+        db.collection::<EndpointDisplayMetadata>("user_endpoints")
+            .find(doc! {"_id": {"$in": &endpoint_ids}, "user_id": owner})
+            .projection(doc! {"_id": 1, "label": 1})
+            .await?
+            .try_collect::<Vec<_>>()
+            .await?
+            .into_iter()
+            .map(|endpoint| (endpoint.id, endpoint.label))
+            .collect()
+    };
     let selected = if let Some(peers) = query.peer_ids.filter(|_| !query.members_only) {
         let members: Vec<_> = peers
             .iter()
@@ -169,7 +229,11 @@ pub async fn inspect(
         });
         let mut row = CandidateInspection {
             user_service_id: service.id.clone(),
-            name: service.slug.clone(),
+            name: endpoint_labels
+                .get(&service.endpoint_id)
+                .filter(|label| !label.is_empty())
+                .cloned()
+                .unwrap_or_else(|| service.slug.clone()),
             slug: service.slug.clone(),
             is_active: service.is_active,
             eligible: true,
@@ -180,6 +244,17 @@ pub async fn inspect(
                 .unwrap_or_else(|| "user".into()),
             protocol: None,
             catalog_service_id: service.catalog_service_id.clone(),
+            group_name: match service.catalog_service_id.as_ref() {
+                Some(id) => catalog_metadata
+                    .get(id)
+                    .map(|metadata| metadata.0.clone())
+                    .unwrap_or_else(|| "Unavailable catalog service".into()),
+                None => "Custom connections".into(),
+            },
+            group_slug: service
+                .catalog_service_id
+                .as_ref()
+                .and_then(|id| catalog_metadata.get(id).map(|metadata| metadata.1.clone())),
             requires_compatibility_declaration: service.catalog_service_id.is_none(),
             cooldown_until: None,
             consecutive_failures: 0,
@@ -200,7 +275,6 @@ pub async fn inspect(
             .await;
             match resolution {
                 Ok(Some(resolution)) => {
-                    row.name = resolution.target.service.name.clone();
                     row.credential_binding = if resolution.master_credential {
                         "platform"
                     } else if resolution.target.auth_method == "none" {
@@ -383,6 +457,8 @@ pub async fn inspect(
                 credential_binding: "unavailable".into(),
                 protocol: None,
                 catalog_service_id: None,
+                group_name: "Custom connections".into(),
+                group_slug: None,
                 requires_compatibility_declaration: false,
                 cooldown_until: None,
                 consecutive_failures: 0,
@@ -443,6 +519,7 @@ pub async fn inspect(
 async fn search_services(
     db: &mongodb::Database,
     filter: mongodb::bson::Document,
+    owner: &str,
     search: &str,
     offset: u64,
     limit: usize,
@@ -455,12 +532,24 @@ async fn search_services(
             doc! {"$sort":{"_id":1}},
             doc! {"$lookup":{
                 "from":"user_endpoints","localField":"endpoint_id","foreignField":"_id",
-                "pipeline":[{"$project":{"_id":0,"label":1}}],"as":"search_endpoint",
+                "pipeline":[
+                    {"$match":{"user_id":owner}},
+                    {"$project":{"_id":0,"label":1}},
+                ],"as":"search_endpoint",
             }},
-            doc! {"$match":{"$or":[{"slug":&pattern},{"search_endpoint.label":pattern}]}},
+            doc! {"$lookup":{
+                "from":DOWNSTREAM_SERVICES,"localField":"catalog_service_id","foreignField":"_id",
+                "pipeline":[{"$project":{"_id":0,"name":1,"slug":1}}],"as":"search_catalog",
+            }},
+            doc! {"$match":{"$or":[
+                {"slug":&pattern},
+                {"search_endpoint.label":&pattern},
+                {"search_catalog.name":&pattern},
+                {"search_catalog.slug":&pattern},
+            ]}},
             doc! {"$skip":offset as i64},
             doc! {"$limit":limit as i64},
-            doc! {"$unset":"search_endpoint"},
+            doc! {"$unset":["search_endpoint","search_catalog"]},
         ])
         .max_time(std::time::Duration::from_secs(5))
         .await?

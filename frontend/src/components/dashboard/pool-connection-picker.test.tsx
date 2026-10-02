@@ -53,7 +53,13 @@ const defaults = {
   isFetchingNextPage: false,
   onLoadMore: vi.fn(),
 };
-function Harness({ initialIds = [] }: { initialIds?: string[] }) {
+function Harness({
+  initialIds = [],
+  sourceRows = defaults.rows,
+}: {
+  initialIds?: string[];
+  sourceRows?: PoolCandidate[];
+}) {
   const [ids, setIds] = useState(initialIds);
   const [search, setSearch] = useState("");
   return (
@@ -66,8 +72,10 @@ function Harness({ initialIds = [] }: { initialIds?: string[] }) {
           selectedIds={ids}
           search={search}
           onSearch={setSearch}
-          rows={defaults.rows.filter((row) =>
-            (row.name || row.slug).toLowerCase().includes(search.toLowerCase()),
+          rows={sourceRows.filter((row) =>
+            `${row.name || row.slug} ${row.slug} ${row.group_name ?? ""}`
+              .toLowerCase()
+              .includes(search.toLowerCase()),
           )}
           onToggle={(row) =>
             setIds((current) =>
@@ -189,6 +197,74 @@ describe("pool connection picker", () => {
       "aria-disabled",
       "true",
     );
+  });
+  it("groups interleaved catalog rows, de-duplicates page overlap, and navigates display order", async () => {
+    const user = userEvent.setup();
+    const groupedRows: PoolCandidate[] = [
+      {
+        ...candidate,
+        name: "A account 1",
+        catalog_service_id: "catalog-a",
+        group_name: "Shared service",
+        group_slug: "service-a",
+      },
+      {
+        ...backup,
+        name: "B account 1",
+        catalog_service_id: "catalog-b",
+        group_name: "Shared service",
+        group_slug: "service-b",
+      },
+      {
+        ...candidate,
+        user_service_id: "three",
+        name: "A account 2",
+        catalog_service_id: "catalog-a",
+        group_name: "Shared service",
+        group_slug: "service-a",
+      },
+      {
+        ...candidate,
+        user_service_id: "three",
+        name: "A account 2 duplicate",
+        catalog_service_id: "catalog-a",
+        group_name: "Shared service",
+        group_slug: "service-a",
+      },
+    ];
+    render(<Harness sourceRows={groupedRows} />);
+    const { input } = await openPicker(user);
+    expect(
+      screen.getByRole("group", {
+        name: "Shared service (service-a) (2 loaded)",
+      }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("group", {
+        name: "Shared service (service-b) (1 loaded)",
+      }),
+    ).toBeVisible();
+    expect(screen.getAllByRole("option")).toHaveLength(3);
+    await user.keyboard("{ArrowUp}");
+    expect(input).toHaveAttribute(
+      "aria-activedescendant",
+      screen.getByRole("option", { name: "B account 1" }).id,
+    );
+    await user.keyboard("{Enter}");
+    expect(screen.getByRole("option", { name: "B account 1" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    await user.keyboard("{ArrowDown}{Enter}{ArrowDown}{Enter}");
+    expect(screen.getByRole("option", { name: "A account 1" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.getByRole("option", { name: "A account 2" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(input).toHaveFocus();
   });
   it("keeps retry and paging inside the dropdown and distinguishes loading, empty search, and empty inventory", async () => {
     const user = userEvent.setup();

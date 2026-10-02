@@ -19,6 +19,15 @@ Backup tiers advance only when visited, so intermittent primary failures still
 distribute work across backups. Members have weight 1–1000 and may be disabled
 without deleting their connection.
 
+Round-robin and weighted routing use the saved member order for a repeating
+cycle. Round-robin gives each eligible member one turn. Weighted routing gives
+each member as many consecutive turns as its weight: A with weight 2 followed
+by B with weight 1 produces A → A → B, then repeats. Reordering those members
+produces B → A → A while preserving their 1/3 and 2/3 shares. The next request
+continues from the pool's current counter; saving does not restart the cycle.
+Disabled or unavailable members are omitted at execution time. Ordered retry
+after a failed attempt requires the `priority` strategy.
+
 A priority pool uses one of two request contracts:
 
 - **Same API (`same_api`)** forwards the existing HTTP wire format. Members must
@@ -268,7 +277,10 @@ primary credential does not block a healthy backup. Inspection checks stored
 state; it does not test credentials against the provider.
 
 Use the dashboard's searchable multi-select dropdown to choose connections.
-Search matches connection names and slugs across the inventory.
+Connections are grouped under their original catalog service, with individual
+accounts and keys visible beneath each heading. Custom connections have their
+own group. Search matches connection and original service names and slugs
+across the inventory.
 It stays open while selecting; select a checked connection again to remove it.
 The selected connections appear in the form with priority and model settings.
 Unavailable connections show a repair reason and cannot be added.
@@ -329,9 +341,13 @@ list saved members without claiming that cooldown has been checked.
 The dashboard provides one Create Pool action. New connections get increasing
 priorities so the common primary/backup setup works without editing priority
 numbers. Same API and AI chat choices explain request behavior; switching back to
-Same API clears hidden model mappings. Retry limits, same-priority balancing,
-description and enabled state live under Advanced settings. Search and pagination
-never discard draft members or their compatibility confirmations. Editing saves
+Same API clears hidden model mappings. Same-priority balancing appears beside
+the connection controls. Weighted and round-robin connections have explicit cycle
+positions and move controls; weighted connections also show their configured
+share among enabled connections (within the same priority tier for fallback).
+Retry limits, description and pool enabled state live under Advanced settings.
+Search and pagination never discard draft members or their compatibility
+confirmations. Editing saves
 one revision-checked update; stale revisions remain visible as conflicts.
 
 Responses include `x-nyxid-pool-member` and `x-nyxid-pool-attempts`. Exhaustion
