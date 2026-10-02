@@ -92,6 +92,7 @@ describe("probePathForSlug — registry uses seeded service_slug forms", () => {
     expect(probePathForSlug("api-twitter")).toBe("users/me");
     expect(probePathForSlug("api-twitch")).toBe("users");
     expect(probePathForSlug("api-facebook")).toBe("me");
+    expect(probePathForSlug("api-linkedin")).toBe("v2/userinfo");
     expect(probePathForSlug("api-lark")).toBe("authen/v1/user_info");
     expect(probePathForSlug("api-feishu")).toBe("authen/v1/user_info");
   });
