@@ -1889,6 +1889,7 @@ async fn proxy_request_through_pool(
             ticket: ticket.clone(),
             policy: policy.clone(),
             lease_lost: Default::default(),
+            settling: Default::default(),
             timed_out: Default::default(),
             status: std::sync::Arc::new(std::sync::atomic::AtomicU16::new(0)),
             node_dispatched: Default::default(),
