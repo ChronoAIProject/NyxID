@@ -150,11 +150,36 @@ export function PoolConnectionsEditor({
             : "Add the connections that should share traffic."}
         </p>
       </div>
+      <div className="space-y-2 rounded-xl border border-border/50 p-3">
+        <h4 className="text-[12px] font-medium">Select connections</h4>
+        <PoolConnectionPicker
+          rows={rows}
+          selectedIds={members.map((member) => member.user_service_id!)}
+          search={search}
+          onSearch={setSearch}
+          onToggle={toggleMember}
+          isLoading={candidates.isLoading}
+          isSearching={
+            search !== settledSearch ||
+            (candidates.isFetching && !candidates.isFetchingNextPage)
+          }
+          isError={candidates.isError}
+          error={candidates.error}
+          onRetry={() => {
+            void candidates.refetch();
+          }}
+          hasNextPage={candidates.hasNextPage}
+          isFetchingNextPage={candidates.isFetchingNextPage}
+          onLoadMore={() => {
+            void candidates.fetchNextPage();
+          }}
+        />
+      </div>
       {members.length === 0 && (
         <div className="rounded-xl border border-dashed border-border p-4 text-[12px] text-muted-foreground">
           {!pool && <p>Add at least one connection to create a pool.</p>}
           {priority
-            ? "Add a primary connection below, then a backup."
+            ? "Choose a primary connection, then a backup."
             : "Add the connections that should share traffic."}{" "}
           You can mix platform access and your own keys.
         </div>
@@ -275,31 +300,6 @@ export function PoolConnectionsEditor({
           </div>
         );
       })}
-      <div className="space-y-2 rounded-xl border border-border/50 p-3">
-        <h4 className="text-[12px] font-medium">Select connections</h4>
-        <PoolConnectionPicker
-          rows={rows}
-          selectedIds={members.map((member) => member.user_service_id!)}
-          search={search}
-          onSearch={setSearch}
-          onToggle={toggleMember}
-          isLoading={candidates.isLoading}
-          isSearching={
-            search !== settledSearch ||
-            (candidates.isFetching && !candidates.isFetchingNextPage)
-          }
-          isError={candidates.isError}
-          error={candidates.error}
-          onRetry={() => {
-            void candidates.refetch();
-          }}
-          hasNextPage={candidates.hasNextPage}
-          isFetchingNextPage={candidates.isFetchingNextPage}
-          onLoadMore={() => {
-            void candidates.fetchNextPage();
-          }}
-        />
-      </div>
       {!aiChat && (
         <details className="rounded-xl border border-border/50 p-3">
           <summary className="cursor-pointer text-[12px] font-medium">

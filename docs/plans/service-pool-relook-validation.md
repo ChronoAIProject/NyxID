@@ -48,6 +48,7 @@ bash scripts/check-rci-backend-boundary.sh
 npm --prefix frontend test
 npm --prefix frontend run lint
 npm --prefix frontend run build
+npm --prefix frontend run test:e2e -- e2e/service-pool-picker.spec.ts
 ```
 
 Initial local results: 108 service-pool backend tests, 39 supplemental pool tests, 14 node-dispatch tests, one billing-route test, 15 adapter tests, and 31 CLI pool tests passed. The full frontend suite passed 4,084 tests in 406 files before the final DOM and overlay corrections. The 24 focused component and hook tests, TypeScript, and ESLint passed after those corrections. Workspace Clippy, formatting, the backend boundary check, and the production frontend build passed.
@@ -99,7 +100,16 @@ checks, name search before pagination, saved health, and healthy fallback with
 one dispatch attempt. The browser searched displayed names, selected and
 deselected connections, handled unavailable rows, repeated three Escape/reopen
 cycles, checked the 390-pixel layout, and created/edited/deleted a pool against
-the backend, with zero page or console errors.
+the backend, with zero window, page, or console errors in the production build.
+
+The browser regression also captures window errors directly because Vite's
+overlay can hide ResizeObserver errors from Playwright's page-error listener.
+Changing selected cards below the connection picker now leaves its anchor in
+place. The permanent browser test reproduced the observer error in all three
+runs against the previous placement and passed all five runs after the fix.
+It covers search shrinking and expanding, repeated selection and deselection,
+mobile-to-desktop resizing, and Escape/focus restoration. The 31 focused tests,
+TypeScript, scoped lint, and production build passed after this layout change.
 
 ## Verification scope
 
