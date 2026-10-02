@@ -157,6 +157,7 @@ export type UpdateServicePoolInput = z.infer<typeof updateServicePoolSchema>;
 export type SetPoolMembersInput = z.infer<typeof setPoolMembersSchema>;
 export interface PoolCandidate {
   user_service_id: string;
+  name?: string;
   slug: string;
   is_active: boolean;
   eligible: boolean;
@@ -170,7 +171,40 @@ export interface PoolCandidate {
   last_status: number | null;
 }
 export interface PoolCandidatesResponse {
+  operation_checked: boolean;
+  method: string | null;
+  path: string | null;
   candidates: PoolCandidate[];
   next_cursor: string | null;
   has_more: boolean;
 }
+
+export const poolOperationSchema = z.object({
+  method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]),
+  path: z
+    .string()
+    .trim()
+    .min(1, "Enter an operation path, or leave the operation check off.")
+    .superRefine((path, ctx) => {
+      if (path.length > 1 && path.endsWith("/")) {
+        ctx.addIssue({
+          code: "custom",
+          message:
+            "Remove the trailing slash (for example, /test instead of /test/).",
+        });
+      } else if (
+        /[?#%\\]/.test(path) ||
+        path.includes("//") ||
+        [...path].some(
+          (c) => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127,
+        ) ||
+        path.split("/").some((part) => part === "." || part === "..")
+      ) {
+        ctx.addIssue({
+          code: "custom",
+          message:
+            "Use a relative API path without a URL, query, fragment, encoded characters, or dot segments.",
+        });
+      }
+    }),
+});

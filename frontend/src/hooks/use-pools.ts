@@ -153,10 +153,12 @@ export interface PoolInspectionOptions {
   poolId?: string;
   orgId?: string;
   contract?: "same_api" | "ai_chat";
+  checkOperation?: boolean;
   method?: string;
   path?: string;
   search?: string;
   peerIds?: string[];
+  selectedOnly?: boolean;
   declaredPeerIds?: string[];
   strategy?: "priority" | "round_robin" | "weighted";
 }
@@ -170,16 +172,17 @@ function inspectionPath(
     : "/service-pools/candidates";
   const query = new URLSearchParams({
     member_contract: options.contract ?? "same_api",
-    method: options.method ?? "POST",
-    path:
-      options.path ??
-      (options.contract === "ai_chat" ? "chat/completions" : "/"),
     limit: "100",
   });
+  if (options.checkOperation != null)
+    query.set("check_operation", String(options.checkOperation));
+  if (options.method) query.set("method", options.method);
+  if (options.path != null) query.set("path", options.path);
   if (options.orgId) query.set("org_id", options.orgId);
   if (options.strategy) query.set("strategy", options.strategy);
   if (options.declaredPeerIds)
     query.set("declared_peer_ids", options.declaredPeerIds.join(","));
+  if (options.selectedOnly) query.set("selected_only", "true");
   if (options.peerIds) query.set("peer_ids", options.peerIds.join(","));
   if (options.search) query.set("search", options.search);
   if (after) query.set("after", after);

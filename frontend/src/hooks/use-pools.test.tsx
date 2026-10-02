@@ -146,6 +146,43 @@ describe("pool management requests", () => {
     expect(last.searchParams.has("after")).toBe(false);
   });
 
+  it("explicitly browses inventory and fetches selected draft IDs independently of search", async () => {
+    api.get.mockResolvedValue({
+      candidates: [],
+      operation_checked: false,
+      method: null,
+      path: null,
+      next_cursor: null,
+      has_more: false,
+    });
+    const { result } = renderHook(
+      () =>
+        usePoolCandidates({
+          poolId: "pool-id",
+          checkOperation: false,
+          selectedOnly: true,
+          peerIds: ["one", "two"],
+          declaredPeerIds: ["one"],
+        }),
+      { wrapper: wrapperFactory() },
+    );
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    const request = new URL(api.get.mock.calls[0]![0], "https://nyxid.invalid");
+    expect(Object.fromEntries(request.searchParams)).toMatchObject({
+      check_operation: "false",
+      selected_only: "true",
+      peer_ids: "one,two",
+      declared_peer_ids: "one",
+    });
+    expect(request.searchParams.has("method")).toBe(false);
+    expect(request.searchParams.has("path")).toBe(false);
+    expect(result.current.data?.pages[0]).toMatchObject({
+      operation_checked: false,
+      method: null,
+      path: null,
+    });
+  });
+
   it("resets the selected member and refreshes the matching operation health", async () => {
     const cooled = {
       user_service_id: "member-id",
@@ -173,7 +210,13 @@ describe("pool management requests", () => {
     api.post.mockResolvedValue({ reset: true });
     const { result } = renderHook(
       () => ({
-        health: usePoolHealth({ poolId: "pool-id", contract: "ai_chat" }),
+        health: usePoolHealth({
+          poolId: "pool-id",
+          contract: "ai_chat",
+          checkOperation: true,
+          method: "POST",
+          path: "chat/completions",
+        }),
         reset: useResetPoolHealth(),
       }),
       { wrapper: wrapperFactory() },
