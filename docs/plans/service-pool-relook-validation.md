@@ -114,7 +114,7 @@ TypeScript, scoped lint, and production build passed after this layout change.
 ## Grouped selector and routing controls
 
 The grouped selector follow-up includes PR #1732 and is rebased onto
-`c1d865e7c00a5b81cfbc8e4d19b4b95496447861` from `main`. Candidate metadata identifies
+`ef830db7` from `main`, including the settled-attempt lease fix from PR #1739. Candidate metadata identifies
 the original catalog service while
 preserving each connection's own label. Group identity uses the catalog ID,
 including when multiple services have the same display name; custom connections

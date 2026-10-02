@@ -514,8 +514,8 @@ pub async fn inspect(
     })
 }
 
-/// Search before pagination, projecting only the referenced endpoint label.
-/// Both personal and platform resolution use this label as the displayed name.
+/// Search connection and original catalog labels before pagination.
+/// Lookups project display metadata only, after owner and caller scope filtering.
 async fn search_services(
     db: &mongodb::Database,
     filter: mongodb::bson::Document,
