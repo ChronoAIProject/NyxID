@@ -7,13 +7,14 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
-import { ChevronRight, UsersRound } from "lucide-react";
+import { ChevronRight, UsersRound, History } from "lucide-react";
 import { useServiceView } from "@/hooks/use-service-view";
 import { useServiceCardTransition } from "@/hooks/use-service-card-transition";
 import { ServiceViewToolbar } from "./service-view-toolbar";
 import { ServiceConnectionTable } from "./service-connection-table";
 import { ServiceAvatarStack } from "./service-avatar-stack";
 import { ServiceBillingSummary } from "./service-billing-summary";
+import { latestServiceEdit } from "@/lib/service-card-summary";
 import {
   useServiceRoutingPools,
   type ServiceRoutingPools,
@@ -56,7 +57,9 @@ function GroupCard({
   filtersRef,
   routing,
   allConnections,
+  catalog,
 }: {
+  readonly catalog?: CatalogEntry;
   readonly routing: ServiceRoutingPools;
   readonly allConnections: readonly KeyInfo[];
   readonly group: ServiceConnectionGroup;
@@ -72,7 +75,7 @@ function GroupCard({
   const [routingOpen, setRoutingOpen] = useState(false);
   const [requestedPanel, setRequestedPanel] = useState<{
     id: string;
-    view: "billing" | "requests" | "access";
+    view: "billing" | "requests" | "access" | "history";
     version: number;
   } | null>(null);
   const [routeId, setRouteId] = useState<string | null>(null);
@@ -161,6 +164,7 @@ function GroupCard({
       }),
     ).values(),
   ];
+  const lastEdit = latestServiceEdit(connections);
   const disabled = connections.filter((key) => !key.is_active).length;
   const connectionInsights = connections.map((key) =>
     insights.connections.get(key.id),
@@ -196,13 +200,15 @@ function GroupCard({
     (item) => item?.usage?.activity.visibility === "own_requests",
   );
   const keysText = configuredKeys.length
-    ? `${configuredKeys.length} ${configuredKeys.length === 1 ? "key" : "keys"}`
+    ? `${configuredKeys.length}${accessIncomplete ? "+" : ""} agent ${configuredKeys.length === 1 ? "key" : "keys"}`
     : accessIncomplete
-      ? "keys —"
-      : "no keys";
+      ? "Agent keys unverified"
+      : "0 agent keys";
   const useText = latestUse
-    ? `${callerLabel(latestUse.caller)} · ${formatRelativeTime(latestUse.occurred_at)}`
-    : "use not recorded";
+    ? `${ownUseOnly ? "Your last use" : "Last used"} ${formatRelativeTime(latestUse.occurred_at)} · ${callerLabel(latestUse.caller)}`
+    : useTracked
+      ? "No recorded use in 30 days"
+      : "Last use not reported";
   const agents =
     insights.status === "loading"
       ? { text: "Loading…", title: "Loading agent keys and use" }
@@ -217,7 +223,7 @@ function GroupCard({
                   : "Agent keys and use couldn't load",
             }
           : {
-              text: `${keysText} · ${useText}`,
+              text: keysText,
               title: [
                 configuredKeys.length
                   ? `Keys with access: ${configuredKeys.join(", ")}`
@@ -232,7 +238,7 @@ function GroupCard({
               ].join("\n"),
             };
   const openSummary = (
-    view: "billing" | "requests" | "access",
+    view: "billing" | "requests" | "access" | "history",
     connectionId?: string,
   ) => {
     const lastConnection =
@@ -287,10 +293,10 @@ function GroupCard({
         <div
           className={cn(
             "relative flex flex-col bg-card",
-            expanded ? "rounded-t-xl shadow-sm" : "h-64 rounded-xl",
+            expanded ? "rounded-t-xl shadow-sm" : "h-72 rounded-xl",
           )}
         >
-          <div className="flex min-h-0 flex-1 flex-col gap-1 p-4">
+          <div className="flex min-h-0 flex-1 flex-col gap-2 p-4">
             <div className="flex items-start gap-3">
               <div className="flex size-10 shrink-0 items-center justify-center rounded-lg border border-border bg-background/50">
                 <ServiceIcon
@@ -326,7 +332,7 @@ function GroupCard({
               )}
             </div>
             {!expanded && (
-              <p className="line-clamp-1 h-4 shrink-0 text-xs leading-4 text-muted-foreground">
+              <p className="line-clamp-2 h-8 shrink-0 text-xs leading-4 text-muted-foreground">
                 {search.trim()
                   ? `Matches: ${connections.map((key) => key.label).join(" · ")}`
                   : group.description}
@@ -340,38 +346,13 @@ function GroupCard({
                   : "space-y-0.5",
               )}
             >
-              {!expanded && (
-                <div className="flex h-6 min-w-0 items-center gap-2">
-                  <span className="w-16 shrink-0 text-muted-foreground">
-                    Sources
-                  </span>
-                  <ServiceAvatarStack
-                    items={sources}
-                    label={`Show sources for ${group.name}`}
-                  />
-                </div>
-              )}
-              <button
-                type="button"
-                onClick={() => {
-                  openSummary(latestUse ? "requests" : "access");
-                }}
-                aria-expanded={expanded}
-                aria-controls={contentId}
-                aria-label={`Show agent keys and use for ${group.name}`}
-                className="flex h-6 w-full min-w-0 items-center gap-2 rounded-sm text-left focus-visible:outline-2 focus-visible:outline-ring"
-              >
-                <span className="w-16 shrink-0 text-muted-foreground">
-                  Agents
-                </span>
-                <UsersRound
-                  className="size-3.5 shrink-0 text-muted-foreground"
-                  aria-hidden="true"
-                />
-                <span className="truncate" title={agents.title}>
-                  {agents.text}
-                </span>
-              </button>
+              <ServiceBillingSummary
+                connections={connections}
+                insights={insights}
+                catalog={catalog}
+                serviceName={group.name}
+                onOpen={(id) => openSummary("billing", id)}
+              />
               <ServicePoolSummary
                 pools={pools}
                 loading={routing.loading}
@@ -384,12 +365,60 @@ function GroupCard({
                   if (!expanded) onToggle(cardRef.current);
                 }}
               />
-              <ServiceBillingSummary
-                connections={connections}
-                insights={insights}
-                serviceName={group.name}
-                onOpen={(id) => openSummary("billing", id)}
-              />
+              <button
+                type="button"
+                onClick={() => {
+                  openSummary(latestUse ? "requests" : "access");
+                }}
+                aria-expanded={expanded}
+                aria-controls={contentId}
+                aria-label={`Show agent keys and use for ${group.name}`}
+                className="flex h-8 w-full min-w-0 flex-col rounded-sm text-left text-xs leading-4 focus-visible:outline-2 focus-visible:outline-ring"
+                title={agents.title}
+              >
+                <span className="flex w-full min-w-0 items-center gap-2">
+                  <UsersRound
+                    className="size-3.5 shrink-0 text-muted-foreground"
+                    aria-hidden="true"
+                  />
+                  <span className="truncate">{agents.text}</span>
+                </span>
+                <span className="block w-full truncate pl-[22px] text-muted-foreground">
+                  {insights.status === "ready"
+                    ? useText
+                    : "Last use unavailable"}
+                </span>
+              </button>
+              <div className="flex h-6 min-w-0 items-center justify-between gap-2">
+                <button
+                  type="button"
+                  aria-label={`Show last edit for ${group.name}`}
+                  aria-controls={contentId}
+                  onClick={() =>
+                    openSummary("history", lastEdit?.connection.id)
+                  }
+                  title={
+                    lastEdit
+                      ? `${lastEdit.edit.action_label ?? "Last edited"} · ${lastEdit.edit.at} · ${lastEdit.edit.actor.name} · ${lastEdit.connection.label}`
+                      : "No edit attribution was reported for these connections"
+                  }
+                  className="flex min-w-0 items-center gap-2 rounded-sm text-left text-xs focus-visible:outline-2 focus-visible:outline-ring"
+                >
+                  <History
+                    className="size-3.5 shrink-0 text-muted-foreground"
+                    aria-hidden="true"
+                  />
+                  <span className="truncate text-muted-foreground">
+                    {lastEdit
+                      ? `Edited ${formatRelativeTime(lastEdit.edit.at)} · ${lastEdit.edit.actor.name}`
+                      : "Last edit not recorded"}
+                  </span>
+                </button>
+                <ServiceAvatarStack
+                  items={sources}
+                  label={`Show sources for ${group.name}`}
+                />
+              </div>
             </div>
           </div>
           <div className="flex h-12 shrink-0 items-center justify-between gap-2 border-t border-border/70 px-4">
@@ -503,6 +532,12 @@ function GroupCard({
                 insights={insights}
                 serviceName={group.name}
                 renderActions={renderConnectionActions}
+                catalog={catalog}
+                pools={pools}
+                onViewPool={(id) => {
+                  setRouteId(id);
+                  setRoutingOpen(true);
+                }}
               />
             )}
           </div>
@@ -632,6 +667,7 @@ export function GroupedServiceCards({
                 insights={insights}
                 routing={routing}
                 allConnections={keys}
+                catalog={catalog?.find((entry) => entry.slug === group.slug)}
                 connections={matches}
                 search={filters.search}
                 onToggle={(card) =>

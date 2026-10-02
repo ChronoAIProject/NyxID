@@ -185,6 +185,81 @@ afterEach(() => {
 });
 
 describe("live grouped services", () => {
+  it("counts all configured charges including disabled connections and opens the billable member", async () => {
+    for (let i = 0; i < 4; i++)
+      records.push({
+        ...records[0]!,
+        id: `extra-${i}`,
+        label: `App ${i}`,
+        slug: `app-${i}`,
+        is_active: i !== 3,
+      });
+    for (const connection of records)
+      insightConnections.set(connection.id, {
+        service_id: connection.id,
+        billing: {
+          ...configuredBilling(connection),
+          credit_billing_configured: connection.id === "extra-3",
+        },
+        usage: null,
+      });
+    render(preview());
+    expect(screen.getByText("1 of 6 connections billable")).toBeVisible();
+    expect(screen.getByText("1 disabled")).toBeVisible();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Show billing for OpenAI" }),
+    );
+    expect(
+      screen.getByRole("region", { name: "Billing for App 3" }),
+    ).toBeVisible();
+    expect(screen.getByText("NyxID usage charges configured")).toBeVisible();
+    expect(screen.getByText("Billable · NyxID usage")).toBeVisible();
+  });
+  it("marks partial billability as a lower bound instead of counting missing billing as free", () => {
+    insightConnections.set("mine", {
+      service_id: "mine",
+      billing: {
+        ...configuredBilling(records[0]!),
+        credit_billing_configured: true,
+      },
+      usage: null,
+    });
+    render(preview());
+    expect(screen.getByText("1+ of 2 connections billable")).toBeVisible();
+  });
+  it("shows recorded last edit and opens that connection's history", async () => {
+    records.push({
+      ...records[0]!,
+      id: "edited",
+      label: "Edited connection",
+      slug: "edited",
+      authorship: {
+        created_by: null,
+        last_change: {
+          actor: {
+            kind: "person",
+            id: "calvin",
+            name: "Calvin",
+            person_id: "calvin",
+            api_key_id: null,
+            app_id: null,
+          },
+          at: "2026-10-01T10:00:00Z",
+          action: "updated",
+          change_group_id: "change",
+        },
+      },
+    });
+    render(preview());
+    expect(screen.getByText(/Edited .* · Calvin/)).toBeVisible();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Show last edit for OpenAI" }),
+    );
+    const row = screen.getByRole("row", { name: /Edited connection/ });
+    expect(
+      within(row).getByRole("button", { name: /History/ }),
+    ).toHaveAttribute("aria-expanded", "true");
+  });
   it("keeps mixed-source billing separate in Personal view and opens the selected source", async () => {
     records.push({
       ...records[0]!,
@@ -215,47 +290,21 @@ describe("live grouped services", () => {
     ).not.toBeInTheDocument();
     const card = screen.getByRole("region", { name: "OpenAI" });
     expect(within(card).getByText("3 connections")).toBeVisible();
-    expect(within(card).getByText("Credit billing unverified")).toBeVisible();
-    expect(screen.queryByText("Your personal account")).not.toBeInTheDocument();
-    await user.hover(
-      screen.getByRole("button", { name: "Show Personal billing for OpenAI" }),
-    );
     expect(
-      within(await screen.findByRole("tooltip")).getByText(
-        /Your personal account/,
-      ),
-    ).toBeInTheDocument();
-    expect(
-      within(screen.getByRole("tooltip")).getByText(
-        "Credit billing unverified",
-      ),
-    ).toBeInTheDocument();
-    await user.keyboard("{Escape}");
-    await user.hover(
-      screen.getByRole("button", { name: "Show Chrono billing for OpenAI" }),
-    );
-    expect(
-      within(
-        await screen.findByRole("tooltip", { name: /Chrono · organization/ }),
-      ).getByText(/Chrono · organization/),
-    ).toBeInTheDocument();
-    await user.keyboard("{Escape}");
-    await user.hover(
-      screen.getByRole("button", { name: "Show Platform billing for OpenAI" }),
-    );
-    expect(
-      within(
-        await screen.findByRole("tooltip", {
-          name: /Acting user's personal account/,
+      within(card).getByText("Billing unverified · 3 connections"),
+    ).toBeVisible();
+    expect(within(card).queryByText("Sources")).not.toBeInTheDocument();
+    for (const source of ["Personal", "Chrono", "NyxID platform"]) {
+      await user.hover(
+        screen.getByRole("button", {
+          name: `${source} · Show sources for OpenAI`,
         }),
-      ).getByText(/Acting user's personal account/),
-    ).toBeInTheDocument();
-    expect(
-      within(screen.getByRole("tooltip")).getByText(
-        "Credit billing unverified",
-      ),
-    ).toBeInTheDocument();
-    await user.keyboard("{Escape}");
+      );
+      expect(
+        within(await screen.findByRole("tooltip")).getByText(source),
+      ).toBeVisible();
+      await user.keyboard("{Escape}");
+    }
     await user.click(
       within(card).getByRole("button", { name: "Expand OpenAI connections" }),
     );
@@ -263,7 +312,7 @@ describe("live grouped services", () => {
     expect(within(card).getByText("openai-team")).toBeVisible();
     await user.click(
       screen.getByRole("button", {
-        name: "Show Platform billing for OpenAI",
+        name: "Billing for Platform account",
       }),
     );
     expect(
@@ -291,7 +340,7 @@ describe("live grouped services", () => {
       screen.getByRole("region", { name: "Platform-only service" }),
     ).toBeVisible();
   });
-  it("shows configured agent associations and reveals expected billing on hover", async () => {
+  it("shows configured agent associations and identifies unverified billing on hover", async () => {
     insightConnections.set("mine", {
       service_id: "mine",
       billing: configuredBilling(records[0]!),
@@ -322,17 +371,17 @@ describe("live grouped services", () => {
       },
     });
     render(preview());
-    expect(screen.getByText("Agents")).toBeVisible();
-    expect(screen.getByText(/1 key · use not recorded/)).toBeVisible();
+    expect(screen.getByText("1+ agent key")).toBeVisible();
+    expect(screen.getByText("Last use not reported")).toBeVisible();
     expect(screen.getByTitle(/Keys with access: Codex CI/)).toBeVisible();
     await userEvent.hover(
-      screen.getByRole("button", { name: "Show Personal billing for OpenAI" }),
+      screen.getByRole("button", { name: "Show billing for OpenAI" }),
     );
     const tooltip = within(await screen.findByRole("tooltip"));
-    expect(tooltip.getByText("Credit billing unverified")).toBeInTheDocument();
-    expect(tooltip.getByText(/Your personal account/)).toBeInTheDocument();
-    expect(tooltip.getByText(/Provider billed separately/)).toBeInTheDocument();
-    expect(tooltip.getByText(/Rate not reported/)).toBeInTheDocument();
+    expect(tooltip.getByText("NyxID usage billing")).toBeInTheDocument();
+    expect(
+      tooltip.getByText("Personal account: Unverified"),
+    ).toBeInTheDocument();
     expect(screen.queryByText("Latest request")).not.toBeInTheDocument();
     expect(screen.queryByText(/No recorded requests/)).not.toBeInTheDocument();
   });
@@ -370,7 +419,8 @@ describe("live grouped services", () => {
       },
     });
     render(preview());
-    expect(screen.getByText(/keys — · Codex worker/)).toBeVisible();
+    expect(screen.getByText("Agent keys unverified")).toBeVisible();
+    expect(screen.getByText(/Last used .*Codex worker/)).toBeVisible();
     expect(
       screen.getByTitle(/Last use: Codex worker · Release app/),
     ).toBeVisible();
@@ -386,10 +436,10 @@ describe("live grouped services", () => {
       screen.getByRole("table", { name: "Recent connection requests" }),
     ).toBeVisible();
     await user.hover(
-      screen.getByRole("button", { name: "Show Personal billing for OpenAI" }),
+      screen.getByRole("button", { name: "Show billing for OpenAI" }),
     );
     await user.click(
-      screen.getByRole("button", { name: "Show Personal billing for OpenAI" }),
+      screen.getByRole("button", { name: "Show billing for OpenAI" }),
     );
     expect(
       screen.getByRole("region", { name: "Billing for Personal account" }),
@@ -1217,7 +1267,7 @@ describe("live grouped services", () => {
 describe("saved routing in service cards", () => {
   it("does not infer a pool from grouped connections", async () => {
     render(preview());
-    expect(screen.getByText("Individual slugs")).toBeVisible();
+    expect(screen.getByText("Direct connections · no pool")).toBeVisible();
     await userEvent.click(
       screen.getByRole("button", { name: "Show routing for OpenAI" }),
     );
@@ -1230,8 +1280,8 @@ describe("saved routing in service cards", () => {
       { ...pool("Reliable"), strategy: "priority", failover: null },
     ];
     render(preview());
-    expect(screen.getByText("Reliable")).toBeVisible();
-    expect(screen.getByText("Up to 3 attempts")).toBeVisible();
+    expect(screen.getByText("2 connections · Priority")).toBeVisible();
+    expect(screen.getByText("Reliable · Up to 3 attempts")).toBeVisible();
     expect(
       screen.getByRole("button", { name: "Show routing for OpenAI" }),
     ).toHaveAttribute("aria-expanded", "false");
@@ -1275,7 +1325,7 @@ describe("saved routing in service cards", () => {
       screen.getByRole("button", { name: "Show routing for OpenAI" }),
     );
     await userEvent.click(
-      screen.getByRole("button", { name: "Show Personal billing for OpenAI" }),
+      screen.getByRole("button", { name: "Show billing for OpenAI" }),
     );
     expect(screen.getByText("Billing flow")).toBeVisible();
     expect(
@@ -1285,9 +1335,8 @@ describe("saved routing in service cards", () => {
   it("does not describe weighted rotation as failover", async () => {
     poolState.data = [{ ...pool("Rotate"), strategy: "weighted" }];
     render(preview());
-    expect(screen.getByText("Rotate")).toBeVisible();
-    expect(screen.getByText("Weighted")).toBeVisible();
-    expect(screen.getByText("Off · single attempt")).toBeVisible();
+    expect(screen.getByText("2 connections · Weighted")).toBeVisible();
+    expect(screen.getByText("Rotate · Off · single attempt")).toBeVisible();
     await userEvent.click(
       screen.getByRole("button", { name: "Show routing for OpenAI" }),
     );
@@ -1302,12 +1351,12 @@ describe("saved routing in service cards", () => {
     const summary = screen.getByRole("button", {
       name: "Show routing for OpenAI",
     });
-    expect(within(summary).getByText("+1")).toBeVisible();
-    expect(within(summary).getByText("On in 1 of 2 pools")).toBeVisible();
+    expect(within(summary).getByText("2 pools")).toBeVisible();
+    expect(
+      within(summary).getByText("Failover · On in 1 of 2 pools"),
+    ).toBeVisible();
     await userEvent.click(summary);
-    await userEvent.click(
-      screen.getByRole("button", { name: "Team" }),
-    );
+    await userEvent.click(screen.getByRole("button", { name: "Team" }));
     expect(
       screen.getByRole("link", { name: "Manage in Service Pools" }),
     ).toHaveAttribute(

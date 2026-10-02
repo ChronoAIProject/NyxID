@@ -36,7 +36,7 @@ export function ServicePoolSummary({
       ? "Loading pools…"
       : incomplete
         ? "Pool access incomplete"
-        : "Individual slugs");
+        : "Direct connections · no pool");
   const failover = first
     ? poolFailoverSummary(pools)
     : loading
@@ -44,14 +44,30 @@ export function ServicePoolSummary({
       : incomplete
         ? "Not confirmed"
         : "No pool";
-  const strategy =
-    first && pools.length === 1
-      ? {
-          priority: "Priority",
-          weighted: "Weighted",
-          round_robin: "Round-robin",
-        }[first.strategy]
-      : undefined;
+  const memberIds = new Set(
+    pools.flatMap((pool) =>
+      pool.members.map((member) => member.user_service_id),
+    ),
+  );
+  const formats = [
+    ...new Set(
+      pools.map(
+        (pool) =>
+          ({
+            priority: "Priority",
+            weighted: "Weighted",
+            round_robin: "Round-robin",
+          })[pool.strategy],
+      ),
+    ),
+  ].join(" / ");
+  const config = first
+    ? `${memberIds.size} ${memberIds.size === 1 ? "connection" : "connections"} · ${formats}`
+    : loading
+      ? "Loading routing…"
+      : incomplete
+        ? "Routing not confirmed"
+        : "Each connection uses its own slug";
 
   return (
     <TooltipProvider delayDuration={180}>
@@ -66,28 +82,23 @@ export function ServicePoolSummary({
             onClick={onOpen}
           >
             <span className="flex w-full min-w-0 items-center gap-2">
-              <span className="w-16 shrink-0 text-muted-foreground">Pool</span>
               <GitBranch
                 className="size-3.5 shrink-0 text-muted-foreground"
                 aria-hidden="true"
               />
-              <span className="truncate font-medium">{name}</span>
+              <span className="truncate font-medium">
+                {first ? config : name}
+              </span>
               {pools.length > 1 && (
-                <span className="shrink-0 text-muted-foreground">
-                  +{pools.length - 1}
-                </span>
-              )}
-              {strategy && (
-                <span className="ml-auto shrink-0 text-[10px] text-muted-foreground">
-                  {strategy}
+                <span className="ml-auto shrink-0 text-muted-foreground">
+                  {pools.length} pools
                 </span>
               )}
             </span>
-            <span className="flex w-full min-w-0 items-center gap-2">
-              <span className="w-16 shrink-0 text-muted-foreground">
-                Failover
-              </span>
-              <span className="min-w-0 truncate">{failover}</span>
+            <span className="block w-full truncate pl-[22px] text-muted-foreground">
+              {first
+                ? `${pools.length === 1 ? `${name} · ` : "Failover · "}${failover}`
+                : config}
             </span>
           </button>
         </TooltipTrigger>
@@ -101,7 +112,11 @@ export function ServicePoolSummary({
               <p className="font-medium">
                 {pool.name} · {poolStrategyLabel(pool)}
               </p>
-              <p>{poolFailoverLabel(pool)}</p>
+              <p>
+                {pool.members.filter((member) => member.enabled).length} of{" "}
+                {pool.members.length} connections enabled ·{" "}
+                {poolFailoverLabel(pool)}
+              </p>
               <code>/api/v1/proxy/s/{pool.slug}</code>
             </div>
           ))}

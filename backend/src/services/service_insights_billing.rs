@@ -79,6 +79,8 @@ pub struct ServiceBillingExplanation {
     pub credential_label: String,
     pub account: Option<ServiceBillingAccount>,
     pub charge_status: ConnectionChargeStatus,
+    /// Saved usage-charge configuration, independent of availability and caller rollout.
+    pub credit_billing_configured: Option<bool>,
     pub rates: Vec<ServiceBillingRate>,
     pub provider_billing: ProviderBillingDisclosure,
     /// "for_you" uses the viewer's default; "agent_key" includes that key's override.
@@ -549,7 +551,106 @@ async fn explain_connections_in_context(
         }
         explanations.insert(service.id.clone(), explanation);
     }
+    // Keep configured billability visible for disabled or unavailable connections.
+    // This reads the already-loaded metadata, without resolving credentials or a payer.
+    for service in services {
+        let Some(explanation) = explanations.get_mut(&service.id) else {
+            continue;
+        };
+        annotate_configured_charge(
+            explanation,
+            service,
+            service
+                .catalog_service_id
+                .as_ref()
+                .and_then(|id| catalog.get(id)),
+            service
+                .api_key_id
+                .as_ref()
+                .and_then(|id| credentials.get(id)),
+            agent_key.is_some(),
+        );
+    }
     Ok(explanations)
+}
+
+fn annotate_configured_charge(
+    explanation: &mut ServiceBillingExplanation,
+    service: &UserService,
+    catalog: Option<&DownstreamService>,
+    credential: Option<&UserApiKey>,
+    agent_context: bool,
+) {
+    if explanation.status == BillingExplanationStatus::Restricted
+        || (service.catalog_service_id.is_some() && catalog.is_none())
+        || (agent_context && explanation.credential_class.is_none())
+    {
+        return;
+    }
+    let stored = credential.filter(|key| key.user_id == service.user_id);
+    let class = explanation.credential_class.or_else(|| {
+        if uses_platform_binding(service) {
+            Some(CredentialClass::NyxidManagedMaster)
+        } else if service.node_id.is_some() {
+            // Without materializing a disabled credential, shared OAuth versus node
+            // supply is ambiguous and can change a credential-restricted price.
+            if stored.is_some_and(|key| key.credential_source.as_deref() == Some("platform")) {
+                None
+            } else {
+                Some(CredentialClass::NodeManaged)
+            }
+        } else if service.auth_method == "none" {
+            Some(CredentialClass::NoAuth)
+        } else {
+            stored.map(|key| default_credential_class(service, key, true))
+        }
+    });
+    let configuration = catalog.and_then(|service| service.billing.as_ref());
+    explanation.credit_billing_configured = if configuration.is_none() {
+        Some(false)
+    } else {
+        class.map(|class| configured_usage_charge(configuration, class))
+    };
+}
+
+fn configured_usage_charge(configuration: Option<&ServiceBilling>, class: CredentialClass) -> bool {
+    let Some(billing) = configuration else {
+        return false;
+    };
+    if class == CredentialClass::NyxidManagedMaster && billing.resale_billable {
+        return true;
+    }
+    if billing.platform_charge_nyxid_credentials_only
+        && !matches!(
+            class,
+            CredentialClass::NyxidManagedMaster | CredentialClass::NyxidPlatformOauthApp
+        )
+    {
+        return false;
+    }
+    let positive = |rate: &str| {
+        crate::services::billing::amounts::decimal_to_pico(rate).is_some_and(|rate| rate > 0)
+    };
+    let legacy = billing.platform_billable
+        && billing.platform_pricing.as_ref().is_none_or(|price| {
+            price.sync_status != PricingSyncStatus::Synced || positive(&price.credits_per_unit)
+        });
+    if billing.byok_pricing.is_none() && billing.platform_key_pricing.is_none() {
+        return legacy;
+    }
+    let lane = match class {
+        CredentialClass::NyxidManagedMaster => billing.platform_key_pricing.as_ref(),
+        CredentialClass::NoAuth => None,
+        _ => billing.byok_pricing.as_ref(),
+    };
+    lane.is_some_and(|lane| {
+        positive(&lane.credits_per_unit)
+            || lane
+                .components
+                .iter()
+                .any(|rate| positive(&rate.credits_per_unit))
+            || (lane.sync_status != PricingSyncStatus::Synced && legacy)
+    })
 }
 
 fn annotate_transport_pricing(
@@ -607,6 +708,7 @@ fn restricted() -> ServiceBillingExplanation {
         credential_label: "Credential restricted".into(),
         account: None,
         charge_status: ConnectionChargeStatus::Restricted,
+        credit_billing_configured: None,
         rates: Vec::new(),
         provider_billing: ProviderBillingDisclosure::Unknown,
         context: "for_you".into(),
@@ -696,6 +798,7 @@ fn project_billing(
         credential_label: credential_label.into(),
         account: Some(account),
         charge_status: ConnectionChargeStatus::NotCharged,
+        credit_billing_configured: Some(configured_usage_charge(configuration, credential_class)),
         rates: Vec::new(),
         provider_billing,
         context: "for_you".into(),
@@ -829,6 +932,124 @@ mod tests {
             sync_error: None,
             components: Vec::new(),
         }
+    }
+
+    #[test]
+    fn configured_billability_for_disabled_connections_preserves_access_and_unknown_states() {
+        let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+        catalog.billing = Some(ServiceBilling {
+            platform_key_pricing: Some(lane(BillingMetric::Requests, "1", "pk")),
+            ..Default::default()
+        });
+        let mut service = connection();
+        service.catalog_service_id = Some(catalog.id.clone());
+        service.is_active = false;
+        service.credential_binding = Some("platform".into());
+        let mut disabled = unavailable("This connection is disabled.");
+        annotate_configured_charge(&mut disabled, &service, Some(&catalog), None, false);
+        assert_eq!(disabled.credit_billing_configured, Some(true));
+        assert_eq!(disabled.status, BillingExplanationStatus::Unavailable);
+        assert!(disabled.account.is_none());
+        let mut hidden = restricted();
+        annotate_configured_charge(&mut hidden, &service, Some(&catalog), None, false);
+        assert_eq!(hidden.credit_billing_configured, None);
+        let mut missing_catalog = unavailable("Missing configuration");
+        annotate_configured_charge(&mut missing_catalog, &service, None, None, false);
+        assert_eq!(missing_catalog.credit_billing_configured, None);
+        let mut override_unavailable = unavailable("Agent override unavailable");
+        annotate_configured_charge(
+            &mut override_unavailable,
+            &service,
+            Some(&catalog),
+            None,
+            true,
+        );
+        assert_eq!(override_unavailable.credit_billing_configured, None);
+    }
+
+    #[test]
+    fn configured_billability_counts_the_credential_lane_independent_of_rollout() {
+        let mut config = ServiceBilling {
+            platform_key_pricing: Some(lane(BillingMetric::Requests, "1", "pk")),
+            ..Default::default()
+        };
+        assert!(configured_usage_charge(
+            Some(&config),
+            CredentialClass::NyxidManagedMaster
+        ));
+        assert!(!configured_usage_charge(
+            Some(&config),
+            CredentialClass::UserOwned
+        ));
+        config.byok_pricing = Some(lane(BillingMetric::Requests, "0", "byok"));
+        assert!(!configured_usage_charge(
+            Some(&config),
+            CredentialClass::UserOwned
+        ));
+        config
+            .byok_pricing
+            .as_mut()
+            .unwrap()
+            .components
+            .push(LanePriceComponent {
+                metric: BillingMetric::Images,
+                credits_per_unit: "0.000000000001".into(),
+                lago_metric_code: "images".into(),
+                sync_status: PricingSyncStatus::Pending,
+                sync_error: None,
+            });
+        assert!(configured_usage_charge(
+            Some(&config),
+            CredentialClass::UserOwned
+        ));
+        let mut service = connection();
+        service.is_active = false;
+        let explanation = project_billing(
+            &service,
+            Some(&config),
+            CredentialClass::UserOwned,
+            ServiceBillingAccount {
+                id: "person".into(),
+                kind: BillingAccountKind::Personal,
+                name: "Personal".into(),
+            },
+            false,
+            false,
+            false,
+        );
+        assert_eq!(explanation.credit_billing_configured, Some(true));
+        assert_eq!(
+            explanation.charge_status,
+            ConnectionChargeStatus::NotCharged
+        );
+        config.platform_charge_nyxid_credentials_only = true;
+        assert!(!configured_usage_charge(
+            Some(&config),
+            CredentialClass::UserOwned
+        ));
+        assert!(configured_usage_charge(
+            Some(&config),
+            CredentialClass::NyxidPlatformOauthApp
+        ));
+        let mut pending = ServiceBilling {
+            platform_billable: true,
+            platform_pricing: Some(ServicePlatformPricing {
+                credits_per_unit: "0".into(),
+                lago_metric_code: "legacy".into(),
+                sync_status: PricingSyncStatus::Pending,
+                sync_error: None,
+            }),
+            ..Default::default()
+        };
+        assert!(configured_usage_charge(
+            Some(&pending),
+            CredentialClass::UserOwned
+        ));
+        pending.platform_pricing.as_mut().unwrap().sync_status = PricingSyncStatus::Synced;
+        assert!(!configured_usage_charge(
+            Some(&pending),
+            CredentialClass::UserOwned
+        ));
     }
 
     fn explain(config: &ServiceBilling, class: CredentialClass) -> ServiceBillingExplanation {

@@ -123,6 +123,14 @@ function ConnectionBillingPanel({
       {bill ? (
         <>
           <div className="flex flex-wrap items-center gap-2 text-xs">
+            {bill.credit_billing_configured != null &&
+              bill.status !== "restricted" && (
+                <Badge variant="secondary">
+                  {bill.credit_billing_configured
+                    ? "NyxID usage charges configured"
+                    : "No NyxID usage charges configured"}
+                </Badge>
+              )}
             <Badge variant="secondary">{billingModelLabel(bill)}</Badge>
             {bill.status !== "restricted" && bill.status !== "unavailable" && (
               <span className="text-muted-foreground">

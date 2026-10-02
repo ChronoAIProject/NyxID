@@ -12,7 +12,7 @@ NyxID's AI Services system lets users manage external API credentials, SSH servi
 
 The External Services grid groups catalog-backed connections by `catalog_service_id`.
 Custom connections remain separate by ID. Each group starts collapsed with a
-256px fixed collapsed height; expanding a group keeps its connection comparison
+288px fixed collapsed height and two reserved description lines; expanding a group keeps its connection comparison
 table inside the parent. Connection details and history remain on their existing detail pages.
 
 The expanded table shows Classification (personal, named organization with role,
@@ -62,15 +62,26 @@ rows and the parent displays the matching count against the group total. With no
 filters all siblings are visible. The full service page always contains every
 accessible connection in the group, independent of list filters.
 
-Sources and Billing use stationary overlapping avatar circles. Hovering or focusing
-a circle brings it to the front and shows its full details in a tooltip. Circles do
-not move or resize, and tooltips do not animate. Extra sources remain reachable
-through the overflow count.
-Billing shows **NyxID credits**, **No NyxID charge**, or **Credit billing unverified**,
-independently of credential supply. Configuration-only data is labeled
-**NyxID credits · configured**; mixed charge states say they vary by connection.
-Each row shows the credential supplier under ownership, and the charge model,
-expected/resolved payer, and rate in Billing. Hover reveals the explanation.
+Source avatars sit at the bottom right of the card body without a visible label.
+Hovering or focusing a stationary circle brings it forward and shows its source
+name. Extra sources remain reachable through the overflow count.
+
+The body starts with the number of connections with configured NyxID usage
+charges, e.g. **1 of 6 connections billable**. Disabled connections count; grants,
+allowances, and caller rollout do not change configured billability. The additive
+`billing.credit_billing_configured` insight field is true/false when known and null
+when unverifiable or restricted. It uses the selected credential class, positive
+primary/component prices, legacy charge configuration, and independent resale
+configuration. Older servers use permitted catalog/connection metadata where
+available; omitted pricing is unverified, never assumed free. External provider
+invoices are separate. Clicking the summary opens the first billable connection's
+billing panel. Every table row exposes its own classification, payer and rates.
+
+Agent keys are counted once across the group's connections; partial inventories
+show a `+`. Last use is on its own line with a relative time and recorded caller.
+The lower-left **Edited** summary uses the latest `authorship.last_change` event,
+including its actor, and opens that connection's history. Creation and credential
+preparation timestamps are not substituted for edits or usage.
 
 BYOK means a supplied API key or developer app. A user's OAuth token is not proof
 of their own app: the internal BYOK price lane also includes NyxID's shared OAuth
@@ -86,14 +97,13 @@ it does not change the provider credential's owner. Conversely, signing into an
 account through NyxID's app is not BYOK. This preview shows the configured funding
 order; identifying the actual allowance, grant, or wallet used requires per-request
 settlement data and is not claimed here.
-Card billing summaries keep each source separate even when the expected payer is
-the same. Personal credentials normally use the personal account, organization
-credentials use the owning organization's account, and a platform key uses the
-acting person's personal account. Each source opens its own inline billing panel.
-Each collapsed service card shows **Pool** (name, strategy, additional pool count)
-and **Failover** (configured attempt limit or off/disabled state). Multiple pools
-show how many have failover enabled; hover/focus lists their individual policies.
-These two compact lines keep the common 256px collapsed card height.
+Personal credentials normally use the personal account, organization credentials
+use the owning organization's account, and a platform key uses the acting person's
+personal account. These details remain separate for every connection in the table.
+The pool summary shows the number of member connections and selection strategy;
+the next line shows the pool name and configured failover. Multiple pools show
+their count and how many have failover enabled. Hover/focus lists each pool's
+members, strategy, policy and slug. Expanded connection rows link to their pools.
 Grouping by catalog does not create a pool or change an individual connection slug.
 Click the pool summary to inspect the pool slug, strategy, priority/weight, credential supplier,
 billing account/rates, and operation-scoped eligibility/cooldown in a table inside

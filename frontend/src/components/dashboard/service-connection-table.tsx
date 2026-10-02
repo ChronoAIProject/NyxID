@@ -9,6 +9,7 @@ import {
   Settings2,
   UsersRound,
   CreditCard,
+  GitBranch,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -37,7 +38,10 @@ import {
   formatDateTime,
   formatRelativeTime,
 } from "@/lib/utils";
-import type { KeyInfo } from "@/types/keys";
+import type { CatalogEntry, KeyInfo } from "@/types/keys";
+import type { ServicePool } from "@/schemas/pools";
+import { poolStrategyLabel } from "@/lib/service-pool-display";
+import { connectionBillability } from "@/lib/service-card-summary";
 import type { ServiceInsight } from "@/schemas/service-insights";
 import {
   useServiceInsights,
@@ -142,13 +146,19 @@ export function ServiceConnectionTable({
   onViewHistory,
   insights: suppliedInsights,
   initialPanel = null,
+  catalog,
+  pools = [],
+  onViewPool,
 }: {
   readonly connections: readonly KeyInfo[];
   readonly serviceName: string;
   readonly renderActions?: (connection: KeyInfo) => ReactNode;
   readonly onViewHistory?: (connection: KeyInfo) => void;
   readonly insights?: ServiceInsightsState;
-  readonly initialPanel?: { id: string; view: InsightPanel } | null;
+  readonly initialPanel?: { id: string; view: InsightPanel | "history" } | null;
+  readonly catalog?: CatalogEntry;
+  readonly pools?: readonly ServicePool[];
+  readonly onViewPool?: (poolId: string) => void;
 }) {
   const [open, setOpen] = useState<{
     id: string;
@@ -191,6 +201,13 @@ export function ServiceConnectionTable({
           {connections.map((key) => {
             const insight = insights.connections.get(key.id);
             const billing = insight?.billing;
+            const billable =
+              insights.status === "ready"
+                ? connectionBillability(key, billing, catalog)
+                : undefined;
+            const memberships = pools.filter((pool) =>
+              pool.members.some((member) => member.user_service_id === key.id),
+            );
             const usage = insight?.usage;
             const latest = latestRecordedUse(usage);
             const useTracked =
@@ -319,6 +336,31 @@ export function ServiceConnectionTable({
                       </span>
                       {editable && renderActions?.(key)}
                     </p>
+                    {memberships.map((pool) => {
+                      const member = pool.members.find(
+                        (member) => member.user_service_id === key.id,
+                      )!;
+                      return (
+                        <button
+                          key={pool.id}
+                          type="button"
+                          onClick={() => onViewPool?.(pool.id)}
+                          className="mt-1 flex max-w-full items-center gap-1.5 text-left text-[11px] text-primary hover:underline"
+                          title={`${poolStrategyLabel(pool)} · ${pool.members.length} connections${!pool.is_active ? " · pool disabled" : ""}${!member.enabled ? " · member disabled" : ""}`}
+                        >
+                          <GitBranch
+                            className="size-3 shrink-0"
+                            aria-hidden="true"
+                          />
+                          <span className="truncate">
+                            {pool.name} ·{" "}
+                            {pool.strategy === "priority"
+                              ? `Priority ${member.priority ?? 0}`
+                              : poolStrategyLabel(pool)}
+                          </span>
+                        </button>
+                      );
+                    })}
                   </TableCell>
                   <TableCell>
                     <div className="flex items-center gap-1.5">
@@ -442,12 +484,16 @@ export function ServiceConnectionTable({
                           <span className="flex items-start gap-1.5 font-medium">
                             <CreditCard className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
                             <span className="truncate">
-                              {billing
-                                ? billingModelLabel(billing)
-                                : insightStatusLabel(
-                                    insights.status,
-                                    "Billing",
-                                  )}
+                              {billable === true
+                                ? "Billable · NyxID usage"
+                                : billable === false
+                                  ? "No NyxID usage charge"
+                                  : billing
+                                    ? billingModelLabel(billing)
+                                    : insightStatusLabel(
+                                        insights.status,
+                                        "Billing",
+                                      )}
                             </span>
                           </span>
                           {billing && (
@@ -550,6 +596,8 @@ export function ServiceConnectionTable({
                             : toggle(key.id, "history")
                         }
                         aria-label={`History for ${key.label} (${owner})`}
+                        aria-expanded={expanded && open.view === "history"}
+                        aria-controls={panelId}
                         className="inline-flex shrink-0 items-center gap-1 rounded-sm text-primary hover:underline focus-visible:outline-2 focus-visible:outline-ring"
                       >
                         <History className="size-3" aria-hidden="true" />{" "}

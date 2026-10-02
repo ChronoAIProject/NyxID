@@ -21,10 +21,21 @@ replica set, including a regression joining each attempt's service history to it
 billing request ID. TypeScript, the production frontend build, changed-file lint
 and whitespace checks passed. Signed-in visual review is still outstanding.
 
-The latest at-a-glance pool/failover summaries and owner-specific management links
-passed 70 focused frontend tests, the production/credential-accept builds and
-changed-file lint. AI service routing inspection has no pool editor; editing is
-confined to Service Pools.
+Updated 2 October: collapsed service cards are 288px tall with two description
+lines and the existing icon/name/count and footer navigation. The body shows a
+configured billable-connection count (including disabled connections), pool
+member count/strategy and failover, deduplicated agent-key count, last-use time,
+and latest recorded edit. Source avatars sit at the body's bottom right. The
+expanded table exposes per-connection billing, pool membership, access/use, and
+edit history. Clicking billing selects the first billable connection; clicking
+last edit opens the affected connection's history. No pool editor is mounted in
+AI service cards.
+
+102 focused frontend tests, 14 backend billing projection tests, production/credential-accept
+builds and changed-file lint passed for this revision. Signed-in visual review remains unavailable.
+The backend now reports configured billing separately from execution availability;
+the production-data preview uses published inventory metadata until that backend
+change is deployed. Missing data remains unverified.
 
 Run from `frontend/`:
 

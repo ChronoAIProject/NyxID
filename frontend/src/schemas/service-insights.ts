@@ -36,7 +36,7 @@ export const serviceBillingExplanationSchema = z.object({
     "unknown",
   ]),
   context: z.string(),
-  credit_billing_configured: z.boolean().optional(),
+  credit_billing_configured: z.boolean().nullish(),
   payer_rule: z.string().optional(),
   notes: z.array(z.string()),
 });

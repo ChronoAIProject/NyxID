@@ -10,6 +10,7 @@ import {
   type ServiceInsight,
 } from "@/schemas/service-insights";
 import type { KeyInfo } from "@/types/keys";
+import { configuredUsageCharge } from "./service-billing-config";
 
 // Read only metadata from the deployed inventory APIs. This projection describes
 // configuration; the execution resolver remains authoritative for ACLs and costs.
@@ -95,9 +96,7 @@ export function configuredBilling(
           ? `${org.org_name} · organization`
           : "Your personal account",
     charge_status: "conditional",
-    credit_billing_configured: Boolean(
-      lane || legacyConfigured || (platform && billing?.resale_billable),
-    ),
+    credit_billing_configured: configuredUsageCharge(connection, catalog),
     rates: lane
       ? [lane, ...(lane.components ?? [])].map((rate) => ({
           layer: "platform",
