@@ -1711,62 +1711,132 @@ async fn dispatch_tools_call(
         return handle_machine_tool(state, auth, tool_name, arguments, request.id.clone()).await;
     }
     if tool_name == "nyx__attachment_read" {
-        return handle_attachment_read(state, auth, &arguments, request.id.clone()).await;
+        return Box::pin(handle_attachment_read(
+            state,
+            auth,
+            &arguments,
+            request.id.clone(),
+        ))
+        .await;
     }
-    // -- Meta-tools --
-    match tool_name {
-        "nyx__search_tools" => {
-            return handle_meta_search(
-                state,
-                auth,
-                session_id,
-                &arguments,
-                request.id.clone(),
-                client_accepts_sse,
-            )
-            .await;
-        }
-        "nyx__discover_services" => {
-            return handle_meta_discover(state, auth, &arguments, request.id.clone()).await;
-        }
-        "nyx__list_connected_services" => {
-            return handle_meta_list_connected(state, auth, &arguments, request.id.clone()).await;
-        }
-        "nyx__connect_service" => {
-            return handle_meta_connect(
-                state,
-                auth,
-                session_id,
-                &arguments,
-                request.id.clone(),
-                client_accepts_sse,
-            )
-            .await;
-        }
-        "nyx__wait_for_connection" => {
-            return handle_wait_for_connection(
-                state,
-                auth,
-                session_id,
-                &arguments,
-                request.id.clone(),
-                client_accepts_sse,
-            )
-            .await;
-        }
-        "nyx__call_tool" => {
-            return Box::pin(handle_meta_call_tool(
-                state,
-                auth,
-                session_id,
-                &arguments,
-                request.id.clone(),
-                client_accepts_sse,
-                billing_egress_permit,
-            ))
-            .await;
-        }
-        "nyx__ssh_exec" | "nyx__ssh_list_services" => {
+    if let Some(future) = dispatch_meta_tool(
+        state,
+        auth,
+        session_id,
+        tool_name,
+        &arguments,
+        request,
+        client_accepts_sse,
+        billing_egress_permit,
+    ) {
+        return future.await;
+    }
+
+    // Service execution has its own frame; native tools must not carry its
+    // catalog, authorization and proxy futures on every poll.
+    Box::pin(dispatch_service_tool(
+        state,
+        auth,
+        session_id,
+        request,
+        tool_name,
+        arguments,
+        billing_egress_permit,
+    ))
+    .await
+}
+
+// Select before polling: constructing every meta-tool in one async match makes
+// unrelated native calls carry all of its debug-frame temporaries.
+#[allow(clippy::too_many_arguments)]
+fn dispatch_meta_tool<'a>(
+    state: &'a AppState,
+    auth: &'a McpAuthContext,
+    session_id: Option<&'a str>,
+    tool_name: &'a str,
+    arguments: &'a serde_json::Value,
+    request: &'a JsonRpcRequest,
+    client_accepts_sse: bool,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+) -> Option<futures::future::BoxFuture<'a, Response>> {
+    Some(match tool_name {
+        "nyx__search_tools" => Box::pin(handle_meta_search(
+            state,
+            auth,
+            session_id,
+            arguments,
+            request.id.clone(),
+            client_accepts_sse,
+        )),
+        "nyx__discover_services" => Box::pin(handle_meta_discover(
+            state,
+            auth,
+            arguments,
+            request.id.clone(),
+        )),
+        "nyx__list_connected_services" => Box::pin(handle_meta_list_connected(
+            state,
+            auth,
+            arguments,
+            request.id.clone(),
+        )),
+        "nyx__connect_service" => Box::pin(handle_meta_connect(
+            state,
+            auth,
+            session_id,
+            arguments,
+            request.id.clone(),
+            client_accepts_sse,
+        )),
+        "nyx__wait_for_connection" => Box::pin(handle_wait_for_connection(
+            state,
+            auth,
+            session_id,
+            arguments,
+            request.id.clone(),
+            client_accepts_sse,
+        )),
+        "nyx__call_tool" => Box::pin(handle_meta_call_tool(
+            state,
+            auth,
+            session_id,
+            arguments,
+            request.id.clone(),
+            client_accepts_sse,
+            billing_egress_permit,
+        )),
+        "nyx__oracle_pools" => Box::pin(handle_oracle_pools(state, auth, request.id.clone())),
+        "nyx__oracle_ask" => Box::pin(handle_oracle_ask(
+            state,
+            auth,
+            arguments,
+            request.id.clone(),
+        )),
+        "nyx__oracle_result" => Box::pin(handle_oracle_result(
+            state,
+            auth,
+            arguments,
+            request.id.clone(),
+        )),
+        "nyx__oracle_attach" => Box::pin(handle_oracle_attach(
+            state,
+            auth,
+            arguments,
+            request.id.clone(),
+        )),
+        "nyx__oracle_extract" => Box::pin(handle_oracle_extract(
+            state,
+            auth,
+            arguments,
+            request.id.clone(),
+        )),
+        "nyx__oracle_session" => Box::pin(handle_oracle_session(
+            state,
+            auth,
+            arguments,
+            request.id.clone(),
+        )),
+        "nyx__ssh_exec" | "nyx__ssh_list_services" => Box::pin(async move {
             if is_scoped_api_key(auth) {
                 return tool_result(
                     request.id.clone(),
@@ -1779,35 +1849,27 @@ async fn dispatch_tools_call(
                 return handle_mcp_ssh_exec(
                     state,
                     auth,
-                    &arguments,
+                    arguments,
                     request.id.clone(),
                     billing_egress_permit,
                 )
                 .await;
             }
-            return handle_mcp_ssh_list(state, auth, request.id.clone()).await;
-        }
-        "nyx__oracle_pools" => {
-            return handle_oracle_pools(state, auth, request.id.clone()).await;
-        }
-        "nyx__oracle_ask" => {
-            return handle_oracle_ask(state, auth, &arguments, request.id.clone()).await;
-        }
-        "nyx__oracle_result" => {
-            return handle_oracle_result(state, auth, &arguments, request.id.clone()).await;
-        }
-        "nyx__oracle_attach" => {
-            return handle_oracle_attach(state, auth, &arguments, request.id.clone()).await;
-        }
-        "nyx__oracle_extract" => {
-            return handle_oracle_extract(state, auth, &arguments, request.id.clone()).await;
-        }
-        "nyx__oracle_session" => {
-            return handle_oracle_session(state, auth, &arguments, request.id.clone()).await;
-        }
-        _ => {}
-    }
+            handle_mcp_ssh_list(state, auth, request.id.clone()).await
+        }),
+        _ => return None,
+    })
+}
 
+async fn dispatch_service_tool(
+    state: &AppState,
+    auth: &McpAuthContext,
+    session_id: Option<&str>,
+    request: &JsonRpcRequest,
+    tool_name: &str,
+    arguments: serde_json::Value,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+) -> Response {
     // -- Service tool: verify activation (when stateful), load, resolve, execute --
     let activated = match session_id {
         Some(sid) => match state.mcp_sessions.get_activated_service_ids(sid).await {
@@ -2634,7 +2696,7 @@ async fn handle_meta_call_tool(
     }
 
     if tool_name == "nyx__attachment_read" {
-        return handle_attachment_read(state, auth, &inner_args, request_id).await;
+        return Box::pin(handle_attachment_read(state, auth, &inner_args, request_id)).await;
     }
     if tool_name.starts_with("nyxid__") {
         return Box::pin(handle_account_tool(

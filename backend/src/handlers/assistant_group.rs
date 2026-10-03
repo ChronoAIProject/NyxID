@@ -409,7 +409,7 @@ async fn post_with_uploads(
     {
         addressed.push(group.lead_agent_id.clone());
     }
-    let message = groups::append_with_uploads(
+    let message = Box::pin(groups::append_with_uploads(
         &state.db,
         owner,
         group_id,
@@ -417,7 +417,7 @@ async fn post_with_uploads(
         author,
         text,
         ids,
-    )
+    ))
     .await?;
     // A new request (the owner's, or NyxBot's from outside the group; it
     // cannot post from inside) restores the hand-off budget. Follow-up loops

@@ -89,14 +89,14 @@ pub async fn upload(
     )
     .await
     .map_err(|_| AppError::BadRequest("Attachment exceeds 20 MiB.".into()))?;
-    let item = uploads::upload(
+    let item = Box::pin(uploads::upload(
         &state.db,
         &state.encryption_keys,
         &user,
         &scope,
         &name,
         bytes.to_vec(),
-    )
+    ))
     .await?;
     Ok((StatusCode::CREATED, Json(item.into())))
 }

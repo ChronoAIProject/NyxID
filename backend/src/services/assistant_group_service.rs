@@ -353,9 +353,15 @@ pub async fn append_with_uploads(
         .await?
         .ok_or_else(not_found)?;
     let message_id = Uuid::new_v4().to_string();
-    let attachments =
-        super::assistant_upload_service::bind(db, owner, group_id, &message_id, ids, &mut session)
-            .await?;
+    let attachments = Box::pin(super::assistant_upload_service::bind(
+        db,
+        owner,
+        group_id,
+        &message_id,
+        ids,
+        &mut session,
+    ))
+    .await?;
     let message = GroupMessage {
         attachments,
         id: message_id,

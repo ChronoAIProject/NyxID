@@ -869,7 +869,13 @@ pub(crate) async fn start_turn(
     permit: DirectChatPermit,
 ) -> AppResult<(AssistantConversation, broadcast::Receiver<Value>)> {
     let user_id = auth.user_id.to_string();
-    let row = engine::begin_turn(&state.db, &user_id, start, &state.encryption_keys).await?;
+    let row = Box::pin(engine::begin_turn(
+        &state.db,
+        &user_id,
+        start,
+        &state.encryption_keys,
+    ))
+    .await?;
     let text = engine::turn_input(&row, start);
     let credential =
         credentials::load_for_conversation(&state.db, &state.encryption_keys, &user_id, &row.id)
@@ -1034,7 +1040,9 @@ async fn run_turn(
     );
     let mut partial = String::new();
     let mut result = {
-        let execution = execute_turn(
+        // Execution includes upload planning and upstream streaming. Keep that
+        // state off the caller's stack when this task is created by a tool.
+        let mut execution = Box::pin(execute_turn(
             &state,
             &auth,
             &row,
@@ -1044,8 +1052,7 @@ async fn run_turn(
             &mut events,
             &block_id,
             &mut partial,
-        );
-        tokio::pin!(execution);
+        ));
         tokio::select! {
             result = &mut execution => result,
             () = permit.cancelled() => Err(TurnError::new("assistant_unavailable")),

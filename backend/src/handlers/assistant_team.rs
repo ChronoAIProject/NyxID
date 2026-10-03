@@ -736,9 +736,7 @@ pub(crate) async fn execute_tool(
             return Ok((refusal, true));
         }
         engine::require_enabled(&state.db, &chat.user_id).await?;
-        // The dispatcher includes large provisioning and scope-edit futures. Keep them
-        // off the caller's stack, including tests and ordinary specialist turns.
-        Box::pin(dispatch(state, chat, name, args)).await
+        dispatch(state, chat, name, args).await
     }
     .await;
     let outcome = match result {
@@ -769,7 +767,57 @@ pub(crate) async fn execute_tool(
     outcome
 }
 
-async fn dispatch(
+// Return a separately boxed future for each tool family. A single async match
+// reserves debug poll-frame temporaries for every branch, even for a small tool
+// such as machine_update. Keep provisioning, turns and group uploads independent.
+fn dispatch<'a>(
+    state: &'a AppState,
+    chat: &'a ChatAuthority,
+    name: &'a str,
+    args: &'a Value,
+) -> futures::future::BoxFuture<'a, AppResult<(Value, bool)>> {
+    match name {
+        "create_schedule" | "list_schedules" | "update_schedule" | "delete_schedule"
+        | "run_schedule_now" => Box::pin(async move {
+            Ok((
+                super::assistant_schedules::dispatch(state, &chat.user_id, name, args).await?,
+                false,
+            ))
+        }),
+        "remember" | "forget" | "spawn_subagent" | "message_subagent" | "wait_for_subagents"
+        | "list_subagents" | "read_subagent" | "grant_subagent" | "revoke_subagent" => {
+            Box::pin(dispatch_specialists(state, chat, name, args))
+        }
+        "request_agent_operations" | "get_agent_operations" | "set_agent_operations" => {
+            Box::pin(dispatch_operation_scopes(state, chat, name, args))
+        }
+        "set_guest_access" | "update_subagent" => {
+            Box::pin(dispatch_agent_settings(state, chat, name, args))
+        }
+        "decide_permission" | "destroy_subagent" => {
+            Box::pin(dispatch_permission_decisions(state, chat, name, args))
+        }
+        "create_group" | "list_groups" | "post_to_group" | "update_group" | "delete_group" => {
+            Box::pin(dispatch_groups(state, chat, name, args))
+        }
+        "update_settings" | "settings_link" => Box::pin(dispatch_settings(state, chat, name, args)),
+        "channel_bot_setup_link"
+        | "connect_channel_bot"
+        | "link_channel_bot"
+        | "list_channel_agents"
+        | "list_channel_chats"
+        | "update_channel_chat"
+        | "update_channel_access"
+        | "post_to_chat"
+        | "disconnect_channel_bot" => Box::pin(dispatch_channels(state, chat, name, args)),
+        "machine_setup_link" => Box::pin(super::machine_setup::link_tool(state, chat, args)),
+        "machine_update" => Box::pin(super::machine_update::tool(state, chat, args)),
+        "machine_pair" => Box::pin(super::machine_setup::pair_tool(state, chat, args)),
+        _ => Box::pin(async { Err(AppError::NotFound("NyxBot tool not found".into())) }),
+    }
+}
+
+async fn dispatch_specialists(
     state: &AppState,
     chat: &ChatAuthority,
     name: &str,
@@ -779,11 +827,6 @@ async fn dispatch(
     let owner = chat.user_id.as_str();
     let caller = chat.conversation_id.as_str();
     Ok(match name {
-        "create_schedule" | "list_schedules" | "update_schedule" | "delete_schedule"
-        | "run_schedule_now" => (
-            super::assistant_schedules::dispatch(state, owner, name, args).await?,
-            false,
-        ),
         "remember" => {
             let note = team::remember(
                 db,
@@ -819,7 +862,14 @@ async fn dispatch(
                 specialty: args["specialty"].as_str().map(str::to_owned),
                 created_by: "nyxbot",
             };
-            match team::create_specialist(db, &state.encryption_keys, owner, request).await? {
+            match Box::pin(team::create_specialist(
+                db,
+                &state.encryption_keys,
+                owner,
+                request,
+            ))
+            .await?
+            {
                 Err(TeamRefusal::LimitReached { limit }) => (
                     json!({"error": "limit_reached", "limit": limit,
                         "instructions": "Reuse or destroy a specialist first, or tell the user \
@@ -832,9 +882,9 @@ async fn dispatch(
                 ),
                 Ok((agent, _)) => {
                     let task = match args["task"].as_str() {
-                        Some(task) => {
-                            started_json(assign(state, owner, &agent, task, Some(caller)).await?)
-                        }
+                        Some(task) => started_json(
+                            Box::pin(assign(state, owner, &agent, task, Some(caller))).await?,
+                        ),
                         None => json!({"status": "idle",
                             "note": "Give it work with nyxid__message_subagent."}),
                     };
@@ -851,7 +901,14 @@ async fn dispatch(
             let agent = team::live_specialist(db, owner, text_arg(args, "subagent")).await?;
             (
                 started_json(
-                    assign(state, owner, &agent, text_arg(args, "text"), Some(caller)).await?,
+                    Box::pin(assign(
+                        state,
+                        owner,
+                        &agent,
+                        text_arg(args, "text"),
+                        Some(caller),
+                    ))
+                    .await?,
                 ),
                 false,
             )
@@ -937,6 +994,19 @@ async fn dispatch(
             }
             (result, false)
         }
+        _ => return Err(AppError::NotFound("NyxBot tool not found".into())),
+    })
+}
+
+async fn dispatch_operation_scopes(
+    state: &AppState,
+    chat: &ChatAuthority,
+    name: &str,
+    args: &Value,
+) -> AppResult<(Value, bool)> {
+    let db = &state.db;
+    let owner = chat.user_id.as_str();
+    Ok(match name {
         "request_agent_operations" => {
             let agent = team::live_specialist(db, owner, &chat.agent_id).await?;
             if text_arg(args, "subagent") != agent.name && text_arg(args, "subagent") != agent.id {
@@ -1070,6 +1140,19 @@ async fn dispatch(
                 Err(error) => return Err(error),
             }
         }
+        _ => return Err(AppError::NotFound("NyxBot tool not found".into())),
+    })
+}
+
+async fn dispatch_agent_settings(
+    state: &AppState,
+    chat: &ChatAuthority,
+    name: &str,
+    args: &Value,
+) -> AppResult<(Value, bool)> {
+    let db = &state.db;
+    let owner = chat.user_id.as_str();
+    Ok(match name {
         "set_guest_access" => {
             let agent = team::live_specialist(db, owner, text_arg(args, "subagent")).await?;
             let access = args["access"]
@@ -1170,6 +1253,19 @@ async fn dispatch(
                 false,
             )
         }
+        _ => return Err(AppError::NotFound("NyxBot tool not found".into())),
+    })
+}
+
+async fn dispatch_permission_decisions(
+    state: &AppState,
+    chat: &ChatAuthority,
+    name: &str,
+    args: &Value,
+) -> AppResult<(Value, bool)> {
+    let db = &state.db;
+    let owner = chat.user_id.as_str();
+    Ok(match name {
         "decide_permission" => {
             let allow = text_arg(args, "decision") == "allow";
             let request_id = text_arg(args, "request_id");
@@ -1249,6 +1345,20 @@ async fn dispatch(
             let agent = destroy_agent(state, owner, &agent.id).await?;
             (json!({"destroyed": agent.name}), false)
         }
+        _ => return Err(AppError::NotFound("NyxBot tool not found".into())),
+    })
+}
+
+async fn dispatch_groups(
+    state: &AppState,
+    chat: &ChatAuthority,
+    name: &str,
+    args: &Value,
+) -> AppResult<(Value, bool)> {
+    let db = &state.db;
+    let owner = chat.user_id.as_str();
+    let caller = chat.conversation_id.as_str();
+    Ok(match name {
         "create_group" => {
             let mut ids = Vec::new();
             for name in string_list(args, "members") {
@@ -1290,13 +1400,15 @@ async fn dispatch(
                 ));
             }
             let author = team::ensure_nyxbot(db, owner).await?;
-            let (message, addressed) = super::assistant_group::post(
+            // Posting can start member turns and bind uploads. Keep that nested
+            // state off the group-tool frame.
+            let (message, addressed) = Box::pin(super::assistant_group::post(
                 state,
                 owner,
                 &group.id,
                 text_arg(args, "text"),
                 Some(&author),
-            )
+            ))
             .await?;
             // This thread is woken with the members' replies once the group
             // is quiet.
@@ -1356,6 +1468,19 @@ async fn dispatch(
             crate::services::assistant_group_service::delete(db, owner, &group.id).await?;
             (json!({"deleted": group.name}), false)
         }
+        _ => return Err(AppError::NotFound("NyxBot tool not found".into())),
+    })
+}
+
+async fn dispatch_settings(
+    state: &AppState,
+    chat: &ChatAuthority,
+    name: &str,
+    args: &Value,
+) -> AppResult<(Value, bool)> {
+    let owner = chat.user_id.as_str();
+    let caller = chat.conversation_id.as_str();
+    Ok(match name {
         "update_settings" => {
             let before = settings::get(&state.db, &chat.user_id).await?;
             let maximum = args["max_auto_continuations"]
@@ -1431,11 +1556,19 @@ async fn dispatch(
                 false,
             )
         }
-        "machine_setup_link" => super::machine_setup::link_tool(state, chat, args).await?,
-        // Keep the cold update/inspection/transaction future out of the shared
-        // dispatcher frame used by every specialist and ordinary NyxBot tool.
-        "machine_update" => Box::pin(super::machine_update::tool(state, chat, args)).await?,
-        "machine_pair" => super::machine_setup::pair_tool(state, chat, args).await?,
+        _ => return Err(AppError::NotFound("NyxBot tool not found".into())),
+    })
+}
+
+async fn dispatch_channels(
+    state: &AppState,
+    chat: &ChatAuthority,
+    name: &str,
+    args: &Value,
+) -> AppResult<(Value, bool)> {
+    let owner = chat.user_id.as_str();
+    let caller = chat.conversation_id.as_str();
+    Ok(match name {
         "channel_bot_setup_link" => {
             let agent = target_agent(state, owner, args["agent"].as_str()).await?;
             super::nyxbot::setup_link_tool(

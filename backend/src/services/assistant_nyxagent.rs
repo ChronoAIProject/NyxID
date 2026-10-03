@@ -1035,7 +1035,9 @@ pub async fn begin_turn(
             let db = &db;
             let user_id = user_id.as_str();
             let start = &start;
-            let operation: AppResult<_> = async {
+            // MongoDB's retry driver stores and polls this callback through
+            // several frames. Keep the turn/message/upload transaction on the heap.
+            let operation: AppResult<_> = Box::pin(async {
                 let now = Utc::now();
                 let collection = db.collection::<AssistantConversation>(CONVERSATIONS);
                 let mut row = if start.conversation_id.is_some() {
@@ -1316,14 +1318,14 @@ pub async fn begin_turn(
                 if start.guest && !start.attachment_ids.is_empty() {
                     return Err(AppError::Forbidden("Uploads are owner-only".into()));
                 }
-                let mut uploads = super::assistant_upload_service::bind(
+                let mut uploads = Box::pin(super::assistant_upload_service::bind(
                     db,
                     user_id,
                     &id,
                     &message_id,
                     &start.attachment_ids,
                     session,
-                )
+                ))
                 .await?;
                 uploads.extend(start.group_attachments.clone());
                 let message = AssistantMessage {
@@ -1355,7 +1357,7 @@ pub async fn begin_turn(
                     .session(&mut *session)
                     .await?;
                 Ok((row, credential))
-            }
+            })
             .await;
             transactions::transaction_result(operation)
         })
