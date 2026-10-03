@@ -36,6 +36,15 @@ pub struct ExactServiceApprovalRedemption {
     pub failure_code: Option<String>,
 }
 
+/// Server-only actor and message-chain binding for organization group cards.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupApprovalBinding {
+    pub group_id: String,
+    pub conversation_id: String,
+    pub actor_user_id: String,
+    pub request_id: String,
+}
+
 /// Versioned producer projection bound to an exact-service approval.
 ///
 /// The version is stored beside the digest so a redeemer never guesses which
@@ -93,6 +102,8 @@ pub struct ExactServiceApprovalBinding {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ApprovalRequest {
+    #[serde(default)]
+    pub assistant_group: Option<GroupApprovalBinding>,
     /// UUID v4 string
     #[serde(rename = "_id")]
     pub id: String,
@@ -250,6 +261,7 @@ mod tests {
 
     fn make_approval_request() -> ApprovalRequest {
         ApprovalRequest {
+            assistant_group: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             service_id: uuid::Uuid::new_v4().to_string(),

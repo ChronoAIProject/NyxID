@@ -253,6 +253,7 @@ function GroupCard({
           {group.name}
         </span>
         <span className="truncate text-[11px] text-text-tertiary">
+          {group.owner?.type === "org" ? `${group.owner.name} · ` : ""}
           {group.members.map((member) => agentTitle(member)).join(", ")}
           {group.last_message_at ? ` · ${formatRelativeTime(group.last_message_at)}` : ""}
         </span>

@@ -411,6 +411,7 @@ pub async fn check_approval(
 /// mint an org-scoped grant on approval (see ChronoAIProject/NyxID#364).
 #[derive(Clone, Debug)]
 pub struct ApprovalRequestOperation {
+    pub assistant_group: Option<crate::models::approval_request::GroupApprovalBinding>,
     pub operation_summary: String,
     pub action_description: Option<String>,
     pub http_method: Option<String>,
@@ -423,6 +424,7 @@ pub struct ApprovalRequestOperation {
 impl ApprovalRequestOperation {
     pub fn from_descriptor(descriptor: &OperationDescriptor, grant_scope: Option<String>) -> Self {
         Self {
+            assistant_group: None,
             operation_summary: descriptor.operation_summary(),
             action_description: Some(descriptor.summary.clone()),
             http_method: descriptor.method.clone(),
@@ -459,14 +461,16 @@ pub async fn create_approval_request(
     notify_user_ids: Vec<String>,
     from_org_policy: bool,
 ) -> AppResult<ApprovalRequest> {
-    let notify_user_ids = if notify_user_ids.is_empty() {
+    let notify_user_ids = if let Some(group) = &operation.assistant_group {
+        vec![group.actor_user_id.clone()]
+    } else if notify_user_ids.is_empty() {
         vec![user_id.to_string()]
     } else {
         notify_user_ids
     };
 
     let collection = db.collection::<ApprovalRequest>(REQUESTS);
-    let idempotency_key = operation
+    let mut idempotency_key = operation
         .exact_service
         .as_ref()
         .map(|binding| binding.request_key.clone())
@@ -480,6 +484,13 @@ pub async fn create_approval_request(
                 from_org_policy,
             )
         });
+    if let Some(group) = &operation.assistant_group {
+        // A card from another chain or private thread can never be coalesced.
+        idempotency_key = format!(
+            "{idempotency_key}:{}:{}",
+            group.conversation_id, group.request_id
+        );
+    }
     let mut inserted_request: Option<ApprovalRequest> = None;
     for _attempt in 0..2 {
         if let Some(binding) = operation.exact_service.as_ref()
@@ -531,6 +542,7 @@ pub async fn create_approval_request(
         let expires_at = now + Duration::seconds(i64::from(timeout_secs));
 
         let request = ApprovalRequest {
+            assistant_group: operation.assistant_group.clone(),
             id: uuid::Uuid::new_v4().to_string(),
             user_id: user_id.to_string(),
             service_id: service_id.to_string(),
@@ -770,6 +782,7 @@ pub async fn create_tool_approval_request(
     let action_description = tool_arguments.map(|args| format!("{tool_name}({args})"));
 
     let request = ApprovalRequest {
+        assistant_group: None,
         id: uuid::Uuid::new_v4().to_string(),
         user_id: user_id.to_string(),
         service_id: "tool_approval".to_string(),
@@ -870,6 +883,46 @@ pub async fn process_decision(
     idempotency_key: Option<&str>,
     decision_channel: &str,
 ) -> AppResult<ApprovalRequest> {
+    Box::pin(process_decision_with_access(
+        db,
+        config,
+        http_client,
+        fcm_auth,
+        apns_auth,
+        request_id,
+        approved,
+        duration_sec,
+        idempotency_key,
+        decision_channel,
+        None,
+    ))
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn process_decision_with_access(
+    db: &Database,
+    config: &AppConfig,
+    http_client: &reqwest::Client,
+    fcm_auth: Option<Arc<FcmAuth>>,
+    apns_auth: Option<Arc<ApnsAuth>>,
+    request_id: &str,
+    approved: bool,
+    duration_sec: Option<i64>,
+    idempotency_key: Option<&str>,
+    decision_channel: &str,
+    snapshot: Option<&Arc<super::org_agent_service::RequestAccess>>,
+) -> AppResult<ApprovalRequest> {
+    let current = get_request(db, request_id).await?;
+    if let Some(binding) = &current.assistant_group {
+        super::org_group_service::authorize_approval(
+            db,
+            &current,
+            &binding.actor_user_id,
+            snapshot,
+        )
+        .await?;
+    }
     let now = Utc::now();
     let new_status = if approved { "approved" } else { "rejected" };
     let collection = db.collection::<ApprovalRequest>(REQUESTS);
@@ -1405,6 +1458,9 @@ pub async fn list_requests(
     per_page: u64,
 ) -> AppResult<(Vec<ApprovalRequest>, u64)> {
     let mut filter = build_requests_filter(user_id, admin_branches);
+    // Org group cards have an explicit participant ACL and are projected by
+    // the group transcript, not the organization-wide approvals inbox.
+    filter.insert("assistant_group", bson::Bson::Null);
     match statuses {
         [] => {}
         [single] => {
@@ -2010,6 +2066,7 @@ mod tests {
     fn make_request(id: &str, status: &str) -> ApprovalRequest {
         let now = Utc::now();
         ApprovalRequest {
+            assistant_group: None,
             id: id.to_string(),
             user_id: "user-1".to_string(),
             service_id: "service-1".to_string(),
@@ -2727,6 +2784,7 @@ mod tests {
     ) -> ApprovalRequest {
         let now = Utc::now();
         ApprovalRequest {
+            assistant_group: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: user_id.to_string(),
             service_id: service_id.to_string(),

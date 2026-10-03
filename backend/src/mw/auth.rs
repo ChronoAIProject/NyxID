@@ -74,6 +74,7 @@ pub struct AuthUser {
     pub allowed_service_ids: Vec<String>,
     pub org_agent_access: Option<std::sync::Arc<crate::services::org_agent_service::RequestAccess>>,
     pub assistant_agent_owner_id: Option<String>,
+    pub assistant_group_id: Option<String>,
     pub assistant_operation_scopes: crate::models::agent_operation_scope::OperationScopes,
     /// RFC 8707 resource URI restrictions carried by OAuth bearer tokens.
     pub resource_uris: Option<Vec<String>>,
@@ -717,6 +718,7 @@ pub(crate) async fn api_key_auth_user(
         key.assistant_agent_owner_id.as_deref(),
     )
     .await?;
+    crate::services::org_group_service::validate_key(db, key, org_agent_access.as_ref()).await?;
     let (allow_all_nodes, allowed_node_ids) =
         crate::services::org_agent_service::key_nodes(db, key, org_agent_access.as_deref()).await?;
     Ok(AuthUser {
@@ -738,6 +740,7 @@ pub(crate) async fn api_key_auth_user(
             )
             .await?,
         org_agent_access,
+        assistant_group_id: key.assistant_group_id.clone(),
         assistant_agent_owner_id: key.assistant_agent_owner_id.clone(),
         assistant_operation_scopes: key.assistant_operation_scopes.clone(),
         resource_uris: None,
@@ -890,6 +893,7 @@ impl FromRequestParts<AppState> for AuthUser {
 
                         return Ok(AuthUser {
                             org_agent_access: None,
+                            assistant_group_id: None,
                             assistant_agent_owner_id: None,
                             assistant_operation_scopes: Default::default(),
                             user_id: sa_uuid,
@@ -1059,6 +1063,7 @@ impl FromRequestParts<AppState> for AuthUser {
                     };
                     return Ok(AuthUser {
                         org_agent_access: None,
+                        assistant_group_id: None,
                         assistant_agent_owner_id,
                         assistant_operation_scopes,
                         user_id,
@@ -1134,6 +1139,7 @@ impl FromRequestParts<AppState> for AuthUser {
                                 // data via the /oauth/userinfo endpoint instead.
                                 return Ok(AuthUser {
                                     org_agent_access: None,
+                                    assistant_group_id: None,
                                     assistant_agent_owner_id: None,
                                     assistant_operation_scopes: Default::default(),
                                     user_id,
@@ -1629,6 +1635,7 @@ mod tests {
     fn test_auth_user(auth_method: AuthMethod, scope: &str) -> AuthUser {
         AuthUser {
             org_agent_access: None,
+            assistant_group_id: None,
             assistant_agent_owner_id: None,
             assistant_operation_scopes: Default::default(),
             user_id: Uuid::new_v4(),
@@ -2338,6 +2345,7 @@ mod tests {
             description: None,
             allowed_service_ids: Vec::new(),
             allowed_platform_service_ids: Vec::new(),
+            assistant_group_id: None,
             assistant_agent_owner_id: None,
             assistant_operation_scopes: Default::default(),
             allowed_node_ids: Vec::new(),
@@ -3129,6 +3137,7 @@ mod tests {
     fn api_key_auth_includes_key_identity() {
         let user = AuthUser {
             org_agent_access: None,
+            assistant_group_id: None,
             assistant_agent_owner_id: None,
             assistant_operation_scopes: Default::default(),
             user_id: Uuid::new_v4(),

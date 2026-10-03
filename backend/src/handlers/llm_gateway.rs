@@ -2057,10 +2057,17 @@ async fn check_llm_approval(
         notification_service::get_or_create_channel(&state.db, &timeout_recipient).await?;
 
     let timeout_secs = channel.approval_timeout_secs;
-    let request_operation = approval_service::ApprovalRequestOperation::from_descriptor(
+    let mut request_operation = approval_service::ApprovalRequestOperation::from_descriptor(
         &operation,
         pending.resolution.grant_scope.clone(),
     );
+    request_operation.assistant_group = crate::services::org_group_service::approval_binding(
+        &state.db,
+        auth_user.assistant_group_id.as_deref(),
+        &auth_user.user_id.to_string(),
+        auth_user.api_key_id.as_deref(),
+    )
+    .await?;
     let approval_request = approval_service::create_approval_request(
         &state.db,
         &state.config,

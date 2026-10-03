@@ -391,21 +391,21 @@ pub fn schema(name: &str) -> Value {
             vec!["channel_agent_id", "private_chats"],
         ),
         "create_group" => (
-            json!({"name": string(60), "members": json!({"type": "array", "minItems": 1, "maxItems": 8,
+            json!({"org":string(128),"participant_user_ids":{"type":"array","maxItems":16,"items":string(36)},"name": string(60), "members": json!({"type": "array", "minItems": 1, "maxItems": 8,
                 "items": {"type": "string", "minLength": 1, "maxLength": 64},
                 "description": "Agents by name or id; \"nyxbot\" is you"})}),
             vec!["name", "members"],
         ),
-        "list_groups" => (json!({}), vec![]),
+        "list_groups" => (json!({"org":string(128)}), vec![]),
         "post_to_group" => (
-            json!({"group": {"type": "string", "minLength": 1, "maxLength": 64,
+            json!({"org":string(128),"group": {"type": "string", "minLength": 1, "maxLength": 64,
                     "description": "Group name or id"},
                 "text": {"type": "string", "minLength": 1, "maxLength": 32768,
                     "description": "Posted as you; @mention members to address them"}}),
             vec!["group", "text"],
         ),
         "update_group" => (
-            json!({"group": string(64), "name": string(60),
+            json!({"org":string(128),"participant_user_ids":{"type":"array","minItems":1,"maxItems":16,"items":string(36)},"lead_agent_id":string(64),"leave":{"type":"boolean"},"group": string(64), "name": string(60),
                 "add": json!({"type": "array", "maxItems": 8,
                 "items": {"type": "string", "minLength": 1, "maxLength": 64},
                 "description": "Agents by name or id; \"nyxbot\" is you"}),
@@ -414,7 +414,10 @@ pub fn schema(name: &str) -> Value {
                 "description": "Agents by name or id; \"nyxbot\" is you"})}),
             vec!["group"],
         ),
-        "delete_group" => (json!({"group": string(64)}), vec!["group"]),
+        "delete_group" => (
+            json!({"org":string(128),"group": string(64)}),
+            vec!["group"],
+        ),
         "update_settings" => (
             json!({"max_auto_continuations":{"type":"integer","minimum":0,"maximum":32,"description":"Owner-requested automatic continuations after upstream tool/time budgets; default 8, 0 disables. Ordinary usage billing still applies."}}),
             vec!["max_auto_continuations"],

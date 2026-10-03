@@ -171,6 +171,8 @@ async fn group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_ar
         State(state.clone()),
         test_auth_user(OWNER),
         Json(CreateGroupRequest {
+            org: None,
+            participant_user_ids: Vec::new(),
             name: "Launch team".into(),
             member_agent_ids: vec![researcher.id.clone(), nyxbot.id.clone()],
         }),

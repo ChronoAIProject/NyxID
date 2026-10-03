@@ -2229,7 +2229,9 @@ async fn group_chats_share_one_thread_and_members_talk_as_guests() {
         &state,
         OWNER,
         TurnStart {
+            org_access: None,
             attachment_ids: Vec::new(),
+            group_request_id: None,
             group_attachments: Vec::new(),
             trigger: None,
             conversation_id: Some(thread.id.clone()),
@@ -3234,7 +3236,9 @@ async fn the_owners_private_chats_share_the_agents_own_thread() {
         &state,
         OWNER,
         TurnStart {
+            org_access: None,
             attachment_ids: Vec::new(),
+            group_request_id: None,
             group_attachments: Vec::new(),
             trigger: None,
             conversation_id: Some(home.clone()),

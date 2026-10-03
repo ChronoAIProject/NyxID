@@ -19,6 +19,7 @@ import { AgentDetailsSheet } from "@/components/assistant/nyxbot-agent-details";
 import { GroupSettingsDialog } from "@/components/assistant/nyxbot-group-forms";
 import { NyxBotSettingsButton } from "@/components/assistant/nyxbot-settings-dialog";
 import { Button } from "@/components/ui/button";
+import { useDecideApproval } from "@/hooks/use-approvals";
 import { useNyxBotAgents } from "@/hooks/use-nyxbot-agents";
 import { useNyxBotGroupMessages } from "@/hooks/use-nyxbot-groups";
 import { sanitizeAssistantMessageContent } from "@/lib/assistant/chat-content";
@@ -94,6 +95,7 @@ function GroupMessageRow({
     return (
       <div className="ml-[30px] flex justify-end">
         <div className="max-w-[78%] whitespace-pre-wrap break-words rounded-lg bg-overlay-strong px-3 py-2 text-[12px] leading-relaxed text-foreground">
+          {message.author ? <p className="mb-1 text-[11px] font-medium text-muted-foreground">{message.author.display_name}</p> : null}
           <UserText text={message.text} names={names} />
           {message.attachments?.map((item) => (
             <ToolImage
@@ -352,11 +354,13 @@ export function GroupPendingActions({
   members,
   sending,
   onAnswer,
+  onDecide,
 }: {
   readonly actions: readonly AssistantGroupPendingAction[];
   readonly members: readonly { readonly id: string; readonly name: string; readonly display_name?: string | null }[];
   readonly sending: boolean;
   readonly onAnswer: (text: string) => Promise<void>;
+  readonly onDecide?: (action: AssistantGroupPendingAction, decision: "allow" | "deny") => Promise<void>;
 }) {
   if (!actions.length) return null;
   return (
@@ -371,10 +375,10 @@ export function GroupPendingActions({
         {actions.map((action) => {
           const member = members.find((candidate) => candidate.id === action.agent_id);
           const who = member?.display_name ?? member?.name ?? "An agent";
-          const code = action.confirm_phrase.slice(4);
+          const code = action.confirm_phrase?.slice(4);
           return (
             <div
-              key={action.acknowledgement_id}
+              key={action.acknowledgement_id ?? action.approval_request_id}
               role="region"
               aria-label={`Confirm: ${action.summary}`}
               className="flex items-center gap-3 rounded-lg border border-border bg-overlay px-3 py-2"
@@ -382,6 +386,13 @@ export function GroupPendingActions({
               <p className="min-w-0 flex-1 text-[12px] text-foreground">
                 <span className="font-medium">{who}</span> wants to: {action.summary}
               </p>
+              {action.triggering_person ? <>
+                <span className="text-[11px] text-muted-foreground">Awaiting {action.triggering_person.display_name}</span>
+                {action.can_decide ? <>
+                  <Button size="sm" variant="outline" disabled={sending} onClick={() => void onDecide?.(action, "deny")}>Deny</Button>
+                  <Button size="sm" disabled={sending} onClick={() => void onDecide?.(action, "allow")}>Allow</Button>
+                </> : null}
+              </> : action.confirm_phrase ? <>
               <Button
                 size="sm"
                 variant="outline"
@@ -390,9 +401,10 @@ export function GroupPendingActions({
               >
                 Cancel
               </Button>
-              <Button size="sm" disabled={sending} onClick={() => void onAnswer(action.confirm_phrase)}>
+              <Button size="sm" disabled={sending} onClick={() => void onAnswer(action.confirm_phrase!)}>
                 Confirm
               </Button>
+              </> : null}
             </div>
           );
         })}
@@ -412,15 +424,17 @@ export function NyxAgentGroupPage({
   const user = useAuthStore((state) => state.user);
   const agents = useNyxBotAgents();
   const transcript = useNyxBotGroupMessages(groupId);
+  const [deciding, setDeciding] = useState(false);
+  const decideApproval = useDecideApproval();
   const composerRef = useRef<HTMLDivElement>(null);
   const [composerHeight, setComposerHeight] = useState(0);
   const [detailsAgentId, setDetailsAgentId] = useState<string>();
   const [settingsOpen, setSettingsOpen] = useState(false);
   // Group payloads name agents by handle; their display names live on the agent list.
-  const group = transcript.data
+  const group = transcript.data && !transcript.error
     ? groupWithDisplayNames(transcript.data.group, agents.data?.agents)
     : undefined;
-  const messages = (transcript.data?.messages ?? []).map((message) =>
+  const messages = (transcript.error ? [] : transcript.data?.messages ?? []).map((message) =>
     message.agent ? { ...message, agent: withDisplayName(message.agent, agents.data?.agents) } : message,
   );
 
@@ -521,9 +535,21 @@ export function NyxAgentGroupPage({
         />
         <div ref={composerRef} className="absolute inset-x-0 bottom-0 z-10">
           <GroupPendingActions
-            actions={transcript.data?.pending_actions ?? []}
+            actions={transcript.error ? [] : transcript.data?.pending_actions ?? []}
             members={group?.members ?? []}
-            sending={transcript.post.isPending}
+            sending={transcript.post.isPending || deciding}
+            onDecide={async (action, decision) => {
+              setDeciding(true);
+              try {
+                if (action.approval_request_id) {
+                  await decideApproval.mutateAsync({ requestId: action.approval_request_id, approved: decision === "allow" });
+                } else if (action.acknowledgement_id) {
+                  await nyxAgentTransport.decide(action.conversation_id, action.acknowledgement_id, decision);
+                }
+                await transcript.refetch();
+              } catch (error) { toast.error(error instanceof Error ? error.message : "Could not decide this action."); }
+              finally { setDeciding(false); }
+            }}
             onAnswer={async (text) => {
               try {
                 await transcript.post.mutateAsync(text);
