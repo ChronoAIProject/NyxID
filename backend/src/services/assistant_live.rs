@@ -55,6 +55,7 @@ pub enum LiveEvent {
         /// thread lists only when these change, not on every activity write.
         turn_id: Option<String>,
         messages: i64,
+        title_changed: bool,
     },
     /// A group or its transcript changed.
     Group {
@@ -328,6 +329,8 @@ fn pipeline() -> Vec<Document> {
             "fullDocument.setup_watch_id": 1,
             "fullDocument.attempt_id": 1, "fullDocument.requested_by": 1,
             "fullDocument.active_turn.turn_id": 1, "fullDocument.message_count": 1,
+            // Signal metadata invalidation without projecting the title text.
+            "fullDocument.title_changed": {"$ne": [{"$type": "$updateDescription.updatedFields.title"}, "missing"]},
         }},
     ]
 }
@@ -350,6 +353,7 @@ fn decode(change: &ChangeStreamEvent<Document>) -> Option<LiveEvent> {
         .to_owned();
     Some(match collection {
         CONVERSATIONS => LiveEvent::Conversation {
+            title_changed: full.get_bool("title_changed").unwrap_or(false),
             id: key,
             user_id,
             group_id: full.get_str("group_id").ok().map(str::to_owned),
@@ -416,6 +420,7 @@ mod tests {
             group_id: None,
             turn_id: Some("turn-1".into()),
             messages: 4,
+            title_changed: false,
         };
         let seen = tokio::time::timeout(Duration::from_secs(20), async {
             let mut attempt = 0;
@@ -447,6 +452,30 @@ mod tests {
         .await
         .expect("a conversation change is published");
         assert_eq!(seen.user_id(), Some("owner"));
+        conversations
+            .update_one(
+                doc! {"_id": "nyxa-1"},
+                doc! {"$set": {"title": "New private title"}},
+            )
+            .await
+            .unwrap();
+        let changed = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Ok(
+                    event @ LiveEvent::Conversation {
+                        title_changed: true,
+                        ..
+                    },
+                ) = events.recv().await
+                {
+                    return event;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!format!("{changed:?}").contains("private title"));
+
         // Group transcripts report their group; bots report activity.
         db.collection::<Document>(GROUP_MESSAGES)
             .insert_one(doc! {"_id": "m1", "group_id": "nyxg-1", "user_id": "owner", "text": "hi"})

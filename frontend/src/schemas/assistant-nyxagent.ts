@@ -74,6 +74,7 @@ export type NyxAgentChannelOrigin = z.infer<typeof nyxAgentChannelOriginSchema>;
 export const nyxAgentConversationSchema = z.object({
   id: conversationId,
   title: z.string(),
+  title_source: z.enum(["provisional", "generated", "user"]).optional(),
   model: z.string(),
   created_at: z.string(),
   last_message_at: z.string(),

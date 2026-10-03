@@ -628,6 +628,10 @@ function NyxAgentThreadPage() {
   return (
     <AssistantShell
       title={showHome ? "Home" : chat.session.title}
+      titleKey={selectedId}
+      onRenameTitle={selectedId && !destroyed
+        ? (title) => chat.renameConversation(selectedId, title)
+        : undefined}
       headerActions={<NyxBotSettingsButton />}
       sidebar={
         <AssistantEngineSidebar

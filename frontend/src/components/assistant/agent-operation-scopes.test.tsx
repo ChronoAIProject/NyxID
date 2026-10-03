@@ -1,3 +1,7 @@
+import userEvent from "@testing-library/user-event";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import { OverlayLayer } from "@/components/ui/overlay-layer";
+import { ASSISTANT_OVERLAY_BASE } from "@/lib/overlay-layer";
 import {
   fireEvent,
   render,
@@ -183,4 +187,15 @@ describe("agent operation scopes", () => {
       screen.getByRole("button", { name: "Save operations" }),
     ).toBeDisabled();
   });
+});
+
+it("keeps the operation selector above an assistant dialog", async () => {
+  const user = userEvent.setup();
+  render(<OverlayLayer layer={ASSISTANT_OVERLAY_BASE}><Dialog open><DialogContent aria-describedby={undefined}>
+    <DialogTitle>Agent settings</DialogTitle><ServiceOperationForm agentId="agent" service={service} />
+  </DialogContent></Dialog></OverlayLayer>);
+  const dialog = screen.getByRole("dialog", { name: "Agent settings" });
+  await user.click(screen.getByRole("combobox", { name: "Example operation access" }));
+  expect(dialog).toHaveStyle({ zIndex: "90" });
+  expect(screen.getByRole("listbox")).toHaveStyle({ zIndex: "100" });
 });

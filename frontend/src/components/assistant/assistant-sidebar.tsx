@@ -207,10 +207,9 @@ function ConversationRow({
           </button>
         </DropdownMenuTrigger>
         {/* Above the z-[80] mobile sidebar drawer this can be opened from. */}
-        <DropdownMenuContent align="end" className="z-[90] min-w-[160px]">
+        <DropdownMenuContent align="end" className="min-w-[160px]">
           {onRequestRename ? (
             <DropdownMenuItem
-              disabled={Boolean(conversation.active_turn)}
               onSelect={onRequestRename}
             >
               <PencilLine aria-hidden="true" />
@@ -625,6 +624,10 @@ export function AssistantSidebar({
   }
 
   function renderRow(conversation: Conversation) {
+    if (renameTarget?.id === conversation.id && onRename) {
+      return <RenameChatInline key={conversation.id} conversation={conversation}
+        onClose={() => setRenameTarget(undefined)} onRename={onRename} />;
+    }
     return (
       <ConversationRow
         key={conversation.id}
@@ -856,25 +859,13 @@ export function AssistantSidebar({
         </div>
       </div>
 
-      {renameTarget && onRename ? (
-        <RenameChatDialog
-          key={renameTarget.id}
-          conversation={renameTarget}
-          onClose={() => setRenameTarget(undefined)}
-          onRename={onRename}
-        />
-      ) : null}
       <Dialog
         open={deleteTarget !== undefined}
         onOpenChange={(open) => {
           if (!open) setDeleteTarget(undefined);
         }}
       >
-        {/* Lifts the panel over the z-[80] mobile sidebar drawer this can be
-            opened from. Dialog's own overlay stays at z-50 and so sits under
-            that drawer, which only shows during the slide transition -- the
-            settled mobile panel is opaque and full-screen. */}
-        <DialogContent className="z-[90] md:max-w-md">
+        <DialogContent className="md:max-w-md">
           <DialogHeader>
             <DialogTitle>Delete chat?</DialogTitle>
             <DialogDescription>
@@ -909,7 +900,7 @@ export function AssistantSidebar({
   );
 }
 
-function RenameChatDialog({
+function RenameChatInline({
   conversation,
   onClose,
   onRename,
@@ -924,17 +915,7 @@ function RenameChatDialog({
   });
   const [error, setError] = useState<string>();
   return (
-    <Dialog open onOpenChange={(open) => {
-      if (!open) onClose();
-    }}>
-      <DialogContent className="z-[90] md:max-w-md">
-        <DialogHeader>
-          <DialogTitle>Rename chat</DialogTitle>
-          <DialogDescription>
-            Choose a title for this conversation.
-          </DialogDescription>
-        </DialogHeader>
-        <form onSubmit={form.handleSubmit(async ({ title }) => {
+        <form className="space-y-2 rounded-lg border border-hairline p-2" aria-label="Rename chat" onKeyDown={(event) => { if (event.key === "Escape") onClose(); }} onSubmit={form.handleSubmit(async ({ title }) => {
           try {
             await onRename(conversation.id, title);
             onClose();
@@ -945,13 +926,13 @@ function RenameChatDialog({
           <label htmlFor="chat-title" className="text-[12px]">
             Title
           </label>
-          <Input id="chat-title" maxLength={200} {...form.register("title")} />
+          <Input autoFocus id="chat-title" maxLength={200} {...form.register("title")} />
           {error ? (
             <p role="alert" className="mt-2 text-[12px] text-destructive">
               {error}
             </p>
           ) : null}
-          <DialogFooter className="mt-4">
+          <div className="flex justify-end gap-1">
             <Button type="button" variant="ghost" onClick={onClose}>
               Cancel
             </Button>
@@ -963,9 +944,7 @@ function RenameChatDialog({
             >
               Save
             </Button>
-          </DialogFooter>
+          </div>
         </form>
-      </DialogContent>
-    </Dialog>
   );
 }

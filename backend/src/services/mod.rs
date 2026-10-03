@@ -255,3 +255,6 @@ pub mod org_agent_service;
 
 #[cfg(test)]
 pub(crate) mod org_agent_tests;
+
+pub(crate) mod assistant_oneshot_inference;
+pub mod assistant_title_service;

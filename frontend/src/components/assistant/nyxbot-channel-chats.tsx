@@ -63,7 +63,7 @@ function SettingSelect<T extends string>({
       <SelectTrigger aria-label={label} className="h-7 w-full max-w-[220px] rounded-md px-2 text-[12px]">
         <SelectValue />
       </SelectTrigger>
-      <SelectContent className="z-[90]">
+      <SelectContent>
         {options.map((option) => (
           <SelectItem key={option.value} value={option.value}>
             {option.label}

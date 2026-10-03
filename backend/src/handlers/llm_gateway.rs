@@ -12,37 +12,13 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::models::service_billing::{BillingMetric, PlatformUsage, ResaleUsage};
-use crate::models::usage_meter::CredentialClass;
 use crate::mw::auth::AuthUser;
 use crate::services::{
     approval_service, audit_service, chatgpt_translator, delegation_service, llm_gateway_service,
     llm_usage_service, notification_service, operation_descriptor, proxy_service, sse_parser,
 };
 
-fn llm_credential_class(
-    resolved_via_user_service: bool,
-    master_credential: bool,
-    credential_source: Option<&str>,
-    target: &proxy_service::ProxyTarget,
-) -> CredentialClass {
-    if target.auth_method == "none" && target.credential.is_empty() {
-        CredentialClass::NoAuth
-    } else if resolved_via_user_service {
-        // Auto-provisioned UserServices with no user key inject the
-        // catalog master credential; classify by whose key was used.
-        if master_credential {
-            CredentialClass::NyxidManagedMaster
-        } else if credential_source == Some("platform") {
-            CredentialClass::NyxidPlatformOauthApp
-        } else {
-            CredentialClass::UserOwned
-        }
-    } else if !target.service.requires_user_credential && !target.credential.is_empty() {
-        CredentialClass::NyxidManagedMaster
-    } else {
-        CredentialClass::UserOwned
-    }
-}
+use crate::services::llm_gateway_service::credential_class as llm_credential_class;
 
 fn resale_usage_from_optional_reported(
     metric: BillingMetric,

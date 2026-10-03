@@ -483,6 +483,7 @@ fn live_turn_expires_at_the_exact_ttl_boundary() {
 
 fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
     AssistantConversation {
+        title_source: Default::default(),
         automation_thread: false,
         agent_owner_id: None,
         id: format!("nyxa-{}", Uuid::new_v4().simple()),

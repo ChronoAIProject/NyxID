@@ -1,3 +1,5 @@
+import { OverlayLayer } from "@/components/ui/overlay-layer";
+import { ASSISTANT_OVERLAY_BASE } from "@/lib/overlay-layer";
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -85,7 +87,7 @@ function renderDialog() {
   const onClose = vi.fn();
   render(
     <QueryClientProvider client={client}>
-      <NewAgentDialog onClose={onClose} onCreated={onCreated} />
+      <OverlayLayer layer={ASSISTANT_OVERLAY_BASE}><NewAgentDialog onClose={onClose} onCreated={onCreated} /></OverlayLayer>
     </QueryClientProvider>,
   );
   return { onCreated, onClose, user: userEvent.setup() };
@@ -217,4 +219,17 @@ it("hides organization selection while rollout is disabled", () => {
   expect(
     screen.getByText(/Organization agents are not enabled yet/),
   ).toBeVisible();
+});
+
+it("opens Ownership above the assistant dialog and preserves keyboard selection", async () => {
+  orgEnabled = true;
+  const { user } = renderDialog();
+  const dialog = screen.getByRole("dialog", { name: "New agent" });
+  expect(dialog).toHaveStyle({ zIndex: "90" });
+  await user.click(screen.getByRole("combobox", { name: "Ownership" }));
+  const menu = screen.getByRole("listbox");
+  expect(menu).toHaveStyle({ zIndex: "100" });
+  expect(dialog).not.toContainElement(menu);
+  await user.click(screen.getByRole("option", { name: "Team" }));
+  expect(screen.getByRole("combobox", { name: "Ownership" })).toHaveTextContent("Team");
 });

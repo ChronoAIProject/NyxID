@@ -244,7 +244,7 @@ export function NewGroupDialog({
         if (!open && !create.isPending) onClose();
       }}
     >
-      <DialogContent scrollMode="body" className="z-[90] md:max-w-md">
+      <DialogContent scrollMode="body" className="md:max-w-md">
         <DialogHeader className="shrink-0 pr-6">
           <DialogTitle>New group</DialogTitle>
           <DialogDescription>
@@ -355,7 +355,7 @@ export function GroupSettingsDialog({
           if (!busy) onOpenChange(next);
         }}
       >
-        <DialogContent scrollMode="body" className="z-[90] md:max-w-md">
+        <DialogContent scrollMode="body" className="md:max-w-md">
           <DialogHeader className="shrink-0 pr-6">
             <DialogTitle>Group settings</DialogTitle>
             <DialogDescription>{GROUP_ROUTING_COPY}</DialogDescription>
@@ -423,7 +423,7 @@ export function GroupSettingsDialog({
           if (!next && !remove.isPending) setConfirmDelete(false);
         }}
       >
-        <DialogContent className="z-[90] md:max-w-md">
+        <DialogContent className="md:max-w-md">
           <DialogHeader>
             <DialogTitle>Delete {group.name}?</DialogTitle>
             <DialogDescription>

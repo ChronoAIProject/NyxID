@@ -797,7 +797,7 @@ function Lifecycle({
           if (!open && !pending) setConfirm(undefined);
         }}
       >
-        <DialogContent className="z-[90] md:max-w-md">
+        <DialogContent className="md:max-w-md">
           <DialogHeader>
             <DialogTitle>
               {confirm === "delete"
