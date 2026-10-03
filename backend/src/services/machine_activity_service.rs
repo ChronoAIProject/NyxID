@@ -601,7 +601,8 @@ pub async fn list(db: &Database, node: &str, query: ActivityQuery) -> AppResult<
     } else {
         None
     };
-    let mut entries = Vec::with_capacity(rows.len());
+    // At most 100 rows (clamped page size); grow naturally.
+    let mut entries = Vec::new();
     for row in rows {
         let Ok(data) = row.get_document("event_data") else {
             continue;
