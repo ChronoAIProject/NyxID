@@ -321,10 +321,13 @@ pub async fn create(
         ));
     }
     let agents = resolve_agents(db, &owner, ids).await?;
-    let mut participant_user_ids = people.to_vec();
-    if !participant_user_ids.iter().any(|id| id == actor) {
-        participant_user_ids.insert(0, actor.into());
-    }
+    // The creator always participates, listed first when not already named.
+    let creator_missing = !people.iter().any(|id| id == actor);
+    let participant_user_ids: Vec<String> = creator_missing
+        .then(|| actor.to_owned())
+        .into_iter()
+        .chain(people.iter().cloned())
+        .collect();
     let now = Utc::now();
     let access = Access {
         actor: actor.into(),
