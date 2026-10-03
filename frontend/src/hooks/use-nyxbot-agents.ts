@@ -242,3 +242,17 @@ export function selectedAgentOf(
   const id = conversationAgentId ?? searchAgentId;
   return (id ? agents?.find((agent) => agent.id === id) : undefined) ?? nyxBotOf(agents);
 }
+
+export function useRememberNyxBotMemory() {
+  return useAgentsMutation(
+    ({
+      agentId,
+      text,
+      replaceId,
+    }: {
+      agentId: string;
+      text: string;
+      replaceId?: string;
+    }) => nyxBotApi.remember(agentId, text, replaceId),
+  );
+}

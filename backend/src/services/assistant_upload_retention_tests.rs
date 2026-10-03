@@ -24,9 +24,10 @@ async fn fixture() -> (AppState, String, String) {
     let agent = team::ensure_nyxbot(&state.db, &owner).await.unwrap();
     let mut session = state.db.client().start_session().await.unwrap();
     session.start_transaction().await.unwrap();
-    let thread = team::create_thread(
+    let thread = team::create_thread_for(
         &state.db,
         &state.encryption_keys,
+        &owner,
         &agent,
         "retention",
         &mut session,

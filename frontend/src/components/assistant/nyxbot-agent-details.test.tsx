@@ -84,6 +84,11 @@ beforeEach(() => {
       memory = memory.filter((note) => note.id !== "n1");
       return new Response(null, { status: 204 });
     }
+    if (endpoint === `/assistant/nyxagent/agents/${id}/memory` &&
+      method === "POST"
+    ) {
+      return new Response(JSON.stringify({ id: "new-note" }));
+    }
     if (endpoint === `/assistant/nyxagent/agents/${id}/skills`) {
       return new Response(JSON.stringify({ revision: 0, skills: [], metadata: {} }));
     }
@@ -306,4 +311,68 @@ it("lets NyxBot get a display name and persona, with full access and no grants o
   expect(within(sheet).getByRole("region", { name: "Access" })).toHaveTextContent("full access");
   expect(within(sheet).queryByRole("form", { name: "Grants" })).not.toBeInTheDocument();
   expect(within(sheet).queryByRole("region", { name: "Danger zone" })).not.toBeInTheDocument();
+});
+
+it("shows an organization viewer a read-only profile without shared memory or lifecycle actions", async () => {
+  agent = agentRow({
+    owner_kind: "org",
+    owner_name: "Team",
+    owner_id: "org-team",
+    org_role: "viewer",
+    can_maintain: false,
+    can_use: false,
+  });
+  renderSheet();
+  const sheet = await screen.findByRole("dialog", { name: "Agent details" });
+  expect(
+    await within(sheet).findByText(/Maintained by Admins and Members/),
+  ).toBeVisible();
+  expect(within(sheet).getByRole("textbox", { name: "Role" })).toBeDisabled();
+  expect(
+    within(sheet).queryByRole("button", { name: "Save grants" }),
+  ).not.toBeInTheDocument();
+  expect(
+    within(sheet).queryByRole("region", { name: "Danger zone" }),
+  ).not.toBeInTheDocument();
+  expect(
+    within(sheet).queryByText("Weekly digests on Mondays"),
+  ).not.toBeInTheDocument();
+  expect(within(sheet).queryByText("Channel bots")).not.toBeInTheDocument();
+  expect(writes).toEqual([]);
+});
+
+it("lets an organization Member edit shared memory with the privacy note and backend bound", async () => {
+  agent = agentRow({
+    owner_kind: "org",
+    owner_name: "Team",
+    owner_id: "org-team",
+    org_role: "member",
+    can_maintain: true,
+    can_use: true,
+  });
+  const { user } = renderSheet();
+  const form = await screen.findByRole("form", { name: "Shared memory" });
+  expect(screen.getByText(/Never save private member content/)).toBeVisible();
+  const input = within(form).getByRole("textbox", { name: "Add shared note" });
+  expect(input).toHaveAttribute("maxlength", "500");
+  expect(
+    within(form).getByRole("button", { name: "Save shared note" }),
+  ).toBeDisabled();
+  await user.type(input, "Public team convention");
+  await user.click(
+    within(form).getByRole("button", { name: "Save shared note" }),
+  );
+  await waitFor(() =>
+    expect(writes).toContainEqual({
+      method: "POST",
+      endpoint: "/assistant/nyxagent/agents/agent-researcher/memory",
+      body: { text: "Public team convention" },
+    }),
+  );
+  expect(
+    screen.queryByRole("switch", { name: "Read my account" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("list", { name: "Guest access" }),
+  ).not.toBeInTheDocument();
 });

@@ -467,8 +467,31 @@ pub fn schema(name: &str) -> Value {
         ),
         _ => (json!({}), vec![]),
     };
+    if matches!(name, "remember" | "forget") {
+        properties["agent"] = string(64);
+    }
     if !read_only(name) {
         properties["acknowledgement_id"] = string(64);
+    }
+    if matches!(
+        name,
+        "spawn_subagent"
+            | "list_subagents"
+            | "read_subagent"
+            | "message_subagent"
+            | "grant_subagent"
+            | "revoke_subagent"
+            | "destroy_subagent"
+            | "update_subagent"
+            | "get_agent_operations"
+            | "set_agent_operations"
+            | "get_agent_skills"
+            | "set_agent_skills"
+            | "remember"
+            | "forget"
+    ) {
+        properties["org"] = json!({"type":"string","minLength":1,"maxLength":128,
+            "description":"Organization ID, slug or unambiguous name. Uses live member access; omit for personal agents."});
     }
     if matches!(
         name,

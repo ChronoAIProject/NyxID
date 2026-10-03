@@ -199,6 +199,9 @@ pub struct AssistantConversation {
     /// including when its previous home was deleted. Explicit home runs leave this false.
     #[serde(default)]
     pub automation_thread: bool,
+    /// Stable agent owner binding; the conversation itself belongs to the person.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_owner_id: Option<String>,
     /// Specialist threads only: the NyxBot thread that assigned the current
     /// work, which receives its report and permission requests.
     #[serde(default)]

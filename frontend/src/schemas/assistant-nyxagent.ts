@@ -304,6 +304,12 @@ export const ASSISTANT_AGENT_DISPLAY_NAME_MAX = 40;
 export const ASSISTANT_AGENT_PERSONA_MAX = 2000;
 
 export const assistantAgentSchema = z.object({
+  owner_id: z.string().optional(),
+  owner_name: z.string().nullable().optional(),
+  owner_kind: z.enum(["person", "org"]).optional(),
+  org_role: z.enum(["admin", "member", "viewer"]).nullable().optional(),
+  can_maintain: z.boolean().optional(),
+  can_use: z.boolean().optional(),
   id: z.string(),
   kind: assistantAgentKindSchema,
   /** The @handle (fixed "NyxBot" for NyxBot). */
@@ -422,6 +428,7 @@ const agentPersona = z
 
 /** "New agent": a specialist with its role, optional style and starting grants. */
 export const assistantAgentCreateSchema = z.object({
+  org: z.string().optional(),
   name: agentName,
   display_name: agentDisplayName.optional(),
   description: agentDescription,
@@ -665,3 +672,12 @@ export const assistantGroupFormSchema = z.object({
 });
 export type AssistantGroupForm = z.infer<typeof assistantGroupFormSchema>;
 export type AssistantGroupUpdate = Partial<AssistantGroupForm>;
+
+export const ASSISTANT_MEMORY_NOTE_MAX = 500;
+export const assistantMemoryNoteSchema = z.object({
+  text: z
+    .string()
+    .trim()
+    .min(1, "Enter a shared note")
+    .max(ASSISTANT_MEMORY_NOTE_MAX),
+});

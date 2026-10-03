@@ -51,6 +51,8 @@ pub(crate) fn owner_auth(owner: &str) -> AppResult<AuthUser> {
     let user_id =
         Uuid::parse_str(owner).map_err(|_| AppError::NotFound("Conversation not found".into()))?;
     Ok(AuthUser {
+        org_agent_access: None,
+        assistant_agent_owner_id: None,
         assistant_operation_scopes: Default::default(),
         user_id,
         session_id: None,
@@ -123,7 +125,7 @@ pub(crate) async fn start_server_turn(
     let Some(permit) = acquire(state, pool).await? else {
         return Ok(Started::PoolFull);
     };
-    start_acquired(state, owner, start, permit).await
+    Box::pin(start_acquired(state, owner, start, permit)).await
 }
 
 async fn start_acquired(
@@ -132,13 +134,13 @@ async fn start_acquired(
     start: TurnStart,
     permit: DirectChatPermit,
 ) -> AppResult<Started> {
-    match super::assistant_nyxagent::start_turn(
+    match Box::pin(super::assistant_nyxagent::start_turn(
         state,
         owner_auth(owner)?,
         &start,
         Some(super::assistant_nyxagent::SERVER_TURN_POLICY),
         permit,
-    )
+    ))
     .await
     {
         Ok((conversation, receiver)) => Ok(Started::Turn {
@@ -187,7 +189,7 @@ fn event_turn(conversation_id: &str) -> TurnStart {
 /// and reach the agent with its next turn.
 pub(crate) async fn wake(state: &AppState, owner: &str, id: &str) {
     let result: AppResult<()> = async {
-        let row = engine::get(&state.db, owner, id).await?;
+        let row = Box::pin(engine::get(&state.db, owner, id)).await?;
         if row.pending_events.is_empty() || live_turn(&row, Utc::now()).is_some() {
             return Ok(());
         }
@@ -195,7 +197,7 @@ pub(crate) async fn wake(state: &AppState, owner: &str, id: &str) {
             return Ok(());
         }
         // A destroyed agent never runs again; events that reached it late are dropped.
-        if team::agent_for_conversation(&state.db, &row)
+        if Box::pin(team::agent_for_conversation(&state.db, &row))
             .await?
             .destroyed_at
             .is_some()
@@ -221,7 +223,7 @@ pub(crate) async fn wake(state: &AppState, owner: &str, id: &str) {
         {
             return Ok(());
         }
-        match start_acquired(state, owner, event_turn(id), permit).await {
+        match Box::pin(start_acquired(state, owner, event_turn(id), permit)).await {
             // A drained-then-raced queue or a just-destroyed agent is harmless.
             Ok(_) | Err(AppError::Conflict(_)) => Ok(()),
             Err(error) => Err(error),
@@ -235,8 +237,13 @@ pub(crate) async fn wake(state: &AppState, owner: &str, id: &str) {
 
 /// NyxBot's home thread, where events land that no thread asked for.
 pub(crate) async fn nyxbot_home(state: &AppState, owner: &str) -> AppResult<AssistantConversation> {
-    let nyxbot = team::ensure_nyxbot(&state.db, owner).await?;
-    team::home_thread(&state.db, &state.encryption_keys, &nyxbot).await
+    let nyxbot = Box::pin(team::ensure_nyxbot(&state.db, owner)).await?;
+    Box::pin(team::home_thread(
+        &state.db,
+        &state.encryption_keys,
+        &nyxbot,
+    ))
+    .await
 }
 
 /// Queue events on a thread and wake it.
@@ -250,7 +257,7 @@ pub(crate) async fn notify(
         .await
         .is_ok()
     {
-        wake(state, owner, conversation_id).await;
+        Box::pin(wake(state, owner, conversation_id)).await;
     }
 }
 
@@ -371,7 +378,7 @@ pub(crate) async fn permission_requested(
     if chat.is_orchestrator() {
         return;
     }
-    let Ok(target) = request_target(state, chat).await else {
+    let Ok(target) = Box::pin(request_target(state, chat)).await else {
         return;
     };
     let target_name = match request.kind.as_str() {
@@ -405,7 +412,7 @@ pub(crate) async fn permission_requested(
             .map(|text| format!("\"{}\".", excerpt(text, 600).replace('"', "'")))
             .unwrap_or_else(|| "(no text)".into()),
     );
-    notify(
+    Box::pin(notify(
         state,
         &chat.user_id,
         &target,
@@ -414,7 +421,7 @@ pub(crate) async fn permission_requested(
             note,
             Some(&chat.agent_id),
         )],
-    )
+    ))
     .await;
 }
 
@@ -556,6 +563,9 @@ pub(crate) async fn turn_notes(
         return notes;
     }
     if let Some(agent) = agent {
+        if agent.user_id != row.user_id {
+            notes.push_str("\n\nThis specialist belongs to an organization. Its memory notes are shared organization data, visible to maintainers. NEVER store a member's private messages, personal content or secrets in shared memory. This thread is private to the acting member; never read or disclose another member's thread.");
+        }
         notes.push_str(&team::memory_note(agent));
         if !agent.machine_node_ids.is_empty() {
             notes.push_str("\n\n");
@@ -648,7 +658,13 @@ pub(crate) async fn assign(
     text: &str,
     report_to: Option<&str>,
 ) -> AppResult<Started> {
-    let home = team::home_thread(&state.db, &state.encryption_keys, agent).await?;
+    let home = Box::pin(team::home_thread_for(
+        &state.db,
+        &state.encryption_keys,
+        owner,
+        agent,
+    ))
+    .await?;
     let limit = team_pool_limit(state, owner).await;
     start_server_turn(
         state,
@@ -713,6 +729,27 @@ pub(crate) async fn execute_tool(
     }
     let result = async {
         assistant_team_tools::validate(name, args)?;
+        let caller_agent = Box::pin(crate::services::org_agent_service::chat_agent(
+            &state.db, chat,
+        ))
+        .await?;
+        let mut normalized = Box::pin(crate::services::org_agent_service::tool_arguments(
+            &state.db,
+            &chat.user_id,
+            chat.is_orchestrator(),
+            args,
+        ))
+        .await?;
+        // Specialists refer to themselves in their own owner's namespace;
+        // a member may also have a personal specialist with the same name.
+        if !chat.is_orchestrator() {
+            for field in ["agent", "subagent"] {
+                if normalized[field].as_str() == Some(caller_agent.name.as_str()) {
+                    normalized[field] = caller_agent.id.clone().into();
+                }
+            }
+        }
+        let args = &normalized;
         if matches!(name, "set_agent_operations" | "request_agent_operations") {
             Box::pin(
                 crate::services::agent_operation_scope_service::require_configuration_enabled(
@@ -840,10 +877,17 @@ async fn dispatch_specialists(
     let caller = chat.conversation_id.as_str();
     Ok(match name {
         "remember" => {
+            let target = args["agent"].as_str().unwrap_or(&chat.agent_id);
+            if !chat.is_orchestrator() && target != chat.agent_id {
+                return Err(AppError::Forbidden(
+                    "Specialists may manage only their own memory".into(),
+                ));
+            }
+
             let note = team::remember(
                 db,
                 owner,
-                &chat.agent_id,
+                target,
                 text_arg(args, "text"),
                 args["replace_id"].as_str(),
             )
@@ -851,16 +895,24 @@ async fn dispatch_specialists(
             (json!({"remembered": note.id}), false)
         }
         "forget" => {
-            team::forget(db, owner, &chat.agent_id, text_arg(args, "note_id")).await?;
+            let target = args["agent"].as_str().unwrap_or(&chat.agent_id);
+            if !chat.is_orchestrator() && target != chat.agent_id {
+                return Err(AppError::Forbidden(
+                    "Specialists may manage only their own memory".into(),
+                ));
+            }
+
+            team::forget(db, owner, target, text_arg(args, "note_id")).await?;
             (json!({"forgotten": text_arg(args, "note_id")}), false)
         }
         "spawn_subagent" => {
-            let targets = team::resolve_targets(
+            let resource_owner = args["org"].as_str().unwrap_or(owner);
+            let targets = Box::pin(team::resolve_targets(
                 db,
                 state.node_ws_manager.as_ref(),
-                owner,
+                resource_owner,
                 &string_list(args, "services"),
-            )
+            ))
             .await?;
             let request = team::CreateRequest {
                 machines: args.get("machines").map(|_| string_list(args, "machines")),
@@ -874,10 +926,11 @@ async fn dispatch_specialists(
                 specialty: args["specialty"].as_str().map(str::to_owned),
                 created_by: "nyxbot",
             };
-            match Box::pin(team::create_specialist(
+            match Box::pin(team::create_specialist_for(
                 db,
                 &state.encryption_keys,
                 owner,
+                resource_owner,
                 request,
             ))
             .await?
@@ -935,6 +988,12 @@ async fn dispatch_specialists(
                 300,
             )
             .await?;
+            let rows: Vec<_> = rows
+                .into_iter()
+                .filter(|r| {
+                    r.can_maintain && args["org"].as_str().is_none_or(|org| org == r.owner_id)
+                })
+                .collect();
             (json!({"subagents": rows}), false)
         }
         "read_subagent" => {
@@ -951,9 +1010,13 @@ async fn dispatch_specialists(
         "grant_subagent" | "revoke_subagent" => {
             let agent = team::live_specialist(db, owner, text_arg(args, "subagent")).await?;
             let requested = string_list(args, "services");
-            let (targets, refused) =
-                team::resolve_each_target(db, state.node_ws_manager.as_ref(), owner, &requested)
-                    .await?;
+            let (targets, refused) = Box::pin(team::resolve_each_target(
+                db,
+                state.node_ws_manager.as_ref(),
+                &agent.user_id,
+                &requested,
+            ))
+            .await?;
             let unchanged = if name == "grant_subagent" {
                 "not_granted"
             } else {
@@ -980,9 +1043,9 @@ async fn dispatch_specialists(
             } else {
                 team::GrantChange::Remove(targets)
             };
-            let change = crate::services::machine_service::resolve_grant_change(
+            let change = Box::pin(crate::services::machine_service::resolve_grant_change(
                 db,
-                owner,
+                &agent.user_id,
                 args.get("machines").map(|_| string_list(args, "machines")),
                 args.get("logins").map(|_| string_list(args, "logins")),
                 change,
@@ -991,9 +1054,9 @@ async fn dispatch_specialists(
                 } else {
                     team::MachineGrantMode::Remove
                 },
-            )
+            ))
             .await?;
-            let agent = team::set_grants(db, owner, &agent.id, change).await?;
+            let agent = Box::pin(team::set_grants(db, owner, &agent.id, change)).await?;
             let summary = team::summaries(db, owner, false, false, 0)
                 .await?
                 .into_iter()
@@ -1189,12 +1252,12 @@ async fn dispatch_agent_settings(
             if requested.is_empty() {
                 levels.extend(granted.iter().map(|id| ((*id).clone(), access)));
             } else {
-                let (targets, refused) = team::resolve_each_target(
+                let (targets, refused) = Box::pin(team::resolve_each_target(
                     db,
                     state.node_ws_manager.as_ref(),
                     owner,
                     &requested,
-                )
+                ))
                 .await?;
                 not_set.extend(refused);
                 for (request, id) in &targets.ids_by_request {
@@ -1216,8 +1279,13 @@ async fn dispatch_agent_settings(
                     true,
                 ));
             }
-            let agent =
-                team::set_grants(db, owner, &agent.id, team::GrantChange::Guests(levels)).await?;
+            let agent = Box::pin(team::set_grants(
+                db,
+                owner,
+                &agent.id,
+                team::GrantChange::Guests(levels),
+            ))
+            .await?;
             let summary = team::summaries(db, owner, false, false, 0)
                 .await?
                 .into_iter()
@@ -1839,6 +1907,8 @@ pub async fn list_agents(
 #[serde(deny_unknown_fields)]
 pub struct CreateAgentRequest {
     #[serde(default)]
+    org: Option<String>,
+    #[serde(default)]
     machines: Option<Vec<String>>,
     #[serde(default)]
     logins: Option<Vec<String>>,
@@ -1862,12 +1932,18 @@ pub async fn create_agent(
 ) -> AppResult<(StatusCode, Json<Value>)> {
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
-    let targets = team::resolve_targets(
+    let resource_owner = match body.org.as_deref() {
+        Some(org) => {
+            crate::services::org_agent_service::resolve_org(&state.db, &owner, org).await?
+        }
+        None => owner.clone(),
+    };
+    let targets = Box::pin(team::resolve_targets(
         &state.db,
         state.node_ws_manager.as_ref(),
-        &owner,
+        &resource_owner,
         &body.services,
-    )
+    ))
     .await?;
     let request = team::CreateRequest {
         machines: body.machines,
@@ -1881,7 +1957,15 @@ pub async fn create_agent(
         specialty: None,
         created_by: "user",
     };
-    match team::create_specialist(&state.db, &state.encryption_keys, &owner, request).await? {
+    match Box::pin(team::create_specialist_for(
+        &state.db,
+        &state.encryption_keys,
+        &owner,
+        &resource_owner,
+        request,
+    ))
+    .await?
+    {
         Err(TeamRefusal::LimitReached { limit }) => Err(AppError::Conflict(format!(
             "You already have {limit} live agents; destroy one or raise the limit in settings"
         ))),
@@ -1918,8 +2002,12 @@ pub async fn get_agent(
         .find(|row| row.summary.id == agent.id)
         .ok_or_else(|| AppError::NotFound("Agent not found".into()))?;
     let now = Utc::now();
-    let threads: Vec<Value> = team::threads(&state.db, &agent, 100)
-        .await?
+    let threads = if response.summary.can_use {
+        team::threads_for(&state.db, &owner, &agent, 100).await?
+    } else {
+        Vec::new()
+    };
+    let threads: Vec<Value> = threads
         .into_iter()
         .map(|row| {
             let running = live_turn(&row, now).is_some();
@@ -1928,9 +2016,11 @@ pub async fn get_agent(
                 "running": running})
         })
         .collect();
+    let can_maintain = response.summary.can_maintain;
     let memory: Vec<MemoryNoteResponse> = agent
         .memory
         .into_iter()
+        .filter(|_| can_maintain)
         .map(|note| MemoryNoteResponse {
             id: note.id,
             text: note.text,
@@ -2006,12 +2096,13 @@ pub async fn set_agent_grants(
 ) -> AppResult<Json<Value>> {
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
-    let targets = team::resolve_targets(
+    let current = team::maintained_agent(&state.db, &owner, &id).await?;
+    let targets = Box::pin(team::resolve_targets(
         &state.db,
         state.node_ws_manager.as_ref(),
-        &owner,
+        &current.user_id,
         &body.services,
-    )
+    ))
     .await?;
     let mut guest_access = BTreeMap::new();
     for (service, level) in &body.guest_access {
@@ -2023,9 +2114,9 @@ pub async fn set_agent_grants(
         })?;
         guest_access.insert(id.clone(), *level);
     }
-    let change = crate::services::machine_service::resolve_grant_change(
+    let change = Box::pin(crate::services::machine_service::resolve_grant_change(
         &state.db,
-        &owner,
+        &current.user_id,
         body.machines,
         body.logins,
         team::GrantChange::Replace {
@@ -2037,9 +2128,9 @@ pub async fn set_agent_grants(
             guests: guest_access,
         },
         team::MachineGrantMode::Replace,
-    )
+    ))
     .await?;
-    let agent = team::set_grants(&state.db, &owner, &id, change).await?;
+    let agent = Box::pin(team::set_grants(&state.db, &owner, &id, change)).await?;
     Ok(Json(json!({"id": agent.id, "services": targets.slugs,
         "account_read": agent.grants.account_read})))
 }
@@ -2073,6 +2164,32 @@ pub async fn delete_agent(
     engine::require_enabled(&state.db, &owner).await?;
     team::purge(&state.db, &owner, &id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryRequest {
+    text: String,
+    replace_id: Option<String>,
+}
+
+pub async fn set_memory(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+    Json(body): Json<MemoryRequest>,
+) -> AppResult<Json<Value>> {
+    let actor = auth.user_id.to_string();
+    engine::require_enabled(&state.db, &actor).await?;
+    let note = team::remember(
+        &state.db,
+        &actor,
+        &id,
+        &body.text,
+        body.replace_id.as_deref(),
+    )
+    .await?;
+    Ok(Json(json!({"id": note.id})))
 }
 
 pub async fn delete_memory(

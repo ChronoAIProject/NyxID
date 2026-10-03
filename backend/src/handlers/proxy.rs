@@ -3557,6 +3557,10 @@ async fn resolve_proxy_execution_inner(
         // Per-agent credential override: if this request is via an API key and
         // the user has bound a different credential for this service, swap it in.
         if pool_authority.is_none()
+            && auth_user
+                .assistant_agent_owner_id
+                .as_deref()
+                .is_none_or(|owner| owner == user_id_str)
             && let (Some(ak_id), Some(us_id)) = (&auth_user.api_key_id, &pre.user_service_id)
             && let Some(override_cred) = Box::pin(proxy_service::resolve_agent_credential_override(
                 &state.db,
@@ -3912,6 +3916,25 @@ async fn execute_resolved_proxy_inner(
     // REST method/path before approval, billing, credential injection, node
     // transport, or forwarding. Rows without a policy retain the legacy path
     // bytes and behavior unchanged.
+    // Preserve the existing authenticated model-transport exception. Machine
+    // jobs never receive it; explicitly granted inference instances still use
+    // the organization's resource boundary.
+    let implicit_model_transport = machine_ingress.is_none()
+        && target.service.inference.is_some()
+        && !auth_user.allow_all_services
+        && !auth_user.allowed_service_ids.iter().any(|id| {
+            id == resolved_user_service_id
+                .as_deref()
+                .unwrap_or(&target.service.id)
+        });
+    if !implicit_model_transport {
+        Box::pin(crate::services::org_agent_service::authorize_execution(
+            &state.db,
+            auth_user,
+            resolved_user_service_id.as_deref(),
+        ))
+        .await?;
+    }
     let operation_target_id = target.service.id.clone();
     let (operation_scope_id, operation_catalog_id) =
         crate::services::agent_operation_scope_service::execution_identity(
@@ -4366,7 +4389,11 @@ async fn execute_resolved_proxy_inner(
             ));
         }
         target.credential = resolved.target.credential;
-        if let Some(key) = auth_user.api_key_id.as_deref()
+        if auth_user
+            .assistant_agent_owner_id
+            .as_deref()
+            .is_none_or(|owner| owner == actor)
+            && let Some(key) = auth_user.api_key_id.as_deref()
             && let Some(credential) = Box::pin(proxy_service::resolve_agent_credential_override(
                 &state.db,
                 &state.encryption_keys,
@@ -11288,6 +11315,8 @@ mod proxy_resolution_integration_tests {
 
     fn service_account_auth(service_account_id: &str, owner_user_id: &str) -> AuthUser {
         AuthUser {
+            org_agent_access: None,
+            assistant_agent_owner_id: None,
             assistant_operation_scopes: Default::default(),
             user_id: Uuid::parse_str(service_account_id).expect("valid service account id"),
             session_id: None,
@@ -11315,6 +11344,8 @@ mod proxy_resolution_integration_tests {
 
     fn access_token_auth(user_id: &str) -> AuthUser {
         AuthUser {
+            org_agent_access: None,
+            assistant_agent_owner_id: None,
             assistant_operation_scopes: Default::default(),
             user_id: Uuid::parse_str(user_id).expect("valid user id"),
             session_id: None,

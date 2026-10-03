@@ -639,9 +639,10 @@ async fn notify_failing(
     let target = match source {
         Some(id) => id,
         None => {
-            crate::services::assistant_team_service::home_thread(
+            crate::services::assistant_team_service::home_thread_for(
                 &state.db,
                 &state.encryption_keys,
+                &row.user_id,
                 &agent,
             )
             .await?

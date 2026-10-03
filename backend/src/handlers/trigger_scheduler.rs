@@ -904,7 +904,7 @@ pub(crate) async fn webhook(
     let policy =
         thread_policy.unwrap_or_else(|| schedules::default_thread_policy(trigger.source, &agent));
     let home = if policy == crate::models::trigger_schedule::ThreadPolicy::Home {
-        Some(team::home_thread(&state.db, &state.encryption_keys, &agent).await?)
+        Some(team::home_thread_for(&state.db, &state.encryption_keys, &run.user_id, &agent).await?)
     } else {
         None
     };

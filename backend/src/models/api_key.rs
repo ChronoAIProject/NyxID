@@ -62,6 +62,9 @@ pub struct ApiKey {
     /// assistant chat keys hold entries; ignored when `allow_all_services`.
     #[serde(default)]
     pub allowed_platform_service_ids: Vec<String>,
+    /// Server-owned specialist owner binding; keys still belong to the acting person.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_agent_owner_id: Option<String>,
     /// Server-only mirror of specialist operation authority.
     #[serde(default)]
     pub assistant_operation_scopes: super::agent_operation_scope::OperationScopes,
@@ -145,6 +148,7 @@ mod tests {
             description: None,
             allowed_service_ids: vec![],
             allowed_platform_service_ids: Vec::new(),
+            assistant_agent_owner_id: None,
             assistant_operation_scopes: Default::default(),
             allowed_node_ids: vec![],
             allow_all_services: true,

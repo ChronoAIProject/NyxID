@@ -123,6 +123,12 @@ const NYXAGENT_ENGINE_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: true,
 };
 
+const ORG_AGENTS_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: "assistant:org-agents",
+    description: "Allows organization specialist creation after all replicas enforce live member authority.",
+    default_enabled: false,
+};
+
 pub const AGENT_OPERATION_SCOPES_FLAG_KEY: &str = "assistant:operation-scopes";
 const AGENT_OPERATION_SCOPES_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: AGENT_OPERATION_SCOPES_FLAG_KEY,
@@ -199,6 +205,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     INVITATION_CODE_FLAG,
     NYXAGENT_ENGINE_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
+    ORG_AGENTS_FLAG,
     AI_ASSISTANT_FLAG,
     BILLING_FLAG,
     AEVATAR_CHAT_WIRE_LOG_FLAG,
@@ -219,6 +226,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     INVITATION_CODE_FLAG,
     NYXAGENT_ENGINE_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
+    ORG_AGENTS_FLAG,
     AI_ASSISTANT_FLAG,
     BILLING_FLAG_TEST,
     AEVATAR_CHAT_WIRE_LOG_FLAG,
@@ -1741,6 +1749,7 @@ mod tests {
                 "auth:invitation-code",
                 "assistant:nyxagent-engine",
                 "assistant:operation-scopes",
+                "assistant:org-agents",
                 "experimental:ai-assistant",
                 "experimental:billing",
                 "experimental:aevatar-chat-wire-log",

@@ -320,7 +320,13 @@ pub async fn for_chat(db: &Database, chat: &ChatAuthority, id: &str) -> AppResul
     if chat.guest || chat.turn_stopped || chat.turn_id.is_none() || Uuid::parse_str(id).is_err() {
         return Err(missing());
     }
-    let thread = engine::get(db, &chat.user_id, &chat.conversation_id).await?;
+    let thread = if let Some(access) = chat.org_agent_access.as_deref() {
+        access
+            .conversation(db, &chat.user_id, &chat.conversation_id)
+            .await?
+    } else {
+        engine::get(db, &chat.user_id, &chat.conversation_id).await?
+    };
     if thread.guest_turn
         || engine::live_turn(&thread, Utc::now())
             .is_none_or(|turn| turn.stop_requested || Some(&turn.turn_id) != chat.turn_id.as_ref())
@@ -601,9 +607,10 @@ mod integration_tests {
         let agent = team::ensure_nyxbot(&state.db, &user).await.unwrap();
         let mut session = state.db.client().start_session().await.unwrap();
         session.start_transaction().await.unwrap();
-        let row = team::create_thread(
+        let row = team::create_thread_for(
             &state.db,
             &state.encryption_keys,
+            &user,
             &agent,
             "uploads",
             &mut session,

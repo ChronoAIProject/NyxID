@@ -30,6 +30,7 @@ pub const ACTION_SECONDS: i64 = 10 * 60;
 
 #[derive(Clone)]
 pub struct ChatAuthority {
+    pub org_agent_access: Option<std::sync::Arc<super::org_agent_service::RequestAccess>>,
     pub turn_id: Option<String>,
     pub turn_stopped: bool,
     pub machine_node_ids: Vec<String>,
@@ -106,6 +107,15 @@ pub async fn for_key(
     user: &str,
     key: Option<&str>,
 ) -> AppResult<Option<ChatAuthority>> {
+    for_key_with_access(db, user, key, None).await
+}
+
+pub async fn for_key_with_access(
+    db: &Database,
+    user: &str,
+    key: Option<&str>,
+    access: Option<&std::sync::Arc<super::org_agent_service::RequestAccess>>,
+) -> AppResult<Option<ChatAuthority>> {
     let Some(key) = key else { return Ok(None) };
     let Some(row) = db
         .collection::<bson::Document>(CREDENTIALS)
@@ -116,8 +126,24 @@ pub async fn for_key(
         return Ok(None);
     };
     let conversation_id = row.get_str("conversation_id").map_err(|_| not_found())?;
-    let conversation = super::assistant_nyxagent::get(db, user, conversation_id).await?;
-    let agent = super::assistant_team_service::agent_for_conversation(db, &conversation).await?;
+    let (conversation, agent) = if let Some(access) = access {
+        // Authentication already resolved live membership. Retain the private
+        // thread/owner/agent fences while reusing that request's snapshot.
+        let conversation = access.conversation(db, user, conversation_id).await?;
+        let agent = access
+            .agent(
+                db,
+                user,
+                conversation.agent_id.as_deref().ok_or_else(not_found)?,
+            )
+            .await?;
+        (conversation, agent)
+    } else {
+        let conversation = super::assistant_nyxagent::get(db, user, conversation_id).await?;
+        let agent =
+            super::assistant_team_service::agent_for_conversation(db, &conversation).await?;
+        (conversation, agent)
+    };
     if agent.destroyed_at.is_some() {
         return Err(not_found());
     }
@@ -136,6 +162,7 @@ pub async fn for_key(
         None
     };
     Ok(Some(ChatAuthority {
+        org_agent_access: access.cloned(),
         turn_id: conversation.active_turn.as_ref().map(|t| t.turn_id.clone()),
         turn_stopped: conversation
             .active_turn
@@ -666,10 +693,13 @@ pub async fn service_gate(
             .iter()
             .any(|allowed| allowed == id)
     } else {
-        key_service::effective_allowed_service_ids(db, &key)
-            .await?
-            .iter()
-            .any(|allowed| allowed == id)
+        (if let Some(access) = chat.org_agent_access.as_deref() {
+            key_service::effective_allowed_service_ids_with_access(db, &key, Some(access)).await?
+        } else {
+            key_service::effective_allowed_service_ids(db, &key).await?
+        })
+        .iter()
+        .any(|allowed| allowed == id)
     };
     if granted {
         return Ok(None);
@@ -806,6 +836,7 @@ pub async fn decide_as(
                     .await?
                     .ok_or_else(not_found)?;
                 let chat = ChatAuthority {
+                    org_agent_access: None,
                     turn_id: target.active_turn.as_ref().map(|t| t.turn_id.clone()),
                     turn_stopped: target.active_turn.as_ref().is_none_or(|t| t.stop_requested),
                     machine_node_ids: Vec::new(),
@@ -859,10 +890,24 @@ pub async fn decide_as(
                         let node = super::node_service::get_node_by_id(&db, id)
                             .await?
                             .ok_or_else(not_found)?;
+                        let access =
+                            super::org_service::resolve_owner_access(&db, &user, &node.user_id)
+                                .await?;
+                        let org_agent_node = if subagent {
+                            let agent = super::assistant_team_service::maintained_agent(
+                                &db,
+                                &user,
+                                target.agent_id.as_deref().ok_or_else(not_found)?,
+                            )
+                            .await?;
+                            agent.user_id != user && agent.user_id == node.user_id
+                        } else {
+                            false
+                        };
                         if !node.is_active
-                            || !super::org_service::resolve_owner_access(&db, &user, &node.user_id)
-                                .await?
-                                .can_write()
+                            || !(access.can_write()
+                                || (org_agent_node
+                                    && super::org_agent_service::can_maintain(&access)))
                         {
                             return Err(not_found());
                         }
@@ -870,34 +915,22 @@ pub async fn decide_as(
                         super::saved_login_service::get(&db, &user, id).await?;
                     }
                     if allow && subagent {
-                        let field = if row.kind == "machine" {
-                            "machine_node_ids"
-                        } else {
-                            "saved_login_ids"
+                        let change = super::assistant_team_service::GrantChange::Machine {
+                            base: Box::new(super::assistant_team_service::GrantChange::Add(
+                                Default::default(),
+                            )),
+                            machines: (row.kind == "machine").then(|| vec![id.to_owned()]),
+                            logins: (row.kind == "saved_login").then(|| vec![id.to_owned()]),
+                            mode: super::assistant_team_service::MachineGrantMode::Add,
                         };
-                        let mut add = doc! {};
-                        add.insert(field, id);
-                        let result = db
-                            .collection::<bson::Document>(
-                                crate::models::assistant_agent::COLLECTION_NAME,
-                            )
-                            .update_one(
-                                doc! {
-                                    "_id": target.agent_id.as_deref().ok_or_else(not_found)?,
-                                    "user_id": &user,
-                                    "kind": "specialist",
-                                    "destroyed_at": bson::Bson::Null,
-                                },
-                                doc! {
-                                    "$addToSet": add,
-                                    "$set": { "updated_at": bson::DateTime::now() },
-                                },
-                            )
-                            .session(&mut *session)
-                            .await?;
-                        if result.matched_count != 1 {
-                            return Err(not_found());
-                        }
+                        Box::pin(super::assistant_team_service::apply_grants_in_session(
+                            &db,
+                            &user,
+                            target.agent_id.as_deref().ok_or_else(not_found)?,
+                            &change,
+                            session,
+                        ))
+                        .await?;
                     }
                 }
                 if allow && subagent && row.kind == "operations" {
@@ -926,13 +959,13 @@ pub async fn decide_as(
                     }
                     if grant != Default::default() {
                         let agent_id = target.agent_id.as_deref().ok_or_else(not_found)?;
-                        super::assistant_team_service::apply_grants_in_session(
+                        Box::pin(super::assistant_team_service::apply_grants_in_session(
                             &db,
                             &user,
                             agent_id,
                             &super::assistant_team_service::GrantChange::Add(grant),
                             &mut *session,
-                        )
+                        ))
                         .await?;
                     }
                 } else if allow && row.kind == "service" {

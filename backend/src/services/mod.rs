@@ -250,3 +250,8 @@ pub mod agent_skill_service;
 pub mod assistant_upload_retention;
 pub mod assistant_upload_service;
 pub mod attachment_extraction;
+
+pub mod org_agent_service;
+
+#[cfg(test)]
+pub(crate) mod org_agent_tests;

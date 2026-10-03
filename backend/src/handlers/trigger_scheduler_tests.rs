@@ -617,6 +617,7 @@ async fn schedule_specialist_authority_threads_and_guest_refusal() {
     assert!(key.allowed_service_ids.is_empty());
     assert!(key.allowed_platform_service_ids.is_empty());
     let chat = ChatAuthority {
+        org_agent_access: None,
         turn_id: None,
         turn_stopped: false,
         machine_node_ids: Vec::new(),

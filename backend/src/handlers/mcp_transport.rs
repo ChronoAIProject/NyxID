@@ -381,6 +381,8 @@ struct McpAuthContext {
     /// Platform-provided catalog services an assistant chat key was allowed
     /// to use from a chat card. Empty for every other caller.
     allowed_platform_service_ids: Vec<String>,
+    org_agent_access: Option<std::sync::Arc<crate::services::org_agent_service::RequestAccess>>,
+    assistant_agent_owner_id: Option<String>,
     assistant_operation_scopes: crate::models::agent_operation_scope::OperationScopes,
     allowed_node_ids: Vec<String>,
     rate_limit_per_second: Option<u32>,
@@ -405,6 +407,8 @@ impl McpAuthContext {
             allow_all_nodes: true,
             allowed_service_ids: Vec::new(),
             allowed_platform_service_ids: Vec::new(),
+            org_agent_access: None,
+            assistant_agent_owner_id: None,
             assistant_operation_scopes: Default::default(),
             allowed_node_ids: Vec::new(),
             rate_limit_per_second: None,
@@ -531,10 +535,18 @@ async fn authenticate_mcp(
                     return Err(mcp_403_api_key_insufficient_scope());
                 }
                 let user_id = verify_user_active(state, user_id).await?;
-                let chat = crate::services::assistant_acknowledgement_service::for_key(
+                let org_agent_access = crate::services::org_agent_service::resolve_key_access(
+                    &state.db,
+                    &user_id,
+                    api_key.assistant_agent_owner_id.as_deref(),
+                )
+                .await
+                .map_err(axum::response::IntoResponse::into_response)?;
+                let chat = crate::services::assistant_acknowledgement_service::for_key_with_access(
                     &state.db,
                     &user_id,
                     Some(&api_key.id),
+                    org_agent_access.as_ref(),
                 )
                 .await
                 .map_err(|_| mcp_401(&state.config.base_url))?;
@@ -544,6 +556,14 @@ async fn authenticate_mcp(
                 } else {
                     Vec::new()
                 };
+                let (allow_all_nodes, allowed_node_ids) =
+                    crate::services::org_agent_service::key_nodes(
+                        &state.db,
+                        &api_key,
+                        org_agent_access.as_deref(),
+                    )
+                    .await
+                    .map_err(axum::response::IntoResponse::into_response)?;
                 return Ok(McpAuthContext {
                     chat,
                     account_acknowledged: api_key
@@ -558,16 +578,20 @@ async fn authenticate_mcp(
                     api_key_id: Some(api_key.id.clone()),
                     api_key_name: Some(api_key.name.clone()),
                     allow_all_services: api_key.allow_all_services,
-                    allow_all_nodes: api_key.allow_all_nodes,
+                    allow_all_nodes,
                     allowed_service_ids:
-                        crate::services::key_service::effective_allowed_service_ids(
-                            &state.db, &api_key,
+                        crate::services::key_service::effective_allowed_service_ids_with_access(
+                            &state.db,
+                            &api_key,
+                            org_agent_access.as_deref(),
                         )
                         .await
                         .map_err(axum::response::IntoResponse::into_response)?,
                     allowed_platform_service_ids: platform_grants,
+                    org_agent_access,
+                    assistant_agent_owner_id: api_key.assistant_agent_owner_id.clone(),
                     assistant_operation_scopes: api_key.assistant_operation_scopes.clone(),
-                    allowed_node_ids: api_key.allowed_node_ids.clone(),
+                    allowed_node_ids,
                     rate_limit_per_second: api_key.rate_limit_per_second,
                     rate_limit_burst: api_key.rate_limit_burst,
                     ip_address: request_ip.clone(),
@@ -675,6 +699,21 @@ async fn authenticate_mcp(
                     ctx.api_key_name = api_key_name;
                 }
                 if let Some(key) = relay_key {
+                    crate::services::org_agent_service::validate_key(
+                        &state.db,
+                        &key.user_id,
+                        key.assistant_agent_owner_id.as_deref(),
+                    )
+                    .await
+                    .map_err(axum::response::IntoResponse::into_response)?;
+                    if key
+                        .assistant_agent_owner_id
+                        .as_deref()
+                        .is_some_and(|owner| owner != key.user_id)
+                    {
+                        return Err(mcp_401(&state.config.base_url));
+                    }
+                    ctx.assistant_agent_owner_id = key.assistant_agent_owner_id.clone();
                     ctx.assistant_operation_scopes = key.assistant_operation_scopes;
                     if !ctx.assistant_operation_scopes.is_empty() {
                         ctx.chat = crate::services::assistant_acknowledgement_service::for_key(
@@ -818,7 +857,13 @@ fn is_scoped_api_key(auth: &McpAuthContext) -> bool {
 }
 
 fn mcp_service_scope(auth: &McpAuthContext) -> mcp_service::ServiceScope<'_> {
-    if auth.chat.is_some() || auth.allow_all_services {
+    if auth
+        .assistant_agent_owner_id
+        .as_deref()
+        .is_some_and(|owner| owner != auth.user_id)
+    {
+        mcp_service::ServiceScope::Allowed(auth.allowed_service_ids.as_slice())
+    } else if auth.chat.is_some() || auth.allow_all_services {
         mcp_service::ServiceScope::Unrestricted
     } else {
         mcp_service::ServiceScope::Allowed(auth.allowed_service_ids.as_slice())
@@ -2061,6 +2106,8 @@ async fn dispatch_service_tool(
 /// the authenticated MCP caller -- API key identity + node scope.
 fn mcp_exec_context<'a>(auth: &'a McpAuthContext) -> mcp_service::McpExecContext<'a> {
     mcp_service::McpExecContext {
+        org_agent_access: auth.org_agent_access.as_deref(),
+        agent_owner: auth.assistant_agent_owner_id.as_deref(),
         operation_scopes: Some(&auth.assistant_operation_scopes),
         api_key_id: auth.api_key_id.as_deref(),
         allow_all_nodes: auth.allow_all_nodes,
@@ -2515,6 +2562,8 @@ async fn handle_account_tool(
         return tool_result(request_id, "{\"error\":\"unauthorized\"}", true);
     };
     let user = auth::AuthUser {
+        org_agent_access: auth.org_agent_access.clone(),
+        assistant_agent_owner_id: auth.assistant_agent_owner_id.clone(),
         assistant_operation_scopes: auth.assistant_operation_scopes.clone(),
         user_id,
         session_id: None,
@@ -4411,6 +4460,8 @@ mod tests {
             allow_all_nodes: false,
             allowed_service_ids,
             allowed_platform_service_ids: Vec::new(),
+            org_agent_access: None,
+            assistant_agent_owner_id: None,
             assistant_operation_scopes: Default::default(),
             allowed_node_ids: Vec::new(),
             rate_limit_per_second: None,
@@ -4771,6 +4822,8 @@ mod tests {
         };
         let mcp_auth = McpAuthContext::user(actor_id.clone(), AuthMethod::AccessToken);
         let proxy_auth = AuthUser {
+            org_agent_access: None,
+            assistant_agent_owner_id: None,
             assistant_operation_scopes: Default::default(),
             user_id: uuid::Uuid::parse_str(&actor_id).unwrap(),
             session_id: None,
@@ -5961,3 +6014,48 @@ mod config_routes_tests;
 #[cfg(test)]
 #[path = "machine_mcp_tests.rs"]
 mod machine_mcp_tests;
+
+#[cfg(test)]
+mod org_agent_mcp_tests {
+    use super::*;
+    #[tokio::test]
+    async fn org_agent_mcp_auth_discovery_and_revocation() {
+        use std::sync::atomic::Ordering;
+        let (f, memberships, _) =
+            crate::services::org_agent_tests::Fixture::observed("org_agent_mcp").await;
+        let (_, row) = f.create().await;
+        let credential =
+            crate::services::assistant_agent_credential_service::load_for_conversation(
+                &f.state.db,
+                &f.state.encryption_keys,
+                &f.admin,
+                &row.id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", credential.raw_key.parse().unwrap());
+        memberships.store(0, Ordering::SeqCst);
+        let ctx = authenticate_mcp(&f.state, &headers, false)
+            .await
+            .ok()
+            .unwrap();
+        assert_eq!(
+            memberships.load(Ordering::SeqCst),
+            1,
+            "MCP authentication and chat lookup resolve org access once"
+        );
+        assert_eq!(ctx.user_id, f.admin);
+        assert!(ctx.chat.is_some());
+        assert!(
+            matches!(mcp_service_scope(&ctx), mcp_service::ServiceScope::Allowed(ids) if ids.is_empty())
+        );
+        f.revoke(&f.admin).await;
+        assert!(authenticate_mcp(&f.state, &headers, false).await.is_err());
+        assert_eq!(memberships.load(Ordering::SeqCst), 2);
+        assert!(authenticate_mcp(&f.state, &headers, true).await.is_err());
+        assert_eq!(memberships.load(Ordering::SeqCst), 3);
+        f.state.db.drop().await.unwrap();
+    }
+}

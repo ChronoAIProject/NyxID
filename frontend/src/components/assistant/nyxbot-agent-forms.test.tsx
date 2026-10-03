@@ -19,6 +19,27 @@ vi.mock("@/hooks/use-keys", () => ({
 vi.mock("@/hooks/use-nodes", () => ({ useNodes: () => ({ data: [{ id: "machine-1", name: "Workspace VM", machine: { shell: true } }] }) }));
 vi.mock("@/hooks/use-saved-logins", () => ({ useSavedLogins: () => ({ data: [{ id: "login-1", label: "GitHub website" }] }) }));
 
+let orgEnabled = false;
+vi.mock("@/hooks/use-feature-flag", () => ({ useFeature: () => orgEnabled }));
+vi.mock("@/hooks/use-orgs", () => ({
+  useOrgs: () => ({
+    data: [
+      {
+        id: "org-team",
+        slug: "team",
+        display_name: "Team",
+        your_role: "member",
+      },
+      {
+        id: "org-viewer",
+        slug: "view",
+        display_name: "View only",
+        your_role: "viewer",
+      },
+    ],
+  }),
+}));
+
 const home = `nyxa-${"d".repeat(32)}`;
 let posts: unknown[];
 let respond: () => Response;
@@ -38,6 +59,7 @@ beforeEach(() => {
   });
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   posts = [];
+  orgEnabled = false;
   respond = () =>
     new Response(JSON.stringify({ id: "agent-new", name: "researcher", home_conversation_id: home }), {
       status: 201,
@@ -154,4 +176,45 @@ it("includes selected machines and saved logins when creating the specialist", a
   await user.click(screen.getByRole("button", { name: "Create agent" }));
   await waitFor(() => expect(onCreated).toHaveBeenCalled());
   expect(posts[0]).toMatchObject({ machines: ["machine-1"], logins: ["login-1"] });
+});
+
+it("gates org creation and offers Member organizations with org-only resource controls", async () => {
+  orgEnabled = true;
+  const { user, onCreated } = renderDialog();
+  await user.click(screen.getByRole("combobox", { name: "Ownership" }));
+  expect(
+    screen.queryByRole("option", { name: "View only" }),
+  ).not.toBeInTheDocument();
+  await user.click(screen.getByRole("option", { name: "Team" }));
+  expect(
+    screen.queryByRole("switch", { name: "Read my account" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("checkbox", { name: /GitHub/ }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("checkbox", { name: /Workspace VM/ }),
+  ).not.toBeInTheDocument();
+  await user.type(screen.getByRole("textbox", { name: "Name" }), "researcher");
+  await user.type(
+    screen.getByRole("textbox", { name: "Role" }),
+    "Research public topics",
+  );
+  await user.click(screen.getByRole("button", { name: "Create agent" }));
+  await waitFor(() => expect(onCreated).toHaveBeenCalled());
+  expect(posts[0]).toMatchObject({
+    org: "org-team",
+    account_read: false,
+    services: [],
+  });
+});
+
+it("hides organization selection while rollout is disabled", () => {
+  renderDialog();
+  expect(
+    screen.queryByRole("combobox", { name: "Ownership" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.getByText(/Organization agents are not enabled yet/),
+  ).toBeVisible();
 });

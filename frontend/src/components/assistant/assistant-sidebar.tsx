@@ -1,3 +1,4 @@
+import { agentOwnerSections } from "@/lib/assistant/nyxbot-labels";
 import { useState, type ReactNode } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useAppForm } from "@/components/ui/form";
@@ -426,7 +427,9 @@ function AgentRow({
         >
           {threads.own.map((conversation) => renderThread(conversation))}
           {model.threadsLoading && !model.threads.length ? (
-            <p className="px-3 py-1.5 text-[11px] text-text-tertiary">Loading threads...</p>
+            <p className="px-3 py-1.5 text-[11px] text-text-tertiary">
+              Loading threads...
+            </p>
           ) : null}
           {threads.bots.map((group) => (
             <ChannelThreadsGroup
@@ -436,7 +439,7 @@ function AgentRow({
               renderThread={renderThread}
             />
           ))}
-          {agent.status === "destroyed" ? null : (
+          {agent.status === "destroyed" || agent.can_use === false ? null : (
             <button
               type="button"
               onClick={() => model.onNewThread(agent.id)}
@@ -470,7 +473,12 @@ function AgentsSection({
     .sort((a, b) => Number(b.kind === "nyxbot") - Number(a.kind === "nyxbot"));
   return (
     <div className="space-y-0.5">
-      {visible.map((agent) => (
+      {agentOwnerSections(visible).map((section) => (
+        <section key={section.id} aria-label={section.label}>
+          <p className="px-3 pb-1 pt-3 text-[10px] font-semibold uppercase tracking-[1.5px] text-text-tertiary">
+            {section.label}
+          </p>
+          {section.agents.map((agent) => (
         <AgentRow
           key={agent.id}
           agent={agent}
@@ -479,6 +487,8 @@ function AgentsSection({
           activeThreadId={activeThreadId}
           renderThread={renderThread}
         />
+          ))}
+        </section>
       ))}
       {destroyed.length ? (
         <button
@@ -559,7 +569,8 @@ export function AssistantSidebar({
 }: {
   readonly conversations: readonly Conversation[];
   readonly activeConversationId: string | undefined;
-  readonly activeView?: "chat" | "plugins" | "approvals" | "automations" | "machines";
+  readonly activeView?:
+    | "chat" | "plugins" | "approvals" | "automations" | "machines";
   readonly deletingId?: string;
   readonly notice?: string;
   readonly onNewChat: () => void;
@@ -919,7 +930,9 @@ function RenameChatDialog({
       <DialogContent className="z-[90] md:max-w-md">
         <DialogHeader>
           <DialogTitle>Rename chat</DialogTitle>
-          <DialogDescription>Choose a title for this conversation.</DialogDescription>
+          <DialogDescription>
+            Choose a title for this conversation.
+          </DialogDescription>
         </DialogHeader>
         <form onSubmit={form.handleSubmit(async ({ title }) => {
           try {
@@ -929,11 +942,19 @@ function RenameChatDialog({
             setError("Could not rename this chat. Try again.");
           }
         })}>
-          <label htmlFor="chat-title" className="text-[12px]">Title</label>
+          <label htmlFor="chat-title" className="text-[12px]">
+            Title
+          </label>
           <Input id="chat-title" maxLength={200} {...form.register("title")} />
-          {error ? <p role="alert" className="mt-2 text-[12px] text-destructive">{error}</p> : null}
+          {error ? (
+            <p role="alert" className="mt-2 text-[12px] text-destructive">
+              {error}
+            </p>
+          ) : null}
           <DialogFooter className="mt-4">
-            <Button type="button" variant="ghost" onClick={onClose}>Cancel</Button>
+            <Button type="button" variant="ghost" onClick={onClose}>
+              Cancel
+            </Button>
             <Button
               type="submit"
               variant="primary"

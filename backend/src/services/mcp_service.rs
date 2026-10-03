@@ -165,6 +165,8 @@ impl McpBillingRouteContextBuilder {
 /// node allow-list enforcement. OAuth and session callers pass `api_key_id:
 /// None` and `allow_all_nodes: true`, preserving their existing behavior.
 pub struct McpExecContext<'a> {
+    pub org_agent_access: Option<&'a super::org_agent_service::RequestAccess>,
+    pub agent_owner: Option<&'a str>,
     pub operation_scopes: Option<&'a crate::models::agent_operation_scope::OperationScopes>,
     /// API key ID that is acting on behalf of the user. Enables per-agent
     /// credential override via [`proxy_service::resolve_agent_credential_override`].
@@ -4137,6 +4139,14 @@ pub async fn execute_tool_response(
     exec_ctx: &McpExecContext<'_>,
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> AppResult<ToolResponse> {
+    super::org_agent_service::authorize_service_with_access(
+        db,
+        user_id,
+        exec_ctx.agent_owner,
+        Some(&service.service_id),
+        exec_ctx.org_agent_access,
+    )
+    .await?;
     if let Some(scopes) = exec_ctx.operation_scopes {
         prepared.authorize_agent_operations(scopes, service, endpoint)?;
     }
@@ -4199,7 +4209,8 @@ pub async fn execute_tool_response(
             // Per-agent credential override: when acting as an API key with
             // an agent binding, swap in the override credential before execute.
             // Matches `execute_proxy_inner` in handlers/proxy.rs.
-            if let Some(ak_id) = exec_ctx.api_key_id
+            if exec_ctx.agent_owner.is_none_or(|owner| owner == user_id)
+                && let Some(ak_id) = exec_ctx.api_key_id
                 && let Some(override_cred) = proxy_service::resolve_agent_credential_override(
                     db,
                     encryption_keys,
@@ -4570,6 +4581,14 @@ pub async fn execute_tool_resolved(
     has_server_credential: bool,
     billing_context_builder: McpBillingRouteContextBuilder,
 ) -> AppResult<McpToolExecutionOutcome> {
+    super::org_agent_service::authorize_service_with_access(
+        db,
+        user_id,
+        exec_ctx.agent_owner,
+        Some(&service.service_id),
+        exec_ctx.org_agent_access,
+    )
+    .await?;
     if let Some(scopes) = exec_ctx.operation_scopes {
         prepared.authorize_agent_operations(scopes, service, endpoint)?;
         if super::agent_operation_scope_service::applicable(
@@ -5938,6 +5957,8 @@ mod tests {
                     &state.token_exchange_cache,
                     &state.cloud_response_cache,
                     &McpExecContext {
+                        org_agent_access: None,
+                        agent_owner: None,
                         operation_scopes: None,
                         api_key_id: None,
                         allow_all_nodes: true,

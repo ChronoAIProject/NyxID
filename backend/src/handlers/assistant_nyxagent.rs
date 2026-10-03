@@ -1293,9 +1293,15 @@ async fn execute_turn(
     };
     // Turn-scoped NyxID notes: team state, direct chats, drained events and
     // channel sender context. Lookup failures only omit a note.
-    let agent = crate::services::assistant_team_service::agent_for_conversation(&state.db, row)
-        .await
-        .ok();
+    let agent =
+        match crate::services::assistant_team_service::agent_for_conversation(&state.db, row).await
+        {
+            Ok(agent) => Some(agent),
+            Err(_) if row.agent_owner_id.is_some() => {
+                return Err(TurnError::new("assistant_unavailable"));
+            }
+            Err(_) => None,
+        };
     decisions
         .push_str(&super::assistant_team::turn_notes(state, row, agent.as_ref(), previous).await);
     let mut binding = row.nyxagent_session_id.clone();

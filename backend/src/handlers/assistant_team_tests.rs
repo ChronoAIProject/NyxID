@@ -552,6 +552,7 @@ async fn owners_create_specialists_within_limits_and_grants_resolve_only_visible
         State(state.clone()),
         test_auth_user(OWNER),
         Json(CreateAgentRequest {
+            org: None,
             machines: None,
             logins: None,
             name: "coder".into(),

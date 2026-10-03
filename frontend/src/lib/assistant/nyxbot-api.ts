@@ -70,6 +70,12 @@ export const nyxBotApi = {
   async deleteAgent(id: string) {
     await assistantJson(agentPath(id), { method: "DELETE" });
   },
+  async remember(agentId: string, text: string, replaceId?: string) {
+    await assistantJson(`${agentPath(agentId)}/memory`, {
+      method: "POST",
+      body: { text, ...(replaceId ? { replace_id: replaceId } : {}) },
+    });
+  },
   async forget(agentId: string, noteId: string) {
     await assistantJson(`${agentPath(agentId)}/memory/${encodeURIComponent(noteId)}`, {
       method: "DELETE",

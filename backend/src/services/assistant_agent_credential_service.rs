@@ -29,6 +29,7 @@ pub enum KeyAuthority {
     Subagent(
         AgentGrants,
         crate::models::agent_operation_scope::OperationScopes,
+        String,
     ),
 }
 
@@ -36,9 +37,11 @@ impl KeyAuthority {
     pub fn for_agent(agent: &AssistantAgent) -> Self {
         match agent.kind {
             AgentKind::Nyxbot => Self::Orchestrator,
-            AgentKind::Specialist => {
-                Self::Subagent(agent.grants.clone(), agent.operation_scopes.clone())
-            }
+            AgentKind::Specialist => Self::Subagent(
+                agent.grants.clone(),
+                agent.operation_scopes.clone(),
+                agent.user_id.clone(),
+            ),
         }
     }
 
@@ -47,13 +50,15 @@ impl KeyAuthority {
     pub fn key_fields(&self) -> bson::Document {
         match self {
             Self::Orchestrator => doc! {
+                "assistant_agent_owner_id": bson::Bson::Null,
                 "assistant_operation_scopes": bson::Document::new(),
                 "allow_all_services": true,
                 "allow_all_nodes": true,
                 "allow_auto_connected_services": true,
                 "scopes": format!("{ASSISTANT_SCOPES} {ASSISTANT_ACCOUNT_SCOPE}"),
             },
-            Self::Subagent(grants, scopes) => doc! {
+            Self::Subagent(grants, scopes, owner) => doc! {
+                "assistant_agent_owner_id": owner,
                 "assistant_operation_scopes": bson::to_bson(scopes).expect("operation scope serialization"),
                 "allow_all_services": false,
                 "allow_all_nodes": true,
@@ -103,12 +108,20 @@ pub async fn authority_in_session(
         return Ok(KeyAuthority::Orchestrator);
     };
     let agents = db.collection::<AssistantAgent>(AGENTS);
-    let filter = doc! {"_id": agent_id, "user_id": &conversation.user_id};
+    let filter = doc! {"_id": agent_id};
     let agent = agents
         .find_one(filter.clone())
         .session(&mut *session)
         .await?
         .ok_or_else(|| AppError::NotFound("Agent not found".into()))?;
+    super::org_agent_service::require_use(db, &conversation.user_id, &agent).await?;
+    if agent.user_id != conversation.user_id
+        && (conversation.guest_turn || conversation.channel.is_some())
+    {
+        return Err(AppError::Forbidden(
+            "Organization agents require a private member thread".into(),
+        ));
+    }
     let destroyed =
         || AppError::Conflict("This agent was destroyed; its threads are read-only".into());
     if agent.destroyed_at.is_some() {

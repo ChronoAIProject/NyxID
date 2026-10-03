@@ -33,6 +33,8 @@ pub const DELEGATED_CATALOG_SCOPE_REQUIRED: &str = "delegated_catalog_scope_requ
 
 #[derive(Clone, Debug)]
 pub struct ExactServiceApprovalCaller {
+    pub org_agent_access: Option<std::sync::Arc<super::org_agent_service::RequestAccess>>,
+    pub agent_owner: Option<String>,
     pub operation_scopes: crate::models::agent_operation_scope::OperationScopes,
     pub actor_user_id: String,
     pub proxy_resolution_user_id: String,
@@ -469,6 +471,8 @@ pub async fn redeem_request(
             }
         };
         let exec_ctx = mcp_service::McpExecContext {
+            org_agent_access: caller.org_agent_access.as_deref(),
+            agent_owner: caller.agent_owner.as_deref(),
             operation_scopes: Some(&caller.operation_scopes),
             api_key_id: caller.api_key_id.as_deref(),
             allow_all_nodes: caller.allow_all_nodes,
@@ -893,7 +897,12 @@ async fn resolve_execution_authority(
             )
         });
     let mut override_identity = None;
-    if let Some(api_key_id) = caller.api_key_id.as_deref() {
+    if caller
+        .agent_owner
+        .as_deref()
+        .is_none_or(|owner| owner == caller.actor_user_id)
+        && let Some(api_key_id) = caller.api_key_id.as_deref()
+    {
         super::destination_routing::validate_selected_override(
             &state.db,
             &caller.proxy_resolution_user_id,
@@ -1221,6 +1230,7 @@ async fn resolve_exact_catalog(
                     &state.db,
                     &caller.actor_user_id,
                     caller.api_key_id.as_deref(),
+                    caller.org_agent_access.as_ref(),
                     &caller.operation_scopes,
                     &service.service_id,
                     super::agent_operation_scope_service::mcp_catalog_id(service),
@@ -1803,6 +1813,8 @@ mod tests {
 
     fn caller() -> ExactServiceApprovalCaller {
         ExactServiceApprovalCaller {
+            agent_owner: None,
+            org_agent_access: None,
             operation_scopes: Default::default(),
             actor_user_id: "user-alpha".to_string(),
             proxy_resolution_user_id: "user-alpha".to_string(),
