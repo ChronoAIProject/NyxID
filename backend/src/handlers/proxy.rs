@@ -3294,7 +3294,7 @@ async fn resolve_proxy_execution_inner(
     pre_resolved: Option<PreResolved>,
     target_mode: TargetMode,
     mut extra_outbound_headers: Vec<(String, String)>,
-) -> AppResult<ProxyExecutionResolution> {
+) -> AppResult<(ResolvedProxyExecution, Vec<(String, String)>)> {
     let machine_ingress = request
         .extensions()
         .get::<crate::services::machine_gateway_service::Ingress>()
