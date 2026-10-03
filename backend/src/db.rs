@@ -118,6 +118,19 @@ pub async fn require_transactions(db: &Database) -> Result<(), mongodb::error::E
 /// Uses `create_index` which is idempotent -- if the index already exists
 /// with the same specification it is a no-op.
 pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
+    // Poll index groups and migrations sequentially without retaining the
+    // large index-construction frame while a migration calls into MongoDB.
+    Box::pin(ensure_core_indexes(db)).await?;
+    Box::pin(ensure_service_indexes(db)).await?;
+    backfill_downstream_service_types(db).await?;
+    migrate_legacy_ssh_auth_mode(db).await?;
+    backfill_org_scope_sources(db).await?;
+    purge_legacy_channel_message_content(db).await?;
+
+    Ok(())
+}
+
+async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
     for collection in ["assistant_attachments", "assistant_upload_limits"] {
         db.collection::<Document>(collection)
             .create_index(
@@ -2006,6 +2019,10 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    Ok(())
+}
+
+async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
     // Drop old sparse unique indexes that conflict with partial filter indexes
     // (MongoDB won't replace an index with different options on the same keys)
     let _ = db
@@ -3226,11 +3243,6 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .build(),
         )
         .await?;
-
-    backfill_downstream_service_types(db).await?;
-    migrate_legacy_ssh_auth_mode(db).await?;
-    backfill_org_scope_sources(db).await?;
-    purge_legacy_channel_message_content(db).await?;
 
     Ok(())
 }
