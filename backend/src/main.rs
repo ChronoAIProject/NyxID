@@ -168,6 +168,7 @@ pub struct AppState {
     /// settings writes. Enforcement reads this in-memory snapshot, never
     /// MongoDB, so broker checks do not add per-request database work.
     pub broker_policy: Arc<std::sync::RwLock<BrokerPolicy>>,
+    pub upload_retention: services::assistant_upload_retention::Cache,
     /// Server-side HMAC key used to derive `CliPairing.code_hash`.
     /// Lives in process memory only (never persisted), so a MongoDB
     /// snapshot alone doesn't let an attacker brute-force the 32^8
@@ -954,6 +955,7 @@ async fn server_main() {
             60,
         ),
         broker_policy: Arc::new(std::sync::RwLock::new(broker_policy)),
+        upload_retention: Default::default(),
         cli_pairing_hmac_key,
         auth_device_hmac_key,
         audit_chain_hmac_key,
@@ -986,6 +988,10 @@ async fn server_main() {
         config.billing_reconcile_interval_secs,
     );
     state.billing.spawn_refresh_worker();
+    services::assistant_upload_retention::refresh(&state.db, &state.upload_retention)
+        .await
+        .expect("Upload retention policy");
+    services::assistant_upload_retention::spawn(state.clone());
     spawn_broker_policy_refresh_task(state.clone());
 
     let login_cleanup_db = state.db.clone();

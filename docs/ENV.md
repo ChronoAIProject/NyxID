@@ -100,9 +100,16 @@ minute across replicas. Larger files return HTTP 400; rate excess returns HTTP
 429. An earlier HTTP 413 can indicate a lower ingress body limit.
 
 Each replica admits four uploads and runs two isolated parser workers. Extraction
-has an eight-second worker deadline plus document/image expansion limits. Pending
-uploads expire after 24 hours, bound uploads after 30 days. These are fixed limits;
-see [Assistant uploads: ingress and operator limits](chat/10-uploads.md#ingress-and-operator-limits)
+has an eight-second worker deadline plus document/image expansion limits.
+Retention is configured at **Admin → Upload retention**, stored in MongoDB and
+refreshed across replicas every five seconds; it has no environment variable.
+Defaults are 24 hours for unsent files, 30 days for sent images/documents and the
+conversation lifetime for tool images. Admins can also delete images after their
+first turn settles. Reads enforce the current policy immediately; cleanup is a
+bounded, leased background sweep. This controls only NyxID's copy, not NyxAgent
+sessions or model-provider copies. Upgrade all replicas before changing policy;
+startup removes the old attachment TTL index. See [retention](chat/10-uploads.md#retention)
+for bounds and lifecycle details, and [Assistant uploads: ingress and operator limits](chat/10-uploads.md#ingress-and-operator-limits)
 for the complete limits, failure behavior and deployment contract.
 
 ### Engine and diagnostics

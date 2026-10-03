@@ -131,16 +131,14 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
 }
 
 async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
-    for collection in ["assistant_attachments", "assistant_upload_limits"] {
-        db.collection::<Document>(collection)
-            .create_index(
-                IndexModel::builder()
-                    .keys(doc! {"expires_at": 1})
-                    .options(IndexOptions::builder().expire_after(Duration::ZERO).build())
-                    .build(),
-            )
-            .await?;
-    }
+    db.collection::<Document>("assistant_upload_limits")
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"expires_at": 1})
+                .options(IndexOptions::builder().expire_after(Duration::ZERO).build())
+                .build(),
+        )
+        .await?;
     db.collection::<Document>("assistant_attachments")
         .create_index(
             IndexModel::builder()
@@ -149,6 +147,11 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
                 .build(),
         )
         .await?;
+    Box::pin(crate::services::assistant_upload_retention::ensure_indexes(
+        db,
+    ))
+    .await
+    .map_err(|_| mongodb::error::Error::custom("Attachment retention index migration failed"))?;
     crate::services::service_history::relay::ensure_indexes(db).await?;
     crate::services::catalog_skill_service::ensure_indexes(db).await?;
     crate::services::assistant_nyxagent::ensure_indexes(db).await?;

@@ -56,6 +56,7 @@ function images(
   return {
     images: attachments.map((attachment) => ({
       id: attachment.id,
+      expired: attachment.expired,
       endpoint: `${path(conversationId)}/attachments/${encodeURIComponent(attachment.id)}`,
       contentType: attachment.content_type,
       label: attachment.label,

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 pub const COLLECTION_NAME: &str = "assistant_attachments";
 
 /// An image a tool returned during a chat turn. The bytes are envelope-encrypted
-/// and live exactly as long as their conversation.
+/// and follow the runtime tool-image policy (conversation lifetime by default).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantAttachment {
     #[serde(rename = "_id")]

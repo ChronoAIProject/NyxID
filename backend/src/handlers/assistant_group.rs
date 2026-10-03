@@ -671,13 +671,23 @@ pub async fn list_messages(
     let before_seq = more.then(|| rows[0].seq);
     let agents = team::agents(&state.db, &owner, true).await?;
     let pending_actions = pending_actions(&state, &owner, &id).await?;
+    let mut messages: Vec<_> = rows
+        .into_iter()
+        .map(|row| message_response(row, &agents))
+        .collect();
+    Box::pin(super::assistant_nyxagent::mark_expired_attachments(
+        &state.db,
+        &owner,
+        messages
+            .iter_mut()
+            .flat_map(|m| m.attachments.iter_mut())
+            .collect(),
+    ))
+    .await?;
     Ok(Json(json!({
         "group": group_response(&state, group).await?,
         "pending_actions": pending_actions,
-        "messages": rows
-            .into_iter()
-            .map(|row| message_response(row, &agents))
-            .collect::<Vec<_>>(),
+        "messages": messages,
         "before_seq": before_seq,
     })))
 }

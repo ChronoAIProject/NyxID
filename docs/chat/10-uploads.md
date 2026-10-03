@@ -2,7 +2,8 @@
 
 Normative contract for human uploads to NyxAgent conversations and owner-posted
 group messages. This extends [08](08-nyxagent-engine.md) and
-[09](09-nyxbot-orchestrator.md); existing owner-only tool images keep their behavior.
+[09](09-nyxbot-orchestrator.md). Tool images remain owner-only; their default
+retention is the conversation lifetime.
 
 ## Admission and storage
 
@@ -25,10 +26,59 @@ use bounded encrypted chunk records in the same collection. Extracted text and
 page/section offsets are separately envelope-encrypted. Metadata contains only
 scope, verified type, safe display name, size, offsets/counts and lifecycle IDs.
 An accepted message atomically claims its pending uploads; an ID cannot be
-reused by another message, conversation, owner or group. Pending uploads expire
-after 24 hours; bound user uploads expire after 30 days. Enforce expiry in reads
-as well as TTL cleanup. Conversation/group deletion and owner purge remove all
-payload chunks and extracted text. Removing an unsent attachment deletes it.
+reused by another message, conversation, owner or group. Apply the runtime
+retention policy below to existing and new files. Conversation/group deletion
+and owner purge remove all payload chunks, extracted text and expiry markers.
+Removing an unsent attachment deletes it.
+
+## Retention
+
+Platform admins configure **Admin → Upload retention** (`/admin/upload-retention`).
+This is a MongoDB override in `platform_settings`, not an environment variable.
+`GET /api/v1/admin/settings/upload-retention` returns defaults, effective policy,
+revision and the responding replica's last refresh. `PUT` replaces all five
+controls; `DELETE` restores defaults. All three require the existing platform
+admin guard (operators cannot use them). Every change commits with an audit-chain
+entry containing the actor, old/new values, reset flag and revision; never file
+names or content. An audit failure aborts the change.
+
+| Control | Default | Allowed values / clock |
+| --- | --- | --- |
+| `pending_hours` | 24 hours | Integer 1–8760 hours (365 days), from upload creation |
+| `image_days` | 30 days | Integer 1–365 days, from first message binding |
+| `images_delete_after_turn` | false | Also expire sent user images once their first referencing turn settles |
+| `document_days` | 30 days | Integer 1–365 days, from first message binding; original bytes and extracted text expire together |
+| `tool_image_days` | null | null keeps tool images with the conversation; otherwise integer 1–365 days from creation |
+
+Replicas refresh the policy snapshot every five seconds without restarting.
+Attachment downloads, agent image fetches, document paging, machine transfers and
+transcript metadata check the **current MongoDB policy**, rather than that cache.
+A shortened policy therefore denies already-expired reads immediately, even before
+refresh or physical deletion. Failed policy reads fail closed. Increasing a limit
+can preserve files still present, but cannot restore deleted bytes.
+
+The first referencing turn includes owner and specialist group turns and image
+capability fallback. Automatic continuations remain the same turn. Successful,
+failed and stopped turns all settle. Settlement records the first-use marker and,
+when enabled, deletes those user images in the same transaction. Enabling the
+option later also expires images whose first turn already settled; abandoned
+turns are considered settled once their live lease ends. Documents and tool
+images do not follow this option.
+
+Cleanup runs every minute under a renewable cluster lease. Each pass examines at
+most 100 roots and 100 chunk records, saving cursors for the next pass. Deletion
+transactions fence both the current lease and policy revision, remove encrypted
+chunks and extracted text with the root, and safely collect legacy orphan chunks.
+Reads enforce expiry independently of sweep latency. Expired bound files retain
+only a scoped metadata marker so the transcript displays **“Attachment expired
+per retention policy. Upload it again to continue.”** Downloads return HTTP 410 /
+`AssistantAttachmentExpired` (12101); `nyx__attachment_read` returns an MCP
+`isError` result with that code and guidance. Pending expiry leaves no transcript marker. Markers disappear with the conversation,
+group or owner; no filename or payload is retained in them.
+
+**NyxID's copy only:** an image the agent already saw may remain in NyxAgent's
+session until it expires, and model providers process it. This policy does not
+remove upstream copies or files the owner/agent already downloaded elsewhere.
 
 ## Documents and untrusted content
 
@@ -113,6 +163,17 @@ marked unviewable by that agent. This protocol version, not a guessed package
 version, is the compatibility boundary. Four upload requests and two parser
 workers may run concurrently per replica. Busy admission asks the owner to retry.
 
+### Retention rollout
+
+Upgrade and drain **all old replicas before changing retention**. Old binaries
+can recreate the fixed TTL index and use the old read rules. Startup idempotently
+removes only the `assistant_attachments.expires_at` TTL index; the upload-rate
+window TTL stays in place. New rows use `created_at` and `bound_at`, never a fixed
+expiration. For older bound roots without `bound_at`, derive it from the old
+`expires_at` minus 30 days (creation time is the final fallback). No payload
+rewrite or full collection scan is required during startup. Already-deleted
+legacy files cannot be recovered.
+
 ### Ingress and operator limits
 
 Reverse proxies, load balancers and ingress controllers MUST allow request bodies
@@ -123,7 +184,8 @@ of at least **21 MiB (22,020,096 bytes)** on both upload routes:
 its existing upstream and authentication configuration. Check every hop, including
 any CDN. This ingress allowance does not change NyxID's 20 MiB file limit.
 
-These limits are fixed application limits, not environment variables:
+Admission and extraction limits are fixed application limits, not environment
+variables. Retention is the runtime admin policy above:
 
 | Limit | Value / behavior |
 | --- | --- |
@@ -134,7 +196,7 @@ These limits are fixed application limits, not environment variables:
 | Extraction | 8-second worker wall deadline, 6 CPU seconds, 1 GiB address-space limit on Linux |
 | Document expansion | 200 PDF pages, 1,000,000 extracted characters, 40 MiB actual DOCX expansion and 1,000 ZIP entries |
 | Image decoding | 32 million pixels; 192 MiB decoder allocation budget |
-| Retention | Pending uploads: 24 hours; message-bound uploads: 30 days |
+| Retention defaults | Pending: 24 hours; sent images/documents: 30 days; tool images: conversation lifetime. Admin-overridable; see [Retention](#retention). |
 
 An ingress-generated HTTP 413 below these limits indicates that a proxy's body
 limit needs updating. Invalid/encrypted documents and extraction deadlines return

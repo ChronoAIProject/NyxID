@@ -1331,6 +1331,15 @@ pub async fn begin_turn(
                 ))
                 .await?;
                 uploads.extend(start.group_attachments.clone());
+                Box::pin(super::assistant_upload_retention::used_in_turn(
+                    db,
+                    session,
+                    user_id,
+                    &id,
+                    &turn_id,
+                    &uploads.iter().map(|a| a.id.clone()).collect::<Vec<_>>(),
+                ))
+                .await?;
                 let message = AssistantMessage {
                     id: message_id,
                     conversation_id: id.clone(),
@@ -1629,6 +1638,7 @@ pub async fn finish_turn(
                     .insert_one(message)
                     .session(&mut *session)
                     .await?;
+                Box::pin(super::assistant_upload_retention::settled_in_session(&db,session,&row.user_id,&row.id,&turn_id)).await?;
                 collection
                     .replace_one(doc! {"_id": &row.id, "user_id": &row.user_id}, current)
                     .session(&mut *session)
@@ -1796,6 +1806,13 @@ pub async fn read_attachment(
         AssistantAttachment, COLLECTION_NAME as ATTACHMENTS,
     };
     get(db, user_id, conversation_id).await?;
+    Box::pin(super::assistant_upload_retention::require_available(
+        db,
+        doc! {
+            "_id":attachment_id,"user_id":user_id,"conversation_id":conversation_id,
+        },
+    ))
+    .await?;
     if db
         .collection::<bson::Document>(ATTACHMENTS)
         .find_one(doc! {"_id": attachment_id, "origin": "user_upload"})
@@ -1812,16 +1829,25 @@ pub async fn read_attachment(
         )
         .await;
     }
+    let filter = doc! {
+        "_id": attachment_id, "user_id": user_id, "conversation_id": conversation_id,
+    };
     let row = db
         .collection::<AssistantAttachment>(ATTACHMENTS)
-        .find_one(doc! {
-            "_id": attachment_id,
-            "user_id": user_id,
-            "conversation_id": conversation_id,
-        })
-        .await?
-        .ok_or_else(not_found)?;
+        .find_one(filter.clone())
+        .await?;
+    let Some(row) = row else {
+        Box::pin(super::assistant_upload_retention::require_available(
+            db, filter,
+        ))
+        .await?;
+        return Err(not_found());
+    };
     let bytes = keys.decrypt(&row.data_encrypted).await?;
+    Box::pin(super::assistant_upload_retention::require_available(
+        db, filter,
+    ))
+    .await?;
     Ok((row.content_type, bytes))
 }
 
@@ -1989,6 +2015,7 @@ pub async fn delete(
                     for collection in [
                         crate::models::assistant_acknowledgement::COLLECTION_NAME,
                         crate::models::assistant_attachment::COLLECTION_NAME,
+                        crate::models::assistant_upload_retention::TOMBSTONES,
                         crate::models::assistant_agent_credential::COLLECTION_NAME,
                         MESSAGES,
                     ] {
