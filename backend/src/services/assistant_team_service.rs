@@ -393,6 +393,7 @@ async fn create_thread_with_kind(
 ) -> AppResult<AssistantConversation> {
     let now = Utc::now();
     let mut row = AssistantConversation {
+        machine_previews: false,
         id: format!("nyxa-{}", Uuid::new_v4().simple()),
         user_id: actor.to_owned(),
         title: super::assistant_title_service::provisional(title),

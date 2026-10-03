@@ -215,6 +215,7 @@ pub mod catalog_editor_service;
 
 pub mod channel_activity_callback_service;
 pub mod channel_activity_service;
+pub mod machine_activity_service;
 pub mod machine_desktop_service;
 pub mod machine_gateway_service;
 pub mod machine_service;

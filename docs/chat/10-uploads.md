@@ -33,6 +33,11 @@ Removing an unsent attachment deletes it.
 
 ## Retention
 
+Opt-in machine command excerpts use the same encrypted attachment lifecycle
+with `origin: machine_preview`. They expire after the shorter of 30 days and
+the current sent-document retention. The tool-image “keep with conversation”
+option never extends command excerpts. Group cards expose metadata only.
+
 Platform admins configure **Admin → Upload retention** (`/admin/upload-retention`).
 This is a MongoDB override in `platform_settings`, not an environment variable.
 `GET /api/v1/admin/settings/upload-retention` returns defaults, effective policy,

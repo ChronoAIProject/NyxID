@@ -138,6 +138,7 @@ pub mod billing_lago_carry;
 
 pub mod machine_desktop;
 pub mod machine_job;
+pub mod machine_receipt;
 pub mod saved_login;
 
 pub mod machine_setup;

@@ -41,7 +41,63 @@ use crate::{
 };
 
 #[derive(Serialize)]
+pub struct MachineReceiptResponse {
+    pub operation_id: String,
+    pub node_id: String,
+    pub machine_name: Option<String>,
+    pub agent_id: String,
+    pub action: String,
+    pub status: String,
+    pub job_id: Option<String>,
+    pub exit_code: Option<i64>,
+    pub bytes: Option<u64>,
+    pub duration_ms: Option<u64>,
+    pub error_code: Option<u32>,
+    pub screenshot_id: Option<String>,
+    pub preview_id: Option<String>,
+    pub preview_enabled: bool,
+}
+impl From<crate::models::machine_receipt::MachineReceipt> for MachineReceiptResponse {
+    fn from(row: crate::models::machine_receipt::MachineReceipt) -> Self {
+        Self {
+            operation_id: row.operation_id,
+            node_id: row.node_id,
+            machine_name: None,
+            agent_id: row.agent_id,
+            action: row.action,
+            status: row.status,
+            job_id: row.job_id,
+            exit_code: row.exit_code,
+            bytes: row.bytes,
+            duration_ms: row.duration_ms,
+            error_code: row.error_code,
+            screenshot_id: row.screenshot_id,
+            preview_id: row.preview_id,
+            preview_enabled: row.preview_enabled,
+        }
+    }
+}
+
+pub(crate) async fn resolve_machine_names(
+    db: &mongodb::Database,
+    viewer: &str,
+    receipts: Vec<&mut MachineReceiptResponse>,
+) -> AppResult<()> {
+    let names = Box::pin(crate::services::machine_activity_service::machine_names(
+        db,
+        viewer,
+        receipts.iter().map(|r| r.node_id.clone()).collect(),
+    ))
+    .await?;
+    for receipt in receipts {
+        receipt.machine_name = names.get(&receipt.node_id).cloned();
+    }
+    Ok(())
+}
+
+#[derive(Serialize)]
 pub struct ActivityResponse {
+    pub(crate) machine: Option<MachineReceiptResponse>,
     id: String,
     label: String,
     status: String,
@@ -51,6 +107,7 @@ pub struct ActivityResponse {
 impl From<crate::models::assistant_conversation::TurnActivity> for ActivityResponse {
     fn from(row: crate::models::assistant_conversation::TurnActivity) -> Self {
         Self {
+            machine: row.machine.map(|m| (*m).into()),
             id: row.id,
             label: row.label,
             status: row.status,
@@ -334,19 +391,27 @@ pub async fn list(
     let chats =
         super::nyxbot::chats::thread_details(&state, &user_id, &rows.iter().collect::<Vec<_>>())
             .await?;
+    let mut conversations: Vec<_> = rows
+        .into_iter()
+        .map(|row| {
+            let count = counts.get(&row.id).copied().unwrap_or(0);
+            let agent_id = row.agent_id.clone();
+            let mut dto = ConversationResponse::from(row)
+                .with_agent(agent_id.as_deref(), &agents)
+                .with_chat(&chats);
+            dto.pending_acknowledgements = count;
+            dto
+        })
+        .collect();
+    let receipts = conversations
+        .iter_mut()
+        .filter_map(|c| c.active_turn.as_mut())
+        .flat_map(|t| t.activities.iter_mut())
+        .filter_map(|a| a.machine.as_mut())
+        .collect();
+    Box::pin(resolve_machine_names(&state.db, &user_id, receipts)).await?;
     Ok(Json(IndexResponse {
-        conversations: rows
-            .into_iter()
-            .map(|row| {
-                let count = counts.get(&row.id).copied().unwrap_or(0);
-                let agent_id = row.agent_id.clone();
-                let mut dto = ConversationResponse::from(row)
-                    .with_agent(agent_id.as_deref(), &agents)
-                    .with_chat(&chats);
-                dto.pending_acknowledgements = count;
-                dto
-            })
-            .collect(),
+        conversations,
         next_cursor,
     }))
 }
@@ -402,7 +467,7 @@ pub async fn history(
     if query.before_seq.is_some_and(|seq| seq <= 0) {
         return Err(AppError::BadRequest("Invalid before_seq".into()));
     }
-    let (conversation, mut rows) =
+    let (mut conversation, mut rows) =
         engine::history_page(&state.db, &user_id, &id, limit + 1, query.before_seq).await?;
     let more = rows.len() > limit as usize;
     if more {
@@ -419,6 +484,22 @@ pub async fn history(
             tracing::debug!(%error, "NyxBot waiting list unavailable");
             Vec::new()
         });
+    let mut receipts: Vec<_> = rows
+        .iter_mut()
+        .flat_map(|m| m.activities.iter_mut())
+        .filter_map(|a| a.machine.as_deref_mut())
+        .collect();
+    if let Some(turn) = conversation.active_turn.as_mut() {
+        receipts.extend(
+            turn.activities
+                .iter_mut()
+                .filter_map(|a| a.machine.as_deref_mut()),
+        );
+    }
+    Box::pin(crate::services::machine_activity_service::refresh_jobs(
+        &state.db, &user_id, receipts,
+    ))
+    .await?;
     let agents = crate::services::assistant_team_service::agents(&state.db, &user_id, true).await?;
     let agent_id = conversation.agent_id.clone();
     let chats = super::nyxbot::chats::thread_details(&state, &user_id, &[&conversation]).await?;
@@ -430,6 +511,19 @@ pub async fn history(
         .filter(|ack| ack.status == "pending")
         .count() as u32;
     let mut messages: Vec<MessageResponse> = rows.into_iter().map(Into::into).collect();
+    let mut receipts: Vec<_> = messages
+        .iter_mut()
+        .flat_map(|m| m.activities.iter_mut())
+        .filter_map(|a| a.machine.as_mut())
+        .collect();
+    if let Some(turn) = conversation.active_turn.as_mut() {
+        receipts.extend(
+            turn.activities
+                .iter_mut()
+                .filter_map(|a| a.machine.as_mut()),
+        );
+    }
+    Box::pin(resolve_machine_names(&state.db, &user_id, receipts)).await?;
     let mut attachments: Vec<_> = messages
         .iter_mut()
         .flat_map(|m| m.attachments.iter_mut())
@@ -610,6 +704,13 @@ pub async fn rename(
         .with_agent(agent_id.as_deref(), &agents)
         .with_chat(&chats);
     dto.pending_acknowledgements = count;
+    let receipts = dto
+        .active_turn
+        .iter_mut()
+        .flat_map(|t| t.activities.iter_mut())
+        .filter_map(|a| a.machine.as_mut())
+        .collect();
+    Box::pin(resolve_machine_names(&state.db, &user_id, receipts)).await?;
     Ok(Json(dto))
 }
 pub async fn stop(

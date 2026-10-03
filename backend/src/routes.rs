@@ -1974,6 +1974,11 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         ),
     ));
     let assistant_routes = Router::new()
+        .route(
+            "/nyxagent/conversations/{id}/machine-preview-policy",
+            get(handlers::machine_activity::get_preview_policy)
+                .put(handlers::machine_activity::preview_policy),
+        )
         .route("/nyxagent/drafts", post(handlers::assistant_uploads::draft))
         .route(
             "/nyxagent/conversations/{id}/attachments",
@@ -2149,6 +2154,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
 
     // Routes that BLOCK service account tokens (human-only endpoints)
     let api_v1_human_only = Router::new()
+        .route(
+            "/machines/{node_id}/activity",
+            get(handlers::machine_activity::list),
+        )
         .route(
             "/machines/updater-image",
             get(handlers::machine_update::updater_image),
