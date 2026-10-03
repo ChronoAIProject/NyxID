@@ -2136,6 +2136,7 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
             60,
         ),
         broker_policy: Arc::new(std::sync::RwLock::new(BrokerPolicy::from_config(&config))),
+        upload_retention: Default::default(),
         // Production default from backend/src/main.rs — 5 claims per
         // 60s per IP; mirror here so claim-rate-limit tests see the
         // same shape.

@@ -61,6 +61,7 @@ impl From<crate::models::assistant_conversation::TurnActivity> for ActivityRespo
 }
 #[derive(Serialize)]
 pub struct AttachmentResponse {
+    expired: bool,
     image_input: Option<String>,
     origin: String,
     pages: Option<usize>,
@@ -72,6 +73,7 @@ pub struct AttachmentResponse {
 impl From<crate::models::assistant_conversation::TurnAttachment> for AttachmentResponse {
     fn from(row: crate::models::assistant_conversation::TurnAttachment) -> Self {
         Self {
+            expired: false,
             image_input: row.image_input,
             origin: row.origin,
             pages: row.pages,
@@ -82,6 +84,23 @@ impl From<crate::models::assistant_conversation::TurnAttachment> for AttachmentR
         }
     }
 }
+/// The page already authorized these attachments through its conversation/group.
+pub(crate) async fn mark_expired_attachments(
+    db: &mongodb::Database,
+    user: &str,
+    attachments: Vec<&mut AttachmentResponse>,
+) -> AppResult<()> {
+    let ids = attachments.iter().map(|a| a.id.clone()).collect::<Vec<_>>();
+    let expired = Box::pin(crate::services::assistant_upload_retention::expired_ids(
+        db, user, &ids,
+    ))
+    .await?;
+    for attachment in attachments {
+        attachment.expired = expired.contains(&attachment.id);
+    }
+    Ok(())
+}
+
 #[derive(Serialize)]
 pub struct ActiveTurnResponse {
     continuations: u32,
@@ -408,12 +427,21 @@ pub async fn history(
         .iter()
         .filter(|ack| ack.status == "pending")
         .count() as u32;
+    let mut messages: Vec<MessageResponse> = rows.into_iter().map(Into::into).collect();
+    let mut attachments: Vec<_> = messages
+        .iter_mut()
+        .flat_map(|m| m.attachments.iter_mut())
+        .collect();
+    if let Some(turn) = conversation.active_turn.as_mut() {
+        attachments.extend(turn.attachments.iter_mut());
+    }
+    Box::pin(mark_expired_attachments(&state.db, &user_id, attachments)).await?;
     Ok(Json(HistoryResponse {
         conversation,
         acknowledgements: acknowledgements.into_iter().map(Into::into).collect(),
         approvals: approvals.into_iter().map(Into::into).collect(),
         waiting,
-        messages: rows.into_iter().map(Into::into).collect(),
+        messages,
         before_seq,
     }))
 }
@@ -441,7 +469,7 @@ pub async fn attachment(
     let headers = response.headers_mut();
     for (name, value) in [
         ("content-type", content_type.as_str()),
-        ("cache-control", "private, max-age=3600"),
+        ("cache-control", "private, no-store"),
         ("x-content-type-options", "nosniff"),
         ("content-disposition", "inline"),
         ("content-security-policy", "default-src 'none'; sandbox"),
@@ -1283,7 +1311,7 @@ async fn execute_turn(
     } else {
         engine::base_prompt(row, agent.as_ref())
     } + &decisions;
-    let attachments = crate::services::assistant_upload_service::turn_attachments(
+    let mut attachments = crate::services::assistant_upload_service::turn_attachments(
         &state.db,
         &row.user_id,
         &row.id,
@@ -1291,7 +1319,21 @@ async fn execute_turn(
     )
     .await
     .map_err(|_| TurnError::new("assistant_unavailable"))?;
+    let expired = Box::pin(crate::services::assistant_upload_retention::expired_ids(
+        &state.db,
+        &row.user_id,
+        &attachments.iter().map(|a| a.id.clone()).collect::<Vec<_>>(),
+    ))
+    .await
+    .map_err(|_| TurnError::new("assistant_unavailable"))?;
     let mut listing = crate::services::assistant_upload_service::listing(&attachments);
+    if !expired.is_empty() {
+        listing.push_str(&format!(
+            "\nAttachments expired per retention policy; ask the owner to upload them again: {}",
+            serde_json::json!(expired)
+        ));
+        attachments.retain(|a| !expired.contains(&a.id));
+    }
     let capabilities = if attachments
         .iter()
         .any(|a| a.origin == "user_upload" && a.content_type.starts_with("image/"))

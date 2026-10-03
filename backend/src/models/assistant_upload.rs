@@ -22,6 +22,9 @@ pub struct AssistantUpload {
     pub text_encrypted: Vec<u8>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
-    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
-    pub expires_at: DateTime<Utc>,
+    // Legacy retention timestamp, used only to recover the original binding time.
+    #[serde(default, with = "super::bson_datetime::optional")]
+    pub expires_at: Option<DateTime<Utc>>,
+    #[serde(default, with = "super::bson_datetime::optional")]
+    pub bound_at: Option<DateTime<Utc>>,
 }

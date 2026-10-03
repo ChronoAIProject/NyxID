@@ -1,3 +1,4 @@
+import { ApiError } from "@/lib/api-client";
 import { useState } from "react";
 import { Download, FileText } from "lucide-react";
 import { assistantHttp } from "@/lib/assistant/assistant-http";
@@ -11,6 +12,7 @@ export function DocumentAttachment({
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(false);
+  const [expired, setExpired] = useState(false);
   async function download() {
     if (busy) return;
     setBusy(true);
@@ -24,8 +26,9 @@ export function DocumentAttachment({
       link.rel = "noopener noreferrer";
       link.click();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
-    } catch {
+    } catch (error) {
       setError(true);
+      setExpired(error instanceof ApiError && error.errorCode === 12101);
     } finally {
       setBusy(false);
     }
@@ -47,7 +50,7 @@ export function DocumentAttachment({
       </button>
       {error && (
         <p role="status" className="text-xs text-muted-foreground">
-          Attachment unavailable or expired. Upload it again.
+          {expired ? "Attachment expired per retention policy. Upload it again to continue." : "Attachment unavailable or expired. Upload it again."}
         </p>
       )}
     </div>

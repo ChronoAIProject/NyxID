@@ -1034,6 +1034,12 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             post(handlers::admin::run_chain_verification),
         )
         .route(
+            "/settings/upload-retention",
+            get(handlers::admin_upload_retention::get)
+                .put(handlers::admin_upload_retention::put)
+                .delete(handlers::admin_upload_retention::reset),
+        )
+        .route(
             "/settings/broker",
             get(handlers::admin::get_broker_settings)
                 .patch(handlers::admin::update_broker_settings),

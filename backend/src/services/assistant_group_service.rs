@@ -275,6 +275,10 @@ pub async fn delete(db: &Database, owner: &str, id: &str) -> AppResult<()> {
         .delete_many(doc! {"group_id": id, "user_id": owner})
         .session(&mut session)
         .await?;
+    db.collection::<bson::Document>(crate::models::assistant_upload_retention::TOMBSTONES)
+        .delete_many(doc! {"group_id": id, "user_id": owner})
+        .session(&mut session)
+        .await?;
     db.collection::<GroupMessage>(MESSAGES)
         .delete_many(doc! {"group_id": id, "user_id": owner})
         .session(&mut session)

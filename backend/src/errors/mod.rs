@@ -111,6 +111,9 @@ pub enum AppError {
     #[error("A turn is already active in this conversation")]
     AssistantTurnActive,
 
+    #[error("Attachment expired per retention policy. Upload it again to continue.")]
+    AssistantAttachmentExpired,
+
     #[error("Grant cascade confirmation required")]
     GrantCascadeConfirmationRequired(Box<GrantCascadePayload>),
 
@@ -724,6 +727,7 @@ impl AppError {
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::Conflict(_) | Self::GrantCascadeConfirmationRequired(_) => StatusCode::CONFLICT,
             Self::AssistantTurnActive => StatusCode::CONFLICT,
+            Self::AssistantAttachmentExpired => StatusCode::GONE,
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::MfaRequired { .. } => StatusCode::FORBIDDEN,
             Self::PkceVerificationFailed
@@ -933,6 +937,7 @@ impl AppError {
             Self::NotFound(_) => 1003,
             Self::Conflict(_) => 1004,
             Self::AssistantTurnActive => 12100,
+            Self::AssistantAttachmentExpired => 12101,
             Self::RateLimited => 1005,
             Self::Internal(_) | Self::PoolAttemptTransport(_) => 1006,
             Self::DatabaseError(_) => 1007,
@@ -1182,6 +1187,7 @@ impl AppError {
             Self::NotFound(_) => "not_found",
             Self::Conflict(_) => "conflict",
             Self::AssistantTurnActive => "turn_active",
+            Self::AssistantAttachmentExpired => "attachment_expired",
             Self::GrantCascadeConfirmationRequired(_) => "grant_cascade_confirmation_required",
             Self::RateLimited => "rate_limited",
             Self::Internal(_) | Self::PoolAttemptTransport(_) => "internal_error",

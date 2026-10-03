@@ -134,6 +134,32 @@ pub async fn append_chained_entry(
         .unwrap_or_else(|| mongodb::error::Error::custom("audit chain append exhausted retries")))
 }
 
+/// Append alongside a policy mutation. The caller retries the enclosing
+/// transaction on conflicts; an audit failure must abort the mutation too.
+pub async fn append_chained_entry_in_session(
+    db: &mongodb::Database,
+    session: &mut mongodb::ClientSession,
+    mut entry: AuditLog,
+    key: &[u8],
+) -> AppResult<()> {
+    let collection = db.collection::<AuditLog>(AUDIT_LOG);
+    let tail = collection
+        .find_one(doc! {"seq": {"$exists": true}})
+        .sort(doc! {"seq": -1})
+        .session(&mut *session)
+        .await?;
+    let (seq, hash) = match tail {
+        Some(tail) => (
+            tail.seq.unwrap_or(0) + 1,
+            tail.entry_hash.unwrap_or_default(),
+        ),
+        None => (1, GENESIS_PREV_HASH.to_owned()),
+    };
+    prepare_chained_entry(&mut entry, seq, hash, key)?;
+    collection.insert_one(entry).session(&mut *session).await?;
+    Ok(())
+}
+
 /// Chain position is assigned on append; every other field belongs to the caller's identity.
 pub fn immutable_entry_matches(left: &AuditLog, right: &AuditLog) -> bool {
     left.id == right.id
