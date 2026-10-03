@@ -484,6 +484,7 @@ fn live_turn_expires_at_the_exact_ttl_boundary() {
 
 fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
     AssistantConversation {
+        machine_previews: false,
         title_source: Default::default(),
         automation_thread: false,
         agent_owner_id: None,

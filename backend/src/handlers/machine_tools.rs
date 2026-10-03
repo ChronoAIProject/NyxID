@@ -1,5 +1,6 @@
 //! Native machine MCP adapter. No token, credential, output, or path is audited.
 use crate::services::assistant_links::AssistantPage;
+use crate::services::machine_activity_service as receipts;
 use crate::{
     AppState,
     errors::{AppError, AppResult},
@@ -363,6 +364,9 @@ pub async fn call(
         arguments["value"] = json!(value.as_str());
         arguments["allowed_origins"] = json!(login.allowed_origins);
     }
+    let mut receipt = receipts::receipt(chat, &node.id, operation, &arguments);
+    receipt.preview_enabled = receipts::preview_enabled(&state.db, chat).await?;
+    receipts::record(&state.db, chat, &receipt).await?;
     let started = std::time::Instant::now();
     let result = match operation {
         Operation::SaveAttachment => save_attachment(state, chat, &node, &arguments).await,
@@ -390,6 +394,15 @@ pub async fn call(
     let mut result = match result {
         Ok(result) => result,
         Err(error) => {
+            receipt.status = if error.error_code() == 12418 {
+                "cancelled"
+            } else {
+                "error"
+            }
+            .into();
+            receipt.error_code = Some(error.error_code());
+            receipt.duration_ms = Some(started.elapsed().as_millis() as u64);
+            let _ = receipts::record(&state.db, chat, &receipt).await;
             audit_service::log_async(
                 state.db.clone(),
                 Some(chat.user_id.clone()),
@@ -397,6 +410,11 @@ pub async fn call(
                 Some(json!({
                     "node_id":node.id,
                     "operation":operation,
+                    "operation_id":receipt.operation_id,
+                    "activity_id":receipts::activity_id(),
+                    "agent_id":chat.agent_id,
+                    "action":receipt.action,
+                    "job_id":receipt.job_id,
                     "conversation_id":chat.conversation_id,
                     "agent_role":chat.role,
                     "services":declared_services.iter().map(|row|row.slug.as_str()).collect::<Vec<_>>(),
@@ -414,7 +432,7 @@ pub async fn call(
         }
     };
     if matches!(operation, Operation::Computer | Operation::Browser) {
-        attach_computer_images(state, chat, &mut result).await?;
+        receipt.screenshot_id = attach_computer_images(state, chat, &mut result).await?;
     }
     if let Some(login) = login {
         if result["status"] == "filled" {
@@ -455,6 +473,35 @@ pub async fn call(
             None,
         );
     }
+    receipt.status = receipts::outcome(&result, operation).into();
+    receipt.exit_code = result["exit_code"].as_i64();
+    receipt.bytes = receipts::transferred_bytes(operation, &arguments, &result);
+    receipt.duration_ms = Some(started.elapsed().as_millis() as u64);
+    receipt.error_code = result["error"]["code"]
+        .as_u64()
+        .and_then(|n| u32::try_from(n).ok());
+    if let (Some(job_id), Some(exit_code)) = (&receipt.job_id, receipt.exit_code) {
+        // Additional outcome metadata; do not resurrect a cancelled job.
+        let _ = state.db.collection::<mongodb::bson::Document>(crate::models::machine_job::COLLECTION_NAME)
+            .update_one(mongodb::bson::doc!{"_id":job_id,"user_id":&chat.user_id,"conversation_id":&chat.conversation_id,"state":{"$ne":"cancelled"}},
+                mongodb::bson::doc!{"$set":{"exit_code":exit_code}}).await;
+    }
+    if operation == Operation::JobCancel
+        && receipt.status == "cancelled"
+        && let Some(job_id) = &receipt.job_id
+    {
+        // Presentation only: the existing job lifecycle remains authoritative.
+        let _ = state.db.collection::<mongodb::bson::Document>(crate::models::machine_job::COLLECTION_NAME)
+            .update_one(mongodb::bson::doc!{"_id":job_id,"user_id":&chat.user_id,"conversation_id":&chat.conversation_id},
+                mongodb::bson::doc!{"$set":{"receipt_cancelled":true}}).await;
+    }
+    if receipts::record(&state.db, chat, &receipt).await.is_err()
+        || receipts::store_preview(state, chat, &mut receipt, &result)
+            .await
+            .is_err()
+    {
+        tracing::warn!("Machine receipt preview could not be retained");
+    }
     audit_service::log_async(
         state.db.clone(),
         Some(chat.user_id.clone()),
@@ -462,14 +509,15 @@ pub async fn call(
         Some(json!({
             "node_id":node.id,
             "operation":operation,
+            "operation_id":receipt.operation_id,
+            "activity_id":receipts::activity_id(),
+            "agent_id":chat.agent_id,
+            "action":receipt.action,
+            "job_id":receipt.job_id,
             "conversation_id":chat.conversation_id,
             "agent_role":chat.role,
             "services":declared_services.iter().map(|row|row.slug.as_str()).collect::<Vec<_>>(),
-            "outcome":if result.get("error").is_some(){
-                "refused"
-            }else{
-                "completed"
-            },
+            "outcome":receipt.status,
             "exit_code":result["exit_code"].as_i64(),
             "duration_ms":started.elapsed().as_millis() as u64,
             "bytes":result.to_string().len(),
@@ -548,7 +596,8 @@ async fn attach_computer_images(
     state: &AppState,
     chat: &ChatAuthority,
     result: &mut Value,
-) -> AppResult<()> {
+) -> AppResult<Option<String>> {
+    let mut screenshot_id = None;
     if let Some(content) = result["content"].as_array_mut() {
         for item in content {
             if item["type"] != "image" {
@@ -578,6 +627,7 @@ async fn attach_computer_images(
                 &media.bytes,
             )
             .await?;
+            screenshot_id = attached.as_ref().map(|meta| meta.id.clone());
             *item = json!({
                 "type":"text",
                 "text":if attached.is_some(){
@@ -588,7 +638,7 @@ async fn attach_computer_images(
             });
         }
     }
-    Ok(())
+    Ok(screenshot_id)
 }
 
 async fn save_attachment(
