@@ -121,6 +121,10 @@ pub struct ToolProgress {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
+    #[serde(default)]
+    pub initiating_message_seq: Option<i64>,
+    #[serde(default)]
+    pub voice_request_id: Option<String>,
     /// Nodes admitted by this turn; Stop uses the durable list across replicas.
     #[serde(default)]
     pub machine_node_ids: Vec<String>,

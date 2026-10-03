@@ -157,3 +157,4 @@ pub mod agent_skills;
 pub mod assistant_uploads;
 
 mod assistant_titles;
+pub mod assistant_voice;

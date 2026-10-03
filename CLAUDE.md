@@ -54,6 +54,8 @@ Strict separation: `handlers/` -> `services/` -> `models/`
 - 12300 `WorkspaceDestinationsNotActivated` (HTTP 503): incomplete automatic Drive/Workspace editor reconciliation; excluded from proxy-fault telemetry
 - 12400-12418 machine nodes: 12400 `MachineCapabilityDisabled`, 12401 `MachineNotAllowed`, 12402 `MachinePathOutsideRoots`, 12403 `MachineJobNotFound`, 12404 `MachineConfirmationPending`, 12405 `MachineConfirmationDeclined`, 12406 `MachineComputerUnavailable`, 12407 `MachineLimitExceeded`, 12408 `MachineOwnerInControl`, 12409 `MachineNotIsolated`, 12410 `MachineLoginNotFound`, 12411 `MachineLoginOriginMismatch`, 12412 `MachineLoginWrongField`, 12413 `MachineBrowserUnavailable`, 12414 `MachineDriverRestarting`, 12415 `MachineComputerPermissionMissing`, 12416 `MachineComputerToolUnsupported`, 12417 `MachineDisplayUnavailable`, 12418 `MachineTurnStopped`.
 
+- 12500-12501 assistant voice: 12500 `VoiceQueueFull` (HTTP 429), 12501 `VoiceProviderUnavailable` (HTTP 503).
+
 ### 4. Frontend Patterns
 
 - Zod schemas in `schemas/` (one per domain); React Hook Form + `@hookform/resolvers`

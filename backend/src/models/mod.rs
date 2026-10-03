@@ -149,3 +149,5 @@ pub mod trigger_schedule;
 
 pub mod assistant_upload;
 pub mod assistant_upload_retention;
+
+pub mod assistant_voice;

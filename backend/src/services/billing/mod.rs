@@ -1448,6 +1448,7 @@ mod tests {
                         cache_read_tokens: 0,
                         cache_write_tokens: 0,
                         images: 0,
+                        voice_seconds: 0,
                         requests: 5,
                         bytes: 100,
                         tokens: 7,
@@ -2085,3 +2086,5 @@ mod exact_tests;
 
 #[cfg(test)]
 mod legacy_v1_fixture;
+
+pub mod voice;

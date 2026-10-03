@@ -1537,3 +1537,105 @@ async fn org_agent_rotation_preserves_binding_and_live_revocation() {
     );
     f.state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn voice_confirmation_refuses_revoked_org_access_without_a_continuation() {
+    Box::pin(async {
+        use super::assistant_voice as voice;
+        let f = Fixture::new("voice_confirmation_org_revoked").await;
+        let (agent, _) = f.create().await;
+        let db = &f.state.db;
+        voice::ensure_indexes(db).await.unwrap();
+        flags::set_platform_override(
+            db,
+            flags::ASSISTANT_VOICE_FLAG_KEY,
+            &flags::FlagTarget::Global,
+            true,
+            &f.admin,
+        )
+        .await
+        .unwrap();
+        let thread = team::home_thread_for(db, &f.state.encryption_keys, &f.member, &agent)
+            .await
+            .unwrap();
+        let request = voice::enqueue(
+            db,
+            &f.member,
+            &thread.id,
+            &Uuid::new_v4().to_string(),
+            "org-action",
+            "Delete the selected object",
+        )
+        .await
+        .unwrap();
+        let active = Box::pin(engine::begin_turn_with_voice(
+            db,
+            &f.member,
+            &engine::TurnRequest {
+                conversation_id: Some(thread.id.clone()),
+                text: "Delete the selected object".into(),
+                attachment_ids: Vec::new(),
+                agent_id: None,
+                model: None,
+                access_mode: None,
+            },
+            &f.state.encryption_keys,
+            Some(&request.id),
+        ))
+        .await
+        .unwrap();
+        let chat = acks::for_key(db, &f.member, Some(&active.credential_api_key_id))
+            .await
+            .unwrap()
+            .unwrap();
+        let card = Box::pin(acks::request(
+            db,
+            &chat,
+            acks::Request {
+                kind: "action",
+                service: None,
+                tool: Some("test_action"),
+                arguments: Some(&serde_json::json!({"id":"x"})),
+                summary: "Delete the selected object",
+                platform: false,
+            },
+        ))
+        .await
+        .unwrap();
+        assert_eq!(card.voice_request_id.as_deref(), Some(request.id.as_str()));
+        f.revoke(&f.member).await;
+        // Exercise the transaction directly, beyond the HTTP/preflight org check.
+        assert!(
+            Box::pin(acks::decide_as(
+                db,
+                &f.member,
+                Some(&thread.id),
+                &card.id,
+                true,
+                acks::Decider::User,
+                None,
+            ))
+            .await
+            .is_err()
+        );
+        let unchanged = db
+            .collection::<crate::models::assistant_acknowledgement::AssistantAcknowledgement>(
+                crate::models::assistant_acknowledgement::COLLECTION_NAME,
+            )
+            .find_one(doc! {"_id":&card.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.status, "pending");
+        assert!(unchanged.continuation_receipt_id.is_none());
+        assert_eq!(
+            db.collection::<bson::Document>(crate::models::assistant_voice::REQUESTS)
+                .count_documents(doc! {"acknowledgement_id":&card.id})
+                .await
+                .unwrap(),
+            0
+        );
+        db.drop().await.unwrap();
+    })
+    .await;
+}

@@ -13,6 +13,7 @@ pub enum BillingMetric {
     CacheReadTokens,
     CacheWriteTokens,
     Images,
+    VoiceSeconds,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
@@ -73,7 +74,7 @@ fn deserialize_components<'de, D: serde::Deserializer<'de>>(
 
 impl BillingMetric {
     /// Stable names enter ledger canonical encoding. Never rename existing units.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Tokens,
         Self::Requests,
         Self::Bytes,
@@ -82,6 +83,7 @@ impl BillingMetric {
         Self::CacheReadTokens,
         Self::CacheWriteTokens,
         Self::Images,
+        Self::VoiceSeconds,
     ];
 
     fn metadata(self) -> (&'static str, &'static str, bool) {
@@ -94,6 +96,7 @@ impl BillingMetric {
             Self::CacheReadTokens => ("cache_read_tokens", "Cache-read tokens", true),
             Self::CacheWriteTokens => ("cache_write_tokens", "Cache-write tokens", true),
             Self::Images => ("images", "Images", false),
+            Self::VoiceSeconds => ("voice_seconds", "Voice seconds", false),
         }
     }
     pub fn as_str(self) -> &'static str {
@@ -242,6 +245,8 @@ pub struct PlatformUsage {
     pub cache_write_tokens: i64,
     #[serde(default)]
     pub images: i64,
+    #[serde(default)]
+    pub voice_seconds: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_breakdown: Option<TokenBreakdown>,
 }
@@ -288,6 +293,23 @@ pub struct ResaleSpec {
 #[cfg(test)]
 mod tests {
     use super::{BillingMetric, ServiceBilling};
+
+    #[test]
+    fn voice_duration_is_explicit_and_legacy_usage_defaults_to_zero() {
+        assert_eq!(BillingMetric::VoiceSeconds.as_str(), "voice_seconds");
+        assert!(!BillingMetric::VoiceSeconds.is_token_family());
+        assert!(!BillingMetric::VoiceSeconds.is_legacy());
+        let usage: super::PlatformUsage =
+            serde_json::from_value(serde_json::json!({"requests":1,"bytes":8000})).unwrap();
+        assert_eq!(usage.voice_seconds, 0);
+        for metric in BillingMetric::ALL {
+            assert_eq!(
+                serde_json::from_value::<BillingMetric>(serde_json::json!(metric.as_str()))
+                    .unwrap(),
+                metric
+            );
+        }
+    }
 
     #[test]
     fn credential_charge_restriction_defaults_off_and_round_trips() {
