@@ -563,6 +563,7 @@ mod tests {
             group_id: None,
             turn_id: None,
             messages: 1,
+            title_changed: false,
         };
         live.route(&queue, personal.clone());
         assert_eq!(
