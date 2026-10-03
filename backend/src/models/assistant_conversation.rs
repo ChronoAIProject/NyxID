@@ -167,12 +167,24 @@ pub struct ActiveTurn {
     pub also_deliver: Vec<ChannelOrigin>,
 }
 
+/// Absent on old rows: their existing title is final until the owner renames it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TitleSource {
+    Provisional,
+    Generated,
+    #[default]
+    User,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantConversation {
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,
     pub title: String,
+    #[serde(default)]
+    pub title_source: TitleSource,
     pub model: String,
     #[serde(default)]
     pub access_mode: AccessMode,

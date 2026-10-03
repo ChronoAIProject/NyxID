@@ -395,7 +395,12 @@ async fn create_thread_with_kind(
     let mut row = AssistantConversation {
         id: format!("nyxa-{}", Uuid::new_v4().simple()),
         user_id: actor.to_owned(),
-        title: title.chars().take(40).collect(),
+        title: super::assistant_title_service::provisional(title),
+        title_source: if automation_thread {
+            crate::models::assistant_conversation::TitleSource::User
+        } else {
+            crate::models::assistant_conversation::TitleSource::Provisional
+        },
         model: agent.model.clone(),
         access_mode: AccessMode::Full,
         nyxagent_session_id: None,

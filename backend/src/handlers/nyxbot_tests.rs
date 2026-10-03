@@ -1452,6 +1452,7 @@ async fn the_live_stream_pushes_only_the_owners_changes() {
     let mut body = response.into_body().into_data_stream();
     assert!(frame(&mut body).await.contains("event: ready"));
     state.assistant_live.publish(LiveEvent::Conversation {
+        title_changed: false,
         id: "nyxa-other".into(),
         user_id: "someone-else".into(),
         group_id: None,
@@ -1459,6 +1460,7 @@ async fn the_live_stream_pushes_only_the_owners_changes() {
         messages: 1,
     });
     state.assistant_live.publish(LiveEvent::Conversation {
+        title_changed: false,
         id: "nyxa-mine".into(),
         user_id: OWNER.into(),
         group_id: Some("nyxg-1".into()),

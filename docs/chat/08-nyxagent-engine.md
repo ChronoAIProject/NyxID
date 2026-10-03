@@ -828,3 +828,78 @@ never launches another browser. A 12416 unsupported computer call includes the
 bounded advertised `computer_tools`; use `nyx__machine_browser` snapshot for page
 content, or dev screenshot for an owner attachment. Machine discovery shares
 service-tool word matching, including full-match-first ranking.
+
+## Thread titles
+
+New owner threads have `title_source: provisional`. Their first owner message
+supplies an immediate title: first nonempty line, collapsed whitespace, at most
+60 Unicode characters, cut at a word boundary where possible. Existing rows
+without `title_source` deserialize as `user` and are never automatically renamed.
+Guest/channel threads, automation threads and hidden group-member threads keep
+their existing naming. User renames set `title_source: user`, remain allowed
+during a turn, and always win over a late generated title. The conditional write
+matches only `provisional`; settlement preserves concurrent metadata changes.
+
+**Model-route decision (U1 review):** do not use NyxAgent for titles.
+Its `POST /v1/responses` `store:false` controls persistence only; it still runs
+an agent with the thread key's MCP authority. `Request` rejects unknown fields
+and has no `tools` switch. A prompt forbidding tools cannot isolate that run,
+especially when the first reply quotes untrusted web or tool content.
+
+`services/assistant_oneshot_inference.rs::one_shot_text` instead calls a provider
+text endpoint directly. Its typed input/limits interface accepts no tool schema,
+agent key, session or arbitrary provider JSON. Requests omit both `tools` and
+`tool_choice`, use `stream:false`, and bound output tokens. Only OpenAI Responses
+sends `store:false`; Chat Completions and Anthropic Messages omit it for provider
+compatibility. Without a tools array, providers reject `tool_choice`. Compatible
+Chat Completions providers can also reject `store` as an unknown field.
+The helper rejects tool calls and non-text content; it never executes them.
+Responses reasoning metadata is ignored, retaining only the text answer. The
+three catalog `inference.wire_protocol` values are supported: Responses, Chat
+Completions and Anthropic Messages. Redirects are disabled and responses are
+capped at 64 KiB.
+
+Discovery considers at most 32 active inference services with model-list support,
+prioritizing available platform routes. Credential selection uses the same
+`resolve_proxy_target_from_user_service`, legacy resolver/viewer guard and
+provider delegation helpers as the LLM gateway: an explicit personal
+`credential_binding` wins, platform grants are checked before decryption, and
+org BYOK is reachable only through the acting person's live role and service
+scope. No credential is provisioned and `llm-nyx` is excluded. Model discovery
+uses the resolved service's `models` endpoint (3-second bound), prefers advertised
+nano/mini/haiku/flash/small/fast models, excludes non-text families and falls back
+to another advertised text model. This small-model preference is a heuristic,
+not a policy decision. There is no hardcoded vendor model fallback. A bounded
+in-process cache holds only the chosen model ID for each (service ID, credential
+class), for 10 minutes and at most 128 entries, evicting the oldest selection.
+Cache hits skip model discovery and its metering; they still resolve credentials,
+ACLs and grants afresh. No credentials or authority are cached. Inference 4xx
+responses (including 404) invalidate that model choice for the next call; 5xx
+and transport errors leave it until expiry. No available route/models, provider
+refusal or timeout leaves the provisional title. There is no retry of a
+dispatched inference request.
+
+Both model discovery and inference use the existing billing admission and
+settlement path and `BillingOwnerResolver::resolve_for_execution`. This metadata
+task bills the acting person, including platform use and authorized org BYOK;
+it never charges an agent or an org wallet. Org-agent titles retain the B3a
+actor checks both before inference and before the conditional title update.
+Provider processing policies still apply. This internal helper is also suitable
+for bounded text classification; callers must independently authorize the task.
+
+After the first successful owner exchange settles, start title generation in a
+detached task. A replica permits at most four concurrent requests, with no queue
+or retries and a 20-second overall deadline (15 seconds for inference, including
+discovery, and 128 output tokens for titles). This never holds the turn permit or
+delays settlement. Supply only bounded text excerpts of the first user/reply
+pair (2,000 characters each), marked as untrusted data, with instructions to
+produce a 3–6 word title in the user's language. Tool isolation comes from the
+provider request contract, not these instructions. Send no images, attachments or session binding.
+Sanitize and bound output to 60 characters and render it as text. Never log
+excerpts or titles; errors are silently best effort and the credential cannot be
+reflected into the title; reflected resolved provider credentials are rejected.
+Cancellation retains metering cleanup, including a usage estimate for dispatched
+requests that never yield a response. The existing identifier-only conversation change
+stream refreshes titles in the sidebar and active thread without a reload.
+Sidebar Rename is an inline editor with optimistic metadata updates and rollback
+on failure; it does not interrupt a running turn.

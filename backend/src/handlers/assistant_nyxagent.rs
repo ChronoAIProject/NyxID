@@ -134,6 +134,7 @@ pub struct ChannelOriginResponse {
 pub struct ConversationResponse {
     id: String,
     title: String,
+    title_source: crate::models::assistant_conversation::TitleSource,
     model: String,
     /// Always `full`: the Ask/Full choice was retired. Kept for older clients.
     access_mode: crate::models::assistant_conversation::AccessMode,
@@ -207,6 +208,7 @@ impl From<AssistantConversation> for ConversationResponse {
         Self {
             id: row.id,
             title: row.title,
+            title_source: row.title_source,
             model: row.model,
             access_mode: crate::models::assistant_conversation::AccessMode::Full,
             created_at: row.created_at,
@@ -1009,11 +1011,11 @@ pub async fn live(State(state): State<AppState>, auth: AuthUser) -> AppResult<Re
                 _ = open.wait_for(|open| !*open) => break,
             };
             let (name, data) = match event {
-                Ok(LiveEvent::Conversation { id, user_id: owner, group_id, turn_id, messages })
+                Ok(LiveEvent::Conversation { id, user_id: owner, group_id, turn_id, messages, title_changed })
                     if owner == user_id =>
                 {
                     ("conversation", json!({"type": "conversation", "id": id,
-                        "group_id": group_id, "turn_id": turn_id, "messages": messages}))
+                        "group_id": group_id, "turn_id": turn_id, "messages": messages, "title_changed": title_changed}))
                 }
                 Ok(LiveEvent::OrgGroup { id, user_id: owner }) if owner == user_id => {
                     // The channel routes candidates; authority is live again at delivery,
@@ -1137,6 +1139,12 @@ async fn run_turn(
     )
     .await;
     if let Some(error) = settled {
+        if error.is_none()
+            && row.message_count == 1
+            && crate::services::assistant_title_service::eligible(&row)
+        {
+            super::assistant_titles::spawn(state.clone(), auth.clone(), row.id.clone());
+        }
         // Team wake-ups and channel deliveries follow a durable settlement only.
         super::assistant_team::after_turn_boxed(
             state.clone(),

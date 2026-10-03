@@ -214,7 +214,7 @@ export function NewAgentDialog({
         if (!open && !create.isPending) onClose();
       }}
     >
-      <DialogContent scrollMode="body" className="z-[90] md:max-w-lg">
+      <DialogContent scrollMode="body" className="md:max-w-lg">
         <DialogHeader className="shrink-0 pr-6">
           <DialogTitle>New agent</DialogTitle>
           <DialogDescription>

@@ -685,7 +685,8 @@ describe("ChatComposer measured layout", () => {
         "Every agent action is brokered, scoped, and audit-logged by NyxID.",
       ),
     ).not.toBeInTheDocument();
-    expect(composer).toHaveClass("ml-[30px]", "flex", "items-start");
+    expect(composer).toHaveClass("flex", "items-start");
+    expect(composer.closest("[data-composer-input]")).toHaveClass("ml-[30px]");
     expect(button).toHaveClass("h-8");
     expect(textarea).toHaveClass("min-h-8", "px-0");
   });

@@ -1136,10 +1136,17 @@ pub async fn begin_turn(
                             .then(|| new_agent.user_id.clone()),
                         id: id.clone(),
                         user_id: user_id.into(),
-                        title: start
-                            .title
-                            .clone()
-                            .unwrap_or_else(|| start.text.trim().chars().take(40).collect()),
+                        title: start.title.clone().unwrap_or_else(|| {
+                            super::assistant_title_service::provisional(&start.text)
+                        }),
+                        title_source: if start.title.is_some()
+                            || start.guest
+                            || start.channel.is_some()
+                        {
+                            crate::models::assistant_conversation::TitleSource::User
+                        } else {
+                            crate::models::assistant_conversation::TitleSource::Provisional
+                        },
                         model: start.model.clone().unwrap_or_else(|| DEFAULT_MODEL.into()),
                         access_mode: AccessMode::Full,
                         nyxagent_session_id: None,
@@ -1169,6 +1176,14 @@ pub async fn begin_turn(
                         guest_turn: false,
                     }
                 };
+                if row.message_count == 0
+                    && super::assistant_title_service::eligible(&row)
+                    && start.origin == TurnOrigin::User
+                    && !start.guest
+                    && start.channel.is_none()
+                {
+                    row.title = super::assistant_title_service::provisional(&start.text);
+                }
                 if start.group_request_id.is_some() {
                     row.group_request_id = start.group_request_id.clone();
                 }
@@ -2059,11 +2074,11 @@ pub async fn rename(
                     row.agent_owner_id.as_deref(),
                 )
                 .await?;
-                if live_turn(&row, Utc::now()).is_some() {
-                    return Err(AppError::AssistantTurnActive);
-                }
                 collection
-                    .find_one_and_update(filter.clone(), doc! {"$set": {"title": &title}})
+                    .find_one_and_update(
+                        filter.clone(),
+                        doc! {"$set": {"title": &title, "title_source": "user"}},
+                    )
                     .return_document(ReturnDocument::After)
                     .session(&mut *session)
                     .await?
