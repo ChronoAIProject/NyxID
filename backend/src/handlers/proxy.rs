@@ -3257,7 +3257,9 @@ async fn execute_proxy_inner(
 
 // Construct the boxed future outside the caller's poll frame: Box::pin at
 // the await site still reserves stack space for the unboxed temporary.
-type ProxyExecutionResolution = (ResolvedProxyExecution, Vec<(String, String)>);
+/// Boxed so callers do not embed the resolution state machine in their frames.
+type ResolvedProxyExecutionFuture<'a> =
+    futures::future::BoxFuture<'a, AppResult<(ResolvedProxyExecution, Vec<(String, String)>)>>;
 
 #[allow(clippy::too_many_arguments)]
 fn resolve_proxy_execution<'a>(
@@ -3269,7 +3271,7 @@ fn resolve_proxy_execution<'a>(
     pre_resolved: Option<PreResolved>,
     target_mode: TargetMode,
     extra_outbound_headers: Vec<(String, String)>,
-) -> futures::future::BoxFuture<'a, AppResult<ProxyExecutionResolution>> {
+) -> ResolvedProxyExecutionFuture<'a> {
     Box::pin(resolve_proxy_execution_inner(
         state,
         auth_user,
