@@ -2210,6 +2210,7 @@ pub async fn delete_memory(
 
 #[derive(Serialize)]
 pub struct SettingsResponse {
+    voice: Option<super::assistant_voice::Preferences>,
     max_auto_continuations: i32,
     max_auto_continuations_limit: i32,
     trigger_runs_per_day: i32,
@@ -2229,6 +2230,7 @@ pub struct SettingsResponse {
 impl From<crate::models::assistant_settings::AssistantSettings> for SettingsResponse {
     fn from(row: crate::models::assistant_settings::AssistantSettings) -> Self {
         Self {
+            voice: row.voice.map(Into::into),
             max_auto_continuations: row.max_auto_continuations,
             max_auto_continuations_limit: crate::services::assistant_continuation::HARD_MAX,
             timezone: row.timezone,
@@ -2263,6 +2265,8 @@ pub async fn get_settings(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SettingsRequest {
+    #[serde(default, deserialize_with = "super::assistant_voice::preference_patch")]
+    voice: Option<Option<super::assistant_voice::Preferences>>,
     max_auto_continuations: Option<i32>,
     trigger_runs_per_day: Option<i32>,
     trigger_runs_per_hour: Option<i32>,
@@ -2285,11 +2289,15 @@ pub async fn update_settings(
     super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
+    if body.voice.is_some() {
+        crate::services::assistant_voice::require_enabled(&state.db, &owner).await?;
+    }
     let before = settings::get(&state.db, &owner).await?;
     let after = settings::update(
         &state.db,
         &owner,
         settings::Update {
+            voice: body.voice.map(|v| v.map(Into::into)),
             max_auto_continuations: body.max_auto_continuations,
             timezone: body.timezone,
             schedule_minimum_minutes: body.schedule_minimum_minutes,
@@ -2408,6 +2416,9 @@ pub fn spawn_sweeps(state: AppState) {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
+            if super::assistant_voice::sweep(&state).await.is_err() {
+                tracing::warn!("Voice queue sweep deferred");
+            }
             // Things the owner finished outside the chat queue events first.
             if let Err(error) = super::nyxbot::process_watches(&state).await {
                 tracing::debug!(%error, "NyxBot watch sweep deferred");

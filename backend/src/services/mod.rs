@@ -255,3 +255,5 @@ pub mod org_agent_service;
 
 #[cfg(test)]
 pub(crate) mod org_agent_tests;
+
+pub mod assistant_voice;

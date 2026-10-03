@@ -9,6 +9,7 @@ export const BILLING_METRICS = [
   "cache_read_tokens",
   "cache_write_tokens",
   "images",
+  "voice_seconds",
 ] as const;
 export const BILLING_UNITS: Record<
   (typeof BILLING_METRICS)[number],
@@ -37,6 +38,7 @@ export const BILLING_UNITS: Record<
     singular: "cache-write token",
     tokenFamily: true,
   },
+  voice_seconds: { label: "voice seconds", singular: "voice second", tokenFamily: false },
   images: { label: "images", singular: "image", tokenFamily: false },
 };
 export function metricLabel(metric: string, quantity?: number): string {

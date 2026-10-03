@@ -568,6 +568,9 @@ async fn delete_user_cascade_internal(
             .await?;
     }
     // NyxBot settings are keyed by the user ID itself.
+    db.collection::<bson::Document>(crate::models::assistant_voice::REQUESTS)
+        .delete_many(doc! {"user_id": target_user_id})
+        .await?;
     db.collection::<bson::Document>(crate::models::assistant_settings::COLLECTION_NAME)
         .delete_one(doc! {"_id": target_user_id})
         .await?;

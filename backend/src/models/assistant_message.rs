@@ -5,6 +5,9 @@ pub const COLLECTION_NAME: &str = "assistant_messages";
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantMessage {
+    /// Voice input is visible in history but is not execution context until claimed.
+    #[serde(default)]
+    pub execution_pending: bool,
     #[serde(rename = "_id")]
     pub id: String,
     pub conversation_id: String,

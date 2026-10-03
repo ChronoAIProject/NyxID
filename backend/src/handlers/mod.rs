@@ -153,3 +153,5 @@ pub(crate) mod trigger_schedule_dto;
 
 pub mod agent_skills;
 pub mod assistant_uploads;
+
+pub mod assistant_voice;

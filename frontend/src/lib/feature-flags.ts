@@ -21,6 +21,7 @@ export const FEATURE_FLAG = {
   BILLING: "experimental:billing",
   AEVATAR_CHAT_WIRE_LOG: "experimental:aevatar-chat-wire-log",
   DIRECT_CHAT_ENGINE: "experimental:direct-chat-engine",
+  ASSISTANT_VOICE: "assistant:voice",
   NYXAGENT_ENGINE: "assistant:nyxagent-engine",
   ORG_AGENTS: "assistant:org-agents",
   AGENT_OPERATION_SCOPES: "assistant:operation-scopes",

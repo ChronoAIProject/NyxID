@@ -113,6 +113,7 @@ describe("feature flag catalog", () => {
     expect(FEATURE_FLAG).toEqual({
       INVITATION_CODE: "auth:invitation-code",
       AI_ASSISTANT: "experimental:ai-assistant",
+      ASSISTANT_VOICE: "assistant:voice",
       NYXAGENT_ENGINE: "assistant:nyxagent-engine",
       AGENT_OPERATION_SCOPES: "assistant:operation-scopes",
       ORG_AGENTS: "assistant:org-agents",

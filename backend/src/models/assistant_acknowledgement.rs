@@ -31,6 +31,10 @@ pub struct AssistantAcknowledgement {
     /// may ask again; the model is explicitly instructed not to retry otherwise.
     pub requested_turn_id: Option<String>,
     #[serde(default)]
+    pub voice_request_id: Option<String>,
+    #[serde(default)]
+    pub continuation_receipt_id: Option<String>,
+    #[serde(default)]
     pub trigger_run_id: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,

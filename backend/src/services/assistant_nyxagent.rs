@@ -1033,6 +1033,17 @@ pub async fn begin_turn(
     start: impl Into<TurnStart>,
     keys: &std::sync::Arc<crate::crypto::aes::EncryptionKeys>,
 ) -> AppResult<AssistantConversation> {
+    Box::pin(begin_turn_with_voice(db, user_id, start, keys, None)).await
+}
+
+pub async fn begin_turn_with_voice(
+    db: &Database,
+    user_id: &str,
+    start: impl Into<TurnStart>,
+    keys: &std::sync::Arc<crate::crypto::aes::EncryptionKeys>,
+    voice_request_id: Option<&str>,
+) -> AppResult<AssistantConversation> {
+    let voice_request_id = voice_request_id.map(str::to_owned);
     let start: TurnStart = start.into();
     let id = start
         .conversation_id
@@ -1141,6 +1152,25 @@ pub async fn begin_turn(
                     super::trigger_schedule::admit_turn(db, user_id, claim, &id, &turn_id, session)
                         .await?;
                 }
+                let voice_request = if let Some(request_id) = &voice_request_id {
+                    if start.origin != TurnOrigin::User || start.guest {
+                        return Err(AppError::Forbidden("Invalid voice turn".into()));
+                    }
+                    Some(
+                        super::assistant_voice::claim(db, &row, request_id, &start.text, session)
+                            .await?,
+                    )
+                } else {
+                    None
+                };
+                let turn_id = voice_request
+                    .as_ref()
+                    .map(|r| &r.turn_id)
+                    .unwrap_or(&turn_id);
+                let message_id = voice_request
+                    .as_ref()
+                    .map(|r| r.message_id.clone())
+                    .unwrap_or_else(|| Uuid::new_v4().to_string());
                 // Every chat now runs with Full access. Stale Ask-mode cards for
                 // service or account consent can no longer be meaningful.
                 if row.role == AgentRole::Orchestrator && row.access_mode != AccessMode::Full {
@@ -1223,6 +1253,15 @@ pub async fn begin_turn(
                     )
                     .await?;
                 let credential_id = credential.api_key_id.as_str();
+                if voice_request
+                    .as_ref()
+                    .and_then(|r| r.credential_api_key_id.as_deref())
+                    .is_some_and(|key| key != credential_id)
+                {
+                    return Err(AppError::Conflict(
+                        "Voice continuation credential changed".into(),
+                    ));
+                }
                 if start.conversation_id.is_some() && row.credential_api_key_id != credential_id {
                     row.nyxagent_session_id = None;
                     row.nyxagent_last_response_id = None;
@@ -1232,6 +1271,7 @@ pub async fn begin_turn(
                 if let Some(lost) = row.active_turn.take() {
                     row.message_count += 1;
                     let message = AssistantMessage {
+                        execution_pending: false,
                         id: Uuid::new_v4().to_string(),
                         conversation_id: id.clone(),
                         user_id: user_id.into(),
@@ -1262,7 +1302,13 @@ pub async fn begin_turn(
                     now.max(reset_at + chrono::Duration::milliseconds(1))
                 });
                 row.credential_api_key_id = credential_id.into();
+                let input_seq = voice_request
+                    .as_ref()
+                    .map(|r| r.message_seq)
+                    .unwrap_or(row.message_count + 1);
                 row.active_turn = Some(ActiveTurn {
+                    initiating_message_seq: Some(input_seq),
+                    voice_request_id: voice_request_id.clone(),
                     machine_node_ids: Vec::new(),
                     continuations: 0,
                     tool_progress: Default::default(),
@@ -1327,7 +1373,9 @@ pub async fn begin_turn(
                     _ => {}
                 }
                 row.updated_at = now;
-                row.message_count += 1;
+                if voice_request.is_none() {
+                    row.message_count += 1;
+                }
                 if start.conversation_id.is_some() {
                     collection
                         .replace_one(owner_filter(user_id, &id)?, &row)
@@ -1350,7 +1398,6 @@ pub async fn begin_turn(
                     .session(&mut *session)
                     .await?;
                 }
-                let message_id = Uuid::new_v4().to_string();
                 if start.guest && !start.attachment_ids.is_empty() {
                     return Err(AppError::Forbidden("Uploads are owner-only".into()));
                 }
@@ -1369,12 +1416,13 @@ pub async fn begin_turn(
                     session,
                     user_id,
                     &id,
-                    &turn_id,
+                    turn_id,
                     &uploads.iter().map(|a| a.id.clone()).collect::<Vec<_>>(),
                 ))
                 .await?;
                 let message = AssistantMessage {
-                    id: message_id,
+                    execution_pending: false,
+                    id: message_id.clone(),
                     conversation_id: id.clone(),
                     user_id: user_id.into(),
                     seq: row.message_count,
@@ -1397,10 +1445,20 @@ pub async fn begin_turn(
                         })
                         .flatten(),
                 };
-                db.collection::<AssistantMessage>(MESSAGES)
-                    .insert_one(message)
-                    .session(&mut *session)
-                    .await?;
+                if voice_request.is_none() {
+                    db.collection::<AssistantMessage>(MESSAGES)
+                        .insert_one(message)
+                        .session(&mut *session)
+                        .await?;
+                } else {
+                    db.collection::<bson::Document>(MESSAGES)
+                        .update_one(
+                            doc! {"_id": &message_id, "user_id": user_id, "conversation_id": &id},
+                            doc! {"$set": {"execution_pending": false}},
+                        )
+                        .session(&mut *session)
+                        .await?;
+                }
                 Ok((row, credential))
             })
             .await;
@@ -1625,6 +1683,15 @@ pub async fn finish_turn(
                     .as_ref()
                     .map(|turn| turn.also_deliver.clone())
                     .unwrap_or_default();
+                if let Some(request_id) = current.active_turn.as_ref().and_then(|t| t.voice_request_id.as_ref()) {
+                    let state = if error.is_some() { bson::Bson::String("cancelled".into()) } else {
+                        bson::Bson::Document(doc! {"$cond":[{"$gt":[{"$size":{"$ifNull":["$pending_acknowledgement_ids",[]]}},0]},"awaiting_confirmation","completed"]})
+                    };
+                    db.collection::<bson::Document>(crate::models::assistant_voice::REQUESTS)
+                        .update_one(doc! {"_id":request_id,"state":{"$in":["claimed","awaiting_confirmation"]}},
+                            vec![doc! {"$set":{"state":state}}])
+                        .session(&mut *session).await?;
+                }
                 current.active_turn = None;
                 if error.as_ref().is_some_and(|e| !e.preserves_session()) || !credential_alive {
                     current.nyxagent_session_id = None;
@@ -1647,6 +1714,7 @@ pub async fn finish_turn(
                     tracing::warn!(conversation_id = %row.id, turn_id = %turn_id, upstream_error_code = error.upstream_code.as_deref().unwrap_or(error.code), "Assistant turn failed");
                 }
                 let message = AssistantMessage {
+                    execution_pending: false,
                     id: message_id.clone(),
                     conversation_id: row.id.clone(),
                     user_id: row.user_id.clone(),
@@ -2053,6 +2121,7 @@ pub async fn delete(
                         Err(error) => return Err(error),
                     }
                     for collection in [
+                        crate::models::assistant_voice::REQUESTS,
                         crate::models::assistant_acknowledgement::COLLECTION_NAME,
                         crate::models::assistant_attachment::COLLECTION_NAME,
                         crate::models::assistant_upload_retention::TOMBSTONES,

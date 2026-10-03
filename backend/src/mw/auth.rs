@@ -2306,6 +2306,13 @@ mod tests {
             .await;
             assert_eq!(response.status(), StatusCode::FORBIDDEN);
         }
+        for path in [
+            "/api/v1/assistant/nyxagent/voice/options",
+            "/api/v1/assistant/nyxagent/conversations/id/voice-requests/rid",
+            "/api/v1/assistant/nyxagent/conversations/id/voice-sessions/sid/stream",
+        ] {
+            assert!(delegated_read_denied_path(path));
+        }
         assert!(!delegated_read_denied_path("/api/v1/channel-platforms"));
         assert!(delegated_read_denied_path(
             "/api/v1/channel-relay/messages/id/attachments/0"
