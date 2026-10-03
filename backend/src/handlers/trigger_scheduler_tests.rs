@@ -1060,6 +1060,7 @@ async fn schedule_confirmation_waits_and_resumes_without_another_budget() {
         .db
         .collection::<AssistantAcknowledgement>(ACKS)
         .insert_one(AssistantAcknowledgement {
+            skill_selection: None,
             operation_selection: None,
             id: ack_id.clone(),
             conversation_id: thread.id.clone(),

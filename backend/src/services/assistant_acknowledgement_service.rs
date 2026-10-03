@@ -397,6 +397,19 @@ pub async fn request_tracked(
     let now = Utc::now();
     let orchestrated = !chat.is_orchestrator() && request.kind != "action";
     let candidate = AssistantAcknowledgement {
+        skill_selection: if request.kind == "skills"
+            && request
+                .arguments
+                .is_some_and(|args| args.get("skills").is_some())
+        {
+            let selection: super::agent_skill_service::Selection =
+                serde_json::from_value(request.arguments.cloned().ok_or_else(not_found)?)
+                    .map_err(|_| AppError::ValidationError("Invalid skill request".into()))?;
+            super::agent_skill_service::validate(&selection)?;
+            Some(selection)
+        } else {
+            None
+        },
         operation_selection: if request.kind == "operations" {
             Some(
                 serde_json::from_value(request.arguments.cloned().ok_or_else(not_found)?).map_err(

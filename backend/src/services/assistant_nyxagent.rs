@@ -155,6 +155,9 @@ pub fn base_prompt(
         ),
     };
     if let Some(agent) = agent {
+        if !row.guest_turn {
+            prompt.push_str(&super::agent_skill_service::instructions(agent));
+        }
         if let Some(display_name) = agent.display_name.as_deref() {
             prompt.push_str(&format!(
                 "\n\nThe user calls you \"{}\" (your handle is @{}).",

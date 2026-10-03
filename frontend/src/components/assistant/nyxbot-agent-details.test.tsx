@@ -84,6 +84,9 @@ beforeEach(() => {
       memory = memory.filter((note) => note.id !== "n1");
       return new Response(null, { status: 204 });
     }
+    if (endpoint === `/assistant/nyxagent/agents/${id}/skills`) {
+      return new Response(JSON.stringify({ revision: 0, skills: [], metadata: {} }));
+    }
     if (endpoint === `/assistant/nyxagent/agents/${id}/grants`) {
       agent = { ...agent, ...(body as object) };
       return new Response(JSON.stringify({ id, ...(body as object) }));
