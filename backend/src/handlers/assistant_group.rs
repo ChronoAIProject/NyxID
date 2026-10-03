@@ -65,6 +65,7 @@ pub struct GroupAgentRef {
 
 #[derive(Serialize)]
 pub struct GroupMessageResponse {
+    activities: Vec<super::assistant_nyxagent::ActivityResponse>,
     #[serde(skip_serializing_if = "Option::is_none")]
     author: Option<Value>,
     attachments: Vec<super::assistant_nyxagent::AttachmentResponse>,
@@ -90,6 +91,7 @@ fn message_response(row: GroupMessage, agents: &[AssistantAgent]) -> GroupMessag
         }
     });
     GroupMessageResponse {
+        activities: row.activities.into_iter().map(Into::into).collect(),
         author: row.author_user_id.map(|id| json!({"id": id,"display_name":row.author_display_name.unwrap_or_else(||"Member".into())})),
         attachments: row.attachments.into_iter().map(Into::into).collect(),
         id: row.id,
@@ -338,7 +340,12 @@ pub(crate) async fn member_settled(
         let agent = team::agent_for_conversation(&state.db, row).await?;
         match error_code {
             None if !text.trim().is_empty() => {
-                groups::append(&state.db, owner, group_id, "agent", Some(&agent), text).await?;
+                let message =
+                    groups::append(&state.db, owner, group_id, "agent", Some(&agent), text).await?;
+                Box::pin(crate::services::machine_activity_service::publish_group(
+                    &state.db, row, &message,
+                ))
+                .await?;
                 let members = groups::members(&state.db, owner, &group).await?;
                 let live: Vec<AssistantAgent> = members
                     .into_iter()
@@ -350,25 +357,33 @@ pub(crate) async fn member_settled(
             }
             None => {}
             Some("cancelled") => {
-                groups::append(
+                let message = groups::append(
                     &state.db,
                     owner,
                     group_id,
                     "notice",
-                    None,
+                    Some(&agent),
                     &format!("{} stopped.", identifier(&agent.name)),
                 )
                 .await?;
+                Box::pin(crate::services::machine_activity_service::publish_group(
+                    &state.db, row, &message,
+                ))
+                .await?;
             }
             Some(code) => {
-                groups::append(
+                let message = groups::append(
                     &state.db,
                     owner,
                     group_id,
                     "notice",
-                    None,
+                    Some(&agent),
                     &format!("{} could not reply ({code}).", identifier(&agent.name)),
                 )
+                .await?;
+                Box::pin(crate::services::machine_activity_service::publish_group(
+                    &state.db, row, &message,
+                ))
                 .await?;
             }
         }
@@ -867,6 +882,8 @@ pub async fn list_messages(
         rows.remove(0);
     }
     let before_seq = more.then(|| rows[0].seq);
+    Box::pin(crate::services::machine_activity_service::refresh_group_jobs(&state.db, &mut rows))
+        .await?;
     let agents = team::agents(&state.db, &group_owner, true).await?;
     let pending_actions = if access.org.is_some() {
         org_pending_actions(&state, &access).await?
@@ -877,6 +894,15 @@ pub async fn list_messages(
         .into_iter()
         .map(|row| message_response(row, &agents))
         .collect();
+    let receipts = messages
+        .iter_mut()
+        .flat_map(|m| m.activities.iter_mut())
+        .filter_map(|a| a.machine.as_mut())
+        .collect();
+    Box::pin(super::assistant_nyxagent::resolve_machine_names(
+        &state.db, &owner, receipts,
+    ))
+    .await?;
     if access.org.is_some() {
         for message in &mut messages {
             if let Some(actor) = message.author.as_ref().and_then(|a| a["id"].as_str()) {

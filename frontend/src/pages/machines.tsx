@@ -1,7 +1,7 @@
-import { MachineIsolationBadge } from "@/components/shared/machine-isolation";
+import { MachineIsolationBadge, MachineSharingBadge } from "@/components/shared/machine-isolation";
 import { useState } from "react";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
-import { Monitor, Settings } from "lucide-react";
+import { Monitor, Settings, History } from "lucide-react";
 import { useMachineUpdates } from "@/hooks/use-machines";
 import type { MachineUpdateStatus } from "@/schemas/machines";
 import { useNodes } from "@/hooks/use-nodes";
@@ -9,6 +9,7 @@ import { useOrgs } from "@/hooks/use-orgs";
 import { useAuthStore } from "@/stores/auth-store";
 import { parseMachinesSearch } from "@/lib/machine-search";
 import { SavedLoginsPage } from "@/pages/saved-logins";
+import { MachineActivity } from "@/components/shared/machine-activity";
 import { MachineSettings } from "@/components/shared/machine-settings";
 import { PageHeader } from "@/components/shared/page-header";
 import { AddCtaButton } from "@/components/shared/add-cta-button";
@@ -28,10 +29,12 @@ import type { NodeInfo } from "@/types/nodes";
 function MachineCard({
   node,
   onSettings,
+  onActivity,
   update,
 }: {
   readonly node: NodeInfo;
   readonly onSettings: () => void;
+  readonly onActivity: () => void;
   readonly update?: MachineUpdateStatus;
 }) {
   const machine = node.machine!;
@@ -52,6 +55,7 @@ function MachineCard({
         </span>
         <NodeStatusBadge status={node.status} isConnected={node.is_connected} />
         <MachineIsolationBadge machine={machine} />
+        <MachineSharingBadge />
       </div>
       <p className="text-[12px] text-muted-foreground">
         {[
@@ -82,6 +86,7 @@ function MachineCard({
             </Link>
           </Button>
         ) : null}
+        <Button onClick={onActivity}><History />Activity</Button>
         <Button onClick={onSettings} aria-label={`Settings for ${node.name}`}>
           <Settings />
           Settings
@@ -100,6 +105,7 @@ export function MachinesPage() {
   const updates = useMachineUpdates();
   const orgs = useOrgs();
   const userId = useAuthStore((state) => state.user?.id);
+  const [activityId, setActivityId] = useState<string>();
   const [selectedId, setSelectedId] = useState<string | undefined>(
     search.machine,
   );
@@ -170,6 +176,7 @@ export function MachinesPage() {
                 node={node}
                 update={updates.data?.find((row) => row.node_id === node.id)}
                 onSettings={() => setSelectedId(node.id)}
+                onActivity={() => setActivityId(node.id)}
               />
             ))}
           </div>
@@ -178,6 +185,15 @@ export function MachinesPage() {
           <SavedLoginsPage />
         </TabsContent>
       </Tabs>
+      <Sheet open={Boolean(activityId)} onOpenChange={(open) => { if (!open) setActivityId(undefined); }}>
+        <SheetContent className="flex w-full min-w-0 flex-col gap-0 overflow-hidden p-0 sm:max-w-lg">
+          <SheetHeader className="shrink-0 p-5 pr-10">
+            <SheetTitle>Machine activity</SheetTitle>
+            <SheetDescription>{machines.find((node) => node.id === activityId)?.name}</SheetDescription>
+          </SheetHeader>
+          {activityId && <MachineActivity key={activityId} nodeId={activityId} />}
+        </SheetContent>
+      </Sheet>
       <Sheet
         open={Boolean(selected)}
         onOpenChange={(open) => {

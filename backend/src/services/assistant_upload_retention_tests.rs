@@ -853,3 +853,63 @@ async fn upload_retention_group_placeholder_and_deletion_keep_scope() {
         0
     );
 }
+
+#[tokio::test]
+async fn machine_preview_retention_shortens_immediately_and_sweep_is_fenced() {
+    let (state, owner, thread) = fixture().await;
+    let id = Uuid::new_v4().to_string();
+    let row = crate::models::assistant_attachment::AssistantAttachment {
+        id: id.clone(),
+        origin: "machine_preview".into(),
+        user_id: owner.clone(),
+        conversation_id: thread.clone(),
+        turn_id: Uuid::new_v4().to_string(),
+        content_type: "text/plain".into(),
+        size: 7,
+        data_encrypted: state.encryption_keys.encrypt(b"preview").await.unwrap(),
+        created_at: Utc::now() - Duration::days(2),
+    };
+    state
+        .db
+        .collection(ATTACHMENTS)
+        .insert_one(row)
+        .await
+        .unwrap();
+    let filter = doc! {"_id":&id,"user_id":&owner,"conversation_id":&thread};
+    require_available(&state.db, filter.clone()).await.unwrap();
+    policy(
+        &state,
+        &owner,
+        Policy {
+            document_days: 1,
+            ..Default::default()
+        },
+    )
+    .await;
+    assert!(matches!(
+        require_available(&state.db, filter.clone()).await,
+        Err(AppError::AssistantAttachmentExpired)
+    ));
+    let runtime = cluster_lease_runtime();
+    let old = runtime.acquire(&state.db, LEASE).await.unwrap().unwrap();
+    LeaseStore::release(&state.db, &old).await.unwrap();
+    let fresh = runtime.acquire(&state.db, LEASE).await.unwrap().unwrap();
+    assert!(!delete_fenced(&state.db, &old, &id).await.unwrap());
+    assert!(delete_fenced(&state.db, &fresh, &id).await.unwrap());
+    assert!(!delete_fenced(&state.db, &fresh, &id).await.unwrap());
+    assert!(
+        state
+            .db
+            .collection::<Document>(ATTACHMENTS)
+            .find_one(doc! {"_id":&id})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(matches!(
+        require_available(&state.db, filter).await,
+        Err(AppError::AssistantAttachmentExpired)
+    ));
+    LeaseStore::release(&state.db, &fresh).await.unwrap();
+    state.db.drop().await.unwrap();
+}

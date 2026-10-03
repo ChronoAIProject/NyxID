@@ -1,5 +1,6 @@
 import {
   MachineIsolationBadge,
+  MachineSharingBadge,
   MachineIsolationDetails,
 } from "@/components/shared/machine-isolation";
 import { useState, type ReactNode } from "react";
@@ -162,6 +163,7 @@ export function MachineSettings({
                 {node.is_connected ? "Connected" : "Disconnected"}
               </Badge>
               <MachineIsolationBadge machine={machine} />
+              <MachineSharingBadge />
             </div>
             <p>
               {[

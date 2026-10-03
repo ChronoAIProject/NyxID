@@ -311,6 +311,7 @@ pub async fn append(
         .await?
         .ok_or_else(not_found)?;
     let message = GroupMessage {
+        activities: Vec::new(),
         org_group: false,
         author_user_id: None,
         author_display_name: None,
@@ -374,6 +375,7 @@ pub async fn append_with_uploads(
     ))
     .await?;
     let message = GroupMessage {
+        activities: Vec::new(),
         org_group: false,
         author_user_id: None,
         author_display_name: None,
