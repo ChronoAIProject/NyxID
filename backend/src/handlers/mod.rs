@@ -131,6 +131,7 @@ pub mod channel_platforms;
 mod curation_tests;
 pub mod nyxbot;
 pub mod options;
+pub(crate) mod org_group;
 
 pub mod service_history;
 

@@ -599,7 +599,12 @@ export const assistantGroupMemberSchema = z.object({
 });
 export type AssistantGroupMember = z.infer<typeof assistantGroupMemberSchema>;
 
+export const groupPersonSchema = z.object({ id: z.string(), display_name: z.string() });
+
 export const assistantGroupSchema = z.object({
+  owner: z.object({ type: z.enum(["personal", "org"]), id: z.string(), name: z.string() }).optional(),
+  participants: z.array(groupPersonSchema).optional(),
+  your_role: z.enum(["creator", "admin", "participant"]).optional(),
   id: z.string(),
   name: z.string(),
   members: z.array(assistantGroupMemberSchema),
@@ -615,6 +620,7 @@ export type AssistantGroup = z.infer<typeof assistantGroupSchema>;
 export const assistantGroupListSchema = z.object({ groups: z.array(assistantGroupSchema) });
 
 export const assistantGroupMessageSchema = z.object({
+  author: groupPersonSchema.optional(),
   attachments: z.array(nyxAgentAttachmentSchema).optional(),
   id: z.string(),
   seq: z.number().int().positive(),
@@ -633,11 +639,14 @@ export type AssistantGroupMessage = z.infer<typeof assistantGroupMessageSchema>;
 /** A member's action card waiting for the owner; answered by posting its phrase. */
 export const assistantGroupPendingActionSchema = z.object({
   conversation_id: z.string(),
-  acknowledgement_id: z.string(),
+  acknowledgement_id: z.string().optional(),
+  approval_request_id: z.string().optional(),
   agent_id: z.string().nullable().optional(),
   summary: z.string(),
   /** "yes 1234": posting it confirms; "no 1234" cancels. */
-  confirm_phrase: z.string().regex(/^yes \d{4}$/),
+  confirm_phrase: z.string().regex(/^yes \d{4}$/).optional(),
+  triggering_person: groupPersonSchema.optional(),
+  can_decide: z.boolean().optional(),
   expires_at: z.string(),
 });
 export type AssistantGroupPendingAction = z.infer<typeof assistantGroupPendingActionSchema>;
@@ -660,6 +669,9 @@ export type AssistantGroupPosted = z.infer<typeof assistantGroupPostedSchema>;
 
 /** "New group" and group settings: a name and its agents. */
 export const assistantGroupFormSchema = z.object({
+  org: z.string().optional(),
+  participant_user_ids: z.array(z.string()).max(16).optional(),
+  lead_agent_id: z.string().optional(),
   name: z
     .string()
     .trim()
@@ -671,7 +683,7 @@ export const assistantGroupFormSchema = z.object({
     .max(ASSISTANT_GROUP_MAX_MEMBERS, `A group has at most ${String(ASSISTANT_GROUP_MAX_MEMBERS)} agents`),
 });
 export type AssistantGroupForm = z.infer<typeof assistantGroupFormSchema>;
-export type AssistantGroupUpdate = Partial<AssistantGroupForm>;
+export type AssistantGroupUpdate = Partial<Omit<AssistantGroupForm, "org">> & { leave?: boolean };
 
 export const ASSISTANT_MEMORY_NOTE_MAX = 500;
 export const assistantMemoryNoteSchema = z.object({

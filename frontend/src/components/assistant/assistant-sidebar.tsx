@@ -505,9 +505,16 @@ function AgentsSection({
 }
 
 function GroupsSection({ model }: { readonly model: SidebarGroups }) {
+  const sections = new Map<string, typeof model.groups>();
+  for (const group of model.groups) {
+    const key = group.owner?.type === "org" ? group.owner.id : "personal";
+    sections.set(key, [...(sections.get(key) ?? []), group]);
+  }
   return (
     <div className="space-y-0.5">
-      {model.groups.map((group) => {
+      {[...sections.entries()].map(([owner, groups]) => <div key={owner}>
+        <p className="px-3 pt-2 pb-1 text-[10px] font-medium text-text-tertiary">{owner === "personal" ? "Personal" : groups[0]?.owner?.name}</p>
+        {groups.map((group) => {
         const working = group.working_agent_ids.length;
         const selected = group.id === model.selectedGroupId;
         return (
@@ -536,7 +543,7 @@ function GroupsSection({ model }: { readonly model: SidebarGroups }) {
             ) : null}
           </button>
         );
-      })}
+      })}</div>)}
       {model.loading && !model.groups.length ? (
         <p className="px-3 py-1.5 text-[11px] text-text-tertiary">Loading groups...</p>
       ) : null}

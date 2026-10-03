@@ -662,6 +662,7 @@ mod tests {
             description: None,
             allowed_service_ids: vec![],
             allowed_platform_service_ids: Vec::new(),
+            assistant_group_id: None,
             assistant_agent_owner_id: None,
             assistant_operation_scopes: Default::default(),
             allowed_node_ids: vec![],

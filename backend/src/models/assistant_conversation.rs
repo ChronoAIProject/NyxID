@@ -231,6 +231,8 @@ pub struct AssistantConversation {
     /// The newest group message this member has already been given.
     #[serde(default)]
     pub group_seen_seq: i64,
+    #[serde(default)]
+    pub group_request_id: Option<String>,
     /// The newest turn was started by someone other than the owner, e.g. a
     /// member of a group chat. Its tool calls are restricted (NyxBot: none;
     /// specialists: their grants, as far as the owner's guest access for each

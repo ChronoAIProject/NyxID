@@ -377,7 +377,9 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
         _ => "Your final reply stays in the web thread.",
     };
     let start = engine::TurnStart {
+        org_access: None,
         attachment_ids: Vec::new(),
+        group_request_id: None,
         group_attachments: Vec::new(),
         trigger: Some(schedules::TurnClaim {
             trigger_updated_at: trigger.updated_at,

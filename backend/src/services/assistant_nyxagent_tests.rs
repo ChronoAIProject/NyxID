@@ -524,6 +524,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         event_streak: 0,
         channel: None,
         group_id: None,
+        group_request_id: None,
         group_seen_seq: 0,
         guest_turn: false,
         reply_channel: None,

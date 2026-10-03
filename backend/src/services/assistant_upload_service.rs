@@ -66,13 +66,19 @@ pub fn metadata(row: &AssistantUpload) -> TurnAttachment {
     }
 }
 
-pub async fn owner_scope(db: &Database, user: &str, scope: &str) -> AppResult<()> {
+pub async fn owner_scope(
+    db: &Database,
+    user: &str,
+    scope: &str,
+) -> AppResult<Option<super::org_group_service::Access>> {
     if scope.starts_with("nyxa-") {
         engine::get(db, user, scope).await?;
     } else {
-        super::assistant_group_service::get(db, user, scope).await?;
+        return Ok(Some(
+            super::org_group_service::get(db, user, scope, None).await?,
+        ));
     }
-    Ok(())
+    Ok(None)
 }
 
 fn scope_filter(user: &str, scope: &str) -> bson::Document {
@@ -99,6 +105,7 @@ pub async fn admit(db: &Database, user: &str) -> AppResult<()> {
     Ok(())
 }
 
+#[cfg(test)]
 pub async fn upload(
     db: &Database,
     keys: &EncryptionKeys,
@@ -107,7 +114,23 @@ pub async fn upload(
     name: &str,
     bytes: Vec<u8>,
 ) -> AppResult<TurnAttachment> {
-    owner_scope(db, user, scope).await?;
+    let access = owner_scope(db, user, scope).await?;
+    Box::pin(upload_authorized(
+        db, keys, user, scope, name, bytes, access,
+    ))
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn upload_authorized(
+    db: &Database,
+    keys: &EncryptionKeys,
+    user: &str,
+    scope: &str,
+    name: &str,
+    bytes: Vec<u8>,
+    access: Option<super::org_group_service::Access>,
+) -> AppResult<TurnAttachment> {
     let label = safe_name(name);
     let extension = label
         .rsplit_once('.')
@@ -159,12 +182,19 @@ pub async fn upload(
     } else {
         crate::models::assistant_conversation::COLLECTION_NAME
     };
+    let mut parent_filter = doc! {"_id": scope, "user_id": user};
+    if let Some(access) = &access
+        && access.org.is_some()
+    {
+        if access.actor != user || access.group.id != scope {
+            return Err(missing());
+        }
+        parent_filter =
+            doc! {"_id":scope,"user_id":&access.group.user_id,"participant_user_ids":user};
+    }
     let present = db
         .collection::<bson::Document>(parent)
-        .update_one(
-            doc! {"_id": scope, "user_id": user},
-            doc! {"$inc": {"upload_generation": 1}},
-        )
+        .update_one(parent_filter, doc! {"$inc": {"upload_generation": 1}})
         .session(&mut session)
         .await?;
     if present.matched_count != 1 {
@@ -245,8 +275,15 @@ pub async fn owner_read(
     scope: &str,
     id: &str,
 ) -> AppResult<(String, Vec<u8>)> {
-    owner_scope(db, user, scope).await?;
+    let access = owner_scope(db, user, scope).await?;
     let mut filter = scope_filter(user, scope);
+    if access.as_ref().is_some_and(|a| a.org.is_some()) {
+        filter.remove("user_id");
+        filter.insert(
+            "$or",
+            bson::bson!([{"message_id":{"$type":"string"}},{"user_id":user}]),
+        );
+    }
     filter.insert("_id", id);
     Box::pin(super::assistant_upload_retention::require_available(
         db,
@@ -335,9 +372,22 @@ pub async fn for_chat(db: &Database, chat: &ChatAuthority, id: &str) -> AppResul
         return Err(missing());
     }
     let scope = if let Some(group_id) = &thread.group_id {
-        let group = super::assistant_group_service::get(db, &chat.user_id, group_id).await?;
-        if !group.member_agent_ids.contains(&chat.agent_id) {
+        let access = super::org_group_service::get(
+            db,
+            &chat.user_id,
+            group_id,
+            chat.org_agent_access.as_ref(),
+        )
+        .await?;
+        if !access.group.member_agent_ids.contains(&chat.agent_id) {
             return Err(missing());
+        }
+        if access.org.is_some() {
+            let request = thread.group_request_id.as_deref().ok_or_else(missing)?;
+            let request = super::org_group_service::request(db, &access, request).await?;
+            if !request.attachment_ids.iter().any(|allowed| allowed == id) {
+                return Err(missing());
+            }
         }
         group_id.as_str()
     } else {
