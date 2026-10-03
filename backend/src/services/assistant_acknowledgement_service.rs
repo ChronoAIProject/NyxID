@@ -481,6 +481,8 @@ pub async fn request_tracked(
         summary: request.summary.into(),
         status: "pending".into(),
         requested_turn_id: None,
+        voice_request_id: None,
+        continuation_receipt_id: None,
         trigger_run_id: None,
         created_at: now,
         decided_at: None,
@@ -502,13 +504,17 @@ pub async fn request_tracked(
                 let mut row = candidate.clone();
                 // Ordinary denials stay bound to the initiating user/orchestrator
                 // message across event turns. Only trigger runs use the active turn.
+                let mut initiating_filter = doc! {
+                    "conversation_id": &conversation.id, "user_id": &chat.user_id,
+                    "role": {"$in": ["user", "orchestrator"]},
+                    "execution_pending": {"$ne": true},
+                };
+                if let Some(seq) = conversation.active_turn.as_ref().and_then(|t| t.initiating_message_seq) {
+                    initiating_filter.insert("seq", doc! {"$lte": seq});
+                }
                 let started_by = db
                     .collection::<AssistantMessage>(MESSAGES)
-                    .find_one(doc! {
-                        "conversation_id": &conversation.id,
-                        "user_id": &chat.user_id,
-                        "role": {"$in": ["user", "orchestrator"]},
-                    })
+                    .find_one(initiating_filter)
                     .sort(doc! {"seq": -1})
                     .session(&mut *session)
                     .await?;
@@ -516,6 +522,7 @@ pub async fn request_tracked(
                     .filter(|turn| turn.trigger_run_id.is_some())
                     .map(|turn| turn.turn_id.clone())
                     .or_else(|| started_by.as_ref().map(|message| message.turn_id.clone()));
+                row.voice_request_id = conversation.active_turn.as_ref().and_then(|t| t.voice_request_id.clone());
                 row.trigger_run_id = conversation.active_turn.as_ref().and_then(|turn| turn.trigger_run_id.clone());
                 if row.decider == "orchestrator" {
                     row.request_excerpt = started_by.map(|message| {
@@ -533,19 +540,31 @@ pub async fn request_tracked(
                 "$or": [{"status": "pending", "expires_at": {"$gt": bson::DateTime::from_chrono(now)}},
                     {"status": "denied", "requested_turn_id": &row.requested_turn_id}]};
                 // A valid allowed action can be reused only by explicitly presenting its id.
-                if let Some(existing) = db
+                if let Some(mut existing) = db
                     .collection::<AssistantAcknowledgement>(ACKS)
                     .find_one(filter)
                     .sort(doc! {"created_at": -1})
                     .session(&mut *session)
                     .await?
                 {
+                    // A pending text card may be encountered again from voice.
+                    // Keep its digest/expiry/initiating identity, and attach the
+                    // server continuation before returning that same record.
+                    if existing.status == "pending" && existing.voice_request_id.is_none()
+                        && row.voice_request_id.is_some() && row.decider == "user" {
+                        existing.voice_request_id = row.voice_request_id.clone();
+                        db.collection::<AssistantAcknowledgement>(ACKS)
+                            .replace_one(doc! {"_id":&existing.id},&existing)
+                            .session(&mut *session).await?;
+                        super::assistant_voice::await_confirmation(&db, &existing, session).await?;
+                    }
                     return Ok((existing, false));
                 }
                 db.collection::<AssistantAcknowledgement>(ACKS)
                     .insert_one(&row)
                     .session(&mut *session)
                     .await?;
+                super::assistant_voice::await_confirmation(&db, &row, session).await?;
                 Ok((row, true))
             })
             .await;
@@ -572,6 +591,11 @@ pub fn refusal(row: &AssistantAcknowledgement) -> Value {
         "The user denied this request. Do not retry or request another \
                 card unless the user explicitly asks again in a later message."
             .into()
+    } else if row.voice_request_id.is_some() {
+        "NyxID is awaiting the owner's confirmation of this exact action. End this turn; \
+        the voice coordinator reads the server summary and handles the owner's decision. \
+        Never infer approval or confirm it yourself; NyxID resumes the task after a decision."
+            .into()
     } else {
         match row.kind.as_str() {
             "service" => format!(
@@ -595,7 +619,7 @@ pub fn refusal(row: &AssistantAcknowledgement) -> Value {
         "kind": row.kind, "acknowledgement_id": row.id, "service_slug": row.service_slug,
         "service_name": row.service_name, "summary": row.summary, "decider": row.decider,
         "instructions": instructions});
-    if row.kind == "action" && !denied {
+    if row.kind == "action" && !denied && row.voice_request_id.is_none() {
         value["confirm_phrase"] = json!(format!("yes {}", confirm_code(&row.id)));
     }
     value
@@ -864,6 +888,14 @@ pub async fn decide_as(
                     .session(&mut *session)
                     .await?
                     .ok_or_else(not_found)?;
+                if row.voice_request_id.is_some() {
+                    super::assistant_agent_credential_service::authority_in_session(
+                        &db,
+                        &target,
+                        &mut *session,
+                    )
+                    .await?;
+                }
                 let chat = ChatAuthority {
                     org_agent_access: None,
                     turn_id: target.active_turn.as_ref().map(|t| t.turn_id.clone()),
@@ -1031,6 +1063,8 @@ pub async fn decide_as(
                 if allow && row.kind == "action" {
                     row.expires_at = now + Duration::seconds(ACTION_SECONDS);
                 }
+                row.continuation_receipt_id =
+                    Box::pin(super::assistant_voice::continuation(&db, &row, session)).await?;
                 collection
                     .replace_one(filter, &row)
                     .session(&mut *session)

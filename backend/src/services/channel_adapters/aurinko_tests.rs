@@ -1363,8 +1363,8 @@ async fn aurinko_individual_delete_busy_ingress_keeps_bot_visible_until_retry() 
     let f = Fixture::new().await;
     f.mock.lock().await.delays.insert("one".into(), 400);
     f.mock.lock().await.requests.clear();
-    let effect = f.event(&["one"]);
-    let deletion = async {
+    let effect = Box::pin(f.event(&["one"]));
+    let deletion = Box::pin(async {
         tokio::time::timeout(Duration::from_secs(3), async {
             loop {
                 if f.mock
@@ -1382,7 +1382,7 @@ async fn aurinko_individual_delete_busy_ingress_keeps_bot_visible_until_retry() 
         .await
         .unwrap();
         assert!(
-            bots::delete_bot(
+            Box::pin(bots::delete_bot(
                 &f.state.db,
                 &f.state.config,
                 &f.state.http_client,
@@ -1390,7 +1390,7 @@ async fn aurinko_individual_delete_busy_ingress_keeps_bot_visible_until_retry() 
                 &f.adapter,
                 &f.bot.id,
                 &f.bot.user_id
-            )
+            ))
             .await
             .is_err()
         );
@@ -1413,11 +1413,11 @@ async fn aurinko_individual_delete_busy_ingress_keeps_bot_visible_until_retry() 
                 .unwrap()
                 .is_active
         );
-    };
+    });
     let (delivered, ()) = tokio::join!(effect, deletion);
     delivered.unwrap();
     assert_eq!(
-        bots::delete_bot(
+        Box::pin(bots::delete_bot(
             &f.state.db,
             &f.state.config,
             &f.state.http_client,
@@ -1425,7 +1425,7 @@ async fn aurinko_individual_delete_busy_ingress_keeps_bot_visible_until_retry() 
             &f.adapter,
             &f.bot.id,
             &f.bot.user_id
-        )
+        ))
         .await
         .unwrap(),
         Some("removed")

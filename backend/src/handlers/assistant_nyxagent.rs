@@ -233,6 +233,7 @@ impl From<AssistantConversation> for ConversationResponse {
 }
 #[derive(Serialize)]
 pub struct MessageResponse {
+    execution_pending: bool,
     id: String,
     seq: i64,
     turn_id: String,
@@ -249,6 +250,7 @@ pub struct MessageResponse {
 impl From<AssistantMessage> for MessageResponse {
     fn from(row: AssistantMessage) -> Self {
         Self {
+            execution_pending: row.execution_pending,
             id: row.id,
             seq: row.seq,
             turn_id: row.turn_id,
@@ -487,6 +489,8 @@ pub async fn attachment(
 }
 #[derive(Serialize)]
 pub struct AcknowledgementResponse {
+    continuation_owner: Option<&'static str>,
+    continuation_receipt_id: Option<String>,
     trigger_run_id: Option<String>,
     id: String,
     kind: String,
@@ -508,6 +512,8 @@ impl From<crate::models::assistant_acknowledgement::AssistantAcknowledgement>
 {
     fn from(row: crate::models::assistant_acknowledgement::AssistantAcknowledgement) -> Self {
         Self {
+            continuation_owner: row.continuation_receipt_id.as_ref().map(|_| "server"),
+            continuation_receipt_id: row.continuation_receipt_id,
             id: row.id,
             kind: row.kind,
             status: row.status,
@@ -901,14 +907,39 @@ pub(crate) async fn start_turn(
     policy: Option<BillingRoutePolicy>,
     permit: DirectChatPermit,
 ) -> AppResult<(AssistantConversation, broadcast::Receiver<Value>)> {
-    let user_id = auth.user_id.to_string();
-    let row = Box::pin(engine::begin_turn(
-        &state.db,
-        &user_id,
-        start,
-        &state.encryption_keys,
+    Box::pin(start_turn_with_voice(
+        state, auth, start, policy, permit, None,
     ))
-    .await?;
+    .await
+}
+
+pub(crate) async fn start_turn_with_voice(
+    state: &AppState,
+    auth: AuthUser,
+    start: &engine::TurnStart,
+    policy: Option<BillingRoutePolicy>,
+    permit: DirectChatPermit,
+    voice_request_id: Option<&str>,
+) -> AppResult<(AssistantConversation, broadcast::Receiver<Value>)> {
+    let user_id = auth.user_id.to_string();
+    let row = if voice_request_id.is_some() {
+        Box::pin(engine::begin_turn_with_voice(
+            &state.db,
+            &user_id,
+            start,
+            &state.encryption_keys,
+            voice_request_id,
+        ))
+        .await?
+    } else {
+        Box::pin(engine::begin_turn(
+            &state.db,
+            &user_id,
+            start,
+            &state.encryption_keys,
+        ))
+        .await?
+    };
     let text = engine::turn_input(&row, start);
     let credential =
         credentials::load_for_conversation(&state.db, &state.encryption_keys, &user_id, &row.id)
@@ -1275,10 +1306,14 @@ async fn execute_turn(
         &row.user_id,
         &row.id,
         20,
-        Some(row.message_count),
+        Some(row.message_count + 1),
     )
     .await
     .map_err(|_| TurnError::new("assistant_unavailable"))?;
+    // Queued speech is visible to the human, but never becomes an instruction
+    // until its own claim. Include earlier completed replies even if their
+    // sequence is after the input that queued this turn.
+    history.retain(|message| !message.execution_pending && message.turn_id != *turn_id);
     // A guest's recap holds only what the chat itself saw.
     if row.guest_turn {
         use crate::models::assistant_conversation::TurnOrigin;

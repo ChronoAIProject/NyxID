@@ -389,6 +389,61 @@ async fn materialize_component_rows(
     Ok(materialized)
 }
 
+/// Voice checkpoints freeze quantities before entering the existing finalization
+/// and claim-fenced settlement path. Reconcile can repeat this after any crash.
+pub(super) async fn settle_voice_window(
+    db: &mongodb::Database,
+    request_id: &str,
+    seconds: i64,
+    initial_window: bool,
+) -> AppResult<()> {
+    reservation::release_unforwarded_rows(
+        db,
+        request_id,
+        UsageStatus::Failed,
+        Some("voice_unforwarded"),
+    )
+    .await?;
+    let rows: Vec<UsageMeterRow> = db
+        .collection::<UsageMeterRow>(USAGE_METER)
+        .find(doc! {"billing_request_id": request_id, "layer":"platform", "forwarded":true})
+        .await?
+        .try_collect()
+        .await?;
+    let usage = PlatformUsage {
+        voice_seconds: seconds,
+        ..Default::default()
+    };
+    let mut finalized = Vec::new();
+    for row in rows {
+        if let Some(saved) = finalize_matching(
+            db,
+            doc! {"_id":&row.id,"status":"forwarded"},
+            if row.metric == BillingMetric::Requests {
+                i64::from(initial_window && seconds > 0)
+            } else {
+                platform_quantity(row.metric, &usage)
+            },
+            None,
+            None,
+            None,
+            Utc::now(),
+        )
+        .await?
+        {
+            finalized.push(saved);
+        } else if let Some(saved) = db
+            .collection::<UsageMeterRow>(USAGE_METER)
+            .find_one(doc! {"_id":&row.id,"quantity":{"$ne":bson::Bson::Null}})
+            .await?
+        {
+            finalized.push(saved);
+        }
+    }
+    finalized.sort_by_key(|r| r.quantity.unwrap_or(0) > 0);
+    settle_persisted(db, finalized).await
+}
+
 pub(super) async fn recover_pending_resale_intents(db: &mongodb::Database) -> AppResult<u64> {
     let components: Vec<UsageMeterRow> = db
         .collection::<UsageMeterRow>(USAGE_METER)
@@ -754,6 +809,7 @@ pub(crate) fn platform_metric_code(metric: BillingMetric) -> &'static str {
         BillingMetric::CacheReadTokens => "platform_cache_read_tokens",
         BillingMetric::CacheWriteTokens => "platform_cache_write_tokens",
         BillingMetric::Images => "platform_images",
+        BillingMetric::VoiceSeconds => "platform_voice_seconds",
     }
 }
 
@@ -767,6 +823,7 @@ fn platform_quantity(metric: BillingMetric, usage: &PlatformUsage) -> i64 {
         BillingMetric::CacheReadTokens => usage.cache_read_tokens.max(0),
         BillingMetric::CacheWriteTokens => usage.cache_write_tokens.max(0),
         BillingMetric::Images => usage.images.max(0),
+        BillingMetric::VoiceSeconds => usage.voice_seconds.max(0),
     }
 }
 

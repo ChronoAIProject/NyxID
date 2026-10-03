@@ -1,6 +1,10 @@
 //! Per-person NyxBot preferences: destructive-action confirmation and team limits.
 use chrono::Utc;
-use mongodb::{Database, bson::doc, options::ReturnDocument};
+use mongodb::{
+    Database,
+    bson::{self, doc},
+    options::ReturnDocument,
+};
 
 use crate::{
     errors::{AppError, AppResult},
@@ -23,6 +27,7 @@ pub async fn get(db: &Database, user_id: &str) -> AppResult<AssistantSettings> {
 
 #[derive(Clone, Debug, Default)]
 pub struct Update {
+    pub voice: Option<Option<crate::models::assistant_voice::VoicePreferences>>,
     pub max_auto_continuations: Option<i32>,
     pub timezone: Option<String>,
     pub schedule_minimum_minutes: Option<i32>,
@@ -105,11 +110,22 @@ pub async fn update(db: &Database, user_id: &str, update: Update) -> AppResult<A
             )));
         }
     }
+    if let Some(Some(voice)) = &update.voice {
+        super::assistant_voice::validate_preferences(voice)?;
+    }
     let mut set = doc! {"updated_at":mongodb::bson::DateTime::from_chrono(Utc::now())};
     let mut defaults = mongodb::bson::to_document(&AssistantSettings::defaults(user_id))
         .map_err(|_| AppError::Internal("Settings serialization failed".into()))?;
     defaults.remove("_id");
     defaults.remove("updated_at");
+    if let Some(voice) = update.voice {
+        set.insert(
+            "voice",
+            bson::to_bson(&voice)
+                .map_err(|_| AppError::Internal("Voice preferences serialization failed".into()))?,
+        );
+        defaults.remove("voice");
+    }
     if let Some(value) = update.max_auto_continuations {
         set.insert("max_auto_continuations", value);
         defaults.remove("max_auto_continuations");

@@ -225,6 +225,7 @@ export function useNyxAgentAssistantChat({
       // approval, and it cannot wait for the decision inside its own turn. A
       // specialist's request routed to NyxBot is resumed by the server itself.
       if (
+        acknowledgement.continuation_owner === "server" ||
         acknowledgement.decider === "orchestrator" ||
         acknowledgement.trigger_run_id
       )

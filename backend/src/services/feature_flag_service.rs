@@ -116,6 +116,13 @@ const DIRECT_CHAT_ENGINE_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+pub const ASSISTANT_VOICE_FLAG_KEY: &str = "assistant:voice";
+const ASSISTANT_VOICE_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: ASSISTANT_VOICE_FLAG_KEY,
+    description: "Enables private assistant voice foundations; provider adapters require a later rollout.",
+    default_enabled: false,
+};
+
 pub const NYXAGENT_ENGINE_FLAG_KEY: &str = "assistant:nyxagent-engine";
 const NYXAGENT_ENGINE_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: NYXAGENT_ENGINE_FLAG_KEY,
@@ -206,6 +213,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     NYXAGENT_ENGINE_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
     ORG_AGENTS_FLAG,
+    ASSISTANT_VOICE_FLAG,
     AI_ASSISTANT_FLAG,
     BILLING_FLAG,
     AEVATAR_CHAT_WIRE_LOG_FLAG,
@@ -227,6 +235,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     NYXAGENT_ENGINE_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
     ORG_AGENTS_FLAG,
+    ASSISTANT_VOICE_FLAG,
     AI_ASSISTANT_FLAG,
     BILLING_FLAG_TEST,
     AEVATAR_CHAT_WIRE_LOG_FLAG,
@@ -1750,6 +1759,7 @@ mod tests {
                 "assistant:nyxagent-engine",
                 "assistant:operation-scopes",
                 "assistant:org-agents",
+                "assistant:voice",
                 "experimental:ai-assistant",
                 "experimental:billing",
                 "experimental:aevatar-chat-wire-log",
@@ -1766,6 +1776,12 @@ mod tests {
         assert_eq!(
             AEVATAR_CHAT_WIRE_LOG_FLAG_KEY,
             "experimental:aevatar-chat-wire-log"
+        );
+        assert!(
+            !find_flag(ASSISTANT_VOICE_FLAG_KEY)
+                .expect("voice flag is registered")
+                .default_enabled,
+            "voice must default to off"
         );
         assert!(
             !find_flag(AEVATAR_CHAT_WIRE_LOG_FLAG_KEY)

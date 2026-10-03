@@ -46,6 +46,8 @@ pub struct AssistantSettings {
     pub updated_at: DateTime<Utc>,
     #[serde(default)]
     pub timezone: Option<String>,
+    #[serde(default)]
+    pub voice: Option<super::assistant_voice::VoicePreferences>,
     #[serde(default = "default_schedule_minimum")]
     pub schedule_minimum_minutes: i32,
     #[serde(default = "default_trigger_hourly")]
@@ -93,6 +95,7 @@ impl AssistantSettings {
             max_group_handoffs_per_hour: DEFAULT_MAX_GROUP_HANDOFFS_PER_HOUR,
             updated_at: Utc::now(),
             timezone: None,
+            voice: None,
             schedule_minimum_minutes: DEFAULT_SCHEDULE_MINIMUM_MINUTES,
             trigger_runs_per_hour: DEFAULT_TRIGGER_RUNS_PER_HOUR,
             trigger_runs_per_day: DEFAULT_TRIGGER_RUNS_PER_DAY,

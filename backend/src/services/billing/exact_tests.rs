@@ -1935,3 +1935,144 @@ async fn migration_ready_latches_only_a_durable_completion_and_diagnostics_are_r
     assert!(exact_migration::ready(&db).await.unwrap());
     db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn voice_seconds_reconcile_uses_allowance_then_grant_then_wallet_once() {
+    use crate::models::{
+        assistant_voice::{VoiceWindow, WINDOWS},
+        service_billing::{BillingMetric, ServiceBilling},
+    };
+    let db = database("voice_funding").await;
+    crate::services::assistant_voice::ensure_indexes(&db)
+        .await
+        .unwrap();
+    db.collection::<Document>("billing_wallet")
+        .insert_one(old_wallet(10_000_000))
+        .await
+        .unwrap();
+    db.collection::<Document>("credit_grants")
+        .insert_one(old_grant(100_000))
+        .await
+        .unwrap();
+    exact_migration::run(&db).await.unwrap();
+    db.collection::<Document>("billing_rate_cache")
+        .insert_one(doc! {
+            "_id":"voice-rate:*","lago_metric_code":"voice-rate","model":null,
+            "credits_per_unit_micros":10_000_i64,"synced_at":bson::DateTime::from_chrono(Utc::now())
+        })
+        .await
+        .unwrap();
+    let now = Utc::now();
+    let allowance = crate::models::usage_allowance::UsageAllowance {
+        id: "allowance".into(),
+        bundle_id: None,
+        service_id: "service".into(),
+        service_slug: "service".into(),
+        metric: BillingMetric::VoiceSeconds,
+        quantity: 10,
+        recurrence: crate::models::usage_allowance::AllowanceRecurrence::Daily,
+        target_kind: crate::models::billing_target::BillingTargetKind::AllUsers,
+        target_user_ids: vec![],
+        target_org_ids: vec![],
+        target_group_ids: vec![],
+        is_active: true,
+        created_by: "admin".into(),
+        created_at: now,
+        updated_at: now,
+    };
+    db.collection::<crate::models::usage_allowance::UsageAllowance>("usage_allowances")
+        .insert_one(&allowance)
+        .await
+        .unwrap();
+    let sid = uuid::Uuid::new_v4().to_string();
+    let id = voice::window_id(&sid, 0).unwrap();
+    let mut ctx = route_context::BillingRouteContext::new(
+        route_inventory::BillingIngress::Proxy,
+        id.clone(),
+        "owner".into(),
+        "owner".into(),
+        None,
+        Some("service".into()),
+        Some("service".into()),
+        Some("service".into()),
+        route_context::NodeIntent::Direct,
+        "bearer".into(),
+        crate::models::usage_meter::CredentialClass::UserOwned,
+        BillingMetric::VoiceSeconds,
+        Some(&ServiceBilling {
+            platform_billable: true,
+            ..Default::default()
+        }),
+        false,
+    )
+    .with_platform_metering(true);
+    ctx.platform_lago_metric_code = "voice-rate".into();
+    ctx.requested_voice_seconds = 30;
+    // Keep the service's text primary. Silence must still settle the duration
+    // component without estimating tokens or losing its funding split.
+    ctx.platform_metric = BillingMetric::Tokens;
+    ctx.platform_lago_metric_code = "voice-text-rate".into();
+    ctx.platform_components = vec![crate::models::service_billing::ResaleSpec {
+        metric: BillingMetric::VoiceSeconds,
+        lago_metric_code: "voice-rate".into(),
+    }];
+    db.collection::<Document>("billing_rate_cache")
+        .insert_one(doc! {
+            "_id":"voice-text-rate:*","lago_metric_code":"voice-text-rate","model":null,
+            "credits_per_unit_micros":1_i64,"synced_at":bson::DateTime::from_chrono(now)
+        })
+        .await
+        .unwrap();
+    let reservation = reservation::gate_and_reserve(&db, Some(&Entitled), &ctx, false, 900)
+        .await
+        .unwrap()
+        .unwrap();
+    let metered = meter::open(&db, &ctx, Some(&reservation)).await.unwrap();
+    meter::mark_forwarded(&db, &metered).await.unwrap();
+    db.collection(WINDOWS)
+        .insert_one(VoiceWindow {
+            id: uuid::Uuid::new_v4().to_string(),
+            billing_request_id: id.clone(),
+            session_id: sid,
+            user_id: "owner".into(),
+            start_second: 0,
+            context_identity: "test".into(),
+            reserved_seconds: 30,
+            observed_seconds: 0,
+            sealed: false,
+            settled: false,
+            uncertain: true,
+            deadline: now - chrono::Duration::seconds(1),
+        })
+        .await
+        .unwrap();
+    voice::observe(&db, &id, 29).await.unwrap();
+    voice::observe(&db, &id, 27).await.unwrap(); // Replayed lower cumulative event cannot reduce usage.
+    assert_eq!(voice::reconcile(&db).await.unwrap(), 1);
+    assert_eq!(voice::reconcile(&db).await.unwrap(), 0);
+    voice::observe(&db, &id, 30).await.unwrap(); // Late tail after the deadline is waived.
+    voice::finalize(&db, &id, false).await.unwrap();
+    let row = db
+        .collection::<UsageMeterRow>("usage_meter")
+        .find_one(doc! {"billing_request_id":&id,"metric":"voice_seconds"})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.quantity, Some(29));
+    let funding = row.funding.unwrap();
+    assert_eq!(
+        funding.allowance_funded,
+        Some(Credits::from_micros(100_000))
+    );
+    assert_eq!(funding.grant_funded, Some(Credits::from_micros(100_000)));
+    assert_eq!(funding.wallet_funded, Some(Credits::from_micros(90_000)));
+    assert!(funding.settled);
+    let text = db
+        .collection::<UsageMeterRow>("usage_meter")
+        .find_one(doc! {"billing_request_id":&id,"metric":"tokens"})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(text.quantity, Some(0));
+    assert_accounts(&db).await;
+}

@@ -118,8 +118,11 @@ export const nyxAgentMessageSchema = z.object({
   attachments: z.array(nyxAgentAttachmentSchema).default([]),
   /** A user message written in a chat app: its platform. */
   via: z.string().nullish(),
+  execution_pending: z.boolean().optional(),
 });
 export const nyxAgentAcknowledgementSchema = z.object({
+  continuation_owner: z.literal("server").nullish(),
+  continuation_receipt_id: z.string().uuid().nullish(),
   trigger_run_id: z.string().nullable().optional(),
   id: z.string().uuid(),
   kind: z.enum(["service", "account", "action", "operations", "skills"]),
@@ -217,7 +220,18 @@ export const nyxAgentEventSchema = z.discriminatedUnion("event", [
 export type NyxAgentConversation = z.infer<typeof nyxAgentConversationSchema>;
 export type NyxAgentHistory = z.infer<typeof nyxAgentHistorySchema>;
 
+export const voicePreferencesSchema = z.object({
+  service_id: z.string().uuid(),
+  connection_id: z.string().uuid().nullable(),
+  key_source: z.enum(["platform", "own"]),
+  model: z.enum(["gpt-live-1", "grok-voice-think-fast-2.0"]),
+  voice: z.string().max(64).nullable(),
+  input_mode: z.enum(["push_to_talk", "automatic"]),
+  language: z.string().max(35).nullable(),
+  notify_on_completion: z.boolean(),
+});
 export const nyxAgentSettingsSchema = z.object({
+  voice: voicePreferencesSchema.nullish(),
   timezone: z.string().nullable().optional(),
   schedule_minimum_minutes: z
     .number()
@@ -248,6 +262,7 @@ export type NyxAgentSettings = z.infer<typeof nyxAgentSettingsSchema>;
 export type NyxAgentSettingsUpdate = Partial<
   Pick<
     NyxAgentSettings,
+    | "voice"
     | "timezone"
     | "schedule_minimum_minutes"
     | "trigger_runs_per_hour"

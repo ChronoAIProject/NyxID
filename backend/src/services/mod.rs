@@ -259,5 +259,6 @@ pub(crate) mod org_agent_tests;
 
 pub(crate) mod assistant_oneshot_inference;
 pub mod assistant_title_service;
+pub mod assistant_voice;
 #[cfg(test)]
 mod org_group_tests;
