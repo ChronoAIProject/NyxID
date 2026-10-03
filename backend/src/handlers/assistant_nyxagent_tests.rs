@@ -981,6 +981,7 @@ async fn history_surfaces_pending_proxy_approvals_raised_by_the_chat_key() {
             .await
             .unwrap();
     let request = |label: &str, status: &str, minutes: i64| ApprovalRequest {
+        assistant_group: None,
         id: uuid::Uuid::new_v4().to_string(),
         user_id: OWNER.to_string(),
         service_id: uuid::Uuid::new_v4().to_string(),
@@ -1377,5 +1378,206 @@ async fn attachments_on_old_nyxagent_persist_fallback_and_do_not_reset_context()
         user.attachments[0].image_input.as_deref(),
         Some("unavailable")
     );
+    server.abort();
+}
+
+#[tokio::test]
+async fn assistant_titles_use_toolless_provider_and_no_route_keeps_provisional() {
+    use crate::services::assistant_title_service as titles;
+    use crate::services::channel_x_tests::billing::{enable_billing_with_entitlement, settled};
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+    let (mut state, _, server) = setup(None, Duration::ZERO).await;
+    let auth = test_auth_user(OWNER);
+    let request =
+        serde_json::from_value::<engine::TurnRequest>(json!({"text":"Plan a week in Japan"}))
+            .unwrap();
+    let start: engine::TurnStart = (&request).into();
+    let row = Box::pin(engine::begin_turn(
+        &state.db,
+        OWNER,
+        &start,
+        &state.encryption_keys,
+    ))
+    .await
+    .unwrap();
+    Box::pin(engine::finish_turn(
+        &state.db,
+        &row,
+        &row.credential_api_key_id,
+        &Uuid::new_v4().to_string(),
+        &engine::TurnResult {
+            text: "Visit Kyoto and Tokyo".into(),
+            session_id: Some(SESSION.into()),
+            response_id: Some(RESPONSE.into()),
+            error: None,
+        },
+    ))
+    .await
+    .unwrap();
+    let mock = MockServer::start().await;
+    enable_billing_with_entitlement(&mut state, OWNER, "title-provider").await;
+    state
+        .db
+        .collection::<mongodb::bson::Document>("billing_rate_cache")
+        .insert_many(["platform_requests", "platform_tokens"].map(|metric| {
+            doc! {
+                "_id":format!("{metric}:*"),"lago_metric_code":metric,"credits_per_unit_pico":1_i64,
+                "credits_per_unit_micros":0_i64,"synced_at":mongodb::bson::DateTime::now(),
+            }
+        }))
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<mongodb::bson::Document>(SERVICES)
+        .update_one(
+            doc! {"slug":engine::SERVICE_SLUG},
+            doc! {"$set": {"slug":"title-provider", "base_url":mock.uri(),
+                "inference":{"wire_protocol":"openai_responses","model_list":true}, "billing": {
+                "platform_billable": true,
+                "platform_charge_nyxid_credentials_only": false,
+            }}},
+        )
+        .await
+        .unwrap();
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"data":[{"id":"text-mini"}]})),
+        )
+        .mount(&mock)
+        .await;
+    Mock::given(method("POST")).and(path("/responses")).respond_with(ResponseTemplate::new(200).set_body_json(json!({
+        "status":"completed","usage":{"input_tokens":4,"output_tokens":2,"total_tokens":6},"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"\"Planning a Japan trip.\""}]}],
+    }))).mount(&mock).await;
+    use tracing::instrument::WithSubscriber;
+    let capture = tempfile::NamedTempFile::new().unwrap();
+    let writer = capture.reopen().unwrap();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::TRACE)
+        .with_writer(move || writer.try_clone().unwrap())
+        .finish();
+    Box::pin(super::super::assistant_titles::generate(
+        &state, &auth, &row.id,
+    ))
+    .with_subscriber(subscriber)
+    .await
+    .unwrap();
+    let logs = std::fs::read_to_string(capture.path()).unwrap();
+    for secret in [
+        "Plan a week in Japan",
+        "Visit Kyoto and Tokyo",
+        "Planning a Japan trip",
+    ] {
+        assert!(
+            !logs.contains(secret),
+            "Title generation must not log content"
+        );
+    }
+    let current = engine::get(&state.db, OWNER, &row.id).await.unwrap();
+    assert_eq!(current.title, "Planning a Japan trip");
+    assert_eq!(
+        current.title_source,
+        crate::models::assistant_conversation::TitleSource::Generated
+    );
+    assert_eq!(current.nyxagent_session_id.as_deref(), Some(SESSION));
+    assert_eq!(current.nyxagent_last_response_id.as_deref(), Some(RESPONSE));
+    let usage = settled(&state).await;
+    assert_eq!(
+        usage.len(),
+        2,
+        "Model discovery and the plain title request are metered"
+    );
+    for row in &usage {
+        assert_eq!(row.billing_owner_id, OWNER);
+        let tokens = row.metric == crate::models::service_billing::BillingMetric::Tokens;
+        assert_eq!(row.quantity, Some(if tokens { 6 } else { 1 }));
+        assert_eq!(
+            row.funding.as_ref().unwrap().wallet_funded,
+            Some(
+                if tokens {
+                    "0.000000000006"
+                } else {
+                    "0.000000000001"
+                }
+                .parse()
+                .unwrap()
+            )
+        );
+    }
+    let requests = mock.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2);
+    let body: Value = requests[1].body_json().unwrap();
+    assert_eq!(body["model"], "text-mini");
+    assert_eq!(body["store"], false);
+    assert_eq!(body["stream"], false);
+    assert!(body.get("tool_choice").is_none());
+    assert!(body.get("tools").is_none());
+    assert!(body.get("conversation").is_none());
+    assert!(body.get("session_id").is_none());
+    assert!(body.get("previous_response_id").is_none());
+    assert!(
+        !requests[1].headers.contains_key("authorization"),
+        "The thread key never reaches the model"
+    );
+    assert!(body["instructions"].as_str().unwrap().contains("untrusted"));
+    // Unavailable direct inference must keep the provisional title.
+    state
+        .db
+        .collection::<mongodb::bson::Document>(
+            crate::models::assistant_conversation::COLLECTION_NAME,
+        )
+        .update_one(
+            doc! {"_id":&row.id},
+            doc! {"$set":{"title_source":"provisional","title":"Provisional"}},
+        )
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<mongodb::bson::Document>(SERVICES)
+        .delete_many(doc! {"slug":"title-provider"})
+        .await
+        .unwrap();
+    assert!(
+        Box::pin(super::super::assistant_titles::generate(
+            &state, &auth, &row.id
+        ))
+        .await
+        .is_ok()
+    );
+    assert_eq!(
+        engine::get(&state.db, OWNER, &row.id).await.unwrap().title,
+        "Provisional"
+    );
+    assert_eq!(mock.received_requests().await.unwrap().len(), 2);
+    assert!(
+        titles::first_exchange(&state.db, OWNER, &row.id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    // An attachment-only owner message can derive its topic from the reply;
+    // title generation never fetches the uploaded payload.
+    state
+        .db
+        .collection::<mongodb::bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
+        .update_one(
+            doc! {"conversation_id":&row.id,"role":"user"},
+            doc! {"$set":{"text":""}},
+        )
+        .await
+        .unwrap();
+    let (_, question, answer) = titles::first_exchange(&state.db, OWNER, &row.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(question.is_empty());
+    assert_eq!(answer, "Visit Kyoto and Tokyo");
     server.abort();
 }

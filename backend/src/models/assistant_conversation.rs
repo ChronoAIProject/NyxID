@@ -171,12 +171,24 @@ pub struct ActiveTurn {
     pub also_deliver: Vec<ChannelOrigin>,
 }
 
+/// Absent on old rows: their existing title is final until the owner renames it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TitleSource {
+    Provisional,
+    Generated,
+    #[default]
+    User,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantConversation {
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,
     pub title: String,
+    #[serde(default)]
+    pub title_source: TitleSource,
     pub model: String,
     #[serde(default)]
     pub access_mode: AccessMode,
@@ -235,6 +247,8 @@ pub struct AssistantConversation {
     /// The newest group message this member has already been given.
     #[serde(default)]
     pub group_seen_seq: i64,
+    #[serde(default)]
+    pub group_request_id: Option<String>,
     /// The newest turn was started by someone other than the owner, e.g. a
     /// member of a group chat. Its tool calls are restricted (NyxBot: none;
     /// specialists: their grants, as far as the owner's guest access for each

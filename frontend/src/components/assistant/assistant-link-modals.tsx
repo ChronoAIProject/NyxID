@@ -1,3 +1,5 @@
+import { useOverlayLayer } from "@/lib/overlay-layer";
+import { OverlayLayer } from "@/components/ui/overlay-layer";
 import {
   useMemo,
   useRef,
@@ -64,13 +66,16 @@ function ConnectLinkModal({
   >;
   readonly onClose: () => void;
 }) {
+  const layer = useOverlayLayer();
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
       <DialogPortal>
-        <DialogOverlay className="z-[80]" />
+        <DialogOverlay style={{ zIndex: layer - 1 }} />
+        <OverlayLayer layer={layer}>
         <DialogPrimitive.Content
           aria-describedby={undefined}
-          className="fixed top-1/2 left-1/2 z-[90] w-[calc(100%-2rem)] max-w-lg -translate-x-1/2 -translate-y-1/2 outline-none"
+          style={{ zIndex: layer }}
+          className="fixed top-1/2 left-1/2 w-[calc(100%-2rem)] max-w-lg -translate-x-1/2 -translate-y-1/2 outline-none"
         >
           <DialogTitle className="sr-only">Connect a service</DialogTitle>
           <DialogBody className="max-h-[calc(100dvh-2rem)] rounded-xl bg-card shadow-xl shadow-primary/5">
@@ -85,6 +90,7 @@ function ConnectLinkModal({
             <span className="sr-only">Close</span>
           </DialogClose>
         </DialogPrimitive.Content>
+        </OverlayLayer>
       </DialogPortal>
     </Dialog>
   );

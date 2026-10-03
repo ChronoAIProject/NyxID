@@ -12,37 +12,13 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::models::service_billing::{BillingMetric, PlatformUsage, ResaleUsage};
-use crate::models::usage_meter::CredentialClass;
 use crate::mw::auth::AuthUser;
 use crate::services::{
     approval_service, audit_service, chatgpt_translator, delegation_service, llm_gateway_service,
     llm_usage_service, notification_service, operation_descriptor, proxy_service, sse_parser,
 };
 
-fn llm_credential_class(
-    resolved_via_user_service: bool,
-    master_credential: bool,
-    credential_source: Option<&str>,
-    target: &proxy_service::ProxyTarget,
-) -> CredentialClass {
-    if target.auth_method == "none" && target.credential.is_empty() {
-        CredentialClass::NoAuth
-    } else if resolved_via_user_service {
-        // Auto-provisioned UserServices with no user key inject the
-        // catalog master credential; classify by whose key was used.
-        if master_credential {
-            CredentialClass::NyxidManagedMaster
-        } else if credential_source == Some("platform") {
-            CredentialClass::NyxidPlatformOauthApp
-        } else {
-            CredentialClass::UserOwned
-        }
-    } else if !target.service.requires_user_credential && !target.credential.is_empty() {
-        CredentialClass::NyxidManagedMaster
-    } else {
-        CredentialClass::UserOwned
-    }
-}
+use crate::services::llm_gateway_service::credential_class as llm_credential_class;
 
 fn resale_usage_from_optional_reported(
     metric: BillingMetric,
@@ -2081,10 +2057,17 @@ async fn check_llm_approval(
         notification_service::get_or_create_channel(&state.db, &timeout_recipient).await?;
 
     let timeout_secs = channel.approval_timeout_secs;
-    let request_operation = approval_service::ApprovalRequestOperation::from_descriptor(
+    let mut request_operation = approval_service::ApprovalRequestOperation::from_descriptor(
         &operation,
         pending.resolution.grant_scope.clone(),
     );
+    request_operation.assistant_group = crate::services::org_group_service::approval_binding(
+        &state.db,
+        auth_user.assistant_group_id.as_deref(),
+        &auth_user.user_id.to_string(),
+        auth_user.api_key_id.as_deref(),
+    )
+    .await?;
     let approval_request = approval_service::create_approval_request(
         &state.db,
         &state.config,

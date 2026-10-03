@@ -156,3 +156,11 @@ it("refreshes the open thread on every change but lists only when a turn or coun
   });
   expect(change("t1", 2).lists).toEqual(threadAndAgents);
 });
+
+it("refreshes titles even when the turn and message count did not change", () => {
+  const seen = new Map<string, string>([["nyxa-1", ":2"]]);
+  const event = { type: "conversation" as const, id: "nyxa-1", group_id: null, turn_id: null, messages: 2, title_changed: true };
+  const refresh = nyxAgentLiveRefresh("u", event, seen);
+  expect(refresh.lists).toContainEqual(["assistant", "nyxagent", "u", "threads"]);
+  expect(refresh.now).toContainEqual(["assistant", "nyxagent", "u", "history", "nyxa-1"]);
+});

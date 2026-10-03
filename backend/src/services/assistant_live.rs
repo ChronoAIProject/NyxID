@@ -10,7 +10,7 @@
 //! secret ever reaches this process through it.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -22,7 +22,7 @@ use mongodb::{
     change_stream::event::{ChangeStreamEvent, OperationType, ResumeToken},
     options::FullDocumentType,
 };
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::models::{
     assistant_conversation::COLLECTION_NAME as CONVERSATIONS,
@@ -37,6 +37,8 @@ const MACHINE_SETUPS: &str = crate::models::machine_setup::COLLECTION_NAME;
 const CAPACITY: usize = 1024;
 /// Per-owner buffer for browser streams.
 const OWNER_CAPACITY: usize = 64;
+const ORG_QUEUE_CAPACITY: usize = 256;
+const ORG_COALESCE_WINDOW: Duration = Duration::from_millis(250);
 /// Live browser streams one owner may hold open at once (tabs, devices).
 pub const MAX_STREAMS_PER_OWNER: usize = 8;
 const MAX_BACKOFF_SECS: u64 = 30;
@@ -55,9 +57,15 @@ pub enum LiveEvent {
         /// thread lists only when these change, not on every activity write.
         turn_id: Option<String>,
         messages: i64,
+        title_changed: bool,
     },
     /// A group or its transcript changed.
     Group {
+        id: String,
+        user_id: String,
+    },
+    /// Organization group identifier routed to a live eligible person.
+    OrgGroup {
         id: String,
         user_id: String,
     },
@@ -105,6 +113,7 @@ impl LiveEvent {
         match self {
             Self::Conversation { user_id, .. }
             | Self::Group { user_id, .. }
+            | Self::OrgGroup { user_id, .. }
             | Self::ConnectLink { user_id, .. }
             | Self::ChannelBot { user_id, .. }
             | Self::Machine { user_id, .. }
@@ -119,7 +128,7 @@ impl LiveEvent {
 
 /// Fan-out of live events: every event to in-process workers, and each
 /// owner's events (plus resyncs) to that owner's browser streams only.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct AssistantLive {
     sender: broadcast::Sender<LiveEvent>,
     owners: Arc<Mutex<HashMap<String, Owner>>>,
@@ -242,14 +251,79 @@ impl AssistantLive {
         let _ = self.sender.send(event);
     }
 
+    pub(crate) async fn publish_resolved(&self, db: &Database, event: LiveEvent) {
+        let LiveEvent::OrgGroup { id, .. } = &event else {
+            self.publish(event);
+            return;
+        };
+        let result: crate::errors::AppResult<()> = async {
+            let Some(group) = db
+                .collection::<crate::models::assistant_group::AssistantGroup>(GROUPS)
+                .find_one(mongodb::bson::doc! {"_id":id})
+                .await?
+            else {
+                return Ok(());
+            };
+            if !super::org_group_service::is_org(&group) {
+                return Ok(());
+            }
+            for actor in &group.participant_user_ids {
+                if super::org_group_service::authorize(db, actor, group.clone(), None)
+                    .await
+                    .is_ok()
+                {
+                    self.publish(LiveEvent::OrgGroup {
+                        id: id.clone(),
+                        user_id: actor.clone(),
+                    });
+                }
+            }
+            Ok(())
+        }
+        .await;
+        if result.is_err() {
+            tracing::debug!("Organization group live delivery deferred");
+        }
+    }
+
+    /// Never wait for organization reads in the replica-wide stream. A full
+    /// queue drops an identifier; browser polling and the worker sweep repair
+    /// missed notifications. Personal events always take the direct path.
+    fn route(&self, org_groups: &mpsc::Sender<String>, event: LiveEvent) {
+        if let LiveEvent::OrgGroup { id, .. } = event {
+            let _ = org_groups.try_send(id);
+        } else {
+            self.publish(event);
+        }
+    }
+
     /// Follow the database's change stream until the process exits,
     /// reopening it (resuming where possible) after any error.
     pub async fn run(&self, db: Database) {
+        let (org_groups, pending) = mpsc::channel(ORG_QUEUE_CAPACITY);
+        // JoinSet aborts the sole worker when run is cancelled (including tests).
+        let mut workers = tokio::task::JoinSet::new();
+        let live = self.clone();
+        let worker_db = db.clone();
+        workers.spawn(async move {
+            org_group_worker(pending, |id| {
+                live.publish_resolved(
+                    &worker_db,
+                    LiveEvent::OrgGroup {
+                        id,
+                        user_id: String::new(),
+                    },
+                )
+            })
+            .await;
+        });
         let mut resume: Option<ResumeToken> = None;
         let mut backoff = 1;
         loop {
             let mut opened = false;
-            let outcome = self.follow(&db, &mut resume, &mut opened).await;
+            let outcome = self
+                .follow(&db, &org_groups, &mut resume, &mut opened)
+                .await;
             self.open.send_replace(false);
             if opened {
                 // It was delivering: reopen quickly, resuming where it was.
@@ -272,6 +346,7 @@ impl AssistantLive {
     async fn follow(
         &self,
         db: &Database,
+        org_groups: &mpsc::Sender<String>,
         resume: &mut Option<ResumeToken>,
         opened: &mut bool,
     ) -> mongodb::error::Result<()> {
@@ -291,10 +366,31 @@ impl AssistantLive {
             let change = change?;
             *resume = Some(change.id.clone());
             if let Some(event) = decode(&change) {
-                self.publish(event);
+                self.route(org_groups, event);
             }
         }
         Ok(())
+    }
+}
+
+/// One bounded worker, with one eligibility resolution per distinct group in
+/// each batch. Even a continuously busy group cannot extend the coalescing
+/// window or grow the batch beyond the queue capacity plus the first item.
+async fn org_group_worker<F, Fut>(mut pending: mpsc::Receiver<String>, mut resolve: F)
+where
+    F: FnMut(String) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    while let Some(first) = pending.recv().await {
+        tokio::time::sleep(ORG_COALESCE_WINDOW).await;
+        let mut groups = HashSet::from([first]);
+        for _ in 0..ORG_QUEUE_CAPACITY {
+            let Ok(id) = pending.try_recv() else { break };
+            groups.insert(id);
+        }
+        for id in groups {
+            resolve(id).await;
+        }
     }
 }
 
@@ -306,6 +402,7 @@ fn pipeline() -> Vec<Document> {
             "operationType": {"$in": ["insert", "update", "replace"]},
             "$or": [
                 {"ns.coll": {"$in": [CONVERSATIONS, GROUPS, GROUP_MESSAGES]}},
+                {"ns.coll": crate::models::approval_request::COLLECTION_NAME, "fullDocument.assistant_group.group_id": {"$type":"string"}},
                 {"ns.coll": crate::models::machine_update::COLLECTION_NAME, "fullDocument.attempt_id": {"$type":"string"}},
                 // Replacing an already-online socket can leave status unchanged.
                 // Update watches still need the authenticated reconnect event.
@@ -324,10 +421,15 @@ fn pipeline() -> Vec<Document> {
         doc! {"$project": {
             "operationType": 1, "ns": 1, "documentKey": 1,
             "fullDocument.user_id": 1, "fullDocument.group_id": 1,
+            "fullDocument.created_by_user_id": 1, "fullDocument.org_group": 1,
+            "fullDocument.group_request_id": 1,
+            "fullDocument.assistant_group.group_id": 1,
             "fullDocument.status": 1, "fullDocument.is_active": 1,
             "fullDocument.setup_watch_id": 1,
             "fullDocument.attempt_id": 1, "fullDocument.requested_by": 1,
             "fullDocument.active_turn.turn_id": 1, "fullDocument.message_count": 1,
+            // Signal metadata invalidation without projecting the title text.
+            "fullDocument.title_changed": {"$ne": [{"$type": "$updateDescription.updatedFields.title"}, "missing"]},
         }},
     ]
 }
@@ -348,8 +450,33 @@ fn decode(change: &ChangeStreamEvent<Document>) -> Option<LiveEvent> {
         .get_str("_id")
         .ok()?
         .to_owned();
+    if collection == crate::models::approval_request::COLLECTION_NAME {
+        return Some(LiveEvent::OrgGroup {
+            id: full
+                .get_document("assistant_group")
+                .ok()?
+                .get_str("group_id")
+                .ok()?
+                .into(),
+            user_id,
+        });
+    }
+    if (collection == GROUPS && full.get_str("created_by_user_id").is_ok())
+        || (collection == GROUP_MESSAGES && full.get_bool("org_group").unwrap_or(false))
+        || (collection == CONVERSATIONS && full.get_str("group_request_id").is_ok())
+    {
+        return Some(LiveEvent::OrgGroup {
+            id: if collection == GROUPS {
+                key
+            } else {
+                full.get_str("group_id").ok()?.into()
+            },
+            user_id,
+        });
+    }
     Some(match collection {
         CONVERSATIONS => LiveEvent::Conversation {
+            title_changed: full.get_bool("title_changed").unwrap_or(false),
             id: key,
             user_id,
             group_id: full.get_str("group_id").ok().map(str::to_owned),
@@ -398,6 +525,103 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn slow_org_resolution_does_not_delay_personal_conversation_events() {
+        let live = AssistantLive::new();
+        let mut owner = live.subscribe_owner("person").unwrap();
+        let (queue, pending) = mpsc::channel(ORG_QUEUE_CAPACITY);
+        let (started, mut resolutions) = mpsc::unbounded_channel();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let blocker = release.clone();
+        let worker = tokio::spawn(org_group_worker(pending, move |id| {
+            let started = started.clone();
+            let blocker = blocker.clone();
+            async move {
+                started.send(id).unwrap();
+                blocker.notified().await;
+            }
+        }));
+        // Saturating the queue neither waits nor schedules unbounded work.
+        for _ in 0..ORG_QUEUE_CAPACITY * 2 {
+            live.route(
+                &queue,
+                LiveEvent::OrgGroup {
+                    id: "group".into(),
+                    user_id: "org".into(),
+                },
+            );
+        }
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), resolutions.recv())
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("group")
+        );
+        let personal = LiveEvent::Conversation {
+            id: "thread".into(),
+            user_id: "person".into(),
+            group_id: None,
+            turn_id: None,
+            messages: 1,
+            title_changed: false,
+        };
+        live.route(&queue, personal.clone());
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), owner.events.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            personal
+        );
+        assert!(resolutions.try_recv().is_err());
+        drop(queue);
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), worker)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            resolutions.recv().await.is_none(),
+            "all duplicate group ids coalesced into one resolution"
+        );
+    }
+
+    #[test]
+    fn org_group_notice_routing_uses_the_server_marker_not_the_author() {
+        for author in [None, Some("person")] {
+            let mut full = doc! {"user_id":"org", "group_id":"group", "org_group":true};
+            if let Some(author) = author {
+                full.insert("author_user_id", author);
+            }
+            let change: ChangeStreamEvent<Document> = mongodb::bson::from_document(doc! {
+                "_id":{"_data":"token"}, "operationType":"insert", "ns":{"db":"test","coll":GROUP_MESSAGES},
+                "documentKey":{"_id":"notice"}, "fullDocument":full,
+            }).unwrap();
+            assert_eq!(
+                decode(&change),
+                Some(LiveEvent::OrgGroup {
+                    id: "group".into(),
+                    user_id: "org".into()
+                })
+            );
+        }
+        let projection = pipeline().pop().unwrap();
+        assert_eq!(
+            projection
+                .get_document("$project")
+                .unwrap()
+                .get_i32("fullDocument.org_group"),
+            Ok(1)
+        );
+        assert!(
+            !projection
+                .get_document("$project")
+                .unwrap()
+                .contains_key("fullDocument.author_user_id")
+        );
+    }
+
+    #[tokio::test]
     async fn changes_are_published_with_identifiers_only() {
         let db =
             crate::test_utils::connect_transaction_test_database("assistant_live_stream").await;
@@ -416,6 +640,7 @@ mod tests {
             group_id: None,
             turn_id: Some("turn-1".into()),
             messages: 4,
+            title_changed: false,
         };
         let seen = tokio::time::timeout(Duration::from_secs(20), async {
             let mut attempt = 0;
@@ -447,6 +672,30 @@ mod tests {
         .await
         .expect("a conversation change is published");
         assert_eq!(seen.user_id(), Some("owner"));
+        conversations
+            .update_one(
+                doc! {"_id": "nyxa-1"},
+                doc! {"$set": {"title": "New private title"}},
+            )
+            .await
+            .unwrap();
+        let changed = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Ok(
+                    event @ LiveEvent::Conversation {
+                        title_changed: true,
+                        ..
+                    },
+                ) = events.recv().await
+                {
+                    return event;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!format!("{changed:?}").contains("private title"));
+
         // Group transcripts report their group; bots report activity.
         db.collection::<Document>(GROUP_MESSAGES)
             .insert_one(doc! {"_id": "m1", "group_id": "nyxg-1", "user_id": "owner", "text": "hi"})

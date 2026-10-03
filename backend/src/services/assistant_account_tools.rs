@@ -480,7 +480,13 @@ impl AccountTools<'_> {
     pub async fn execute(&self, auth: &AuthUser, tool_name: &str, args: &Value) -> ToolResult {
         let user = auth.user_id.to_string();
         let chat = if auth.auth_method == AuthMethod::ApiKey {
-            acks::for_key(self.db, &user, auth.api_key_id.as_deref()).await
+            Box::pin(acks::for_key_with_access(
+                self.db,
+                &user,
+                auth.api_key_id.as_deref(),
+                auth.org_agent_access.as_ref(),
+            ))
+            .await
         } else {
             Ok(None)
         };
@@ -495,7 +501,7 @@ impl AccountTools<'_> {
             .and_then(|chat| chat.as_ref())
             .map(|chat| chat.conversation_id.clone());
         let result = match chat {
-            Ok(Some(chat)) => self.execute_authorized(&chat, auth, tool_name, args).await,
+            Ok(Some(chat)) => Box::pin(self.execute_authorized(&chat, auth, tool_name, args)).await,
             Ok(None) => Err(AppError::Forbidden("Conversation key required".into())),
             Err(error) => Err(error),
         };

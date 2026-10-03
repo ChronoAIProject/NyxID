@@ -121,6 +121,8 @@ pub async fn create(
     let group = AssistantGroup {
         id: format!("nyxg-{}", Uuid::new_v4().simple()),
         user_id: owner.into(),
+        participant_user_ids: Vec::new(),
+        created_by_user_id: None,
         name,
         member_agent_ids: members.iter().map(|member| member.id.clone()).collect(),
         lead_agent_id: lead_of(&members),
@@ -309,6 +311,10 @@ pub async fn append(
         .await?
         .ok_or_else(not_found)?;
     let message = GroupMessage {
+        org_group: false,
+        author_user_id: None,
+        author_display_name: None,
+        request_id: None,
         attachments: Vec::new(),
         id: Uuid::new_v4().to_string(),
         group_id: group_id.into(),
@@ -368,6 +374,10 @@ pub async fn append_with_uploads(
     ))
     .await?;
     let message = GroupMessage {
+        org_group: false,
+        author_user_id: None,
+        author_display_name: None,
+        request_id: None,
         attachments,
         id: message_id,
         group_id: group_id.into(),
@@ -501,7 +511,8 @@ pub async fn follow(
     conversation_id: &str,
     since_seq: i64,
 ) -> AppResult<()> {
-    let filter = owner_filter(owner, group_id)?;
+    let mut filter = owner_filter(owner, group_id)?;
+    filter.insert("created_by_user_id", bson::Bson::Null);
     let groups = db.collection::<AssistantGroup>(GROUPS);
     groups
         .update_one(
@@ -695,7 +706,7 @@ pub async fn set_seen(db: &Database, owner: &str, thread_id: &str, seq: i64) -> 
 pub async fn with_pending(db: &Database) -> AppResult<Vec<AssistantGroup>> {
     let rows: Vec<AssistantGroup> = db
         .collection::<AssistantGroup>(GROUPS)
-        .find(doc! {"pending_agent_ids.0": {"$exists": true}})
+        .find(doc! {"$or": [{"pending_agent_ids.0": {"$exists": true}}, {"created_by_user_id": {"$type": "string"}}]})
         .sort(doc! {"pending_checked_at": 1})
         .limit(50)
         .await?
@@ -732,7 +743,11 @@ pub async fn remove_agent(db: &Database, owner: &str, agent_id: &str) -> AppResu
             .filter_map(|id| agents.iter().find(|agent| &agent.id == id).cloned())
             .collect();
         if members.is_empty() {
-            delete(db, owner, &group.id).await?;
+            if super::org_group_service::is_org(&group) {
+                super::org_group_service::delete_contents(db, &group, None).await?;
+            } else {
+                delete(db, owner, &group.id).await?;
+            }
             continue;
         }
         db.collection::<AssistantGroup>(GROUPS)

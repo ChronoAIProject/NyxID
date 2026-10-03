@@ -12,7 +12,33 @@ use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
 use crate::models::user_provider_token::{
     COLLECTION_NAME as USER_PROVIDER_TOKENS, UserProviderToken,
 };
-use crate::services::{org_service, user_service_service};
+use crate::services::{org_service, proxy_service, user_service_service};
+
+pub(crate) fn credential_class(
+    resolved_via_user_service: bool,
+    master_credential: bool,
+    credential_source: Option<&str>,
+    target: &proxy_service::ProxyTarget,
+) -> crate::models::usage_meter::CredentialClass {
+    use crate::models::usage_meter::CredentialClass;
+    if target.auth_method == "none" && target.credential.is_empty() {
+        CredentialClass::NoAuth
+    } else if resolved_via_user_service {
+        // Auto-provisioned UserServices with no user key inject the
+        // catalog master credential; classify by whose key was used.
+        if master_credential {
+            CredentialClass::NyxidManagedMaster
+        } else if credential_source == Some("platform") {
+            CredentialClass::NyxidPlatformOauthApp
+        } else {
+            CredentialClass::UserOwned
+        }
+    } else if !target.service.requires_user_credential && !target.credential.is_empty() {
+        CredentialClass::NyxidManagedMaster
+    } else {
+        CredentialClass::UserOwned
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Response types

@@ -5,6 +5,8 @@ pub const COLLECTION_NAME: &str = "assistant_groups";
 pub const MESSAGES_COLLECTION_NAME: &str = "assistant_group_messages";
 pub const MAX_MEMBERS: usize = 8;
 pub const MAX_NAME_CHARS: usize = 60;
+pub const MAX_PARTICIPANTS: usize = 16;
+pub const REQUESTS_COLLECTION_NAME: &str = "assistant_group_requests";
 /// NyxBot threads that posted into a group and wait for its outcome.
 pub const MAX_FOLLOWERS: usize = 8;
 
@@ -16,6 +18,10 @@ pub struct AssistantGroup {
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,
+    #[serde(default)]
+    pub participant_user_ids: Vec<String>,
+    #[serde(default)]
+    pub created_by_user_id: Option<String>,
     pub name: String,
     pub member_agent_ids: Vec<String>,
     /// Answers user messages that mention no one: NyxBot when it is a member.
@@ -47,6 +53,15 @@ pub struct AssistantGroup {
 /// One message in a group transcript.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GroupMessage {
+    /// Server-only routing marker, including notices with no human author.
+    #[serde(default)]
+    pub org_group: bool,
+    #[serde(default)]
+    pub author_user_id: Option<String>,
+    #[serde(default)]
+    pub author_display_name: Option<String>,
+    #[serde(default)]
+    pub request_id: Option<String>,
     #[serde(default)]
     pub attachments: Vec<super::assistant_conversation::TurnAttachment>,
     #[serde(rename = "_id")]
@@ -71,6 +86,23 @@ pub struct GroupFollower {
     pub conversation_id: String,
     /// Its post; the summary covers the messages after it.
     pub since_seq: i64,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub created_at: DateTime<Utc>,
+}
+
+/// One org-group message chain; actor and attachment authority never change
+/// when an agent hands work to another member.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GroupRequest {
+    #[serde(rename = "_id")]
+    pub id: String,
+    pub group_id: String,
+    pub user_id: String,
+    pub actor_user_id: String,
+    pub message_seq: i64,
+    pub attachment_ids: Vec<String>,
+    pub pending_agent_ids: Vec<String>,
+    pub hops_remaining: i32,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
 }

@@ -401,15 +401,21 @@ async fn ensure_caller_can_decide(
     db: &mongodb::Database,
     request: &crate::models::approval_request::ApprovalRequest,
     auth_user_id: &str,
-) -> AppResult<()> {
+) -> AppResult<Option<std::sync::Arc<crate::services::org_agent_service::RequestAccess>>> {
+    let group_access =
+        crate::services::org_group_service::authorize_approval(db, request, auth_user_id, None)
+            .await?;
     if request.user_id == auth_user_id {
-        return Ok(());
+        return Ok(group_access);
     }
 
     // Check whether the request owner is an org and the caller is one of
     // its admins. `resolve_owner_access` returns Forbidden for non-org
     // owners or non-member callers, which collapses both "ex-admin" and
     // "stranger" into the same denial path.
+    if group_access.is_some() {
+        return Ok(group_access);
+    }
     let access =
         crate::services::org_service::resolve_owner_access(db, auth_user_id, &request.user_id)
             .await?;
@@ -432,7 +438,7 @@ async fn ensure_caller_can_decide(
         ));
     }
 
-    Ok(())
+    Ok(None)
 }
 
 // --- Query/Request types ---
@@ -663,7 +669,18 @@ pub async fn get_request_status(
     // - the legacy match, OR
     // - the actor has any access to the owning org (member or admin),
     //   which means the request was created on their behalf via cascade.
-    if request.user_id != owner_user_id {
+    if let Some(binding) = &request.assistant_group {
+        if binding.actor_user_id != auth_user.user_id.to_string() {
+            return Err(crate::services::org_group_service::missing());
+        }
+        crate::services::org_group_service::get(
+            &state.db,
+            &binding.actor_user_id,
+            &binding.group_id,
+            auth_user.org_agent_access.as_ref(),
+        )
+        .await?;
+    } else if request.user_id != owner_user_id {
         let access = crate::services::org_service::resolve_owner_access(
             &state.db,
             &owner_user_id,
@@ -693,6 +710,11 @@ pub async fn create_request(
     tele: TelemetryContext,
     Json(body): Json<CreateToolApprovalRequest>,
 ) -> AppResult<(axum::http::StatusCode, Json<CreateApprovalResponse>)> {
+    if auth_user.assistant_group_id.is_some() {
+        return Err(AppError::Forbidden(
+            "Use the assistant action cards for organization group tools".into(),
+        ));
+    }
     // Validate tool_name
     let tool_name = body.tool_name.trim();
     if tool_name.is_empty() || tool_name.len() > 256 {
@@ -800,7 +822,7 @@ pub async fn decide_request(
     // Verify the caller can act on this request -- direct owner, named
     // recipient, or current admin of the owning org.
     let request = approval_service::get_request(&state.db, &request_id).await?;
-    ensure_caller_can_decide(&state.db, &request, &user_id).await?;
+    let group_access = ensure_caller_can_decide(&state.db, &request, &user_id).await?;
 
     if let Some(duration_sec) = body.duration_sec
         && duration_sec <= 0
@@ -810,7 +832,7 @@ pub async fn decide_request(
         ));
     }
 
-    let updated = approval_service::process_decision(
+    let updated = approval_service::process_decision_with_access(
         &state.db,
         &state.config,
         &state.http_client,
@@ -821,6 +843,7 @@ pub async fn decide_request(
         body.duration_sec,
         idempotency_key,
         "web",
+        group_access.as_ref(),
     )
     .await?;
 
@@ -1870,6 +1893,7 @@ mod tests {
 
     fn sample_request(user_id: &str) -> ApprovalRequest {
         ApprovalRequest {
+            assistant_group: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: user_id.to_string(),
             service_id: uuid::Uuid::new_v4().to_string(),

@@ -175,3 +175,37 @@ describe("Assistant uploads composer", () => {
     expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
   });
 });
+
+it("keeps the paperclip and chips inside the composer and highlights file drops", async () => {
+  render(<UploadComposer {...base} scope={{ kind: "conversations", id: "one" }} />);
+  const box = screen.getByRole("textbox").closest("[data-composer-input]")!;
+  expect(box).toContainElement(screen.getByRole("button", { name: "Attach files" }));
+  expect(screen.queryByText(/Images and documents ·/)).not.toBeInTheDocument();
+  fireEvent.dragEnter(box, { dataTransfer: { types: ["Files"] } });
+  expect(screen.getByRole("status")).toHaveTextContent("Drop files to attach");
+  fireEvent.drop(box, { dataTransfer: { files: [new File(["notes"], "notes.txt")] } });
+  await screen.findByText("Ready");
+  expect(box).toContainElement(screen.getByRole("list", { name: "Attachments" }));
+  expect(screen.queryByText("Drop files to attach")).not.toBeInTheDocument();
+});
+
+it("does not admit drops or paste while the turn is active", async () => {
+  render(<UploadComposer {...base} active scope={{ kind: "groups", id: "group" }} />);
+  const box = screen.getByRole("textbox").closest("[data-composer-input]")!;
+  expect(screen.getByRole("button", { name: "Attach files" })).toBeDisabled();
+  fireEvent.dragEnter(box, { dataTransfer: { types: ["Files"] } });
+  fireEvent.drop(box, { dataTransfer: { files: [new File(["notes"], "notes.txt")] } });
+  fireEvent.paste(box, { clipboardData: { files: [new File(["notes"], "notes.txt")] } });
+  await act(async () => {});
+  expect(uploadFile).not.toHaveBeenCalled();
+  expect(screen.queryByText("Drop files to attach")).not.toBeInTheDocument();
+});
+
+it("reports the file size limit inline without starting an upload", async () => {
+  render(<UploadComposer {...base} scope={{ kind: "conversations", id: "one" }} />);
+  const file = new File(["x"], "huge.pdf");
+  Object.defineProperty(file, "size", { value: 20 * 1024 * 1024 + 1 });
+  choose(file);
+  expect(await screen.findByRole("alert")).toHaveTextContent("20 MB");
+  expect(uploadFile).not.toHaveBeenCalled();
+});
