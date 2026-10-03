@@ -762,14 +762,17 @@ async fn pool_proxy_attempt_deadline_bounds_headers_first_body_and_rejection_dra
                 doc! { "_id": &fixture.pool_id },
                 doc! { "$set": {
                     "failover.per_attempt_timeout_ms": 1000,
-                    "failover.overall_deadline_ms": 5000,
+                    // The 1 s per-attempt bound is what this test proves. The
+                    // overall budget only needs slack for slow (coverage)
+                    // runs: a broken per-attempt bound still stalls into it.
+                    "failover.overall_deadline_ms": 30000,
                     "failover.retry_on": ["http_429", "timeout"],
                 } },
             )
             .await
             .unwrap();
         let response =
-            tokio::time::timeout(std::time::Duration::from_secs(6), call(&fixture, "{}"))
+            tokio::time::timeout(std::time::Duration::from_secs(35), call(&fixture, "{}"))
                 .await
                 .expect("stalled attempt must leave time to try the backup");
         assert_eq!(response.status(), StatusCode::OK);

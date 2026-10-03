@@ -247,3 +247,5 @@ pub mod service_pool_routing;
 mod agent_operation_scope_tests;
 
 pub mod agent_skill_service;
+pub mod assistant_upload_service;
+pub mod attachment_extraction;

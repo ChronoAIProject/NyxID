@@ -159,6 +159,11 @@ export function ChatMessageBubble({
     return (
       <div className="ml-auto max-w-[78%] rounded-lg bg-overlay-strong px-3 py-2 text-[12px] leading-relaxed text-foreground whitespace-pre-wrap">
         {content}
+        {message.images?.length ? (
+          <div className="mt-2 flex flex-wrap gap-2">
+            {message.images.map((image) => <ToolImage key={image.id} image={image} />)}
+          </div>
+        ) : null}
       </div>
     );
   }

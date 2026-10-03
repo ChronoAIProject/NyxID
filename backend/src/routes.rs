@@ -1898,6 +1898,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     // Shared management routes; individual groups retain service-account gates.
     // Delegated reads require account:read and the existing route/method policy.
     let api_v1_shared = Router::new()
+        .route(
+            "/assistant-attachments/{id}/content",
+            get(handlers::assistant_uploads::thread_image),
+        )
         .route("/keys", get(handlers::service_account_key_reads::list_keys))
         .route(
             "/keys/{key_id}",
@@ -1964,6 +1968,20 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         ),
     ));
     let assistant_routes = Router::new()
+        .route("/nyxagent/drafts", post(handlers::assistant_uploads::draft))
+        .route(
+            "/nyxagent/conversations/{id}/attachments",
+            post(handlers::assistant_uploads::upload),
+        )
+        .route(
+            "/nyxagent/groups/{id}/attachments",
+            post(handlers::assistant_uploads::upload),
+        )
+        .route(
+            "/nyxagent/groups/{id}/attachments/{attachment_id}",
+            get(handlers::assistant_uploads::group_content)
+                .delete(handlers::assistant_uploads::remove),
+        )
         .route("/nyxagent/machines", get(handlers::machine_desktop::list))
         .route(
             "/nyxagent/machines/{node_id}/desktop",
@@ -2067,7 +2085,8 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .route(
             "/nyxagent/conversations/{id}/attachments/{attachment_id}",
-            get(handlers::assistant_nyxagent::attachment),
+            get(handlers::assistant_nyxagent::attachment)
+                .delete(handlers::assistant_uploads::remove),
         )
         .route("/wire-logs/{id}", get(handlers::assistant::get_wire_log))
         .route(

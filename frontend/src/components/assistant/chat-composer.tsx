@@ -121,6 +121,9 @@ interface ChatComposerProps {
    */
   readonly focusRequest?: number;
   readonly controls?: ReactNode;
+  readonly hasAttachments?: boolean;
+  readonly uploadBlocked?: boolean;
+  readonly onFiles?: (files: File[]) => void;
   /** Idle placeholder, e.g. "Message NyxBot". */
   readonly placeholder?: string;
   /**
@@ -152,6 +155,9 @@ function DraftedChatComposer({
   draftKey,
   focusRequest = 0,
   controls,
+  hasAttachments = false,
+  uploadBlocked = false,
+  onFiles,
   placeholder,
   mentions,
   onSend,
@@ -555,7 +561,7 @@ function DraftedChatComposer({
 
   async function submit() {
     const message = content.trim();
-    if (!message || locked || disabled || sending) return;
+    if ((!message && !hasAttachments) || uploadBlocked || locked || disabled || sending) return;
     cancelScheduledSave();
     const userId = ownerUserIdRef.current;
     const key = draftKeyRef.current;
@@ -613,6 +619,21 @@ function DraftedChatComposer({
     <div
       // Opaque: the transcript scrolls underneath the composer, so its band
       // must hide it instead of showing text around and below the input.
+      onDragOver={(event) => {
+        if (onFiles && event.dataTransfer.types.includes("Files")) event.preventDefault();
+      }}
+      onDrop={(event) => {
+        if (onFiles && event.dataTransfer.files.length) {
+          event.preventDefault();
+          onFiles(Array.from(event.dataTransfer.files));
+        }
+      }}
+      onPaste={(event) => {
+        if (onFiles && event.clipboardData.files.length) {
+          event.preventDefault();
+          onFiles(Array.from(event.clipboardData.files));
+        }
+      }}
       data-composer-band
       className="relative shrink-0 bg-background"
       style={{
@@ -761,7 +782,7 @@ function DraftedChatComposer({
                 type="button"
                 variant="primary"
                 size="icon"
-                disabled={!content.trim() || sending || disabled}
+                disabled={(!content.trim() && !hasAttachments) || uploadBlocked || sending || disabled}
                 onClick={() => void submit()}
                 aria-label={
                   allowActiveInput

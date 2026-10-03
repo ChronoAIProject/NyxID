@@ -74,7 +74,7 @@ export type DirectTurnEvent =
   | (DirectTurnEventBase & { readonly event: "turn.continuing"; readonly turn_id: string; readonly continuation: number })
   | (DirectTurnEventBase & {
       readonly event: "turn.notice";
-      readonly code: "context_reset";
+      readonly code: "context_reset" | "image_input_unavailable";
       readonly message: string;
     })
   | (DirectTurnEventBase & {

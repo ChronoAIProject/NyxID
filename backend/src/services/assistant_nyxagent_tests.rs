@@ -5,6 +5,7 @@ use crate::test_utils::{connect_transaction_test_database, test_app_state, test_
 
 fn request(id: Option<&str>, text: &str) -> TurnRequest {
     TurnRequest {
+        attachment_ids: Vec::new(),
         agent_id: None,
         conversation_id: id.map(str::to_owned),
         text: text.into(),

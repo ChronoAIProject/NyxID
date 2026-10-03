@@ -592,7 +592,7 @@ mod tests {
     fn streamed_writes_validate_size_and_hash_before_atomic_commit() {
         let temp = tempfile::tempdir().unwrap();
         let roots = Roots::new(&[temp.path().into()], &[]).unwrap();
-        let bytes = vec![b'X'; 2 * 1024 * 1024];
+        let bytes = vec![b'X'; 20 * 1024 * 1024];
         let expected = hex::encode(Sha256::digest(&bytes));
         let mut reader = std::io::Cursor::new(&bytes);
         assert_eq!(

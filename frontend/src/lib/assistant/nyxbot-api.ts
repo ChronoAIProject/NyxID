@@ -165,9 +165,9 @@ export const nyxBotApi = {
     );
   },
   /** Accepted (202): replies arrive later as new messages. */
-  async postGroupMessage(id: string, text: string) {
+  async postGroupMessage(id: string, text: string, attachmentIds?: string[]) {
     return assistantGroupPostedSchema.parse(
-      await assistantJson(`${groupPath(id)}/messages`, { method: "POST", body: { text } }),
+      await assistantJson(`${groupPath(id)}/messages`, { method: "POST", body: { text, ...(attachmentIds?.length ? { attachment_ids: attachmentIds } : {}) } }),
     );
   },
 };

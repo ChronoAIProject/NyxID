@@ -75,7 +75,7 @@ pub fn definitions() -> Vec<McpToolDefinition> {
         ),
         (
             "save_attachment",
-            "Stream an attachment from this conversation to a machine workspace.",
+            "Stream an attachment from this conversation or group to a machine workspace (up to 20 MiB). For files over 5 MiB, update older machine nodes to the current server release first.",
             json!({"attachment_id":{"type":"string"},"path":{"type":"string"}}),
             vec!["attachment_id", "path"],
         ),

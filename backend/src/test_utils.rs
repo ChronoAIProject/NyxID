@@ -2719,6 +2719,7 @@ pub async fn scoped_specialist_auth(
             agent_id: None,
             conversation_id: Some(home.id),
             text: "Exercise service operations".into(),
+            attachment_ids: Vec::new(),
             model: None,
             access_mode: None,
         },
