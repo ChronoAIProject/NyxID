@@ -111,6 +111,45 @@ It covers search shrinking and expanding, repeated selection and deselection,
 mobile-to-desktop resizing, and Escape/focus restoration. The 31 focused tests,
 TypeScript, scoped lint, and production build passed after this layout change.
 
+## Grouped selector and routing controls
+
+The grouped selector follow-up includes PR #1732 and is rebased onto
+`ef830db7` from `main`, including the settled-attempt lease fix from PR #1739. Candidate metadata identifies
+the original catalog service while
+preserving each connection's own label. Group identity uses the catalog ID,
+including when multiple services have the same display name; custom connections
+have a separate group. Search includes original service names and slugs before
+connection pagination. Metadata reads retain owner and caller scopes and do not
+materialize credentials.
+
+The form exposes weighted and round-robin cycle ordering, configured weighted
+shares, fallback priorities, and same-priority balancing. These controls use the
+existing runtime contract. The independent real HTTP/CLI/browser smoke passed
+20 checks, including weighted A → A → B, reordered B → A → A, saving midway
+through a cycle without resetting its counter, round-robin ordering,
+disabled-member skipping, actual dispatch from UI-saved configurations, and the
+earlier unavailable-credential behavior. Browser checks create, edit, reopen,
+and delete pools, with zero window, page, or console errors.
+
+Review reproduced a ResizeObserver error when opening Routing during the pool
+dialog's entrance animation (39 errors across 30 fresh dialogs). Disabling only
+this editor's entrance animation removed the race; the shared dialog and select
+components keep their existing behavior. The permanent browser suite covers
+fresh dialogs, repeated selection, resizing, focus restoration, and short
+viewports. Independent production checks passed 30 fresh-dialog cycles and seven
+viewport sizes, including 780×390. Each short viewport fits a complete connection
+row inside the actual scroll area, with no runtime errors or horizontal overflow.
+
+On the rebased branch, all 4,118 frontend tests in 412 files, all three permanent
+production-browser regressions, lint, the production build, Rust formatting,
+and the backend boundary check passed. An initial parallel run timed out in one
+signup test; the complete 18-test signup file and then the entire frontend suite
+passed with bounded concurrency, without changing the test or its timeout.
+The 30 focused pool component tests also passed. The extended backend inspection
+regression passes on MongoDB 8 and verifies literal catalog-name/slug matching,
+pagination, foreign-owner exclusion, service scope, and no credential
+materialization.
+
 ## Verification scope
 
 The local backend runs target service pools and their integration boundaries; they are not a claim that every backend test ran locally. The PR's CI jobs run the full selected backend, CLI, frontend, feature, and coverage suites.
