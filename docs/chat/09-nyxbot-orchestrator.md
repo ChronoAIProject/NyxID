@@ -884,3 +884,7 @@ tmpfs for the published 0.41.0 helper; new helpers keep TUF state inside the upd
 volume. Secure browser actions and saved-login fills automatically recover after
 persisted-profile relaunches and package repair. Follow 12413 recovery guidance;
 12416 lists supported computer tools and points to the browser snapshot action.
+
+## Owner attachments
+
+The owner can attach documents and images to direct or group messages; see [Assistant uploads](10-uploads.md). Each agent receives safe metadata only for the message it is answering. Documents are untrusted, paginated tool data. Group members share the group’s bound uploads while they remain members; unrelated specialist threads and guests cannot read them. Images use capability negotiation, with an explicit fallback to saving the attachment on a granted machine when the deployed agent cannot view them. Channel-media ingestion remains a follow-up.

@@ -1,6 +1,6 @@
 [package]
 name = "nyxid"
-version = "0.42.0"
+version = "0.44.0"
 edition = "2024"
 rust-version.workspace = true
 license.workspace = true
@@ -18,7 +18,12 @@ name = "nyxid-server"
 path = "src/main.rs"
 
 [dependencies]
-zip = { version = "3.0.0", default-features = false, features = ["deflate"] }
+lopdf = { version = "0.38", default-features = false }
+zip = { version = "6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+quick-xml = "0.41"
+image = { version = "0.25.9", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+csv = "1"
+libc = "0.2"
 mime = "0.3.17"
 axum = { workspace = true }
 tower = "0.5.3"
@@ -112,10 +117,6 @@ tokio-rustls = "0.26"
 tokio = { workspace = true, features = ["test-util"] }
 nyxid-service-adapters = { path = "../service-adapters", features = ["test-support"] }
 wiremock = "0.6"
-# Used only by `test_utils` (compiled under `#[cfg(test)]`) to register an
-# `atexit` hook that drops the per-test databases at process exit. Already in
-# the dependency tree transitively, so this adds no new compilation.
-libc = "0.2"
 nyxid-node-proxy-test = { package = "nyxid-cli", path = "../cli", features = ["node-proxy-test"] }
 
 [features]

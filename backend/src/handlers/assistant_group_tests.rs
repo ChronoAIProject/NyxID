@@ -187,6 +187,7 @@ async fn group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_ar
         test_auth_user(OWNER),
         Path(id.clone()),
         Json(PostMessageRequest {
+            attachment_ids: Vec::new(),
             text: "hello team".into(),
         }),
     )

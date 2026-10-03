@@ -96,6 +96,12 @@ pub struct TurnActivity {
 /// `assistant_attachments`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TurnAttachment {
+    #[serde(default)]
+    pub image_input: Option<String>,
+    #[serde(default)]
+    pub origin: String,
+    #[serde(default)]
+    pub pages: Option<usize>,
     pub id: String,
     pub content_type: String,
     pub size: i64,

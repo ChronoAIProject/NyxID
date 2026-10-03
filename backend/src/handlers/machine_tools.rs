@@ -597,15 +597,34 @@ async fn save_attachment(
     node: &Node,
     args: &Value,
 ) -> AppResult<Value> {
-    let (_, bytes) = engine::read_attachment(
-        &state.db,
-        &state.encryption_keys,
-        &chat.user_id,
-        &chat.conversation_id,
-        argument(args, "attachment_id")?,
-    )
-    .await?;
-    if bytes.len() > crate::services::mcp_service::MAX_TOOL_IMAGE_BYTES {
+    let id = argument(args, "attachment_id")?;
+    let is_upload = state
+        .db
+        .collection::<mongodb::bson::Document>(crate::models::assistant_attachment::COLLECTION_NAME)
+        .find_one(mongodb::bson::doc! {"_id": id, "origin": "user_upload"})
+        .projection(mongodb::bson::doc! {"_id":1})
+        .await?
+        .is_some();
+    let (_, bytes) = if is_upload {
+        crate::services::assistant_upload_service::chat_bytes(
+            &state.db,
+            &state.encryption_keys,
+            chat,
+            id,
+            false,
+        )
+        .await?
+    } else {
+        engine::read_attachment(
+            &state.db,
+            &state.encryption_keys,
+            &chat.user_id,
+            &chat.conversation_id,
+            argument(args, "attachment_id")?,
+        )
+        .await?
+    };
+    if bytes.len() > crate::services::attachment_extraction::MAX_BYTES {
         return Err(AppError::ValidationError(
             "Attachment exceeds the transfer limit".into(),
         ));
@@ -669,7 +688,22 @@ async fn share_file(
     }))
 }
 
-/// The attachment store encrypts one bounded image buffer. The node socket and
+fn attachment_transfer_limit(operation: Operation, parameters: &Value) -> AppResult<u64> {
+    match operation {
+        // Sign the actual file size, so existing <=5 MiB saves still work on
+        // older nodes. Updated nodes accept user documents/images up to 20 MiB.
+        Operation::SaveAttachment => parameters["size"]
+            .as_u64()
+            .filter(|size| {
+                *size > 0 && *size <= crate::services::attachment_extraction::MAX_BYTES as u64
+            })
+            .ok_or(AppError::MachineLimitExceeded),
+        Operation::ShareFile => Ok(crate::services::mcp_service::MAX_TOOL_IMAGE_BYTES as u64),
+        _ => Err(AppError::MachineLimitExceeded),
+    }
+}
+
+/// The attachment store encrypts bounded buffers. The node socket and
 /// cross-replica hop carry bounded raw chunks, with no base64 body copies.
 async fn transfer(
     state: &AppState,
@@ -680,7 +714,7 @@ async fn transfer(
     result_limit: usize,
 ) -> AppResult<Vec<u8>> {
     use crate::services::node_ws_manager::{ProxyResponseType, StreamChunk};
-    parameters["max_bytes"] = json!(crate::services::mcp_service::MAX_TOOL_IMAGE_BYTES);
+    parameters["max_bytes"] = json!(attachment_transfer_limit(operation, &parameters)?);
     let request = signed_request(state, node, operation, parameters).await?;
     let response = state
         .node_dispatch
@@ -714,5 +748,32 @@ async fn transfer(
                 ));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod attachment_transfer_tests {
+    use super::*;
+
+    #[test]
+    fn assistant_attachment_transfers_preserve_legacy_images_and_bound_large_uploads() {
+        let upload = crate::services::attachment_extraction::MAX_BYTES as u64;
+        assert_eq!(
+            attachment_transfer_limit(Operation::SaveAttachment, &json!({"size": 512})).unwrap(),
+            512
+        );
+        assert_eq!(
+            attachment_transfer_limit(Operation::SaveAttachment, &json!({"size": upload})).unwrap(),
+            upload
+        );
+        assert!(
+            attachment_transfer_limit(Operation::SaveAttachment, &json!({"size": upload + 1}))
+                .is_err()
+        );
+        assert!(attachment_transfer_limit(Operation::SaveAttachment, &json!({})).is_err());
+        assert_eq!(
+            attachment_transfer_limit(Operation::ShareFile, &json!({"size": upload})).unwrap(),
+            5 * 1024 * 1024
+        );
     }
 }

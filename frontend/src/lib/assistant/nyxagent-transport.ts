@@ -59,6 +59,7 @@ function images(
       endpoint: `${path(conversationId)}/attachments/${encodeURIComponent(attachment.id)}`,
       contentType: attachment.content_type,
       label: attachment.label,
+      ...(attachment.image_input ? { imageInput: attachment.image_input } : {}),
     })),
   };
 }
@@ -490,11 +491,15 @@ export class NyxAgentTransport {
     onAdopt: (id: string) => void,
     onTurnFailed?: (conversationId: string, turnId: string, code: string) => void,
     /** New threads only: the agent to talk to (the server defaults to NyxBot). */
-    options: { readonly agent?: NyxAgentConversationAgent } = {},
+    options: {
+      readonly agent?: NyxAgentConversationAgent;
+      readonly attachmentIds?: string[];
+      readonly adoptExisting?: boolean;
+    } = {},
   ) {
     const generation = this.identity();
     if (this.isRunning(id)) throw new Error("A turn is already active.");
-    if (!text.trim() || [...text].length > 32768) {
+    if ((!text.trim() && !options.attachmentIds?.length) || [...text].length > 32768) {
       throw new Error("Message must contain 1 to 32768 characters.");
     }
     const controller = new AbortController();
@@ -547,7 +552,7 @@ export class NyxAgentTransport {
     };
     this.live.set(key, turn);
     this.changed();
-    let adopted = Boolean(id);
+    let adopted = Boolean(id) && !options.adoptExisting;
     let terminal = false;
     try {
       const response = await subscriptionDeadline(
@@ -558,6 +563,7 @@ export class NyxAgentTransport {
               ? { conversation_id: id }
               : { model, ...(options.agent ? { agent_id: options.agent.id } : {}) }),
             text,
+            ...(options.attachmentIds?.length ? { attachment_ids: options.attachmentIds } : {}),
           },
           headers: { Accept: "text/event-stream" },
           signal: controller.signal,
@@ -612,7 +618,7 @@ export class NyxAgentTransport {
               this.index.set(key, turn.conversation);
             }
             if (!adopted) throw new Error("Assistant did not identify the conversation.");
-            if (event.event === "turn.notice") {
+            if (event.event === "turn.notice" && event.code === "context_reset") {
               turn.resetBeforeMessageId = turn.state.messages.at(-1)?.id;
               this.changed();
               // Fetch the reset timestamp so a prior failed turn keeps its note
@@ -640,6 +646,12 @@ export class NyxAgentTransport {
                   }
                 }
               }
+            }
+            if (event.event === "turn.notice" && event.code === "image_input_unavailable") {
+              await this.history(key).catch(() => undefined);
+              this.current(generation);
+              this.changed();
+              continue;
             }
             turn.state = applyDirectTurnEvent(turn.state, event);
             this.changed();

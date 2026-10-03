@@ -1,3 +1,4 @@
+import type { UploadedMessage } from "@/lib/assistant/uploads";
 import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { nyxAgentTransport } from "@/lib/assistant/nyxagent-transport";
@@ -40,10 +41,19 @@ function liveSend(
   text: string,
   onAdopt: (id: string) => void,
   agent?: NyxAgentConversationAgent,
+  attachmentIds?: string[],
+  adoptExisting?: boolean,
 ) {
   const actorId = currentCreditsActor();
   const onFailed = (id: string, turnId: string, code: string) =>
     notifyTurnCredits(id, turnId, code, actorId);
+  if (attachmentIds?.length) {
+    return nyxAgentTransport.send(conversationId, text, onAdopt, onFailed, {
+      ...(!conversationId && agent ? { agent } : {}),
+      attachmentIds,
+      adoptExisting,
+    });
+  }
   return conversationId || !agent
     ? nyxAgentTransport.send(conversationId, text, onAdopt, onFailed)
     : nyxAgentTransport.send(undefined, text, onAdopt, onFailed, { agent });
@@ -151,9 +161,13 @@ export function useNyxAgentAssistantChat({
       ),
   });
   const send = useCallback(
-    async (text: string) => {
+    async (text: string, uploads?: UploadedMessage) => {
       try {
-        await liveSend(selectedConversationId, text, onConversationAdopted, draftAgent);
+        const id = selectedConversationId ?? uploads?.conversationId;
+        await liveSend(
+          id, text, onConversationAdopted, draftAgent,
+          uploads?.attachmentIds, Boolean(id && !selectedConversationId),
+        );
       } finally {
         // A new thread changes its agent's summary. (Model routing is
         // server-side, so there is no profile list to refresh.)

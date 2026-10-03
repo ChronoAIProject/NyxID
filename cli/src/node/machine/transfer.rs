@@ -18,6 +18,19 @@ use tokio::{
 use zeroize::Zeroizing;
 
 const LIMIT: u64 = 5 * 1024 * 1024;
+const UPLOAD_LIMIT: u64 = nyxid_machine::MAX_ATTACHMENT_UPLOAD_BYTES as u64;
+
+fn transfer_limit(operation: Operation, metadata: &Value) -> Result<u64> {
+    let ceiling = match operation {
+        Operation::SaveAttachment => UPLOAD_LIMIT,
+        Operation::ShareFile => LIMIT,
+        _ => bail!("invalid file operation"),
+    };
+    metadata["max_bytes"]
+        .as_u64()
+        .filter(|size| *size <= ceiling)
+        .context("file transfer limit exceeded")
+}
 
 /// Closing the pipes cancels the worker; cleanup/reaping never delays takeover.
 struct Worker(Option<tokio::process::Child>);
@@ -195,10 +208,7 @@ impl Runtime {
         if !matches!(operation, Operation::SaveAttachment | Operation::ShareFile) {
             bail!("invalid file operation");
         }
-        let limit = metadata["max_bytes"]
-            .as_u64()
-            .filter(|n| *n <= LIMIT)
-            .context("file transfer limit exceeded")?;
+        let limit = transfer_limit(operation, metadata)?;
         let id = string(metadata, "request_id")?;
         let request = FileRequest {
             roots: self.config.roots.clone(),
@@ -295,10 +305,7 @@ pub fn worker() -> Result<()> {
     let request: FileRequest = serde_json::from_slice(&header)?;
     let roots = Roots::new(&request.roots, &request.excluded)?;
     let path = string(&request.parameters, "path")?;
-    let limit = request.parameters["max_bytes"]
-        .as_u64()
-        .filter(|n| *n <= LIMIT)
-        .context("invalid file transfer limit")?;
+    let limit = transfer_limit(request.operation, &request.parameters)?;
     let mut output = std::io::stdout().lock();
     match request.operation {
         Operation::SaveAttachment => {
@@ -316,4 +323,30 @@ pub fn worker() -> Result<()> {
     }
     output.flush()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn user_attachment_limit_does_not_widen_image_or_clipboard_reads() {
+        let large = json!({"max_bytes": UPLOAD_LIMIT});
+        assert_eq!(
+            transfer_limit(Operation::SaveAttachment, &large).unwrap(),
+            UPLOAD_LIMIT
+        );
+        assert!(
+            transfer_limit(
+                Operation::SaveAttachment,
+                &json!({"max_bytes": UPLOAD_LIMIT + 1})
+            )
+            .is_err()
+        );
+        assert!(transfer_limit(Operation::ShareFile, &large).is_err());
+        assert_eq!(
+            transfer_limit(Operation::ShareFile, &json!({"max_bytes": LIMIT})).unwrap(),
+            LIMIT
+        );
+    }
 }

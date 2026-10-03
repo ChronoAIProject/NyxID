@@ -238,6 +238,7 @@ async fn assert_parity(state: &AppState, headers: &HeaderMap, rest: &Value) {
     let mut definitions = mcp_service::generate_tool_definitions(&services, None);
     if auth.chat.as_ref().is_some_and(|chat| !chat.guest) {
         definitions.extend(crate::services::machine_tools::definitions());
+        definitions.push(crate::services::assistant_upload_service::definition());
     }
     let expected: Vec<Value> = definitions
         .iter()

@@ -2227,6 +2227,8 @@ async fn group_chats_share_one_thread_and_members_talk_as_guests() {
         &state,
         OWNER,
         TurnStart {
+            attachment_ids: Vec::new(),
+            group_attachments: Vec::new(),
             trigger: None,
             conversation_id: Some(thread.id.clone()),
             text: "Private note to myself".into(),
@@ -3230,6 +3232,8 @@ async fn the_owners_private_chats_share_the_agents_own_thread() {
         &state,
         OWNER,
         TurnStart {
+            attachment_ids: Vec::new(),
+            group_attachments: Vec::new(),
             trigger: None,
             conversation_id: Some(home.clone()),
             text: "Thanks, noted".into(),

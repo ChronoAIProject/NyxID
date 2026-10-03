@@ -287,6 +287,7 @@ async fn assistant_operation_scope_transaction_sync_revision_regrant_rotation_an
             agent_id: Some(f.chat.agent_id.clone()),
             conversation_id: None,
             text: "Another thread".into(),
+            attachment_ids: Vec::new(),
             model: None,
             access_mode: None,
         },

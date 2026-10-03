@@ -16,6 +16,9 @@ pub const PROTOCOL_VERSION: u32 = 1;
 pub const MAX_RESULT_BYTES: usize = 9_000;
 pub const STREAM_CHUNK_BYTES: usize = 64 * 1024;
 pub const MAX_FRAME_BYTES: usize = 5 * 1024 * 1024;
+/// Encrypted user uploads and their signed transfer to a machine share this cap.
+/// Owner tool images and clipboard transfers retain their separate 5 MiB limit.
+pub const MAX_ATTACHMENT_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
 /// Git receive-pack sends the pack before receiving response headers. The
 /// command's own lifetime and stream idle limits still bound this allowance.
 pub const GIT_UPLOAD_TIMEOUT_SECS: u64 = 3600;

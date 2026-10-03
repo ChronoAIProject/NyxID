@@ -126,7 +126,7 @@ export function useNyxBotGroupMessages(groupId: string | undefined) {
   }, [groupId, queryClient, userId]);
 
   const post = useMutation({
-    mutationFn: (text: string) => nyxBotApi.postGroupMessage(groupId!, text),
+    mutationFn: (input: string | { text: string; attachmentIds: string[] }) => nyxBotApi.postGroupMessage(groupId!, typeof input === "string" ? input : input.text, typeof input === "string" ? undefined : input.attachmentIds),
     onSuccess: (posted) => {
       fastUntil.current = Date.now() + GROUP_AFTER_POST_MS;
       // Show the message and who it went to straight away; the next poll

@@ -70,6 +70,76 @@ async fn call(f: &Fixture, auth: &McpAuthContext, name: &str, args: Value) -> Re
     .await
 }
 
+async fn assert_scoped_thread_attachment_access(f: &Fixture, auth: &McpAuthContext) {
+    use crate::services::assistant_upload_service as uploads;
+
+    assert!(!auth.assistant_operation_scopes.is_empty());
+    let item = uploads::upload(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.owner,
+        &f.row.id,
+        "notes.txt",
+        b"Owner-provided thread notes".to_vec(),
+    )
+    .await
+    .unwrap();
+    let message = f
+        .state
+        .db
+        .collection::<crate::models::assistant_message::AssistantMessage>(
+            crate::models::assistant_message::COLLECTION_NAME,
+        )
+        .find_one(doc! {"conversation_id": &f.row.id, "role": "user"})
+        .await
+        .unwrap()
+        .unwrap();
+    let mut session = f.state.db.client().start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    uploads::bind(
+        &f.state.db,
+        &f.owner,
+        &f.row.id,
+        &message.id,
+        std::slice::from_ref(&item.id),
+        &mut session,
+    )
+    .await
+    .unwrap();
+    session.commit_transaction().await.unwrap();
+
+    let search = result(
+        direct_call(
+            f,
+            auth,
+            "nyx__search_tools",
+            json!({"query": "attachment read"}),
+        )
+        .await,
+        false,
+    )
+    .await;
+    assert!(
+        search["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == "nyx__attachment_read")
+    );
+    for generic in [false, true] {
+        let args = json!({"attachment_id": item.id});
+        let response = if generic {
+            call(f, auth, "nyx__attachment_read", args).await
+        } else {
+            direct_call(f, auth, "nyx__attachment_read", args).await
+        };
+        assert_eq!(
+            result(response, false).await["text"],
+            "Owner-provided thread notes"
+        );
+    }
+}
+
 #[tokio::test]
 async fn mounted_chat_service_edits_record_verified_actor_and_separate_request_groups() {
     use crate::models::service_change_event::{HistoryActorKind, ServiceChangeEvent};
@@ -2408,6 +2478,14 @@ async fn assistant_operation_scopes_hide_typed_tools_and_preserve_guest_and_webh
             .iter()
             .any(|tool| tool["name"] == "scoped-catalog__write")
     );
+    assert!(
+        tools
+            .iter()
+            .any(|tool| tool["name"] == "nyx__attachment_read")
+    );
+    // Operation scopes restrict service operations, never a thread's native
+    // attachment tools. Exercise discovery plus both typed and generic calls.
+    Box::pin(assert_scoped_thread_attachment_access(&f, &auth)).await;
     for query in ["scoped catalog", "write", "DELETE items"] {
         let searched = result(
             direct_call(&f, &auth, "nyx__search_tools", json!({"query":query})).await,

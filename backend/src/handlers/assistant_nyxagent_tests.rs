@@ -279,6 +279,7 @@ async fn lost_session_rebinds_with_recap_and_same_turn_id() {
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
             text: "old question".into(),
@@ -535,6 +536,7 @@ async fn stale_fences_are_hidden_in_index_and_history_dtos() {
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
             text: "interrupted".into(),
@@ -585,6 +587,7 @@ async fn settlement_failure_is_bounded_emits_terminal_error_and_releases_permit(
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
             text: "question".into(),
@@ -714,6 +717,7 @@ async fn model_fallbacks_are_uncached_and_successes_are_cached() {
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
             text: "models".into(),
@@ -762,6 +766,7 @@ async fn invalid_and_wrong_owner_turns_do_not_consume_rate_limit() {
         &state.db,
         "other",
         &engine::TurnRequest {
+            attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
             text: "private".into(),
@@ -960,6 +965,7 @@ async fn history_surfaces_pending_proxy_approvals_raised_by_the_chat_key() {
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
             text: "read my github profile".into(),
@@ -1047,6 +1053,7 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
             text: "use github".into(),
@@ -1284,4 +1291,89 @@ async fn continuation_limit_and_no_progress_preserve_context_and_a_diagnostic_co
         assert_eq!(calls.lock().await.len(), attempts);
         server.abort();
     }
+}
+
+#[tokio::test]
+async fn attachments_on_old_nyxagent_persist_fallback_and_do_not_reset_context() {
+    let (state, calls, server) = setup(None, Duration::ZERO).await;
+    let draft = super::super::assistant_uploads::draft(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        Json(super::super::assistant_uploads::Draft { agent_id: None }),
+    )
+    .await
+    .unwrap()
+    .0;
+    let id = draft["id"].as_str().unwrap();
+    let warmup = turns(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        turn_request(Some(id)),
+    )
+    .await
+    .unwrap();
+    drop(warmup);
+    assert_eq!(
+        settled(&state).await.nyxagent_session_id.as_deref(),
+        Some(SESSION)
+    );
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::RgbImage::new(2, 2)
+        .write_to(&mut png, image::ImageFormat::Png)
+        .unwrap();
+    let attachment = crate::services::assistant_upload_service::upload(
+        &state.db,
+        &state.encryption_keys,
+        OWNER,
+        id,
+        "photo.png",
+        png.into_inner(),
+    )
+    .await
+    .unwrap();
+    let mut req = Request::builder()
+        .method("POST")
+        .body(Body::from(
+            json!({"conversation_id":id,"text":"","attachment_ids":[attachment.id]}).to_string(),
+        ))
+        .unwrap();
+    req.extensions_mut().insert(SERVER_TURN_POLICY);
+    let response = turns(State(state.clone()), test_auth_user(OWNER), req)
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let row = settled(&state).await;
+    assert!(
+        row.context_reset_at.is_none(),
+        "{:?}",
+        row.context_reset_reason
+    );
+    assert_eq!(row.nyxagent_session_id.as_deref(), Some(SESSION));
+    let captured = calls.lock().await;
+    assert_eq!(captured.len(), 2);
+    assert_eq!(captured[1].body["conversation"], SESSION);
+    assert!(
+        captured[1].body["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("cannot view")
+    );
+    assert!(
+        captured[1].body["input"]
+            .as_str()
+            .unwrap()
+            .contains("attachments")
+    );
+    let messages = engine::messages(&state.db, OWNER, id, 20, None)
+        .await
+        .unwrap();
+    let user = messages
+        .iter()
+        .find(|m| m.role == "user" && m.attachments.iter().any(|a| a.id == attachment.id))
+        .expect("message with the uploaded image");
+    assert_eq!(
+        user.attachments[0].image_input.as_deref(),
+        Some("unavailable")
+    );
+    server.abort();
 }

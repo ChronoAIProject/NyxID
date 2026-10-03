@@ -457,6 +457,10 @@ Discovery does not provision a key: users without one initially see the default
 profile. The browser refreshes profiles after a send, so provisioning makes the
 upstream list available immediately. No new NyxID environment variable is introduced.
 
+## User uploads
+
+[10 — Assistant uploads](10-uploads.md) defines owner uploads for conversations and groups. Documents are read through `nyx__attachment_read`; user images use the advertised `nyxagent-input-image-v1` protocol and the exact thread key. Older deployments explicitly report that images cannot be viewed. This does not change tool-image delivery below.
+
 ## Tool images
 
 Machine screenshots and shared images use this same owner-only attachment

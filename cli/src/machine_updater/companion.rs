@@ -794,7 +794,7 @@ mod tests {
                     Some("update_companion:successor_unhealthy")
                 );
                 drop(guard);
-                assert!(lock(root.path()).is_ok());
+                drop(super::relock_eventually(root.path()));
                 // A second recovery is a no-op, including after journal deletion.
                 drop(acquire(&api, root.path(), "machine", "old").await.unwrap());
             }
