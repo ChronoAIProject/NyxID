@@ -92,6 +92,7 @@ fn caller(auth_user: &AuthUser) -> AppResult<ExactServiceApprovalCaller> {
         };
     Ok(ExactServiceApprovalCaller {
         org_agent_access: auth_user.org_agent_access.clone(),
+        assistant_group_id: auth_user.assistant_group_id.clone(),
         agent_owner: auth_user.assistant_agent_owner_id.clone(),
         operation_scopes: auth_user.assistant_operation_scopes.clone(),
         actor_user_id,
@@ -129,6 +130,7 @@ mod tests {
     fn auth(method: AuthMethod) -> AuthUser {
         AuthUser {
             org_agent_access: None,
+            assistant_group_id: None,
             assistant_agent_owner_id: None,
             assistant_operation_scopes: Default::default(),
             user_id: uuid::Uuid::new_v4(),

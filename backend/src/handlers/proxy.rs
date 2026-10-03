@@ -4291,10 +4291,18 @@ async fn execute_resolved_proxy_inner(
                 notification_service::get_or_create_channel(&state.db, &timeout_recipient).await?;
 
             let timeout_secs = channel.approval_timeout_secs;
-            let request_operation = approval_service::ApprovalRequestOperation::from_descriptor(
+            let mut request_operation = approval_service::ApprovalRequestOperation::from_descriptor(
                 &operation,
                 pending.resolution.grant_scope.clone(),
             );
+            request_operation.assistant_group =
+                crate::services::org_group_service::approval_binding(
+                    &state.db,
+                    auth_user.assistant_group_id.as_deref(),
+                    &auth_user.user_id.to_string(),
+                    auth_user.api_key_id.as_deref(),
+                )
+                .await?;
             let approval_request = Box::pin(approval_service::create_approval_request(
                 &state.db,
                 &state.config,
@@ -11316,6 +11324,7 @@ mod proxy_resolution_integration_tests {
     fn service_account_auth(service_account_id: &str, owner_user_id: &str) -> AuthUser {
         AuthUser {
             org_agent_access: None,
+            assistant_group_id: None,
             assistant_agent_owner_id: None,
             assistant_operation_scopes: Default::default(),
             user_id: Uuid::parse_str(service_account_id).expect("valid service account id"),
@@ -11345,6 +11354,7 @@ mod proxy_resolution_integration_tests {
     fn access_token_auth(user_id: &str) -> AuthUser {
         AuthUser {
             org_agent_access: None,
+            assistant_group_id: None,
             assistant_agent_owner_id: None,
             assistant_operation_scopes: Default::default(),
             user_id: Uuid::parse_str(user_id).expect("valid user id"),

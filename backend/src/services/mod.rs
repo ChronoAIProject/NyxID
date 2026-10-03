@@ -252,6 +252,10 @@ pub mod assistant_upload_service;
 pub mod attachment_extraction;
 
 pub mod org_agent_service;
+pub mod org_group_service;
 
 #[cfg(test)]
 pub(crate) mod org_agent_tests;
+
+#[cfg(test)]
+mod org_group_tests;

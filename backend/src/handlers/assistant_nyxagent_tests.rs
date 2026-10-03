@@ -981,6 +981,7 @@ async fn history_surfaces_pending_proxy_approvals_raised_by_the_chat_key() {
             .await
             .unwrap();
     let request = |label: &str, status: &str, minutes: i64| ApprovalRequest {
+        assistant_group: None,
         id: uuid::Uuid::new_v4().to_string(),
         user_id: OWNER.to_string(),
         service_id: uuid::Uuid::new_v4().to_string(),

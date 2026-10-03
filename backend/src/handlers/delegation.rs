@@ -1124,6 +1124,7 @@ mod tests {
     fn catalog_auth(method: AuthMethod) -> AuthUser {
         AuthUser {
             org_agent_access: None,
+            assistant_group_id: None,
             assistant_agent_owner_id: None,
             assistant_operation_scopes: Default::default(),
             user_id: uuid::Uuid::new_v4(),
@@ -1596,6 +1597,7 @@ mod tests {
             .expect("verify minted delegated token");
         AuthUser {
             org_agent_access: None,
+            assistant_group_id: None,
             assistant_agent_owner_id: None,
             assistant_operation_scopes: Default::default(),
             user_id: Uuid::parse_str(&claims.sub).expect("delegated subject is a UUID"),

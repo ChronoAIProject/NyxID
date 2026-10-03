@@ -860,12 +860,15 @@ pub async fn turns(
         super::login_client_context::require_first_party_human(&auth)?;
     }
     // Ownership is checked before provisioning or touching a credential.
-    if let Some(id) = &input.conversation_id {
-        engine::get(&state.db, &user_id, id).await?;
-    }
+    let org_access = if let Some(id) = &input.conversation_id {
+        engine::get_authorized(&state.db, &user_id, id).await?.1
+    } else {
+        None
+    };
     let permit = state.direct_chat_limiter.try_acquire(&user_id).await?;
     let policy = parts.extensions.get::<BillingRoutePolicy>().copied();
     let mut start = engine::TurnStart::from(&input);
+    start.org_access = org_access;
     if start.conversation_id.is_none() && start.model.is_none() {
         start.model = Some(
             crate::services::assistant_profile_routing::model_for(
@@ -1011,6 +1014,12 @@ pub async fn live(State(state): State<AppState>, auth: AuthUser) -> AppResult<Re
                 {
                     ("conversation", json!({"type": "conversation", "id": id,
                         "group_id": group_id, "turn_id": turn_id, "messages": messages}))
+                }
+                Ok(LiveEvent::OrgGroup { id, user_id: owner }) if owner == user_id => {
+                    // The channel routes candidates; authority is live again at delivery,
+                    // including the first delivery after subscribing.
+                    if crate::services::org_group_service::get(&state.db,&user_id,&id,None).await.is_err() { continue; }
+                    ("group", json!({"type":"group","id":id}))
                 }
                 Ok(LiveEvent::Group { id, user_id: owner }) if owner == user_id => {
                     ("group", json!({"type": "group", "id": id}))
@@ -1407,13 +1416,18 @@ async fn execute_turn(
             .await
             .map_err(|_| TurnError::new("assistant_unavailable"))?;
         if let Some(group_id) = &row.group_id {
+            let group_owner = if row.group_request_id.is_some() {
+                row.agent_owner_id.as_deref().unwrap_or(&row.user_id)
+            } else {
+                &row.user_id
+            };
             state
                 .db
                 .collection::<mongodb::bson::Document>(
                     crate::models::assistant_group::MESSAGES_COLLECTION_NAME,
                 )
                 .update_one(
-                    doc! {"user_id": &row.user_id,"group_id": group_id,"attachments.id": &item.id},
+                    doc! {"user_id": group_owner,"group_id": group_id,"attachments.id": &item.id},
                     doc! {"$set": {"attachments.$.image_input":status}},
                 )
                 .await

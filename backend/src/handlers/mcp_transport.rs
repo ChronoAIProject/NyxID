@@ -382,6 +382,7 @@ struct McpAuthContext {
     /// to use from a chat card. Empty for every other caller.
     allowed_platform_service_ids: Vec<String>,
     org_agent_access: Option<std::sync::Arc<crate::services::org_agent_service::RequestAccess>>,
+    assistant_group_id: Option<String>,
     assistant_agent_owner_id: Option<String>,
     assistant_operation_scopes: crate::models::agent_operation_scope::OperationScopes,
     allowed_node_ids: Vec<String>,
@@ -408,6 +409,7 @@ impl McpAuthContext {
             allowed_service_ids: Vec::new(),
             allowed_platform_service_ids: Vec::new(),
             org_agent_access: None,
+            assistant_group_id: None,
             assistant_agent_owner_id: None,
             assistant_operation_scopes: Default::default(),
             allowed_node_ids: Vec::new(),
@@ -542,6 +544,13 @@ async fn authenticate_mcp(
                 )
                 .await
                 .map_err(axum::response::IntoResponse::into_response)?;
+                crate::services::org_group_service::validate_key(
+                    &state.db,
+                    &api_key,
+                    org_agent_access.as_ref(),
+                )
+                .await
+                .map_err(axum::response::IntoResponse::into_response)?;
                 let chat = crate::services::assistant_acknowledgement_service::for_key_with_access(
                     &state.db,
                     &user_id,
@@ -589,6 +598,7 @@ async fn authenticate_mcp(
                         .map_err(axum::response::IntoResponse::into_response)?,
                     allowed_platform_service_ids: platform_grants,
                     org_agent_access,
+                    assistant_group_id: api_key.assistant_group_id.clone(),
                     assistant_agent_owner_id: api_key.assistant_agent_owner_id.clone(),
                     assistant_operation_scopes: api_key.assistant_operation_scopes.clone(),
                     allowed_node_ids,
@@ -2238,10 +2248,18 @@ async fn authorize_mcp_operation(
             )
         })?;
     let timeout_secs = channel.approval_timeout_secs;
-    let request_operation = approval_service::ApprovalRequestOperation::from_descriptor(
+    let mut request_operation = approval_service::ApprovalRequestOperation::from_descriptor(
         operation,
         pending.resolution.grant_scope.clone(),
     );
+    request_operation.assistant_group = crate::services::org_group_service::approval_binding(
+        &state.db,
+        auth.assistant_group_id.as_deref(),
+        &auth.user_id.to_string(),
+        auth.api_key_id.as_deref(),
+    )
+    .await
+    .map_err(|_| tool_result(request_id.clone(), "Group approval is unavailable", true))?;
     let approval_request = approval_service::create_approval_request(
         &state.db,
         &state.config,
@@ -2563,6 +2581,7 @@ async fn handle_account_tool(
     };
     let user = auth::AuthUser {
         org_agent_access: auth.org_agent_access.clone(),
+        assistant_group_id: auth.assistant_group_id.clone(),
         assistant_agent_owner_id: auth.assistant_agent_owner_id.clone(),
         assistant_operation_scopes: auth.assistant_operation_scopes.clone(),
         user_id,
@@ -4461,6 +4480,7 @@ mod tests {
             allowed_service_ids,
             allowed_platform_service_ids: Vec::new(),
             org_agent_access: None,
+            assistant_group_id: None,
             assistant_agent_owner_id: None,
             assistant_operation_scopes: Default::default(),
             allowed_node_ids: Vec::new(),
@@ -4823,6 +4843,7 @@ mod tests {
         let mcp_auth = McpAuthContext::user(actor_id.clone(), AuthMethod::AccessToken);
         let proxy_auth = AuthUser {
             org_agent_access: None,
+            assistant_group_id: None,
             assistant_agent_owner_id: None,
             assistant_operation_scopes: Default::default(),
             user_id: uuid::Uuid::parse_str(&actor_id).unwrap(),

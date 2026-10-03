@@ -67,7 +67,7 @@ pub async fn require_maintain(db: &Database, actor: &str, agent: &AssistantAgent
 }
 
 /// Explicit selector resolution: ID, slug, then an unambiguous visible name.
-pub async fn resolve_org(db: &Database, actor: &str, selector: &str) -> AppResult<String> {
+pub async fn resolve_org_selector(db: &Database, actor: &str, selector: &str) -> AppResult<String> {
     let memberships = org_service::list_memberships_for_member(db, actor, false).await?;
     let ids: Vec<_> = memberships.iter().map(|m| &m.org_user_id).collect();
     let orgs: Vec<User> = db
@@ -95,12 +95,17 @@ pub async fn resolve_org(db: &Database, actor: &str, selector: &str) -> AppResul
         }
         org
     };
-    if !can_maintain(&access(db, actor, &org.id).await?) {
+    Ok(org.id.clone())
+}
+
+pub async fn resolve_org(db: &Database, actor: &str, selector: &str) -> AppResult<String> {
+    let owner = resolve_org_selector(db, actor, selector).await?;
+    if !can_maintain(&access(db, actor, &owner).await?) {
         return Err(AppError::Forbidden(
             "Only organization Admins and Members may maintain agents".into(),
         ));
     }
-    Ok(org.id.clone())
+    Ok(owner)
 }
 
 pub async fn visible_owners(db: &Database, actor: &str) -> AppResult<Vec<String>> {
@@ -180,6 +185,17 @@ pub struct RequestAccess {
 }
 
 impl RequestAccess {
+    pub(crate) fn approval_admin_permits(&self, ids: &[String]) -> bool {
+        self.acl.can_write() && self.acl.allows_any_resource(ids)
+    }
+
+    pub(crate) fn is_admin(&self) -> bool {
+        matches!(self.acl, OwnerAccess::AsOrgAdmin { .. })
+    }
+
+    pub(crate) fn matches(&self, actor: &str, owner: &str) -> bool {
+        self.actor == actor && self.owner == owner && can_use(&self.acl)
+    }
     pub async fn conversation(
         &self,
         db: &Database,
@@ -195,6 +211,9 @@ impl RequestAccess {
             .await?
             .ok_or_else(|| AppError::NotFound("Conversation not found".into()))?;
         self.check_conversation(&row)?;
+        if row.group_id.is_some() {
+            super::org_group_service::check_thread_participation(db, &row, self).await?;
+        }
         Ok(row)
     }
 
@@ -356,6 +375,9 @@ pub async fn authorize_execution(
     auth: &crate::mw::auth::AuthUser,
     instance: Option<&str>,
 ) -> AppResult<()> {
+    if auth.assistant_group_id.is_some() && auth.org_agent_access.is_none() {
+        return Err(super::org_group_service::missing());
+    }
     authorize_service_with_access(
         db,
         &auth.user_id.to_string(),

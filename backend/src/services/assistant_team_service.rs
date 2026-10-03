@@ -344,9 +344,27 @@ pub(crate) async fn create_thread_for(
     title: &str,
     session: &mut ClientSession,
 ) -> AppResult<AssistantConversation> {
-    super::org_agent_service::require_use(db, actor, agent).await?;
+    create_thread_for_with_access(db, keys, actor, agent, title, session, None).await
+}
+
+pub(crate) async fn create_thread_for_with_access(
+    db: &Database,
+    keys: &EncryptionKeys,
+    actor: &str,
+    agent: &AssistantAgent,
+    title: &str,
+    session: &mut ClientSession,
+    snapshot: Option<&std::sync::Arc<super::org_agent_service::RequestAccess>>,
+) -> AppResult<AssistantConversation> {
+    if let Some(access) = snapshot {
+        if !access.matches(actor, &agent.user_id) {
+            return Err(super::org_group_service::missing());
+        }
+    } else {
+        super::org_agent_service::require_use(db, actor, agent).await?;
+    }
     Box::pin(create_thread_with_kind(
-        db, keys, actor, agent, title, false, session,
+        db, keys, actor, agent, title, false, session, snapshot,
     ))
     .await
 }
@@ -359,7 +377,7 @@ pub(crate) async fn create_automation_thread(
     title: &str,
     session: &mut ClientSession,
 ) -> AppResult<AssistantConversation> {
-    create_thread_with_kind(db, keys, actor, agent, title, true, session).await
+    create_thread_with_kind(db, keys, actor, agent, title, true, session, None).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -371,6 +389,7 @@ async fn create_thread_with_kind(
     title: &str,
     automation_thread: bool,
     session: &mut ClientSession,
+    snapshot: Option<&std::sync::Arc<super::org_agent_service::RequestAccess>>,
 ) -> AppResult<AssistantConversation> {
     let now = Utc::now();
     let mut row = AssistantConversation {
@@ -401,6 +420,7 @@ async fn create_thread_with_kind(
         event_streak: 0,
         channel: None,
         group_id: None,
+        group_request_id: None,
         group_seen_seq: 0,
         guest_turn: false,
         reply_channel: None,
@@ -408,7 +428,10 @@ async fn create_thread_with_kind(
     };
     let collection = db.collection::<AssistantConversation>(CONVERSATIONS);
     collection.insert_one(&row).session(&mut *session).await?;
-    let authority = Box::pin(credentials::authority_in_session(db, &row, session)).await?;
+    let authority = Box::pin(credentials::authority_with_access(
+        db, &row, session, snapshot,
+    ))
+    .await?;
     let credential = credentials::load_or_provision_in_session(
         db,
         keys,
@@ -520,6 +543,7 @@ pub async fn home_thread_for(
                 &agent.name,
                 false,
                 session,
+                None,
             )
             .await;
             transactions::transaction_result(operation)
@@ -853,6 +877,7 @@ pub async fn create_specialist_for(
                     &agent.name,
                     false,
                     session,
+                    None,
                 )
                 .await?;
                 let mut agent = agent;
