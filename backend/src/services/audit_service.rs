@@ -130,6 +130,27 @@ pub async fn log_actor_event(
     write_audit_entry(db, entry, event_type).await
 }
 
+/// An admin policy change and its metadata audit commit atomically.
+pub async fn log_actor_event_in_session(
+    db: &mongodb::Database,
+    session: &mut mongodb::ClientSession,
+    key: &[u8],
+    actor: &AuditActor,
+    event_type: &str,
+    event_data: serde_json::Value,
+) -> crate::errors::AppResult<()> {
+    let entry = build_audit_entry(
+        Some(actor.user_id.clone()),
+        event_type.into(),
+        Some(event_data),
+        actor.ip_address.clone(),
+        actor.user_agent.clone(),
+        actor.api_key_id.clone(),
+        actor.api_key_name.clone(),
+    );
+    audit_chain_service::append_chained_entry_in_session(db, session, entry, key).await
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_audit_entry(
     user_id: Option<String>,

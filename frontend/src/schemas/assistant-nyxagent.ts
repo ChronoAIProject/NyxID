@@ -25,6 +25,7 @@ export const nyxAgentAttachmentSchema = z.object({
   ]),
   origin: z.enum(["tool", "user_upload", ""]).optional(),
   pages: z.number().int().nonnegative().nullable().optional(),
+  expired: z.boolean().optional(),
   image_input: z.enum(["sent", "unavailable"]).nullable().optional(),
   size: z.number().int().nonnegative(),
   label: z.string(),

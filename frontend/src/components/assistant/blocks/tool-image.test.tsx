@@ -52,3 +52,16 @@ it("downloads documents only after an owner click and reports expiry", async () 
   );
   expect(assistantHttp).toHaveBeenCalledWith("/private/doc");
 });
+
+it.each(["image/png", "application/pdf"])("shows a retention placeholder for expired %s without fetching bytes", (contentType) => {
+  render(<ToolImage image={{ id: "expired", endpoint: "/private/expired", label: "old file", contentType, expired: true }} />);
+  expect(screen.getByRole("status")).toHaveTextContent("expired per retention policy");
+  expect(assistantHttp).not.toHaveBeenCalled();
+  expect(screen.queryByRole("button")).not.toBeInTheDocument();
+});
+it("handles retention expiry between history and the image download", async () => {
+  const { ApiError } = await import("@/lib/api-client");
+  vi.mocked(assistantHttp).mockRejectedValue(new ApiError(410, { error: "attachment_expired", error_code: 12101, message: "Attachment expired per retention policy." }));
+  render(<ToolImage image={{ id: "expired", endpoint: "/private/expired", label: "old image", contentType: "image/png" }} />);
+  await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("expired per retention policy"));
+});

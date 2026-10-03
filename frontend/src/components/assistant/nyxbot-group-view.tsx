@@ -103,6 +103,7 @@ function GroupMessageRow({
                 label: item.label,
                 contentType: item.content_type,
                 imageInput: item.image_input ?? undefined,
+                expired: item.expired,
                 endpoint: `/assistant/nyxagent/groups/${groupId}/attachments/${item.id}`,
               }}
             />

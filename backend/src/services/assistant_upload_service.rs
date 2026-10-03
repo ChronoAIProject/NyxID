@@ -76,7 +76,7 @@ pub async fn owner_scope(db: &Database, user: &str, scope: &str) -> AppResult<()
 }
 
 fn scope_filter(user: &str, scope: &str) -> bson::Document {
-    let mut f = doc! { "user_id": user, "origin": "user_upload", "expires_at": {"$gt": bson::DateTime::now()} };
+    let mut f = doc! { "user_id": user, "origin": "user_upload" };
     if scope.starts_with("nyxa-") {
         f.insert("conversation_id", scope);
         f.insert("group_id", bson::Bson::Null);
@@ -136,7 +136,8 @@ pub async fn upload(
             .encrypt(&serde_json::to_vec(&extracted).map_err(|_| missing())?)
             .await?,
         created_at: Utc::now(),
-        expires_at: Utc::now() + Duration::hours(24),
+        expires_at: None,
+        bound_at: None,
     };
     let mut documents = vec![bson::to_document(&row).map_err(|_| missing())?];
     for (index, chunk) in bytes.chunks(CHUNK).enumerate() {
@@ -147,7 +148,6 @@ pub async fn upload(
             "user_id": user,
             "conversation_id": &row.conversation_id,
             "group_id": &row.group_id,
-            "expires_at": bson::DateTime::from_chrono(row.expires_at),
             "data_encrypted": bson::Binary {subtype: bson::spec::BinarySubtype::Generic, bytes: keys.encrypt(chunk).await?},
         });
     }
@@ -193,12 +193,17 @@ pub async fn bind(
         let mut filter = scope_filter(user, scope);
         filter.insert("_id", id);
         filter.insert("message_id", bson::Bson::Null);
-        let expires = bson::DateTime::from_chrono(Utc::now() + Duration::days(30));
+        Box::pin(super::assistant_upload_retention::require_available(
+            db,
+            filter.clone(),
+        ))
+        .await?;
+        let bound_at = bson::DateTime::now();
         let row = db
             .collection::<AssistantUpload>(COLLECTION_NAME)
             .find_one_and_update(
                 filter,
-                doc! {"$set": {"message_id": message, "expires_at": expires}},
+                doc! {"$set": {"message_id": message, "bound_at": bound_at}, "$unset": {"expires_at": ""}},
             )
             .session(&mut *session)
             .await?
@@ -206,7 +211,7 @@ pub async fn bind(
         db.collection::<bson::Document>(COLLECTION_NAME)
             .update_many(
                 doc! {"parent_attachment_id": id, "user_id": user},
-                doc! {"$set": {"expires_at": expires}},
+                doc! {"$unset": {"expires_at": ""}},
             )
             .session(&mut *session)
             .await?;
@@ -243,11 +248,22 @@ pub async fn owner_read(
     owner_scope(db, user, scope).await?;
     let mut filter = scope_filter(user, scope);
     filter.insert("_id", id);
+    Box::pin(super::assistant_upload_retention::require_available(
+        db,
+        filter.clone(),
+    ))
+    .await?;
     let row = db
         .collection::<AssistantUpload>(COLLECTION_NAME)
-        .find_one(filter)
-        .await?
-        .ok_or_else(missing)?;
+        .find_one(filter.clone())
+        .await?;
+    let Some(row) = row else {
+        Box::pin(super::assistant_upload_retention::require_available(
+            db, filter,
+        ))
+        .await?;
+        return Err(missing());
+    };
     payload(db, keys, &row).await
 }
 
@@ -256,6 +272,11 @@ async fn payload(
     keys: &EncryptionKeys,
     row: &AssistantUpload,
 ) -> AppResult<(String, Vec<u8>)> {
+    let mut filter = scope_filter(
+        &row.user_id,
+        row.group_id.as_deref().unwrap_or(&row.conversation_id),
+    );
+    filter.insert("_id", &row.id);
     let mut bytes = Vec::new();
     for index in 0..row.chunks {
         let chunk = db
@@ -264,10 +285,17 @@ async fn payload(
                 "parent_attachment_id": &row.id,
                 "chunk_index": index as i64,
                 "user_id": &row.user_id,
-                "expires_at": {"$gt": bson::DateTime::now()},
             })
-            .await?
-            .ok_or_else(missing)?;
+            .await?;
+        let Some(chunk) = chunk else {
+            // Cleanup may have committed between the availability check and
+            // this chunk read. Keep the specific expiry response in that race.
+            Box::pin(super::assistant_upload_retention::require_available(
+                db, filter,
+            ))
+            .await?;
+            return Err(missing());
+        };
         let encrypted = chunk
             .get_binary_generic("data_encrypted")
             .map_err(|_| missing())?;
@@ -279,6 +307,12 @@ async fn payload(
     if bytes.len() as i64 != row.size {
         return Err(missing());
     }
+    // Recheck after chunk reads too, so a policy shortened during a download
+    // cannot authorize delivery using the earlier snapshot.
+    Box::pin(super::assistant_upload_retention::require_available(
+        db, filter,
+    ))
+    .await?;
     Ok((row.content_type.clone(), bytes))
 }
 
@@ -306,10 +340,23 @@ pub async fn for_chat(db: &Database, chat: &ChatAuthority, id: &str) -> AppResul
     let mut filter = scope_filter(&chat.user_id, scope);
     filter.insert("_id", id);
     filter.insert("message_id", doc! {"$type":"string"});
-    db.collection::<AssistantUpload>(COLLECTION_NAME)
-        .find_one(filter)
-        .await?
-        .ok_or_else(missing)
+    Box::pin(super::assistant_upload_retention::require_available(
+        db,
+        filter.clone(),
+    ))
+    .await?;
+    let row = db
+        .collection::<AssistantUpload>(COLLECTION_NAME)
+        .find_one(filter.clone())
+        .await?;
+    if let Some(row) = row {
+        return Ok(row);
+    }
+    Box::pin(super::assistant_upload_retention::require_available(
+        db, filter,
+    ))
+    .await?;
+    Err(missing())
 }
 
 pub async fn chat_bytes(
@@ -344,6 +391,15 @@ pub async fn read(
     let extracted: Extracted = serde_json::from_slice(&bytes).map_err(|_| missing())?;
     let offset = args["offset"].as_u64().unwrap_or(0) as usize;
     let limit = (args["limit"].as_u64().unwrap_or(4000) as usize).clamp(1, 6000);
+    let mut filter = scope_filter(
+        &row.user_id,
+        row.group_id.as_deref().unwrap_or(&row.conversation_id),
+    );
+    filter.insert("_id", &row.id);
+    Box::pin(super::assistant_upload_retention::require_available(
+        db, filter,
+    ))
+    .await?;
     Ok(page(&extracted, offset, limit))
 }
 
@@ -934,7 +990,7 @@ mod integration_tests {
         let item = upload(db, keys, &user, &id, "expire.txt", b"expire".to_vec())
             .await
             .unwrap();
-        db.collection::<bson::Document>(COLLECTION_NAME).update_one(doc! {"_id":&item.id},doc! {"$set":{"expires_at":bson::DateTime::from_chrono(Utc::now()-Duration::seconds(1))}}).await.unwrap();
+        db.collection::<bson::Document>(COLLECTION_NAME).update_one(doc! {"_id":&item.id},doc! {"$set":{"created_at":bson::DateTime::from_chrono(Utc::now()-Duration::hours(25))}}).await.unwrap();
         assert!(owner_read(db, keys, &user, &id, &item.id).await.is_err());
         assert!(
             engine::begin_turn(db, &user, &request(&id, vec![item.id]), keys)
