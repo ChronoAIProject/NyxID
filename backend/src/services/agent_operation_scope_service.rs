@@ -21,9 +21,7 @@ use crate::{
         user_service::{COLLECTION_NAME as SERVICES, UserService},
     },
     services::{
-        api_key_mutation_service as transactions,
-        assistant_agent_credential_service as credentials, assistant_team_service as team,
-        mcp_service,
+        api_key_mutation_service as transactions, assistant_team_service as team, mcp_service,
         proxy_authorization::{self, CanonicalPath},
     },
 };
@@ -442,7 +440,7 @@ pub async fn set(
         .map_err(transactions::map_transaction_error)?;
     super::audit_service::log_actor_event(db.clone(), &super::audit_service::AuditActor {
         user_id:owner.into(), ip_address:None, user_agent:None, api_key_id:None, api_key_name:None },
-        "assistant_agent_operations_changed", Some(serde_json::json!({"agent_id":agent.id,"service_id":service,
+        "assistant_agent_operations_changed", Some(serde_json::json!({"owner_id":agent.user_id,"agent_id":agent.id,"service_id":service,
             "revision":revision(&agent, service),"operation_count":agent.operation_scopes.get(service).map(|scope| scope.operations.len())}))).await?;
     Ok(agent)
 }
@@ -475,15 +473,32 @@ pub async fn options(
     owner: &str,
     agent_id: &str,
 ) -> AppResult<Vec<ServiceOptions>> {
-    let agent = team::live_specialist(db, owner, agent_id).await?;
+    let mut agent = team::live_specialist(db, owner, agent_id).await?;
+    super::org_agent_service::require_maintain(db, owner, &agent).await?;
+    if agent.user_id != owner {
+        let acl = super::org_agent_service::access(db, owner, &agent.user_id).await?;
+        agent
+            .grants
+            .service_ids
+            .retain(|id| acl.allows_resource(id));
+    }
     // Management reads durable rows, including offline services. Loading the
     // execution catalog here would fetch remote specs and hide offline grants.
-    let instances: Vec<UserService> = db
+    let mut instances: Vec<UserService> = db
         .collection::<UserService>(SERVICES)
         .find(doc! {"_id":{"$in":&agent.grants.service_ids}})
         .await?
         .try_collect()
         .await?;
+    if agent.user_id != owner {
+        let acl = super::org_agent_service::access(db, owner, &agent.user_id).await?;
+        instances
+            .retain(|row| row.user_id == agent.user_id && (!row.admin_only || acl.can_write()));
+        agent
+            .grants
+            .service_ids
+            .retain(|id| instances.iter().any(|row| &row.id == id));
+    }
     let catalog_ids: Vec<&str> = agent
         .grants
         .platform_service_ids
@@ -626,6 +641,7 @@ pub async fn check_non_mcp_context(
         db,
         &auth.user_id.to_string(),
         auth.api_key_id.as_deref(),
+        auth.org_agent_access.as_ref(),
         &auth.assistant_operation_scopes,
         service,
         catalog,
@@ -640,6 +656,7 @@ pub async fn check_non_mcp_key_context(
     db: &Database,
     actor: &str,
     key: Option<&str>,
+    access: Option<&std::sync::Arc<super::org_agent_service::RequestAccess>>,
     scopes: &OperationScopes,
     service: &str,
     catalog: Option<&str>,
@@ -647,7 +664,9 @@ pub async fn check_non_mcp_key_context(
     path: &CanonicalPath,
 ) -> AppResult<bool> {
     use crate::models::assistant_agent::GuestAccess;
-    let Some(chat) = super::assistant_acknowledgement_service::for_key(db, actor, key).await?
+    let Some(chat) =
+        super::assistant_acknowledgement_service::for_key_with_access(db, actor, key, access)
+            .await?
     else {
         return Err(AppError::ApiKeyScopeForbidden(
             "Specialist operation authority requires a live conversation".into(),
@@ -739,8 +758,10 @@ pub(crate) async fn apply_in_session(
     session: &mut ClientSession,
 ) -> AppResult<AssistantAgent> {
     Box::pin(require_configuration_enabled(db, owner)).await?;
-    let filter =
-        doc! {"_id":agent_id,"user_id":owner,"kind":"specialist","destroyed_at":bson::Bson::Null};
+    let current = team::maintained_agent(db, owner, agent_id).await?;
+    super::org_agent_service::authorize_service(db, owner, Some(&current.user_id), Some(service))
+        .await?;
+    let filter = doc! {"_id":agent_id,"user_id":&current.user_id,"kind":"specialist","destroyed_at":bson::Bson::Null};
     let mut agent = db
         .collection::<AssistantAgent>(AGENTS)
         .find_one(filter.clone())
@@ -783,17 +804,11 @@ pub(crate) async fn apply_in_session(
                 "updated_at":bson::DateTime::now()}}).session(&mut *session).await?;
     let mut cursor = db
         .collection::<AssistantConversation>(CONVERSATIONS)
-        .find(doc! {"user_id":owner,"agent_id":&agent.id})
+        .find(doc! {"agent_id":&agent.id})
         .session(&mut *session)
         .await?;
     let rows: Vec<AssistantConversation> = cursor.stream(&mut *session).try_collect().await?;
-    let authority = credentials::KeyAuthority::for_agent(&agent);
-    for key in team::thread_key_ids(db, owner, &rows, session).await? {
-        match credentials::apply_authority(db, owner, &key, &authority, session).await {
-            Ok(()) | Err(AppError::NotFound(_)) => {}
-            Err(error) => return Err(error),
-        }
-    }
+    team::sync_thread_authority(db, &agent, &rows, session).await?;
     Ok(agent)
 }
 

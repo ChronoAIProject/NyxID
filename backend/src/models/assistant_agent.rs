@@ -90,6 +90,7 @@ pub struct MemoryNote {
 pub struct AssistantAgent {
     #[serde(rename = "_id")]
     pub id: String,
+    /// Polymorphic owner: a person or organization User. Only specialists may be org-owned.
     pub user_id: String,
     pub kind: AgentKind,
     /// Display name. Specialists use a short unique slug-like name.

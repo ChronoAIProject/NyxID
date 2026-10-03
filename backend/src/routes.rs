@@ -2039,6 +2039,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             post(handlers::assistant_team::destroy_agent_route),
         )
         .route(
+            "/nyxagent/agents/{id}/memory",
+            post(handlers::assistant_team::set_memory),
+        )
+        .route(
             "/nyxagent/agents/{id}/memory/{note_id}",
             delete(handlers::assistant_team::delete_memory),
         )

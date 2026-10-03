@@ -45,13 +45,14 @@ pub async fn draft(
     }
     let mut session = state.db.client().start_session().await?;
     session.start_transaction().await?;
-    let row = team::create_thread(
+    let row = Box::pin(team::create_thread_for(
         &state.db,
         &state.encryption_keys,
+        &user,
         &agent,
         "New conversation",
         &mut session,
-    )
+    ))
     .await?;
     session.commit_transaction().await?;
     Ok(Json(json!({"id":row.id})))
@@ -136,10 +137,11 @@ pub async fn thread_image(
     if !matches!(auth.auth_method, crate::mw::auth::AuthMethod::ApiKey) {
         return Err(AppError::Forbidden("A thread Agent Key is required".into()));
     }
-    let chat = crate::services::assistant_acknowledgement_service::for_key(
+    let chat = crate::services::assistant_acknowledgement_service::for_key_with_access(
         &state.db,
         &auth.user_id.to_string(),
         auth.api_key_id.as_deref(),
+        auth.org_agent_access.as_ref(),
     )
     .await?
     .ok_or_else(|| AppError::Forbidden("A thread Agent Key is required".into()))?;

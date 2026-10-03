@@ -589,21 +589,33 @@ pub(crate) async fn job_auth(state: &AppState, job: &MachineJob) -> AppResult<Au
             "The machine restarted; start a new job".into(),
         ));
     }
-    if !crate::services::org_service::resolve_owner_access(&state.db, &job.user_id, &node.user_id)
-        .await?
-        .can_write()
+    let auth = crate::mw::auth::api_key_auth_user(&state.db, &key, None, None, None).await?;
+    let agent = if let Some(access) = auth.org_agent_access.as_deref() {
+        access.agent(&state.db, &job.user_id, &job.agent_id).await?
+    } else {
+        crate::services::assistant_team_service::agent(&state.db, &job.user_id, &job.agent_id)
+            .await?
+    };
+    if agent.user_id != job.user_id {
+        if auth.org_agent_access.is_none() || node.user_id != agent.user_id {
+            return Err(AppError::MachineNotAllowed);
+        }
+    } else if !crate::services::org_service::resolve_owner_access(
+        &state.db,
+        &job.user_id,
+        &node.user_id,
+    )
+    .await?
+    .can_write()
     {
         return Err(AppError::Forbidden("Machine ownership changed".into()));
     }
-    let agent =
-        crate::services::assistant_team_service::agent(&state.db, &job.user_id, &job.agent_id)
-            .await?;
     if agent.destroyed_at.is_some()
         || (!agent.is_nyxbot() && !agent.machine_node_ids.contains(&job.node_id))
     {
         return Err(AppError::Forbidden("Machine grant was removed".into()));
     }
-    crate::mw::auth::api_key_auth_user(&state.db, &key, None, None, None).await
+    Ok(auth)
 }
 
 async fn verify(

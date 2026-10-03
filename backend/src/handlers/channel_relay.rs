@@ -3472,6 +3472,8 @@ mod tests {
 
     fn api_key_auth_user(api_key: &ApiKey) -> AuthUser {
         AuthUser {
+            org_agent_access: None,
+            assistant_agent_owner_id: None,
             assistant_operation_scopes: Default::default(),
             user_id: Uuid::parse_str(&api_key.user_id).expect("valid api key user id"),
             session_id: None,
@@ -3499,6 +3501,8 @@ mod tests {
 
     fn auth_user_with_method(method: crate::mw::auth::AuthMethod) -> AuthUser {
         AuthUser {
+            org_agent_access: None,
+            assistant_agent_owner_id: None,
             assistant_operation_scopes: Default::default(),
             user_id: Uuid::new_v4(),
             session_id: None,
@@ -3628,6 +3632,7 @@ mod tests {
             description: None,
             allowed_service_ids: vec![],
             allowed_platform_service_ids: Vec::new(),
+            assistant_agent_owner_id: None,
             assistant_operation_scopes: Default::default(),
             allowed_node_ids: vec![],
             allow_all_services: true,

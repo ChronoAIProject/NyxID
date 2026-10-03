@@ -107,10 +107,11 @@ pub async fn get_mcp_config(
         mcp_service::NodeScope::Allowed(auth_user.allowed_node_ids.as_slice())
     };
 
-    let chat = crate::services::assistant_acknowledgement_service::for_key(
+    let chat = crate::services::assistant_acknowledgement_service::for_key_with_access(
         &state.db,
         &user_id,
         auth_user.api_key_id.as_deref(),
+        auth_user.org_agent_access.as_ref(),
     )
     .await
     .map_err(|error| match error {

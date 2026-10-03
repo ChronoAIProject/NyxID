@@ -9,6 +9,8 @@ async fn setup_approval(
     operation_name: &str,
 ) -> (ExactServiceApprovalCaller, ExactServiceApprovalResult) {
     let caller = ExactServiceApprovalCaller {
+        org_agent_access: None,
+        agent_owner: None,
         operation_scopes: Default::default(),
         actor_user_id: owner.into(),
         proxy_resolution_user_id: owner.into(),

@@ -543,6 +543,12 @@ pub async fn connect(
     bot_id: &str,
     agent: &crate::models::assistant_agent::AssistantAgent,
 ) -> AppResult<(NyxbotChannel, LinkInstructions)> {
+    if agent.user_id != owner {
+        return Err(AppError::Forbidden(
+            "Organization agents use private member threads; channel sharing is not available"
+                .into(),
+        ));
+    }
     if agent.destroyed_at.is_some() {
         return Err(AppError::Conflict("That agent was destroyed".into()));
     }
@@ -1906,6 +1912,12 @@ pub(crate) async fn setup_link_tool(
     label: Option<&str>,
     agent: &crate::models::assistant_agent::AssistantAgent,
 ) -> AppResult<(Value, bool)> {
+    if agent.user_id != owner {
+        return Err(AppError::Forbidden(
+            "Organization agents use private member threads; channel sharing is not available"
+                .into(),
+        ));
+    }
     if agent.destroyed_at.is_some() {
         return Err(AppError::Conflict("That agent was destroyed".into()));
     }
@@ -2310,6 +2322,12 @@ pub async fn link(
     channel_id: &str,
     agent: &crate::models::assistant_agent::AssistantAgent,
 ) -> AppResult<Value> {
+    if agent.user_id != owner {
+        return Err(AppError::Forbidden(
+            "Organization agents use private member threads; channel sharing is not available"
+                .into(),
+        ));
+    }
     if agent.destroyed_at.is_some() {
         return Err(AppError::Conflict("That agent was destroyed".into()));
     }

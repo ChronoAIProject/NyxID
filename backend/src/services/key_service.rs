@@ -633,6 +633,7 @@ pub(crate) async fn create_api_key_with_security_class_and_id(
         description: description.map(|s| s.to_string()),
         allowed_service_ids: svc_ids.clone(),
         allowed_platform_service_ids: Vec::new(),
+        assistant_agent_owner_id: None,
         assistant_operation_scopes: Default::default(),
         allowed_node_ids: node_ids.clone(),
         allow_all_services: all_svcs,
@@ -702,6 +703,23 @@ pub async fn effective_allowed_service_ids(
     db: &mongodb::Database,
     key: &ApiKey,
 ) -> AppResult<Vec<String>> {
+    let access = super::org_agent_service::resolve_key_access(
+        db,
+        &key.user_id,
+        key.assistant_agent_owner_id.as_deref(),
+    )
+    .await?;
+    effective_allowed_service_ids_with_access(db, key, access.as_deref()).await
+}
+
+pub async fn effective_allowed_service_ids_with_access(
+    db: &mongodb::Database,
+    key: &ApiKey,
+    access: Option<&super::org_agent_service::RequestAccess>,
+) -> AppResult<Vec<String>> {
+    if let Some(ids) = super::org_agent_service::key_services(db, key, access).await? {
+        return Ok(ids);
+    }
     let mut ids = key.allowed_service_ids.clone();
     if !key.allowed_platform_service_ids.is_empty() {
         ids.extend(key.allowed_platform_service_ids.iter().cloned());
@@ -1142,6 +1160,7 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                     description: old_key.description.clone(),
                     allowed_service_ids: old_key.allowed_service_ids.clone(),
                     allowed_platform_service_ids: Vec::new(),
+                    assistant_agent_owner_id: None,
                     assistant_operation_scopes: Default::default(),
                     allowed_node_ids: old_key.allowed_node_ids.clone(),
                     allow_all_services: old_key.allow_all_services,
@@ -1226,7 +1245,9 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                         super::assistant_agent_credential_service::KeyAuthority::Subagent(
                             grants,
                             scopes,
+                            owner,
                         ) => {
+                            successor.assistant_agent_owner_id = Some(owner.clone());
                             successor.assistant_operation_scopes = scopes.clone();
                             successor.allowed_service_ids = grants.service_ids.clone();
                             successor.allowed_platform_service_ids =
@@ -1411,6 +1432,24 @@ pub async fn update_api_key_scope_with_expected_state_version(
         && existing.state_version != expected
     {
         return Err(stale_api_key_conflict());
+    }
+
+    if existing
+        .assistant_agent_owner_id
+        .as_deref()
+        .is_some_and(|owner| owner != user_id)
+        && (scopes.is_some()
+            || allowed_service_ids.is_some()
+            || allowed_node_ids.is_some()
+            || allow_all_services.is_some()
+            || allow_all_nodes.is_some()
+            || allow_auto_connected_services.is_some()
+            || platform.is_some()
+            || callback_url.is_some())
+    {
+        return Err(AppError::Forbidden(
+            "Organization thread authority is managed through the agent's grants".into(),
+        ));
     }
 
     if existing.purpose == ApiKeyPurpose::ScheduledInvocation

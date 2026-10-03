@@ -396,7 +396,7 @@ pub async fn set(
     confirmed: bool,
 ) -> AppResult<SkillsResponse> {
     validate(selection)?;
-    let agent = super::assistant_team_service::agent(db, owner, id).await?;
+    let agent = super::assistant_team_service::maintained_agent(db, owner, id).await?;
     if agent.destroyed_at.is_some() {
         return Err(inaccessible());
     }
@@ -454,7 +454,7 @@ pub async fn set(
     };
     let result = db.collection::<AssistantAgent>(COLLECTION_NAME)
         .update_one(
-            doc! { "_id": id, "user_id": owner, "destroyed_at": bson::Bson::Null, "$or": revisions },
+            doc! { "_id": id, "user_id": &agent.user_id, "destroyed_at": bson::Bson::Null, "$or": revisions },
             doc! { "$set": {
                 "skills": bson::to_bson(&selection.skills).map_err(|_| invalid("Invalid skills"))?,
                 "skills_revision": revision,
@@ -472,7 +472,7 @@ pub async fn set(
         &super::audit_service::AuditActor { user_id: owner.into(), ip_address: None, user_agent: None, api_key_id: None, api_key_name: None },
         "assistant_skills_updated",
         Some(json!({
-            "agent_id": id, "revision": revision, "count": selection.skills.len(),
+            "owner_id": agent.user_id, "agent_id": id, "revision": revision, "count": selection.skills.len(),
             "skills": selection.skills.iter().map(|s| json!({"id": s.skill_id, "version": s.version})).collect::<Vec<_>>(),
         })),
     ).await;

@@ -229,6 +229,7 @@ pub(crate) async fn dispatch(
         }
         "skill_read" => {
             let agent = team::agent(db, &chat.user_id, &chat.agent_id).await?;
+            crate::services::org_agent_service::require_use(db, &chat.user_id, &agent).await?;
             if agent.destroyed_at.is_some() {
                 return Err(AppError::Forbidden("Agent is destroyed".into()));
             }
@@ -309,6 +310,10 @@ pub(crate) async fn dispatch(
                     .await;
                 }
                 return Ok((acks::refusal(&card), true));
+            }
+            if name == "set_agent_skills" {
+                crate::services::org_agent_service::require_maintain(db, &chat.user_id, &agent)
+                    .await?;
             }
             let selection: skills::Selection = serde_json::from_value(args["selection"].clone())
                 .map_err(|_| AppError::ValidationError("Invalid skill selection".into()))?;

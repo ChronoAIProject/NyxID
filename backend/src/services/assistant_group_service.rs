@@ -64,6 +64,7 @@ async fn resolve_members(
         let agent = team::agent(db, owner, id)
             .await
             .map_err(|_| AppError::ValidationError("Unknown agent in member_agent_ids".into()))?;
+        super::org_agent_service::require_use(db, owner, &agent).await?;
         if agent.destroyed_at.is_some() {
             return Err(AppError::Conflict(format!(
                 "Agent {} was destroyed",

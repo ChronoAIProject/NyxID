@@ -266,24 +266,29 @@ pub(super) fn is_duplicate_key_error(error: &mongodb::error::Error) -> bool {
     }
 }
 
-pub(crate) async fn with_operation<T>(
-    db: &mongodb::Database,
-    name: &str,
-    operation: impl std::future::Future<Output = AppResult<T>>,
-) -> AppResult<T> {
-    use super::coordination_service::{LeaseStore, cluster_lease_runtime};
-    let runtime = cluster_lease_runtime();
-    let lease = runtime
-        .acquire(db, name)
-        .await?
-        .ok_or_else(|| conflict("Another Telegram operation is running. Try again shortly."))?;
-    let result = runtime.run_while_renewed(db, &lease, operation).await;
-    let _ = LeaseStore::release(db, &lease).await;
-    result.unwrap_or_else(|| {
-        Err(conflict(
-            "Telegram operation interrupted. Reopen Add Channel Bot → Telegram to continue the saved request; for manager configuration, save it again.",
-        ))
-    })
+pub(crate) fn with_operation<'a, T: 'a>(
+    db: &'a mongodb::Database,
+    name: &'a str,
+    operation: impl std::future::Future<Output = AppResult<T>> + 'a,
+) -> impl std::future::Future<Output = AppResult<T>> + 'a {
+    // Registration nests leases. Box before constructing their futures so the
+    // large operation is not embedded in each lease's debug poll frame.
+    let operation = Box::pin(operation);
+    async move {
+        use super::coordination_service::{LeaseStore, cluster_lease_runtime};
+        let runtime = cluster_lease_runtime();
+        let lease = runtime
+            .acquire(db, name)
+            .await?
+            .ok_or_else(|| conflict("Another Telegram operation is running. Try again shortly."))?;
+        let result = runtime.run_while_renewed(db, &lease, operation).await;
+        let _ = LeaseStore::release(db, &lease).await;
+        result.unwrap_or_else(|| {
+            Err(conflict(
+                "Telegram operation interrupted. Reopen Add Channel Bot → Telegram to continue the saved request; for manager configuration, save it again.",
+            ))
+        })
+    }
 }
 
 pub async fn ensure_indexes(db: &mongodb::Database) -> Result<(), mongodb::error::Error> {

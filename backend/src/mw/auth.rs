@@ -72,6 +72,8 @@ pub struct AuthUser {
     pub allow_all_nodes: bool,
     /// List of UserService IDs this key can access (only checked when allow_all_services is false).
     pub allowed_service_ids: Vec<String>,
+    pub org_agent_access: Option<std::sync::Arc<crate::services::org_agent_service::RequestAccess>>,
+    pub assistant_agent_owner_id: Option<String>,
     pub assistant_operation_scopes: crate::models::agent_operation_scope::OperationScopes,
     /// RFC 8707 resource URI restrictions carried by OAuth bearer tokens.
     pub resource_uris: Option<Vec<String>>,
@@ -709,6 +711,14 @@ pub(crate) async fn api_key_auth_user(
     if !user.is_some_and(|user| user.is_active) {
         return Err(AppError::Unauthorized("User account is inactive".into()));
     }
+    let org_agent_access = crate::services::org_agent_service::resolve_key_access(
+        db,
+        &key.user_id,
+        key.assistant_agent_owner_id.as_deref(),
+    )
+    .await?;
+    let (allow_all_nodes, allowed_node_ids) =
+        crate::services::org_agent_service::key_nodes(db, key, org_agent_access.as_deref()).await?;
     Ok(AuthUser {
         user_id,
         session_id: None,
@@ -719,12 +729,19 @@ pub(crate) async fn api_key_auth_user(
         approval_owner_user_id: None,
         auth_method: AuthMethod::ApiKey,
         allow_all_services: key.allow_all_services,
-        allow_all_nodes: key.allow_all_nodes,
-        allowed_service_ids: crate::services::key_service::effective_allowed_service_ids(db, key)
+        allow_all_nodes,
+        allowed_service_ids:
+            crate::services::key_service::effective_allowed_service_ids_with_access(
+                db,
+                key,
+                org_agent_access.as_deref(),
+            )
             .await?,
+        org_agent_access,
+        assistant_agent_owner_id: key.assistant_agent_owner_id.clone(),
         assistant_operation_scopes: key.assistant_operation_scopes.clone(),
         resource_uris: None,
-        allowed_node_ids: key.allowed_node_ids.clone(),
+        allowed_node_ids,
         api_key_id: Some(key.id.clone()),
         api_key_name: Some(key.name.clone()),
         api_key_credential_id: credential_id,
@@ -872,6 +889,8 @@ impl FromRequestParts<AppState> for AuthUser {
                         })?;
 
                         return Ok(AuthUser {
+                            org_agent_access: None,
+                            assistant_agent_owner_id: None,
                             assistant_operation_scopes: Default::default(),
                             user_id: sa_uuid,
                             session_id: None,
@@ -978,11 +997,16 @@ impl FromRequestParts<AppState> for AuthUser {
                     // check is the revocation lever the relay branch previously
                     // lacked, so deleting/deactivating the agent key immediately
                     // kills its relay tokens (matching the ApiKey path).
-                    let assistant_operation_scopes = if auth_method == AuthMethod::Relay {
-                        ensure_relay_agent_key_active(&state.db, &claims).await?.assistant_operation_scopes
-                    } else {
-                        Default::default()
-                    };
+                    let relay_key = if auth_method == AuthMethod::Relay {
+                        let key = ensure_relay_agent_key_active(&state.db, &claims).await?;
+                        crate::services::org_agent_service::validate_key(&state.db, &key.user_id, key.assistant_agent_owner_id.as_deref()).await?;
+                        if key.assistant_agent_owner_id.as_deref().is_some_and(|owner| owner != key.user_id) {
+                            return Err(AppError::Forbidden("Organization agents do not support channel relay tokens".into()));
+                        }
+                        Some(key)
+                    } else { None };
+                    let assistant_operation_scopes = relay_key.as_ref().map(|k| k.assistant_operation_scopes.clone()).unwrap_or_default();
+                    let assistant_agent_owner_id = relay_key.as_ref().and_then(|k| k.assistant_agent_owner_id.clone());
 
                     // Relay tokens inherit the originating agent key's scope.
                     // OAuth access tokens, including delegated tokens, carry
@@ -1034,6 +1058,8 @@ impl FromRequestParts<AppState> for AuthUser {
                         None
                     };
                     return Ok(AuthUser {
+                        org_agent_access: None,
+                        assistant_agent_owner_id,
                         assistant_operation_scopes,
                         user_id,
                         session_id,
@@ -1107,6 +1133,8 @@ impl FromRequestParts<AppState> for AuthUser {
                                 // those scopes. Session users can retrieve RBAC
                                 // data via the /oauth/userinfo endpoint instead.
                                 return Ok(AuthUser {
+                                    org_agent_access: None,
+                                    assistant_agent_owner_id: None,
                                     assistant_operation_scopes: Default::default(),
                                     user_id,
                                     session_id: Some(session_id),
@@ -1600,6 +1628,8 @@ mod tests {
 
     fn test_auth_user(auth_method: AuthMethod, scope: &str) -> AuthUser {
         AuthUser {
+            org_agent_access: None,
+            assistant_agent_owner_id: None,
             assistant_operation_scopes: Default::default(),
             user_id: Uuid::new_v4(),
             session_id: None,
@@ -2308,6 +2338,7 @@ mod tests {
             description: None,
             allowed_service_ids: Vec::new(),
             allowed_platform_service_ids: Vec::new(),
+            assistant_agent_owner_id: None,
             assistant_operation_scopes: Default::default(),
             allowed_node_ids: Vec::new(),
             allow_all_services: true,
@@ -3097,6 +3128,8 @@ mod tests {
     #[test]
     fn api_key_auth_includes_key_identity() {
         let user = AuthUser {
+            org_agent_access: None,
+            assistant_agent_owner_id: None,
             assistant_operation_scopes: Default::default(),
             user_id: Uuid::new_v4(),
             session_id: None,

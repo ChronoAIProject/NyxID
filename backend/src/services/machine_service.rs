@@ -93,7 +93,17 @@ pub fn caller(chat: &ChatAuthority) -> AppResult<()> {
 /// One membership snapshot and one node query; never a lookup per node.
 pub async fn visible_nodes(db: &Database, chat: &ChatAuthority) -> AppResult<Vec<Node>> {
     caller(chat)?;
-    let owners = usable_owners(db, &chat.user_id).await?;
+    let owners = if chat.is_orchestrator() {
+        // NyxBot is always personal; retain its existing batched read budget.
+        usable_owners(db, &chat.user_id).await?
+    } else {
+        let agent = super::org_agent_service::chat_agent(db, chat).await?;
+        if agent.user_id != chat.user_id {
+            vec![agent.user_id]
+        } else {
+            usable_owners(db, &chat.user_id).await?
+        }
+    };
     Ok(db
         .collection::<Node>(NODES)
         .find(doc! {

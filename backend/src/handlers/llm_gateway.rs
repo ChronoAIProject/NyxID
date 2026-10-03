@@ -2140,6 +2140,12 @@ async fn enforce_agent_llm_operations(
     body: &[u8],
 ) -> AppResult<(Option<String>, bool)> {
     use crate::services::agent_operation_scope_service as operations;
+    Box::pin(crate::services::org_agent_service::authorize_execution(
+        db,
+        auth,
+        user_service,
+    ))
+    .await?;
     let (id, catalog_id) = operations::execution_identity(auth, user_service, catalog);
     if operations::applicable(&auth.assistant_operation_scopes, id, catalog_id)
         .next()

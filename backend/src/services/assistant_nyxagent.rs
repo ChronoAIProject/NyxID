@@ -877,10 +877,20 @@ fn owner_filter(user_id: &str, id: &str) -> AppResult<bson::Document> {
     Ok(doc! {"_id": id, "user_id": user_id})
 }
 pub async fn get(db: &Database, user_id: &str, id: &str) -> AppResult<AssistantConversation> {
-    db.collection::<AssistantConversation>(CONVERSATIONS)
+    let row = db
+        .collection::<AssistantConversation>(CONVERSATIONS)
         .find_one(owner_filter(user_id, id)?)
         .await?
-        .ok_or_else(not_found)
+        .ok_or_else(not_found)?;
+    if let Some(owner) = row.agent_owner_id.as_deref() {
+        Box::pin(super::org_agent_service::validate_key(
+            db,
+            user_id,
+            Some(owner),
+        ))
+        .await?;
+    }
+    Ok(row)
 }
 
 pub fn index_cursor(row: &AssistantConversation) -> String {
@@ -895,7 +905,10 @@ pub async fn list(
     agent: Option<&crate::models::assistant_agent::AssistantAgent>,
 ) -> AppResult<Vec<AssistantConversation>> {
     let mut filter = match agent {
-        Some(agent) => super::assistant_team_service::thread_filter(agent),
+        Some(agent) => {
+            super::org_agent_service::require_use(db, user_id, agent).await?;
+            super::assistant_team_service::thread_filter_for(user_id, agent)
+        }
         None => doc! {"user_id": user_id, "group_id": bson::Bson::Null},
     };
     if let Some(cursor) = cursor {
@@ -914,14 +927,32 @@ pub async fn list(
         ]);
         filter = doc! {"$and": [filter, {"$or": page}]};
     }
-    Ok(db
+    let mut rows: Vec<AssistantConversation> = db
         .collection::<AssistantConversation>(CONVERSATIONS)
         .find(filter)
         .sort(doc! {"updated_at": -1, "_id": -1})
         .limit(limit)
         .await?
         .try_collect()
-        .await?)
+        .await?;
+    // Request-local checks only for organization threads. Personal lists add no reads.
+    let mut access = std::collections::HashMap::new();
+    for row in &rows {
+        if let Some(owner) = row.agent_owner_id.as_deref()
+            && !access.contains_key(owner)
+        {
+            let allowed = super::org_agent_service::can_use(
+                &super::org_agent_service::access(db, user_id, owner).await?,
+            );
+            access.insert(owner.to_owned(), allowed);
+        }
+    }
+    rows.retain(|row| {
+        row.agent_owner_id
+            .as_ref()
+            .is_none_or(|owner| access.get(owner).copied().unwrap_or(false))
+    });
+    Ok(rows)
 }
 pub async fn messages(
     db: &Database,
@@ -1052,6 +1083,8 @@ pub async fn begin_turn(
                 } else {
                     AssistantConversation {
                         automation_thread: false,
+                        agent_owner_id: (new_agent.user_id != user_id)
+                            .then(|| new_agent.user_id.clone()),
                         id: id.clone(),
                         user_id: user_id.into(),
                         title: start
@@ -1901,6 +1934,7 @@ pub async fn rename(
     let mut session = db.client().start_session().await?;
     let db = db.clone();
     let title = title.trim().to_owned();
+    let user_id = user_id.to_owned();
     session
         .start_transaction()
         .and_run2(async move |session| {
@@ -1911,6 +1945,12 @@ pub async fn rename(
                     .session(&mut *session)
                     .await?
                     .ok_or_else(not_found)?;
+                super::org_agent_service::validate_key(
+                    &db,
+                    &user_id,
+                    row.agent_owner_id.as_deref(),
+                )
+                .await?;
                 if live_turn(&row, Utc::now()).is_some() {
                     return Err(AppError::AssistantTurnActive);
                 }

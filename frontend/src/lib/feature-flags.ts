@@ -22,6 +22,7 @@ export const FEATURE_FLAG = {
   AEVATAR_CHAT_WIRE_LOG: "experimental:aevatar-chat-wire-log",
   DIRECT_CHAT_ENGINE: "experimental:direct-chat-engine",
   NYXAGENT_ENGINE: "assistant:nyxagent-engine",
+  ORG_AGENTS: "assistant:org-agents",
   AGENT_OPERATION_SCOPES: "assistant:operation-scopes",
   NYXBOT_GATEWAY_LARK: "nyxbot:gateway-lark",
   NYXBOT_GATEWAY_FEISHU: "nyxbot:gateway-feishu",

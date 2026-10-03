@@ -484,6 +484,7 @@ fn live_turn_expires_at_the_exact_ttl_boundary() {
 fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
     AssistantConversation {
         automation_thread: false,
+        agent_owner_id: None,
         id: format!("nyxa-{}", Uuid::new_v4().simple()),
         user_id: "owner".into(),
         title: "Interrupted turn".into(),
