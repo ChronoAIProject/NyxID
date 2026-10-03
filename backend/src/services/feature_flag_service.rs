@@ -123,6 +123,13 @@ const ASSISTANT_VOICE_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+pub const NYXBOT_THREAD_FOLLOW_FLAG_KEY: &str = "nyxbot:thread-follow";
+const NYXBOT_THREAD_FOLLOW_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: NYXBOT_THREAD_FOLLOW_FLAG_KEY,
+    description: "Staged direct-relay channel thread follow. Gateway follow remains unavailable until a compatible gateway is negotiated.",
+    default_enabled: false,
+};
+
 pub const NYXAGENT_ENGINE_FLAG_KEY: &str = "assistant:nyxagent-engine";
 const NYXAGENT_ENGINE_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: NYXAGENT_ENGINE_FLAG_KEY,
@@ -211,6 +218,7 @@ const NYXBOT_GATEWAY_FLAG_DEFS: [FeatureFlagDef; 7] = [
 pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     INVITATION_CODE_FLAG,
     NYXAGENT_ENGINE_FLAG,
+    NYXBOT_THREAD_FOLLOW_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
     ORG_AGENTS_FLAG,
     ASSISTANT_VOICE_FLAG,
@@ -233,6 +241,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
 pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     INVITATION_CODE_FLAG,
     NYXAGENT_ENGINE_FLAG,
+    NYXBOT_THREAD_FOLLOW_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
     ORG_AGENTS_FLAG,
     ASSISTANT_VOICE_FLAG,
@@ -1757,6 +1766,7 @@ mod tests {
             vec![
                 "auth:invitation-code",
                 "assistant:nyxagent-engine",
+                "nyxbot:thread-follow",
                 "assistant:operation-scopes",
                 "assistant:org-agents",
                 "assistant:voice",

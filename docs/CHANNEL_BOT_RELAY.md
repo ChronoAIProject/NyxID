@@ -18,6 +18,30 @@ A configured Telegram bot-creation manager can also be registered using its exis
 
 These callbacks deliberately omit `X-NyxID-User-Token` for every route: a public Telegram sender does not authorize access to the channel owner's services. The signed callback and message-bound reply token remain available, allowing the agent to send asynchronous replies as the manager. This exception does not change other channel bots' scoped owner-token behavior. The manager path retains its 32 concurrent deliveries per backend process, drop-on-full, transient delivery, and possible duplicates.
 
+## Staged thread-follow support
+
+The [thread-follow design](CHANNEL_THREAD_FOLLOW.md) is approved for staged
+implementation. The initial contract unit adds optional metadata-only
+`thread_context` to direct NyxBot callbacks behind the default-off
+`nyxbot:thread-follow` flag, resolved for the linked person even on organization
+bots. Other callbacks omit it. The adapter capability response adds
+`thread_reply`, `thread_follow` and `thread_history`; absent fields mean
+unsupported. Native bound replies are implemented for Slack, Telegram (including
+managed bots), Discord, Lark and Feishu. History is supported for Slack and
+Discord; Lark/Feishu offer explicitly partial known-message reads. Telegram uses
+metadata fallback. Provider failures never request additional scopes. All
+`thread_follow` capabilities remain false and channel-agent responses report
+`follow_readiness=unavailable`. This unit does not enable thread follow.
+
+T1 excludes X public-thread follow; existing addressed-post replies and X DMs
+keep their current behavior. Agent Event Gateway transports remain legacy until
+the external gateway implements and advertises the
+[versioned facts and bound-reply contract](CHANNEL_THREAD_FOLLOW_GATEWAY_CONTRACT.md).
+Native direct reply/history operations are dormant until the follow service
+supplies an explicit bound target; all legacy reply paths remain unchanged.
+Owner controls and email follow ship in later review units. History is ephemeral
+and limited to 20 messages / 32 KiB / eight seconds, with metadata fallback.
+
 ## X accounts: DMs, mentions and replies
 
 X also supports separately selected encrypted chat and own-post metadata notifications. See [Typed channel activity](CHANNEL_ACTIVITY.md) for activity counts, event selection, receiver capability declarations and the callback compatibility contract.

@@ -19,7 +19,7 @@ pub struct TelegramNewAdapter {
 
 impl TelegramNewAdapter {
     #[cfg(test)]
-    pub(super) fn media_test_adapter(base: &str) -> Self {
+    pub(crate) fn media_test_adapter(base: &str) -> Self {
         Self {
             transport: TelegramAdapter::media_test_adapter(base),
         }
@@ -50,6 +50,45 @@ pub fn credential_descriptor() -> PlatformCredentialDescriptor {
 
 #[async_trait::async_trait]
 impl PlatformAdapter for TelegramNewAdapter {
+    async fn resolve_thread(
+        &self,
+        http: &reqwest::Client,
+        credentials: &BotCredentials<'_>,
+        facts: &crate::models::channel_thread::ChannelThreadFacts,
+        ancestors: &[crate::models::channel_thread::ChannelThreadFacts],
+    ) -> AppResult<Option<crate::models::channel_thread::ChannelThreadFacts>> {
+        self.transport
+            .resolve_thread(http, credentials, facts, ancestors)
+            .await
+    }
+    async fn send_thread_reply(
+        &self,
+        http: &reqwest::Client,
+        credentials: &BotCredentials<'_>,
+        target: &crate::services::channel_thread_service::ThreadReplyTarget,
+        reply: &OutboundReply,
+    ) -> AppResult<Option<String>> {
+        self.transport
+            .send_thread_reply(http, credentials, target, reply)
+            .await
+    }
+
+    fn thread_facts(
+        &self,
+        inbound: &InboundMessage,
+        bot: &ChannelBot,
+        bot_user_id: Option<&str>,
+    ) -> Option<crate::models::channel_thread::ChannelThreadFacts> {
+        self.transport.thread_facts(inbound, bot, bot_user_id)
+    }
+
+    fn thread_capabilities(&self) -> crate::services::channel_platform::ThreadCapabilities {
+        crate::services::channel_platform::ThreadCapabilities {
+            thread_reply: true,
+            ..Default::default()
+        }
+    }
+
     fn display_name(&self) -> &str {
         "Telegram"
     }

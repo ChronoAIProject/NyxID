@@ -1009,7 +1009,11 @@ impl PlatformAdapter for WhatsAppAdapter {
         credentials: &BotCredentials<'_>,
         conversation_id: &str,
         reply: &OutboundReply,
+        thread_target: Option<&crate::services::channel_thread_service::ThreadReplyTarget>,
     ) -> AppResult<crate::services::channel_platform::SendOutcome> {
+        if thread_target.is_some() {
+            return Err(crate::services::channel_thread_service::unavailable());
+        }
         self.send_reply_outcome(http, credentials, conversation_id, reply)
             .await
     }
