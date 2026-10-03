@@ -677,6 +677,7 @@ pub async fn append(
         super::assistant_upload_service::bind(db, &access.actor, &group.id, &id, ids, &mut session)
             .await?;
     let message = GroupMessage {
+        activities: Vec::new(),
         org_group: true,
         id,
         group_id: group.id,
@@ -748,6 +749,7 @@ async fn dropped_notice(
         doc! {"$inc":{"message_count":1},"$set":{"updated_at":bson::DateTime::now(),"last_message_at":bson::DateTime::now()}})
         .return_document(mongodb::options::ReturnDocument::After).session(&mut *session).await? else { return Ok(()); };
     let message = GroupMessage {
+        activities: Vec::new(),
         org_group: true,
         id: Uuid::new_v4().to_string(),
         group_id: group.id.clone(),

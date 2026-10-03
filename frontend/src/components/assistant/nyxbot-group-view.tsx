@@ -1,3 +1,4 @@
+import { MachineToolCard } from "./machine-tool-card";
 import {
   Fragment,
   useLayoutEffect,
@@ -73,7 +74,7 @@ function UserText({ text, names }: { readonly text: string; readonly names: read
   );
 }
 
-function GroupMessageRow({
+export function GroupMessageRow({
   groupId,
   message,
   names,
@@ -86,9 +87,12 @@ function GroupMessageRow({
 }) {
   if (message.role === "notice") {
     return (
-      <p role="note" aria-label="Group notice" className="px-8 text-center text-[11px] text-text-tertiary">
-        {message.text}
-      </p>
+      <div className="min-w-0 px-8">
+        <p role="note" aria-label="Group notice" className="text-center text-[11px] text-text-tertiary">{message.text}</p>
+          {message.activities?.filter((activity) => activity.machine).map((activity) => (
+            <MachineToolCard key={activity.id} receipt={activity.machine!} />
+          ))}
+      </div>
     );
   }
   if (message.role === "user") {
@@ -146,6 +150,9 @@ function GroupMessageRow({
           ) : null}
         </div>
         <div className="px-px text-foreground">
+          {message.activities?.filter((activity) => activity.machine).map((activity) => (
+            <MachineToolCard key={activity.id} receipt={activity.machine!} />
+          ))}
           <TextBlock text={sanitizeAssistantMessageContent(message.text)} />
         </div>
       </div>

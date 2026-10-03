@@ -1,3 +1,4 @@
+import type { MachineReceipt } from "@/schemas/machine-activity";
 import {
   AGUIEventType,
   CustomEventName,
@@ -75,6 +76,8 @@ export type RuntimeStepInfo = {
 };
 
 export type RuntimeToolCallInfo = {
+  machine?: MachineReceipt;
+  conversationId?: string;
   id: string;
   name: string;
   status: "running" | "done" | "error";
