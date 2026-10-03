@@ -214,6 +214,8 @@ pub fn base_prompt(
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TurnRequest {
+    #[serde(default)]
+    pub attachment_ids: Vec<String>,
     pub conversation_id: Option<String>,
     /// New threads only: the agent to talk to; the owner's NyxBot by default.
     #[serde(default)]
@@ -230,6 +232,9 @@ pub struct TurnRequest {
 /// subagent, a batch of NyxID events, or a channel message.
 #[derive(Clone)]
 pub struct TurnStart {
+    pub attachment_ids: Vec<String>,
+    /// Already-bound uploads from the group transcript (server-authored only).
+    pub group_attachments: Vec<crate::models::assistant_conversation::TurnAttachment>,
     pub trigger: Option<super::trigger_schedule::TurnClaim>,
     pub conversation_id: Option<String>,
     pub text: String,
@@ -388,6 +393,8 @@ impl From<&TurnStart> for TurnStart {
 impl From<&TurnRequest> for TurnStart {
     fn from(request: &TurnRequest) -> Self {
         Self {
+            attachment_ids: request.attachment_ids.clone(),
+            group_attachments: Vec::new(),
             trigger: None,
             conversation_id: request.conversation_id.clone(),
             text: request.text.clone(),
@@ -461,7 +468,8 @@ pub fn valid_model(model: &str) -> bool {
 pub fn parse_turn(bytes: &[u8]) -> AppResult<TurnRequest> {
     let request: TurnRequest = serde_json::from_slice(bytes)
         .map_err(|_| AppError::BadRequest("Invalid assistant turn request".into()))?;
-    if request.text.trim().is_empty()
+    super::assistant_upload_service::validate_ids(&request.attachment_ids)?;
+    if (request.text.trim().is_empty() && request.attachment_ids.is_empty())
         || request.text.chars().count() > MAX_MESSAGE_CHARS
         || request
             .conversation_id
@@ -1027,7 +1035,9 @@ pub async fn begin_turn(
             let db = &db;
             let user_id = user_id.as_str();
             let start = &start;
-            let operation: AppResult<_> = async {
+            // MongoDB's retry driver stores and polls this callback through
+            // several frames. Keep the turn/message/upload transaction on the heap.
+            let operation: AppResult<_> = Box::pin(async {
                 let now = Utc::now();
                 let collection = db.collection::<AssistantConversation>(CONVERSATIONS);
                 let mut row = if start.conversation_id.is_some() {
@@ -1304,8 +1314,22 @@ pub async fn begin_turn(
                     .session(&mut *session)
                     .await?;
                 }
+                let message_id = Uuid::new_v4().to_string();
+                if start.guest && !start.attachment_ids.is_empty() {
+                    return Err(AppError::Forbidden("Uploads are owner-only".into()));
+                }
+                let mut uploads = Box::pin(super::assistant_upload_service::bind(
+                    db,
+                    user_id,
+                    &id,
+                    &message_id,
+                    &start.attachment_ids,
+                    session,
+                ))
+                .await?;
+                uploads.extend(start.group_attachments.clone());
                 let message = AssistantMessage {
-                    id: Uuid::new_v4().to_string(),
+                    id: message_id,
                     conversation_id: id.clone(),
                     user_id: user_id.into(),
                     seq: row.message_count,
@@ -1316,7 +1340,7 @@ pub async fn begin_turn(
                     error_code: None,
                     created_at: now,
                     activities: Vec::new(),
-                    attachments: Vec::new(),
+                    attachments: uploads,
                     origin: Some(start.origin),
                     via: (start.origin == TurnOrigin::Channel)
                         .then(|| {
@@ -1333,7 +1357,7 @@ pub async fn begin_turn(
                     .session(&mut *session)
                     .await?;
                 Ok((row, credential))
-            }
+            })
             .await;
             transactions::transaction_result(operation)
         })
@@ -1692,6 +1716,9 @@ pub async fn attach_image(
         assistant_conversation::TurnAttachment,
     };
     let meta = TurnAttachment {
+        image_input: None,
+        origin: "tool".into(),
+        pages: None,
         id: Uuid::new_v4().to_string(),
         content_type: content_type.to_owned(),
         size: bytes.len() as i64,
@@ -1727,6 +1754,7 @@ pub async fn attach_image(
         let data_encrypted = keys.encrypt(bytes).await?;
         db.collection::<AssistantAttachment>(ATTACHMENTS)
             .insert_one(AssistantAttachment {
+                origin: "tool".into(),
                 id: meta.id.clone(),
                 user_id: user_id.to_owned(),
                 conversation_id: conversation_id.to_owned(),
@@ -1765,6 +1793,22 @@ pub async fn read_attachment(
         AssistantAttachment, COLLECTION_NAME as ATTACHMENTS,
     };
     get(db, user_id, conversation_id).await?;
+    if db
+        .collection::<bson::Document>(ATTACHMENTS)
+        .find_one(doc! {"_id": attachment_id, "origin": "user_upload"})
+        .projection(doc! {"_id":1})
+        .await?
+        .is_some()
+    {
+        return super::assistant_upload_service::owner_read(
+            db,
+            keys,
+            user_id,
+            conversation_id,
+            attachment_id,
+        )
+        .await;
+    }
     let row = db
         .collection::<AssistantAttachment>(ATTACHMENTS)
         .find_one(doc! {

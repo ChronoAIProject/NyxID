@@ -199,6 +199,24 @@ pub(crate) fn lock(root: &Path) -> Result<std::fs::File> {
     try_lock(root, "controller.lock")?.context("Another updater owns this mailbox")
 }
 
+/// Tests only: other tests in the same process spawn children, and a child
+/// forked before its exec briefly shares an flock open file description. Wait
+/// for the release instead of assuming it is instantaneous.
+#[cfg(test)]
+pub(crate) fn relock_eventually(root: &Path) -> std::fs::File {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(file) = lock(root) {
+            return file;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "controller lock was not released"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 pub fn write(root: &Path, name: &str, value: &[u8]) -> Result<()> {
     use std::io::Write;
     private_directory(root)?;
@@ -608,7 +626,7 @@ mod tests {
             "bootstrap and watch must serialize"
         );
         drop(guard);
-        let _next = lock(root.path()).unwrap();
+        let _next = relock_eventually(root.path());
         std::fs::remove_dir_all(&path).unwrap();
         let outside = tempfile::tempdir().unwrap();
         symlink(outside.path(), &path).unwrap();
@@ -1057,7 +1075,7 @@ mod tests {
             ])
         );
         // Bootstrap releases the lease before starting the long-running helper.
-        assert!(lock(root.path()).is_ok());
+        drop(relock_eventually(root.path()));
         server.verify().await;
     }
 }

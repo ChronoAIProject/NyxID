@@ -88,6 +88,25 @@ host route. If route detection fails, NyxID falls back to `HOSTNAME` and then
 
 ## Assistant Diagnostics
 
+### Upload ingress
+
+Assistant uploads add no environment variables. Every reverse proxy, CDN and
+ingress in front of NyxID must allow request bodies of at least **21 MiB** on
+`POST /api/v1/assistant/nyxagent/{conversations|groups}/{id}/attachments`.
+For nginx, set `client_max_body_size 21m;` in the existing location handling those
+paths, preserving its upstream configuration. NyxID itself accepts at most
+20 MiB per file and ten files per message, with 30 upload attempts per owner per
+minute across replicas. Larger files return HTTP 400; rate excess returns HTTP
+429. An earlier HTTP 413 can indicate a lower ingress body limit.
+
+Each replica admits four uploads and runs two isolated parser workers. Extraction
+has an eight-second worker deadline plus document/image expansion limits. Pending
+uploads expire after 24 hours, bound uploads after 30 days. These are fixed limits;
+see [Assistant uploads: ingress and operator limits](chat/10-uploads.md#ingress-and-operator-limits)
+for the complete limits, failure behavior and deployment contract.
+
+### Engine and diagnostics
+
 The default NyxAgent assistant introduces **no environment variable**. Its catalog
 slug `llm-nyx` and default-on feature flag `assistant:nyxagent-engine` are code-level
 configuration. The catalog row provides the upstream base URL. Readiness reports

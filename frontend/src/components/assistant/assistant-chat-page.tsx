@@ -44,6 +44,7 @@ import { useNyxAgentAssistantChat } from "@/hooks/use-assistant-nyxagent";
 import { Button } from "@/components/ui/button";
 import { AssistantWireLogAction } from "@/components/assistant/assistant-wire-log-panel";
 import { ChatActorControls } from "@/components/assistant/chat-actor-controls";
+import { UploadComposer } from "@/components/assistant/upload-composer";
 import { ChatComposer } from "@/components/assistant/chat-composer";
 import { ChatMessageBubble, ChatMessageList } from "@/components/assistant/chat-message";
 import {
@@ -776,7 +777,9 @@ function NyxAgentThreadPage() {
           </AssistantLinkModalHost>
         )}
         <div ref={composerRef} className="absolute inset-x-0 bottom-0 z-10">
-          <ChatComposer
+          <UploadComposer
+            key={`${user?.id}:${selectedId ?? headerAgent?.id ?? "draft"}`}
+            scope={{ kind: "conversations", id: selectedId, agentId: headerAgent?.id }}
             active={chat.isStreaming}
             sending={chat.isStreaming}
             disabled={Boolean(selectedId && chat.error) || destroyed}
@@ -791,9 +794,9 @@ function NyxAgentThreadPage() {
             focusRequest={focusRequest}
             // Model routing is server-side: there is no profile selector here.
             placeholder={`Message ${agentName}`}
-            onSend={async (text) => {
+            onSend={async (text, uploads) => {
               try {
-                await chat.send(text);
+                await chat.send(text, uploads);
               } catch (error) {
                 toast.error(
                   error instanceof Error ? error.message : "The assistant is unavailable.",

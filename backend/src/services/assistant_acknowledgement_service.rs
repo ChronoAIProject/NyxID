@@ -435,7 +435,8 @@ pub async fn request_tracked(
     session
         .start_transaction()
         .and_run2(async move |session| {
-            let operation = async {
+            // Do not embed the card transaction in MongoDB's retry frames.
+            let operation = Box::pin(async {
                 let (conversation, _) = fence(&db, &chat, session).await?;
                 let mut row = candidate.clone();
                 // Ordinary denials stay bound to the initiating user/orchestrator
@@ -485,7 +486,7 @@ pub async fn request_tracked(
                     .session(&mut *session)
                     .await?;
                 Ok((row, true))
-            }
+            })
             .await;
             mutations::transaction_result(operation)
         })

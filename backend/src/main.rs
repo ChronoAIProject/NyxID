@@ -320,8 +320,16 @@ enum Commands {
     CleanupOrphans(cleanup_cli::CleanupArgs),
 }
 
+fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--attachment-worker") {
+        services::attachment_extraction::worker();
+        return;
+    }
+    server_main();
+}
+
 #[tokio::main]
-async fn main() {
+async fn server_main() {
     // Pick a rustls `CryptoProvider` explicitly before ANY TLS use.
     // Feature unification can compile multiple providers into the
     // backend (notably aws_lc_rs and ring), and rustls cannot

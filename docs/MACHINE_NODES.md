@@ -129,7 +129,7 @@ model knows when to use them. Names:
 | `nyx__machine_read_file` | `{machine, path, offset?, limit?, encoding? text\|base64}` paginated; binary files as base64 only when asked |
 | `nyx__machine_write_file` | `{machine, path, content, encoding?, mode create\|overwrite\|append, expected_sha256?}` returns new sha256 |
 | `nyx__machine_edit_file` | `{machine, path, old_string, new_string, replace_all?, expected_sha256?}`: exact-match replace (fails on 0 or ambiguous matches) |
-| `nyx__machine_save_attachment` | Write one of this conversation's attachments (e.g. a generated image) to a path on the machine |
+| `nyx__machine_save_attachment` | Write an attachment from this conversation or group to a workspace path (up to 20 MiB; update older nodes before saving files over 5 MiB) |
 | `nyx__machine_share_file` | Attach an image file from the machine to the conversation, so the owner sees it (same rules as tool images: PNG/JPEG/GIF/WebP, ≤ 5 MiB, verified magic bytes) |
 | `nyx__machine_computer` | Call one cua driver tool the machine advertises: `{machine, tool, arguments}` |
 
@@ -193,7 +193,9 @@ model knows when to use them. Names:
 - **Git and other connected services** go through the machine's service
   gateway (D14). No credential is ever sent to the machine.
 - **Transfers.** `save_attachment` streams the attachment from NyxID
-  (owner-only, same conversation, size-capped). `share_file` streams a verified
+  (owner-only, same conversation or group, up to 20 MiB on updated nodes;
+  older nodes retain 5 MiB). See [assistant uploads](chat/10-uploads.md).
+  `share_file` retains its 5 MiB limit and streams a verified
   image into `assistant_attachments` (≤ 8 per turn, existing rules).
 
 ### D7. Computer use through the cua driver
