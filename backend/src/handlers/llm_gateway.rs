@@ -344,6 +344,9 @@ pub async fn llm_proxy_request(
     request: Request<Body>,
 ) -> AppResult<Response> {
     auth_user.ensure_llm_proxy_access()?;
+    auth_user
+        .ensure_live_assistant_turn(&state.db, "llm.provider")
+        .await?;
     if !auth_user.assistant_operation_scopes.is_empty() {
         crate::services::proxy_authorization::CanonicalPath::from_mcp_built(request.uri().path())?;
     }
@@ -763,6 +766,9 @@ async fn gateway_request_inner(
     let gateway_uri = request.uri().clone();
     let gateway_extensions = request.extensions().clone();
     auth_user.ensure_llm_proxy_access()?;
+    auth_user
+        .ensure_live_assistant_turn(&state.db, "llm.gateway")
+        .await?;
     let billing_egress_permit = enforce_llm_billing_classification(
         &request,
         crate::services::billing::BillingIngress::LlmGateway,

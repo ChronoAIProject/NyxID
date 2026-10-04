@@ -552,6 +552,8 @@ pub async fn attachment(
 ) -> AppResult<Response> {
     let user_id = auth.user_id.to_string();
     engine::require_enabled(&state.db, &user_id).await?;
+    auth.ensure_live_assistant_turn(&state.db, "assistant.attachment")
+        .await?;
     if Uuid::parse_str(&attachment_id).is_err() {
         return Err(AppError::NotFound("Attachment not found".into()));
     }

@@ -25,6 +25,87 @@ use crate::{
     services::{api_key_mutation_service as mutations, audit_service, key_service},
 };
 
+/// The request-time authority snapshot for a per-conversation assistant key.
+/// It is populated while the conversation is loaded during authentication and
+/// never contains key material.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AssistantTurnFence {
+    pub conversation_id: String,
+    pub turn_id: Option<String>,
+    pub turn_live: bool,
+    pub turn_stopped: bool,
+}
+
+impl AssistantTurnFence {
+    pub fn require_live(&self) -> AppResult<()> {
+        if self.turn_live && !self.turn_stopped {
+            return Ok(());
+        }
+        Err(AppError::AssistantTurnRequired)
+    }
+
+    pub fn refusal_reason(&self) -> &'static str {
+        if self.turn_id.is_none() {
+            "idle"
+        } else if self.turn_stopped {
+            "stopped"
+        } else {
+            "expired"
+        }
+    }
+}
+
+/// Apply the rollout-controlled request fence and emit a bounded, sampled
+/// metadata-only audit record for refusals. The fence itself is always
+/// computed by authentication; this function only controls enforcement.
+#[allow(clippy::too_many_arguments)]
+pub async fn enforce_turn_gate(
+    db: &Database,
+    fence: &AssistantTurnFence,
+    user_id: &str,
+    api_key_id: Option<&str>,
+    api_key_name: Option<&str>,
+    ip_address: Option<&str>,
+    user_agent: Option<&str>,
+    route: &str,
+) -> AppResult<()> {
+    if !crate::services::feature_flag_service::personal_flag_enabled(
+        db,
+        user_id,
+        crate::services::feature_flag_service::ASSISTANT_LIVE_TURN_GATE_FLAG_KEY,
+    )
+    .await?
+    {
+        return Ok(());
+    }
+    if let Err(error) = fence.require_live() {
+        let sample_id = format!("{user_id}:{}", fence.conversation_id);
+        if crate::telemetry::should_sample_event("assistant_turn_gate_refused", &sample_id, 10) {
+            let _ = audit_service::log_actor_event(
+                db.clone(),
+                &audit_service::AuditActor {
+                    user_id: user_id.to_owned(),
+                    ip_address: ip_address.map(str::to_owned),
+                    user_agent: user_agent.map(str::to_owned),
+                    api_key_id: api_key_id.map(str::to_owned),
+                    api_key_name: api_key_name.map(str::to_owned),
+                },
+                "assistant_turn_gate_refused",
+                Some(json!({
+                    "route": route,
+                    "conversation_id": fence.conversation_id,
+                    "turn_id": fence.turn_id,
+                    "reason": fence.refusal_reason(),
+                    "sample_percent": 10,
+                })),
+            )
+            .await;
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
 pub const PENDING_SECONDS: i64 = 15 * 60;
 pub const ACTION_SECONDS: i64 = 10 * 60;
 
@@ -33,6 +114,7 @@ pub struct ChatAuthority {
     pub org_agent_access: Option<std::sync::Arc<super::org_agent_service::RequestAccess>>,
     pub turn_id: Option<String>,
     pub turn_stopped: bool,
+    pub turn_live: bool,
     pub machine_node_ids: Vec<String>,
     pub saved_login_ids: Vec<String>,
     pub conversation_id: String,
@@ -52,6 +134,35 @@ impl ChatAuthority {
     /// NyxBot threads run with Full access; specialists only with their grants.
     pub fn is_orchestrator(&self) -> bool {
         self.role == AgentRole::Orchestrator
+    }
+
+    pub fn turn_fence(&self) -> AssistantTurnFence {
+        AssistantTurnFence {
+            conversation_id: self.conversation_id.clone(),
+            turn_id: self.turn_id.clone(),
+            turn_live: self.turn_live,
+            turn_stopped: self.turn_stopped,
+        }
+    }
+
+    pub async fn ensure_live_turn(
+        &self,
+        db: &Database,
+        ip_address: Option<&str>,
+        user_agent: Option<&str>,
+        route: &str,
+    ) -> AppResult<()> {
+        enforce_turn_gate(
+            db,
+            &self.turn_fence(),
+            &self.user_id,
+            Some(&self.api_key_id),
+            None,
+            ip_address,
+            user_agent,
+            route,
+        )
+        .await
     }
 }
 impl std::fmt::Debug for ChatAuthority {
@@ -161,6 +272,7 @@ pub async fn for_key_with_access(
     } else {
         None
     };
+    let turn_live = super::assistant_nyxagent::live_turn(&conversation, Utc::now()).is_some();
     Ok(Some(ChatAuthority {
         org_agent_access: access.cloned(),
         turn_id: conversation.active_turn.as_ref().map(|t| t.turn_id.clone()),
@@ -168,6 +280,7 @@ pub async fn for_key_with_access(
             .active_turn
             .as_ref()
             .is_none_or(|t| t.stop_requested),
+        turn_live,
         machine_node_ids: agent.machine_node_ids.clone(),
         saved_login_ids: agent.saved_login_ids.clone(),
         user_id: user.into(),
@@ -900,6 +1013,7 @@ pub async fn decide_as(
                     org_agent_access: None,
                     turn_id: target.active_turn.as_ref().map(|t| t.turn_id.clone()),
                     turn_stopped: target.active_turn.as_ref().is_none_or(|t| t.stop_requested),
+                    turn_live: super::assistant_nyxagent::live_turn(&target, Utc::now()).is_some(),
                     machine_node_ids: Vec::new(),
                     saved_login_ids: Vec::new(),
                     confirmation_policy: None,

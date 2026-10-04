@@ -48,6 +48,9 @@ pub async fn redeem_request(
     Json(fence): Json<ExactServiceApprovalFence>,
 ) -> AppResult<Json<ExactServiceApprovalResult>> {
     auth_user.ensure_rest_proxy_access()?;
+    auth_user
+        .ensure_live_assistant_turn(&state.db, "exact-approval.redeem")
+        .await?;
     enforce_rate_limit(&state, &auth_user).await?;
     let caller = caller(&auth_user)?;
     let permit =
@@ -133,6 +136,8 @@ mod tests {
             assistant_group_id: None,
             assistant_agent_owner_id: None,
             assistant_operation_scopes: Default::default(),
+            assistant_turn_fence: None,
+            assistant_chat: None,
             user_id: uuid::Uuid::new_v4(),
             session_id: None,
             scope: "proxy".to_string(),

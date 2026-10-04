@@ -150,6 +150,13 @@ const AGENT_OPERATION_SCOPES_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+pub const ASSISTANT_LIVE_TURN_GATE_FLAG_KEY: &str = "assistant:live-turn-gate";
+const ASSISTANT_LIVE_TURN_GATE_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: ASSISTANT_LIVE_TURN_GATE_FLAG_KEY,
+    description: "Require assistant conversation keys to have a live turn before execution.",
+    default_enabled: false,
+};
+
 pub const INVITATION_CODE_FLAG_KEY: &str = "auth:invitation-code";
 const INVITATION_CODE_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: INVITATION_CODE_FLAG_KEY,
@@ -220,6 +227,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     NYXAGENT_ENGINE_FLAG,
     NYXBOT_THREAD_FOLLOW_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
+    ASSISTANT_LIVE_TURN_GATE_FLAG,
     ORG_AGENTS_FLAG,
     ASSISTANT_VOICE_FLAG,
     AI_ASSISTANT_FLAG,
@@ -243,6 +251,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     NYXAGENT_ENGINE_FLAG,
     NYXBOT_THREAD_FOLLOW_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
+    ASSISTANT_LIVE_TURN_GATE_FLAG,
     ORG_AGENTS_FLAG,
     ASSISTANT_VOICE_FLAG,
     AI_ASSISTANT_FLAG,
@@ -1768,6 +1777,7 @@ mod tests {
                 "assistant:nyxagent-engine",
                 "nyxbot:thread-follow",
                 "assistant:operation-scopes",
+                "assistant:live-turn-gate",
                 "assistant:org-agents",
                 "assistant:voice",
                 "experimental:ai-assistant",
