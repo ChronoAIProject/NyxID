@@ -1276,6 +1276,7 @@ mod tests {
             skill_metadata: Default::default(),
             operation_scope_revisions: Default::default(),
             machine_node_ids: Vec::new(),
+            machine_access: None,
             saved_login_ids: Vec::new(),
             created_by: "learning-test-owner".into(),
             model: "test".into(),
