@@ -26,7 +26,7 @@ export function MachineGrantPicker({
               node.machine &&
               (node.machine.shell ||
                 node.machine.files ||
-                node.machine.computer),
+                node.machine.computer || node.machine.browser),
           )
           .map((node) => ({ id: node.id, label: node.name }))
       : (logins.data ?? []).map((login) => ({

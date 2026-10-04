@@ -5035,6 +5035,8 @@ async fn execute_resolved_proxy_inner(
                         .map_or(state.config.proxy_max_body_size, |meter| meter.limit)
                 );
                 let mut signed = nyxid_machine::Request {
+                    version: 1,
+                    authority: None,
                     request_id: attempt_request.request_id,
                     node_id: (*node_id).into(),
                     operation: nyxid_machine::Operation::ProxyUpload,

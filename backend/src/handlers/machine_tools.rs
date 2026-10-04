@@ -1,5 +1,6 @@
 //! Native machine MCP adapter. No token, credential, output, or path is audited.
 use crate::services::assistant_links::AssistantPage;
+use crate::services::machine_access_service as access;
 use crate::services::machine_activity_service as receipts;
 use crate::{
     AppState,
@@ -13,6 +14,7 @@ use crate::{
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use chrono::Utc;
+use nyxid_machine::authority::Authority;
 use nyxid_machine::{Operation, Request};
 use serde_json::{Value, json};
 
@@ -71,13 +73,18 @@ pub async fn call(
         } else {
             "No machine is available. Ask NyxBot for a machine setup link."
         };
+        let visible = Box::pin(access::visible_assignments(&state.db, chat))
+            .await?
+            .into_iter()
+            .map(|(node, assignment)| {
+                let mut row = machines::metadata(&node);
+                row["access"] = json!(assignment);
+                row
+            })
+            .collect();
         return tools::list_page(
             "machines",
-            nodes
-                .iter()
-                .filter(|node| machines::granted(chat, node))
-                .map(machines::metadata)
-                .collect(),
+            visible,
             &arguments,
             json!({
                 "services": services.iter().map(|service| service.slug.as_str()).collect::<Vec<_>>(),
@@ -99,11 +106,17 @@ pub async fn call(
             "Several machines have this name; use the ID".into(),
         ));
     }
-    if !machines::granted(chat, &node) {
-        return permission(state, chat, "machine", &node.id, &node.name).await;
-    }
     let operation = tools::operation(name)
         .ok_or_else(|| AppError::NotFound("Machine tool not found".into()))?;
+    if operation != Operation::JobCancel {
+        match Box::pin(access::assignment(&state.db, chat, &node)).await {
+            Ok(_) => {}
+            Err(AppError::MachinePermissionRevoked) => {
+                return permission(state, chat, "machine", &node.id, &node.name).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
     machines::capable(&node, operation)?;
     if operation == Operation::Browser
         && !node
@@ -203,6 +216,10 @@ pub async fn call(
         arguments["login"] = json!(row.id);
         login = Some(row);
     }
+    Box::pin(access::authorize(
+        &state.db, chat, &node, operation, &arguments,
+    ))
+    .await?;
     let declared_services = if operation == Operation::Exec {
         let requested: Vec<String> = serde_json::from_value(
             arguments
@@ -229,6 +246,11 @@ pub async fn call(
     } else {
         Vec::new()
     };
+    arguments["machine_access_revision"] = json!(
+        Box::pin(access::policy(&state.db, &chat.agent_id))
+            .await?
+            .revision
+    );
     // Arbitrary commands, writes and mutating desktop input can destroy data.
     // Filling a checked login field and asking the owner for control change
     // state, but do not themselves remove data or grant arbitrary execution.
@@ -352,6 +374,28 @@ pub async fn call(
     } else {
         None
     };
+    let authority = match Box::pin(access::admit(
+        &state.db,
+        chat,
+        &node,
+        operation,
+        &arguments,
+        job.as_ref().map(|job| job.id.as_str()),
+    ))
+    .await
+    {
+        Ok(authority) => authority,
+        Err(error) => {
+            if let Some(job) = &job {
+                machines::finish(&state.db, &job.id).await?;
+            }
+            return Err(error);
+        }
+    };
+    if let (Some(job), Some(authority)) = (&job, &authority) {
+        state.db.collection::<mongodb::bson::Document>(crate::models::machine_job::COLLECTION_NAME)
+            .update_one(mongodb::bson::doc!{"_id":&job.id},mongodb::bson::doc!{"$set":{"machine_authority":mongodb::bson::to_bson(authority).map_err(|_|AppError::MachineAuthorityStale)?}}).await?;
+    }
     if let Some(login) = &login {
         let field = argument(&arguments, "field")?.to_owned();
         let value = crate::services::saved_login_service::materialize(
@@ -368,11 +412,43 @@ pub async fn call(
     receipt.preview_enabled = receipts::preview_enabled(&state.db, chat).await?;
     receipts::record(&state.db, chat, &receipt).await?;
     let started = std::time::Instant::now();
-    let result = match operation {
-        Operation::SaveAttachment => save_attachment(state, chat, &node, &arguments).await,
-        Operation::ShareFile => share_file(state, chat, &node, &arguments).await,
-        _ => dispatch(state, &node, operation, arguments.clone()).await,
+    let mut result = match operation {
+        Operation::SaveAttachment => {
+            save_attachment(state, chat, &node, &arguments, authority.clone()).await
+        }
+        Operation::ShareFile => share_file(state, chat, &node, &arguments, authority.clone()).await,
+        _ => {
+            dispatch_authorized(
+                state,
+                &node,
+                operation,
+                arguments.clone(),
+                authority.clone(),
+            )
+            .await
+        }
     };
+    if let Some(authority) = &authority
+        && operation != Operation::JobCancel
+    {
+        let current = state.db.collection::<mongodb::bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+            .find_one(mongodb::bson::doc! {"_id":&authority.agent_id,"destroyed_at":mongodb::bson::Bson::Null,format!("machine_access.assignments.{}.revision",node.id):authority.revision})
+            .projection(mongodb::bson::doc! {"_id":1}).await?;
+        if current.is_none() {
+            result = Err(AppError::MachinePermissionRevoked);
+        }
+    }
+    if let Some(authority) = &authority
+        && (job.is_none()
+            || result.as_ref().is_ok_and(|r| r["status"] == "finished")
+            || result.is_err())
+    {
+        let _ = state
+            .db
+            .collection::<mongodb::bson::Document>(crate::models::machine_access::LEASES)
+            .delete_one(mongodb::bson::doc! {"_id":&authority.lease_id})
+            .await;
+    }
     if let Some(job) = job
         && (result.is_err()
             || result
@@ -563,7 +639,16 @@ pub async fn dispatch(
     operation: Operation,
     parameters: Value,
 ) -> AppResult<Value> {
-    let request = signed_request(state, node, operation, parameters).await?;
+    dispatch_authorized(state, node, operation, parameters, None).await
+}
+async fn dispatch_authorized(
+    state: &AppState,
+    node: &Node,
+    operation: Operation,
+    parameters: Value,
+    authority: Option<Box<Authority>>,
+) -> AppResult<Value> {
+    let request = signed_request(state, node, operation, parameters, authority).await?;
     Ok(state
         .node_dispatch
         .machine_request_with_node(request, node)
@@ -576,10 +661,13 @@ async fn signed_request(
     node: &Node,
     operation: Operation,
     parameters: Value,
+    authority: Option<Box<Authority>>,
 ) -> AppResult<Request> {
     machines::capable(node, operation)?;
     let secret = node_service::signing_secret_from_node(&state.encryption_keys, node).await?;
     let mut request = Request {
+        version: if authority.is_some() { 2 } else { 1 },
+        authority,
         request_id: uuid::Uuid::new_v4().to_string(),
         node_id: node.id.clone(),
         operation,
@@ -646,6 +734,7 @@ async fn save_attachment(
     chat: &ChatAuthority,
     node: &Node,
     args: &Value,
+    authority: Option<Box<Authority>>,
 ) -> AppResult<Value> {
     let id = argument(args, "attachment_id")?;
     let is_upload = state
@@ -694,6 +783,7 @@ async fn save_attachment(
         parameters,
         axum::body::Body::from(bytes),
         4096,
+        authority,
     )
     .await?;
     serde_json::from_slice(&result)
@@ -705,6 +795,7 @@ async fn share_file(
     chat: &ChatAuthority,
     node: &Node,
     args: &Value,
+    authority: Option<Box<Authority>>,
 ) -> AppResult<Value> {
     let bytes = transfer(
         state,
@@ -713,6 +804,7 @@ async fn share_file(
         json!({"path":args["path"],"conversation_id":args["conversation_id"],"turn_id":args["turn_id"]}),
         axum::body::Body::empty(),
         crate::services::mcp_service::MAX_TOOL_IMAGE_BYTES,
+        authority,
     )
     .await?;
     let kind = ["image/png", "image/jpeg", "image/gif", "image/webp"]
@@ -762,10 +854,11 @@ async fn transfer(
     mut parameters: Value,
     body: axum::body::Body,
     result_limit: usize,
+    authority: Option<Box<Authority>>,
 ) -> AppResult<Vec<u8>> {
     use crate::services::node_ws_manager::{ProxyResponseType, StreamChunk};
     parameters["max_bytes"] = json!(attachment_transfer_limit(operation, &parameters)?);
-    let request = signed_request(state, node, operation, parameters).await?;
+    let request = signed_request(state, node, operation, parameters, authority).await?;
     let response = state
         .node_dispatch
         .proxy_upload(request, body)
@@ -792,6 +885,16 @@ async fn transfer(
                 bytes.extend_from_slice(&data);
             }
             StreamChunk::End if started => return Ok(bytes),
+            // The node emits fixed protocol reason codes, never child stderr.
+            StreamChunk::Error(reason) if reason == "machine_authority_stale" => {
+                return Err(AppError::MachineAuthorityStale);
+            }
+            StreamChunk::Error(reason) if reason == "machine_turn_stopped" => {
+                return Err(AppError::MachineTurnStopped);
+            }
+            StreamChunk::Error(reason) if reason == "owner_in_control" => {
+                return Err(AppError::MachineOwnerInControl);
+            }
             _ => {
                 return Err(AppError::ValidationError(
                     "Machine file transfer refused or interrupted".into(),

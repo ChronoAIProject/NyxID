@@ -59,6 +59,7 @@ pub const AGENT_TOOL_NAMES: &[&str] = &[
     "forget",
     "post_to_chat",
     "machine_update",
+    "machine_capabilities",
     "request_agent_operations",
     "get_agent_operations",
     "get_agent_skills",
@@ -169,7 +170,8 @@ pub fn read_only(name: &str) -> bool {
 pub fn destructive(name: &str) -> bool {
     matches!(
         name,
-        "machine_update"
+        "machine_capabilities"
+            | "machine_update"
             | "delete_schedule"
             | "revoke_subagent"
             | "destroy_subagent"
@@ -442,8 +444,12 @@ pub fn schema(name: &str) -> Value {
             vec!["area"],
         ),
         "machine_setup_link" => (
-            json!({"name":string(64),"where":{"type":"string","enum":["this_computer","vm","docker"]},"capabilities":{"type":"array","minItems":1,"maxItems":3,"items":{"type":"string","enum":["shell","files","computer"]}},"grant_to":string(64)}),
+            json!({"name":string(64),"where":{"type":"string","enum":["this_computer","vm","docker"]},"capabilities":{"type":"array","minItems":1,"maxItems":4,"items":{"type":"string","enum":["shell","files","browser","computer"]}},"grant_to":string(64)}),
             vec!["where"],
+        ),
+        "machine_capabilities" => (
+            json!({"agent":{"type":"string"},"machine":{"type":"string"},"selection":{"type":"object","properties":{"expected_revision":{"type":"integer"},"capabilities":{"type":"object","properties":{"shell":{"type":"boolean"},"files":{"type":"boolean"},"browser":{"type":"boolean"},"computer":{"type":"boolean"},"developer_browser":{"type":"boolean"}},"additionalProperties":false},"saved_login_ids":{"type":["array","null"],"items":{"type":"string"}}},"required":["expected_revision","capabilities"],"additionalProperties":false}}),
+            vec![],
         ),
         "machine_update" => (
             json!({"machine":string(128),"host_machine":string(128),"container":string(128)}),
@@ -647,7 +653,10 @@ fn description(name: &str) -> &'static str {
             directly for what they cover."
         }
         "machine_setup_link" => {
-            "Help the owner set up a machine for coding, files or computer use. Returns a prefilled Assistant → Machines setup link; credentials never enter chat. Recommend a VM or container. End the turn and wait for the connected event, then verify with machine_list and a harmless command and apply the requested specialist grant."
+            "Help the owner set up a machine for coding, files or computer use. Returns a prefilled Assistant → Machines setup link; credentials never enter chat. Recommend a VM or container. End the turn and wait for the connected event, then use nyxid__machine_capabilities to obtain owner approval for the required capabilities and verify with machine_list and a harmless permitted action. New assignments start denied."
+        }
+        "machine_capabilities" => {
+            "Read or configure an agent's explicit machine capabilities. Omit selection to list current revisions and node ceilings. New assignments deny every capability when the acting person has capability editing enabled; otherwise the existing Grants workflow snapshots legacy access. Widening requires an owner card; NyxBot can narrow access immediately and specialists request owner confirmation. Computer and developer_browser require browser. Shell can access its OS user's files; these permissions do not isolate shared browser sessions. Old nodes require an update before capability edits."
         }
         "machine_update" => {
             "Offer an update when machine_list shows update_available or old machines lack browser/AX capabilities. NyxBot and granted specialists always request an owner action card. If no updater exists or updater.phase is legacy, relay the credential-free link and pinned host terminal command. Legacy repair replaces only the companion, retaining machine and volumes; end the turn and wait for companion version metadata or expiry. Otherwise wait for reconnect/expiry. If the owner identifies another granted native machine on the Docker host, pass host_machine and their container name: Docker is inspected before the card names both machines. Never guess a host or migrate inside the target container. Surface any previous_update code and guidance; on failure follow the fixed recovery guidance rather than guessing at credentials or Docker metadata. After wake verify version, AX and browser snapshot, then resume."

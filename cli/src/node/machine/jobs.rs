@@ -248,6 +248,17 @@ impl Jobs {
         ids
     }
 
+    pub async fn preempt_ids(&self, ids: &[String]) {
+        let jobs = self.jobs.lock().await;
+        for id in ids {
+            if let Some(job) = jobs.get(id) {
+                if job.running.load(Ordering::Acquire) {
+                    signal_group(job.pid, libc::SIGKILL);
+                }
+                job.cancel.send_replace(true);
+            }
+        }
+    }
     pub async fn cancel_all(&self) {
         let jobs: Vec<_> = self.jobs.lock().await.values().cloned().collect();
         for job in &jobs {

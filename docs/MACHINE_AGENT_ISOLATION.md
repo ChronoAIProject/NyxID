@@ -90,7 +90,7 @@ Display capture, trusted input and cua must take an explicit resolved context en
 
 ### 3.2 Capability grants, saved logins, and NyxBot policy
 
-Store explicit per-(agent,machine) grants beside `machine_node_ids`, not inside service `grants`. Each new assignment starts with all four tool capabilities off. A machine selection alone never enables them. Effective authority is the intersection of: live actor/org access, machine membership, explicit agent capability, node-local capability, supported protocol/isolation mode, live grant revision, live turn/job, owner-control fence, and applicable owner confirmation. Saved-login filling adds its own live login grant and origin/field gates; service gateway use adds B1 and current service grants/ACLs/billing. Discovery and execution use the same projection; ungranted capabilities have an actionable permission-request flow rather than an opaque missing tool.
+Store explicit per-(agent,machine) grants beside `machine_node_ids`, not inside service `grants`. With the capability editor enabled for the acting person, each new assignment starts with all four tool capabilities off. While that flag is off, the existing pairing and Grants flows snapshot legacy capabilities under the live ACL (§8.4). Effective authority is the intersection of: live actor/org access, machine membership, explicit agent capability, node-local capability, supported protocol/isolation mode, live grant revision, live turn/job, owner-control fence, and applicable owner confirmation. Saved-login filling adds its own live login grant and origin/field gates; service gateway use adds B1 and current service grants/ACLs/billing. Discovery and execution use the same projection; ungranted capabilities have an actionable permission-request flow rather than an opaque missing tool.
 
 | Grant | Native operations | Additional rule |
 |---|---|---|
@@ -190,8 +190,8 @@ Proposed feature flags: `assistant:machine-capabilities` for new assignment conf
 ### 5.2 Ordered migration
 
 1. Deploy additive readers, dual-protocol support and enforcement to the entire server fleet with creation flags off. Preserve the sibling-field write discipline. Install indexes through existing boxed DB phases once, before enabling context writes. Drain old long-lived WS/MCP workers; routing only the settings page to new replicas is insufficient.
-2. Run an idempotent bounded, leased/fenced migration of existing agent-machine memberships. Snapshot current compatibility authority as explicit `shared_legacy` assignments, with all historically permitted tool families intersected by local authority. Materialize NyxBot's existing implicit reachability for the person's currently accessible machines (including eligible organization nodes), even if its flat membership list was empty; execution still rechecks live owner/org access. Record a policy cutover epoch and migration provenance; newly registered machines/agents after cutover do not acquire legacy grants. Serialize migration with grant mutations so it never revives a removal.
-3. Set each agent's access-version marker atomically with its migration. Before that marker only the exact pre-cutover compatibility path is allowed. Afterwards absent assignment or tombstone means deny; never implement “missing new field means allow all” forever. Both modern and legacy grant endpoints must preserve existing restrictions; adding only a `machine_node_ids` entry after cutover creates an all-off pending assignment, not full access. Reject stale writers that attempt to undo context state. Surface only the capabilities the node can actually enforce.
+2. Run an idempotent bounded, leased/fenced migration of existing agent-machine memberships. Snapshot current compatibility authority as explicit `shared_legacy` assignments, with all historically permitted tool families intersected by local authority. Materialize NyxBot's existing implicit reachability for the person's currently accessible machines (including eligible organization nodes), even if its flat membership list was empty; execution still rechecks live owner/org access. Record a policy cutover epoch and migration provenance; the cutover migration itself never sweeps in post-cutover machines/agents; while the capability flag is off, the live pairing/Grants compatibility path can create their authorized legacy snapshots (§8.4). Serialize migration with grant mutations so it never revives a removal.
+3. Set each agent's access-version marker atomically with its migration. Before that marker only the exact pre-cutover compatibility path is allowed. Afterwards absent assignment means deny unless the flag-off NyxBot compatibility path first materializes an authorized legacy snapshot (§8.4); missing fields themselves never grant authority. Both modern and legacy grant endpoints must preserve existing restrictions; adding a `machine_node_ids` entry creates an all-off pending assignment with the editor enabled, or a legacy capability snapshot with it disabled. Reject stale writers that attempt to undo context state. Surface only the capabilities the node can actually enforce.
 4. Upgrade nodes through the existing attested updater flow; do not manually replace its trust or hand-off protocol. An upgrade alone does not opt an owner into isolated workspaces or move files. New compatible installs recommend isolated mode; initial capability toggles stay off until explicitly confirmed. Old and single-user nodes keep the honest legacy warning and upgrade/separate-container guidance.
 5. Owner opts an assignment into isolated mode using a reviewable card/settings action showing root change, clean browser, capacity and effects on running work. Drain/cancel its current jobs and desktop input, provision a fresh context, verify enforcement, then commit the new assignment revision. On failure retain the old assignment only with its old explicit policy; never execute an isolated request in the old workspace as a fallback. Existing agent tasks may continue in shared mode until their owner elects migration.
 6. Do not clone legacy cookies, native sockets, credentials or an entire HOME. Offer explicit selected workspace-file transfer using existing validated file/attachment paths, scan/reject symlinks/special files and exclude caches/secrets; copies are owner-reviewed and do not imply inherited execution permission. The old shared workspace/profile remains available to explicitly shared assignments. Reauthenticate approved saved logins in each new secure context.
@@ -248,7 +248,7 @@ Each PR includes its migration, docs and tests; disabled creation flags leave a 
 ### 8.1 Approved decisions (2026-10-03)
 
 1. Direction and order approved: M1.1 → M1.2 → M1.3 → M1.4, each its own PR. M1.5 is deferred; existing separate machine containers remain the recommendation for stronger separation.
-2. Existing machines remain `shared_legacy` with the visible warning. New capability assignments are deny-by-default. NyxBot gets its own context on v2 machines. Organization-agent contexts partition per acting person and additionally per group for group tasks. `assistant:machine-capabilities` and `assistant:machine-contexts` default off; stored restrictions are enforced independently of those flags.
+2. Existing machines remain `shared_legacy` with the visible warning. New capability assignments are deny-by-default when the acting person has the editor enabled. The M1.2 review clarifies that flag-off owners retain legacy pairing and Grants semantics through explicit snapshots (§8.4); toggling the flag never widens an existing restriction. NyxBot gets its own context on v2 machines. Organization-agent contexts partition per acting person and additionally per group for group tasks. `assistant:machine-capabilities` and `assistant:machine-contexts` default off; stored restrictions are enforced independently of those flags.
 3. M1.3 acceptance depends on the Landlock spike meeting the threat model on supported hosts. If it cannot, stop and report back. Never weaken the meaning of “isolated”.
 4. The HTTP-200/MCP-`isError` activity bug is general. M1.1 fixes it for all tools using the typed MCP outcome, with regression coverage.
 
@@ -326,3 +326,64 @@ read-time DTO enrichment using the existing node read ACL, batched once per
 transcript page (including group history) and never written into audit rows.
 Raw identifiers stay inside collapsed correlation disclosures; unattributed
 activity has an explicit “Unknown (older node)” filter.
+
+### 8.4 M1.2 capability authority
+
+M1.2 adds an explicit boxed `machine_access` sibling policy (version, monotonic
+editor revision, per-machine execution revisions and assignments). For acting people
+with `assistant:machine-capabilities` enabled, new selections start with all
+capabilities off and the editor is available. With the flag off, existing workflows
+keep working: NyxBot snapshots missing assignments at discovery or first use after
+live ACL checks, and the specialist Grants picker snapshots selected machines.
+Both use `legacy:true` and the node's current legacy capability profile. The
+one-time cutover likewise snapshots pre-existing reachability as `shared_legacy`.
+Turning the flag on preserves these snapshots until edited. Turning it off never
+widens an explicitly configured assignment.
+Migration and grant writes serialize on the agent row. Removal and re-addition
+retain the global revision fence rather than growing an unbounded tombstone map.
+Legacy rosters above the 500-machine discovery page remain explicit and usable;
+migration streams all pre-cutover rows in batches of 100. The editor limits new
+assignments to 64 without truncating or revoking larger legacy rosters.
+
+Profiles retain wire version 1 for old servers and separately advertise authority
+version 2. Agent requests to capable nodes use the distinct `machine_request_v2`
+message and signing domain. The signed envelope binds the server-derived opaque
+context, agent/owner/acting person/group, runtime, turn, revision, capabilities
+and 45-second authority lease, renewed every ten seconds. Context IDs are persisted UUIDv4 values behind a
+unique node/owner/agent/person/group identity index. These context IDs partition authority only in
+M1.2: files and browser sessions remain visibly shared. No isolated mode is
+accepted until its later enforcement work is complete.
+
+Capability writes and revocations append a transactional outbox. A change stream
+wakes per-row fenced delivery; the leased one-second sweep retries missed events, including to another replica's socket; monotonically increasing
+node fences make late delivery harmless. Live leases reauthorize from MongoDB,
+including current thread keys, actor access, grants and background job state.
+The local monotonic watchdog cancels expired work and gateway streams after a
+network loss. Old nodes get only their existing scoped Stop command, with persisted cursor
+progress across bounded batches, and preserve unmodified legacy access; explicit capability edits require an upgrade. A node
+that accepts a restricted assignment durably refuses v1 agent work. Human Stop,
+control and attested updates retain their separate authority path.
+
+The editor and `nyxid__machine_capabilities` expose local ceilings, inherited
+legacy access and the required revision. Widening through an agent requires an
+owner action card. `assistant:machine-capabilities` gates editor writes and selects defaults for new
+assignments; it cannot bypass stored restrictions. Both machine flags default off. Deploy all server
+replicas before enabling configuration. Rolling back to a server that ignores
+these restrictions requires draining affected work and explicit operator review;
+never serve restricted assignments through a v1 node.
+
+M1.2 resource bounds: admission is transactionally capped at **128 live v2
+operation leases per node**, above the node's maximum 64 local jobs (default 4).
+There is no fleet-wide lease cap. Idle connections, expired rows and other nodes
+do not count. Saturation returns HTTP 429 `machine_authority_busy` before dispatch:
+retry when an operation finishes. Running work and renewal continue, and job
+cancellation bypasses admission capacity. V1 nodes return before lease admission
+and are never affected by this cap. Renewal streams bounded batches with 64
+concurrent requests every ten seconds, independently of the one-second revocation
+sweep and compatibility migration. A brief socket loss preserves the running job;
+reconnect can renew it while the last 45-second signed lease is still live.
+Push revocation remains immediate, with the offline deadline as its backstop. Lease messages are never retried past an
+expired local deadline. The compatibility snapshot uses bounded driver batches, without applying
+new-assignment limits to existing access. Node fence storage is private, capped at 2 MiB and
+persisted before activation. Context metadata remains separate from process or
+filesystem isolation.

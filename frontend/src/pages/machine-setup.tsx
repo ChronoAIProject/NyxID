@@ -47,6 +47,7 @@ import {
 const labels = {
   shell: "Commands — run code and use connected services",
   files: "Files — read, edit and move files in workspace roots",
+  browser: "Browser — use the managed browser",
   computer: "Computer — operate the desktop and browser",
 };
 const states: Record<string, string> = {
@@ -204,9 +205,9 @@ export function MachineSetupPage() {
           />
           <fieldset disabled={locked} className="space-y-3">
             <legend className="mb-2 text-[12px] font-medium">
-              Let agents use
+              Enable on this machine
             </legend>
-            {(["shell", "files", "computer"] as const).map((capability) => (
+            {(["shell", "files", "browser", "computer"] as const).map((capability) => (
               <label
                 key={capability}
                 className="flex items-center gap-2 text-[12px]"
@@ -231,7 +232,7 @@ export function MachineSetupPage() {
             name="grant_to"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>Also let a specialist use this machine</FormLabel>
+                <FormLabel>Select a specialist for this machine</FormLabel>
                 <Select
                   value={field.value ?? "none"}
                   disabled={locked}
@@ -245,7 +246,7 @@ export function MachineSetupPage() {
                     </SelectTrigger>
                   </FormControl>
                   <SelectContent>
-                    <SelectItem value="none">NyxBot only</SelectItem>
+                    <SelectItem value="none">No specialist assignment</SelectItem>
                     {agents.data?.agents
                       .filter(
                         (agent) =>
@@ -263,6 +264,7 @@ export function MachineSetupPage() {
               </FormItem>
             )}
           />
+          <p className="text-[12px] text-muted-foreground">Agent permissions are configured separately in agent settings. New assignments start with no allowed capabilities.</p>
           <label className="flex items-start gap-2 text-[12px]">
             <Checkbox
               checked={form.watch("automatic_updates") ?? true}
@@ -286,7 +288,7 @@ export function MachineSetupPage() {
               volumes are preserved.
             </p>
           ) : null}
-          {where !== "docker" && capabilities.includes("computer") ? (
+          {where !== "docker" && (capabilities.includes("computer") || capabilities.includes("browser")) ? (
             <p className="text-[12px] text-muted-foreground">
               {SINGLE_USER_WARNING} Saved-login typing starts off; allow it
               later in Nodes settings. Setup asks once for administrator access
@@ -473,7 +475,7 @@ function SetupProgress({ setup }: { readonly setup: MachineSetup }) {
       {setup.machine ? (
         <p>
           Enabled:{" "}
-          {(["shell", "files", "computer"] as const)
+          {(["shell", "files", "browser", "computer"] as const)
             .filter((c) => setup.machine?.[c])
             .join(", ")}
         </p>

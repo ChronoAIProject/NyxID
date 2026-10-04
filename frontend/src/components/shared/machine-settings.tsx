@@ -169,6 +169,7 @@ export function MachineSettings({
               {[
                 machine.shell && "Commands",
                 machine.files && "Files",
+                (machine.browser ?? machine.computer) && "Browser",
                 machine.computer && "Computer",
               ]
                 .filter(Boolean)
@@ -180,7 +181,7 @@ export function MachineSettings({
             </p>
             <MachineIsolationDetails machine={machine} />
           </SettingsSection>
-          {machine.computer ? (
+          {machine.computer || machine.browser ? (
             <SettingsSection title="Live desktop">
               <p className="text-muted-foreground">
                 {machine.computer_ready
@@ -240,7 +241,7 @@ export function MachineSettings({
               </Select>
             </SettingsSection>
           ) : null}
-          {canManage && machine.computer && !machine.browser_isolated ? (
+          {canManage && (machine.browser ?? machine.computer) && !machine.browser_isolated ? (
             <SettingsSection title="Saved logins on a shared OS user">
               <p className="text-muted-foreground">{SINGLE_USER_WARNING}</p>
               <label className="flex items-start gap-3">

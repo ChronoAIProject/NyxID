@@ -82,20 +82,18 @@ pub async fn execute(
     })
     .await;
     if !matches!(result, Ok(Ok(()))) {
-        let reason = match result {
-            Ok(Err(ref error))
-                if matches!(
-                    error.downcast_ref::<super::MachineError>(),
-                    Some(super::MachineError::OwnerInControl)
-                ) =>
-            {
-                "owner_in_control"
-            }
-            _ => "Machine file transfer refused, interrupted, or exceeded its limit",
+        let reason = match &result {
+            Ok(Err(error)) => match error.downcast_ref::<super::MachineError>() {
+                Some(super::MachineError::OwnerInControl) => "owner_in_control",
+                Some(super::MachineError::AuthorityStale) => "machine_authority_stale",
+                Some(super::MachineError::TurnStopped) => "machine_turn_stopped",
+                _ => "machine_transfer_refused",
+            },
+            _ => "machine_transfer_refused",
         };
         let _ = sender
             .send(NodeWsMessage::Text(
-                json!({"type":"proxy_error","request_id":id,"status":403,"error":reason})
+                json!({"type":"proxy_error","request_id":id,"status":403,"error":reason,"reason":reason,"retryable":true})
                     .to_string(),
             ))
             .await;
@@ -167,11 +165,32 @@ impl Runtime {
     }
 
     async fn transfer(
-        &self,
+        self: &Arc<Self>,
         metadata: &Value,
         upload: VerifiedUpload,
         sender: &mpsc::Sender<NodeWsMessage>,
     ) -> Result<()> {
+        self.ensure_authority_watch();
+        let authority: Option<Box<nyxid_machine::authority::Authority>> =
+            serde_json::from_value(metadata["_authority"].clone())?;
+        let mut authority_stop = if let Some(authority) = &authority {
+            if !authority.capabilities.allows(upload.operation(), metadata)
+                || metadata["conversation_id"] != authority.conversation_id
+                || metadata["turn_id"] != authority.turn_id
+            {
+                return Err(super::MachineError::AuthorityStale.into());
+            }
+            Some(
+                self.authority
+                    .admit(authority, &self.runtime_id, None)
+                    .map_err(|_| super::MachineError::AuthorityStale)?,
+            )
+        } else {
+            if self.authority.enrolled() {
+                return Err(super::MachineError::AuthorityStale.into());
+            }
+            None
+        };
         let _admission = self.operation_admission.read().await;
         if self.upgrading.load(std::sync::atomic::Ordering::Acquire) {
             return Err(super::MachineError::TurnStopped.into());
@@ -186,13 +205,21 @@ impl Runtime {
         if *control.borrow_and_update() & 1 != 0 || *dev_control.borrow_and_update() & 1 != 0 {
             return Err(super::MachineError::OwnerInControl.into());
         }
-        tokio::select! {
+        let result = tokio::select! {
             biased;
+            _ = async { if let Some(stop)=&mut authority_stop {let _=stop.changed().await;} else {std::future::pending::<()>().await;} } => Err(super::MachineError::AuthorityStale.into()),
             _ = stopped.changed() => Err(super::MachineError::TurnStopped.into()),
             _ = control.changed() => Err(super::MachineError::OwnerInControl.into()),
             _ = dev_control.changed() => Err(super::MachineError::OwnerInControl.into()),
             result = self.transfer_inner(metadata, upload, sender) => result,
+        };
+        if let Some(authority) = authority {
+            if !self.authority.live(&authority.lease_id) {
+                return Err(super::MachineError::AuthorityStale.into());
+            }
+            self.authority.finish(&authority.lease_id);
         }
+        result
     }
 
     async fn transfer_inner(

@@ -2034,6 +2034,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::agent_skills::get).put(handlers::agent_skills::set),
         )
         .route(
+            "/nyxagent/agents/{id}/machines",
+            get(handlers::machine_access::get),
+        )
+        .route(
+            "/nyxagent/agents/{id}/machines/{node_id}",
+            axum::routing::put(handlers::machine_access::put),
+        )
+        .route(
             "/nyxagent/agents/{id}/operations",
             get(handlers::assistant_team::agent_operations),
         )

@@ -264,6 +264,14 @@ pub async fn tool(
                 true,
             ));
         }
+        Box::pin(crate::services::machine_access_service::authorize(
+            &state.db,
+            chat,
+            host,
+            Operation::Exec,
+            &json!({}),
+        ))
+        .await?;
         if !host.machine.as_ref().is_some_and(|m| m.shell)
             || updates::installation(host) == nyxid_machine::update::Installation::Container
         {
@@ -1065,7 +1073,26 @@ mod tests {
             .replace_one(doc! {"_id": &host.id}, &host)
             .await
             .unwrap();
-        f.chat.machine_node_ids = vec![target.id.clone(), host.id.clone()];
+        // The host's shell grant is checked against live authority, not an
+        // in-memory chat snapshot. Persist the fixture's legacy memberships.
+        use crate::services::assistant_team_service as team;
+        Box::pin(team::set_grants(
+            &f.state.db,
+            &f.owner,
+            &f.chat.agent_id,
+            team::GrantChange::Machine {
+                base: Box::new(team::GrantChange::Add(Default::default())),
+                machines: Some(vec![target.id.clone(), host.id.clone()]),
+                logins: None,
+                mode: team::MachineGrantMode::Add,
+            },
+        ))
+        .await
+        .unwrap();
+        f.chat = acks::for_key(&f.state.db, &f.owner, Some(&f.chat.api_key_id))
+            .await
+            .unwrap()
+            .unwrap();
         let (task, mut seen) = peer(
             &f,
             &host,

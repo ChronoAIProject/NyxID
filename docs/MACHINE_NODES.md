@@ -1079,7 +1079,9 @@ In `frontend/`, run `npm run lint`, `npm test`, `npx tsc -b`, and `npm run build
 Run `node --test cli/tests/machine_filler.test.mjs` from the repository root.
 Shared-runner CI enforces correctness and generous timing sanity ceilings:
 desktop activity must exceed **8 fps** (catching the former 5 fps path), and
-input-to-frame p95 must stay below **500 ms**. Stop has a 5-second ceiling and
+input-to-frame p95 must stay below **500 ms**. The CI AX fixture allows a 5-second
+AT-SPI walk and bounded observation retries when navigation or a partial tree
+has not exposed its expected element; strict benchmark mode retains 1.2 seconds. Stop has a 5-second ceiling and
 takeover a 2-second ceiling, both well below the deliberately stalled 30-second
 action. Every run prints its timings. These are CI ceilings, not product targets.
 Frontend animation tests use fake clocks; their deterministic timing assertions
@@ -1512,3 +1514,52 @@ and direct the agent to `nyx__machine_browser` snapshot for page content or the 
 browser screenshot action for owner attachments. Persisted-profile container and
 migration tests cover relaunch, container restart, hash changes, missing packages,
 saved-login filling and harmless status reads under both seccomp profiles.
+
+### Per-agent capabilities (M1.2)
+
+Machine assignments have separate shell, files, browser and computer permissions,
+plus a developer-browser modifier. With capability editing enabled for the acting
+person, new assignments start with all switches off. With the flag off, NyxBot's
+live-ACL reachability and the existing specialist Grants picker create explicit
+legacy snapshots so pairing and granting new machines keep working. Existing
+access is also migrated to **Shared legacy** assignments. Enabling the flag keeps
+these snapshots until edited; disabling it never widens explicit restrictions.
+Shared files and browser sessions remain shared. These switches control tool
+APIs: shell commands can still access their OS user's files, and full computer
+control can operate applications through their UI. Choose browser-only access
+when desktop control is unnecessary.
+
+After all server replicas support authority v2, enable the default-off
+`assistant:machine-capabilities` flag to edit access in an agent's settings.
+Changes require a v2 node; old nodes continue their migrated legacy behavior.
+`nyxid__machine_capabilities` reads effective grants and proposes changes with
+an owner card for widening. Current grants are enforced even with the flag off.
+NyxBot's machine permissions are explicit too. Organization execution retains
+live acting-person membership checks and does not grant personal saved logins.
+
+Local `machine.browser` is optional: absent inherits `machine.computer`, preserving
+existing installs. `nyxid node machine enable --browser` enables it explicitly;
+`--browser=false` or `machine disable --browser` disables it. Node setup also
+accepts `--browser`. The node's local ceiling always wins. Computer access and
+developer-browser access require a browser grant. Saved logins additionally
+require their existing login grant and secure-browser confirmation checks.
+
+V2 agent work carries signed context and revision metadata with a 45-second
+lease, renewed every ten seconds; v1 nodes retain their shared behavior without leases. Revocation is committed with a durable outbox and cancels local
+operations, background process groups and service streams. Disconnected nodes
+stop leased work on expiry. Completed external effects cannot be undone. The
+UI reports pending delivery and the 45-second lease-expiry cancellation bound rather than
+promising instantaneous distributed cancellation. Context IDs currently partition authority,
+not files or cookies; enforced per-agent workspaces and browsers are later phases.
+
+Unsupported authority, revoked permissions and expired authority return distinct
+`machine_authority_unsupported`, `machine_permission_revoked` and
+`machine_authority_stale` errors (numeric definitions remain in `errors/mod.rs`).
+Update an old node before editing capabilities; request a missing grant through
+NyxBot; refresh authority after expiry. Owner Stop and takeover remain independent.
+
+V2 admission allows 128 active operation leases per node (local jobs are capped
+at 64, default 4). Idle connections, expired leases and other nodes do not count;
+there is no fleet-wide 500-lease limit. At saturation new work gets HTTP 429
+`machine_authority_busy` and can retry after an operation completes. Existing
+work, renewals and job cancellation continue. V1 work bypasses lease admission.
