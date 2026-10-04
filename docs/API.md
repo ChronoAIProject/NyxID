@@ -3781,6 +3781,10 @@ its connection ID, `name`, `slug`, eligibility and reason, credential binding,
 protocol, compatibility requirements, and cooldown metadata. Inventory results
 do not establish that a particular operation can execute. Inspection is
 read-only and never decrypts credentials or sends a request to a provider.
+The connection `name` and name search use the same label as the Services page:
+the owned stored key's label, falling back to the owned endpoint label and then
+the connection slug. Explicit platform bindings use the endpoint label even
+when a personal key is retained. Connection-label lookups project only IDs and labels.
 
 Candidates also carry `catalog_service_id`, `group_name`, and `group_slug` for
 grouped connection selectors. Catalog-backed connections use the original

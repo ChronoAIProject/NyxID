@@ -38,7 +38,15 @@ const manyCandidates = Array.from({ length: 12 }, (_, index) => ({
   requires_compatibility_declaration: false,
 }));
 
-async function mockConnections(page: Page, sourceRows = candidates) {
+async function mockConnections(
+  page: Page,
+  sourceRows = candidates,
+  options: {
+    pageSize?: number;
+    delayMs?: number;
+    peerSensitive?: boolean;
+  } = {},
+) {
   await page.route("**/api/v1/**", async (route) => {
     const url = new URL(route.request().url());
     const path = url.pathname.replace("/api/v1", "");
@@ -60,17 +68,36 @@ async function mockConnections(page: Page, sourceRows = candidates) {
     else if (path.endsWith("/candidates")) {
       const search = (url.searchParams.get("search") ?? "").toLowerCase();
       const peers = (url.searchParams.get("peer_ids") ?? "").split(",");
+      const selectedOnly = url.searchParams.get("selected_only") === "true";
+      const filtered = sourceRows.filter((row) =>
+        url.searchParams.get("selected_only") === "true"
+          ? peers.includes(row.user_service_id)
+          : row.name.toLowerCase().includes(search) ||
+            row.slug.includes(search) ||
+            row.group_name.toLowerCase().includes(search) ||
+            row.group_slug.includes(search),
+      );
+      if (!selectedOnly && options.delayMs)
+        await new Promise((resolve) => setTimeout(resolve, options.delayMs));
+      const offset = selectedOnly
+        ? 0
+        : Number(url.searchParams.get("after") ?? 0);
+      const limit = selectedOnly
+        ? filtered.length
+        : (options.pageSize ?? filtered.length);
+      const hasMore = offset + limit < filtered.length;
       body = {
-        candidates: sourceRows.filter((row) =>
-          url.searchParams.get("selected_only") === "true"
-            ? peers.includes(row.user_service_id)
-            : row.name.toLowerCase().includes(search) ||
-              row.slug.includes(search) ||
-              row.group_name.toLowerCase().includes(search) ||
-              row.group_slug.includes(search),
-        ),
-        has_more: false,
-        next_cursor: null,
+        candidates: filtered
+          .slice(offset, offset + limit)
+          .map((row) =>
+            options.peerSensitive &&
+            peers.some(Boolean) &&
+            !peers.includes(row.user_service_id)
+              ? { ...row, eligible: false, reason: "incompatible_protocol" }
+              : row,
+          ),
+        has_more: hasMore,
+        next_cursor: hasMore ? String(offset + limit) : null,
         operation_checked: false,
         method: null,
         path: null,
@@ -339,4 +366,124 @@ test("keeps a long picker within short landscape and mobile viewports", async ({
         (window as Window & { poolLayoutErrors: string[] }).poolLayoutErrors,
     ),
   ).toEqual([]);
+});
+
+test("selection preserves delayed inventory pages and scroll, and final pagination restores keyboard focus", async ({
+  page,
+}) => {
+  const rows = Array.from({ length: 40 }, (_, index) => ({
+    ...manyCandidates[0]!,
+    user_service_id: `55555555-5555-4555-8555-${String(index + 1).padStart(12, "0")}`,
+    name: `Account ${index + 1}`,
+    slug: `account-${index + 1}`,
+  }));
+  await mockConnections(page, rows, { pageSize: 20, delayMs: 200 });
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.goto("/keys?tab=pools");
+  await page.getByRole("button", { name: /^Create pool$/i }).click();
+  await page.getByRole("button", { name: "Choose connections" }).click();
+  const picker = page.getByRole("dialog", {
+    name: "Choose pool connections",
+    exact: true,
+  });
+  const search = picker.getByRole("combobox");
+  await expect(picker.getByRole("option")).toHaveCount(20);
+  await search.press("Tab");
+  await expect(
+    picker.getByRole("button", { name: "Load more connections" }),
+  ).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(picker.getByRole("option")).toHaveCount(40);
+  await expect(search).toBeFocused();
+  const last = picker.getByRole("option", { name: "Account 40", exact: true });
+  await last.scrollIntoViewIfNeeded();
+  const scrollTop = () =>
+    picker
+      .getByRole("listbox")
+      .evaluate((node) => node.parentElement!.scrollTop);
+  const before = await scrollTop();
+  expect(before).toBeGreaterThan(0);
+  for (const selected of ["true", "false", "true"]) {
+    const refreshedLastPage = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return (
+        url.pathname.endsWith("/candidates") &&
+        url.searchParams.get("after") === "20"
+      );
+    });
+    await last.click();
+    await expect(last).toHaveAttribute("aria-selected", selected);
+    await expect(picker.getByRole("option")).toHaveCount(40);
+    await refreshedLastPage;
+    await expect(picker.getByRole("option")).toHaveCount(40);
+    await expect.poll(scrollTop).toBe(before);
+    await expect(search).toBeFocused();
+  }
+  expect(errors).toEqual([]);
+});
+
+test("pagination and selection finish without stale options or dropped pages", async ({
+  page,
+}) => {
+  const rows = manyCandidates.slice(0, 8).map((row) => ({
+    ...row,
+    catalog_service_id: "shared",
+    group_name: "Shared service",
+    group_slug: "shared",
+  }));
+  await mockConnections(page, rows, {
+    pageSize: 3,
+    delayMs: 500,
+    peerSensitive: true,
+  });
+  await page.goto("/keys?tab=pools");
+  await page.getByRole("button", { name: /^Create pool$/i }).click();
+  await page.getByRole("button", { name: "Choose connections" }).click();
+  const picker = page.getByRole("dialog", {
+    name: "Choose pool connections",
+    exact: true,
+  });
+  const primary = picker.getByRole("option", {
+    name: rows[0]!.name,
+    exact: true,
+  });
+  const second = picker.getByRole("option", {
+    name: rows[1]!.name,
+    exact: true,
+  });
+  const more = picker.getByRole("button", { name: "Load more connections" });
+  await expect(picker.getByRole("option")).toHaveCount(3);
+  await more.click();
+  await primary.click();
+  await expect(second).toHaveAttribute("aria-disabled", "true");
+  await expect(picker.getByRole("listbox")).toHaveAttribute(
+    "aria-busy",
+    "false",
+  );
+  await expect(picker.getByRole("option")).toHaveCount(6);
+  await expect(second).toHaveAttribute("aria-disabled", "true");
+  await primary.click();
+  await expect(more).toBeDisabled();
+  await expect(second).toHaveAttribute("aria-disabled", "true");
+  await expect(second).toHaveAttribute("aria-disabled", "false");
+  await expect(more).toBeEnabled();
+  await more.click();
+  await expect(picker.getByRole("option")).toHaveCount(8);
+  const search = picker.getByRole("combobox");
+  await search.fill(rows[0]!.name);
+  await expect(picker.getByRole("option")).toHaveCount(1);
+  await primary.click();
+  await expect(picker.getByRole("listbox")).toHaveAttribute(
+    "aria-busy",
+    "false",
+  );
+  await search.clear();
+  await expect(picker.getByRole("option")).toHaveCount(8);
+  await expect(second).toHaveAttribute("aria-disabled", "true");
+  await expect(picker.getByRole("listbox")).toHaveAttribute(
+    "aria-busy",
+    "false",
+  );
+  await expect(second).toHaveAttribute("aria-disabled", "true");
 });

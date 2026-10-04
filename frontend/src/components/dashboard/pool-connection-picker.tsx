@@ -20,6 +20,8 @@ type Props = {
   onToggle: (row: PoolCandidate) => void;
   isLoading: boolean;
   isSearching: boolean;
+  isCheckingCompatibility?: boolean;
+  isRefreshing?: boolean;
   isError: boolean;
   error: unknown;
   onRetry: () => void;
@@ -36,6 +38,8 @@ export function PoolConnectionPicker({
   onToggle,
   isLoading,
   isSearching,
+  isCheckingCompatibility = false,
+  isRefreshing = false,
   isError,
   error,
   onRetry,
@@ -49,6 +53,14 @@ export function PoolConnectionPicker({
   const listId = `${id}-list`;
   const input = useRef<HTMLInputElement>(null);
   const list = useRef<HTMLDivElement>(null);
+  const loadMoreButton = useRef<HTMLButtonElement>(null);
+  const restoreLoadMoreFocus = useRef(false);
+  useEffect(() => {
+    if (isFetchingNextPage || !restoreLoadMoreFocus.current) return;
+    restoreLoadMoreFocus.current = false;
+    if (document.activeElement === document.body)
+      (hasNextPage ? loadMoreButton.current : input.current)?.focus();
+  }, [isFetchingNextPage, hasNextPage, rows]);
   const groups = useMemo(() => {
     const grouped = new Map<
       string,
@@ -102,7 +114,8 @@ export function PoolConnectionPicker({
   function disabled(row: PoolCandidate) {
     return (
       !selectedIds.includes(row.user_service_id) &&
-      (selectedIds.length >= 50 ||
+      (isCheckingCompatibility ||
+        selectedIds.length >= 50 ||
         (!row.eligible && row.reason !== "compatibility_declaration_required"))
     );
   }
@@ -183,8 +196,13 @@ export function PoolConnectionPicker({
               }
             }}
           />
-          <p className="px-1 text-[11px] text-muted-foreground [@media(max-height:500px)]:sr-only">
-            Select multiple connections. Select again to remove.
+          <p
+            aria-live="polite"
+            className="px-1 text-[11px] text-muted-foreground [@media(max-height:500px)]:sr-only"
+          >
+            {isCheckingCompatibility
+              ? "Checking compatibility…"
+              : "Select multiple connections. Select again to remove."}
           </p>
           <div className="min-h-0 overflow-y-auto overscroll-contain">
             {isError && (
@@ -206,7 +224,7 @@ export function PoolConnectionPicker({
               role="listbox"
               aria-label="Connections"
               aria-multiselectable="true"
-              aria-busy={busy}
+              aria-busy={busy || isCheckingCompatibility}
             >
               {groups.map((group) => (
                 <div
@@ -291,10 +309,16 @@ export function PoolConnectionPicker({
             )}
             {hasNextPage && (
               <Button
+                ref={loadMoreButton}
                 type="button"
                 className="mt-2 w-full"
                 isLoading={isFetchingNextPage}
-                onClick={onLoadMore}
+                disabled={isRefreshing || isCheckingCompatibility}
+                onClick={(event) => {
+                  restoreLoadMoreFocus.current =
+                    document.activeElement === event.currentTarget;
+                  void onLoadMore();
+                }}
               >
                 Load more connections
               </Button>

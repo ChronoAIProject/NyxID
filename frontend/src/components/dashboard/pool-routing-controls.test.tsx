@@ -6,6 +6,7 @@ import type { PoolCandidate, ServicePool } from "@/schemas/pools";
 
 const mocks = vi.hoisted(() => ({
   update: vi.fn(),
+  reload: vi.fn(),
   create: vi.fn(),
   candidates: vi.fn(),
   health: vi.fn(),
@@ -14,6 +15,7 @@ const mocks = vi.hoisted(() => ({
 }));
 vi.mock("@/hooks/use-pools", () => ({
   useUpdateServicePool: () => ({ mutateAsync: mocks.update, isPending: false }),
+  useReloadServicePool: () => ({ mutateAsync: mocks.reload, isPending: false }),
   useCreateServicePool: () => ({ mutateAsync: mocks.create, isPending: false }),
   usePoolCandidates: mocks.candidates,
   useDeleteServicePool: () => ({ isPending: false }),
@@ -127,7 +129,9 @@ describe("pool routing controls", () => {
       screen.getByText(/Cycle position 2 of 2 · last in cycle/),
     ).toBeVisible();
     expect(
-      screen.getByText(/Cycle order: My connection → Second connection/),
+      screen.getByText(
+        /Cycle order: My connection \(3 turns\) → Second connection \(1 turn\)/,
+      ),
     ).toBeVisible();
     await user.click(
       screen.getByRole("button", {
@@ -135,7 +139,9 @@ describe("pool routing controls", () => {
       }),
     );
     expect(
-      screen.getByText(/Cycle order: Second connection → My connection/),
+      screen.getByText(
+        /Cycle order: Second connection \(1 turn\) → My connection \(3 turns\)/,
+      ),
     ).toBeVisible();
     await user.clear(screen.getByLabelText("Weight for member 1"));
     expect(
@@ -146,7 +152,9 @@ describe("pool routing controls", () => {
     expect(screen.queryByText(/NaN%|Infinity%/)).not.toBeInTheDocument();
     await user.click(screen.getByRole("switch", { name: "Member 1 enabled" }));
     expect(
-      screen.getByText(/disabled · excluded from configured share/),
+      screen.getByText(
+        /Disabled · excluded from cycle · excluded from configured share/,
+      ),
     ).toBeVisible();
     expect(screen.getByText(/configured share 100%/)).toBeVisible();
   });
@@ -298,4 +306,156 @@ describe("pool routing controls", () => {
     ).not.toBeInTheDocument();
     await waitFor(() => expect(saveButton()).toBeDisabled());
   });
+});
+
+it.each(["Round robin", "Automatic fallback"])(
+  "can save %s after hiding an invalid weighted draft",
+  async (routing) => {
+    const user = userEvent.setup();
+    render(
+      <PoolEditor pool={{ ...pool, strategy: "weighted" }} onClose={vi.fn()} />,
+    );
+    await user.clear(screen.getByLabelText("Weight for member 1"));
+    await waitFor(() => expect(saveButton()).toBeDisabled());
+    await user.click(screen.getByRole("combobox", { name: "Routing" }));
+    await user.click(screen.getByRole("option", { name: routing }));
+    expect(
+      screen.queryByLabelText("Weight for member 1"),
+    ).not.toBeInTheDocument();
+    await waitFor(() => expect(saveButton()).toBeEnabled());
+    await user.click(saveButton());
+    expect(mocks.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        strategy: routing === "Round robin" ? "round_robin" : "priority",
+        members: [expect.objectContaining({ weight: 1 })],
+      }),
+    );
+  },
+);
+
+it("can save Take turns after hiding an invalid tier weight", async () => {
+  const user = userEvent.setup();
+  render(
+    <PoolEditor
+      pool={{ ...pool, tier_balance: "weighted" }}
+      onClose={vi.fn()}
+    />,
+  );
+  await user.clear(screen.getByLabelText("Weight for member 1"));
+  await user.click(
+    screen.getByRole("combobox", {
+      name: "Connections with the same priority",
+    }),
+  );
+  await user.click(screen.getByRole("option", { name: "Take turns" }));
+  await waitFor(() => expect(saveButton()).toBeEnabled());
+  await user.click(saveButton());
+  expect(mocks.update).toHaveBeenCalledWith(
+    expect.objectContaining({
+      tier_balance: "round_robin",
+      members: [expect.objectContaining({ weight: 1 })],
+    }),
+  );
+});
+
+it("retains priorities, models, tier balancing and retries across a routing round trip", async () => {
+  const { defaultFailoverPolicy } = await import("@/schemas/pools");
+  const user = userEvent.setup();
+  const original = {
+    ...pool,
+    member_contract: "ai_chat" as const,
+    tier_balance: "weighted" as const,
+    failover: { ...defaultFailoverPolicy, max_attempts: 4 },
+    members: [{ ...pool.members[0]!, priority: 10, model: "chat-model" }],
+  };
+  render(<PoolEditor pool={original} onClose={vi.fn()} />);
+  for (const routing of ["Round robin", "Automatic fallback"]) {
+    await user.click(screen.getByRole("combobox", { name: "Routing" }));
+    await user.click(screen.getByRole("option", { name: routing }));
+  }
+  expect(screen.getByLabelText("Priority for member 1")).toHaveValue(10);
+  expect(screen.getByLabelText("Model for member 1")).toHaveValue("chat-model");
+  expect(
+    screen.getByRole("combobox", {
+      name: "Connections with the same priority",
+    }),
+  ).toHaveTextContent("Share by weight");
+  await user.type(screen.getByLabelText("Name"), " changed");
+  await user.click(saveButton());
+  expect(mocks.update).toHaveBeenCalledWith(
+    expect.objectContaining({
+      members: original.members,
+      failover: original.failover,
+      tier_balance: "weighted",
+      member_contract: "ai_chat",
+    }),
+  );
+});
+
+it.each(["weighted", "round_robin"] as const)(
+  "moves connections within their %s priority tier without changing settings",
+  async (tierBalance) => {
+    const user = userEvent.setup();
+    const first = { ...pool.members[0]!, weight: 2, priority: 0 };
+    const backup = { ...first, user_service_id: "backup", priority: 10 };
+    const second = { ...first, user_service_id: "second", weight: 1 };
+    render(
+      <PoolEditor
+        pool={{
+          ...pool,
+          tier_balance: tierBalance,
+          members: [first, backup, second],
+        }}
+        onClose={vi.fn()}
+      />,
+    );
+    expect(
+      screen.getByRole("button", {
+        name: "Move connection 1 earlier within priority 0",
+      }),
+    ).toBeDisabled();
+    await user.click(
+      screen.getByRole("button", {
+        name: "Move connection 2 earlier within priority 0",
+      }),
+    );
+    await user.click(saveButton());
+    expect(mocks.update).toHaveBeenCalledWith(
+      expect.objectContaining({ members: [second, backup, first] }),
+    );
+  },
+);
+
+it("reloads a conflicted draft and saves using the latest revision", async () => {
+  const { ApiError } = await import("@/lib/api-client");
+  const user = userEvent.setup();
+  mocks.update.mockRejectedValueOnce(
+    new ApiError(409, {
+      error: "conflict",
+      error_code: 1009,
+      message: "Changed elsewhere",
+    }),
+  );
+  mocks.reload.mockResolvedValue({
+    ...pool,
+    name: "Latest pool",
+    config_revision: 18,
+  });
+  render(<PoolEditor pool={pool} onClose={vi.fn()} />);
+  await user.type(screen.getByLabelText("Name"), " stale");
+  await user.click(saveButton());
+  await user.click(
+    await screen.findByRole("button", { name: "Reload latest" }),
+  );
+  await waitFor(() =>
+    expect(screen.getByLabelText("Name")).toHaveValue("Latest pool"),
+  );
+  await user.type(screen.getByLabelText("Name"), " edited");
+  await user.click(saveButton());
+  expect(mocks.update).toHaveBeenLastCalledWith(
+    expect.objectContaining({
+      name: "Latest pool edited",
+      expected_revision: 18,
+    }),
+  );
 });

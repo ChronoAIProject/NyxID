@@ -74,12 +74,31 @@ const slugSchema = z
     /^[a-z0-9]+(?:-[a-z0-9]+)*$/,
     "Use lowercase letters, numbers, and single hyphens",
   );
+const weightMessage = "Enter a whole-number weight from 1 to 1000";
+const descriptionSchema = z
+  .string()
+  .refine(
+    (value) => [...value].length <= 1024,
+    "Description must be 1024 characters or fewer",
+  );
 export const poolMemberSchema = z.object({
   user_service_id: z.string().min(1, "Select a service"),
-  weight: z.number().int().min(1).max(1000),
+  weight: z
+    .number({ error: weightMessage })
+    .int(weightMessage)
+    .min(1, weightMessage)
+    .max(1000, weightMessage),
   enabled: z.boolean(),
   priority: z.number().int().min(0).max(4294967295).optional(),
-  model: z.string().trim().max(256).nullable().optional(),
+  model: z
+    .string()
+    .trim()
+    .refine(
+      (value) => [...value].length <= 256,
+      "Model must be 256 characters or fewer",
+    )
+    .nullable()
+    .optional(),
   same_api_compatible: z.boolean().optional(),
 });
 export const servicePoolSchema = z.object({
@@ -104,8 +123,15 @@ export const servicePoolListResponseSchema = z.object({
 });
 const poolInputSchema = z.object({
   slug: slugSchema,
-  name: z.string().trim().min(1, "Name is required").max(128),
-  description: z.string().max(1024).optional(),
+  name: z
+    .string()
+    .trim()
+    .min(1, "Name is required")
+    .refine(
+      (value) => [...value].length <= 128,
+      "Name must be 128 characters or fewer",
+    ),
+  description: descriptionSchema.optional(),
   strategy: poolStrategySchema,
   tier_balance: z.enum(["round_robin", "weighted"]).optional(),
   member_contract: poolContractSchema.optional(),
@@ -142,7 +168,7 @@ export const updateServicePoolSchema = poolInputSchema
   .partial()
   .extend({
     expected_revision: z.number().int().optional(),
-    description: z.string().max(1024).nullable().optional(),
+    description: descriptionSchema.nullable().optional(),
   });
 export const setPoolMembersSchema = z.object({
   members: z.array(poolMemberSchema).max(50),

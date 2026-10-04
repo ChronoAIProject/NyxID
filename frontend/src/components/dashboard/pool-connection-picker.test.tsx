@@ -306,3 +306,64 @@ describe("pool connection picker", () => {
     expect(screen.getByRole("combobox")).toBeVisible();
   });
 });
+
+it("returns keyboard focus to search after the final page button disappears", async () => {
+  const user = userEvent.setup();
+  const { rerender } = render(
+    <PoolConnectionPicker {...defaults} hasNextPage />,
+  );
+  const { input } = await openPicker(user);
+  await user.tab();
+  const more = screen.getByRole("button", { name: "Load more connections" });
+  expect(more).toHaveFocus();
+  await user.keyboard("{Enter}");
+  rerender(
+    <PoolConnectionPicker {...defaults} hasNextPage isFetchingNextPage />,
+  );
+  rerender(
+    <PoolConnectionPicker
+      {...defaults}
+      rows={[...defaults.rows, { ...backup, user_service_id: "last" }]}
+      hasNextPage={false}
+    />,
+  );
+  await waitFor(() => expect(input).toHaveFocus());
+});
+
+it("blocks stale additions and pagination during compatibility checks while allowing removal", async () => {
+  const user = userEvent.setup();
+  const onToggle = vi.fn();
+  const onLoadMore = vi.fn();
+  const { rerender } = render(
+    <PoolConnectionPicker
+      {...defaults}
+      selectedIds={[candidate.user_service_id]}
+      onToggle={onToggle}
+      onLoadMore={onLoadMore}
+      hasNextPage
+      isCheckingCompatibility
+      isRefreshing
+    />,
+  );
+  await openPicker(user);
+  expect(screen.getByText("Checking compatibility…")).toBeVisible();
+  const primary = screen.getByRole("option", { name: candidate.name! });
+  const second = screen.getByRole("option", { name: backup.name });
+  expect(primary).toHaveAttribute("aria-disabled", "false");
+  expect(second).toHaveAttribute("aria-disabled", "true");
+  await user.click(second);
+  await user.click(
+    screen.getByRole("button", { name: "Load more connections" }),
+  );
+  expect(onToggle).not.toHaveBeenCalled();
+  expect(onLoadMore).not.toHaveBeenCalled();
+  await user.click(primary);
+  expect(onToggle).toHaveBeenCalledWith(candidate);
+  rerender(
+    <PoolConnectionPicker {...defaults} onLoadMore={onLoadMore} hasNextPage />,
+  );
+  await user.click(
+    screen.getByRole("button", { name: "Load more connections" }),
+  );
+  expect(onLoadMore).toHaveBeenCalledTimes(1);
+});

@@ -77,12 +77,12 @@ pub struct UpdatePoolInput {
 }
 
 fn validate_text_fields(name: &str, description: Option<&str>) -> AppResult<()> {
-    if name.trim().is_empty() || name.len() > MAX_NAME_LEN {
+    if name.trim().is_empty() || name.chars().count() > MAX_NAME_LEN {
         return Err(AppError::ValidationError(format!(
             "Pool name must be 1-{MAX_NAME_LEN} characters"
         )));
     }
-    if description.is_some_and(|d| d.len() > MAX_DESCRIPTION_LEN) {
+    if description.is_some_and(|d| d.chars().count() > MAX_DESCRIPTION_LEN) {
         return Err(AppError::ValidationError(format!(
             "description must not exceed {MAX_DESCRIPTION_LEN} characters"
         )));
@@ -121,7 +121,7 @@ fn normalize_members(members: Vec<ServicePoolMember>) -> AppResult<Vec<ServicePo
             let trimmed = model.trim();
             if trimmed.is_empty() {
                 member.model = None;
-            } else if trimmed.len() > MAX_MODEL_LEN {
+            } else if trimmed.chars().count() > MAX_MODEL_LEN {
                 return Err(AppError::ServicePoolMemberInvalid(format!(
                     "member model must not exceed {MAX_MODEL_LEN} characters"
                 )));
@@ -1178,6 +1178,10 @@ pub(crate) fn is_duplicate_key(err: &mongodb::error::Error) -> bool {
             if we.code == 11000
     )
 }
+
+#[cfg(test)]
+#[path = "service_pool_validation_tests.rs"]
+mod validation_tests;
 
 #[cfg(test)]
 mod tests {

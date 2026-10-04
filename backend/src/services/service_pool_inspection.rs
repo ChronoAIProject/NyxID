@@ -23,7 +23,7 @@ struct CatalogDisplayMetadata {
 }
 
 #[derive(Debug, Deserialize)]
-struct EndpointDisplayMetadata {
+struct ConnectionDisplayMetadata {
     #[serde(rename = "_id")]
     id: String,
     label: String,
@@ -186,7 +186,7 @@ pub async fn inspect(
     let endpoint_labels: std::collections::HashMap<String, String> = if endpoint_ids.is_empty() {
         std::collections::HashMap::new()
     } else {
-        db.collection::<EndpointDisplayMetadata>("user_endpoints")
+        db.collection::<ConnectionDisplayMetadata>("user_endpoints")
             .find(doc! {"_id": {"$in": &endpoint_ids}, "user_id": owner})
             .projection(doc! {"_id": 1, "label": 1})
             .await?
@@ -194,6 +194,24 @@ pub async fn inspect(
             .await?
             .into_iter()
             .map(|endpoint| (endpoint.id, endpoint.label))
+            .collect()
+    };
+    let key_ids: Vec<String> = services
+        .iter()
+        .filter(|service| super::platform_key_service::binding(service) != "platform")
+        .filter_map(|service| service.api_key_id.clone())
+        .collect();
+    let key_labels: std::collections::HashMap<String, String> = if key_ids.is_empty() {
+        std::collections::HashMap::new()
+    } else {
+        db.collection::<ConnectionDisplayMetadata>("user_api_keys")
+            .find(doc! {"_id": {"$in": &key_ids}, "user_id": owner})
+            .projection(doc! {"_id": 1, "label": 1})
+            .await?
+            .try_collect::<Vec<_>>()
+            .await?
+            .into_iter()
+            .map(|key| (key.id, key.label))
             .collect()
     };
     let selected = if let Some(peers) = query.peer_ids.filter(|_| !query.members_only) {
@@ -229,8 +247,12 @@ pub async fn inspect(
         });
         let mut row = CandidateInspection {
             user_service_id: service.id.clone(),
-            name: endpoint_labels
-                .get(&service.endpoint_id)
+            name: service
+                .api_key_id
+                .as_ref()
+                .filter(|_| super::platform_key_service::binding(&service) != "platform")
+                .and_then(|id| key_labels.get(id))
+                .or_else(|| endpoint_labels.get(&service.endpoint_id))
                 .filter(|label| !label.is_empty())
                 .cloned()
                 .unwrap_or_else(|| service.slug.clone()),
@@ -541,15 +563,27 @@ async fn search_services(
                 "from":DOWNSTREAM_SERVICES,"localField":"catalog_service_id","foreignField":"_id",
                 "pipeline":[{"$project":{"_id":0,"name":1,"slug":1}}],"as":"search_catalog",
             }},
+            doc! {"$lookup":{
+                "from":"user_api_keys","localField":"api_key_id","foreignField":"_id",
+                "let":{"binding":"$credential_binding"},
+                "pipeline":[
+                    {"$match":{"user_id":owner,"$expr":{"$ne":[{"$ifNull":["$$binding","user"]},"platform"]}}},
+                    {"$project":{"_id":0,"label":1}},
+                ],"as":"search_key",
+            }},
+            doc! {"$set":{"search_label":{"$ifNull":[
+                {"$arrayElemAt":["$search_key.label",0]},
+                {"$arrayElemAt":["$search_endpoint.label",0]},
+            ]}}},
             doc! {"$match":{"$or":[
                 {"slug":&pattern},
-                {"search_endpoint.label":&pattern},
+                {"search_label":&pattern},
                 {"search_catalog.name":&pattern},
                 {"search_catalog.slug":&pattern},
             ]}},
             doc! {"$skip":offset as i64},
             doc! {"$limit":limit as i64},
-            doc! {"$unset":["search_endpoint","search_catalog"]},
+            doc! {"$unset":["search_endpoint","search_catalog","search_key","search_label"]},
         ])
         .max_time(std::time::Duration::from_secs(5))
         .await?

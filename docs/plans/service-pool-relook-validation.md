@@ -155,3 +155,30 @@ materialization.
 The local backend runs target service pools and their integration boundaries; they are not a claim that every backend test ran locally. The PR's CI jobs run the full selected backend, CLI, frontend, feature, and coverage suites.
 
 An early local run used unsupported MongoDB 7 and failed during billing bulk writes. That run was discarded and repeated on MongoDB 8. Browser interaction failures found during review were fixed and rerun on stable source. Temporary test identities, signing keys, databases, and servers were cleaned up after the successful runs.
+
+
+## Independent review follow-up
+
+GPT-6-astra and Claude Opus 5.5, both at xhigh, independently reviewed issue #1680
+and PR #1737. Their findings prompted corrections for paginated selection under
+latency, hidden invalid weights, same-priority member ordering, connection renames,
+revision-conflict recovery, routing draft preservation, weighted cycle descriptions,
+keyboard focus after final pagination, and Unicode validation parity. The backend
+inspection tests were split to keep the extended module within the contributing
+guide's file-length limit.
+
+After rebasing onto `d9a53135` from `main`, the full frontend suite passed 4,246 tests
+in 429 files. The production build and lint passed with no lint errors or new
+warnings in changed files. Five permanent Playwright tests passed against the
+production build, including 200 ms candidate responses, two loaded pages,
+repeated selection/deselection without scroll loss, focus after final pagination,
+and selection changes during pagination and cached searches. The final pagination
+corrections also passed 53 focused frontend tests. Candidate pages track the draft
+used for compatibility checks; stale options cannot be added, and a pending next
+page finishes before all loaded pages refresh. Error/retry coverage ensures failed
+refreshes do not loop. All 31 CLI pool tests passed on the rebased code, and the
+dedicated Rust Unicode boundary regression passed.
+The fresh MongoDB 8 run passed all 11 inspection cases, including renaming through
+the key service, matching the Services view, unavailable keys, explicit platform
+bindings with retained keys, foreign references, selected/health views and zero
+credential materialization, last-used writes or provider dispatch during inspection.
