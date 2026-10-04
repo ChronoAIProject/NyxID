@@ -14,6 +14,10 @@ pub const WATCHES_COLLECTION_NAME: &str = "nyxbot_watches";
 /// (`"direct"`).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct NyxbotChannel {
+    #[serde(default)]
+    pub follow_capacity_revision: i64,
+    #[serde(default)]
+    pub follow_binding_generation: i64,
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,
@@ -149,6 +153,8 @@ impl std::fmt::Debug for NyxbotChannel {
 /// `kind`, so the gateway's conversation registry keeps working.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct NyxbotThread {
+    #[serde(flatten, default)]
+    pub follow: super::channel_thread_follow::ThreadFollow,
     #[serde(rename = "_id")]
     pub id: String,
     pub channel_id: String,
@@ -226,6 +232,10 @@ impl std::fmt::Debug for NyxbotThread {
 /// `readEventContext` returns exactly what was admitted. TTL-expired.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct NyxbotEvent {
+    #[serde(default)]
+    pub resolved_thread_id: Option<String>,
+    #[serde(default)]
+    pub resolved_conversation_id: Option<String>,
     /// SHA-256 of `binding_id` and the idempotency key.
     #[serde(rename = "_id")]
     pub id: String,

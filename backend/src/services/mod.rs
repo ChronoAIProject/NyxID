@@ -52,6 +52,7 @@ pub mod channel_registration;
 pub mod channel_relay_service;
 pub mod channel_routing_service;
 pub mod channel_send_service;
+pub mod channel_thread_follow_service;
 pub mod channel_thread_service;
 pub mod channel_verification_service;
 #[cfg(test)]
@@ -185,6 +186,9 @@ pub mod ws_frame_injector;
 pub mod catalog_skill_service;
 pub mod curation_grant_service;
 pub mod inference_service;
+pub mod inference_voice;
+#[cfg(test)]
+mod inference_voice_tests;
 pub mod options_service;
 pub mod platform_key_service;
 pub mod service_account_scope_service;
@@ -265,3 +269,9 @@ pub mod assistant_title_service;
 pub mod assistant_voice;
 #[cfg(test)]
 mod org_group_tests;
+
+pub mod machine_access_service;
+pub mod voice;
+
+#[cfg(test)]
+mod machine_access_tests;

@@ -116,6 +116,26 @@ const DIRECT_CHAT_ENGINE_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+pub const VOICE_GROK_FLAG_KEY: &str = "assistant:voice-grok";
+const VOICE_GROK_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: VOICE_GROK_FLAG_KEY,
+    description: "Grok voice private beta (push-to-talk/headphones only).",
+    default_enabled: false,
+};
+pub const VOICE_GROK_PLATFORM_FLAG_KEY: &str = "assistant:voice-grok-platform";
+const VOICE_GROK_PLATFORM_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: VOICE_GROK_PLATFORM_FLAG_KEY,
+    description: "Paid platform Grok voice; enable only after provider invoice validation.",
+    default_enabled: false,
+};
+
+pub const VOICE_OPENAI_PLATFORM_FLAG_KEY: &str = "assistant:voice-openai-platform";
+const VOICE_OPENAI_PLATFORM_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: VOICE_OPENAI_PLATFORM_FLAG_KEY,
+    description: "Allows platform GPT-Live only after forced-close and invoice reconciliation validation.",
+    default_enabled: false,
+};
+
 pub const ASSISTANT_VOICE_FLAG_KEY: &str = "assistant:voice";
 const ASSISTANT_VOICE_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: ASSISTANT_VOICE_FLAG_KEY,
@@ -147,6 +167,26 @@ pub const AGENT_OPERATION_SCOPES_FLAG_KEY: &str = "assistant:operation-scopes";
 const AGENT_OPERATION_SCOPES_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: AGENT_OPERATION_SCOPES_FLAG_KEY,
     description: "Allows configuring specialist operation scopes after every replica supports enforcement. Existing scopes are always enforced.",
+    default_enabled: false,
+};
+
+pub const ASSISTANT_LIVE_TURN_GATE_FLAG_KEY: &str = "assistant:live-turn-gate";
+const ASSISTANT_LIVE_TURN_GATE_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: ASSISTANT_LIVE_TURN_GATE_FLAG_KEY,
+    description: "Require assistant conversation keys to have a live turn before execution.",
+    default_enabled: false,
+};
+
+pub const MACHINE_CAPABILITIES_FLAG_KEY: &str = "assistant:machine-capabilities";
+const MACHINE_CAPABILITIES_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: MACHINE_CAPABILITIES_FLAG_KEY,
+    description: "Enable the capability editor and deny-by-default new assignments after upgrading all replicas; stored restrictions are always enforced.",
+    default_enabled: false,
+};
+pub const MACHINE_CONTEXTS_FLAG_KEY: &str = "assistant:machine-contexts";
+const MACHINE_CONTEXTS_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: MACHINE_CONTEXTS_FLAG_KEY,
+    description: "Configure isolated machine contexts on supported nodes (not yet available).",
     default_enabled: false,
 };
 
@@ -227,9 +267,15 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     NYXAGENT_ENGINE_FLAG,
     NYXBOT_THREAD_FOLLOW_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
+    ASSISTANT_LIVE_TURN_GATE_FLAG,
+    MACHINE_CAPABILITIES_FLAG,
+    MACHINE_CONTEXTS_FLAG,
     AGENT_LEARNING_FLAG,
     ORG_AGENTS_FLAG,
     ASSISTANT_VOICE_FLAG,
+    VOICE_OPENAI_PLATFORM_FLAG,
+    VOICE_GROK_FLAG,
+    VOICE_GROK_PLATFORM_FLAG,
     AI_ASSISTANT_FLAG,
     BILLING_FLAG,
     AEVATAR_CHAT_WIRE_LOG_FLAG,
@@ -251,9 +297,15 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     NYXAGENT_ENGINE_FLAG,
     NYXBOT_THREAD_FOLLOW_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
+    ASSISTANT_LIVE_TURN_GATE_FLAG,
+    MACHINE_CAPABILITIES_FLAG,
+    MACHINE_CONTEXTS_FLAG,
     AGENT_LEARNING_FLAG,
     ORG_AGENTS_FLAG,
     ASSISTANT_VOICE_FLAG,
+    VOICE_OPENAI_PLATFORM_FLAG,
+    VOICE_GROK_FLAG,
+    VOICE_GROK_PLATFORM_FLAG,
     AI_ASSISTANT_FLAG,
     BILLING_FLAG_TEST,
     AEVATAR_CHAT_WIRE_LOG_FLAG,
@@ -1777,9 +1829,15 @@ mod tests {
                 "assistant:nyxagent-engine",
                 "nyxbot:thread-follow",
                 "assistant:operation-scopes",
+                "assistant:live-turn-gate",
+                "assistant:machine-capabilities",
+                "assistant:machine-contexts",
                 "assistant:agent-learning",
                 "assistant:org-agents",
                 "assistant:voice",
+                "assistant:voice-openai-platform",
+                "assistant:voice-grok",
+                "assistant:voice-grok-platform",
                 "experimental:ai-assistant",
                 "experimental:billing",
                 "experimental:aevatar-chat-wire-log",

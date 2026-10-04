@@ -20,11 +20,31 @@ use nyxid_machine::{Confirmation, MachineProfile, Operation};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+/// Historical machine tests exercise migrated shared assignments. Capability
+/// cutover/default-denial tests use ungranted_node to model a new registration.
 pub(crate) async fn node(f: &Fixture, owner: &str) -> Node {
-    let (_, token, _) =
-        node_service::create_registration_token(&f.state.db, owner, "test-machine", 100, 300)
-            .await
-            .unwrap();
+    let node = ungranted_node(f, owner).await;
+    let assignment = crate::models::machine_access::Assignment {
+        capabilities: nyxid_machine::authority::Capabilities::legacy(
+            node.machine.as_ref().unwrap(),
+        ),
+        legacy: true,
+        ..Default::default()
+    };
+    let key = format!("machine_access.assignments.{}", node.id);
+    f.state.db.collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME).update_many(
+        doc!{"$or":[{"_id":&f.chat.agent_id},{"user_id":&f.owner,"kind":"nyxbot"}]},
+        doc!{"$set":{key:bson::to_bson(&assignment).unwrap(),"machine_access.version":2,"machine_access.revision":1}}
+    ).await.unwrap();
+    node
+}
+pub(crate) async fn ungranted_node(f: &Fixture, owner: &str) -> Node {
+    Box::pin(ungranted_node_named(f, owner, "test-machine")).await
+}
+pub(crate) async fn ungranted_node_named(f: &Fixture, owner: &str, name: &str) -> Node {
+    let (_, token, _) = node_service::create_registration_token(&f.state.db, owner, name, 100, 300)
+        .await
+        .unwrap();
     let (mut node, _, _) =
         node_service::register_node(&f.state.db, &f.state.encryption_keys, &token, None)
             .await
@@ -556,6 +576,7 @@ async fn machine_catalog_discovery_projects_one_batch_of_referenced_and_allowed_
         wire_protocol: crate::models::downstream_service::InferenceWireProtocol::OpenaiCompletions,
         model_list: false,
         realtime: false,
+        voice: None,
     });
     let catalog_id = catalog.id.clone();
     f.state

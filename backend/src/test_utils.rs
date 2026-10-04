@@ -2233,6 +2233,8 @@ pub(crate) fn test_auth_user(user_id: &str) -> AuthUser {
         assistant_group_id: None,
         assistant_agent_owner_id: None,
         assistant_operation_scopes: Default::default(),
+        assistant_turn_fence: None,
+        assistant_chat: None,
         user_id: Uuid::parse_str(user_id).expect("valid uuid user id"),
         session_id: None,
         scope: String::new(),

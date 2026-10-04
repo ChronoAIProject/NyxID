@@ -222,7 +222,7 @@ mod tests {
         assert_eq!(
             telegram["capabilities"],
             serde_json::json!({"initiated_send":true,"reply_to":true,"thread":true,"edit":true,
-            "thread_reply":true,"thread_follow":false,"thread_history":false,
+            "thread_reply":true,"thread_follow":true,"thread_history":false,
             "media":{"inbound":["image","file","audio","video"],"outbound":["image","file","audio","video"]}})
         );
         assert_eq!(

@@ -158,3 +158,5 @@ pub mod assistant_uploads;
 
 mod assistant_titles;
 pub mod assistant_voice;
+
+pub mod machine_access;

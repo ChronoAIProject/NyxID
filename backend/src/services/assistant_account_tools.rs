@@ -479,7 +479,9 @@ fn route_view(row: &ChannelConversation) -> Value {
 impl AccountTools<'_> {
     pub async fn execute(&self, auth: &AuthUser, tool_name: &str, args: &Value) -> ToolResult {
         let user = auth.user_id.to_string();
-        let chat = if auth.auth_method == AuthMethod::ApiKey {
+        let chat = if let Some(chat) = auth.assistant_chat.as_deref() {
+            Ok(Some(chat.clone()))
+        } else if auth.auth_method == AuthMethod::ApiKey {
             Box::pin(acks::for_key_with_access(
                 self.db,
                 &user,

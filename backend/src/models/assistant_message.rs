@@ -5,6 +5,8 @@ pub const COLLECTION_NAME: &str = "assistant_messages";
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantMessage {
+    #[serde(default)]
+    pub voice: Option<VoiceTranscript>,
     /// Voice input is visible in history but is not execution context until claimed.
     #[serde(default)]
     pub execution_pending: bool,
@@ -43,4 +45,19 @@ impl std::fmt::Debug for AssistantMessage {
             .field("status", &self.status)
             .finish_non_exhaustive()
     }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct VoiceTranscript {
+    pub session_id: String,
+    pub segment_id: String,
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub sealed: bool,
+    pub complete: bool,
+    pub delivery: String,
+    #[serde(default)]
+    pub request_id: Option<String>,
+    #[serde(default)]
+    pub backend_message_id: Option<String>,
 }

@@ -13,7 +13,8 @@ export function MachineSummary({ node }: { readonly node: NodeInfo }) {
           {[
             machine.shell && "Commands",
             machine.files && "Files",
-            machine.computer && "Computer",
+            (machine.browser ?? machine.computer) && "Browser",
+                machine.computer && "Computer",
           ]
             .filter(Boolean)
             .join(" · ")}

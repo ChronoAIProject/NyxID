@@ -6,7 +6,9 @@ use crate::{
             AssistantConversation, COLLECTION_NAME as CONVERSATIONS, TurnOrigin,
         },
         assistant_message::{AssistantMessage, COLLECTION_NAME as MESSAGES},
-        assistant_voice::{MAX_QUEUED, REQUESTS, RequestState, VoicePreferences, VoiceRequest},
+        assistant_voice::{
+            MAX_QUEUED, REQUESTS, RequestState, VoiceKeySource, VoicePreferences, VoiceRequest,
+        },
     },
 };
 use chrono::{Duration, Utc};
@@ -38,10 +40,10 @@ pub fn validate_preferences(p: &VoicePreferences) -> AppResult<()> {
         || p.connection_id.as_deref().is_some_and(|s| !valid_id(s))
         || (p.key_source == crate::models::assistant_voice::VoiceKeySource::Own)
             != p.connection_id.is_some()
-        || !matches!(p.model.as_str(), "gpt-live-1" | "grok-voice-think-fast-2.0")
+        || !super::inference_voice::valid_id(&p.model)
         || p.voice
             .as_ref()
-            .is_some_and(|s| s.is_empty() || s.len() > 64)
+            .is_some_and(|s| !super::inference_voice::valid_id(s))
         || p.language
             .as_ref()
             .is_some_and(|s| s.is_empty() || s.len() > 35)
@@ -188,34 +190,69 @@ pub(crate) async fn enqueue_in_session(
     {
         return Err(AppError::VoiceQueueFull);
     }
-    row.message_count += 1;
+    let existing_input = db
+        .collection::<AssistantMessage>(MESSAGES)
+        .find_one(doc! {"_id":&request.message_id,
+        "user_id":&request.user_id,"conversation_id":&request.conversation_id})
+        .session(&mut *session)
+        .await?;
+    if let Some(input) = &existing_input {
+        if !input.execution_pending
+            || input.text != text
+            || input.role != "user"
+            || !input.voice.as_ref().is_some_and(|v| {
+                v.session_id == request.session_id
+                    && v.sealed
+                    && v.complete
+                    && v.request_id.is_none()
+            })
+        {
+            return Err(AppError::Conflict(
+                "Voice segment cannot be admitted".into(),
+            ));
+        }
+        request.message_seq = input.seq;
+    } else {
+        row.message_count += 1;
+        request.message_seq = row.message_count;
+    }
     row.updated_at = Utc::now();
-    request.message_seq = row.message_count;
     // The conversation write serializes concurrent admissions and queue claims.
     conversations
         .replace_one(doc! {"_id":&row.id,"user_id":&request.user_id}, &row)
         .session(&mut *session)
         .await?;
-    db.collection::<AssistantMessage>(MESSAGES)
-        .insert_one(AssistantMessage {
-            execution_pending: true,
-            id: request.message_id.clone(),
-            conversation_id: row.id,
-            user_id: request.user_id.clone(),
-            seq: request.message_seq,
-            turn_id: request.turn_id.clone(),
-            role: "user".into(),
-            text: text.into(),
-            status: "completed".into(),
-            error_code: None,
-            created_at: request.created_at,
-            activities: Vec::new(),
-            attachments: Vec::new(),
-            origin: Some(TurnOrigin::User),
-            via: Some("voice".into()),
-        })
-        .session(&mut *session)
-        .await?;
+    if existing_input.is_some() {
+        db.collection::<AssistantMessage>(MESSAGES)
+            .update_one(
+                doc! {"_id":&request.message_id},
+                doc! {"$set":{"turn_id":&request.turn_id,"voice.request_id":&request.id}},
+            )
+            .session(&mut *session)
+            .await?;
+    } else {
+        db.collection::<AssistantMessage>(MESSAGES)
+            .insert_one(AssistantMessage {
+                voice: None,
+                execution_pending: true,
+                id: request.message_id.clone(),
+                conversation_id: row.id,
+                user_id: request.user_id.clone(),
+                seq: request.message_seq,
+                turn_id: request.turn_id.clone(),
+                role: "user".into(),
+                text: text.into(),
+                status: "completed".into(),
+                error_code: None,
+                created_at: request.created_at,
+                activities: Vec::new(),
+                attachments: Vec::new(),
+                origin: Some(TurnOrigin::User),
+                via: Some("voice".into()),
+            })
+            .session(&mut *session)
+            .await?;
+    }
     requests.insert_one(&request).session(&mut *session).await?;
     Ok(request)
 }
@@ -322,7 +359,7 @@ pub(crate) async fn claim(
     requests
         .update_one(
             doc! {"_id":id,"state":"queued"},
-            doc! {"$set":{"state":"claimed"}},
+            doc! {"$set":{"state":"claimed","started_at":bson::DateTime::now()}},
         )
         .session(&mut *session)
         .await?;
@@ -609,11 +646,15 @@ pub struct VoiceOption {
     service_id: String,
     connection_id: Option<String>,
     key_source: &'static str,
-    model: &'static str,
+    model: String,
+    model_label: String,
+    default_model: bool,
+    voice: crate::models::downstream_service::VoiceInference,
     available: bool,
-    unavailable_reason: &'static str,
+    unavailable_reason: Option<&'static str>,
     pricing: Option<super::inference_service::LanePricingView>,
     billing_owner: &'static str,
+    reported_token_pricing: Option<super::inference_service::LanePricingView>,
 }
 
 pub async fn options(
@@ -628,61 +669,129 @@ pub async fn options(
         super::user_service_service::list_user_services_with_sources(db, &thread.user_id).await?;
     let services: Vec<crate::models::downstream_service::DownstreamService> = db
         .collection(crate::models::downstream_service::COLLECTION_NAME)
-        .find(doc! {"slug":{"$in":["llm-openai","llm-xai"]},"is_active":true})
+        .find(doc! {"inference.voice":{"$type":"object"},"is_active":true})
         .await?
         .try_collect()
         .await?;
     let mut options = Vec::new();
     for entry in catalog {
-        let model = match entry.slug.as_str() {
-            "llm-openai" => "gpt-live-1",
-            "llm-xai" => "grok-voice-think-fast-2.0",
-            _ => continue,
-        };
-        if !entry.inference.as_ref().is_some_and(|i| i.realtime) || entry.requires_gateway_url {
+        if entry.requires_gateway_url {
             continue;
         }
         let Some(service) = services.iter().find(|s| s.slug == entry.slug) else {
             continue;
         };
-        if entry.platform_key.available {
-            options.push(VoiceOption {
-                service_id: service.id.clone(),
-                connection_id: None,
-                key_source: "platform",
-                model,
-                available: false,
-                unavailable_reason: "provider_adapter_not_enabled",
-                pricing: entry.platform_key.pricing,
-                billing_owner: "acting_person",
-            });
+        let Some(voice) = service
+            .inference
+            .as_ref()
+            .and_then(|i| i.voice.as_ref())
+            .filter(|v| super::voice::supported_metadata(v))
+        else {
+            continue;
+        };
+        if voice.protocol == crate::models::downstream_service::VoiceProtocol::XaiRealtime
+            && (!super::feature_flag_service::personal_flag_enabled(
+                db,
+                &thread.user_id,
+                super::feature_flag_service::VOICE_GROK_FLAG_KEY,
+            )
+            .await?
+                || super::voice::credentials::authorize_inference(db, thread, service)
+                    .await
+                    .is_err()
+                || !super::voice::credentials::official_provider_origin(
+                    &service.base_url,
+                    &voice.protocol,
+                ))
+        {
+            continue;
         }
-        let resource_owner = thread.agent_owner_id.as_deref().unwrap_or(&thread.user_id);
-        for connection in connections.iter().filter(|c| {
-            c.service.user_id == resource_owner
-                && !matches!(
-                    c.source,
-                    super::user_service_service::CredentialSource::Org { allowed: false, .. }
-                )
-                && c.service.catalog_service_id.as_deref() == Some(&service.id)
-                && c.service.node_id.is_none()
-                && c.service.api_key_id.is_some()
-                && c.service.credential_binding.as_deref() != Some("platform")
-        }) {
-            options.push(VoiceOption {
-                service_id: service.id.clone(),
-                connection_id: Some(connection.service.id.clone()),
-                key_source: "own",
-                model,
-                available: false,
-                unavailable_reason: "provider_adapter_not_enabled",
-                pricing: entry.byok_pricing.clone(),
-                billing_owner: if resource_owner == thread.user_id {
-                    "acting_person"
-                } else {
-                    "organization"
-                },
-            });
+        for model in &voice.models {
+            let billing = service.billing.as_ref();
+            let platform_priced =
+                super::voice::credentials::duration_billing(&VoiceKeySource::Platform, billing)
+                    .is_ok();
+            let own_billing =
+                super::voice::credentials::duration_billing(&VoiceKeySource::Own, billing);
+            let platform_enabled = super::feature_flag_service::personal_flag_enabled(
+                db,
+                &thread.user_id,
+                super::voice::credentials::platform_flag(&voice.protocol),
+            )
+            .await?;
+            if entry.platform_key.available {
+                options.push(VoiceOption {
+                    service_id: service.id.clone(),
+                    connection_id: None,
+                    key_source: "platform",
+                    model: model.id.clone(),
+                    model_label: model.label.clone(),
+                    default_model: model.default,
+                    voice: voice.clone(),
+                    available: platform_enabled && platform_priced,
+                    unavailable_reason: if !platform_enabled {
+                        Some("provider_rollout_pending")
+                    } else if !platform_priced {
+                        Some("duration_tariff_unavailable")
+                    } else {
+                        None
+                    },
+                    reported_token_pricing: if voice.protocol
+                        == crate::models::downstream_service::VoiceProtocol::XaiRealtime
+                    {
+                        entry.platform_key.pricing.clone()
+                    } else {
+                        None
+                    },
+                    pricing: entry.platform_key.pricing.clone(),
+                    billing_owner: "acting_person",
+                });
+            }
+            let resource_owner = thread.agent_owner_id.as_deref().unwrap_or(&thread.user_id);
+            for connection in connections.iter().filter(|c| {
+                c.service.user_id == resource_owner
+                    && !matches!(
+                        c.source,
+                        super::user_service_service::CredentialSource::Org { allowed: false, .. }
+                    )
+                    && c.service.catalog_service_id.as_deref() == Some(&service.id)
+                    && c.service.node_id.is_none()
+                    && c.service.api_key_id.is_some()
+                    && c.service.credential_binding.as_deref() != Some("platform")
+            }) {
+                options.push(VoiceOption {
+                    service_id: service.id.clone(),
+                    connection_id: Some(connection.service.id.clone()),
+                    key_source: "own",
+                    model: model.id.clone(),
+                    model_label: model.label.clone(),
+                    default_model: model.default,
+                    voice: voice.clone(),
+                    available: own_billing.is_ok(),
+                    unavailable_reason: if own_billing.is_err() {
+                        Some("duration_tariff_unavailable")
+                    } else {
+                        None
+                    },
+                    reported_token_pricing: if voice.protocol
+                        == crate::models::downstream_service::VoiceProtocol::XaiRealtime
+                    {
+                        entry.byok_pricing.clone()
+                    } else {
+                        None
+                    },
+                    pricing: if matches!(&own_billing, Ok(None)) {
+                        None
+                    } else {
+                        entry.byok_pricing.clone()
+                    },
+                    billing_owner: if resource_owner == thread.user_id {
+                        "acting_person"
+                    } else {
+                        "organization"
+                    },
+                });
+            }
         }
     }
     Ok(options)

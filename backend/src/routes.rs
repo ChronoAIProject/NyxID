@@ -2034,6 +2034,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::agent_skills::get).put(handlers::agent_skills::set),
         )
         .route(
+            "/nyxagent/agents/{id}/machines",
+            get(handlers::machine_access::get),
+        )
+        .route(
+            "/nyxagent/agents/{id}/machines/{node_id}",
+            axum::routing::put(handlers::machine_access::put),
+        )
+        .route(
             "/nyxagent/agents/{id}/operations",
             get(handlers::assistant_team::agent_operations),
         )
@@ -2085,6 +2093,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/nyxagent/channels/{id}",
             delete(handlers::nyxbot::disconnect_channel).patch(handlers::nyxbot::link_channel),
+        )
+        .route(
+            "/nyxagent/channels/{id}/chats/{chat_id}/threads",
+            get(handlers::nyxbot::thread_controls::list_threads),
+        )
+        .route(
+            "/nyxagent/channels/{id}/chats/{chat_id}/threads/{thread_id}/stop",
+            post(handlers::nyxbot::thread_controls::stop_thread),
         )
         .route(
             "/nyxagent/channels/{id}/chats",
@@ -2164,7 +2180,20 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .route(
             "/assistant/nyxagent/conversations/{id}/voice-sessions",
-            post(handlers::assistant_voice::start),
+            post(handlers::assistant_voice::start)
+                .layer(axum::extract::DefaultBodyLimit::max(128 * 1024)),
+        )
+        .route(
+            "/assistant/nyxagent/conversations/{id}/voice-sessions/{sid}",
+            get(handlers::assistant_voice::session_status),
+        )
+        .route(
+            "/assistant/nyxagent/conversations/{id}/voice-sessions/{sid}/stream",
+            get(handlers::assistant_voice::stream),
+        )
+        .route(
+            "/assistant/nyxagent/conversations/{id}/voice-sessions/{sid}/control",
+            post(handlers::assistant_voice::control),
         )
         .route(
             "/assistant/nyxagent/conversations/{id}/voice-requests/{rid}",

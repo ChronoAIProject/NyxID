@@ -1,4 +1,6 @@
-//! Human-only voice control and durable request dispatch; no media adapter yet.
+mod socket;
+pub use socket::stream;
+// Human-only voice control and durable request dispatch.
 use crate::{
     AppState,
     errors::{AppError, AppResult},
@@ -82,17 +84,121 @@ pub async fn options(
         "transmitting_calls":1,"queued_requests":crate::models::assistant_voice::MAX_QUEUED},"recording":false})))
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StartRequest {
+    pub client_request_id: String,
+    pub preferences: Preferences,
+    #[serde(default)]
+    pub sdp_offer: String,
+}
+#[derive(Serialize)]
+pub struct StartResponse {
+    session: SessionResponse,
+    sdp_answer: String,
+}
 pub async fn start(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(id): Path<String>,
-) -> AppResult<()> {
+    headers: axum::http::HeaderMap,
+    Json(body): Json<StartRequest>,
+) -> AppResult<Json<StartResponse>> {
     super::login_client_context::require_first_party_human(&auth)?;
-    let user = auth.user_id.to_string();
-    voice::require_enabled(&state.db, &user).await?;
-    voice::thread(&state.db, &user, &id).await?;
-    // Flag enable alone cannot accidentally start unmetered provider sessions.
-    Err(AppError::VoiceProviderUnavailable)
+    require_origin(&state, &headers)?;
+    let started = Box::pin(crate::services::voice::runtime::start(
+        &state,
+        &auth.user_id.to_string(),
+        &id,
+        &body.client_request_id,
+        body.preferences.into(),
+        &body.sdp_offer,
+    ))
+    .await?;
+    Ok(Json(StartResponse {
+        session: started.session.into(),
+        sdp_answer: started.sdp,
+    }))
+}
+
+#[derive(Serialize)]
+pub struct SessionResponse {
+    created_at: chrono::DateTime<chrono::Utc>,
+    closed_at: Option<chrono::DateTime<chrono::Utc>>,
+    id: String,
+    generation: i64,
+    state: crate::models::assistant_voice_session::SessionState,
+    muted: bool,
+    input_muted: bool,
+    end_requested: bool,
+    control_revision: i64,
+    observed_seconds: i64,
+    reserved_until: i64,
+    final_usage_confirmed: bool,
+    end_reason: Option<String>,
+    idle_warning: bool,
+}
+impl From<crate::models::assistant_voice_session::VoiceSession> for SessionResponse {
+    fn from(row: crate::models::assistant_voice_session::VoiceSession) -> Self {
+        Self {
+            id: row.id,
+            generation: row.generation,
+            created_at: row.created_at,
+            closed_at: row.closed_at,
+            state: row.state,
+            muted: row.desired_muted,
+            input_muted: row.input_muted,
+            end_requested: row.end_requested,
+            control_revision: row.control_revision,
+            observed_seconds: row.observed_seconds,
+            reserved_until: row.reserved_until,
+            final_usage_confirmed: row.final_usage_confirmed,
+            end_reason: row.end_reason,
+            idle_warning: (chrono::Utc::now() - row.last_user_at).num_seconds() >= 165,
+        }
+    }
+}
+pub async fn session_status(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((id, sid)): Path<(String, String)>,
+) -> AppResult<Json<SessionResponse>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    Ok(Json(
+        crate::services::voice::session::get(&state.db, &auth.user_id.to_string(), &id, &sid)
+            .await?
+            .into(),
+    ))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ControlRequest {
+    command_id: String,
+    expected_revision: i64,
+    action: String,
+}
+pub async fn control(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((id, sid)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<ControlRequest>,
+) -> AppResult<Json<SessionResponse>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    require_origin(&state, &headers)?;
+    Ok(Json(
+        crate::services::voice::session::control(
+            &state.db,
+            &auth.user_id.to_string(),
+            &id,
+            &sid,
+            &body.command_id,
+            body.expected_revision,
+            &body.action,
+        )
+        .await?
+        .into(),
+    ))
 }
 
 #[derive(Serialize)]
@@ -173,6 +279,36 @@ pub(crate) async fn sweep(state: &AppState) -> AppResult<()> {
     Ok(())
 }
 
+fn require_origin(state: &AppState, headers: &axum::http::HeaderMap) -> AppResult<()> {
+    let origin = headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|h| h.to_str().ok())
+        .ok_or_else(|| {
+            crate::errors::AppError::Forbidden("Voice requires a trusted browser origin".into())
+        })?;
+    let trusted = std::iter::once(&state.config.frontend_url)
+        .chain(std::iter::once(&state.config.base_url))
+        .chain(state.config.cors_allowed_origins.iter())
+        .any(|s| url::Url::parse(s).is_ok_and(|u| u.origin().ascii_serialization() == origin));
+    if !trusted {
+        return Err(crate::errors::AppError::Forbidden(
+            "Voice requires a trusted browser origin".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn spawn_dispatch(state: AppState) {
+    tokio::spawn(Box::pin(async move {
+        loop {
+            crate::services::voice::dispatch_wakeup().await;
+            if sweep(&state).await.is_err() {
+                tracing::warn!("Voice request dispatch deferred to reconciliation");
+            }
+        }
+    }));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,7 +338,7 @@ mod tests {
         assert!(voice::validate_preferences(&preferences).is_err());
         preferences.connection_id = Some(uuid::Uuid::new_v4().to_string());
         voice::validate_preferences(&preferences).unwrap();
-        preferences.model = "gpt-live-1-mini".into();
+        preferences.model = "https://untrusted.example/model".into();
         assert!(voice::validate_preferences(&preferences).is_err());
     }
 }

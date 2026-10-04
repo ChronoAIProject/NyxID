@@ -139,6 +139,8 @@ async fn channel(state: &AppState, transport: &str) -> (NyxbotChannel, String) {
     let agent = key(state, "agent").await;
     let now = Utc::now();
     let row = NyxbotChannel {
+        follow_capacity_revision: 0,
+        follow_binding_generation: 0,
         id: Uuid::new_v4().to_string(),
         user_id: OWNER.into(),
         channel_bot_id: Uuid::new_v4().to_string(),
@@ -1063,6 +1065,8 @@ async fn inbound_of(
 
 fn admission(channel_id: &str, event_id: &str) -> NyxbotEvent {
     NyxbotEvent {
+        resolved_thread_id: None,
+        resolved_conversation_id: None,
         id: Uuid::new_v4().to_string(),
         channel_id: channel_id.into(),
         user_id: OWNER.into(),
@@ -1206,6 +1210,8 @@ async fn lost_chat_app_messages_are_reported_to_the_agent_once() {
     // Once a message reaches the agent again, the channel is healthy.
     let arrived = inbound(&state, &route_id, "7", "delivered", None, 0).await;
     let admitted = NyxbotEvent {
+        resolved_thread_id: None,
+        resolved_conversation_id: None,
         id: Uuid::new_v4().to_string(),
         channel_id: row.id.clone(),
         user_id: OWNER.into(),
@@ -2714,6 +2720,8 @@ fn telegram_mentions_and_replies_to_the_bot_are_recognised() {
     let mut row: NyxbotChannel = {
         let now = Utc::now();
         NyxbotChannel {
+            follow_capacity_revision: 0,
+            follow_binding_generation: 0,
             id: "c".into(),
             user_id: OWNER.into(),
             channel_bot_id: "b".into(),
@@ -3365,6 +3373,7 @@ async fn the_same_question_is_not_worked_on_twice() {
         .unwrap()
         .unwrap();
     let asked_from = ChannelOrigin {
+        thread: None,
         nyxbot_channel_id: telegram.id.clone(),
         partition: chat_row.partition.clone(),
         platform: "telegram".into(),
@@ -4450,6 +4459,7 @@ async fn org_group_bots_moved_to_a_specialist_keep_answering() {
         wire_protocol: crate::models::downstream_service::InferenceWireProtocol::OpenaiResponses,
         model_list: false,
         realtime: false,
+        voice: None,
     });
     state
         .db
@@ -4495,6 +4505,7 @@ async fn org_group_bots_moved_to_a_specialist_keep_answering() {
                     crate::models::downstream_service::InferenceWireProtocol::OpenaiCompletions,
                 model_list: false,
                 realtime: false,
+                voice: None,
             });
         state
             .db
@@ -4753,3 +4764,6 @@ async fn lark_groups_count_only_mentions_of_the_bot_itself() {
     );
     server.abort();
 }
+
+#[path = "nyxbot_thread_follow_tests.rs"]
+mod thread_follow_tests;

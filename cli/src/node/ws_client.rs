@@ -812,7 +812,11 @@ async fn run_connection_loop(
 ) {
     let mut backoff = ReconnectBackoff::new();
     let proxy_uploads = Arc::new(super::proxy_upload::Uploads::default());
-    let machine = if config.machine.shell || config.machine.files || config.machine.computer {
+    let machine = if config.machine.shell
+        || config.machine.files
+        || config.machine.computer
+        || config.machine.browser_enabled()
+    {
         match super::machine::Runtime::new(&config.machine, &config.node.id, config_dir) {
             Ok(runtime) => Some(runtime),
             Err(_) => {
@@ -1173,7 +1177,7 @@ async fn connect_and_serve(
                         .await;
                 }
             }
-            Some("machine_request") => {
+            Some("machine_request" | "machine_request_v2") => {
                 if let (Some(machine), Some(secret)) = (machine.clone(), signing_secret.clone())
                     && let Ok(request) =
                         serde_json::from_value::<nyxid_machine::Request>(parsed.clone())
@@ -1184,7 +1188,9 @@ async fn connect_and_serve(
                         let operation = request.operation;
                         let revision =
                             machine.control_revision(request.operation, &request.parameters);
-                        let parameters = request.parameters.clone();
+                        let mut parameters = request.parameters.clone();
+                        parameters["_signed_authority"] = serde_json::to_value(&request.authority)
+                            .unwrap_or(serde_json::Value::Null);
                         let signing_bytes = zeroize::Zeroizing::new(
                             hex::decode(secret.as_str()).unwrap_or_default(),
                         );
@@ -1195,7 +1201,7 @@ async fn connect_and_serve(
                     });
                 }
             }
-            Some("proxy_upload") => {
+            Some("proxy_upload" | "proxy_upload_v2") => {
                 let request_id = parsed["request_id"].as_str().unwrap_or_default().to_owned();
                 let verified = if let Some(secret) = signing_secret.as_ref() {
                     proxy_uploads
@@ -5045,6 +5051,8 @@ mod tests {
             let uploads = Arc::new(super::super::proxy_upload::Uploads::default());
             let id = uuid::Uuid::new_v4();
             let mut opening = Request {
+                version: 1,
+                authority: None,
                 request_id: id.to_string(),
                 node_id: config.node.id.clone(),
                 operation: Operation::ProxyUpload,

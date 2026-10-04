@@ -38,7 +38,19 @@ pub async fn send_reply(
     };
     for part in components {
         let sent = async {
-            if !resolution::eligible_source(db, bot, &source).await? {
+            let eligible = if let Some((owner, origin, conversation)) = &target.admitted {
+                crate::services::channel_thread_follow_service::validate_delivery(
+                    db,
+                    owner,
+                    origin,
+                    conversation,
+                )
+                .await?;
+                resolution::eligible_source_live(db, bot, &source).await?
+            } else {
+                resolution::eligible_source(db, bot, &source).await?
+            };
+            if !eligible {
                 return Err(unavailable());
             }
             adapter

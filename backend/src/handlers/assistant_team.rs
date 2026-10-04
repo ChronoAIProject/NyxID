@@ -55,6 +55,8 @@ pub(crate) fn owner_auth(owner: &str) -> AppResult<AuthUser> {
         assistant_group_id: None,
         assistant_agent_owner_id: None,
         assistant_operation_scopes: Default::default(),
+        assistant_turn_fence: None,
+        assistant_chat: None,
         user_id,
         session_id: None,
         scope: String::new(),
@@ -202,6 +204,16 @@ pub(crate) async fn wake(state: &AppState, owner: &str, id: &str) {
             }
             Err(error) => return Err(error),
         };
+        if row
+            .pending_events
+            .iter()
+            .any(|e| e.reply_to.iter().any(|o| o.thread.is_some()))
+            && crate::services::channel_thread_follow_service::prune_queue(&state.db, owner, id)
+                .await?
+                == 0
+        {
+            return Ok(());
+        }
         if row.pending_events.is_empty() || live_turn(&row, Utc::now()).is_some() {
             return Ok(());
         }
@@ -220,7 +232,12 @@ pub(crate) async fn wake(state: &AppState, owner: &str, id: &str) {
         // never uses it up. NyxBot's event turns share the pool with working
         // specialists.
         let limit = team_pool_limit(state, owner).await + 1;
-        let Some(permit) = acquire(state, Pool::Team { owner, limit }).await? else {
+        let pool = if row.channel.as_ref().is_some_and(|o| o.thread.is_some()) {
+            Pool::Channel { owner }
+        } else {
+            Pool::Team { owner, limit }
+        };
+        let Some(permit) = acquire(state, pool).await? else {
             return Ok(());
         };
         if !RateWindowStore::admit(
@@ -393,7 +410,24 @@ pub(crate) async fn after_turn(
     // Only asynchronous event turns reach the chat: a channel turn answers its
     // own event, and a turn the owner starts in the web app stays in the web app.
     if (row.channel.is_some() || row.reply_channel.is_some()) && turn.origin == TurnOrigin::Event {
-        super::nyxbot::deliver_update(state, row, text).await;
+        let bound: Vec<_> = turn
+            .events
+            .iter()
+            .flat_map(|e| &e.reply_to)
+            .filter(|o| o.thread.is_some())
+            .collect();
+        if bound.is_empty() {
+            super::nyxbot::deliver_update(state, row, text).await;
+        } else {
+            let mut sent = std::collections::HashSet::new();
+            for origin in bound {
+                if let Some(binding) = origin.thread.as_ref()
+                    && sent.insert(binding.source_message_id.clone())
+                {
+                    super::nyxbot::deliver_to(state, row, origin, text).await;
+                }
+            }
+        }
     }
     for origin in &also {
         super::nyxbot::deliver_to(state, row, origin, text).await;
@@ -825,7 +859,11 @@ pub(crate) async fn execute_tool(
         // strict as either webhook policy; do not consume a second digest.
         if !matches!(
             name,
-            "set_agent_operations" | "set_agent_skills" | "decide_permission" | "machine_update"
+            "set_agent_operations"
+                | "set_agent_skills"
+                | "decide_permission"
+                | "machine_update"
+                | "machine_capabilities"
         ) && let Some(refusal) = acks::webhook_action_gate(
             &state.db,
             chat,
@@ -923,12 +961,15 @@ fn dispatch<'a>(
         | "link_channel_bot"
         | "list_channel_agents"
         | "list_channel_chats"
+        | "list_channel_threads"
+        | "stop_following_thread"
         | "update_channel_chat"
         | "update_channel_access"
         | "post_to_chat"
         | "disconnect_channel_bot" => Box::pin(dispatch_channels(state, chat, name, args)),
         "machine_setup_link" => Box::pin(super::machine_setup::link_tool(state, chat, args)),
         "machine_update" => Box::pin(super::machine_update::tool(state, chat, args)),
+        "machine_capabilities" => Box::pin(super::machine_access::native(state, chat, args)),
         "machine_pair" => Box::pin(super::machine_setup::pair_tool(state, chat, args)),
         _ => Box::pin(async { Err(AppError::NotFound("NyxBot tool not found".into())) }),
     }
@@ -1874,6 +1915,30 @@ async fn dispatch_channels(
             .await?;
             (json!({"chats": chats}), false)
         }
+        "list_channel_threads" => (
+            super::nyxbot::thread_controls::list_tool(state, owner, args).await?,
+            false,
+        ),
+        "stop_following_thread" => {
+            let child=state.db.collection::<crate::models::nyxbot_channel::NyxbotThread>(crate::models::nyxbot_channel::THREADS_COLLECTION_NAME)
+                .find_one(mongodb::bson::doc! {"_id":text_arg(args,"thread_id"),"user_id":owner,"record_scope":"platform_thread"}).await?
+                .ok_or_else(crate::services::channel_thread_follow_service::not_found)?;
+            (
+                super::nyxbot::thread_controls::stop(
+                    state,
+                    owner,
+                    &child.channel_id,
+                    child
+                        .follow
+                        .parent_chat_id
+                        .as_deref()
+                        .ok_or_else(crate::services::channel_thread_follow_service::not_found)?,
+                    &child.id,
+                )
+                .await?,
+                false,
+            )
+        }
         "update_channel_chat" => {
             let agent_id = match args["agent"].as_str() {
                 Some("default") => Some("default".to_owned()),
@@ -1881,6 +1946,7 @@ async fn dispatch_channels(
                 None => None,
             };
             let settings = super::nyxbot::chats::ChatSettings {
+                threads: args["threads"].as_str().map(str::to_owned),
                 reply_mode: args["reply_mode"].as_str().map(str::to_owned),
                 members: args["members"].as_str().map(str::to_owned),
                 allow_posts: args["allow_posts"].as_bool(),
@@ -2595,11 +2661,19 @@ const SWEEP_SECS: u64 = 15;
 /// restarted) when their events arrived. Agents are persistent, so nothing
 /// is destroyed automatically.
 pub fn spawn_sweeps(state: AppState) {
+    super::assistant_voice::spawn_dispatch(state.clone());
+    crate::services::voice::runtime::spawn_recovery(state.clone());
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(SWEEP_SECS));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
+            if crate::services::channel_thread_follow_service::sweep(&state.db)
+                .await
+                .is_err()
+            {
+                tracing::debug!("Channel thread sweep deferred");
+            }
             if super::assistant_voice::sweep(&state).await.is_err() {
                 tracing::warn!("Voice queue sweep deferred");
             }

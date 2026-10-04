@@ -402,7 +402,7 @@ impl PlatformAdapter for DiscordAdapter {
         crate::services::channel_platform::ThreadCapabilities {
             thread_reply: true,
             thread_history: true,
-            thread_follow: false,
+            thread_follow: true,
         }
     }
 

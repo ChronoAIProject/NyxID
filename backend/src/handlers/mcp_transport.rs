@@ -577,14 +577,18 @@ async fn authenticate_mcp(
                 )
                 .await
                 .map_err(axum::response::IntoResponse::into_response)?;
-                let chat = crate::services::assistant_acknowledgement_service::for_key_with_access(
-                    &state.db,
-                    &user_id,
-                    Some(&api_key.id),
-                    org_agent_access.as_ref(),
-                )
-                .await
-                .map_err(|_| mcp_401(&state.config.base_url))?;
+                let chat = if auth::is_assistant_conversation_key_candidate(&api_key) {
+                    crate::services::assistant_acknowledgement_service::for_key_with_access(
+                        &state.db,
+                        &user_id,
+                        Some(&api_key.id),
+                        org_agent_access.as_ref(),
+                    )
+                    .await
+                    .map_err(|_| mcp_401(&state.config.base_url))?
+                } else {
+                    None
+                };
                 // Platform grants are meaningful only for assistant chat keys.
                 let platform_grants = if chat.is_some() {
                     api_key.allowed_platform_service_ids.clone()
@@ -749,9 +753,10 @@ async fn authenticate_mcp(
                     {
                         return Err(mcp_401(&state.config.base_url));
                     }
+                    let is_conversation_key = auth::is_assistant_conversation_key_candidate(&key);
                     ctx.assistant_agent_owner_id = key.assistant_agent_owner_id.clone();
                     ctx.assistant_operation_scopes = key.assistant_operation_scopes;
-                    if !ctx.assistant_operation_scopes.is_empty() {
+                    if is_conversation_key {
                         ctx.chat = crate::services::assistant_acknowledgement_service::for_key(
                             &state.db,
                             &ctx.user_id,
@@ -1120,6 +1125,11 @@ fn app_error_to_rpc(id: Option<serde_json::Value>, err: &crate::errors::AppError
     use crate::errors::AppError;
     match err {
         AppError::RateLimited => rpc_error(id, -32005, "Rate limit exceeded"),
+        AppError::AssistantTurnRequired => rpc_error(
+            id,
+            -32003,
+            "This assistant key is only valid while its conversation has a live turn; start or resume the conversation",
+        ),
         AppError::ApiKeyScopeForbidden(msg) => rpc_scope_forbidden(id, msg),
         _ => rpc_error(id, -32603, "Internal error"),
     }
@@ -1508,8 +1518,14 @@ async fn handle_tools_list(
         tool_defs.retain(|t| !SSH_META_TOOL_NAMES.contains(&t.name.as_str()));
     }
 
-    if auth.chat.as_ref().is_some_and(|chat| !chat.guest) {
-        tool_defs.extend(crate::services::machine_tools::definitions());
+    if let Some(chat) = auth.chat.as_ref().filter(|chat| !chat.guest) {
+        tool_defs.extend(
+            Box::pin(crate::services::machine_access_service::definitions(
+                &state.db, chat,
+            ))
+            .await
+            .unwrap_or_default(),
+        );
         tool_defs.push(crate::services::assistant_upload_service::definition());
     }
 
@@ -1566,6 +1582,28 @@ async fn handle_tools_call(
     client_accepts_sse: bool,
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> Response {
+    if let Some(chat) = auth.chat.as_ref()
+        && !matches!(
+            request
+                .params
+                .as_ref()
+                .and_then(|params| params.get("name"))
+                .and_then(serde_json::Value::as_str),
+            Some("nyx__search_tools")
+                | Some("nyx__discover_services")
+                | Some("nyx__list_connected_services")
+        )
+        && let Err(error) = chat
+            .ensure_live_turn(
+                &state.db,
+                auth.ip_address.as_deref(),
+                auth.user_agent.as_deref(),
+                "mcp.tools.call",
+            )
+            .await
+    {
+        return app_error_to_rpc(request.id.clone(), &error);
+    }
     let window = if let Some(chat) = &auth.chat {
         match crate::services::assistant_continuation::started(
             &state.db,
@@ -2626,6 +2664,8 @@ async fn handle_account_tool(
         allow_all_nodes: auth.allow_all_nodes,
         allowed_service_ids: auth.allowed_service_ids.clone(),
         resource_uris: None,
+        assistant_turn_fence: auth.chat.as_ref().map(|chat| chat.turn_fence()),
+        assistant_chat: auth.chat.clone().map(std::sync::Arc::new),
         allowed_node_ids: auth.allowed_node_ids.clone(),
         api_key_id: auth.api_key_id.clone(),
         api_key_name: auth.api_key_name.clone(),
@@ -3052,19 +3092,23 @@ async fn handle_meta_search(
         })
         .collect();
 
-    if auth.chat.as_ref().is_some_and(|chat| !chat.guest) {
+    if let Some(chat) = auth.chat.as_ref().filter(|chat| !chat.guest) {
         let matcher = mcp_service::ToolSearch::new(query);
-        let mut tools: Vec<_> = crate::services::machine_tools::definitions()
-            .into_iter()
-            .chain(std::iter::once(
-                crate::services::assistant_upload_service::definition(),
-            ))
-            .filter_map(|tool| {
-                matcher
-                    .rank(&tool.name, &tool.description)
-                    .map(|rank| (rank, tool))
-            })
-            .collect();
+        let mut tools: Vec<_> = Box::pin(crate::services::machine_access_service::definitions(
+            &state.db, chat,
+        ))
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .chain(std::iter::once(
+            crate::services::assistant_upload_service::definition(),
+        ))
+        .filter_map(|tool| {
+            matcher
+                .rank(&tool.name, &tool.description)
+                .map(|rank| (rank, tool))
+        })
+        .collect();
         tools.sort_by_key(|(rank, _)| std::cmp::Reverse(*rank));
         results.extend(tools.into_iter().map(|(_, tool)| {
             serde_json::json!({
@@ -4884,6 +4928,8 @@ mod tests {
             assistant_group_id: None,
             assistant_agent_owner_id: None,
             assistant_operation_scopes: Default::default(),
+            assistant_turn_fence: None,
+            assistant_chat: None,
             user_id: uuid::Uuid::parse_str(&actor_id).unwrap(),
             session_id: None,
             scope: "proxy".to_string(),
@@ -5650,6 +5696,21 @@ mod tests {
     fn app_error_to_rpc_handles_generic_error() {
         let resp = app_error_to_rpc(None, &crate::errors::AppError::Internal("unknown".into()));
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn app_error_to_rpc_maps_assistant_turn_required() {
+        let resp = app_error_to_rpc(
+            Some(serde_json::json!(3)),
+            &crate::errors::AppError::AssistantTurnRequired,
+        );
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["code"], -32003);
+        assert_eq!(
+            value["error"]["message"],
+            "This assistant key is only valid while its conversation has a live turn; start or resume the conversation"
+        );
     }
 
     #[tokio::test]

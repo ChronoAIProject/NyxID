@@ -12,7 +12,7 @@ pub(crate) fn client() -> AppResult<reqwest::Client> {
         .map_err(|_| unavailable())
 }
 
-pub(super) async fn eligible_source(
+pub(super) async fn eligible_source_live(
     db: &mongodb::Database,
     bot: &ChannelBot,
     source: &ChannelMessage,
@@ -65,8 +65,69 @@ pub(super) async fn eligible_source(
     {
         return Ok(false);
     }
+    Ok(true)
+}
+
+pub(super) async fn eligible_source(
+    db: &mongodb::Database,
+    bot: &ChannelBot,
+    source: &ChannelMessage,
+) -> AppResult<bool> {
+    if !eligible_source_live(db, bot, source).await? {
+        return Ok(false);
+    }
+    let Some(link) = db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .find_one(doc! {
+            "channel_bot_id": &bot.id, "route_api_key_id": &source.agent_api_key_id,
+            "transport": "direct", "status": "active",
+        })
+        .await?
+    else {
+        return Ok(false);
+    };
     feature_flag_service::personal_flag_enabled(db, &link.user_id, NYXBOT_THREAD_FOLLOW_FLAG_KEY)
         .await
+}
+
+/// Reconstruct only a server-persisted child delivery binding. Subscription
+/// stop/expiry/flag rollback do not discard already admitted work.
+pub async fn resolve_admitted(
+    db: &mongodb::Database,
+    adapter: &dyn PlatformAdapter,
+    bot: &ChannelBot,
+    credentials: &BotCredentials<'_>,
+    owner: &str,
+    origin: &crate::models::assistant_conversation::ChannelOrigin,
+    conversation: &str,
+) -> AppResult<Option<ThreadReplyTarget>> {
+    crate::services::channel_thread_follow_service::validate_delivery(
+        db,
+        owner,
+        origin,
+        conversation,
+    )
+    .await?;
+    let Some(binding) = origin.thread.as_deref() else {
+        return Ok(None);
+    };
+    let mut target = tokio::time::timeout(
+        std::time::Duration::from_secs(HISTORY_SECONDS),
+        resolve_inner(
+            db,
+            adapter,
+            bot,
+            credentials,
+            &binding.source_message_id,
+            false,
+        ),
+    )
+    .await
+    .unwrap_or(Ok(None))?;
+    if let Some(t) = &mut target {
+        t.admitted = Some((owner.into(), origin.clone(), conversation.into()));
+    }
+    Ok(target)
 }
 
 /// Called after sender/route admission, never by an HTTP DTO. Re-load retained
@@ -80,7 +141,7 @@ pub async fn resolve(
 ) -> AppResult<Option<ThreadReplyTarget>> {
     tokio::time::timeout(
         std::time::Duration::from_secs(HISTORY_SECONDS),
-        resolve_inner(db, adapter, bot, credentials, message_id),
+        resolve_inner(db, adapter, bot, credentials, message_id, true),
     )
     .await
     .unwrap_or(Ok(None))
@@ -92,6 +153,7 @@ async fn resolve_inner(
     bot: &ChannelBot,
     credentials: &BotCredentials<'_>,
     message_id: &str,
+    require_flag: bool,
 ) -> AppResult<Option<ThreadReplyTarget>> {
     if adapter.platform_id() != bot.platform || !adapter.thread_capabilities().thread_reply {
         return Ok(None);
@@ -103,7 +165,11 @@ async fn resolve_inner(
     else {
         return Ok(None);
     };
-    if !eligible_source(db, bot, &source).await? {
+    if !(if require_flag {
+        eligible_source(db, bot, &source).await?
+    } else {
+        eligible_source_live(db, bot, &source).await?
+    }) {
         return Ok(None);
     }
     let Some(facts) = source
@@ -178,6 +244,7 @@ async fn resolve_inner(
         route_key_id: source.agent_api_key_id.unwrap(),
         platform: bot.platform.clone(),
         facts: resolved,
+        admitted: None,
     }))
 }
 
@@ -195,4 +262,20 @@ pub(super) fn source_matches(facts: &ChannelThreadFacts, source: &ChannelMessage
         ]
         .into_iter()
         .all(|id| id.as_deref().is_none_or(valid_id))
+}
+
+/// Callback-only resolution; selection still enforces activation/rollback rules.
+pub(crate) async fn resolve_retained(
+    db: &mongodb::Database,
+    adapter: &dyn PlatformAdapter,
+    bot: &ChannelBot,
+    credentials: &BotCredentials<'_>,
+    message: &str,
+) -> AppResult<Option<ThreadReplyTarget>> {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(HISTORY_SECONDS),
+        resolve_inner(db, adapter, bot, credentials, message, false),
+    )
+    .await
+    .unwrap_or(Ok(None))
 }

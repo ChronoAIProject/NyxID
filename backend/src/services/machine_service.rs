@@ -118,7 +118,7 @@ pub async fn visible_nodes(db: &Database, chat: &ChatAuthority) -> AppResult<Vec
                 "machine.files":true
             },{
                 "machine.computer":true
-            }]
+            },{"machine.browser":true}]
         })
         .sort(doc! {"name":1,"_id":1})
         .limit(500)

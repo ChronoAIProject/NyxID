@@ -748,6 +748,41 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
             false,
         ),
         (
+            crate::models::nyxbot_channel::THREADS_COLLECTION_NAME,
+            doc! {"user_id": 1, "channel_id": 1, "record_scope": 1, "parent_chat_id": 1, "created_at": -1, "_id": -1},
+            false,
+        ),
+        (
+            crate::models::nyxbot_channel::THREADS_COLLECTION_NAME,
+            doc! {"record_scope": 1, "follow_state": 1, "follow_expires_at": 1, "_id": 1},
+            false,
+        ),
+        (
+            crate::models::nyxbot_channel::THREADS_COLLECTION_NAME,
+            doc! {"record_scope": 1, "follow_state": 1, "follow_opening_expires_at": 1, "_id": 1},
+            false,
+        ),
+        (
+            crate::models::nyxbot_channel::THREADS_COLLECTION_NAME,
+            doc! {"channel_id": 1, "record_scope": 1, "follow_state": 1, "parent_chat_id": 1},
+            false,
+        ),
+        (
+            crate::models::nyxbot_channel::THREADS_COLLECTION_NAME,
+            doc! {"channel_id": 1, "record_scope": 1, "platform_chat_id": 1, "thread_root_id": 1},
+            false,
+        ),
+        (
+            crate::models::nyxbot_channel::THREADS_COLLECTION_NAME,
+            doc! {"user_id":1,"channel_id":1,"record_scope":1,"parent_chat_id":1,"follow_state":1,"created_at":-1,"_id":-1},
+            false,
+        ),
+        (
+            crate::models::nyxbot_channel::THREADS_COLLECTION_NAME,
+            doc! {"user_id":1,"parent_chat_id":1,"record_scope":1,"follow_state":1,"follow_expires_at":1},
+            false,
+        ),
+        (
             crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME,
             doc! {"channel_id": 1, "partition": 1, "event_id": 1},
             false,
@@ -1235,6 +1270,15 @@ pub async fn begin_turn_with_voice(
                 if live_turn(&row, now).is_some() {
                     return Err(AppError::AssistantTurnActive);
                 }
+                if start.origin == TurnOrigin::Channel
+                    && let Some(origin) = start.channel.as_ref().filter(|o| o.thread.is_some())
+                {
+                    if origin.thread.as_ref().is_some_and(|b|b.guest!=start.guest) {
+                        return Err(AppError::Forbidden("Thread sender changed".into()));
+                    }
+                    super::channel_thread_follow_service::admit_turn(db,user_id,origin,&id,session).await?;
+                    row.channel=Some(origin.clone());
+                }
                 if let Some(request) = start.group_request_id.as_deref() {
                     if start.origin != TurnOrigin::Group { return Err(AppError::Forbidden("Invalid group request".into())); }
                     let claimed = db.collection::<bson::Document>(crate::models::assistant_group::REQUESTS_COLLECTION_NAME)
@@ -1298,8 +1342,26 @@ pub async fn begin_turn_with_voice(
                 {
                     Vec::new()
                 } else {
-                    std::mem::take(&mut row.pending_events)
+                    super::channel_thread_follow_service::filter_events(db,user_id,&id,
+                        std::mem::take(&mut row.pending_events),session).await?
                 };
+                if start.origin == TurnOrigin::Event && events.is_empty() {
+                    return Err(AppError::Conflict("No eligible pending events".into()));
+                }
+                if start.origin == TurnOrigin::Event
+                    && row.channel.as_ref().is_some_and(|o| o.thread.is_some())
+                {
+                    // A queued owner request retains its own authority even
+                    // when the preceding turn's guest is no longer eligible.
+                    if let Some(origin) = events.iter().flat_map(|e| &e.reply_to)
+                        .find(|o| o.thread.is_some())
+                    {
+                        row.channel = Some(origin.clone());
+                    }
+                    super::channel_thread_follow_service::validate_in_session(
+                        db, user_id, row.channel.as_ref().unwrap(), &id, true, session,
+                    ).await?;
+                }
                 // A guest turn never inherits the owner's live context (their
                 // tool results may hold more than the chat saw): it starts from
                 // the transcript alone.
@@ -1382,6 +1444,7 @@ pub async fn begin_turn_with_voice(
                 if let Some(lost) = row.active_turn.take() {
                     row.message_count += 1;
                     let message = AssistantMessage {
+                        voice: None,
                         execution_pending: false,
                         id: Uuid::new_v4().to_string(),
                         conversation_id: id.clone(),
@@ -1532,6 +1595,7 @@ pub async fn begin_turn_with_voice(
                 ))
                 .await?;
                 let message = AssistantMessage {
+                    voice: None,
                     execution_pending: false,
                     id: message_id.clone(),
                     conversation_id: id.clone(),
@@ -1828,6 +1892,7 @@ pub async fn finish_turn(
                     tracing::warn!(conversation_id = %row.id, turn_id = %turn_id, upstream_error_code = error.upstream_code.as_deref().unwrap_or(error.code), "Assistant turn failed");
                 }
                 let message = AssistantMessage {
+                    voice: None,
                     execution_pending: false,
                     id: message_id.clone(),
                     conversation_id: row.id.clone(),
@@ -2217,6 +2282,19 @@ pub async fn delete(
                     .session(&mut *session)
                     .await?
                     .ok_or_else(not_found)?;
+                if db
+                    .collection::<bson::Document>(
+                        crate::models::assistant_voice_session::COLLECTION_NAME,
+                    )
+                    .find_one(doc! {"user_id":user_id,"conversation_id":id,"live_slot":true})
+                    .session(&mut *session)
+                    .await?
+                    .is_some()
+                {
+                    return Err(AppError::Conflict(
+                        "End the voice call before deleting this conversation".into(),
+                    ));
+                }
                 let rows = vec![row];
                 let now = Utc::now();
                 if rows.iter().any(|row| live_turn(row, now).is_some()) {
@@ -2225,6 +2303,12 @@ pub async fn delete(
                 let mut children = Vec::new();
                 for row in &rows {
                     let id = row.id.as_str();
+                    if row.channel.as_ref().is_some_and(|o| o.thread.is_some()) {
+                        super::channel_thread_follow_service::delete_conversation(
+                            db, user_id, id, session,
+                        )
+                        .await?;
+                    }
                     // Revoke the conversation's key and ciphertext in this transaction.
                     let credential = db
                         .collection::<bson::Document>(
@@ -2253,6 +2337,7 @@ pub async fn delete(
                     }
                     for collection in [
                         crate::models::assistant_voice::REQUESTS,
+                        crate::models::assistant_voice_session::COLLECTION_NAME,
                         crate::models::assistant_acknowledgement::COLLECTION_NAME,
                         crate::models::assistant_attachment::COLLECTION_NAME,
                         crate::models::assistant_upload_retention::TOMBSTONES,

@@ -485,6 +485,10 @@ pub trait PlatformAdapter: Send + Sync {
     fn outbound_capabilities(&self) -> OutboundCapabilities;
     fn media_capabilities(&self) -> MediaCapabilities;
 
+    fn thread_follow_guidance(&self) -> &'static str {
+        "Following needs access to ordinary messages and replies in this chat. Earlier message bodies may be unavailable; NyxID never requests extra permissions automatically."
+    }
+
     fn thread_capabilities(&self) -> ThreadCapabilities {
         ThreadCapabilities::default()
     }

@@ -49,6 +49,8 @@ export function nyxAgentLiveRefresh(
     }
     case "group":
       return { now: [nyxBotGroupKeys.messages(userId, event.id)], lists: [groupList] };
+    case "channel_thread":
+      return { now: [], lists: [nyxBotQueryKeys.channelChats(userId, event.channel_id), nyxBotQueryKeys.threads(userId)] };
     case "channels":
       return {
         now: [],

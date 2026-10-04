@@ -10,7 +10,10 @@ use mongodb::{
 use serde::Serialize;
 use uuid::Uuid;
 
-use super::{assistant_group_service as personal, org_agent_service as org};
+use super::{
+    api_key_mutation_service as transactions, assistant_group_service as personal,
+    org_agent_service as org,
+};
 use crate::{
     errors::{AppError, AppResult},
     models::{
@@ -427,34 +430,48 @@ pub async fn update(
         require_manager_remains(db, &access).await?;
     }
     let mut session = db.client().start_session().await?;
-    session.start_transaction().await?;
-    let changed = db.collection::<AssistantGroup>(GROUPS).update_one(doc! {"_id":&access.group.id,"user_id":&access.group.user_id,
-        "participant_user_ids": &before.participant_user_ids,"member_agent_ids":&before.member_agent_ids,"name":&before.name,"lead_agent_id":&before.lead_agent_id},doc! {"$set": {
-        "name":&access.group.name,"member_agent_ids":&access.group.member_agent_ids,"participant_user_ids":&access.group.participant_user_ids,
-        "lead_agent_id":&access.group.lead_agent_id,"updated_at":bson::DateTime::now()
-    }}).session(&mut session).await?;
-    if changed.matched_count != 1 {
-        return Err(AppError::Conflict(
-            "Group settings changed; reload and try again".into(),
-        ));
-    }
-    if !removed.is_empty() {
-        Box::pin(delete_threads_in_session(
-            db,
-            &before,
-            Some(&removed),
-            &mut session,
-        ))
-        .await?;
-        db.collection::<bson::Document>(crate::models::assistant_group::REQUESTS_COLLECTION_NAME)
-            .delete_many(doc! {"group_id":&before.id,"actor_user_id":{"$in":&removed}})
-            .session(&mut session)
-            .await?;
-        db.collection::<bson::Document>(crate::models::approval_request::COLLECTION_NAME)
-            .delete_many(doc! {"assistant_group.group_id":&before.id,"assistant_group.actor_user_id":{"$in":&removed}})
-            .session(&mut session).await?;
-    }
-    session.commit_transaction().await?;
+    // Await aborts before returning a semantic refusal. Otherwise the next
+    // leave/revocation can race the dropped session's asynchronous cleanup.
+    let db_owned = db.clone();
+    let next = access.group.clone();
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let db = &db_owned;
+            let result = Box::pin(async {
+                let filter = doc! {
+                    "_id": &next.id, "user_id": &next.user_id,
+                    "participant_user_ids": &before.participant_user_ids,
+                    "member_agent_ids": &before.member_agent_ids,
+                    "name": &before.name, "lead_agent_id": &before.lead_agent_id,
+                };
+                let update = doc! {"$set": {
+                    "name": &next.name,
+                    "member_agent_ids": &next.member_agent_ids,
+                    "participant_user_ids": &next.participant_user_ids,
+                    "lead_agent_id": &next.lead_agent_id,
+                    "updated_at": bson::DateTime::now(),
+                }};
+                let changed = db.collection::<AssistantGroup>(GROUPS)
+                    .update_one(filter, update).session(&mut *session).await?;
+                if changed.matched_count != 1 {
+                    return Err(AppError::Conflict(
+                        "Group settings changed; reload and try again".into(),
+                    ));
+                }
+                if !removed.is_empty() {
+                    Box::pin(delete_threads_in_session(db, &before, Some(&removed), &mut *session)).await?;
+                    db.collection::<bson::Document>(crate::models::assistant_group::REQUESTS_COLLECTION_NAME)
+                        .delete_many(doc! {"group_id": &before.id, "actor_user_id": {"$in": &removed}})
+                        .session(&mut *session).await?;
+                    db.collection::<bson::Document>(crate::models::approval_request::COLLECTION_NAME)
+                        .delete_many(doc! {"assistant_group.group_id": &before.id, "assistant_group.actor_user_id": {"$in": &removed}})
+                        .session(&mut *session).await?;
+                }
+                Ok(())
+            }).await;
+            transactions::transaction_result(result)
+        }).await.map_err(transactions::map_transaction_error)?;
     audit(
         db,
         &access.actor,
@@ -526,44 +543,57 @@ pub(crate) async fn delete_contents(
 ) -> AppResult<()> {
     use crate::models::assistant_group;
     let mut session = db.client().start_session().await?;
-    session.start_transaction().await?;
-    let mut filter = doc! {"_id":&group.id,"user_id":&group.user_id,
-    "participant_user_ids": &group.participant_user_ids};
-    if let Some(actor) = actor {
-        filter.insert("$and", vec![doc! {"participant_user_ids": actor}]);
-    }
-    if db
-        .collection::<AssistantGroup>(GROUPS)
-        .update_one(filter, doc! {"$inc":{"admission_generation":1}})
-        .session(&mut session)
-        .await?
-        .matched_count
-        != 1
-    {
-        return Err(missing());
-    }
-    Box::pin(delete_threads_in_session(db, group, None, &mut session)).await?;
-    for collection in [
-        assistant_group::MESSAGES_COLLECTION_NAME,
-        assistant_group::REQUESTS_COLLECTION_NAME,
-        crate::models::assistant_attachment::COLLECTION_NAME,
-        crate::models::assistant_upload_retention::TOMBSTONES,
-    ] {
-        db.collection::<bson::Document>(collection)
-            .delete_many(doc! {"group_id":&group.id})
-            .session(&mut session)
-            .await?;
-    }
-    db.collection::<bson::Document>(crate::models::approval_request::COLLECTION_NAME)
-        .delete_many(doc! {"assistant_group.group_id":&group.id})
-        .session(&mut session)
-        .await?;
-    db.collection::<AssistantGroup>(GROUPS)
-        .delete_one(doc! {"_id":&group.id,"user_id":&group.user_id})
-        .session(&mut session)
-        .await?;
-    session.commit_transaction().await?;
-    Ok(())
+    let db_owned = db.clone();
+    let group_owned = group.clone();
+    let actor_owned = actor.map(str::to_owned);
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let db = &db_owned;
+            let group = &group_owned;
+            let result = Box::pin(async {
+                let mut filter = doc! {"_id":&group.id,"user_id":&group.user_id,
+                "participant_user_ids": &group.participant_user_ids};
+                if let Some(actor) = actor_owned.as_deref() {
+                    filter.insert("$and", vec![doc! {"participant_user_ids": actor}]);
+                }
+                if db
+                    .collection::<AssistantGroup>(GROUPS)
+                    .update_one(filter, doc! {"$inc":{"admission_generation":1}})
+                    .session(&mut *session)
+                    .await?
+                    .matched_count
+                    != 1
+                {
+                    return Err(missing());
+                }
+                Box::pin(delete_threads_in_session(db, group, None, &mut *session)).await?;
+                for collection in [
+                    assistant_group::MESSAGES_COLLECTION_NAME,
+                    assistant_group::REQUESTS_COLLECTION_NAME,
+                    crate::models::assistant_attachment::COLLECTION_NAME,
+                    crate::models::assistant_upload_retention::TOMBSTONES,
+                ] {
+                    db.collection::<bson::Document>(collection)
+                        .delete_many(doc! {"group_id":&group.id})
+                        .session(&mut *session)
+                        .await?;
+                }
+                db.collection::<bson::Document>(crate::models::approval_request::COLLECTION_NAME)
+                    .delete_many(doc! {"assistant_group.group_id":&group.id})
+                    .session(&mut *session)
+                    .await?;
+                db.collection::<AssistantGroup>(GROUPS)
+                    .delete_one(doc! {"_id":&group.id,"user_id":&group.user_id})
+                    .session(&mut *session)
+                    .await?;
+                Ok(())
+            })
+            .await;
+            transactions::transaction_result(result)
+        })
+        .await
+        .map_err(transactions::map_transaction_error)
 }
 
 /// The parent group was already written in this transaction, serializing

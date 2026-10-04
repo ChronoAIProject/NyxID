@@ -69,6 +69,8 @@ pub struct AgentEvent {
 /// channel bot through the Agent Event Gateway. Identifiers only.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChannelOrigin {
+    #[serde(default)]
+    pub thread: Option<Box<super::channel_thread_follow::ThreadTurnBinding>>,
     /// The NyxBot channel (`nyxbot_channels._id`).
     pub nyxbot_channel_id: String,
     /// The chat partition (`nyxbot_threads.partition`): a gateway conversation

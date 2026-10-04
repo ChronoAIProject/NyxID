@@ -1,8 +1,8 @@
 # Realtime voice for NyxBot and specialists
 
-Status: **approved; Phase 2 foundations authorized, flag off and no voice UI**. Researched 2026-10-03
-against NyxID `240852b5` (`origin/main`, 0.46.0). No product implementation or
-provider session was run for this design. Latencies below are engineering budgets,
+Status: **Phase 3 merged (PR #1751, v0.54.0); Phase 4 Grok private beta in implementation, flags off**. Initially researched 2026-10-03
+against NyxID `240852b5` (`origin/main`, 0.46.0). Implementation validation uses
+provider fixtures; no paid provider session has been run. Latencies below are engineering budgets,
 not measurements. Provider documentation is evidence of a contract, not proof of
 account entitlement or browser acoustic performance.
 
@@ -203,6 +203,9 @@ event enum. Raw provider frames are never browser-authorized execution requests.
    tampering cannot inject tool requests, transcripts, usage or instructions.
    Browser mute disables its track immediately; server mute/unmute waits for the
    corresponding provider acknowledgement. Mute does not end billing.
+   The current one-second control tick performs about four reads per live call.
+   This is acceptable with one call per person; change-stream push is a future
+   optimization, retaining live authorization checks and a polling backstop.
 6. End disables capture/playback immediately, requests close through NyxID,
    and drains the sideband/data channel for `session.closed` (five-second local
    finalization budget). Then stop tracks and peer connections. The visible mic
@@ -216,6 +219,27 @@ provider ID or report startup uncertainty. Never cache SDP in logs or durable
 rows to make this replayable. A replacement connection is a new session/offer.
 
 ### xAI relay and why it is selected
+
+Phase 4 implements a separate default-off `assistant:voice-grok` beta and
+`assistant:voice-grok-platform` paid-platform gate. Only Hold to talk is admitted;
+the UI recommends headphones. Automatic speaker mode is refused server-side
+until manual transcription during output and physical loopback AEC are verified.
+Provider fixtures exercise the wire contract without making paid calls.
+
+The POST admits an unstarted relay and returns an empty SDP answer; it accepts
+no SDP offer. Its human, origin-checked control socket claims the starting session
+on the serving replica before resolving credentials again and opening xAI. The
+browser sends bounded PCM16 frames and explicit PTT controls, never provider JSON.
+The provider actor has bounded channels and processes receipts outside cancellable
+timer futures; a coordinator tick cannot abandon a consumed provider event.
+Dropping its owner or exceeding the bounded shutdown aborts the relay task and
+releases the sole upstream socket. Duration freezes before token settlement I/O.
+Shutdown persists pending completed captions and seals incomplete tails without
+admitting new work or deciding confirmations. Checkpoints survive cancellation
+of the active loop while database or classifier work is in progress.
+A recovered Grok lease never reconnects or replays a response: only persisted
+elapsed checkpoints are collectible, with the existing 24-hour uncertain-usage
+reconciliation deadline. Unknown tail usage remains platform exposure.
 
 The browser connects only to NyxID with first-party human authentication. NyxID
 connects upstream with the resolved Bearer key. After `session.created`, configure
@@ -536,7 +560,7 @@ exact-money types and storage paths.
 
 | Storage | Proposed fields and invariants |
 | --- | --- |
-| `assistant_voice_sessions` (new) | Acting `user_id`, `conversation_id`, `agent_id`, resolved service/connection ID, credential class/reference and binding revision, adapter/model/voice, state (`starting`, `active`, `closing`, `closed`, `failed`), `live_slot`, local `client_request_id`, worker lease/generation, created/ready/last-user/closed times, hard deadline, safe end reason. Provider session ID is server-only protected metadata; never a client-chosen locator. No credential copy, SDP, ICE, audio or transcript body. Unique `(user_id,conversation_id)` where `live_slot:true`; idempotency `(user_id,client_request_id)`; expiry/reconciliation index. Clear slot only through fenced closure/recovery. |
+| `assistant_voice_sessions` (new) | Acting `user_id`, `conversation_id`, `agent_id`, resolved service/connection ID, credential class/reference and binding revision, adapter/model/voice, state (`starting`, `active`, `closing`, `closed`, `failed`), `live_slot`, local `client_request_id`, worker lease/generation, created/ready/last-user/closed times, hard deadline, safe end reason. Provider session ID is server-only protected metadata; never a client-chosen locator. No credential copy, SDP, ICE, audio or transcript body. Unique `user_id` where `live_slot:true`; idempotency `(user_id,client_request_id)`; expiry/reconciliation index. Clear slot only through fenced closure/recovery. |
 | `assistant_voice_requests` (new admission records) | User/thread/session, provider delegation/call ID, immutable source-message IDs and transcript cutoff, request version, dedupe identity, preallocated backend turn ID, queue seq, state, queue expiry, `awaiting_confirmation` state, pending acknowledgement IDs, continuation ownership, result-message ID, notification/announcement receipt. No duplicated prompt/tool payload. Unique provider-delegation identity and `(conversation_id,queue_seq)`. A transaction claims exactly one request into the existing turn fence. |
 | `assistant_messages` (additive) | Reuse `via:"voice"`; optional `voice:{session_id,segment_id,speaker,start_ms,end_ms,revision,sealed,delivery,request_id,backend_message_id}`. Existing `turn_id` remains a string: transcript-only segments use a separate UUID grouping ID and are explicitly not admitted execution turns; claim associates request input with its preallocated execution turn. DTOs make that distinction explicit. Deduplicate segments by session/speaker/segment identity; use existing conversation seq allocator. No raw audio attachment. |
 | `ActiveTurn` / turn admission (additive) | Optional immutable initiating message/seq and voice request ID. Claim validates all referenced input rows belong to the actor/thread and are unclaimed. Scope prompt deltas to a consumed voice watermark; preserve on continuation/reset. Ordinary text writes retain current semantics. |
@@ -560,11 +584,11 @@ cleanup and Stop continue when the feature flag is disabled.
 | --- | --- |
 | `GET /voice/options?conversation_id=...` | Authorized realtime services and valid connection/binding choices, adapter, verified models/voices, availability reason, lane prices and billing owner label. Metadata only, no credential provisioning side effects. |
 | Existing `POST /drafts` | Create a normal private thread for selected agent before the first call if necessary. |
-| `POST /conversations/{id}/voice-sessions` | `{client_request_id,service_id,connection_id?,key_source,model,voice,input_mode,sdp_offer?}`. OpenAI SDP required, xAI forbidden. Returns local session ID, transport, limits and OpenAI SDP answer. It does not change the thread's NyxAgent profile. |
+| `POST /conversations/{id}/voice-sessions` | `{client_request_id,preferences:{service_id,connection_id?,key_source,model,voice,input_mode,language?,notify_on_completion},sdp_offer}`. OpenAI SDP required, xAI forbidden. Returns `{session,sdp_answer}`; the safe session DTO carries state, timing and revision, and options disclose limits. It does not change the thread's NyxAgent profile. |
 | `GET /conversations/{id}/voice-sessions/{sid}` | Authoritative safe state and task IDs for reconnect. No provider IDs, SDP, key IDs or transcript dump. |
 | `GET /conversations/{id}/voice-sessions/{sid}/stream` (WS) | Human control socket and normalized captions/task state; xAI audio additionally flows here. Authenticate before accepting input or making an upstream connection. No bearer/query tokens in the URL. |
-| `POST /conversations/{id}/voice-sessions/{sid}/control` | Idempotent `{command_id,action:"mute"|"unmute"|"end"}`; durable desired state, safe status. Used by ordinary HTTP controls and cross-replica recovery. |
-| `POST /conversations/{id}/voice-requests/{rid}/cancel` | `{command_id}`; server resolves expected active turn and performs normal Stop or queued cancellation. No caller-supplied tool/authority. Existing `/stop` remains available. |
+| `POST /conversations/{id}/voice-sessions/{sid}/control` | Idempotent `{command_id,expected_revision,action:"mute"|"unmute"|"end"}`; durable desired state, safe status. Used by ordinary HTTP controls and cross-replica recovery. |
+| `POST /conversations/{id}/voice-requests/{rid}/cancel` | Empty body; idempotent by request ID. Server resolves expected active turn and performs normal Stop or queued cancellation. No caller-supplied tool/authority. Existing `/stop` remains available. |
 | `GET /conversations/{id}/voice-requests/{rid}` | Owner-authorized request state, turn ID and pending acknowledgement IDs; remains readable after flag disable. |
 | Existing acknowledgement route | Clicking Allow/Deny is an optional fallback racing the spoken decision path. Voice-associated decisions return `continuation_owner:"server"` and a receipt, so the upgraded frontend does not also send a continuation. Server rechecks existing exact-card policy. |
 | Server-only spoken decision adapter (Phase 3) | No client-supplied decision/transcript endpoint. After §11 playback/input gates and bounded classification, call the existing acknowledgement service with source `voice`; accept only authoritative provider segments. |
@@ -621,7 +645,7 @@ centrally in `errors/mod.rs` during implementation.
 | --- | --- |
 | `conversation.created`, `session.created`, `session.updated` | Server-only provider identity/config; readiness after validated acknowledgement. |
 | `input_audio_buffer.append` / binary audio | Adapter-generated from bounded authenticated mic input; never raw browser JSON forwarding. |
-| `input_audio_buffer.commit` | Manual endpoint from speech gate/PTT; requires `turn_detection:null`. |
+| `input_audio_buffer.commit` | Manual endpoint from speech gate/PTT; requires `turn_detection: {"type": null}`. |
 | `input_audio_buffer.speech_started/stopped` | VAD hints in supported automatic mode; never task cancellation or confirmation authority. |
 | `conversation.item.input_audio_transcription.updated` | Replace draft text keyed by item ID; requires `grok-transcribe`. |
 | `conversation.item.input_audio_transcription.completed` | Final user text and request boundary; perform echo/intent checks before accepting work. |
@@ -686,7 +710,7 @@ audio transport only if these measurements require it; that is additional scope.
 
 Default `server_vad` can stop generation before NyxID verifies speech. Ducking
 only in the browser cannot undo that. The intended protected path is
-`turn_detection:null` with local VAD/endpointing and NyxID-controlled response
+`turn_detection: {"type": null}` with local VAD/endpointing and NyxID-controlled response
 creation/cancellation:
 
 1. While output plays, a candidate voiced input ducks output by roughly 12 dB
@@ -707,6 +731,20 @@ creation/cancellation:
    dependency. Do not ship `server_vad` as meeting this guarantee. Ship a labelled
    PTT/headphone beta first and gate automatic mode on provider transcription
    and loopback AEC evidence.
+
+The Phase 4 PTT gate measures committed voiced samples, checks a bounded output
+PCM reference and uses the normal billed, tool-less one-shot helper to classify
+meaningful interruption versus backchannel/uncertainty. No lexical allow/deny
+lists are used. Fixtures substitute that advisory classifier. A provider VAD
+event cannot cancel speech or backend work. Truncation retains the provider item
+after `response.done` so buffered playback can still be interrupted; cancelled
+output transcripts cannot arm a spoken confirmation. Browser fixtures verify
+resampling, one receive-track speaker path, bounded buffers and cleanup. Separate
+capture/playback generations reject worklet messages delayed across PTT holds or
+output flushes; stale PCM cannot enter the next utterance and stale playback marks
+cannot advance a later readback. The worklet is a separate same-origin asset.
+These fixtures do
+not establish physical AEC performance or live-provider manual-mode behavior.
 
 GPT-Live handles backchannels and duplex interruptions natively. Do not layer
 a half-duplex output cancellation rule over it. AEC still matters; its full-duplex
@@ -750,15 +788,20 @@ monotonic mapping to server-observed output and must fail closed on gaps/reconne
 Only sealed authoritative input segments whose speech starts strictly after
 this boundary qualify: GPT-Live sideband input transcript, or xAI completed input
 transcription. Segments overlapping any assistant playback are discarded.
-Discard segments whose normalized text matches recent assistant output, including
-an echoed “yes”. Bound and expire the output comparison buffer; do not persist
-it or use lexical approve/deny lists. AEC remains necessary; these guards add to
+Discard segments whose normalized text is contained in nearby assistant output,
+including an echoed “yes”: require
+`user.start_ms < output.end_ms + playback_lag_ms + 1500` and
+`user.end_ms > output.start_ms`. Temporal playback overlap always
+rejects input; containment alone cannot reject a reply matching older speech
+(for example, “yes” spoken 20 seconds earlier). Bound and expire the output
+comparison buffer; do not persist it or use lexical approve/deny lists. AEC remains necessary; these guards add to
 §10's Grok manual-transcription/loopback gate, without claiming unsupported VAD.
 
 NyxID classifies the **user's utterance**, against this exact action, through a
 bounded, stateless one-shot model call using only the server summary and sealed
 user transcript as untrusted data. Reuse the U1 title-generation inference helper
-once it lands, the person's resolved inference credential and normal billing.
+(`services/assistant_oneshot_inference.rs::one_shot_text`), the person's resolved
+inference credential and normal billing.
 Require a closed `approve | deny | unclear` response, no tools/history/state,
 fixed input/output limits and timeout; failure or malformed output is `unclear`.
 There are no hardcoded word lists. A conversational model claim, function call,
@@ -796,12 +839,36 @@ claimed requests without replaying execution. It never treats expiry as approval
 
 ### Discovery and choice
 
-List only caller-visible, active services with `inference.realtime:true` and a
-supported adapter. Batch through existing service visibility, `OwnerGrants`,
+List only caller-visible, active services with validated `inference.voice` metadata
+intersected with compiled, supported adapter protocols (OpenAI Live in Phase 3). Batch through existing service visibility, `OwnerGrants`,
 provider status and connection resolvers; no per-option membership query and
 no across-request grant cache. Distinguish catalog metadata, usable binding,
 model entitlement and temporary provider health. A custom service marked
 realtime does not automatically become an OpenAI/xAI transport.
+
+
+`ServiceInference.voice` is additive and serde-defaulted: `protocol` (`openai_live`
+or `xai_realtime`, with unknown future protocols ineligible for execution), `models`
+(`id`, `label`, optional `default`), `voices` (`id`, `label`), `usage_source`, and
+`billing_metrics`. Compatibility `realtime` is projected true whenever voice is
+present. Response-only `capabilities.supports_realtime_voice` derives from the
+same metadata in catalog, keys and MCP; it is never independently stored.
+
+Startup seeds OpenAI `gpt-live-1` and xAI `grok-voice-think-fast-2.0`, plus their
+documented voice IDs, without any prices. A separate null-guarded update fills
+only `inference.voice` on existing inference blocks. Both seed paths skip
+`inference_admin_modified:true`, including whole-block and voice null clears.
+Admin edits preserve this marker. Unknown fields remain readable by old replicas.
+IDs/labels are bounded to 128 bytes, model lists to 32, voices to 64, metrics to
+six unique duration/token units; IDs cannot contain URLs and at most one model
+is default. The first listed voice is the fallback when no voice is selected.
+
+The existing service Inference editor owns these choices. Adding an officially
+verified Mini later requires only a catalog edit. Options and start validate the
+catalog choices again; no runtime model-name or voice-name allowlist exists.
+Adapters retain fixed origins and protocol/usage-source validation. Metadata alone
+never enables an unshipped adapter or overrides the paid platform rollout gate.
+Call setup displays the resolved model/voice, credential class, tariff and payer.
 
 Platform resolves through the existing shared platform ACL **before decrypting**
 the catalog master credential; fixed catalog destination, no user headers,
@@ -849,13 +916,24 @@ decimal strings. No floats or minute rounding in credit movements.
 
 Add a synced duration component to the applicable BYOK/platform lane while
 preserving existing text-token prices. A voice call reports zero token quantities
-unless real provider tokens are intentionally priced; it must not fall through
+unless actual provider-reported tokens have configured components; it must not fall through
 to byte-estimated token billing. Ordinary text requests report zero seconds.
-Missing matching lane remains free under existing semantics; pending primary
-still follows the existing whole-lane fallback. For a **paid voice offering**,
-options/start must explicitly refuse when its required duration component is
-not synced instead of presenting a misleading free quote. An explicitly free
-pilot can use metering-only usage with no benefits consumed.
+Own-key voice without a `byok_pricing` lane, or with a synced primary but no
+`voice_seconds` primary/component, is allowed as metering-only: record seconds
+without charging allowances, grants or wallets, even when legacy platform pricing
+exists. These options return no voice quote. The UI discloses no NyxID voice charge
+and that provider charges still apply. An existing BYOK primary must be synced;
+an explicitly configured duration price must also be synced. These voice admission
+rules do not change ordinary text billing or its configured token prices.
+
+| Credential and lane state | Voice admission and duration billing |
+| --- | --- |
+| BYOK: no lane | Metering-only; no voice charge or quote. |
+| BYOK: synced primary, no `voice_seconds` primary/component | Metering-only; no voice charge or quote. |
+| BYOK: pending/failed primary | Refuse. |
+| BYOK: pending/failed `voice_seconds` primary/component | Refuse. |
+| BYOK: synced primary and duration price | Quote and charge the configured duration price. |
+| Platform | Require synced primary and duration price plus the separate operator flag; quote and charge normally. |
 
 Initial service prices are per-provider tariffs, as the current lane schema is
 per service rather than per model. Do not invent model-specific price lookup.
@@ -881,16 +959,31 @@ pricing decision. Never advertise an unverified Mini discount.
   provisional settlement uses completed seconds and the same disclosed terminal
   fraction policy. Never round independently per audio chunk/window. Initialization
   minimum accounting is provider-specific and not applied to Grok.
-* The reported Grok text-input charge is an unresolved pricing risk for repeated
-  context injection. If confirmed, include that cost in the disclosed duration tariff, track
-  count-only diagnostic provenance and keep appends bounded. Do not map every
-  frame/tool receipt to the existing `requests` metric. If separately itemized
-  pricing is wanted, introduce a dedicated verified text-input metric in a later
-  all-replica change after establishing which item types are chargeable.
+* A separate Grok text-input fee remains an unresolved pricing question. If a
+  confirmed fee is not represented in authoritative token usage, the admin can
+  fold it into the disclosed seconds tariff. Actual reported tokens use configured
+  token components; never synthesize a second token count, duration quantity or
+  per-frame request charge for the same usage. No new text-input money path or
+  dedicated metric is introduced here. Keep context appends bounded.
 * Reuse `RealtimeLlmUsageCollector` for actual Grok `response.done` token
-  provenance/dedup only where meaningful. Disable uncovered-byte estimation on
+  provenance and configured token-component settlement, keyed by response ID.
+  Duration is settled only from the duration checkpoint; token events carry zero
+  seconds, and repeated response IDs reuse deterministic settlement identities.
+  xAI has no provider duration event: its token counts must never become a duration
+  estimate. Implement this adapter path in Phase 4. Disable uncovered-byte estimation on
   this voice surface. GPT-Live client delegation has no Responses backend to
   double-charge; NyxAgent work is already metered on its normal path.
+
+Grok reserves tokens through the existing billing service before each response
+or scripted utterance, using a deterministic session/response-sequence identity.
+The actor binds one provider response ID to that reservation and deduplicates
+terminal events before persisting the ordinary settlement intent. Actual token
+settlement uses only provider-reported counts; byte estimates apply only to the
+reservation budget, never the final charge. Token rows carry zero seconds and
+duration rows carry zero tokens. A text-only BYOK lane may therefore meter voice
+seconds freely while still disclosing and charging its configured reported-token
+components. A missing terminal report remains uncertain exposure; no estimated
+tokens are invented on close.
 
 ### Reserve before spending; settle once
 
@@ -954,6 +1047,24 @@ outer grid, 30px identity gutter, 680px content column and measured composer
 controls. The full transcript/cards remain available without ending the call.
 End voice and Stop task are distinct labelled controls. Results interrupt only
 at a natural pause; an important card also remains visually discoverable.
+
+The full panel has separate **You** and **Assistant** caption regions and a live
+elapsed timer. Speaker mute controls local playback only; microphone mute is a
+separate control and neither ends billing. Minimize keeps the same media session
+mounted in a floating bar with timer, status, microphone mute and End; Restore
+returns to the full panel while the chat stays usable. A competing tab shows
+**End the current call first**. The server's unique per-person live slot remains
+the authority; no browser-only lock or automatic takeover.
+
+On closure, append exactly one compact **Call receipt** through the existing
+thread message/sequence path with `via: "voice"`. Its deterministic server
+snapshot records elapsed duration, requests started/completed/still queued/
+cancelled, confirmations decided, and links to available results. The receipt
+is a call-end snapshot, not an LLM summary or a claim that queued work completed.
+Its durable session-bound identity and transactional marker deduplicate normal
+close, disconnect recovery and reconciliation. Results that settle later remain
+in the thread through the usual result path.
+
 
 Follow `DESIGN.md`: Space Grotesk headings, Manrope text, JetBrains Mono timing;
 semantic theme tokens, warm purple only for identity/active interaction, neutral
@@ -1072,7 +1183,7 @@ its no-recording rule changes a provider's default retention policy.
   session never 105; confirmed initialization-only charge, zero/short session,
   disconnected finalization, duplicate checkpoints, fixed-price windows, exact
   allowance/grant/wallet splits, token-primary-zero/duration-component-positive,
-  missing lane/free pilot, pending primary/component, renewal failure, replayed
+  missing BYOK lane or duration component/metering-only with no quote, pending primary/component, renewal failure, replayed
   reconcile, ledger integrity and Lago dedupe. Unconfirmed seconds cannot become
   invented final charges. Test Grok subsecond carry without per-window rounding.
 * Confirmation tests: approve, deny, unclear twice, silence and expiry; overlapping
@@ -1129,10 +1240,12 @@ PTT is a usable fallback and an honestly labelled earlier beta.
 
 ## 17. Shippable implementation phases and rollout
 
-Phase 1 is approved. Phase 2 is authorized. Each implementation phase is its own
+Phases 1–3 are approved. Phase 4 is authorized on `feat/voice-grok`, stacked on
+Phase 3 with its HMAC credential-fingerprint fix. Each implementation phase is its own
 PR to main; the owner reviews, versions and merges. Do not commit during this
 implementation session. Composer UI is owned by another implementer; Phase 2
-must not edit either composer. Mic/panel work waits for Phase 3 coordination.
+must not edit either composer. U1 (`36e3ef04`, 0.48.0) is now merged into the
+Phase 3 worktree; its one-shot helper and composer are the integration base.
 
 | Phase | Deliverable that can ship independently | Exit gate |
 | --- | --- | --- |
@@ -1150,8 +1263,17 @@ migration is complete; this feature does not repeat or bypass its cutover.
 Create additive indexes before enabling; preserve legacy field defaults and
 all unrelated traffic paths without new voice database reads.
 
-Enable a test-person override, then a small cohort, with platform and own-key
-pricing explicitly configured. Track known/unknown duration, setup failures,
+Enable a test-person override, then a small cohort, with platform pricing and
+any paid own-key pricing explicitly configured.
+Phase 3 uses a separate default-off `assistant:voice-openai-platform` gate for
+platform-paid sessions. Platform sessions require synced duration pricing.
+BYOK allows disclosed metering-only use when its lane is absent or its synced
+primary has no duration price; explicitly authored primary/duration prices must
+be synced.
+Unknown closure retains the person's live slot until provider finalization or the call deadline. Leases
+renew during setup and slow inference; settlement retries retain their own
+completion marker. A closed socket is never proof of zero provider cost.
+ Track known/unknown duration, setup failures,
 lost sidebands, duplicate suppression, queue delay, interruptions, confirmation
 failures and exact settlement lag. Flag checks apply at admission; the active
 session sweep treats flag disable as orderly voice shutdown. Queued accepted

@@ -11,6 +11,11 @@ target_version=${target_version#nyxid }
 local_image="ghcr.io/chronoaiproject/nyxid/nyxid-node-machine:$target_version-e2e-$$"
 cleanup() {
     test_status=$?
+    if [ "$test_status" -ne 0 ]; then
+        # The machine emits metadata-only diagnostics; capture them before the
+        # failed fixture is removed so restart/readiness failures are actionable.
+        docker logs --tail 80 "$name" >&2 || true
+    fi
     for companion in $(docker ps -aq --filter "label=dev.nyxid.machine.updater=$name"); do
         if [ "$test_status" -ne 0 ]; then docker logs --tail 40 "$companion" >&2 || true; fi
         docker rm -f -v "$companion" >/dev/null 2>&1 || true

@@ -1029,6 +1029,7 @@ async fn server_main() {
     // NyxBot reaction to finished links and new bots.
     handlers::nyxbot::spawn_live_dispatch(state.clone());
     handlers::machine_update::spawn(state.clone());
+    services::machine_access_service::spawn(state.clone());
     {
         let live = state.assistant_live.clone();
         let db = state.db.clone();
