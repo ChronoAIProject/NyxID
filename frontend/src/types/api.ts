@@ -346,6 +346,7 @@ export interface WsFrameInjection {
 }
 
 export interface ServiceCapabilities {
+  readonly supports_realtime_voice?: boolean;
   readonly supports_proxy_read: boolean;
   readonly supports_proxy_write: boolean;
   readonly supports_proxy_binary_upload: boolean;

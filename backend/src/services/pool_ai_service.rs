@@ -742,6 +742,7 @@ mod tests {
             wire_protocol: protocol,
             model_list: false,
             realtime: false,
+            voice: None,
         });
         s
     }

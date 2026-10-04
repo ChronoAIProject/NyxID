@@ -107,7 +107,7 @@ pub async fn for_key(
     user: &str,
     key: Option<&str>,
 ) -> AppResult<Option<ChatAuthority>> {
-    for_key_with_access(db, user, key, None).await
+    Box::pin(for_key_with_access(db, user, key, None)).await
 }
 
 pub async fn for_key_with_access(
@@ -244,6 +244,27 @@ async fn fence(
         .ok_or_else(not_found)?;
     if key.expires_at.is_some_and(|expiry| expiry <= Utc::now()) {
         return Err(not_found());
+    }
+    // Cards are execution authority. Human decisions and internal NyxBot paths
+    // must enforce the same live org/group ACL as a new tool request.
+    if let Some(owner) = row.agent_owner_id.as_deref() {
+        let access = match chat.org_agent_access.as_ref() {
+            Some(access) if access.matches(&row.user_id, owner) => Some(access.clone()),
+            Some(_) => return Err(not_found()),
+            None => {
+                super::org_agent_service::resolve_key_access(db, &row.user_id, Some(owner)).await?
+            }
+        };
+        if let Some(access) = access {
+            super::org_group_service::check_thread_participation(db, &row, &access).await?;
+            if row.group_request_id.is_some()
+                && let Some(id) = row.group_id.as_deref()
+            {
+                let group =
+                    super::org_group_service::get(db, &row.user_id, id, Some(&access)).await?;
+                super::org_group_service::fence(db, &group, session).await?;
+            }
+        }
     }
     Ok((row, key))
 }
@@ -479,7 +500,7 @@ pub async fn request_tracked(
         .and_run2(async move |session| {
             // Do not embed the card transaction in MongoDB's retry frames.
             let operation = Box::pin(async {
-                let (conversation, _) = fence(&db, &chat, session).await?;
+                let (conversation, _) = Box::pin(fence(&db, &chat, session)).await?;
                 let mut row = candidate.clone();
                 // Ordinary denials stay bound to the initiating user/orchestrator
                 // message across event turns. Only trigger runs use the active turn.
@@ -807,8 +828,16 @@ pub async fn decide(
     id: &str,
     allow: bool,
 ) -> AppResult<AssistantAcknowledgement> {
-    super::assistant_nyxagent::get(db, user, conversation).await?;
-    decide_as(db, user, Some(conversation), id, allow, Decider::User, None).await
+    Box::pin(decide_as(
+        db,
+        user,
+        Some(conversation),
+        id,
+        allow,
+        Decider::User,
+        None,
+    ))
+    .await
 }
 
 /// Decide a card. The owner decides from the card's conversation; the owner's
@@ -823,6 +852,20 @@ pub async fn decide_as(
     decider: Decider,
     reason: Option<&str>,
 ) -> AppResult<AssistantAcknowledgement> {
+    decide_with_voice(db, user, conversation, id, allow, decider, reason, None).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn decide_with_voice(
+    db: &Database,
+    user: &str,
+    conversation: Option<&str>,
+    id: &str,
+    allow: bool,
+    decider: Decider,
+    reason: Option<&str>,
+    voice: Option<super::voice::confirmation::DecisionFence>,
+) -> AppResult<AssistantAcknowledgement> {
     let db = db.clone();
     let user = user.to_owned();
     let conversation = conversation.map(str::to_owned);
@@ -834,7 +877,7 @@ pub async fn decide_as(
     let row = session
         .start_transaction()
         .and_run2(async move |session| {
-            let operation = async {
+            let operation = Box::pin(async {
                 let collection = db.collection::<AssistantAcknowledgement>(ACKS);
                 let mut filter = doc! {"_id": &id, "user_id": &user};
                 if let Some(conversation) = &conversation {
@@ -848,6 +891,9 @@ pub async fn decide_as(
                     .session(&mut *session)
                     .await?
                     .ok_or_else(not_found)?;
+                if let Some(voice)=&voice {
+                    super::voice::confirmation::fence_decision(&db,session,&row,voice).await?;
+                }
                 if row.status != "pending" || row.expires_at <= Utc::now() {
                     return Err(AppError::Conflict(
                         "Acknowledgement is no longer pending".into(),
@@ -882,7 +928,7 @@ pub async fn decide_as(
                     agent_name: String::new(),
                     guest: target.guest_turn,
                 };
-                let (_, key) = fence(&db, &chat, session).await?;
+                let (_, key) = Box::pin(fence(&db, &chat, session)).await?;
                 let subagent = target.role == AgentRole::Subagent;
                 let now = Utc::now();
                 if row.kind == "service" {
@@ -1054,8 +1100,15 @@ pub async fn decide_as(
                         .session(&mut *session)
                         .await?;
                 }
+                if let Some(voice)=&voice {
+                    super::audit_service::log_actor_event_in_session(&db,session,voice.audit_key.as_ref().as_ref(),
+                        &super::audit_service::AuditActor{user_id:user.clone(),ip_address:None,user_agent:None,api_key_id:None,api_key_name:None},
+                        "assistant_confirmation_decided",json!({"source":"voice","conversation_id":row.conversation_id,
+                            "session_id":voice.session.id,"acknowledgement_id":row.id,"request_id":row.voice_request_id,
+                            "continuation_receipt_id":row.continuation_receipt_id})).await?;
+                }
                 Ok(row)
-            }
+            })
             .await;
             mutations::transaction_result(operation)
         })
@@ -1080,7 +1133,7 @@ pub async fn consume_action(
     let mut session = db.client().start_session().await?;
     session.start_transaction().and_run2(async move |session| {
         let operation = async {
-            fence(&db, &chat, session).await?;
+            Box::pin(fence(&db, &chat, session)).await?;
             let result = db.collection::<AssistantAcknowledgement>(ACKS).update_one(
                 doc! {"_id": &id, "user_id": &chat.user_id, "conversation_id": &chat.conversation_id,
                     "api_key_id": &chat.api_key_id, "kind": "action", "tool_name": &tool,

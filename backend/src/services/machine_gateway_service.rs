@@ -217,6 +217,7 @@ pub async fn services(
                     wire_protocol: InferenceWireProtocol::OpenaiCompletions,
                     model_list: false,
                     realtime: false,
+                    voice: None,
                 })
             } else {
                 members.first().and_then(|row| row.inference.clone())
@@ -529,6 +530,7 @@ mod tests {
                 wire_protocol: InferenceWireProtocol::AnthropicMessages,
                 model_list: false,
                 realtime: false,
+                voice: None,
             }),
             git: Some(GitHttp {
                 origin: "https://git.example.test:8443".into(),

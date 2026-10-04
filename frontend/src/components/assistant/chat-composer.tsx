@@ -9,7 +9,7 @@ import {
   type ReactNode,
   type UIEvent,
 } from "react";
-import { Send, Square } from "lucide-react";
+import { Mic, Send, Square } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { AgentAvatar } from "@/components/assistant/nyxbot-agent-avatar";
 import {
@@ -121,6 +121,8 @@ interface ChatComposerProps {
    */
   readonly focusRequest?: number;
   readonly controls?: ReactNode;
+  readonly attachmentButton?: ReactNode;
+  readonly attachments?: ReactNode;
   readonly hasAttachments?: boolean;
   readonly uploadBlocked?: boolean;
   readonly onFiles?: (files: File[]) => void;
@@ -133,6 +135,7 @@ interface ChatComposerProps {
   readonly mentions?: readonly ComposerMention[];
   readonly onSend: (content: string) => Promise<void>;
   readonly onStop: () => Promise<void>;
+  readonly onVoice?: () => void;
 }
 
 interface PendingDraftTransition {
@@ -155,6 +158,8 @@ function DraftedChatComposer({
   draftKey,
   focusRequest = 0,
   controls,
+  attachmentButton,
+  attachments,
   hasAttachments = false,
   uploadBlocked = false,
   onFiles,
@@ -162,8 +167,11 @@ function DraftedChatComposer({
   mentions,
   onSend,
   onStop,
+  onVoice,
 }: ChatComposerProps) {
   const locked = active && !allowActiveInput;
+  const [dragging, setDragging] = useState(false);
+  const dragDepth = useRef(0);
   const mentionListId = `${useId()}-mentions`;
   const [mention, setMention] = useState<MentionQuery>();
   const [mentionIndex, setMentionIndex] = useState(0);
@@ -619,21 +627,6 @@ function DraftedChatComposer({
     <div
       // Opaque: the transcript scrolls underneath the composer, so its band
       // must hide it instead of showing text around and below the input.
-      onDragOver={(event) => {
-        if (onFiles && event.dataTransfer.types.includes("Files")) event.preventDefault();
-      }}
-      onDrop={(event) => {
-        if (onFiles && event.dataTransfer.files.length) {
-          event.preventDefault();
-          onFiles(Array.from(event.dataTransfer.files));
-        }
-      }}
-      onPaste={(event) => {
-        if (onFiles && event.clipboardData.files.length) {
-          event.preventDefault();
-          onFiles(Array.from(event.clipboardData.files));
-        }
-      }}
       data-composer-band
       className="relative shrink-0 bg-background"
       style={{
@@ -651,8 +644,47 @@ function DraftedChatComposer({
       >
         {controls}
         <div
+          data-composer-input
+          onDragEnter={(event) => {
+            if (!onFiles || !event.dataTransfer.types.includes("Files")) return;
+            event.preventDefault();
+            dragDepth.current += 1;
+            if (!locked && !disabled && !sending) setDragging(true);
+          }}
+          onDragLeave={(event) => {
+            event.preventDefault();
+            dragDepth.current = Math.max(0, dragDepth.current - 1);
+            if (!dragDepth.current) setDragging(false);
+          }}
+          onDragOver={(event) => {
+            if (onFiles && event.dataTransfer.types.includes("Files")) {
+              event.preventDefault();
+              event.dataTransfer.dropEffect = locked || disabled || sending ? "none" : "copy";
+            }
+          }}
+          onDrop={(event) => {
+            dragDepth.current = 0;
+            setDragging(false);
+            if (onFiles && event.dataTransfer.files.length) {
+              event.preventDefault();
+              if (!locked && !disabled && !sending) onFiles(Array.from(event.dataTransfer.files));
+            }
+          }}
+          onPaste={(event) => {
+            if (onFiles && event.clipboardData.files.length) {
+              event.preventDefault();
+              if (!locked && !disabled && !sending) onFiles(Array.from(event.clipboardData.files));
+            }
+          }}
+          className={cn("relative ml-[30px] rounded-xl border bg-card px-3 py-2 transition-colors focus-within:border-hairline-strong", dragging ? "border-primary ring-1 ring-primary" : "border-hairline")}
+        >
+          {dragging && <div role="status" className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center rounded-xl bg-card/95 text-[12px] font-medium">Drop files to attach</div>}
+          {attachments}
+          <div className="flex items-start gap-1.5">
+          {attachmentButton}
+          <div
           ref={composerRef}
-          className={`relative ml-[30px] flex gap-1.5 rounded-xl border border-hairline bg-card px-3 py-2 transition-colors focus-within:border-hairline-strong ${
+          className={`relative flex min-w-0 flex-1 gap-1.5 ${
             multiline ? "flex-col items-stretch" : "items-start"
           }`}
         >
@@ -777,6 +809,9 @@ function DraftedChatComposer({
               >
                 <Square className="fill-current" />
               </Button>
+            ) : onVoice && !content.trim() && !hasAttachments && !uploadBlocked ? (
+              <Button type="button" variant="primary" size="icon" disabled={sending || disabled}
+                onClick={onVoice} aria-label="Open voice call"><Mic /></Button>
             ) : (
               <Button
                 type="button"
@@ -793,6 +828,8 @@ function DraftedChatComposer({
                 <Send />
               </Button>
             )}
+          </div>
+        </div>
           </div>
         </div>
       </div>

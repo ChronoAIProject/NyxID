@@ -52,6 +52,7 @@ pub(crate) fn owner_auth(owner: &str) -> AppResult<AuthUser> {
         Uuid::parse_str(owner).map_err(|_| AppError::NotFound("Conversation not found".into()))?;
     Ok(AuthUser {
         org_agent_access: None,
+        assistant_group_id: None,
         assistant_agent_owner_id: None,
         assistant_operation_scopes: Default::default(),
         user_id,
@@ -161,7 +162,9 @@ pub(crate) async fn team_pool_limit(state: &AppState, owner: &str) -> u32 {
 
 fn event_turn(conversation_id: &str) -> TurnStart {
     TurnStart {
+        org_access: None,
         attachment_ids: Vec::new(),
+        group_request_id: None,
         group_attachments: Vec::new(),
         trigger: None,
         conversation_id: Some(conversation_id.to_owned()),
@@ -189,7 +192,16 @@ fn event_turn(conversation_id: &str) -> TurnStart {
 /// and reach the agent with its next turn.
 pub(crate) async fn wake(state: &AppState, owner: &str, id: &str) {
     let result: AppResult<()> = async {
-        let row = Box::pin(engine::get(&state.db, owner, id)).await?;
+        let (row, org_access) = match Box::pin(engine::get_authorized(&state.db, owner, id)).await {
+            Ok(authorized) => authorized,
+            Err(AppError::NotFound(_) | AppError::Forbidden(_)) => {
+                return crate::services::org_group_service::drop_ineligible_events(
+                    &state.db, owner, id,
+                )
+                .await;
+            }
+            Err(error) => return Err(error),
+        };
         if row.pending_events.is_empty() || live_turn(&row, Utc::now()).is_some() {
             return Ok(());
         }
@@ -223,7 +235,41 @@ pub(crate) async fn wake(state: &AppState, owner: &str, id: &str) {
         {
             return Ok(());
         }
-        match Box::pin(start_acquired(state, owner, event_turn(id), permit)).await {
+        let mut start = event_turn(id);
+        start.org_access = org_access;
+        let mut group_seen = None;
+        if row.group_request_id.is_some()
+            && let Some(group_id) = row.group_id.as_deref()
+        {
+            let access = crate::services::org_group_service::get(
+                &state.db,
+                owner,
+                group_id,
+                start.org_access.as_ref(),
+            )
+            .await?;
+            let agent = team::agent_for_conversation(&state.db, &row).await?;
+            start.note =
+                Some(crate::services::org_group_service::note(&state.db, &access, &agent).await?);
+            let (transcript, newest) = crate::services::org_group_service::transcript(
+                &state.db,
+                &access,
+                row.group_seen_seq,
+            )
+            .await?;
+            start.text = transcript;
+            group_seen = Some(newest);
+        }
+        match Box::pin(start_acquired(state, owner, start, permit)).await {
+            Ok(Started::Turn { .. }) if group_seen.is_some() => {
+                crate::services::assistant_group_service::set_seen(
+                    &state.db,
+                    owner,
+                    id,
+                    group_seen.unwrap_or(row.group_seen_seq),
+                )
+                .await
+            }
             // A drained-then-raced queue or a just-destroyed agent is harmless.
             Ok(_) | Err(AppError::Conflict(_)) => Ok(()),
             Err(error) => Err(error),
@@ -564,7 +610,11 @@ pub(crate) async fn turn_notes(
     }
     if let Some(agent) = agent {
         if agent.user_id != row.user_id {
-            notes.push_str("\n\nThis specialist belongs to an organization. Its memory notes are shared organization data, visible to maintainers. NEVER store a member's private messages, personal content or secrets in shared memory. This thread is private to the acting member; never read or disclose another member's thread.");
+            if row.group_request_id.is_some() {
+                notes.push_str("\n\nThis is a shared organization group. Never read or disclose a member's private threads. Shared agent memory must never contain a member's private content.");
+            } else {
+                notes.push_str("\n\nThis specialist belongs to an organization. Its memory notes are shared organization data, visible to maintainers. NEVER store a member's private messages, personal content or secrets in shared memory. This thread is private to the acting member; never read or disclose another member's thread.");
+            }
         }
         notes.push_str(&team::memory_note(agent));
         if !agent.machine_node_ids.is_empty() {
@@ -572,10 +622,12 @@ pub(crate) async fn turn_notes(
             notes.push_str(crate::services::machine_tools::USE_INSTRUCTIONS);
         }
         // Only the agent's own threads hear about its other chats.
-        if row.channel.is_none() {
+        if row.channel.is_none() && row.group_request_id.is_none() {
             notes.push_str(&in_progress_note(state, row, agent).await);
         }
-        if let Some(note) = super::assistant_group::group_note(state, row, agent).await {
+        if row.group_request_id.is_none()
+            && let Some(note) = super::assistant_group::group_note(state, row, agent).await
+        {
             notes.push_str("\n\n");
             notes.push_str(&note);
         }
@@ -670,7 +722,9 @@ pub(crate) async fn assign(
         state,
         owner,
         TurnStart {
+            org_access: None,
             attachment_ids: Vec::new(),
+            group_request_id: None,
             group_attachments: Vec::new(),
             trigger: None,
             conversation_id: Some(home.id),
@@ -733,13 +787,20 @@ pub(crate) async fn execute_tool(
             &state.db, chat,
         ))
         .await?;
-        let mut normalized = Box::pin(crate::services::org_agent_service::tool_arguments(
-            &state.db,
-            &chat.user_id,
-            chat.is_orchestrator(),
-            args,
-        ))
-        .await?;
+        let mut normalized = if matches!(
+            name,
+            "create_group" | "list_groups" | "update_group" | "delete_group" | "post_to_group"
+        ) {
+            args.clone()
+        } else {
+            Box::pin(crate::services::org_agent_service::tool_arguments(
+                &state.db,
+                &chat.user_id,
+                chat.is_orchestrator(),
+                args,
+            ))
+            .await?
+        };
         // Specialists refer to themselves in their own owner's namespace;
         // a member may also have a personal specialist with the same name.
         if !chat.is_orchestrator() {
@@ -771,7 +832,14 @@ pub(crate) async fn execute_tool(
             tool_name,
             args,
             assistant_team_tools::read_only(name),
-            assistant_team_tools::destructive(name),
+            assistant_team_tools::destructive(name)
+                // Participant edits can purge hidden threads and credentials;
+                // last-person leave also deletes the shared transcript. Retain
+                // the destructive automation gate without changing personal
+                // group name/agent edits or performing extra lookup reads.
+                || (name == "update_group"
+                    && (args["leave"].as_bool() == Some(true)
+                        || args.get("participant_user_ids").is_some())),
         )
         .await?
         {
@@ -1439,6 +1507,9 @@ async fn dispatch_groups(
     let db = &state.db;
     let owner = chat.user_id.as_str();
     let caller = chat.conversation_id.as_str();
+    if let Some(result) = Box::pin(dispatch_org_groups(state, chat, name, args)).await? {
+        return Ok(result);
+    }
     Ok(match name {
         "create_group" => {
             let mut ids = Vec::new();
@@ -1551,6 +1622,119 @@ async fn dispatch_groups(
         }
         _ => return Err(AppError::NotFound("NyxBot tool not found".into())),
     })
+}
+
+/// Org management uses the same explicit participant ACL as the HTTP routes.
+async fn dispatch_org_groups(
+    state: &AppState,
+    chat: &ChatAuthority,
+    name: &str,
+    args: &Value,
+) -> AppResult<Option<(Value, bool)>> {
+    use crate::services::org_group_service as groups;
+    let db = &state.db;
+    let actor = chat.user_id.as_str();
+    let selector = args["org"].as_str();
+    if name == "list_groups" {
+        let owner = if let Some(selector) = selector {
+            Some(
+                crate::services::org_agent_service::resolve_org_selector(db, actor, selector)
+                    .await?,
+            )
+        } else {
+            None
+        };
+        let mut rows = Vec::new();
+        for access in groups::list(db, actor).await? {
+            if owner
+                .as_ref()
+                .is_some_and(|owner| owner != &access.group.user_id)
+            {
+                continue;
+            }
+            let members = crate::services::assistant_group_service::members(
+                db,
+                &access.group.user_id,
+                &access.group,
+            )
+            .await?;
+            let mut row = json!({"id":access.group.id,"name":access.group.name,
+                "members":members.iter().map(|a|a.name.clone()).collect::<Vec<_>>(),"messages":access.group.message_count});
+            if access.org.is_some() {
+                row["owner"] = json!({"type":"org","id":access.group.user_id});
+                row["participants"] = json!(groups::participants(db, &access.group).await?);
+                row["your_role"] = access.role().into();
+            }
+            rows.push(row);
+        }
+        return Ok(Some((json!({"groups":rows}), false)));
+    }
+    if name == "create_group" {
+        let Some(selector) = selector else {
+            return Ok(None);
+        };
+        let owner =
+            crate::services::org_agent_service::resolve_org_selector(db, actor, selector).await?;
+        let ids = groups::agent_ids(db, &owner, &string_list(args, "members")).await?;
+        let access = groups::create(
+            db,
+            actor,
+            &owner,
+            text_arg(args, "name"),
+            &ids,
+            &string_list(args, "participant_user_ids"),
+            "nyxbot",
+        )
+        .await?;
+        return Ok(Some((
+            json!({"group":{"id":access.group.id,"name":access.group.name},
+            "note":"The participants can chat in this organization group. NyxBot cannot post into or follow it."}),
+            false,
+        )));
+    }
+    if !matches!(name, "update_group" | "delete_group" | "post_to_group") {
+        return Ok(None);
+    }
+    let access = groups::find(db, actor, text_arg(args, "group"), selector).await?;
+    if access.org.is_none() {
+        return Ok(None);
+    }
+    if name == "post_to_group" {
+        return Err(AppError::Forbidden(
+            "NyxBot cannot post into or follow organization groups".into(),
+        ));
+    }
+    if name == "delete_group" {
+        groups::delete(db, &access).await?;
+        return Ok(Some((json!({"deleted":access.group.name}), false)));
+    }
+    let mut ids = access.group.member_agent_ids.clone();
+    for id in groups::agent_ids(db, &access.group.user_id, &string_list(args, "add")).await? {
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    for id in groups::agent_ids(db, &access.group.user_id, &string_list(args, "remove")).await? {
+        ids.retain(|i| i != &id);
+    }
+    let people = args
+        .get("participant_user_ids")
+        .map(|_| string_list(args, "participant_user_ids"));
+    let leave = args["leave"].as_bool().unwrap_or(false);
+    let access = groups::update(
+        db,
+        access,
+        args["name"].as_str(),
+        (!leave).then_some(ids.as_slice()),
+        people.as_deref(),
+        args["lead_agent_id"].as_str(),
+        leave,
+    )
+    .await?;
+    Ok(Some((
+        json!({"group":{"id":access.group.id,"name":access.group.name}}),
+        false,
+    )))
 }
 
 async fn dispatch_settings(
@@ -2411,6 +2595,8 @@ const SWEEP_SECS: u64 = 15;
 /// restarted) when their events arrived. Agents are persistent, so nothing
 /// is destroyed automatically.
 pub fn spawn_sweeps(state: AppState) {
+    super::assistant_voice::spawn_dispatch(state.clone());
+    crate::services::voice::runtime::spawn_recovery(state.clone());
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(SWEEP_SECS));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

@@ -118,6 +118,7 @@ export class NyxAgentTransport {
   private revision = 0;
   private mutationRevision = 0;
   private rowRevisions = new Map<string, number>();
+  private pendingTitles = new Map<string, string>();
   private listeners = new Set<() => void>();
   private index = new Map<string, NyxAgentConversation>();
   private histories = new Map<string, NyxAgentHistory>();
@@ -145,6 +146,7 @@ export class NyxAgentTransport {
     this.generation += 1;
     this.mutationRevision += 1;
     this.rowRevisions.clear();
+    this.pendingTitles.clear();
     this.owner = getAssistantIdentityUserId();
     for (const request of this.requests) request.abort();
     this.requests.clear();
@@ -178,20 +180,6 @@ export class NyxAgentTransport {
   getConversation(id?: string): NyxAgentConversation | undefined {
     if (!id) return undefined;
     return this.live.get(id)?.conversation ?? this.histories.get(id)?.conversation ?? this.index.get(id);
-  }
-
-  /**
-   * A row returned by a mutation (rename) carries neither the owning agent nor
-   * the pending-card count; keep the ones already known.
-   */
-  private withAggregates(row: NyxAgentConversation): NyxAgentConversation {
-    const known = this.histories.get(row.id)?.conversation ?? this.index.get(row.id);
-    if (!known) return row;
-    return {
-      ...row,
-      agent: row.agent ?? known.agent,
-      pending_acknowledgements: known.pending_acknowledgements,
-    };
   }
 
   /** Drop every cached thread of an agent that was deleted permanently. */
@@ -240,7 +228,10 @@ export class NyxAgentTransport {
         await assistantJson(`${ROOT}/conversations?limit=100${scope}${query}`),
       );
       this.current(generation);
-      for (const row of page.conversations) rows.set(row.id, row);
+      for (const row of page.conversations) {
+        const title = this.pendingTitles.get(row.id);
+        rows.set(row.id, title === undefined ? row : { ...row, title, title_source: "user" });
+      }
       cursor = page.next_cursor;
       if (cursor && seen.has(cursor)) throw new Error("Invalid assistant pagination.");
       if (cursor) seen.add(cursor);
@@ -249,6 +240,10 @@ export class NyxAgentTransport {
     if (mutationRevision !== this.mutationRevision) return this.getConversations(agentId);
     for (const [id, turn] of this.live) {
       if (id !== "draft" && (!agentId || turn.conversation.agent?.id === agentId)) {
+        const current = rows.get(id);
+        if (current) {
+          turn.conversation = { ...turn.conversation, title: current.title, title_source: current.title_source };
+        }
         rows.set(id, turn.conversation);
       }
     }
@@ -273,6 +268,12 @@ export class NyxAgentTransport {
       throw new DOMException("Conversation changed", "AbortError");
     }
     if (page.conversation.id !== id) throw new Error("Assistant conversation mismatch.");
+    const optimisticTitle = this.pendingTitles.get(id);
+    if (optimisticTitle !== undefined) {
+      page.conversation = { ...page.conversation, title: optimisticTitle, title_source: "user" };
+    }
+    const live = this.live.get(id);
+    if (live) live.conversation = { ...live.conversation, title: page.conversation.title, title_source: page.conversation.title_source };
     const existing = this.histories.get(id);
     // Preserve older pages during the running-turn poll and deduplicate by seq.
     const merged = new Map((existing?.messages ?? []).map((message) => [message.seq, message]));
@@ -289,20 +290,41 @@ export class NyxAgentTransport {
     return history;
   }
 
+  private setTitle(id: string, title: string, source: NyxAgentConversation["title_source"]) {
+    const row = this.index.get(id);
+    if (row) this.index.set(id, { ...row, title, title_source: source });
+    const history = this.histories.get(id);
+    if (history) this.histories.set(id, { ...history, conversation: { ...history.conversation, title, title_source: source } });
+    const live = this.live.get(id);
+    if (live) live.conversation = { ...live.conversation, title, title_source: source };
+    this.changed();
+  }
+
   async rename(id: string, title: string) {
     const generation = this.identity();
-    const row = nyxAgentConversationSchema.parse(
-      await assistantJson(path(id), { method: "PATCH", body: { title } }),
-    );
-    this.current(generation);
-    if (row.id !== id) throw new Error("Assistant conversation mismatch.");
+    const before = this.getConversation(id);
+    if (this.pendingTitles.has(id)) throw new Error("A rename is already in progress.");
+    this.pendingTitles.set(id, title.trim());
     this.mutationRevision += 1;
     this.rowRevisions.set(id, (this.rowRevisions.get(id) ?? 0) + 1);
-    const merged = this.withAggregates(row);
-    this.index.set(id, merged);
-    const history = this.histories.get(id);
-    if (history) this.histories.set(id, { ...history, conversation: merged });
-    this.changed();
+    this.setTitle(id, title.trim(), "user");
+    try {
+      const row = nyxAgentConversationSchema.parse(
+        await assistantJson(path(id), { method: "PATCH", body: { title } }),
+      );
+      this.current(generation);
+      if (row.id !== id) throw new Error("Assistant conversation mismatch.");
+      this.setTitle(id, row.title, row.title_source ?? "user");
+    } catch (error) {
+      if (generation === this.generation && before) this.setTitle(id, before.title, before.title_source);
+      throw error;
+    } finally {
+      if (generation === this.generation) {
+        this.pendingTitles.delete(id);
+        this.mutationRevision += 1;
+        this.rowRevisions.set(id, (this.rowRevisions.get(id) ?? 0) + 1);
+      }
+    }
   }
 
   async delete(id: string) {
@@ -515,7 +537,8 @@ export class NyxAgentTransport {
       conversation: this.index.get(key) ??
         this.histories.get(key)?.conversation ?? {
           id: key,
-          title: [...text.trim()].slice(0, 40).join(""),
+          title: provisionalTitle(text),
+          title_source: "provisional",
           model,
           created_at: now,
           last_message_at: now,
@@ -687,3 +710,11 @@ export class NyxAgentTransport {
 }
 
 export const nyxAgentTransport = new NyxAgentTransport();
+
+function provisionalTitle(text: string): string {
+  const line = text.split(/\r?\n/).find((part) => part.trim()) ?? "";
+  const clean = line.replace(/\s+/g, " ").trim();
+  if ([...clean].length <= 60) return clean || "New chat";
+  const prefix = [...clean].slice(0, 60).join("");
+  return prefix.includes(" ") ? prefix.slice(0, prefix.lastIndexOf(" ")) : prefix;
+}

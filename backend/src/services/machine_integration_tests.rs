@@ -556,6 +556,7 @@ async fn machine_catalog_discovery_projects_one_batch_of_referenced_and_allowed_
         wire_protocol: crate::models::downstream_service::InferenceWireProtocol::OpenaiCompletions,
         model_list: false,
         realtime: false,
+        voice: None,
     });
     let catalog_id = catalog.id.clone();
     f.state

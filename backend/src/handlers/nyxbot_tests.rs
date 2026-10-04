@@ -1452,6 +1452,7 @@ async fn the_live_stream_pushes_only_the_owners_changes() {
     let mut body = response.into_body().into_data_stream();
     assert!(frame(&mut body).await.contains("event: ready"));
     state.assistant_live.publish(LiveEvent::Conversation {
+        title_changed: false,
         id: "nyxa-other".into(),
         user_id: "someone-else".into(),
         group_id: None,
@@ -1459,6 +1460,7 @@ async fn the_live_stream_pushes_only_the_owners_changes() {
         messages: 1,
     });
     state.assistant_live.publish(LiveEvent::Conversation {
+        title_changed: false,
         id: "nyxa-mine".into(),
         user_id: OWNER.into(),
         group_id: Some("nyxg-1".into()),
@@ -2227,7 +2229,9 @@ async fn group_chats_share_one_thread_and_members_talk_as_guests() {
         &state,
         OWNER,
         TurnStart {
+            org_access: None,
             attachment_ids: Vec::new(),
+            group_request_id: None,
             group_attachments: Vec::new(),
             trigger: None,
             conversation_id: Some(thread.id.clone()),
@@ -3232,7 +3236,9 @@ async fn the_owners_private_chats_share_the_agents_own_thread() {
         &state,
         OWNER,
         TurnStart {
+            org_access: None,
             attachment_ids: Vec::new(),
+            group_request_id: None,
             group_attachments: Vec::new(),
             trigger: None,
             conversation_id: Some(home.clone()),
@@ -4444,6 +4450,7 @@ async fn org_group_bots_moved_to_a_specialist_keep_answering() {
         wire_protocol: crate::models::downstream_service::InferenceWireProtocol::OpenaiResponses,
         model_list: false,
         realtime: false,
+        voice: None,
     });
     state
         .db
@@ -4489,6 +4496,7 @@ async fn org_group_bots_moved_to_a_specialist_keep_answering() {
                     crate::models::downstream_service::InferenceWireProtocol::OpenaiCompletions,
                 model_list: false,
                 realtime: false,
+                voice: None,
             });
         state
             .db

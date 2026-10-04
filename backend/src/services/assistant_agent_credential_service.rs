@@ -104,6 +104,15 @@ pub async fn authority_in_session(
     conversation: &AssistantConversation,
     session: &mut ClientSession,
 ) -> AppResult<KeyAuthority> {
+    Box::pin(authority_with_access(db, conversation, session, None)).await
+}
+
+pub(crate) async fn authority_with_access(
+    db: &Database,
+    conversation: &AssistantConversation,
+    session: &mut ClientSession,
+    snapshot: Option<&std::sync::Arc<super::org_agent_service::RequestAccess>>,
+) -> AppResult<KeyAuthority> {
     let Some(agent_id) = conversation.agent_id.as_deref() else {
         return Ok(KeyAuthority::Orchestrator);
     };
@@ -114,7 +123,39 @@ pub async fn authority_in_session(
         .session(&mut *session)
         .await?
         .ok_or_else(|| AppError::NotFound("Agent not found".into()))?;
-    super::org_agent_service::require_use(db, &conversation.user_id, &agent).await?;
+    if agent.user_id != conversation.user_id && conversation.group_id.is_some() {
+        let access = match snapshot {
+            Some(access) if access.matches(&conversation.user_id, &agent.user_id) => access.clone(),
+            Some(_) => return Err(super::org_group_service::missing()),
+            None => super::org_agent_service::resolve_key_access(
+                db,
+                &conversation.user_id,
+                Some(&agent.user_id),
+            )
+            .await?
+            .ok_or_else(super::org_group_service::missing)?,
+        };
+        super::org_group_service::check_thread_participation(db, conversation, &access).await?;
+        let group = super::org_group_service::get(
+            db,
+            &conversation.user_id,
+            conversation.group_id.as_deref().unwrap_or_default(),
+            Some(&access),
+        )
+        .await?;
+        if group.org.is_some() {
+            super::org_group_service::fence(db, &group, session).await?;
+            if let Some(request) = &conversation.group_request_id {
+                super::org_group_service::request(db, &group, request).await?;
+            }
+        }
+    } else if let Some(access) = snapshot {
+        if !access.matches(&conversation.user_id, &agent.user_id) {
+            return Err(super::org_group_service::missing());
+        }
+    } else {
+        super::org_agent_service::require_use(db, &conversation.user_id, &agent).await?;
+    }
     if agent.user_id != conversation.user_id
         && (conversation.guest_turn || conversation.channel.is_some())
     {
@@ -376,7 +417,9 @@ pub async fn load_or_provision_in_session(
     let created = key_service::create_api_key_with_security_class_and_id(
         db,
         user_id,
-        Some(user_id),
+        // Empty bootstrap grants need no visibility enumeration. The checked
+        // agent authority is applied below in the same transaction.
+        None,
         None,
         &name,
         ASSISTANT_SCOPES,

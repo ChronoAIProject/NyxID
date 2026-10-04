@@ -186,7 +186,7 @@ pub struct ServiceResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub issues_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub capabilities: Option<ServiceCapabilities>,
+    pub capabilities: Option<crate::services::inference_service::ServiceCapabilitiesView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub billing: Option<ServiceBilling>,
     pub inference: Option<crate::models::downstream_service::ServiceInference>,
@@ -954,6 +954,13 @@ async fn create_service_inner(
     tele: TelemetryContext,
     mut body: CreateServiceRequest,
 ) -> AppResult<Json<ServiceResponse>> {
+    if let Some(inference) = body.inference.as_mut() {
+        if let Some(voice) = &inference.voice {
+            crate::services::inference_voice::validate(voice)?;
+        }
+        inference.realtime |= inference.voice.is_some();
+    }
+
     require_admin(&state, &auth_user).await?;
 
     let create_fingerprint = crate::services::catalog_skill_service::create_fingerprint(
@@ -1776,6 +1783,13 @@ async fn update_service_inner(
     service_id: String,
     mut body: UpdateServiceRequest,
 ) -> AppResult<Json<ServiceResponse>> {
+    if let Some(inference) = body.inference.as_mut().and_then(Option::as_mut) {
+        if let Some(voice) = &inference.voice {
+            crate::services::inference_voice::validate(voice)?;
+        }
+        inference.realtime |= inference.voice.is_some();
+    }
+
     let skill_fingerprint_input = serde_json::to_value(&body)
         .map_err(|e| AppError::Internal(format!("Cannot fingerprint service update: {e}")))?;
     let service = fetch_service(&state, &service_id).await?;

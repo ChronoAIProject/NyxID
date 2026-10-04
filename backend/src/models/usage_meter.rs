@@ -49,7 +49,7 @@ pub enum UsageStatus {
     DeadLetter,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum CredentialClass {
     NyxidManagedMaster,

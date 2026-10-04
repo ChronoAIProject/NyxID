@@ -1,5 +1,4 @@
 import {
-  Fragment,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -417,9 +416,9 @@ export function ChatMessageList({
         ) : null}
         {!messages.length ? <EmptyState>{emptyDescription}</EmptyState> : null}
         {messages.map((message) => (
-          <Fragment key={message.id}>
+          <div id={`message-${message.id}`} key={message.id}>
             {renderMessage?.(message) ?? <ChatMessageEntry message={message} />}
-          </Fragment>
+          </div>
         ))}
         {footer}
         {emptyTurnDetected ? (

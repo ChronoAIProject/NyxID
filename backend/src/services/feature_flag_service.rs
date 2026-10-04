@@ -116,6 +116,13 @@ const DIRECT_CHAT_ENGINE_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+pub const VOICE_OPENAI_PLATFORM_FLAG_KEY: &str = "assistant:voice-openai-platform";
+const VOICE_OPENAI_PLATFORM_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: VOICE_OPENAI_PLATFORM_FLAG_KEY,
+    description: "Allows platform GPT-Live only after forced-close and invoice reconciliation validation.",
+    default_enabled: false,
+};
+
 pub const ASSISTANT_VOICE_FLAG_KEY: &str = "assistant:voice";
 const ASSISTANT_VOICE_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: ASSISTANT_VOICE_FLAG_KEY,
@@ -214,6 +221,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     AGENT_OPERATION_SCOPES_FLAG,
     ORG_AGENTS_FLAG,
     ASSISTANT_VOICE_FLAG,
+    VOICE_OPENAI_PLATFORM_FLAG,
     AI_ASSISTANT_FLAG,
     BILLING_FLAG,
     AEVATAR_CHAT_WIRE_LOG_FLAG,
@@ -236,6 +244,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     AGENT_OPERATION_SCOPES_FLAG,
     ORG_AGENTS_FLAG,
     ASSISTANT_VOICE_FLAG,
+    VOICE_OPENAI_PLATFORM_FLAG,
     AI_ASSISTANT_FLAG,
     BILLING_FLAG_TEST,
     AEVATAR_CHAT_WIRE_LOG_FLAG,
@@ -1760,6 +1769,7 @@ mod tests {
                 "assistant:operation-scopes",
                 "assistant:org-agents",
                 "assistant:voice",
+                "assistant:voice-openai-platform",
                 "experimental:ai-assistant",
                 "experimental:billing",
                 "experimental:aevatar-chat-wire-log",

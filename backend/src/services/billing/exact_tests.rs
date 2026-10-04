@@ -2076,3 +2076,266 @@ async fn voice_seconds_reconcile_uses_allowance_then_grant_then_wallet_once() {
     assert_eq!(text.quantity, Some(0));
     assert_accounts(&db).await;
 }
+
+#[tokio::test]
+async fn voice_and_reported_token_components_settle_independently_without_replay_debits() {
+    Box::pin(async {
+        use crate::models::service_billing::{
+            BillingMetric, LanePriceComponent, LanePricing, PlatformUsage, PricingSyncStatus,
+            ServiceBilling,
+        };
+        let db = database("voice_token_components").await;
+        db.collection::<Document>("billing_wallet")
+            .insert_one(old_wallet(10_000_000))
+            .await
+            .unwrap();
+        exact_migration::run(&db).await.unwrap();
+        for (code, rate) in [("input-rate", 1_i64), ("duration-rate", 10_000_i64)] {
+            db.collection::<Document>("billing_rate_cache").insert_one(doc! {
+                "_id":format!("{code}:*"),"lago_metric_code":code,"model":null,
+                "credits_per_unit_micros":rate,"synced_at":bson::DateTime::from_chrono(Utc::now())
+            }).await.unwrap();
+        }
+        let billing = ServiceBilling {
+            byok_pricing: Some(LanePricing {
+                metric: BillingMetric::InputTokens,
+                credits_per_unit: "0.000001".into(),
+                lago_metric_code: "input-rate".into(),
+                sync_status: PricingSyncStatus::Synced,
+                sync_error: None,
+                components: vec![LanePriceComponent {
+                    metric: BillingMetric::VoiceSeconds,
+                    credits_per_unit: "0.01".into(),
+                    lago_metric_code: "duration-rate".into(),
+                    sync_status: PricingSyncStatus::Synced,
+                    sync_error: None,
+                }],
+            }),
+            ..Default::default()
+        };
+        let session = uuid::Uuid::new_v4().to_string();
+        for (request, duration, input_tokens) in [
+            (voice::window_id(&session, 0).unwrap(), 29, 0),
+            (format!("voice:{session}:response:fixture-response"), 0, 42),
+        ] {
+            let mut ctx = route_context::BillingRouteContext::new(
+                route_inventory::BillingIngress::LlmProvider,
+                request.clone(),
+                "owner".into(),
+                "owner".into(),
+                None,
+                Some("service".into()),
+                Some("service".into()),
+                Some("service".into()),
+                route_context::NodeIntent::Direct,
+                "bearer".into(),
+                crate::models::usage_meter::CredentialClass::UserOwned,
+                BillingMetric::VoiceSeconds,
+                Some(&billing),
+                false,
+            )
+            .with_platform_metering(true);
+            ctx.requested_voice_seconds = if duration > 0 { 30 } else { 0 };
+            ctx.request_bytes = 256;
+            let reservation = reservation::gate_and_reserve(&db, Some(&Entitled), &ctx, false, 900)
+                .await
+                .unwrap()
+                .unwrap();
+            let metered = meter::open(&db, &ctx, Some(&reservation)).await.unwrap();
+            meter::mark_forwarded(&db, &metered).await.unwrap();
+            let usage = PlatformUsage {
+                voice_seconds: duration,
+                input_tokens,
+                ..Default::default()
+            };
+            meter::settle(&db, &metered, usage.clone(), None, None)
+                .await
+                .unwrap();
+            let count = db
+                .collection::<Document>("billing_ledger")
+                .count_documents(doc! {})
+                .await
+                .unwrap();
+            meter::settle(&db, &metered, usage, None, None)
+                .await
+                .unwrap();
+            assert_eq!(
+                db.collection::<Document>("billing_ledger")
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                count
+            );
+            for (metric, expected) in [("voice_seconds", duration), ("input_tokens", input_tokens)]
+            {
+                let row = db
+                    .collection::<UsageMeterRow>("usage_meter")
+                    .find_one(doc! {"billing_request_id":&request,"metric":metric})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(row.quantity, Some(expected));
+            }
+        }
+        assert_accounts(&db).await;
+        db.drop().await.unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn voice_without_byok_duration_price_records_seconds_without_charges_or_benefits() {
+    Box::pin(async {
+        use crate::models::{
+            assistant_voice::VoiceKeySource,
+            service_billing::{BillingMetric, LanePricing, PricingSyncStatus, ServiceBilling},
+        };
+        let db = database("voice_byok_metering_only").await;
+        crate::services::assistant_voice::ensure_indexes(&db)
+            .await
+            .unwrap();
+        db.collection::<Document>("billing_wallet")
+            .insert_one(old_wallet(10_000_000))
+            .await
+            .unwrap();
+        db.collection::<Document>("credit_grants")
+            .insert_one(old_grant(100_000))
+            .await
+            .unwrap();
+        exact_migration::run(&db).await.unwrap();
+        let now = bson::DateTime::now();
+        db.collection::<Document>("usage_allowances")
+            .insert_one(doc! {
+                "_id":"voice-allowance", "service_id":"service", "service_slug":"service",
+                "metric":"voice_seconds", "quantity":100_i64, "recurrence":"daily",
+                "target_kind":"all_users", "is_active":true, "created_by":"admin",
+                "created_at":now, "updated_at":now
+            })
+            .await
+            .unwrap();
+        let mut before = Vec::new();
+        for collection in [
+            "billing_wallet",
+            "credit_grants",
+            "usage_allowances",
+            "billing_ledger",
+        ] {
+            let rows: Vec<Document> = db
+                .collection(collection)
+                .find(doc! {})
+                .sort(doc! {"_id":1})
+                .await
+                .unwrap()
+                .try_collect()
+                .await
+                .unwrap();
+            before.push((collection, rows));
+        }
+        db.collection(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                "owner",
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        crate::services::feature_flag_service::set_platform_override(
+            &db,
+            crate::services::feature_flag_service::BILLING_FLAG_KEY,
+            &crate::services::feature_flag_service::FlagTarget::Global,
+            true,
+            "owner",
+        )
+        .await
+        .unwrap();
+        let legacy = ServiceBilling {
+            platform_billable: true,
+            ..Default::default()
+        };
+        let text_only = ServiceBilling {
+            byok_pricing: Some(LanePricing {
+                metric: BillingMetric::InputTokens,
+                credits_per_unit: "0.001".into(),
+                lago_metric_code: "input".into(),
+                sync_status: PricingSyncStatus::Synced,
+                sync_error: None,
+                components: vec![],
+            }),
+            ..legacy.clone()
+        };
+        let mut config = crate::test_utils::test_app_config();
+        config.billing_enabled = true;
+        let billing = BillingService::new(db.clone(), std::sync::Arc::new(config));
+        for unpriced_duration in [legacy, text_only] {
+            let ctx = route_context::BillingRouteContext::new(
+                route_inventory::BillingIngress::LlmProvider,
+                "unused".into(),
+                "owner".into(),
+                "owner".into(),
+                None,
+                Some("service".into()),
+                Some("service".into()),
+                Some("service".into()),
+                route_context::NodeIntent::Direct,
+                "bearer".into(),
+                crate::models::usage_meter::CredentialClass::UserOwned,
+                BillingMetric::VoiceSeconds,
+                crate::services::voice::credentials::duration_billing(
+                    &VoiceKeySource::Own,
+                    Some(&unpriced_duration),
+                )
+                .unwrap(),
+                false,
+            );
+            assert!(
+                !ctx.service_platform_billable,
+                "unpriced voice duration must not select legacy pricing"
+            );
+            let session = uuid::Uuid::new_v4().to_string();
+            let id = voice::window_id(&session, 0).unwrap();
+            let metered = voice::reserve(&db, &billing, ctx.clone(), &session, 0)
+                .await
+                .unwrap();
+            voice::reserve(&db, &billing, ctx, &session, 0)
+                .await
+                .unwrap();
+            meter::mark_forwarded(&db, &metered).await.unwrap();
+            voice::observe(&db, &id, 29).await.unwrap();
+            voice::finalize(&db, &id, false).await.unwrap();
+            voice::finalize(&db, &id, false).await.unwrap();
+            let rows: Vec<UsageMeterRow> = db
+                .collection("usage_meter")
+                .find(doc! {"billing_request_id":&id})
+                .await
+                .unwrap()
+                .try_collect()
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].metric, BillingMetric::VoiceSeconds);
+            assert_eq!(rows[0].quantity, Some(29));
+            assert!(rows[0].wallet_id.is_none());
+            assert!(rows[0].funding.is_none());
+        }
+        for (collection, expected) in before {
+            let rows: Vec<Document> = db
+                .collection(collection)
+                .find(doc! {})
+                .sort(doc! {"_id":1})
+                .await
+                .unwrap()
+                .try_collect()
+                .await
+                .unwrap();
+            assert_eq!(rows, expected, "metering must not mutate {collection}");
+        }
+        assert_eq!(
+            db.collection::<Document>("usage_allowance_periods")
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        db.drop().await.unwrap();
+    })
+    .await;
+}

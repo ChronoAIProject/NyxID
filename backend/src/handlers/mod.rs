@@ -131,6 +131,7 @@ pub mod channel_platforms;
 mod curation_tests;
 pub mod nyxbot;
 pub mod options;
+pub(crate) mod org_group;
 
 pub mod service_history;
 
@@ -154,4 +155,5 @@ pub(crate) mod trigger_schedule_dto;
 pub mod agent_skills;
 pub mod assistant_uploads;
 
+mod assistant_titles;
 pub mod assistant_voice;

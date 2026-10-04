@@ -33,6 +33,7 @@ pub const DELEGATED_CATALOG_SCOPE_REQUIRED: &str = "delegated_catalog_scope_requ
 
 #[derive(Clone, Debug)]
 pub struct ExactServiceApprovalCaller {
+    pub assistant_group_id: Option<String>,
     pub org_agent_access: Option<std::sync::Arc<super::org_agent_service::RequestAccess>>,
     pub agent_owner: Option<String>,
     pub operation_scopes: crate::models::agent_operation_scope::OperationScopes,
@@ -315,11 +316,18 @@ pub async fn create_request(
         }),
         redemption: None,
     };
-    let operation = approval_service::ApprovalRequestOperation::from_descriptor(
+    let mut operation = approval_service::ApprovalRequestOperation::from_descriptor(
         &descriptor,
         pending.resolution.grant_scope.clone(),
     )
     .with_exact_service(binding);
+    operation.assistant_group = super::org_group_service::approval_binding(
+        &state.db,
+        caller.assistant_group_id.as_deref(),
+        &caller.actor_user_id,
+        caller.api_key_id.as_deref(),
+    )
+    .await?;
     let request = approval_service::create_approval_request(
         &state.db,
         &state.config,
@@ -1813,6 +1821,7 @@ mod tests {
 
     fn caller() -> ExactServiceApprovalCaller {
         ExactServiceApprovalCaller {
+            assistant_group_id: None,
             agent_owner: None,
             org_agent_access: None,
             operation_scopes: Default::default(),
@@ -2177,6 +2186,7 @@ mod tests {
             .map(|value| value.request_key.clone())
             .unwrap_or_else(|| format!("generic-{id}"));
         ApprovalRequest {
+            assistant_group: None,
             id: id.to_string(),
             user_id: "user-alpha".to_string(),
             service_id: "catalog-alpha".to_string(),
@@ -2231,6 +2241,7 @@ mod tests {
             "client-alpha",
             None,
             approval_service::ApprovalRequestOperation {
+                assistant_group: None,
                 operation_summary: "write".to_string(),
                 action_description: None,
                 http_method: Some("POST".to_string()),

@@ -262,6 +262,37 @@ pub async fn run(command: CatalogCommands) -> Result<()> {
                         "Inference: {}",
                         super::service::catalog_admin::inference_summary(&item)
                     );
+                    if let Some(voice) = item["inference"]["voice"].as_object() {
+                        eprintln!(
+                            "Voice protocol: {}",
+                            voice["protocol"].as_str().unwrap_or("unknown")
+                        );
+                        for (field, label) in [("models", "Voice models"), ("voices", "Voices")] {
+                            let entries: Vec<String> = voice[field]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .map(|v| {
+                                    format!(
+                                        "{} ({}){}",
+                                        v["label"].as_str().unwrap_or(""),
+                                        v["id"].as_str().unwrap_or(""),
+                                        if v["default"] == true {
+                                            " [default]"
+                                        } else {
+                                            ""
+                                        }
+                                    )
+                                })
+                                .collect();
+                            eprintln!("{label}: {}", entries.join(", "));
+                        }
+                        eprintln!(
+                            "Voice usage: {}",
+                            voice["usage_source"].as_str().unwrap_or("unknown")
+                        );
+                        eprintln!("Voice billing units: {}", voice["billing_metrics"]);
+                    }
                     if item["platform_key"]["available"] == true {
                         eprintln!(
                             "Platform key: available; nyxid service add {item_slug} --platform-key"

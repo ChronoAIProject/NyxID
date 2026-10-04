@@ -238,6 +238,26 @@ own pagination fields. Optional `realtime=true` advertises WebSocket
 `/api/v1/proxy/s/{slug}/realtime`. xAI and OpenAI preserve the bearer-injected
 `wss://api.x.ai/v1/realtime` and `wss://api.openai.com/v1/realtime` transports.
 
+
+`inference.voice` adds structured voice discovery to catalog, key and MCP
+responses: `{protocol, models: [{id,label,default?}], voices: [{id,label}],
+usage_source, billing_metrics}`. `capabilities.supports_realtime_voice` derives
+solely from presence of that block; it is response-only, and `realtime` is also
+true when the block is present. Legacy `realtime:true` without voice metadata
+does not admit a NyxBot voice call. `realtime` alone does not identify the transport:
+OpenAI Live uses its dedicated session/WebRTC adapter, not the legacy `/realtime`
+proxy. Provider origins remain fixed in adapters.
+
+`nyxid catalog show` displays models, default, voices, protocol, usage source and
+billing units. Voice options read these catalog choices, intersect supported
+adapter protocols, then apply live visibility/binding and tariff/rollout gates.
+Phase 3 supports OpenAI Live; seeded xAI metadata does not enable its Phase 4
+adapter. Admins can add models without code changes after provider availability
+is verified. Startup backfills only missing voice metadata and respects
+`inference_admin_modified`, including explicit null clears. Price information
+continues through the existing admin-authored, Lago-synced lane DTOs; no default
+prices accompany voice metadata.
+
 `binding` is computed for the caller. `platform` means an authorized server-held
 key is available and omits `status_slug`; it does not change the binding of an
 existing personal connection. `user` means the client needs a personal connection:

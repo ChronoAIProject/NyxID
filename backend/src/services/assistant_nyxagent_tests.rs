@@ -260,6 +260,7 @@ fn insufficient_credits_is_a_stable_terminal_code() {
 fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
     let messages: Vec<_> = (0..30)
         .map(|i| AssistantMessage {
+            voice: None,
             execution_pending: false,
             id: Uuid::new_v4().to_string(),
             conversation_id: "c".into(),
@@ -484,6 +485,7 @@ fn live_turn_expires_at_the_exact_ttl_boundary() {
 
 fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
     AssistantConversation {
+        title_source: Default::default(),
         automation_thread: false,
         agent_owner_id: None,
         id: format!("nyxa-{}", Uuid::new_v4().simple()),
@@ -527,6 +529,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         event_streak: 0,
         channel: None,
         group_id: None,
+        group_request_id: None,
         group_seen_seq: 0,
         guest_turn: false,
         reply_channel: None,

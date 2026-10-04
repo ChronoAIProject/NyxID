@@ -633,6 +633,7 @@ pub(crate) async fn create_api_key_with_security_class_and_id(
         description: description.map(|s| s.to_string()),
         allowed_service_ids: svc_ids.clone(),
         allowed_platform_service_ids: Vec::new(),
+        assistant_group_id: None,
         assistant_agent_owner_id: None,
         assistant_operation_scopes: Default::default(),
         allowed_node_ids: node_ids.clone(),
@@ -1160,6 +1161,7 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                     description: old_key.description.clone(),
                     allowed_service_ids: old_key.allowed_service_ids.clone(),
                     allowed_platform_service_ids: Vec::new(),
+                    assistant_group_id: None,
                     assistant_agent_owner_id: None,
                     assistant_operation_scopes: Default::default(),
                     allowed_node_ids: old_key.allowed_node_ids.clone(),
@@ -1260,7 +1262,31 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                         }
                     }
                     successor.allowed_node_ids.clear();
+                    successor.assistant_group_id = conversation
+                        .group_request_id
+                        .as_ref()
+                        .and(conversation.group_id.clone());
+                    if successor.assistant_group_id.is_some() {
+                        // Group authentication binds the key to its hidden
+                        // thread. Move that binding with the encrypted successor,
+                        // rather than waiting for the next turn to refresh it.
+                        db.collection::<bson::Document>(
+                            crate::models::assistant_conversation::COLLECTION_NAME,
+                        )
+                        .update_one(
+                            doc! {"_id": &conversation.id, "user_id": &user_id,
+                            "credential_api_key_id": &old_key.id},
+                            doc! {"$set": {"credential_api_key_id": &successor.id}},
+                        )
+                        .session(&mut *session)
+                        .await?;
+                    }
                     let mut update = fields;
+                    update.insert(
+                        "assistant_group_id",
+                        bson::to_bson(&successor.assistant_group_id)
+                            .expect("group binding serialization"),
+                    );
                     update.insert("allowed_node_ids", bson::Bson::Array(Vec::new()));
                     if !update.contains_key("allowed_service_ids") {
                         update.insert("allowed_service_ids", bson::Bson::Array(Vec::new()));

@@ -13,6 +13,9 @@ import { AgentDetailsSheet } from "./nyxbot-agent-details";
 import { NewAgentDialog } from "./nyxbot-agent-forms";
 import { NewGroupDialog } from "./nyxbot-group-forms";
 import { NyxAgentGroupPage } from "./nyxbot-group-view";
+import { LazyVoicePanel as VoicePanel } from "./lazy-voice-panel";
+import { useFeature } from "@/hooks/use-feature-flag";
+import { useNyxBotSettings } from "@/hooks/use-nyxbot-agents";
 import { NyxBotHome } from "./nyxbot-home";
 import { nyxBotOf, selectedAgentOf, useNyxBotAgents } from "@/hooks/use-nyxbot-agents";
 import { useNyxBotGroups } from "@/hooks/use-nyxbot-groups";
@@ -481,6 +484,9 @@ export function NyxAgentAssistantChatPage() {
 }
 
 function NyxAgentThreadPage() {
+  const voiceEnabled = useFeature("assistant:voice");
+  const voiceSettings = useNyxBotSettings(voiceEnabled);
+  const [voiceThread, setVoiceThread] = useState<string>();
   const navigate = useNavigate();
   const user = useAuthStore((state) => state.user);
   const search = useRouterState({
@@ -585,6 +591,7 @@ function NyxAgentThreadPage() {
    * returns to its home (where the composer starts a new NyxBot thread).
    */
   function go(id?: string) {
+    setVoiceThread(undefined);
     setFocusRequest((value) => value + 1);
     if (id) navigateTo({ c: id });
     else if (selectedAgent?.kind === "specialist") {
@@ -628,6 +635,10 @@ function NyxAgentThreadPage() {
   return (
     <AssistantShell
       title={showHome ? "Home" : chat.session.title}
+      titleKey={selectedId}
+      onRenameTitle={selectedId && !destroyed
+        ? (title) => chat.renameConversation(selectedId, title)
+        : undefined}
       headerActions={<NyxBotSettingsButton />}
       sidebar={
         <AssistantEngineSidebar
@@ -776,9 +787,20 @@ function NyxAgentThreadPage() {
             />
           </AssistantLinkModalHost>
         )}
+        {voiceEnabled && voiceThread && voiceThread === selectedId && !destroyed && !channelPlatform && (
+          <div className="absolute inset-x-0 top-3 z-20 mx-auto w-full max-w-[758px] px-4">
+            <VoicePanel key={`${user?.id}:${voiceThread}`} threadId={voiceThread} savedPreferences={voiceSettings.data?.voice}
+              onClose={() => { setVoiceThread(undefined); setFocusRequest((n) => n + 1); }} />
+          </div>
+        )}
         <div ref={composerRef} className="absolute inset-x-0 bottom-0 z-10">
           <UploadComposer
             key={`${user?.id}:${selectedId ?? headerAgent?.id ?? "draft"}`}
+            onVoice={voiceEnabled && !destroyed && !channelPlatform ? async (id) => {
+              if (selection.current !== selectedId) return;
+              setVoiceThread(id);
+              adopt(id);
+            } : undefined}
             scope={{ kind: "conversations", id: selectedId, agentId: headerAgent?.id }}
             active={chat.isStreaming}
             sending={chat.isStreaming}

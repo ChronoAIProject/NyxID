@@ -5533,6 +5533,9 @@ pub async fn discover_services_with_scope(
             result["inference"] =
                 serde_json::to_value(inference).map_err(|e| AppError::Internal(e.to_string()))?;
         }
+        result["capabilities"] =
+            serde_json::to_value(crate::services::inference_service::capabilities(service))
+                .map_err(|e| AppError::Internal(e.to_string()))?;
         result["platform_key"] = serde_json::json!({ "available": available,
             "pricing": service.billing.as_ref().and_then(|b| b.platform_key_pricing.as_ref()).map(crate::services::inference_service::LanePricingView::from) });
         result["byok_pricing"] = serde_json::json!(

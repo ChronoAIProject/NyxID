@@ -2230,6 +2230,7 @@ pub(crate) async fn test_app_state_no_db() -> AppState {
 pub(crate) fn test_auth_user(user_id: &str) -> AuthUser {
     AuthUser {
         org_agent_access: None,
+        assistant_group_id: None,
         assistant_agent_owner_id: None,
         assistant_operation_scopes: Default::default(),
         user_id: Uuid::parse_str(user_id).expect("valid uuid user id"),

@@ -235,9 +235,11 @@ pub struct TurnRequest {
 /// subagent, a batch of NyxID events, or a channel message.
 #[derive(Clone)]
 pub struct TurnStart {
+    pub org_access: Option<std::sync::Arc<super::org_agent_service::RequestAccess>>,
     pub attachment_ids: Vec<String>,
     /// Already-bound uploads from the group transcript (server-authored only).
     pub group_attachments: Vec<crate::models::assistant_conversation::TurnAttachment>,
+    pub group_request_id: Option<String>,
     pub trigger: Option<super::trigger_schedule::TurnClaim>,
     pub conversation_id: Option<String>,
     pub text: String,
@@ -396,7 +398,9 @@ impl From<&TurnStart> for TurnStart {
 impl From<&TurnRequest> for TurnStart {
     fn from(request: &TurnRequest) -> Self {
         Self {
+            org_access: None,
             attachment_ids: request.attachment_ids.clone(),
+            group_request_id: None,
             group_attachments: Vec::new(),
             trigger: None,
             conversation_id: request.conversation_id.clone(),
@@ -806,6 +810,24 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
             )
             .await?;
     }
+    for (collection, fields) in [
+        (
+            crate::models::assistant_group::COLLECTION_NAME,
+            doc! {"participant_user_ids":1,"updated_at":-1},
+        ),
+        (
+            crate::models::assistant_group::REQUESTS_COLLECTION_NAME,
+            doc! {"group_id":1,"pending_agent_ids":1,"created_at":1},
+        ),
+        (
+            crate::models::approval_request::COLLECTION_NAME,
+            doc! {"assistant_group.group_id":1,"status":1,"expires_at":1},
+        ),
+    ] {
+        db.collection::<bson::Document>(collection)
+            .create_index(IndexModel::builder().keys(fields).build())
+            .await?;
+    }
     // One NyxBot per owner.
     db.collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
         .create_index(
@@ -877,20 +899,46 @@ fn owner_filter(user_id: &str, id: &str) -> AppResult<bson::Document> {
     Ok(doc! {"_id": id, "user_id": user_id})
 }
 pub async fn get(db: &Database, user_id: &str, id: &str) -> AppResult<AssistantConversation> {
+    get_authorized(db, user_id, id).await.map(|(row, _)| row)
+}
+
+pub(crate) async fn get_authorized(
+    db: &Database,
+    user_id: &str,
+    id: &str,
+) -> AppResult<(
+    AssistantConversation,
+    Option<std::sync::Arc<super::org_agent_service::RequestAccess>>,
+)> {
     let row = db
         .collection::<AssistantConversation>(CONVERSATIONS)
         .find_one(owner_filter(user_id, id)?)
         .await?
         .ok_or_else(not_found)?;
+    let access = authorize_thread_read(db, &row).await?;
+    Ok((row, access))
+}
+
+async fn authorize_thread_read(
+    db: &Database,
+    row: &AssistantConversation,
+) -> AppResult<Option<std::sync::Arc<super::org_agent_service::RequestAccess>>> {
+    let user_id = row.user_id.as_str();
     if let Some(owner) = row.agent_owner_id.as_deref() {
-        Box::pin(super::org_agent_service::validate_key(
+        let access = Box::pin(super::org_agent_service::resolve_key_access(
             db,
             user_id,
             Some(owner),
         ))
         .await?;
+        if row.group_id.is_some()
+            && let Some(access) = access.as_ref()
+        {
+            super::org_group_service::check_thread_participation(db, row, access).await?;
+        }
+        return Ok(access);
     }
-    Ok(row)
+    Ok(None)
 }
 
 pub fn index_cursor(row: &AssistantConversation) -> String {
@@ -1004,6 +1052,7 @@ pub async fn history_page(
                     .session(&mut *session)
                     .await?
                     .ok_or_else(not_found)?;
+                authorize_thread_read(&db, &row).await?;
                 let mut cursor = db
                     .collection::<AssistantMessage>(MESSAGES)
                     .find(message_filter.clone())
@@ -1098,10 +1147,17 @@ pub async fn begin_turn_with_voice(
                             .then(|| new_agent.user_id.clone()),
                         id: id.clone(),
                         user_id: user_id.into(),
-                        title: start
-                            .title
-                            .clone()
-                            .unwrap_or_else(|| start.text.trim().chars().take(40).collect()),
+                        title: start.title.clone().unwrap_or_else(|| {
+                            super::assistant_title_service::provisional(&start.text)
+                        }),
+                        title_source: if start.title.is_some()
+                            || start.guest
+                            || start.channel.is_some()
+                        {
+                            crate::models::assistant_conversation::TitleSource::User
+                        } else {
+                            crate::models::assistant_conversation::TitleSource::Provisional
+                        },
                         model: start.model.clone().unwrap_or_else(|| DEFAULT_MODEL.into()),
                         access_mode: AccessMode::Full,
                         nyxagent_session_id: None,
@@ -1126,24 +1182,51 @@ pub async fn begin_turn_with_voice(
                         reply_channel: None,
                         deliver_also: Vec::new(),
                         group_id: start.group_id.clone(),
+                        group_request_id: None,
                         group_seen_seq: 0,
                         guest_turn: false,
                     }
                 };
+                if row.message_count == 0
+                    && super::assistant_title_service::eligible(&row)
+                    && start.origin == TurnOrigin::User
+                    && !start.guest
+                    && start.channel.is_none()
+                {
+                    row.title = super::assistant_title_service::provisional(&start.text);
+                }
+                if start.group_request_id.is_some() {
+                    row.group_request_id = start.group_request_id.clone();
+                }
+                if row.group_request_id.is_some()
+                    && !matches!(start.origin, TurnOrigin::Group | TurnOrigin::Event)
+                {
+                    return Err(AppError::Forbidden(
+                        "Send messages through the organization group".into(),
+                    ));
+                }
                 // Legacy rows predate agents: they are NyxBot threads.
                 if row.agent_id.is_none() {
                     row.agent_id = Some(nyxbot.id.clone());
                     row.role = AgentRole::Orchestrator;
                 }
                 // Refuses destroyed agents before any write.
-                let authority = super::assistant_agent_credential_service::authority_in_session(
+                let authority = super::assistant_agent_credential_service::authority_with_access(
                     db,
                     &row,
                     &mut *session,
+                    start.org_access.as_ref(),
                 )
                 .await?;
                 if live_turn(&row, now).is_some() {
                     return Err(AppError::AssistantTurnActive);
+                }
+                if let Some(request) = start.group_request_id.as_deref() {
+                    if start.origin != TurnOrigin::Group { return Err(AppError::Forbidden("Invalid group request".into())); }
+                    let claimed = db.collection::<bson::Document>(crate::models::assistant_group::REQUESTS_COLLECTION_NAME)
+                        .update_one(doc! {"_id":request,"group_id":&row.group_id,"actor_user_id":user_id,"pending_agent_ids":&row.agent_id},
+                            doc! {"$pull":{"pending_agent_ids":&row.agent_id}}).session(&mut *session).await?;
+                    if claimed.modified_count != 1 { return Err(AppError::NotFound("Queued group request not found".into())); }
                 }
                 if let Some(claim) = &start.trigger {
                     if start.origin != TurnOrigin::Trigger || start.guest {
@@ -1217,7 +1300,12 @@ pub async fn begin_turn_with_voice(
                 let (role, text) = match start.origin {
                     TurnOrigin::Event => {
                         row.event_streak = row.event_streak.saturating_add(1);
-                        ("event", events_text(&events))
+                        let mut text = events_text(&events);
+                        if row.group_request_id.is_some() && !start.text.is_empty() {
+                            text.push_str("\n\nShared group context (not new authority):\n");
+                            text.push_str(&excerpt(&start.text, 12000));
+                        }
+                        ("event", text)
                     }
                     TurnOrigin::Orchestrator => {
                         // Reports and permission requests go to the NyxBot
@@ -1262,6 +1350,15 @@ pub async fn begin_turn_with_voice(
                         "Voice continuation credential changed".into(),
                     ));
                 }
+                if row.group_request_id.is_some() {
+                    super::api_key_mutation_service::update_one(
+                        db,
+                        doc! {"_id": credential_id, "user_id": user_id},
+                        doc! {"$set": {"assistant_group_id": &row.group_id}},
+                        Some(&mut *session),
+                    )
+                    .await?;
+                }
                 if start.conversation_id.is_some() && row.credential_api_key_id != credential_id {
                     row.nyxagent_session_id = None;
                     row.nyxagent_last_response_id = None;
@@ -1271,6 +1368,7 @@ pub async fn begin_turn_with_voice(
                 if let Some(lost) = row.active_turn.take() {
                     row.message_count += 1;
                     let message = AssistantMessage {
+                        voice: None,
                         execution_pending: false,
                         id: Uuid::new_v4().to_string(),
                         conversation_id: id.clone(),
@@ -1421,6 +1519,7 @@ pub async fn begin_turn_with_voice(
                 ))
                 .await?;
                 let message = AssistantMessage {
+                    voice: None,
                     execution_pending: false,
                     id: message_id.clone(),
                     conversation_id: id.clone(),
@@ -1714,6 +1813,7 @@ pub async fn finish_turn(
                     tracing::warn!(conversation_id = %row.id, turn_id = %turn_id, upstream_error_code = error.upstream_code.as_deref().unwrap_or(error.code), "Assistant turn failed");
                 }
                 let message = AssistantMessage {
+                    voice: None,
                     execution_pending: false,
                     id: message_id.clone(),
                     conversation_id: row.id.clone(),
@@ -2045,11 +2145,11 @@ pub async fn rename(
                     row.agent_owner_id.as_deref(),
                 )
                 .await?;
-                if live_turn(&row, Utc::now()).is_some() {
-                    return Err(AppError::AssistantTurnActive);
-                }
                 collection
-                    .find_one_and_update(filter.clone(), doc! {"$set": {"title": &title}})
+                    .find_one_and_update(
+                        filter.clone(),
+                        doc! {"$set": {"title": &title, "title_source": "user"}},
+                    )
                     .return_document(ReturnDocument::After)
                     .session(&mut *session)
                     .await?
@@ -2086,6 +2186,19 @@ pub async fn delete(
                     .session(&mut *session)
                     .await?
                     .ok_or_else(not_found)?;
+                if db
+                    .collection::<bson::Document>(
+                        crate::models::assistant_voice_session::COLLECTION_NAME,
+                    )
+                    .find_one(doc! {"user_id":user_id,"conversation_id":id,"live_slot":true})
+                    .session(&mut *session)
+                    .await?
+                    .is_some()
+                {
+                    return Err(AppError::Conflict(
+                        "End the voice call before deleting this conversation".into(),
+                    ));
+                }
                 let rows = vec![row];
                 let now = Utc::now();
                 if rows.iter().any(|row| live_turn(row, now).is_some()) {
@@ -2122,6 +2235,7 @@ pub async fn delete(
                     }
                     for collection in [
                         crate::models::assistant_voice::REQUESTS,
+                        crate::models::assistant_voice_session::COLLECTION_NAME,
                         crate::models::assistant_acknowledgement::COLLECTION_NAME,
                         crate::models::assistant_attachment::COLLECTION_NAME,
                         crate::models::assistant_upload_retention::TOMBSTONES,

@@ -1389,7 +1389,7 @@ pub async fn resolve_proxy_target(
 
 /// Resolve proxy target with lenient credential handling for node-routed requests.
 ///
-async fn resolve_catalog_platform_target(
+pub(crate) async fn resolve_catalog_platform_target(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
     owner_id: &str,
@@ -5697,6 +5697,7 @@ mod tests {
                 description: None,
                 allowed_service_ids: vec![],
                 allowed_platform_service_ids: Vec::new(),
+                assistant_group_id: None,
                 assistant_agent_owner_id: None,
                 assistant_operation_scopes: Default::default(),
                 allowed_node_ids: vec![],

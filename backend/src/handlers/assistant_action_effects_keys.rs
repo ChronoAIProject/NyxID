@@ -956,6 +956,7 @@ mod tests {
             description: Some("assistant key fixture".to_string()),
             allowed_service_ids,
             allowed_platform_service_ids: Vec::new(),
+            assistant_group_id: None,
             assistant_agent_owner_id: None,
             assistant_operation_scopes: Default::default(),
             allowed_node_ids: Vec::new(),

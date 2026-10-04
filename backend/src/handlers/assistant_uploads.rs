@@ -70,7 +70,7 @@ pub async fn upload(
     require_first_party_human(&auth)?;
     let user = auth.user_id.to_string();
     engine::require_enabled(&state.db, &user).await?;
-    uploads::owner_scope(&state.db, &user, &scope).await?;
+    let access = uploads::owner_scope(&state.db, &user, &scope).await?;
     uploads::admit(&state.db, &user).await?;
     let _permit = UPLOADS.try_acquire().map_err(|_| {
         AppError::BadRequest("Upload processing is busy. Try again shortly.".into())
@@ -90,13 +90,14 @@ pub async fn upload(
     )
     .await
     .map_err(|_| AppError::BadRequest("Attachment exceeds 20 MiB.".into()))?;
-    let item = Box::pin(uploads::upload(
+    let item = Box::pin(uploads::upload_authorized(
         &state.db,
         &state.encryption_keys,
         &user,
         &scope,
         &name,
         bytes.to_vec(),
+        access,
     ))
     .await?;
     Ok((StatusCode::CREATED, Json(item.into())))

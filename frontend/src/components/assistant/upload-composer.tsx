@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ComponentProps } from "react";
 import { FileText, Paperclip, X } from "lucide-react";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Button } from "@/components/ui/button";
 import { ChatComposer } from "@/components/assistant/chat-composer";
 import {
@@ -21,18 +22,21 @@ type Pending = {
   item?: NyxAgentAttachment;
   controller: AbortController;
 };
-type Props = Omit<ComponentProps<typeof ChatComposer>, "onSend"> & {
+type Props = Omit<ComponentProps<typeof ChatComposer>, "onSend" | "onVoice"> & {
   readonly scope: UploadScope;
+  readonly onVoice?: (conversationId: string) => Promise<void>;
   readonly onSend: (text: string, uploads?: UploadedMessage) => Promise<void>;
 };
 
 /** Keyed by owner + conversation at the call site: drafts never cross threads. */
-export function UploadComposer({ scope, onSend, ...props }: Props) {
+export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
   const [files, setFiles] = useState<Pending[]>([]);
   const [notice, setNotice] = useState<string>();
   const pending = useRef(new Map<string, Pending>());
   const input = useRef<HTMLInputElement>(null);
+  const attach = useRef<HTMLButtonElement>(null);
   const uploadQueue = useRef(Promise.resolve());
+  const openingVoice = useRef(false);
   const scopeId = useRef<Promise<string> | undefined>(undefined);
   const resolved = useRef<UploadScope>(scope);
   const alive = useRef(true);
@@ -61,6 +65,7 @@ export function UploadComposer({ scope, onSend, ...props }: Props) {
     if (file.item)
       void removeUpload(resolved.current, file.item.id).catch(() => undefined);
     refresh();
+    requestAnimationFrame(() => attach.current?.focus());
   }
   async function add(incoming: File[]) {
     if (locked) return;
@@ -123,16 +128,30 @@ export function UploadComposer({ scope, onSend, ...props }: Props) {
       });
     }
   }
+  async function openVoice() {
+    if (locked || openingVoice.current || pending.current.size || scope.kind !== "conversations" || !onVoice) return;
+    openingVoice.current = true;
+    try {
+      scopeId.current ??= scope.id ? Promise.resolve(scope.id) : createUploadDraft(scope.agentId);
+      const id = await scopeId.current;
+      resolved.current = { ...scope, id };
+      if (alive.current) await onVoice(id);
+    } catch {
+      if (!resolved.current.id) scopeId.current = undefined;
+      if (alive.current) setNotice("Voice could not open. Please try again.");
+    } finally { openingVoice.current = false; }
+  }
   return (
     <ChatComposer
       {...props}
+      onVoice={onVoice ? () => { void openVoice(); } : undefined}
       hasAttachments={files.some((file) => file.item)}
       uploadBlocked={files.some((file) => !file.item)}
       onFiles={(items) => void add(items)}
-      controls={
-        <div className="ml-[30px] mb-2 space-y-2">
+      attachments={
+        <div className={files.length || notice ? "mb-2 space-y-2" : undefined}>
           {files.length > 0 && (
-            <ul aria-label="Attachments" className="grid gap-2 sm:grid-cols-2">
+            <ul aria-label="Attachments" className="assistant-scrollbar grid max-h-44 gap-1.5 overflow-y-auto overscroll-contain sm:grid-cols-2">
               {files.map((file) => (
                 <li
                   key={file.key}
@@ -142,7 +161,7 @@ export function UploadComposer({ scope, onSend, ...props }: Props) {
                     <img
                       src={file.preview}
                       alt="Upload preview"
-                      className="h-10 w-10 shrink-0 rounded object-cover"
+                      className="h-8 w-8 shrink-0 rounded object-cover"
                     />
                   ) : (
                     <FileText className="h-5 w-5 shrink-0 text-muted-foreground" />
@@ -182,32 +201,47 @@ export function UploadComposer({ scope, onSend, ...props }: Props) {
               {notice}
             </p>
           )}
+        </div>
+      }
+      attachmentButton={
+        <>
           <input
             ref={input}
             type="file"
             multiple
             accept={UPLOAD_ACCEPT}
             className="sr-only"
+            tabIndex={-1}
             aria-label="Choose attachments"
+            disabled={locked}
             onChange={(event) => {
               void add(Array.from(event.target.files ?? []));
               event.target.value = "";
             }}
           />
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            disabled={locked || files.length >= 10}
-            onClick={() => input.current?.click()}
-          >
-            <Paperclip className="mr-1.5 h-3.5 w-3.5" />
-            Attach files
-          </Button>
-          <span className="ml-2 text-[10px] text-muted-foreground">
-            Images and documents · 20 MB each · up to 10
-          </span>
-        </div>
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="shrink-0 text-muted-foreground"
+                  ref={attach}
+                  aria-label="Attach files"
+                  disabled={locked || files.length >= 10}
+                  onClick={() => input.current?.click()}
+                >
+                  <Paperclip className="h-4 w-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent className="max-w-64">
+                PNG, JPEG, GIF, WebP, PDF, DOCX, text, Markdown, CSV and JSON.
+                Up to 20 MB each, 10 files per message.
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        </>
       }
       onSend={async (text) => {
         const items = [...pending.current.values()];
