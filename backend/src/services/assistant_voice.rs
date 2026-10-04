@@ -654,6 +654,7 @@ pub struct VoiceOption {
     unavailable_reason: Option<&'static str>,
     pricing: Option<super::inference_service::LanePricingView>,
     billing_owner: &'static str,
+    reported_token_pricing: Option<super::inference_service::LanePricingView>,
 }
 
 pub async fn options(
@@ -688,6 +689,23 @@ pub async fn options(
         else {
             continue;
         };
+        if voice.protocol == crate::models::downstream_service::VoiceProtocol::XaiRealtime
+            && (!super::feature_flag_service::personal_flag_enabled(
+                db,
+                &thread.user_id,
+                super::feature_flag_service::VOICE_GROK_FLAG_KEY,
+            )
+            .await?
+                || super::voice::credentials::authorize_inference(db, thread, service)
+                    .await
+                    .is_err()
+                || !super::voice::credentials::official_provider_origin(
+                    &service.base_url,
+                    &voice.protocol,
+                ))
+        {
+            continue;
+        }
         for model in &voice.models {
             let billing = service.billing.as_ref();
             let platform_priced =
@@ -698,7 +716,7 @@ pub async fn options(
             let platform_enabled = super::feature_flag_service::personal_flag_enabled(
                 db,
                 &thread.user_id,
-                super::feature_flag_service::VOICE_OPENAI_PLATFORM_FLAG_KEY,
+                super::voice::credentials::platform_flag(&voice.protocol),
             )
             .await?;
             if entry.platform_key.available {
@@ -715,6 +733,13 @@ pub async fn options(
                         Some("provider_rollout_pending")
                     } else if !platform_priced {
                         Some("duration_tariff_unavailable")
+                    } else {
+                        None
+                    },
+                    reported_token_pricing: if voice.protocol
+                        == crate::models::downstream_service::VoiceProtocol::XaiRealtime
+                    {
+                        entry.platform_key.pricing.clone()
                     } else {
                         None
                     },
@@ -745,6 +770,13 @@ pub async fn options(
                     available: own_billing.is_ok(),
                     unavailable_reason: if own_billing.is_err() {
                         Some("duration_tariff_unavailable")
+                    } else {
+                        None
+                    },
+                    reported_token_pricing: if voice.protocol
+                        == crate::models::downstream_service::VoiceProtocol::XaiRealtime
+                    {
+                        entry.byok_pricing.clone()
                     } else {
                         None
                     },

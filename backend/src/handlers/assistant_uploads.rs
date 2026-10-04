@@ -138,16 +138,15 @@ pub async fn thread_image(
     if !matches!(auth.auth_method, crate::mw::auth::AuthMethod::ApiKey) {
         return Err(AppError::Forbidden("A thread Agent Key is required".into()));
     }
-    let chat = crate::services::assistant_acknowledgement_service::for_key_with_access(
-        &state.db,
-        &auth.user_id.to_string(),
-        auth.api_key_id.as_deref(),
-        auth.org_agent_access.as_ref(),
-    )
-    .await?
-    .ok_or_else(|| AppError::Forbidden("A thread Agent Key is required".into()))?;
+    auth.ensure_live_assistant_turn(&state.db, "/assistant-attachments/{id}/content")
+        .await?;
+    let chat = auth
+        .assistant_chat
+        .as_ref()
+        .map(std::sync::Arc::as_ref)
+        .ok_or_else(|| AppError::Forbidden("A thread Agent Key is required".into()))?;
     let (mime, bytes) =
-        uploads::chat_bytes(&state.db, &state.encryption_keys, &chat, &id, true).await?;
+        uploads::chat_bytes(&state.db, &state.encryption_keys, chat, &id, true).await?;
     content(mime, bytes)
 }
 

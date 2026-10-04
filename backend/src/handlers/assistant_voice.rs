@@ -89,6 +89,7 @@ pub async fn options(
 pub struct StartRequest {
     pub client_request_id: String,
     pub preferences: Preferences,
+    #[serde(default)]
     pub sdp_offer: String,
 }
 #[derive(Serialize)]

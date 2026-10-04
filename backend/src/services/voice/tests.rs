@@ -10,7 +10,7 @@ use crate::{
 use mongodb::bson::{self, doc};
 use uuid::Uuid;
 
-async fn setup(
+pub(super) async fn setup(
     name: &str,
 ) -> (
     crate::AppState,
@@ -562,6 +562,18 @@ async fn voice_options_use_catalog_models_voices_and_supported_protocols_only() 
         }
         rows.update_one(doc! {"_id": &service.id}, doc! {"$set":{"inference.voice.protocol":"xai_realtime", "inference.voice.usage_source":"server_measured"}}).await.unwrap();
         assert!(super::super::assistant_voice::options(&state.db, &state.encryption_keys, &thread).await.unwrap().is_empty());
+        flags::set_platform_override(&state.db, flags::VOICE_GROK_FLAG_KEY, &flags::FlagTarget::Global, true, &thread.user_id).await.unwrap();
+        // A protocol switch cannot redirect credentials to the old provider origin.
+        assert!(super::super::assistant_voice::options(&state.db, &state.encryption_keys, &thread).await.unwrap().is_empty());
+        rows.update_one(doc! {"_id": &service.id}, doc! {"$set":{"base_url":"https://api.x.ai/v1", "billing.byok_pricing":bson::Bson::Null}}).await.unwrap();
+        let grok_options=serde_json::to_value(super::super::assistant_voice::options(&state.db, &state.encryption_keys, &thread).await.unwrap()).unwrap();
+        let own=grok_options.as_array().unwrap().iter().find(|o|o["key_source"]=="own").unwrap();
+        assert_eq!(own["model"],"admin-added-live-model");
+        assert_eq!(own["voice"]["protocol"],"xai_realtime");
+        assert_eq!(own["available"],true);
+        let mut automatic=preferences(); automatic.service_id=service.id.clone(); automatic.model="admin-added-live-model".into();
+        automatic.voice=Some("admin-added-voice".into()); automatic.input_mode=VoiceInputMode::Automatic;
+        assert!(matches!(Box::pin(credentials::resolve(&state,&thread.user_id,&thread.id,&automatic)).await,Err(crate::errors::AppError::ValidationError(_))));
         rows.update_one(doc! {"_id": &service.id}, doc! {"$set":{"inference.voice":bson::Bson::Null,"inference.realtime":true}}).await.unwrap();
         assert!(super::super::assistant_voice::options(&state.db, &state.encryption_keys, &thread).await.unwrap().is_empty());
         state.db.drop().await.unwrap();

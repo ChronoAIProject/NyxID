@@ -620,6 +620,7 @@ async fn schedule_specialist_authority_threads_and_guest_refusal() {
         org_agent_access: None,
         turn_id: None,
         turn_stopped: false,
+        turn_live: true,
         machine_node_ids: Vec::new(),
         saved_login_ids: Vec::new(),
         confirmation_policy: None,

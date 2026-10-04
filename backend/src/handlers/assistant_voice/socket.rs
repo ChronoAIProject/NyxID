@@ -1,4 +1,4 @@
-//! Human-only metadata/control socket. Never accepts transcripts or provider frames.
+//! Human-only control and bounded PCM relay. Never accepts transcripts or provider frames.
 use crate::{
     AppState,
     errors::{AppError, AppResult},
@@ -25,6 +25,8 @@ use serde_json::json;
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum ClientEvent {
+    PttBegin,
+    PttCommit,
     Heartbeat {
         generation: i64,
         playback_ms: i64,
@@ -56,7 +58,32 @@ pub async fn stream(
         .max_frame_size(4096)
         .on_upgrade(move |socket| {
             Box::pin(async move {
-                let _ = serve(&state, call.clone(), socket, &human_session, &socket_id).await;
+                let (input, output) = if call.protocol
+                    == Some(crate::models::downstream_service::VoiceProtocol::XaiRealtime)
+                {
+                    let (tx, rx) = tokio::sync::mpsc::channel(64);
+                    let (out, stream) = tokio::sync::mpsc::channel(64);
+                    tokio::spawn(Box::pin(crate::services::voice::grok_runtime::serve(
+                        state.clone(),
+                        call.clone(),
+                        socket_id.clone(),
+                        rx,
+                        out,
+                    )));
+                    (Some(tx), Some(stream))
+                } else {
+                    (None, None)
+                };
+                let _ = serve(
+                    &state,
+                    call.clone(),
+                    socket,
+                    &human_session,
+                    &socket_id,
+                    input,
+                    output,
+                )
+                .await;
                 let _ =
                     crate::services::voice::session::release_stream(&state.db, &call, &socket_id)
                         .await;
@@ -70,7 +97,10 @@ async fn serve(
     mut socket: WebSocket,
     human_session: &str,
     socket_id: &str,
+    input: Option<tokio::sync::mpsc::Sender<crate::services::voice::grok::ClientInput>>,
+    mut output: Option<tokio::sync::mpsc::Receiver<crate::services::voice::grok::Output>>,
 ) -> AppResult<()> {
+    use crate::services::voice::grok::{ClientInput, Output};
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut frame_window = tokio::time::Instant::now();
@@ -79,11 +109,40 @@ async fn serve(
         tokio::select! {
             frame=socket.next()=>{
                 if frame_window.elapsed()>=std::time::Duration::from_secs(1) {frame_window=tokio::time::Instant::now();frames=0;}
-                frames+=1;if frames>20 {return Err(AppError::RateLimited);}
-                let Some(Ok(Message::Text(text)))=frame else {return Ok(());};
+                frames+=1;if frames>if input.is_some() {80} else {20} {return Err(AppError::RateLimited);}
+                let text = match frame {
+                    Some(Ok(Message::Binary(bytes))) if input.is_some() && call.state == crate::models::assistant_voice_session::SessionState::Active => {
+                        if bytes.is_empty() || bytes.len()>1920 || bytes.len()%2!=0 {return Err(AppError::ValidationError("Invalid voice audio frame".into()));}
+                        input.as_ref().expect("checked relay").try_send(ClientInput::Pcm(bytes.to_vec())).map_err(|_|AppError::ClientDisconnected)?;
+                        continue;
+                    }
+                    Some(Ok(Message::Text(text)))=>text,
+                    _=>return Ok(()),
+                };
                 let event:ClientEvent=serde_json::from_str(&text).map_err(|_|AppError::ValidationError("Invalid voice control frame".into()))?;
-                match event {ClientEvent::Heartbeat{generation,playback_ms,playback_audible,revision}=>
-                    crate::services::voice::session::heartbeat(&state.db,&call,generation,playback_ms,playback_audible,revision).await?}
+                match event {
+                    ClientEvent::PttBegin | ClientEvent::PttCommit => {
+                        let tx=input.as_ref().ok_or_else(||AppError::ValidationError("Unexpected voice media control".into()))?;
+                        tx.try_send(if matches!(event,ClientEvent::PttBegin) {ClientInput::Begin} else {ClientInput::Commit}).map_err(|_|AppError::ClientDisconnected)?;
+                    }
+                    ClientEvent::Heartbeat{generation,playback_ms,playback_audible,revision}=> {
+                        crate::services::voice::session::heartbeat(&state.db,&call,generation,playback_ms,playback_audible,revision).await?;
+                        if let Some(tx)=&input {tx.try_send(ClientInput::Playback{ms:playback_ms,audible:playback_audible}).map_err(|_|AppError::ClientDisconnected)?;}
+                    }
+                }
+            },
+            audio=async {match &mut output {Some(rx)=>rx.recv().await,None=>std::future::pending().await}}=>{
+                let Some(audio)=audio else {return Ok(());};
+                let result=tokio::time::timeout(std::time::Duration::from_secs(2),async {
+                    match audio {
+                        Output::Audio{bytes,end_ms}=>{
+                            socket.send(Message::Text(json!({"type":"audio","generation":call.generation,"end_ms":end_ms}).to_string().into())).await?;
+                            socket.send(Message::Binary(bytes.into())).await
+                        }
+                        Output::Flush=>socket.send(Message::Text(json!({"type":"audio_flush","generation":call.generation}).to_string().into())).await,
+                    }
+                }).await;
+                result.map_err(|_|AppError::ClientDisconnected)?.map_err(|_|AppError::ClientDisconnected)?;
             },
             _=tick.tick()=>{
                 crate::services::voice::session::refresh_stream(&state.db,&call,socket_id).await?;
