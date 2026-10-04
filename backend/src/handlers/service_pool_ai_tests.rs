@@ -89,6 +89,7 @@ async fn fixture(label: &str, backup: ResponseTemplate) -> Fixture {
             wire_protocol: protocol,
             model_list: false,
             realtime: false,
+            voice: None,
         });
         db.collection::<crate::models::downstream_service::DownstreamService>(
             "downstream_services",

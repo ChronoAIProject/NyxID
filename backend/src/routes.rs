@@ -2164,7 +2164,20 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .route(
             "/assistant/nyxagent/conversations/{id}/voice-sessions",
-            post(handlers::assistant_voice::start),
+            post(handlers::assistant_voice::start)
+                .layer(axum::extract::DefaultBodyLimit::max(128 * 1024)),
+        )
+        .route(
+            "/assistant/nyxagent/conversations/{id}/voice-sessions/{sid}",
+            get(handlers::assistant_voice::session_status),
+        )
+        .route(
+            "/assistant/nyxagent/conversations/{id}/voice-sessions/{sid}/stream",
+            get(handlers::assistant_voice::stream),
+        )
+        .route(
+            "/assistant/nyxagent/conversations/{id}/voice-sessions/{sid}/control",
+            post(handlers::assistant_voice::control),
         )
         .route(
             "/assistant/nyxagent/conversations/{id}/voice-requests/{rid}",

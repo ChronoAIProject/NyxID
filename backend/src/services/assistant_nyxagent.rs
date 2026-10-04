@@ -1369,6 +1369,7 @@ pub async fn begin_turn_with_voice(
                 if let Some(lost) = row.active_turn.take() {
                     row.message_count += 1;
                     let message = AssistantMessage {
+                        voice: None,
                         execution_pending: false,
                         id: Uuid::new_v4().to_string(),
                         conversation_id: id.clone(),
@@ -1519,6 +1520,7 @@ pub async fn begin_turn_with_voice(
                 ))
                 .await?;
                 let message = AssistantMessage {
+                    voice: None,
                     execution_pending: false,
                     id: message_id.clone(),
                     conversation_id: id.clone(),
@@ -1815,6 +1817,7 @@ pub async fn finish_turn(
                     tracing::warn!(conversation_id = %row.id, turn_id = %turn_id, upstream_error_code = error.upstream_code.as_deref().unwrap_or(error.code), "Assistant turn failed");
                 }
                 let message = AssistantMessage {
+                    voice: None,
                     execution_pending: false,
                     id: message_id.clone(),
                     conversation_id: row.id.clone(),
@@ -2204,6 +2207,19 @@ pub async fn delete(
                     .session(&mut *session)
                     .await?
                     .ok_or_else(not_found)?;
+                if db
+                    .collection::<bson::Document>(
+                        crate::models::assistant_voice_session::COLLECTION_NAME,
+                    )
+                    .find_one(doc! {"user_id":user_id,"conversation_id":id,"live_slot":true})
+                    .session(&mut *session)
+                    .await?
+                    .is_some()
+                {
+                    return Err(AppError::Conflict(
+                        "End the voice call before deleting this conversation".into(),
+                    ));
+                }
                 let rows = vec![row];
                 let now = Utc::now();
                 if rows.iter().any(|row| live_turn(row, now).is_some()) {
@@ -2240,6 +2256,7 @@ pub async fn delete(
                     }
                     for collection in [
                         crate::models::assistant_voice::REQUESTS,
+                        crate::models::assistant_voice_session::COLLECTION_NAME,
                         crate::models::assistant_acknowledgement::COLLECTION_NAME,
                         crate::models::assistant_attachment::COLLECTION_NAME,
                         crate::models::assistant_upload_retention::TOMBSTONES,

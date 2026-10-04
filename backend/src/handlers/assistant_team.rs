@@ -2597,6 +2597,8 @@ const SWEEP_SECS: u64 = 15;
 /// restarted) when their events arrived. Agents are persistent, so nothing
 /// is destroyed automatically.
 pub fn spawn_sweeps(state: AppState) {
+    super::assistant_voice::spawn_dispatch(state.clone());
+    crate::services::voice::runtime::spawn_recovery(state.clone());
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(SWEEP_SECS));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

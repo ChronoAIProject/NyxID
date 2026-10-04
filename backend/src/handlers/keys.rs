@@ -435,6 +435,8 @@ pub struct KeyResponse {
     pub platform_key_available: bool,
     pub platform_key_pricing: Option<crate::services::inference_service::LanePricingView>,
     pub byok_pricing: Option<crate::services::inference_service::LanePricingView>,
+    pub inference: Option<crate::services::inference_service::InferenceView>,
+    pub capabilities: Option<crate::services::inference_service::ServiceCapabilitiesView>,
     pub credential_type: String,
     pub auth_method: String,
     pub auth_key_name: String,
@@ -2697,6 +2699,8 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
         platform_key_available: crate::services::platform_key_service::binding(&result.service)
             == "platform",
         byok_pricing: None,
+        inference: None,
+        capabilities: None,
         platform_key_pricing: None,
         credential_type: result
             .api_key
@@ -2839,6 +2843,8 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
         platform_key_available: view.platform_key_available,
         platform_key_pricing: view.platform_key_pricing,
         byok_pricing: view.byok_pricing,
+        inference: view.inference,
+        capabilities: view.capabilities,
         auth_method: view.auth_method,
         auth_key_name: view.auth_key_name,
         status: view.status,

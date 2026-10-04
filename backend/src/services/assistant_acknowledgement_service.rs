@@ -965,6 +965,20 @@ pub async fn decide_as(
     decider: Decider,
     reason: Option<&str>,
 ) -> AppResult<AssistantAcknowledgement> {
+    decide_with_voice(db, user, conversation, id, allow, decider, reason, None).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn decide_with_voice(
+    db: &Database,
+    user: &str,
+    conversation: Option<&str>,
+    id: &str,
+    allow: bool,
+    decider: Decider,
+    reason: Option<&str>,
+    voice: Option<super::voice::confirmation::DecisionFence>,
+) -> AppResult<AssistantAcknowledgement> {
     let db = db.clone();
     let user = user.to_owned();
     let conversation = conversation.map(str::to_owned);
@@ -990,6 +1004,9 @@ pub async fn decide_as(
                     .session(&mut *session)
                     .await?
                     .ok_or_else(not_found)?;
+                if let Some(voice)=&voice {
+                    super::voice::confirmation::fence_decision(&db,session,&row,voice).await?;
+                }
                 if row.status != "pending" || row.expires_at <= Utc::now() {
                     return Err(AppError::Conflict(
                         "Acknowledgement is no longer pending".into(),
@@ -1196,6 +1213,13 @@ pub async fn decide_as(
                         )
                         .session(&mut *session)
                         .await?;
+                }
+                if let Some(voice)=&voice {
+                    super::audit_service::log_actor_event_in_session(&db,session,voice.audit_key.as_ref().as_ref(),
+                        &super::audit_service::AuditActor{user_id:user.clone(),ip_address:None,user_agent:None,api_key_id:None,api_key_name:None},
+                        "assistant_confirmation_decided",json!({"source":"voice","conversation_id":row.conversation_id,
+                            "session_id":voice.session.id,"acknowledgement_id":row.id,"request_id":row.voice_request_id,
+                            "continuation_receipt_id":row.continuation_receipt_id})).await?;
                 }
                 Ok(row)
             })
