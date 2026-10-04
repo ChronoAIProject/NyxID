@@ -45,6 +45,7 @@ frontend/src/components/service-icons/api-ifttt-mcp.tsx
 frontend/src/components/service-icons/api-ifttt.tsx
 frontend/src/components/service-icons/api-lark-bot.tsx
 frontend/src/components/service-icons/api-lark.tsx
+frontend/src/components/service-icons/api-linkedin.tsx
 frontend/src/components/service-icons/api-microsoft.tsx
 frontend/src/components/service-icons/api-notion.tsx
 frontend/src/components/service-icons/api-reddit.tsx
