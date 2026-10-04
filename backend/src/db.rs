@@ -302,6 +302,10 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    db.collection::<Document>(crate::models::permission_policy::COLLECTION_NAME)
+        .create_index(IndexModel::builder().keys(doc! { "user_id": 1 }).build())
+        .await?;
+
     // ── api_keys ──
     let api_keys = db.collection::<mongodb::bson::Document>("api_keys");
     api_keys

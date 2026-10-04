@@ -147,3 +147,5 @@ pub mod trigger_scheduler;
 pub mod assistant_schedules;
 
 pub(crate) mod trigger_schedule_dto;
+
+pub mod permission_keys;

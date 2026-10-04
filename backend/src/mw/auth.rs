@@ -409,6 +409,17 @@ async fn ensure_catalog_editor_route(
 }
 
 fn ensure_api_key_purpose_route(api_key: &ApiKey, path: &str) -> Result<(), AppError> {
+    if api_key.purpose == ApiKeyPurpose::PermissionBound {
+        return if path == "/api/v1/permission-execution/mcp"
+            || path.starts_with("/api/v1/permission-execution/rest/")
+        {
+            Ok(())
+        } else {
+            Err(AppError::Forbidden(
+                "Permission-bound keys require the permission execution endpoints".into(),
+            ))
+        };
+    }
     if api_key.purpose != ApiKeyPurpose::ScheduledInvocation {
         return Ok(());
     }
@@ -443,6 +454,7 @@ fn api_key_management_write_requires_scope(method: &Method, path: &str) -> bool 
         "/api/v1/delegation",
         "/api/v1/llm",
         "/api/v1/proxy",
+        "/api/v1/permission-execution",
         "/api/v1/ssh",
         "/api/v1/approvals/exact-service",
     ]
@@ -519,7 +531,9 @@ fn delegated_read_denied_path(path: &str) -> bool {
     if matches!(
         segments.first().copied(),
         Some(
-            "admin"
+            "permission-execution"
+                | "permission-keys"
+                | "admin"
                 | "ownership"
                 | "ssh"
                 | "assistant"
@@ -3545,6 +3559,32 @@ mod tests {
 
         key.purpose = crate::models::api_key::ApiKeyPurpose::General;
         assert!(ensure_api_key_purpose_route(&key, "/api/v1/llm/chat/completions").is_ok());
+    }
+
+    #[test]
+    fn permission_keys_routes_require_exact_execution_namespace() {
+        let mut key = delegated_fixture_api_key("key", "owner", "hash");
+        key.purpose = ApiKeyPurpose::PermissionBound;
+        for path in [
+            "/api/v1/permission-execution/mcp",
+            "/api/v1/permission-execution/rest/drive/v3/files/x",
+        ] {
+            assert!(ensure_api_key_purpose_route(&key, path).is_ok());
+            assert!(!api_key_management_write_requires_scope(
+                &Method::POST,
+                path
+            ));
+            assert!(delegated_read_denied_path(path));
+        }
+        for path in [
+            "/api/v1/proxy/a/b",
+            "/api/v1/permission-execution/mcp/extra",
+            "/api/v1/permission-execution/restish",
+            "/api/v1/permission-keys",
+            "/api/v1/auth/agent-key/self",
+        ] {
+            assert!(ensure_api_key_purpose_route(&key, path).is_err());
+        }
     }
 
     // -- approval_requester_type --

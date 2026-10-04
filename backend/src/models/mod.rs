@@ -143,3 +143,5 @@ pub mod machine_setup;
 pub mod pool_recovery_diagnostic;
 pub mod trigger_run;
 pub mod trigger_schedule;
+
+pub mod permission_policy;

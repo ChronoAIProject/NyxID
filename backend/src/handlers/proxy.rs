@@ -576,6 +576,68 @@ const ALLOWED_WS_FORWARD_HEADERS: &[&str] = &[
     "x-correlation-id",
 ];
 
+/// Only the permission engine's transport can construct this in-process ingress.
+#[derive(Clone)]
+struct PermissionIngress {
+    binding: crate::models::permission_policy::PermissionPolicy,
+    expected_origin: Option<String>,
+}
+
+pub(super) async fn execute_permission_request(
+    state: &AppState,
+    auth: &AuthUser,
+    binding: &crate::models::permission_policy::PermissionPolicy,
+    expected_origin: Option<&str>,
+    resolved: proxy_service::UserServiceResolution,
+    path: &str,
+    mut request: Request<Body>,
+) -> AppResult<Response> {
+    if auth.api_key_purpose != crate::models::api_key::ApiKeyPurpose::PermissionBound
+        || auth.api_key_id.as_deref() != Some(binding.id.as_str())
+        || auth.user_id.to_string() != binding.user_id
+        || resolved.user_service_id != binding.user_service_id
+        || crate::services::permission_policy_service::authority(&resolved)?
+            != binding.execution_authority_digest
+    {
+        return Err(AppError::Forbidden(
+            "Permission binding changed or unavailable".into(),
+        ));
+    }
+    crate::services::permission_policy_service::validate_policy_connection(
+        &binding.policy,
+        &resolved,
+    )?;
+    let service_id = resolved.target.service.id.clone();
+    request.extensions_mut().insert(PermissionIngress {
+        binding: binding.clone(),
+        expected_origin: expected_origin.map(str::to_owned),
+    });
+    execute_proxy_inner(
+        state,
+        auth,
+        &service_id,
+        path,
+        request,
+        Some(PreResolved {
+            target: resolved.target,
+            catalog_service_slug: resolved.catalog_service_slug,
+            node_id: None,
+            user_service_id: Some(resolved.user_service_id),
+            has_server_credential: resolved.has_server_credential,
+            master_credential: false,
+            require_identity_assertion: false,
+            credential_source: resolved.credential_source,
+            effective_owner_id: auth.user_id.to_string(),
+            billing_owner_id: None,
+            is_auto_connected: false,
+        }),
+        TargetMode::CallerAddressed,
+        vec![],
+        &mut String::new(),
+    )
+    .await
+}
+
 /// Pre-resolved proxy target from the new UserService path.
 struct PreResolved {
     target: proxy_service::ProxyTarget,
@@ -3172,6 +3234,14 @@ async fn execute_proxy_inner(
     mut extra_outbound_headers: Vec<(String, String)>,
     resolved_slug: &mut String,
 ) -> AppResult<Response> {
+    let permission_ingress = request.extensions().get::<PermissionIngress>().cloned();
+    let permission_bound =
+        auth_user.api_key_purpose == crate::models::api_key::ApiKeyPurpose::PermissionBound;
+    if permission_bound && request.extensions().get::<PermissionIngress>().is_none() {
+        return Err(AppError::Forbidden(
+            "Permission engine ingress required".into(),
+        ));
+    }
     let machine_ingress = request
         .extensions()
         .get::<crate::services::machine_gateway_service::Ingress>()
@@ -3429,7 +3499,8 @@ async fn execute_proxy_inner(
         }
         // Per-agent credential override: if this request is via an API key and
         // the user has bound a different credential for this service, swap it in.
-        if pool_authority.is_none()
+        if !permission_bound
+            && pool_authority.is_none()
             && let (Some(ak_id), Some(us_id)) = (&auth_user.api_key_id, &pre.user_service_id)
             && let Some(override_cred) = proxy_service::resolve_agent_credential_override(
                 &state.db,
@@ -3664,6 +3735,20 @@ async fn execute_proxy_inner(
     );
     if is_ws_upgrade_request(&request) {
         crate::services::destination_routing::reject_websocket(&target)?;
+    }
+
+    if permission_bound {
+        if node_route.is_some() || master_credential || agent_override_applied {
+            return Err(AppError::Forbidden(
+                "Permission-bound requests require the bound server credential".into(),
+            ));
+        }
+        crate::services::permission_policy_service::validate_execution_target(
+            &target,
+            permission_ingress
+                .as_ref()
+                .and_then(|ingress| ingress.expected_origin.as_deref()),
+        )?;
     }
 
     // Billing is metadata-only and must never change proxy resolution
@@ -3964,6 +4049,26 @@ async fn execute_proxy_inner(
                         &state.config.frontend_url,
                     )
                 })?;
+        }
+    }
+
+    if let Some(ingress) = &permission_ingress {
+        crate::services::permission_policy_service::check_live(&state.db, &ingress.binding).await?;
+        let snapshot = proxy_service::read_proxy_authority_snapshot_by_user_service_id(
+            &state.db,
+            &state.encryption_keys,
+            &ingress.binding.user_id,
+            &ingress.binding.user_service_id,
+            None,
+        )
+        .await?
+        .ok_or_else(|| AppError::Forbidden("Bound connection unavailable".into()))?;
+        if crate::services::permission_policy_service::authority(&snapshot)?
+            != ingress.binding.execution_authority_digest
+        {
+            return Err(AppError::Forbidden(
+                "Bound connection changed during admission".into(),
+            ));
         }
     }
 

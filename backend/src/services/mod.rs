@@ -239,3 +239,5 @@ pub mod service_pool_inspection;
 pub mod service_pool_contract;
 
 pub mod service_pool_routing;
+
+pub mod permission_policy_service;
