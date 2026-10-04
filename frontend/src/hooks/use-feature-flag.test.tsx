@@ -121,6 +121,7 @@ describe("feature flag catalog", () => {
       BILLING: "experimental:billing",
       AEVATAR_CHAT_WIRE_LOG: "experimental:aevatar-chat-wire-log",
       DIRECT_CHAT_ENGINE: "experimental:direct-chat-engine",
+      NYXBOT_THREAD_FOLLOW: "nyxbot:thread-follow",
       NYXBOT_GATEWAY_LARK: "nyxbot:gateway-lark",
       NYXBOT_GATEWAY_FEISHU: "nyxbot:gateway-feishu",
       NYXBOT_GATEWAY_DISCORD: "nyxbot:gateway-discord",

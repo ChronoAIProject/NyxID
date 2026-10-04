@@ -14,6 +14,9 @@ const UNREACHABLE_TARGET_MARKERS: &[&str] = &[
     "message can't be edited",
 ];
 
+#[path = "telegram_thread.rs"]
+mod thread;
+
 use crate::services::channel_media_service as media;
 use crate::services::channel_platform::{FetchedMedia, MediaCapabilities, MediaKind};
 
@@ -376,6 +379,42 @@ impl TelegramAdapter {
 
 #[async_trait::async_trait]
 impl PlatformAdapter for TelegramAdapter {
+    async fn resolve_thread(
+        &self,
+        _http: &reqwest::Client,
+        _credentials: &crate::services::channel_platform::BotCredentials<'_>,
+        facts: &crate::models::channel_thread::ChannelThreadFacts,
+        ancestors: &[crate::models::channel_thread::ChannelThreadFacts],
+    ) -> AppResult<Option<crate::models::channel_thread::ChannelThreadFacts>> {
+        Ok(self.resolve_native_thread(facts, ancestors))
+    }
+
+    async fn send_thread_reply(
+        &self,
+        http: &reqwest::Client,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
+        target: &crate::services::channel_thread_service::ThreadReplyTarget,
+        reply: &OutboundReply,
+    ) -> AppResult<Option<String>> {
+        self.reply_in_thread(http, credentials, target, reply).await
+    }
+
+    fn thread_facts(
+        &self,
+        inbound: &InboundMessage,
+        bot: &ChannelBot,
+        _bot_user_id: Option<&str>,
+    ) -> Option<crate::models::channel_thread::ChannelThreadFacts> {
+        super::thread_facts::telegram(inbound, bot)
+    }
+
+    fn thread_capabilities(&self) -> crate::services::channel_platform::ThreadCapabilities {
+        crate::services::channel_platform::ThreadCapabilities {
+            thread_reply: true,
+            ..Default::default()
+        }
+    }
+
     fn display_name(&self) -> &str {
         "Telegram bot token"
     }
