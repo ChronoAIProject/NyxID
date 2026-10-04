@@ -474,6 +474,8 @@ pub async fn forward_trigger_event(
         assistant_group_id: None,
         assistant_agent_owner_id: None,
         assistant_operation_scopes: Default::default(),
+        assistant_turn_fence: None,
+        assistant_chat: None,
         user_id,
         session_id: None,
         scope: String::new(),
