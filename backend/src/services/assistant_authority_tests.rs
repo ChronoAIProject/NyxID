@@ -194,6 +194,7 @@ fn orchestrator_chat() -> acks::ChatAuthority {
         org_agent_access: None,
         turn_id: None,
         turn_stopped: false,
+        turn_live: true,
         machine_node_ids: Vec::new(),
         saved_login_ids: Vec::new(),
         confirmation_policy: None,

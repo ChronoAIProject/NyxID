@@ -115,6 +115,11 @@ pub enum AppError {
     #[error("Voice provider adapters are not enabled")]
     VoiceProviderUnavailable,
 
+    #[error(
+        "This assistant key is only valid while its conversation has a live turn; start or resume the conversation"
+    )]
+    AssistantTurnRequired,
+
     #[error("Attachment expired per retention policy. Upload it again to continue.")]
     AssistantAttachmentExpired,
 
@@ -733,6 +738,7 @@ impl AppError {
             Self::AssistantTurnActive => StatusCode::CONFLICT,
             Self::VoiceQueueFull => StatusCode::TOO_MANY_REQUESTS,
             Self::VoiceProviderUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            Self::AssistantTurnRequired => StatusCode::CONFLICT,
             Self::AssistantAttachmentExpired => StatusCode::GONE,
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::MfaRequired { .. } => StatusCode::FORBIDDEN,
@@ -945,6 +951,8 @@ impl AppError {
             Self::AssistantTurnActive => 12100,
             Self::VoiceQueueFull => 12500,
             Self::VoiceProviderUnavailable => 12501,
+            // 12101 is already the public upload-retention code.
+            Self::AssistantTurnRequired => 12102,
             Self::AssistantAttachmentExpired => 12101,
             Self::RateLimited => 1005,
             Self::Internal(_) | Self::PoolAttemptTransport(_) => 1006,
@@ -1197,6 +1205,7 @@ impl AppError {
             Self::AssistantTurnActive => "turn_active",
             Self::VoiceQueueFull => "voice_queue_full",
             Self::VoiceProviderUnavailable => "voice_provider_unavailable",
+            Self::AssistantTurnRequired => "assistant_turn_required",
             Self::AssistantAttachmentExpired => "attachment_expired",
             Self::GrantCascadeConfirmationRequired(_) => "grant_cascade_confirmation_required",
             Self::RateLimited => "rate_limited",
@@ -1453,6 +1462,7 @@ impl AppError {
                 | AppError::PoolAttemptTransport(_)
                 | AppError::DatabaseError(_) => "An internal error occurred".to_string(),
                 AppError::MfaRequired { .. } => "MFA verification required".to_string(),
+                AppError::AssistantTurnRequired => "This assistant key is only valid while its conversation has a live turn; start or resume the conversation".to_string(),
                 AppError::ConsentRequired { .. } => {
                     "Consent required. Complete authorization in browser flow.".to_string()
                 }
@@ -1820,9 +1830,19 @@ mod tests {
     }
 
     #[test]
+    fn assistant_turn_required_contract() {
+        let error = AppError::AssistantTurnRequired;
+        assert_eq!(error.status_code(), StatusCode::CONFLICT);
+        assert_eq!(error.error_code(), 12102);
+        assert_eq!(error.error_key(), "assistant_turn_required");
+        assert!(error.response_body().message.len() < 2_000);
+    }
+
+    #[test]
     fn error_codes_unique() {
         let codes = vec![
             AppError::AssistantTurnActive.error_code(),
+            AppError::AssistantTurnRequired.error_code(),
             AppError::AdminUsageQueryTimeout.error_code(),
             AppError::WorkspaceDestinationsNotActivated.error_code(),
             AppError::NodeHttpSignatureUnsupported.error_code(),

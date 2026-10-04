@@ -20,6 +20,30 @@ handler independently enforces the effective per-person engine flag. Disabled
 routes and another person's conversation return not-found-shaped responses.
 No request accepts an owner, upstream URL, secret, or upstream session ID.
 
+### Conversation-key live-turn gate
+
+Every per-thread `nyxid-assistant` credential carries a request-time
+`AssistantTurnFence` loaded with its conversation. When the runtime flag
+`assistant:live-turn-gate` is enabled, MCP tool execution, provider/proxy
+execution, pinned skill reads, conversation attachment reads, exact-approval
+redemption and Oracle submission require `live_turn` and
+`active_turn.stop_requested=false`. Discovery/list/search, human session
+routes and Stop remain available. Dedicated channel-agent keys are a separate
+credential class and are not subject to this gate; a conversation credential
+must not be used as a channel route or event-gateway key.
+
+The fence uses the existing 2,100-second execution plus settlement lease and
+adds no grace period. A request admitted before a concurrent Stop keeps its
+request snapshot; the next request is refused with `assistant_turn_required`.
+Voice delegation must enter through `begin_turn` on the same thread and must
+not call tools with the bare key after the voice session or turn ends.
+
+The flag is default-off for rollout safety: deploy every auth, MCP, proxy, LLM
+and worker replica with fence support, then enable `assistant:live-turn-gate`.
+Rollback disables the flag before rolling back binaries. Existing fences are
+always computed, and ordinary API keys, sessions, service accounts and public
+requests keep their no-extra-read path.
+
 ## Deployment prerequisites
 
 The active admin-managed catalog row `llm-nyx` supplies the destination.
