@@ -863,7 +863,9 @@ mod tests {
                 socket: temp.path().join("unused.sock"),
                 _lock: std::fs::File::create(temp.path().join("lock")).unwrap(),
             };
-            let error = browser.exchange("expected", b"{}").await.unwrap_err();
+            // Per-run nonce: the "nonce" case replies with a different value.
+            let nonce = uuid::Uuid::new_v4().to_string();
+            let error = browser.exchange(&nonce, b"{}").await.unwrap_err();
             let failure = error.downcast_ref::<Failure>().unwrap();
             assert!(match case {
                 "write" => matches!(failure, Failure::TransportWrite),
