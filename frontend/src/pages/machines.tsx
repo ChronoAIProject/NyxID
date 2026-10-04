@@ -61,6 +61,7 @@ function MachineCard({
         {[
           machine.shell && "Commands",
           machine.files && "Files",
+          (machine.browser ?? machine.computer) && "Browser",
           machine.computer && "Computer",
         ]
           .filter(Boolean)
@@ -75,7 +76,7 @@ function MachineCard({
           : ""}
       </p>
       <div className="flex flex-wrap gap-2">
-        {machine.computer ? (
+        {machine.computer || machine.browser ? (
           <Button asChild disabled={!node.is_connected}>
             <Link
               to="/assistant/machines/$nodeId/desktop"

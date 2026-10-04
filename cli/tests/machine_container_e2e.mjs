@@ -13,13 +13,14 @@ const {WebSocketServer}=createRequire(import.meta.url)('ws');
 // Opt in explicitly on a quiet host; both modes always print measurements.
 const strictBenchmark=process.env.NYXID_MACHINE_STRICT_BENCHMARK==='1';
 const limits=strictBenchmark
- ? {fps:15,inputMs:100,takeoverMs:150,stopMs:1000}
- : {fps:8,inputMs:500,takeoverMs:2000,stopMs:5000};
+ ? {fps:15,inputMs:100,takeoverMs:150,stopMs:1000,axWalkMs:1200}
+ : {fps:8,inputMs:500,takeoverMs:2000,stopMs:5000,axWalkMs:5000};
 console.log('Timing policy:',strictBenchmark?'strict benchmark':'CI sanity',JSON.stringify(limits));
 const signing=randomBytes(32), nodeId=randomUUID(), auth=`nyx_nauth_${randomBytes(32).toString('hex')}`;
 const token=`nyx_nreg_${randomBytes(32).toString('hex')}`;
 const responses=new Map(), transfers=new Map(), output=[], frames=[], screenshotTargets=new Map(), screenshotWrites=[];
 let socket, profile, child, website, browserSite;
+let offlineUntil=0;
 let conversationId=randomUUID(), turnId=randomUUID();
 const values={username:`user-${randomBytes(12).toString('hex')}@example.test`,password:randomBytes(24).toString('base64url'),one_time_code:''};
 const totpKey=randomBytes(20);
@@ -45,6 +46,7 @@ wss.on('connection',connection=>connection.on('message',(raw,binary)=>{
     assert.equal(message.token,token);
     connection.send(JSON.stringify({type:'register_ok',node_id:nodeId,auth_token:auth,signing_secret:signing.toString('hex')}));
   }else if(message.type==='auth'){
+    if(Date.now()<offlineUntil){connection.close();return;}
     socket=connection;
     connection.send(JSON.stringify({type:'auth_ok',heartbeat_interval_secs:10,capabilities:{proxy_binary_chunks:true}}));
   }else if(message.capabilities?.machine){profile=message.capabilities.machine;}
@@ -60,23 +62,28 @@ wss.on('connection',connection=>connection.on('message',(raw,binary)=>{
   else if(message.type==='machine_result'){responses.get(message.request_id)?.(message.result);responses.delete(message.request_id);}
 }));
 server.listen(0,'127.0.0.1');await once(server,'listening');
-const heartbeat=setInterval(()=>socket?.send(JSON.stringify({type:'heartbeat_ping'})),3000);
+const heartbeat=setInterval(()=>{if(socket?.readyState===1)socket.send(JSON.stringify({type:'heartbeat_ping'}));},3000);
 const delay=ms=>new Promise(r=>setTimeout(r,ms));
 async function waitFor(check,label,ms=45000){const end=Date.now()+ms;while(Date.now()<end){if(check())return;await delay(5);}throw new Error(`Timed out: ${label}`);}
 function canonical(value){if(Array.isArray(value))return `[${value.map(canonical).join(',')}]`;if(value && typeof value==='object')return `{${Object.keys(value).sort().map(k=>JSON.stringify(k)+':'+canonical(value[k])).join(',')}}`;return JSON.stringify(value);}
-function request(operation,parameters){
+function request(operation,parameters,authority){
  parameters={conversation_id:conversationId,turn_id:turnId,...parameters};
  if(operation==='exec')parameters={...parameters,runtime_id:profile.runtime_id};
  const r={type:'machine_request',request_id:randomUUID(),node_id:nodeId,operation,parameters,timestamp:Math.floor(Date.now()/1000),nonce:randomUUID()};
- const mac=createHmac('sha256',signing).update(Buffer.from('nyxid.machine.request.v1\0'));
+ const mac=createHmac('sha256',signing);
+ if(authority){
+  r.type='machine_request_v2';r.version=2;r.authority=authority;
+  const version=Buffer.alloc(4);version.writeUInt32BE(2);
+  mac.update(Buffer.from('nyxid.machine.request.v2\0')).update(createHash('sha256').update(canonical(authority)).digest()).update(version);
+ }else mac.update(Buffer.from('nyxid.machine.request.v1\0'));
  const time=Buffer.alloc(8);time.writeBigInt64BE(BigInt(r.timestamp));
  for(const field of [r.request_id,nodeId,JSON.stringify(operation),createHash('sha256').update(canonical(parameters)).digest(),time,r.nonce]){
   const bytes=Buffer.isBuffer(field)?field:Buffer.from(field),length=Buffer.alloc(8);length.writeBigUInt64BE(BigInt(bytes.length));mac.update(length).update(bytes);
  }
  r.signature=mac.digest('hex');return r;
 }
-async function call(operation,parameters){
- const message=request(operation,parameters);
+async function call(operation,parameters,authority){
+ const message=request(operation,parameters,authority);
  const response=new Promise((resolve,reject)=>{const timeout=setTimeout(()=>{responses.delete(message.request_id);reject(new Error(`Timed out: ${operation}`));},40000);responses.set(message.request_id,result=>{clearTimeout(timeout);resolve(result);});});
  socket.send(JSON.stringify(message));const result=await response;results.push(result);return result;
 }
@@ -129,7 +136,7 @@ try{
  });
  website.listen(0,'127.0.0.1');await once(website,'listening');
  const origin=`https://127.0.0.1:${website.address().port}`;
- child=spawn('/usr/local/bin/nyxid-machine-entrypoint',[],{env:{...process.env,NYXID_NODE_TOKEN:token,NYXID_NODE_URL:`ws://127.0.0.1:${server.address().port}/api/v1/nodes/ws`},detached:true,stdio:['ignore','pipe','pipe']});
+ child=spawn('/usr/local/bin/nyxid-machine-entrypoint',['--machine','--browser','--computer'],{env:{...process.env,NYXID_NODE_TOKEN:token,NYXID_NODE_URL:`ws://127.0.0.1:${server.address().port}/api/v1/nodes/ws`},detached:true,stdio:['ignore','pipe','pipe']});
  for(const stream of [child.stdout,child.stderr])stream.on('data',bytes=>{output.push(bytes.toString());});
  await waitFor(()=>profile,'machine capabilities',60000);
  assert.equal(profile.browser_isolated,true);
@@ -351,10 +358,18 @@ CHECK`,cwd:'/workspace',services:[],timeout_secs:10});
  assert(!JSON.stringify(observed).includes('fixture-password'));assert(!JSON.stringify(observed).includes('123456'));
  const protectedField=observed.snapshot.elements.find(e=>e.label==='Protected password');
  assert.equal((await browser('type',{ref:protectedField.ref,text:'refused'})).status,'refused');
- const windows=(await call('computer',{tool:'list_windows',arguments:{}})).structuredContent.windows;
- const win=windows.find(w=>JSON.stringify(w).includes('Machine browser fixture'))||windows[0];
- const state=await call('computer',{tool:'get_window_state',arguments:{pid:win.pid,window_id:win.window_id,include_screenshot:false}});
- assert(!state.structuredContent?.degraded_reason,JSON.stringify(state).slice(0,1800));
+ // Navigation's DOM result can precede the AT-SPI title/tree update. Wait for
+ // this fixture's window and content, never fall back to an unrelated window.
+ let win,state;
+ const axDeadline=performance.now()+15000;
+ do {
+  const windows=(await call('computer',{tool:'list_windows',arguments:{}})).structuredContent?.windows??[];
+  win=windows.find(w=>JSON.stringify(w).includes('Machine browser fixture'));
+  if(win)state=await call('computer',{tool:'get_window_state',arguments:{pid:win.pid,window_id:win.window_id,include_screenshot:false,timeout_ms:limits.axWalkMs}});
+  if(state && JSON.stringify(state).includes('Project catalog'))break;
+  await delay(100);
+ }while(performance.now()<axDeadline);
+ assert(state && !state.structuredContent?.degraded_reason,JSON.stringify(state)?.slice(0,1800));
  assert(JSON.stringify(state).includes('Project catalog'),'AX must include visible page text');
  const indexed=state.structuredContent.elements.find(e=>e.label?.includes('Choose Atlas'));
  assert(indexed?.element_token,'AX must expose an indexed interactive element');
@@ -369,13 +384,18 @@ CHECK`,cwd:'/workspace',services:[],timeout_secs:10});
  async function cuaStep(tool,args={}){
   cuaCalls++;
   const result=tool==='get_window_state'
-   ?await call('computer',{tool,arguments:{pid:win.pid,window_id:win.window_id,include_screenshot:false}})
+   ?await call('computer',{tool,arguments:{pid:win.pid,window_id:win.window_id,include_screenshot:false,timeout_ms:limits.axWalkMs}})
    :await computer(tool,args);
   assert(!result.error&&!result.isError,JSON.stringify(result));return result;
  }
  async function observe(){cuaState=await cuaStep('get_window_state');}
  async function clickLabel(label){
-  const element=cuaState.structuredContent.elements.find(e=>e.label===label);
+  let element=cuaState.structuredContent.elements.find(e=>e.label===label);
+  const deadline=performance.now()+15000;
+  while(!element?.element_token && performance.now()<deadline){
+   await delay(100);await observe();
+   element=cuaState.structuredContent.elements.find(e=>e.label===label);
+  }
   assert(element?.element_token,`AX missing ${label}: ${JSON.stringify(cuaState)}`);
   cuaCalls++;
   const result=await call('computer',{tool:'click',arguments:{element_token:element.element_token,target:{kind:'window',pid:win.pid,window_id:win.window_id},delivery_mode:'foreground'}});
@@ -665,7 +685,7 @@ assert policy['URLBlocklist']==['file://*'] and 'ExtensionInstallForcelist' not 
  for(let n=0;n<10;n++)for(const tool of Object.keys(cuaSamples)){
   const started=performance.now();
   const result=tool==='get_window_state'
-   ?await call('computer',{tool,arguments:{pid:win.pid,window_id:win.window_id,include_screenshot:false}})
+   ?await call('computer',{tool,arguments:{pid:win.pid,window_id:win.window_id,include_screenshot:false,timeout_ms:limits.axWalkMs}})
    :await computer(tool,tool==='click'?{x:200,y:170,delivery_mode:'foreground'}:{text:'sample '});
   assert(!result.error&&!result.isError,JSON.stringify(result));
   cuaSamples[tool].push(performance.now()-started);
@@ -701,6 +721,53 @@ assert policy['URLBlocklist']==['file://*'] and 'ExtensionInstallForcelist' not 
  assert(performanceSamples[0].bytes_per_second<1024,'idle bandwidth should be near zero');
  assert(latencies[9]<=limits.inputMs,`input-to-frame p95 ${latencies[9]} ms exceeds ${limits.inputMs} ms`);
  await call('desktop_control',{session_id:session,viewer_id:'test-owner',owner:false,revision:4});
+ // Enroll only after the legacy regression matrix: v1 remains functional until
+ // an explicit restricted assignment is installed, then cannot widen it.
+ assert(profile.authority_versions.includes(2));
+ const identity={require_v2:true,context_id:randomUUID(),generation:1,mode:'shared_legacy',agent_id:randomUUID(),owner_id:randomUUID(),actor_id:randomUUID(),group_id:null,runtime_id:profile.runtime_id,conversation_id:conversationId,turn_id:turnId,revision:1,capabilities:{shell:true,files:false,browser:false,computer:false,developer_browser:false}};
+ const authority=(changes={})=>({...identity,lease_id:randomUUID(),expires_at_ms:Date.now()+45000,...changes});
+ assert.equal((await call('read_file',{path:'/workspace/transfer.bin'},authority())).error.code,12420,'signed file denial');
+ const leased=authority(),leasedJob=randomUUID();
+ const startedLease=await call('exec',{job_id:leasedJob,command:'sleep 60',background:true,services:[]},leased);
+ assert.equal(startedLease.job_id,leasedJob,JSON.stringify(startedLease));
+ const runningLease=await call('job',{job_id:leasedJob},authority());
+ assert.equal(runningLease.status,'running',JSON.stringify(runningLease));
+ assert.equal((await call('exec',{job_id:randomUUID(),command:'true',services:[]})).error.code,12419,'enrollment refuses v1 downgrade');
+ await delay(50);
+ assert.equal((await call('authority_renew',{}, {...leased,expires_at_ms:Date.now()+45000})).accepted,true);
+ const oldSocket=socket,oldRuntime=profile.runtime_id,blipAt=performance.now();
+ offlineUntil=Date.now()+7000;socket=undefined;oldSocket.terminate();
+ await waitFor(()=>socket&&socket!==oldSocket&&socket.readyState===1,'authority reconnect after seven-second blip',30000);
+ assert.equal(profile.runtime_id,oldRuntime,'socket recovery must preserve the runtime');
+ const afterBlip=await call('job',{job_id:leasedJob},authority());
+ assert.equal(afterBlip.status,'running','a brief WS outage must not cancel a long job');
+ assert.equal((await call('authority_renew',{}, {...leased,expires_at_ms:Date.now()+45000})).accepted,true);
+ console.log('Authority disconnect survived ms:',(performance.now()-blipAt).toFixed(2));
+ const revokeAt=performance.now();
+ assert.equal((await call('authority_revoke',{},authority({revision:2}))).accepted,true);
+ let cancelled;
+ for(let n=0;n<200;n++){
+  cancelled=await call('job',{job_id:leasedJob},authority({revision:2}));
+  if(cancelled.status==='finished')break;
+  await delay(25);
+ }
+ assert.equal(cancelled.status,'finished',JSON.stringify(cancelled));
+ console.log('Authority revoke-to-finished ms:',(performance.now()-revokeAt).toFixed(2));
+ assert.equal((await call('authority_renew',{}, {...leased,expires_at_ms:Date.now()+45000})).error.code,12421,'revoked lease cannot renew');
+ assert.equal((await call('exec',{job_id:randomUUID(),command:'true',services:[]},authority())).error.code,12421,'old revision cannot restart');
+ const expiring=authority({revision:2,expires_at_ms:Date.now()+5000}),expiryJob=randomUUID();
+ const startedExpiry=await call('exec',{job_id:expiryJob,command:'sleep 60',background:true,services:[]},expiring);
+ assert.equal(startedExpiry.job_id,expiryJob,JSON.stringify(startedExpiry));
+ await delay(5200);
+ let expired;
+ for(let n=0;n<200;n++){
+  expired=await call('job',{job_id:expiryJob},authority({revision:2}));
+  if(expired.status==='finished')break;
+  await delay(25);
+ }
+ assert.equal(expired.status,'finished','lack of renewal stops the background process');
+ assert.equal((await call('exec',{job_id:randomUUID(),command:'true',services:[]},authority({revision:3}))).exit_code,0,'fresh revision recovers');
+ console.log('Authority v2: capability denial, renewal, revocation, late renewal, expiry and v1 downgrade passed');
  for(const secret of [token,auth,signing.toString('hex')])assert(!output.join('').includes(secret),'node logs must not contain credentials');
  assert(!output.join('').includes('stderr-secret-fixture'),'developer diagnostics must never expose child stderr');
  console.log('| Scenario | Changed frames/s | Frame bytes/s | Actions |\n|---|---:|---:|---:|');

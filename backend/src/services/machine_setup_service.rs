@@ -74,10 +74,10 @@ pub async fn validate_choices(
         || choices
             .capabilities
             .iter()
-            .any(|c| !matches!(c.as_str(), "shell" | "files" | "computer"))
+            .any(|c| !matches!(c.as_str(), "shell" | "files" | "browser" | "computer"))
     {
         return Err(AppError::ValidationError(
-            "Choose shell, files or computer capabilities".into(),
+            "Choose shell, files, browser or computer capabilities".into(),
         ));
     }
     if let Some(selected) = &choices.owner_id

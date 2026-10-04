@@ -961,6 +961,7 @@ pub(crate) async fn webhook(
                     .db
                     .collection::<AssistantMessage>(MESSAGES)
                     .insert_one(AssistantMessage {
+                        voice: None,
                         execution_pending: false,
                         id: message_id,
                         conversation_id: row.id.clone(),

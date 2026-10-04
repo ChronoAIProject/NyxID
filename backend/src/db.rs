@@ -156,6 +156,10 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
     crate::services::catalog_skill_service::ensure_indexes(db).await?;
     crate::services::assistant_nyxagent::ensure_indexes(db).await?;
     crate::services::assistant_voice::ensure_indexes(db).await?;
+    crate::services::voice::session::ensure_indexes(db).await?;
+    Box::pin(crate::services::machine_access_service::ensure_indexes(db))
+        .await
+        .map_err(|_| mongodb::error::Error::custom("Machine authority index migration failed"))?;
     // Best effort: a failure only leaves bad home pointers for lazy repair.
     if let Err(error) = crate::services::assistant_nyxagent::repair_channel_homes(db).await {
         tracing::warn!(%error, "NyxBot home repair deferred");
@@ -2433,6 +2437,31 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
     crate::services::channel_activity_service::ensure_indexes(db).await?;
     crate::services::channel_delivery_service::ensure_indexes(db).await?;
     let channel_msgs = db.collection::<mongodb::bson::Document>("channel_messages");
+    for (name, keys) in [
+        (
+            "channel_messages_thread_root_v1",
+            doc! {
+                "channel_bot_id": 1, "platform_conversation_id": 1,
+                "thread_context.root_id": 1, "created_at": -1,
+            },
+        ),
+        (
+            "channel_messages_thread_parent_v1",
+            doc! {
+                "channel_bot_id": 1, "platform_conversation_id": 1,
+                "platform_message_id": 1,
+            },
+        ),
+    ] {
+        channel_msgs
+            .create_index(
+                IndexModel::builder()
+                    .keys(keys)
+                    .options(IndexOptions::builder().name(name.to_string()).build())
+                    .build(),
+            )
+            .await?;
+    }
     channel_msgs
         .create_index(
             IndexModel::builder()

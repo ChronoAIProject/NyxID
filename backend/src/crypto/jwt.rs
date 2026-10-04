@@ -1911,6 +1911,8 @@ mod tests {
             assistant_group_id: None,
             assistant_agent_owner_id: None,
             assistant_operation_scopes: Default::default(),
+            assistant_turn_fence: None,
+            assistant_chat: None,
             user_id: Uuid::new_v4(),
             session_id: None,
             scope: "llm:proxy".to_string(),

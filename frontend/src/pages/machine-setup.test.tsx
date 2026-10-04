@@ -150,3 +150,11 @@ it("quotes setup credentials and URLs, installs the CLI if missing and preserves
     ).toThrow();
   }
 });
+
+it("renders a browser-only setup without broad computer access", () => {
+  const token = `nyx_nreg_${"b".repeat(64)}`;
+  const command = machineSetupCommand({ ...choices, where: "vm", capabilities: ["browser"] }, token, "wss://example.test");
+  expect(command).toContain("--browser");
+  expect(command).not.toContain("--computer");
+  expect(command).not.toContain("--shell");
+});

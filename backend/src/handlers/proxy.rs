@@ -1002,6 +1002,9 @@ pub(crate) async fn proxy_request_inner(
 ) -> AppResult<Response> {
     validate_original_proxy_request_path(&request)?;
     auth_user.ensure_rest_proxy_access()?;
+    auth_user
+        .ensure_live_assistant_turn(&state.db, "proxy.uuid")
+        .await?;
 
     if auth_user.auth_method == AuthMethod::ServiceAccount {
         let sa = crate::services::service_account_service::get_service_account(
@@ -2464,6 +2467,9 @@ pub(crate) async fn proxy_request_by_slug_inner(
     } else {
         auth_user.ensure_rest_proxy_access()?;
     }
+    auth_user
+        .ensure_live_assistant_turn(&state.db, "proxy.slug")
+        .await?;
 
     if auth_user.auth_method == AuthMethod::ServiceAccount {
         let sa = crate::services::service_account_service::get_service_account(
@@ -5029,6 +5035,8 @@ async fn execute_resolved_proxy_inner(
                         .map_or(state.config.proxy_max_body_size, |meter| meter.limit)
                 );
                 let mut signed = nyxid_machine::Request {
+                    version: 1,
+                    authority: None,
                     request_id: attempt_request.request_id,
                     node_id: (*node_id).into(),
                     operation: nyxid_machine::Operation::ProxyUpload,
@@ -11327,6 +11335,8 @@ mod proxy_resolution_integration_tests {
             assistant_group_id: None,
             assistant_agent_owner_id: None,
             assistant_operation_scopes: Default::default(),
+            assistant_turn_fence: None,
+            assistant_chat: None,
             user_id: Uuid::parse_str(service_account_id).expect("valid service account id"),
             session_id: None,
             scope: "proxy".to_string(),
@@ -11357,6 +11367,8 @@ mod proxy_resolution_integration_tests {
             assistant_group_id: None,
             assistant_agent_owner_id: None,
             assistant_operation_scopes: Default::default(),
+            assistant_turn_fence: None,
+            assistant_chat: None,
             user_id: Uuid::parse_str(user_id).expect("valid user id"),
             session_id: None,
             scope: "proxy".to_string(),

@@ -1,4 +1,5 @@
 import { AgentSkills } from "./agent-skills";
+import { MachineCapabilities } from "./machine-capabilities";
 import { AgentOperationScopes } from "./agent-operation-scopes";
 import { MachineGrantPicker } from "./machine-grant-picker";
 import { AgentAutomations } from "./automation-preferences";
@@ -184,10 +185,9 @@ export function AgentDetailsSheet({
                   agent={agent}
                 />
               ) : (
-                <Section
-                  title="Access"
-                  description="NyxBot runs with full access to your connected services and account. Destructive actions follow your confirmation setting."
-                />
+                <Section title="Access" description="NyxBot runs with full access to your connected services and account. Machine capabilities are assigned separately. Destructive actions follow your confirmation setting.">
+                  <MachineCapabilities agentId={agent.id} disabled={agent.status === "destroyed"} />
+                </Section>
               )}
               <AgentSkills agentId={agent.id} readOnly={agent.status === "destroyed" || agent.can_maintain === false
                 } />
@@ -505,7 +505,10 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
         </form>
       </Form>
       {agent.can_maintain !== false ? (
-        <AgentOperationScopes agentId={agent.id} disabled={readOnly} />
+        <>
+          <AgentOperationScopes agentId={agent.id} disabled={readOnly} />
+          <MachineCapabilities agentId={agent.id} disabled={readOnly} />
+        </>
       ) : null}
     </Section>
   );

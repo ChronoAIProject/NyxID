@@ -637,6 +637,18 @@ pub async fn check_non_mcp_context(
     method: &str,
     path: &CanonicalPath,
 ) -> AppResult<bool> {
+    if let Some(chat) = auth.assistant_chat.as_deref() {
+        return check_non_mcp_chat_context(
+            db,
+            chat,
+            &auth.assistant_operation_scopes,
+            service,
+            catalog,
+            method,
+            path,
+        )
+        .await;
+    }
     check_non_mcp_key_context(
         db,
         &auth.user_id.to_string(),
@@ -663,7 +675,6 @@ pub async fn check_non_mcp_key_context(
     method: &str,
     path: &CanonicalPath,
 ) -> AppResult<bool> {
-    use crate::models::assistant_agent::GuestAccess;
     let Some(chat) =
         super::assistant_acknowledgement_service::for_key_with_access(db, actor, key, access)
             .await?
@@ -672,6 +683,19 @@ pub async fn check_non_mcp_key_context(
             "Specialist operation authority requires a live conversation".into(),
         ));
     };
+    check_non_mcp_chat_context(db, &chat, scopes, service, catalog, method, path).await
+}
+
+async fn check_non_mcp_chat_context(
+    db: &Database,
+    chat: &super::assistant_acknowledgement_service::ChatAuthority,
+    scopes: &OperationScopes,
+    service: &str,
+    catalog: Option<&str>,
+    method: &str,
+    path: &CanonicalPath,
+) -> AppResult<bool> {
+    use crate::models::assistant_agent::GuestAccess;
     let method_value = reqwest::Method::from_bytes(method.as_bytes())
         .map_err(|_| AppError::BadRequest("Invalid method".into()))?;
     let mut reads = true;
@@ -718,7 +742,7 @@ pub async fn check_non_mcp_key_context(
         }
     }
     if super::assistant_acknowledgement_service::webhook_confirmation_required(
-        &chat,
+        chat,
         reads,
         destructive,
     ) {

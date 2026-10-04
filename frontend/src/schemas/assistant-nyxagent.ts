@@ -226,8 +226,8 @@ export const voicePreferencesSchema = z.object({
   service_id: z.string().uuid(),
   connection_id: z.string().uuid().nullable(),
   key_source: z.enum(["platform", "own"]),
-  model: z.enum(["gpt-live-1", "grok-voice-think-fast-2.0"]),
-  voice: z.string().max(64).nullable(),
+  model: z.string().min(1).max(128).regex(/^[A-Za-z0-9_.-]+$/),
+  voice: z.string().max(128).nullable(),
   input_mode: z.enum(["push_to_talk", "automatic"]),
   language: z.string().max(35).nullable(),
   notify_on_completion: z.boolean(),
@@ -504,6 +504,7 @@ export const assistantAgentDestroyedSchema = z.object({ id: z.string(), destroye
 
 /** A channel bot that reaches one of the owner's agents. */
 export const nyxAgentChannelAgentSchema = z.object({
+  follow_readiness: z.enum(["ready", "unavailable"]).catch("unavailable").optional(),
   id: z.string(),
   channel_bot_id: z.string(),
   platform: z.string(),

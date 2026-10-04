@@ -1389,7 +1389,7 @@ pub async fn resolve_proxy_target(
 
 /// Resolve proxy target with lenient credential handling for node-routed requests.
 ///
-async fn resolve_catalog_platform_target(
+pub(crate) async fn resolve_catalog_platform_target(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
     owner_id: &str,

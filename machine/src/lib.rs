@@ -1,5 +1,6 @@
 //! Machine-node wire types and security primitives shared by NyxID and its node.
 
+pub mod authority;
 pub mod binary;
 pub mod config;
 pub mod desktop;
@@ -56,6 +57,8 @@ pub struct MachineProfile {
     pub shell: bool,
     pub files: bool,
     pub computer: bool,
+    pub browser: Option<bool>,
+    pub authority_versions: Vec<u32>,
     pub os: String,
     pub arch: String,
     pub roots: Vec<String>,
@@ -76,14 +79,23 @@ pub struct MachineProfile {
 }
 
 impl MachineProfile {
+    pub fn browser_enabled(&self) -> bool {
+        self.browser.unwrap_or(self.computer)
+    }
+    pub fn authority_v2(&self) -> bool {
+        self.authority_versions.contains(&authority::VERSION)
+    }
     pub fn enabled(&self) -> bool {
-        self.version == PROTOCOL_VERSION && (self.shell || self.files || self.computer)
+        self.version == PROTOCOL_VERSION
+            && (self.shell || self.files || self.computer || self.browser_enabled())
     }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Operation {
+    AuthorityRenew,
+    AuthorityRevoke,
     ProxyUpload,
     ServiceCall,
     JobFinished,
@@ -117,6 +129,7 @@ impl Operation {
         }
         match self {
             Self::ProxyUpload => false,
+            Self::AuthorityRenew | Self::AuthorityRevoke => profile.authority_v2(),
             Self::Cancel | Self::Upgrade | Self::UpgradeStatus => profile.enabled(),
             Self::ContainerInspect
             | Self::ContainerMigrate
@@ -131,13 +144,11 @@ impl Operation {
             | Self::EditFile
             | Self::SaveAttachment
             | Self::ShareFile => profile.files,
-            Self::Computer
-            | Self::Browser
-            | Self::DesktopOpen
-            | Self::DesktopClose
-            | Self::DesktopControl
-            | Self::DesktopInput
-            | Self::FillLogin => profile.computer,
+            Self::Browser | Self::FillLogin => profile.browser_enabled(),
+            Self::Computer => profile.computer && profile.browser_enabled(),
+            Self::DesktopOpen | Self::DesktopClose | Self::DesktopControl | Self::DesktopInput => {
+                profile.computer || profile.browser_enabled()
+            }
         }
     }
 }
@@ -145,6 +156,10 @@ impl Operation {
 /// Parameters may contain a login value, commands, or paths; Debug never does.
 #[derive(Clone, Deserialize, Serialize)]
 pub struct Request {
+    #[serde(default = "legacy_version")]
+    pub version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<Box<authority::Authority>>,
     pub request_id: String,
     pub node_id: String,
     pub operation: Operation,
@@ -152,6 +167,10 @@ pub struct Request {
     pub timestamp: i64,
     pub nonce: String,
     pub signature: String,
+}
+
+fn legacy_version() -> u32 {
+    1
 }
 
 impl std::fmt::Debug for Request {

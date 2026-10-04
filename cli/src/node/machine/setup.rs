@@ -28,6 +28,8 @@ pub struct Setup {
     pub files: bool,
     #[arg(long)]
     pub computer: bool,
+    #[arg(long, num_args=0..=1, default_missing_value="true")]
+    pub browser: Option<bool>,
     #[arg(long = "root")]
     pub roots: Vec<PathBuf>,
     #[arg(long)]
@@ -117,8 +119,8 @@ pub async fn run(mut args: Setup) -> Result<()> {
     let token = args.token.take().map(Zeroizing::new);
     let shell = args.machine || args.shell;
     let files = args.machine || args.files;
-    if !shell && !files && !args.computer {
-        bail!("Choose --machine (commands and files) or --computer");
+    if !shell && !files && !args.computer && args.browser != Some(true) {
+        bail!("Choose --machine (commands and files), --browser or --computer");
     }
     eprintln!(
         "Recommended: use the machine container or set up a VM with --separate-users. Agents act with their OS user's full access; prompt injection is possible."
@@ -136,7 +138,16 @@ pub async fn run(mut args: Setup) -> Result<()> {
     if !config_path.exists() {
         let token = match token {
             Some(token) => token,
-            None => pair(&api, shell, files, args.computer).await?,
+            None => {
+                pair(
+                    &api,
+                    shell,
+                    files,
+                    args.computer,
+                    args.browser.unwrap_or(args.computer),
+                )
+                .await?
+            }
         };
         crate::node::agent::cmd_register(&token, Some(&args.url), directory.to_str(), false)
             .await?;
@@ -181,7 +192,10 @@ pub async fn run(mut args: Setup) -> Result<()> {
     } else {
         directory.join("managed-desktop")
     };
-    let cua_driver = if args.computer && separated && args.cua_driver.is_none() {
+    let cua_driver = if (args.computer || args.browser == Some(true))
+        && separated
+        && args.cua_driver.is_none()
+    {
         Some(super::cua::install(Path::new("/opt/nyxid/cua")).await?)
     } else {
         args.cua_driver
@@ -191,6 +205,7 @@ pub async fn run(mut args: Setup) -> Result<()> {
             shell,
             files,
             computer: args.computer,
+            browser: args.browser,
             roots: args.roots,
             computer_mode: args.computer_mode,
             allow_root: args.allow_root,
@@ -200,7 +215,7 @@ pub async fn run(mut args: Setup) -> Result<()> {
         None,
     )
     .await?;
-    if args.computer && !args.skip_browser_policy {
+    if args.browser.unwrap_or(args.computer) && !args.skip_browser_policy {
         let port = browser_port(profile.unwrap_or("default"));
         let installed = if unsafe { libc::geteuid() } == 0 {
             install_browser(port)?;
@@ -260,7 +275,11 @@ pub async fn run(mut args: Setup) -> Result<()> {
             )?;
         }
         if args.separate_users {
-            install_supervisor(&directory, profile, args.computer)?;
+            install_supervisor(
+                &directory,
+                profile,
+                args.computer || args.browser == Some(true),
+            )?;
         } else {
             crate::node::daemon::install(directory.to_str(), profile, None, false)?;
             crate::node::daemon::start(directory.to_str(), profile)?;
@@ -280,6 +299,7 @@ async fn pair(
     shell: bool,
     files: bool,
     computer: bool,
+    browser: bool,
 ) -> Result<Zeroizing<String>> {
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -294,6 +314,9 @@ async fn pair(
     }
     if computer {
         capabilities.push("computer");
+    }
+    if browser && !computer {
+        capabilities.push("browser");
     }
     let mut hostname_bytes = [0u8; 256];
     if unsafe { libc::gethostname(hostname_bytes.as_mut_ptr().cast(), hostname_bytes.len()) } != 0 {

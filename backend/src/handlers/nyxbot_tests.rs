@@ -4450,6 +4450,7 @@ async fn org_group_bots_moved_to_a_specialist_keep_answering() {
         wire_protocol: crate::models::downstream_service::InferenceWireProtocol::OpenaiResponses,
         model_list: false,
         realtime: false,
+        voice: None,
     });
     state
         .db
@@ -4495,6 +4496,7 @@ async fn org_group_bots_moved_to_a_specialist_keep_answering() {
                     crate::models::downstream_service::InferenceWireProtocol::OpenaiCompletions,
                 model_list: false,
                 realtime: false,
+                voice: None,
             });
         state
             .db

@@ -10,6 +10,8 @@ pub struct Config {
     pub shell: bool,
     pub files: bool,
     pub computer: bool,
+    /// Absent preserves the pre-v2 computer ceiling. Explicit false always wins.
+    pub browser: Option<bool>,
     pub roots: Vec<PathBuf>,
     pub computer_mode: ComputerMode,
     pub max_jobs: usize,
@@ -29,6 +31,7 @@ impl Default for Config {
             shell: false,
             files: false,
             computer: false,
+            browser: None,
             roots: Vec::new(),
             computer_mode: ComputerMode::Standard,
             max_jobs: 4,
@@ -45,6 +48,9 @@ impl Default for Config {
 }
 
 impl Config {
+    pub fn browser_enabled(&self) -> bool {
+        self.browser.unwrap_or(self.computer)
+    }
     /// Existing container volumes predate the developer-browser setting. The
     /// official image always provisions this separate identity on upgrade.
     pub fn effective_dev_browser_user(&self) -> Option<&str> {

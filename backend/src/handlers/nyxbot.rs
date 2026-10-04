@@ -329,6 +329,8 @@ fn gateway_error_code(response: &GatewayResponse) -> &'static str {
 
 #[derive(Serialize)]
 pub struct ChannelAgentResponse {
+    /// Admission ships separately; gateway follow also needs a negotiated version.
+    follow_readiness: &'static str,
     id: String,
     channel_bot_id: String,
     platform: String,
@@ -356,6 +358,7 @@ pub struct ChannelAgentResponse {
 impl From<&NyxbotChannel> for ChannelAgentResponse {
     fn from(row: &NyxbotChannel) -> Self {
         Self {
+            follow_readiness: "unavailable",
             id: row.id.clone(),
             channel_bot_id: row.channel_bot_id.clone(),
             platform: row.platform.clone(),

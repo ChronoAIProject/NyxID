@@ -12,7 +12,9 @@ the credential used for execution.
 
 - `DownstreamService.inference` is optional. Its `wire_protocol` enum is
   `anthropic_messages`, `openai_responses`, or `openai_completions`; `model_list` and
-  `realtime` are defaulted booleans. Unknown protocol values fail validation.
+  `realtime` are defaulted booleans. The additive, defaulted `voice` block describes
+  voice protocol, catalog models/voices, usage source and billing units; its presence
+  makes the compatibility `realtime` response true. Unknown text protocols fail validation.
   The defaulted `inference_admin_modified` marker records explicit edits, including
   null clears, so startup never restores an admin-cleared block.
 - `DownstreamService.platform_key` is optional, with defaulted `enabled`, an
@@ -325,6 +327,40 @@ admin-authored block or an explicit null clear.
 | llm-deepseek, llm-mistral, llm-openrouter | openai_completions | true       | false    |
 | chrono-llm, chrono-llm-public             | openai_completions | true       | false    |
 | llm-xai                                   | openai_completions | true       | true     |
+
+
+Voice capability is the additive, defaulted `inference.voice` block:
+`protocol` (`openai_live` or `xai_realtime`), `models: [{id,label,default?}]`,
+`voices: [{id,label}]`, `usage_source`, and `billing_metrics`. Startup seeds
+`gpt-live-1`/documented OpenAI voices with `provider_reported`, and
+`grok-voice-think-fast-2.0`/documented xAI voices with `server_measured`.
+OpenAI uses cumulative `session.usage.updated` seconds and final `session.closed`;
+xAI measures duration on the server and records `response.done` tokens separately.
+
+Existing inference blocks receive a separate null-guarded update of only
+`inference.voice`; every seed/backfill checks `inference_admin_modified`.
+Admin null clears survive restart. No unknown-field denial was added, so old
+replicas ignore voice metadata. The compatibility `realtime` response is true
+when voice exists. Response-only `supports_realtime_voice` uses the same voice
+presence and is never independently persisted. Unrecognized future voice
+protocols remain readable but cannot execute.
+
+Admins edit voice choices in the existing service Inference section. IDs and
+labels are bounded to 128 bytes (IDs allow letters, digits, `_`, `-`, `.` only),
+models to 32, voices to 64, metrics to six unique duration/token units, and at most
+one model is default. The first listed voice is the fallback. No endpoint or
+secret is accepted in this block. Model additions need no deployment; options
+intersect metadata with the adapters actually shipped and revalidate at start.
+
+No voice prices are seeded. Add `voice_seconds` beside token components in the
+existing BYOK/platform lanes, using the same admin/Lago synchronization, funding
+precedence and deterministic settlement IDs. The price editor suggests duration
+only for metadata advertising it; already-authored prices remain editable after
+a metadata clear. Call setup shows configured rates and the payer. GPT-Live
+reports duration only; its silent windows never estimate tokens. For the xAI
+adapter in Phase 4, response-ID-deduped tokens settle configured token components
+separately from cumulative duration, with zero seconds on token events. A replay
+must never debit either component twice. See [voice design](chat/11-voice.md).
 
 OpenAI, Anthropic, DeepSeek, Mistral and OpenRouter document `GET /models`.
 Anthropic's list uses the familiar `data` model array with its own pagination fields;

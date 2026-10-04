@@ -20,6 +20,30 @@ handler independently enforces the effective per-person engine flag. Disabled
 routes and another person's conversation return not-found-shaped responses.
 No request accepts an owner, upstream URL, secret, or upstream session ID.
 
+### Conversation-key live-turn gate
+
+Every per-thread `nyxid-assistant` credential carries a request-time
+`AssistantTurnFence` loaded with its conversation. When the runtime flag
+`assistant:live-turn-gate` is enabled, MCP tool execution, provider/proxy
+execution, pinned skill reads, conversation attachment reads, exact-approval
+redemption and Oracle submission require `live_turn` and
+`active_turn.stop_requested=false`. Discovery/list/search, human session
+routes and Stop remain available. Dedicated channel-agent keys are a separate
+credential class and are not subject to this gate; a conversation credential
+must not be used as a channel route or event-gateway key.
+
+The fence uses the existing 2,100-second execution plus settlement lease and
+adds no grace period. A request admitted before a concurrent Stop keeps its
+request snapshot; the next request is refused with `assistant_turn_required`.
+Voice delegation must enter through `begin_turn` on the same thread and must
+not call tools with the bare key after the voice session or turn ends.
+
+The flag is default-off for rollout safety: deploy every auth, MCP, proxy, LLM
+and worker replica with fence support, then enable `assistant:live-turn-gate`.
+Rollback disables the flag before rolling back binaries. Existing fences are
+always computed, and ordinary API keys, sessions, service accounts and public
+requests keep their no-extra-read path.
+
 ## Deployment prerequisites
 
 The active admin-managed catalog row `llm-nyx` supplies the destination.
@@ -903,3 +927,14 @@ requests that never yield a response. The existing identifier-only conversation 
 stream refreshes titles in the sidebar and active thread without a reload.
 Sidebar Rename is an inline editor with optimistic metadata updates and rollback
 on failure; it does not interrupt a running turn.
+
+Machine tool discovery and execution intersect explicit per-agent capability
+assignments, node-local ceilings and live actor authority. With capability editing
+enabled for the acting person, new selection enables nothing. With it disabled,
+NyxBot reachability and specialist Grants selection snapshot legacy capabilities
+under the live ACL. Existing snapshots survive enabling the editor, and explicit
+restrictions survive disabling it. `nyxid__machine_capabilities` lists the current revision and
+proposes owner-reviewed widening; it cannot approve its own request. A v2 node
+receives signed, 45-second authority renewed every ten seconds, and stops work on revocation
+or lease expiry even after socket loss. Legacy assignments remain visibly shared;
+context IDs in this phase do not isolate files or browser sessions.

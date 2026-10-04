@@ -289,7 +289,35 @@ impl From<AssistantConversation> for ConversationResponse {
     }
 }
 #[derive(Serialize)]
+struct VoiceTranscriptResponse {
+    session_id: String,
+    segment_id: String,
+    start_ms: i64,
+    end_ms: i64,
+    sealed: bool,
+    complete: bool,
+    delivery: String,
+    request_id: Option<String>,
+    backend_message_id: Option<String>,
+}
+impl From<crate::models::assistant_message::VoiceTranscript> for VoiceTranscriptResponse {
+    fn from(v: crate::models::assistant_message::VoiceTranscript) -> Self {
+        Self {
+            session_id: v.session_id,
+            segment_id: v.segment_id,
+            start_ms: v.start_ms,
+            end_ms: v.end_ms,
+            sealed: v.sealed,
+            complete: v.complete,
+            delivery: v.delivery,
+            request_id: v.request_id,
+            backend_message_id: v.backend_message_id,
+        }
+    }
+}
+#[derive(Serialize)]
 pub struct MessageResponse {
+    voice: Option<VoiceTranscriptResponse>,
     execution_pending: bool,
     id: String,
     seq: i64,
@@ -307,6 +335,7 @@ pub struct MessageResponse {
 impl From<AssistantMessage> for MessageResponse {
     fn from(row: AssistantMessage) -> Self {
         Self {
+            voice: row.voice.map(VoiceTranscriptResponse::from),
             execution_pending: row.execution_pending,
             id: row.id,
             seq: row.seq,
@@ -552,6 +581,8 @@ pub async fn attachment(
 ) -> AppResult<Response> {
     let user_id = auth.user_id.to_string();
     engine::require_enabled(&state.db, &user_id).await?;
+    auth.ensure_live_assistant_turn(&state.db, "assistant.attachment")
+        .await?;
     if Uuid::parse_str(&attachment_id).is_err() {
         return Err(AppError::NotFound("Attachment not found".into()));
     }

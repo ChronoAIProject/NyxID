@@ -474,6 +474,8 @@ pub async fn forward_trigger_event(
         assistant_group_id: None,
         assistant_agent_owner_id: None,
         assistant_operation_scopes: Default::default(),
+        assistant_turn_fence: None,
+        assistant_chat: None,
         user_id,
         session_id: None,
         scope: String::new(),
@@ -625,6 +627,7 @@ fn build_device_callback_payload(
         .map_err(|e| AppError::Internal(format!("failed to serialize event envelope: {e}")))?;
 
     Ok(CallbackPayload {
+        thread_context: None,
         activity: None,
         // NyxID-assigned message id so async replies via /channel-relay/reply
         // resolve to the persisted ChannelMessage. The client-supplied

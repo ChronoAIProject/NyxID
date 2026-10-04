@@ -115,6 +115,11 @@ pub enum AppError {
     #[error("Voice provider adapters are not enabled")]
     VoiceProviderUnavailable,
 
+    #[error(
+        "This assistant key is only valid while its conversation has a live turn; start or resume the conversation"
+    )]
+    AssistantTurnRequired,
+
     #[error("Attachment expired per retention policy. Upload it again to continue.")]
     AssistantAttachmentExpired,
 
@@ -251,7 +256,7 @@ pub enum AppError {
     #[error("External provider not configured: {0}")]
     ExternalProviderNotConfigured(String),
 
-    // 12400–12418: machine access, controller privacy and saved-login filling.
+    // 12400–12422: machine access, controller privacy and saved-login filling.
     #[error("Machine capability is disabled; the owner must enable it on the node")]
     MachineCapabilityDisabled,
 
@@ -310,6 +315,21 @@ pub enum AppError {
     MachineDisplayUnavailable,
     #[error("The owner stopped this turn; wait for a new turn")]
     MachineTurnStopped,
+    #[error("Machine authority v2 is required; update the machine before configuring capabilities")]
+    MachineAuthorityUnsupported,
+    #[error(
+        "Machine permission was revoked or is not granted; request the capability from the owner through NyxBot"
+    )]
+    MachinePermissionRevoked,
+    #[error(
+        "Machine authority lease expired or revision changed; start a freshly authorized operation"
+    )]
+    MachineAuthorityStale,
+
+    #[error(
+        "This machine has too many active operations; retry when an operation finishes. Running work continues."
+    )]
+    MachineAuthorityBusy,
 
     #[error("Node not found: {0}")]
     NodeNotFound(String),
@@ -733,6 +753,7 @@ impl AppError {
             Self::AssistantTurnActive => StatusCode::CONFLICT,
             Self::VoiceQueueFull => StatusCode::TOO_MANY_REQUESTS,
             Self::VoiceProviderUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            Self::AssistantTurnRequired => StatusCode::CONFLICT,
             Self::AssistantAttachmentExpired => StatusCode::GONE,
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::MfaRequired { .. } => StatusCode::FORBIDDEN,
@@ -789,6 +810,10 @@ impl AppError {
             Self::MachineComputerPermissionMissing => StatusCode::FORBIDDEN,
             Self::MachineComputerToolUnsupported => StatusCode::BAD_REQUEST,
             Self::MachineTurnStopped => StatusCode::CONFLICT,
+            Self::MachineAuthorityUnsupported => StatusCode::CONFLICT,
+            Self::MachinePermissionRevoked => StatusCode::FORBIDDEN,
+            Self::MachineAuthorityStale => StatusCode::CONFLICT,
+            Self::MachineAuthorityBusy => StatusCode::TOO_MANY_REQUESTS,
             Self::NodeNotFound(_) => StatusCode::NOT_FOUND,
             Self::NodeOffline(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::NodeProxyTimeout => StatusCode::GATEWAY_TIMEOUT,
@@ -945,6 +970,8 @@ impl AppError {
             Self::AssistantTurnActive => 12100,
             Self::VoiceQueueFull => 12500,
             Self::VoiceProviderUnavailable => 12501,
+            // 12101 is already the public upload-retention code.
+            Self::AssistantTurnRequired => 12102,
             Self::AssistantAttachmentExpired => 12101,
             Self::RateLimited => 1005,
             Self::Internal(_) | Self::PoolAttemptTransport(_) => 1006,
@@ -1005,6 +1032,10 @@ impl AppError {
             Self::MachineComputerToolUnsupported => 12416,
             Self::MachineDisplayUnavailable => 12417,
             Self::MachineTurnStopped => 12418,
+            Self::MachineAuthorityUnsupported => 12419,
+            Self::MachinePermissionRevoked => 12420,
+            Self::MachineAuthorityStale => 12421,
+            Self::MachineAuthorityBusy => 12422,
             Self::NodeNotFound(_) => 8000,
             Self::NodeOffline(_) => 8001,
             Self::NodeProxyTimeout => 8002,
@@ -1197,6 +1228,7 @@ impl AppError {
             Self::AssistantTurnActive => "turn_active",
             Self::VoiceQueueFull => "voice_queue_full",
             Self::VoiceProviderUnavailable => "voice_provider_unavailable",
+            Self::AssistantTurnRequired => "assistant_turn_required",
             Self::AssistantAttachmentExpired => "attachment_expired",
             Self::GrantCascadeConfirmationRequired(_) => "grant_cascade_confirmation_required",
             Self::RateLimited => "rate_limited",
@@ -1260,6 +1292,10 @@ impl AppError {
             Self::MachineComputerToolUnsupported => "computer_tool_not_supported",
             Self::MachineDisplayUnavailable => "display_unavailable",
             Self::MachineTurnStopped => "machine_turn_stopped",
+            Self::MachineAuthorityUnsupported => "machine_authority_unsupported",
+            Self::MachinePermissionRevoked => "machine_permission_revoked",
+            Self::MachineAuthorityStale => "machine_authority_stale",
+            Self::MachineAuthorityBusy => "machine_authority_busy",
             Self::NodeNotFound(_) => "node_not_found",
             Self::NodeOffline(_) => "node_offline",
             Self::NodeProxyTimeout => "node_proxy_timeout",
@@ -1453,6 +1489,7 @@ impl AppError {
                 | AppError::PoolAttemptTransport(_)
                 | AppError::DatabaseError(_) => "An internal error occurred".to_string(),
                 AppError::MfaRequired { .. } => "MFA verification required".to_string(),
+                AppError::AssistantTurnRequired => "This assistant key is only valid while its conversation has a live turn; start or resume the conversation".to_string(),
                 AppError::ConsentRequired { .. } => {
                     "Consent required. Complete authorization in browser flow.".to_string()
                 }
@@ -1820,9 +1857,19 @@ mod tests {
     }
 
     #[test]
+    fn assistant_turn_required_contract() {
+        let error = AppError::AssistantTurnRequired;
+        assert_eq!(error.status_code(), StatusCode::CONFLICT);
+        assert_eq!(error.error_code(), 12102);
+        assert_eq!(error.error_key(), "assistant_turn_required");
+        assert!(error.response_body().message.len() < 2_000);
+    }
+
+    #[test]
     fn error_codes_unique() {
         let codes = vec![
             AppError::AssistantTurnActive.error_code(),
+            AppError::AssistantTurnRequired.error_code(),
             AppError::AdminUsageQueryTimeout.error_code(),
             AppError::WorkspaceDestinationsNotActivated.error_code(),
             AppError::NodeHttpSignatureUnsupported.error_code(),

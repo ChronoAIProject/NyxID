@@ -22,19 +22,21 @@ type Pending = {
   item?: NyxAgentAttachment;
   controller: AbortController;
 };
-type Props = Omit<ComponentProps<typeof ChatComposer>, "onSend"> & {
+type Props = Omit<ComponentProps<typeof ChatComposer>, "onSend" | "onVoice"> & {
   readonly scope: UploadScope;
+  readonly onVoice?: (conversationId: string) => Promise<void>;
   readonly onSend: (text: string, uploads?: UploadedMessage) => Promise<void>;
 };
 
 /** Keyed by owner + conversation at the call site: drafts never cross threads. */
-export function UploadComposer({ scope, onSend, ...props }: Props) {
+export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
   const [files, setFiles] = useState<Pending[]>([]);
   const [notice, setNotice] = useState<string>();
   const pending = useRef(new Map<string, Pending>());
   const input = useRef<HTMLInputElement>(null);
   const attach = useRef<HTMLButtonElement>(null);
   const uploadQueue = useRef(Promise.resolve());
+  const openingVoice = useRef(false);
   const scopeId = useRef<Promise<string> | undefined>(undefined);
   const resolved = useRef<UploadScope>(scope);
   const alive = useRef(true);
@@ -126,9 +128,23 @@ export function UploadComposer({ scope, onSend, ...props }: Props) {
       });
     }
   }
+  async function openVoice() {
+    if (locked || openingVoice.current || pending.current.size || scope.kind !== "conversations" || !onVoice) return;
+    openingVoice.current = true;
+    try {
+      scopeId.current ??= scope.id ? Promise.resolve(scope.id) : createUploadDraft(scope.agentId);
+      const id = await scopeId.current;
+      resolved.current = { ...scope, id };
+      if (alive.current) await onVoice(id);
+    } catch {
+      if (!resolved.current.id) scopeId.current = undefined;
+      if (alive.current) setNotice("Voice could not open. Please try again.");
+    } finally { openingVoice.current = false; }
+  }
   return (
     <ChatComposer
       {...props}
+      onVoice={onVoice ? () => { void openVoice(); } : undefined}
       hasAttachments={files.some((file) => file.item)}
       uploadBlocked={files.some((file) => !file.item)}
       onFiles={(items) => void add(items)}

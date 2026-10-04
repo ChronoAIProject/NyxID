@@ -1,3 +1,4 @@
+mod authority;
 pub mod browser;
 mod browser_input;
 mod cancellation;
@@ -41,6 +42,8 @@ enum MachineError {
     OwnerInControl,
     #[error("machine_turn_stopped")]
     TurnStopped,
+    #[error("machine_authority_stale")]
+    AuthorityStale,
     #[error("path_outside_roots")]
     PathOutsideRoots,
     #[error("job_not_found")]
@@ -79,6 +82,7 @@ impl From<anyhow::Error> for MachineError {
 impl MachineError {
     fn public(&self) -> (u32, &'static str) {
         match self {
+            Self::AuthorityStale => (12421, "machine_authority_stale: acquire fresh authority"),
             Self::TurnStopped => (
                 12418,
                 "machine_turn_stopped: the owner stopped this turn; wait for a new turn",
@@ -172,6 +176,8 @@ pub struct Runtime {
     owner_control: tokio::sync::watch::Sender<u64>,
     dev_owner_control: tokio::sync::watch::Sender<u64>,
     turns: cancellation::Turns,
+    authority: authority::Fences,
+    authority_watch: std::sync::atomic::AtomicBool,
 }
 
 impl Runtime {
@@ -180,7 +186,8 @@ impl Runtime {
         let identity = process::Identity::resolve(config.agent_user.as_deref())?;
         let browser = process::Identity::resolve(config.browser_user.as_deref())?;
         if !config.allow_root
-            && ((config.shell && identity.uid == 0) || (config.computer && browser.uid == 0))
+            && ((config.shell && identity.uid == 0)
+                || ((config.computer || config.browser_enabled()) && browser.uid == 0))
         {
             bail!("machine shell/computer as root requires --allow-root");
         }
@@ -194,15 +201,15 @@ impl Runtime {
         let driver = config
             .cua_driver
             .as_ref()
-            .filter(|_| config.computer)
+            .filter(|_| config.computer || config.browser_enabled())
             .map(|path| cua::Driver::new(path.clone(), browser.clone(), config.computer_mode));
         let owner_driver = config
             .cua_driver
             .as_ref()
-            .filter(|_| config.computer)
+            .filter(|_| config.computer || config.browser_enabled())
             .map(|path| cua::Driver::new(path.clone(), browser, config.computer_mode).for_human());
         let redactor = Arc::new(Mutex::new(Redactor::default()));
-        Ok(Arc::new(Self {
+        let runtime = Arc::new(Self {
             update_directory: update::directory(config, config_dir),
             status_directory: config_dir.to_owned(),
             upgrading: std::sync::atomic::AtomicBool::new(false),
@@ -228,7 +235,10 @@ impl Runtime {
             owner_control: tokio::sync::watch::channel(0).0,
             dev_owner_control: tokio::sync::watch::channel(0).0,
             turns: cancellation::Turns::default(),
-        }))
+            authority: authority::Fences::open(config_dir)?,
+            authority_watch: std::sync::atomic::AtomicBool::new(false),
+        });
+        Ok(runtime)
     }
 
     pub async fn connect(
@@ -251,7 +261,7 @@ impl Runtime {
         *self.desktop.sender.lock().await = Some(sender.clone());
         *self.dev_desktop.sender.lock().await = Some(sender);
         *self.desktop_secret.lock().await = Some(zeroize::Zeroizing::new(signing_secret.to_vec()));
-        if self.config.computer {
+        if self.config.computer || self.config.browser_enabled() {
             self.start_capture(nyxid_machine::desktop::Display::Secure);
             self.start_capture(nyxid_machine::desktop::Display::Dev);
         }
@@ -314,15 +324,16 @@ impl Runtime {
                 && self.identity.gid != browser.gid
                 && unsafe { libc::geteuid() } == 0
         });
-        let saved_login_ready = if self.config.computer && self.config.managed_browser.is_some() {
-            self.ensure_browser().await.is_ok()
-                && match self.browser.lock().await.as_ref() {
-                    Some(browser) => browser.ready().await,
-                    None => false,
-                }
-        } else {
-            false
-        };
+        let saved_login_ready =
+            if self.config.browser_enabled() && self.config.managed_browser.is_some() {
+                self.ensure_browser().await.is_ok()
+                    && match self.browser.lock().await.as_ref() {
+                        Some(browser) => browser.ready().await,
+                        None => false,
+                    }
+            } else {
+                false
+            };
         let profile = MachineProfile {
             installation: Some(update::installation(&self.config)),
             updater_ready: update::ready(&self.update_directory),
@@ -332,6 +343,8 @@ impl Runtime {
             shell: self.config.shell,
             files: self.config.files,
             computer: self.config.computer,
+            browser: self.config.browser,
+            authority_versions: vec![2],
             os: std::env::consts::OS.into(),
             arch: std::env::consts::ARCH.into(),
             roots: self
@@ -348,7 +361,7 @@ impl Runtime {
             browser_isolated: isolated,
             commands_isolated: Some(self.identity.commands_isolated(&self.excluded).await),
             saved_login_ready,
-            browser_tools: self.config.computer,
+            browser_tools: self.config.browser_enabled(),
         };
         if cache_status(&self.status_directory, &profile).is_err() {
             tracing::warn!("machine_status_snapshot_unavailable");
@@ -430,7 +443,9 @@ impl Runtime {
         let current = (*a << 32) | *b;
         if !matches!(
             operation,
-            Operation::Cancel
+            Operation::AuthorityRenew
+                | Operation::AuthorityRevoke
+                | Operation::Cancel
                 | Operation::Upgrade
                 | Operation::UpgradeStatus
                 | Operation::DesktopControl
@@ -446,6 +461,31 @@ impl Runtime {
             };
             let (code, message) = error.public();
             result = json!({"error":{"code":code,"message":message}});
+        }
+        if let Ok(Some(authority)) = serde_json::from_value::<
+            Option<Box<nyxid_machine::authority::Authority>>,
+        >(parameters["_signed_authority"].clone())
+        {
+            if result.get("error").is_none()
+                && !self.authority.live(&authority.lease_id)
+                && !matches!(
+                    operation,
+                    Operation::AuthorityRenew | Operation::AuthorityRevoke
+                )
+            {
+                result = json!({"error":{"code":12421,"message":"machine_authority_stale: acquire fresh authority"}});
+            }
+            // A renewal's acknowledgement is not the operation's completion.
+            // Rejected signatures/envelopes may not mutate an existing lease.
+            if !matches!(
+                operation,
+                Operation::AuthorityRenew | Operation::AuthorityRevoke
+            ) && !matches!(
+                result["error"]["code"].as_u64(),
+                Some(12401 | 12420 | 12421)
+            ) {
+                self.authority.finish(&authority.lease_id);
+            }
         }
         permit.send(crate::node::ws_client::NodeWsMessage::Text(
             json!({
@@ -469,7 +509,30 @@ impl Runtime {
         }
     }
 
-    pub async fn handle(&self, request: Request, signing_secret: &[u8]) -> Value {
+    fn ensure_authority_watch(self: &Arc<Self>) {
+        if !self
+            .authority_watch
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            let weak = Arc::downgrade(self);
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_millis(50));
+                loop {
+                    interval.tick().await;
+                    let Some(runtime) = weak.upgrade() else { break };
+                    let jobs = runtime.authority.expired_jobs();
+                    runtime.jobs.preempt_ids(&jobs).await;
+                    if let Some(gateway) = runtime.gateway.get() {
+                        gateway.cancel_jobs(&jobs).await;
+                    }
+                }
+            });
+        }
+    }
+    pub async fn handle(self: &Arc<Self>, mut request: Request, signing_secret: &[u8]) -> Value {
+        if request.version == 2 {
+            self.ensure_authority_watch();
+        }
         if self
             .replay
             .lock()
@@ -484,6 +547,58 @@ impl Runtime {
         {
             return json!({"error":{"code":12401,"message":"machine signature or replay check failed"}});
         }
+        let mut authority_stop = None;
+        if let Some(authority) = request.authority.as_ref() {
+            let result = match request.operation {
+                Operation::AuthorityRenew => self.authority.renew(authority, &self.runtime_id),
+                Operation::AuthorityRevoke => self.authority.revoke(authority, &self.runtime_id),
+                _ => {
+                    if !authority
+                        .capabilities
+                        .allows(request.operation, &request.parameters)
+                        || request.parameters["conversation_id"] != authority.conversation_id
+                        || request.parameters["turn_id"] != authority.turn_id
+                    {
+                        return json!({"error":{"code":12420,"message":"machine_permission_revoked: capability or task not authorized"}});
+                    }
+                    self.authority
+                        .admit(
+                            authority,
+                            &self.runtime_id,
+                            (request.operation == Operation::Exec)
+                                .then(|| request.parameters["job_id"].as_str().map(str::to_owned))
+                                .flatten(),
+                        )
+                        .map(|stop| authority_stop = Some(stop))
+                }
+            };
+            if result.is_err() {
+                return json!({"error":{"code":12421,"message":"machine_authority_stale: acquire fresh authority"}});
+            }
+            if matches!(
+                request.operation,
+                Operation::AuthorityRenew | Operation::AuthorityRevoke
+            ) {
+                return json!({"accepted":true});
+            }
+        } else if self.authority.enrolled()
+            && !matches!(
+                request.operation,
+                Operation::Cancel
+                    | Operation::Upgrade
+                    | Operation::UpgradeStatus
+                    | Operation::ContainerInspect
+                    | Operation::ContainerMigrate
+                    | Operation::DesktopOpen
+                    | Operation::DesktopClose
+                    | Operation::DesktopControl
+                    | Operation::DesktopInput
+            )
+        {
+            return json!({"error":{"code":12419,"message":"machine_authority_unsupported: v2 required for agent work"}});
+        }
+        request.parameters["_machine_authority"] =
+            serde_json::to_value(&request.authority).unwrap_or(Value::Null);
         let agent_operation = !matches!(
             request.operation,
             Operation::Cancel
@@ -496,7 +611,20 @@ impl Runtime {
         );
         let (first, second) = self.control_channels(request.operation, &request.parameters);
         let revision = (*first.borrow(), *second.borrow());
-        let result = self.execute(request.operation, request.parameters).await;
+        let result = if let Some(mut stopped) = authority_stop {
+            tokio::select! {
+                biased;
+                _=stopped.changed()=>Err(MachineError::AuthorityStale),
+                value=self.execute(request.operation,request.parameters)=>value,
+            }
+        } else {
+            self.execute(request.operation, request.parameters).await
+        };
+        if let Some(authority) = &request.authority
+            && !self.authority.live(&authority.lease_id)
+        {
+            return json!({"error":{"code":12421,"message":"machine_authority_stale: acquire fresh authority"}});
+        }
         match result {
             Ok(mut value) => {
                 scrub_value(&mut value, &*self.redactor.lock().await);
@@ -598,12 +726,17 @@ impl Runtime {
             shell: self.config.shell,
             files: self.config.files,
             computer: self.config.computer,
+            browser: self.config.browser,
+            authority_versions: vec![2],
             ..Default::default()
         };
         if !operation.allowed(&profile) {
             bail!("machine capability disabled locally");
         }
         match operation {
+            Operation::AuthorityRenew | Operation::AuthorityRevoke => {
+                bail!("authority command requires v2")
+            }
             Operation::ContainerInspect | Operation::ContainerMigrate => {
                 update::container_operation(
                     &self.identity,
@@ -682,6 +815,13 @@ impl Runtime {
                         &environment_spec,
                     )
                     .await?;
+                gateway
+                    .bind_authority(
+                        string(&parameters, "job_id")?,
+                        &parameters["_machine_authority"],
+                    )
+                    .await;
+
                 let mut request: jobs::Exec = serde_json::from_value(parameters)?;
                 let background = request.background;
                 let id = request.job_id.clone();
@@ -1576,6 +1716,8 @@ for line in sys.stdin:
         )
         .unwrap();
         let mut request = Request {
+            version: 1,
+            authority: None,
             request_id: uuid::Uuid::new_v4().to_string(),
             node_id: "node".into(),
             operation: Operation::FillLogin,
@@ -1599,5 +1741,295 @@ for line in sys.stdin:
         assert_eq!(result.public().0, 12413);
         assert!(result.public().1.contains("browser=secure"));
         assert!(!result.to_string().contains("must-not-escape"));
+    }
+}
+
+#[cfg(test)]
+mod authority_runtime_tests {
+    use super::*;
+    fn signed(
+        runtime: &Runtime,
+        operation: Operation,
+        parameters: Value,
+        authority: Option<nyxid_machine::authority::Authority>,
+    ) -> Request {
+        let mut request = Request {
+            version: if authority.is_some() { 2 } else { 1 },
+            authority: authority.map(Box::new),
+            request_id: uuid::Uuid::new_v4().to_string(),
+            node_id: runtime.node_id.clone(),
+            operation,
+            parameters,
+            timestamp: chrono::Utc::now().timestamp(),
+            nonce: uuid::Uuid::new_v4().to_string(),
+            signature: String::new(),
+        };
+        request.signature = nyxid_machine::signing::sign(&request, b"authority test");
+        request
+    }
+    async fn fixture() -> (
+        tempfile::TempDir,
+        Arc<Runtime>,
+        nyxid_machine::authority::Authority,
+        tokio::sync::mpsc::Receiver<crate::node::ws_client::NodeWsMessage>,
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("node");
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&config).unwrap();
+        std::fs::create_dir(&workspace).unwrap();
+        let runtime = Runtime::new(
+            &Config {
+                shell: true,
+                files: true,
+                allow_root: true,
+                roots: vec![workspace],
+                ..Default::default()
+            },
+            &uuid::Uuid::new_v4().to_string(),
+            &config,
+        )
+        .unwrap();
+        let (sender, receiver) = tokio::sync::mpsc::channel(100);
+        runtime.connect(sender, b"authority test").await.unwrap();
+        let id = || uuid::Uuid::new_v4().to_string();
+        let a = nyxid_machine::authority::Authority {
+            require_v2: true,
+            context_id: id(),
+            generation: 1,
+            mode: "shared_legacy".into(),
+            agent_id: id(),
+            owner_id: id(),
+            actor_id: id(),
+            group_id: None,
+            runtime_id: runtime.runtime_id.clone(),
+            conversation_id: format!("nyxa-{}", uuid::Uuid::new_v4().simple()),
+            turn_id: id(),
+            lease_id: id(),
+            revision: 1,
+            expires_at_ms: chrono::Utc::now().timestamp_millis() + 4_000,
+            capabilities: nyxid_machine::authority::Capabilities {
+                shell: true,
+                files: true,
+                ..Default::default()
+            },
+        };
+        (root, runtime, a, receiver)
+    }
+    fn exec(a: &nyxid_machine::authority::Authority, job: &str, background: bool) -> Value {
+        json!({"conversation_id":a.conversation_id,"turn_id":a.turn_id,"runtime_id":a.runtime_id,"job_id":job,"command":"sleep 30","background":background})
+    }
+    #[tokio::test]
+    async fn renewal_result_does_not_finish_foreground_lease_and_denials_keep_their_code() {
+        let (_directory, runtime, a, _receiver) = fixture().await;
+        runtime.authority.admit(&a, &a.runtime_id, None).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
+        runtime
+            .send_result(
+                &sender,
+                "renew",
+                Operation::AuthorityRenew,
+                0,
+                &json!({"_signed_authority":a}),
+                json!({"accepted":true}),
+            )
+            .await;
+        assert!(runtime.authority.live(&a.lease_id));
+        receiver.recv().await.unwrap();
+        let mut denied = a.clone();
+        denied.lease_id = uuid::Uuid::new_v4().to_string();
+        runtime
+            .send_result(
+                &sender,
+                "denied",
+                Operation::ReadFile,
+                0,
+                &json!({"_signed_authority":denied}),
+                json!({"error":{"code":12420}}),
+            )
+            .await;
+        let crate::node::ws_client::NodeWsMessage::Text(message) = receiver.recv().await.unwrap()
+        else {
+            panic!("text result");
+        };
+        assert_eq!(
+            serde_json::from_str::<Value>(&message).unwrap()["result"]["error"]["code"],
+            12420
+        );
+        runtime
+            .send_result(
+                &sender,
+                "forged",
+                Operation::ReadFile,
+                0,
+                &json!({"_signed_authority":a}),
+                json!({"error":{"code":12401}}),
+            )
+            .await;
+        assert!(runtime.authority.live(&a.lease_id));
+    }
+    #[tokio::test]
+    async fn authority_revocation_cancels_foreground_and_background_work_and_next_revision_works() {
+        for background in [false, true] {
+            let (_directory, runtime, a, _receiver) = fixture().await;
+            let job = uuid::Uuid::new_v4().to_string();
+            let request = signed(
+                &runtime,
+                Operation::Exec,
+                exec(&a, &job, background),
+                Some(a.clone()),
+            );
+            let copy = runtime.clone();
+            let task = tokio::spawn(async move { copy.handle(request, b"authority test").await });
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while !runtime.jobs.running(&job).await {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            let mut revoked = a.clone();
+            revoked.revision = 2;
+            assert_eq!(
+                runtime
+                    .handle(
+                        signed(
+                            &runtime,
+                            Operation::AuthorityRevoke,
+                            json!({}),
+                            Some(revoked.clone())
+                        ),
+                        b"authority test"
+                    )
+                    .await["accepted"],
+                true
+            );
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while runtime.jobs.running(&job).await {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            let result = task.await.unwrap();
+            if !background {
+                assert_eq!(result["error"]["code"], 12421);
+            }
+            assert_eq!(
+                runtime
+                    .handle(
+                        signed(&runtime, Operation::Exec, exec(&a, &job, true), None),
+                        b"authority test"
+                    )
+                    .await["error"]["code"],
+                12419
+            );
+            revoked.lease_id = uuid::Uuid::new_v4().to_string();
+            revoked.expires_at_ms = chrono::Utc::now().timestamp_millis() + 4_000;
+            let mut params = exec(&revoked, &uuid::Uuid::new_v4().to_string(), false);
+            params["command"] = json!("true");
+            let result = runtime
+                .handle(
+                    signed(&runtime, Operation::Exec, params, Some(revoked)),
+                    b"authority test",
+                )
+                .await;
+            assert!(result.get("error").is_none(), "{result}");
+        }
+    }
+    #[tokio::test]
+    async fn authority_grace_keeps_a_job_alive_through_a_seven_second_disconnect() {
+        let (_directory, runtime, mut a, _receiver) = fixture().await;
+        a.expires_at_ms =
+            chrono::Utc::now().timestamp_millis() + nyxid_machine::authority::LEASE_MS;
+        let job = uuid::Uuid::new_v4().to_string();
+        let result = runtime
+            .handle(
+                signed(
+                    &runtime,
+                    Operation::Exec,
+                    exec(&a, &job, true),
+                    Some(a.clone()),
+                ),
+                b"authority test",
+            )
+            .await;
+        assert_eq!(result["job_id"], job, "{result}");
+        runtime.disconnect().await;
+        tokio::time::sleep(std::time::Duration::from_secs(7)).await;
+        assert!(runtime.jobs.running(&job).await);
+        assert!(runtime.authority.live(&a.lease_id));
+        let (sender, _receiver) = tokio::sync::mpsc::channel(100);
+        runtime.connect(sender, b"authority test").await.unwrap();
+        a.expires_at_ms =
+            chrono::Utc::now().timestamp_millis() + nyxid_machine::authority::LEASE_MS;
+        assert_eq!(
+            runtime
+                .handle(
+                    signed(
+                        &runtime,
+                        Operation::AuthorityRenew,
+                        json!({}),
+                        Some(a.clone())
+                    ),
+                    b"authority test"
+                )
+                .await["accepted"],
+            true
+        );
+        assert!(runtime.jobs.running(&job).await);
+        a.revision += 1;
+        assert_eq!(
+            runtime
+                .handle(
+                    signed(&runtime, Operation::AuthorityRevoke, json!({}), Some(a)),
+                    b"authority test"
+                )
+                .await["accepted"],
+            true
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while runtime.jobs.running(&job).await {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        runtime.shutdown().await;
+    }
+    #[tokio::test]
+    async fn authority_expiry_stops_background_work_without_a_socket_or_renewal() {
+        let (_directory, runtime, mut a, _receiver) = fixture().await;
+        let job = uuid::Uuid::new_v4().to_string();
+        let result = runtime
+            .handle(
+                signed(
+                    &runtime,
+                    Operation::Exec,
+                    exec(&a, &job, true),
+                    Some(a.clone()),
+                ),
+                b"authority test",
+            )
+            .await;
+        assert!(result.get("error").is_none(), "{result}");
+        runtime.disconnect().await;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while runtime.jobs.running(&job).await {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        a.expires_at_ms = chrono::Utc::now().timestamp_millis() + 4_000;
+        assert_eq!(
+            runtime
+                .handle(
+                    signed(&runtime, Operation::AuthorityRenew, json!({}), Some(a)),
+                    b"authority test"
+                )
+                .await["error"]["code"],
+            12421
+        );
     }
 }

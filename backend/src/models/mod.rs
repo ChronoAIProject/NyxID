@@ -27,6 +27,7 @@ pub mod channel_conversation;
 pub mod channel_event_log;
 pub mod channel_message;
 pub mod channel_send_claim;
+pub mod channel_thread;
 pub mod cli_pairing;
 pub mod connect_link;
 pub mod consent;
@@ -151,3 +152,6 @@ pub mod assistant_upload;
 pub mod assistant_upload_retention;
 
 pub mod assistant_voice;
+
+pub mod assistant_voice_session;
+pub mod machine_access;
