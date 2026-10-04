@@ -77,11 +77,13 @@ specific request selected the platform credential.
 When no platform price is configured, the summary uses credential categories,
 e.g. **1 NyxID · 5 BYOK**.
 NyxID means the platform supplies the key or developer app; BYOK means a person
-or organization supplies it. **Not billable** requires no provider credential and
-confirmed absence of configured NyxID usage charges. Unverified credential supply
-stays unverified, including OAuth app provenance and user-key rows alongside
-platform pricing on older servers. A resolved backend credential class remains
-authoritative. Disabled
+or organization supplies it. Confirmed absence of configured NyxID usage charges
+shows **—**, with **Not billable by NyxID** on hover or keyboard focus. Supplied
+private keys remain **BYOK**; other unpriced private services show the dash.
+Unknown OAuth app provenance does not make known billing configuration unverified.
+Groups containing only unpriced connections show one dash; mixed summaries count
+the NyxID/BYOK/unverified connections and list unpriced siblings in the tooltip.
+A resolved backend credential class remains authoritative for credential supply. Disabled
 connections retain their classification. Clicking the summary opens the first
 NyxID connection's billing panel, or the first connection when there is none.
 Expanded rows use the same labels and show payer/rates directly for NyxID
@@ -92,7 +94,10 @@ Detailed charge configuration is independent of these summary labels. The additi
 when unverifiable or restricted. It uses the selected credential class, positive
 primary/component prices, legacy charge configuration, and independent resale
 configuration. Older servers use permitted catalog/connection metadata where
-available; omitted pricing is unverified, never assumed free. External provider
+available. A successfully loaded catalog entry with omitted billing means no
+configured charge, as does a custom service with no catalog link or published price.
+Failed or missing catalog reads for a catalog-backed service remain unverified;
+absence of a rate alone does not override published charge configuration. External provider
 invoices are separate. Grants, allowances and caller rollout do not change the
 credential supplier or configured charges.
 

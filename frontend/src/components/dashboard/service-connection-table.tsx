@@ -45,7 +45,7 @@ import {
   connectionBillingCategory,
   connectionBillingLabels,
 } from "@/lib/service-card-summary";
-import { configuredPlatformPrice } from "@/lib/service-billing-config";
+import { configuredBillablePlatformPrice } from "@/lib/service-billing-config";
 import { lanePriceLabel } from "@/schemas/platform-keys";
 import type { ServiceInsight } from "@/schemas/service-insights";
 import {
@@ -205,7 +205,7 @@ export function ServiceConnectionTable({
           {connections.map((key) => {
             const insight = insights.connections.get(key.id);
             const billing = insight?.billing;
-            const platformPrice = configuredPlatformPrice(key, catalog);
+            const platformPrice = configuredBillablePlatformPrice(key, catalog);
             const billingCategory =
               insights.status === "ready"
                 ? connectionBillingCategory(key, billing, catalog)
@@ -482,6 +482,11 @@ export function ServiceConnectionTable({
                           aria-expanded={expanded && open.view === "billing"}
                           aria-controls={panelId}
                           aria-label={`Billing for ${key.label}`}
+                          aria-description={
+                            billingCategory === "not_billable" && !platformPrice
+                              ? "Not billable by NyxID"
+                              : undefined
+                          }
                           data-insight-view="billing"
                           data-connection-id={key.id}
                           className="block w-full rounded-sm text-left text-xs hover:text-primary focus-visible:outline-2 focus-visible:outline-ring"
@@ -534,17 +539,23 @@ export function ServiceConnectionTable({
                         collisionPadding={12}
                         className="max-w-xs whitespace-normal"
                       >
-                        <p className="font-medium">
-                          {credentialLabel(key, billing)}
-                        </p>
-                        <p className="mt-1">
-                          {billing
-                            ? billingExplanation(billing)
-                            : insightStatusLabel(insights.status, "Billing")}
-                        </p>
-                        <p className="mt-1 text-muted-foreground">
-                          Click to see rates and the funding order.
-                        </p>
+                        {billingCategory === "not_billable" && !platformPrice ? (
+                          <p>Not billable by NyxID</p>
+                        ) : (
+                          <>
+                            <p className="font-medium">
+                              {credentialLabel(key, billing)}
+                            </p>
+                            <p className="mt-1">
+                              {billing
+                                ? billingExplanation(billing)
+                                : insightStatusLabel(insights.status, "Billing")}
+                            </p>
+                            <p className="mt-1 text-muted-foreground">
+                              Click to see rates and the funding order.
+                            </p>
+                          </>
+                        )}
                       </TooltipContent>
                     </Tooltip>
                   </TableCell>

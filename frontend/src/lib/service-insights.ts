@@ -198,6 +198,8 @@ export function billingModelLabel(
   if (!billing) return "Billing not reported";
   if (billing.status === "restricted") return "Billing restricted";
   if (billing.status === "unavailable") return "Billing unavailable";
+  if (billing.credit_billing_configured === false)
+    return "Not billable by NyxID";
   switch (billing.charge_status) {
     case "usage_based":
       return "NyxID credits";
@@ -257,13 +259,15 @@ export function billingExplanation(billing: ServiceBillingExplanation): string {
             ? "No provider credential is required."
             : "The supplier of this connection's key or developer app is unverified.";
   const charges =
-    billing.charge_status === "not_charged"
-      ? "NyxID does not charge this caller for this connection."
-      : billing.charge_status === "usage_based"
-        ? "NyxID meters usage against the billing account shown."
-        : billing.credit_billing_configured || billing.rates.length
-          ? "NyxID credit billing is configured; caller eligibility and the active rate are verified at execution."
-          : "NyxID credit charges have not been verified. A missing rate does not mean usage is free.";
+    billing.credit_billing_configured === false
+      ? "No NyxID usage charges are configured for this connection."
+      : billing.charge_status === "not_charged"
+        ? "NyxID does not charge this caller for this connection."
+        : billing.charge_status === "usage_based"
+          ? "NyxID meters usage against the billing account shown."
+          : billing.credit_billing_configured || billing.rates.length
+            ? "NyxID credit billing is configured; caller eligibility and the active rate are verified at execution."
+            : "NyxID credit charges have not been verified. A missing rate does not mean usage is free.";
   return `${supply} ${charges}`;
 }
 

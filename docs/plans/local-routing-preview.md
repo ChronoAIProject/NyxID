@@ -49,6 +49,20 @@ This display fix does not change stored bindings or execution pricing. The
 compatibility catalog read now includes all services so platform services do
 not disappear from billing lookup.
 
+Updated 5 October: unpriced services display **—** in the billing row on both
+collapsed cards and expanded connection tables. Hover or keyboard focus reads
+**Not billable by NyxID**. Supplied private keys still show **BYOK**. The UI now
+recognizes that a loaded catalog entry omits `billing` when no configuration
+exists, and that custom services need no catalog entry. Unknown OAuth app
+ownership no longer makes those unpriced services appear billing-unverified.
+Failed/missing catalog reads remain distinct from confirmed absence of charges.
+All-unpriced groups show one dash; mixed groups retain per-connection explanations
+in the tooltip. Zero platform prices do not advertise platform charges. Twitter
+and DeepSeek retain their configured platform-billing labels and rate details.
+All 92 focused frontend tests, production builds, changed-file ESLint and whitespace
+checks passed. The running preview serves the updated modules; signed-in visual
+inspection remains unavailable in this session.
+
 Run from `frontend/`:
 
 ```sh

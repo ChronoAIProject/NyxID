@@ -105,6 +105,46 @@ function mount(connections: KeyInfo[] = [personal]) {
 }
 
 describe("deployed service insight compatibility", () => {
+  it("treats omitted catalog billing as unpriced while retaining OAuth provenance separately", async () => {
+    responses.set("/catalog?include_all=true", { entries: [{ slug: "openai" }] });
+    const [item] = await loadConfiguredServiceInsights(
+      [{ ...personal, credential_type: "oauth2" }],
+      "person",
+    );
+    expect(item!.billing).toMatchObject({
+      credit_billing_configured: false,
+      charge_status: "not_charged",
+      credential_label: "Connected account · app unverified",
+      rates: [],
+    });
+    expect(item!.billing!.notes.join(" ")).not.toContain(
+      "does not mean usage is free",
+    );
+  });
+
+  it.each([403, 500, "missing"] as const)(
+    "does not call a catalog service unpriced after a %s catalog lookup",
+    async (failure) => {
+      responses.set(
+        "/catalog?include_all=true",
+        failure === "missing" ? { entries: [] } : unavailable(failure),
+      );
+      const [catalogService, customService] = await loadConfiguredServiceInsights(
+        [personal, {
+          ...personal,
+          id: "custom",
+          source: "custom",
+          catalog_service_id: null,
+          catalog_service_slug: null,
+        }],
+        "person",
+      );
+      expect(catalogService!.billing!.credit_billing_configured).toBeUndefined();
+      expect(catalogService!.billing!.charge_status).toBe("conditional");
+      expect(customService!.billing!.credit_billing_configured).toBe(false);
+      expect(customService!.billing!.charge_status).toBe("not_charged");
+    },
+  );
   it("does not classify an OAuth login as a supplied developer app", () => {
     const bill = configuredBilling({
       ...personal,
@@ -155,7 +195,7 @@ describe("deployed service insight compatibility", () => {
     });
     expect(bill.credit_billing_configured).toBe(false);
     expect(bill.rates).toEqual([]);
-    expect(bill.charge_status).toBe("conditional");
+    expect(bill.charge_status).toBe("not_charged");
   });
 
   it("does not advertise platform-only charges on a known user-supplied API key", () => {

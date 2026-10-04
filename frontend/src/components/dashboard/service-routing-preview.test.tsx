@@ -185,6 +185,69 @@ afterEach(() => {
 });
 
 describe("live grouped services", () => {
+  it("shows a dash and exact no-charge tooltip on the card and each expanded connection", async () => {
+    for (let i = 0; i < 2; i++) {
+      const connection = {
+        ...records[0]!,
+        id: `unpriced-${i}`,
+        label: `Unpriced account ${i}`,
+        catalog_service_id: "unpriced",
+        catalog_service_slug: "unpriced",
+        catalog_service_name: "Unpriced service",
+        credential_type: "oauth2",
+      };
+      records.push(connection);
+      insightConnections.set(connection.id, {
+        service_id: connection.id,
+        billing: configuredBilling(connection, { slug: "unpriced" }),
+        usage: null,
+      });
+    }
+    const user = userEvent.setup();
+    render(preview());
+    const card = within(screen.getByRole("region", { name: "Unpriced service" }));
+    const summary = card.getByRole("button", { name: "Show billing for Unpriced service" });
+    expect(summary).toHaveTextContent(/^—$/);
+    expect(summary).not.toHaveTextContent(/unverified/i);
+    await user.hover(summary);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(/^Not billable by NyxID$/);
+    await user.click(summary);
+    const billing = card.getByRole("region", { name: "Billing for Unpriced account 0" });
+    expect(within(billing).getByText("No NyxID usage charges configured")).toBeVisible();
+    expect(within(billing).queryByText("Credit billing unverified")).not.toBeInTheDocument();
+    const row = card.getByRole("button", { name: "Billing for Unpriced account 1" });
+    expect(row).toHaveTextContent(/^—$/);
+    await user.hover(row);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(/^Not billable by NyxID$/);
+  });
+
+  it.each([
+    { type: "api_key", auth: "bearer", label: "BYOK" },
+    { type: "api_key", auth: "none", label: "—" },
+    { type: "oauth2", auth: "bearer", label: "—" },
+  ])("shows $label for a private $type service using $auth auth", ({ type, auth, label }) => {
+    const connection: KeyInfo = {
+      ...records[0]!,
+      id: "private",
+      label: "Private service",
+      slug: "private",
+      source: "custom",
+      catalog_service_id: null,
+      catalog_service_slug: null,
+      catalog_service_name: null,
+      credential_type: type,
+      auth_method: auth,
+    };
+    records.push(connection);
+    insightConnections.set(connection.id, {
+      service_id: connection.id,
+      billing: configuredBilling(connection),
+      usage: null,
+    });
+    render(preview());
+    expect(screen.getByRole("button", { name: "Show billing for Private service" })).toHaveTextContent(label);
+  });
+
   it.each([
     {
       name: "Twitter / X API",

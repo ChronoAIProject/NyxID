@@ -17,6 +17,17 @@ export function positiveUsageRate(rate: string): boolean {
   return /^\d+(?:\.\d+)?$/.test(rate) && /[1-9]/.test(rate);
 }
 
+export function configuredBillablePlatformPrice(
+  connection: KeyInfo,
+  catalog?: ConfiguredCatalogEntry,
+) {
+  const price = configuredPlatformPrice(connection, catalog);
+  return price &&
+    configuredUsageCharge(connection, catalog, "nyxid_managed_master")
+    ? price
+    : undefined;
+}
+
 /** Configured charges, independent of connection status, grants or wallet balance. */
 export function configuredUsageCharge(
   connection: KeyInfo,
@@ -64,8 +75,14 @@ export function configuredUsageCharge(
     return oauthUnknown && platformCharge ? undefined : false;
   }
   if (platformCharge) return true;
-  // Omitted catalog billing on an older server is not a declaration of free usage.
-  if (byok || pk || (catalog && Object.hasOwn(catalog, "billing")))
-    return false;
+  // The catalog omits `billing` when no configuration exists. A missing
+  // catalog entry is different: a failed or restricted read proves nothing.
+  const custom =
+    !connection.catalog_service_id &&
+    !connection.catalog_service_slug &&
+    (connection.source === "custom" ||
+      (connection.catalog_service_id === null &&
+        connection.catalog_service_slug === null));
+  if (byok || pk || catalog || custom) return false;
   return undefined;
 }

@@ -6,7 +6,10 @@ import {
 } from "./service-card-summary";
 import { configuredBilling } from "./service-insights-compat";
 import type { KeyInfo } from "@/types/keys";
-import { configuredPlatformPrice } from "./service-billing-config";
+import {
+  configuredPlatformPrice,
+  configuredBillablePlatformPrice,
+} from "./service-billing-config";
 
 const connection = {
   id: "personal",
@@ -22,6 +25,66 @@ const lane = {
   sync_status: "synced" as const,
 };
 describe("card billing categories", () => {
+  it("separates confirmed unpriced catalog services from unknown OAuth app ownership", () => {
+    const oauth = {
+      ...connection,
+      credential_type: "oauth2",
+      catalog_service_slug: "oauth",
+    };
+    const catalog = { slug: "oauth" };
+    const bill = configuredBilling(oauth, catalog);
+    expect(bill.credit_billing_configured).toBe(false);
+    expect(bill.credential_label).toContain("app unverified");
+    expect(connectionBillingCategory(oauth, bill, catalog)).toBe("not_billable");
+    expect(connectionBillingCategory(oauth, configuredBilling(oauth))).toBe(
+      "unknown",
+    );
+  });
+  it("classifies custom services as BYOK or not billable without a catalog", () => {
+    const custom = {
+      ...connection,
+      source: "custom" as const,
+      catalog_service_id: null,
+      catalog_service_slug: null,
+    };
+    expect(connectionBillingCategory(custom, configuredBilling(custom))).toBe(
+      "byok",
+    );
+    for (const patch of [
+      { auth_method: "none", api_key_id: null },
+      { credential_type: "oauth2" },
+      { credential_missing: true },
+    ]) {
+      const unpriced = { ...custom, ...patch };
+      expect(connectionBillability(unpriced, configuredBilling(unpriced))).toBe(
+        false,
+      );
+      expect(
+        connectionBillingCategory(unpriced, configuredBilling(unpriced)),
+      ).toBe("not_billable");
+    }
+  });
+  it("does not hide published rates when a custom service lacks catalog pricing", () => {
+    const custom = {
+      ...connection,
+      catalog_service_id: null,
+      catalog_service_slug: null,
+    };
+    expect(
+      connectionBillability(custom, {
+        ...configuredBilling(custom),
+        credit_billing_configured: undefined,
+        charge_status: "usage_based",
+        rates: [{
+          layer: "platform",
+          metric: "requests",
+          credits_per_unit: "1",
+          currency: "credits",
+          source: "service_price",
+        }],
+      }),
+    ).toBe(true);
+  });
   it("identifies NyxID's shared OAuth app without calling a personal OAuth login BYOK", () => {
     const oauth = { ...connection, credential_type: "oauth2" };
     const bill = configuredBilling(oauth);
@@ -89,6 +152,23 @@ describe("card billing categories", () => {
 });
 
 describe("card billing configuration", () => {
+  it("does not advertise a zero platform price as billable", () => {
+    const platform = { ...connection, credential_binding: "platform" as const };
+    const catalog = {
+      slug: "zero",
+      billing: { platform_key_pricing: { ...lane, credits_per_unit: "0" } },
+    };
+    expect(configuredBillablePlatformPrice(platform, catalog)).toBeUndefined();
+    expect(
+      connectionBillingCategory(platform, configuredBilling(platform, catalog), catalog),
+    ).toBe("not_billable");
+    expect(
+      configuredBillablePlatformPrice(platform, {
+        slug: "charged",
+        billing: { platform_key_pricing: lane },
+      }),
+    ).toEqual(lane);
+  });
   it("reads platform prices from service billing even when the connection uses its own credential", () => {
     const catalog = {
       slug: "llm-deepseek",
@@ -97,7 +177,7 @@ describe("card billing configuration", () => {
     expect(configuredPlatformPrice(connection, catalog)).toEqual(lane);
     const bill = configuredBilling(connection, catalog);
     expect(connectionBillingCategory(connection, bill, catalog)).toBe(
-      "unknown",
+      "not_billable",
     );
     expect(bill.credential_label).toBe("Stored API key · supplier unverified");
     expect(bill.provider_billing).toBe("unknown");

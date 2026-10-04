@@ -89,20 +89,25 @@ export function configuredBilling(
             : userCredential && connection.credential_type === "api_key"
               ? "Stored API key · supplier unverified"
               : "Credential supplier unverified";
+  const creditBillingConfigured = configuredUsageCharge(connection, catalog);
   return {
     status: "conditional",
     credential_class: null,
     credential_label: credentialLabel,
     account: null,
-    payer_rule: platform
-      ? "Acting user's personal account"
-      : !userCredential
-        ? "Determined at execution"
-        : org
-          ? `${org.org_name} · organization`
-          : "Your personal account",
-    charge_status: "conditional",
-    credit_billing_configured: configuredUsageCharge(connection, catalog),
+    payer_rule:
+      creditBillingConfigured === false
+        ? "Not billable by NyxID"
+        : platform
+          ? "Acting user's personal account"
+          : !userCredential
+            ? "Determined at execution"
+            : org
+              ? `${org.org_name} · organization`
+              : "Your personal account",
+    charge_status:
+      creditBillingConfigured === false ? "not_charged" : "conditional",
+    credit_billing_configured: creditBillingConfigured,
     rates: lane
       ? [lane, ...(lane.components ?? [])].map((rate) => ({
           layer: "platform",
@@ -134,7 +139,9 @@ export function configuredBilling(
           : "unknown",
     context: "configuration",
     notes: [
-      "Configured billing for the connection default. The payer and applicable charges are verified at execution; agent credential overrides can change them.",
+      creditBillingConfigured === false
+        ? "No NyxID usage charges are configured for this connection. The provider may charge separately."
+        : "Configured billing for the connection default. The payer and applicable charges are verified at execution; agent credential overrides can change them.",
       ...(oauth
         ? [
             "Signing in does not identify the developer app's owner. This server does not report whether this connection uses your app or NyxID's app.",
@@ -163,7 +170,7 @@ export function configuredBilling(
             "Unsynced prices are not confirmed as active. Current billing rules apply until price synchronization completes.",
           ]
         : []),
-      ...(lane || legacyConfigured
+      ...(lane || legacyConfigured || creditBillingConfigured === false
         ? []
         : [
             "This server does not report a credential-specific rate here. This does not mean usage is free.",

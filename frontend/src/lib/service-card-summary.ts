@@ -5,7 +5,7 @@ import type {
 import type { KeyInfo } from "@/types/keys";
 import {
   configuredUsageCharge,
-  configuredPlatformPrice,
+  configuredBillablePlatformPrice,
   positiveUsageRate,
 } from "./service-billing-config";
 
@@ -21,7 +21,7 @@ export const connectionBillingLabels: Record<
 > = {
   platform: "NyxID credentials",
   byok: "BYOK",
-  not_billable: "Not billable",
+  not_billable: "—",
   unknown: "Unverified",
 };
 
@@ -31,41 +31,42 @@ export function connectionBillingCategory(
   catalog?: ConfiguredCatalogEntry,
 ): ConnectionBillingCategory {
   if (billing?.status === "restricted") return "unknown";
+  const notBillable =
+    connectionBillability(connection, billing, catalog) === false;
   // A resolved caller override takes precedence over the connection default.
   switch (billing?.credential_class) {
     case "nyxid_managed_master":
     case "nyxid_platform_oauth_app":
-      return "platform";
+      return notBillable ? "not_billable" : "platform";
     case "user_owned":
     case "agent_override_user_owned":
     case "node_managed":
       return "byok";
     case "no_auth":
-      return connectionBillability(connection, billing, catalog) === false
-        ? "not_billable"
-        : "unknown";
+      return notBillable ? "not_billable" : "unknown";
   }
-  if (billing?.context === "agent_key") return "unknown";
-  if (connection.credential_binding === "platform") return "platform";
-  if (billing?.provider_billing === "nyxid_credential") return "platform";
+  if (billing?.context === "agent_key")
+    return notBillable ? "not_billable" : "unknown";
+  if (
+    connection.credential_binding === "platform" ||
+    billing?.provider_billing === "nyxid_credential"
+  )
+    return notBillable ? "not_billable" : "platform";
   // A stored user-key row can coexist with platform billing. It does not
   // establish who supplied that credential on an older server.
-  if (configuredPlatformPrice(connection, catalog)) return "unknown";
-  if (connection.node_id || connection.has_node_binding) return "unknown";
-  if (connection.auth_method === "none")
-    return connectionBillability(connection, billing, catalog) === false
-      ? "not_billable"
-      : "unknown";
-  // An OAuth login does not establish who supplies the developer app.
-  if (["oauth2", "device_code"].includes(connection.credential_type))
-    return "unknown";
+  const platformPrice = configuredBillablePlatformPrice(connection, catalog);
   if (
+    !platformPrice &&
+    !connection.node_id &&
+    !connection.has_node_binding &&
+    connection.auth_method !== "none" &&
     connection.credential_type === "api_key" &&
     !connection.credential_missing &&
     (connection.api_key_id || connection.credential_binding === "user")
   )
     return "byok";
-  return "unknown";
+  // Credential provenance can be unknown without billing being unknown.
+  return notBillable ? "not_billable" : "unknown";
 }
 
 export function connectionBillability(
@@ -81,8 +82,8 @@ export function connectionBillability(
     catalog,
     billing?.credential_class,
   );
-  if (configured !== undefined) return configured;
-  if (billing?.status === "unavailable") return undefined;
+  if (configured === true) return true;
+  if (billing?.status === "unavailable") return configured;
   if (billing?.rates.length)
     return billing.rates.some(
       (rate) =>
@@ -91,7 +92,7 @@ export function connectionBillability(
     );
   if (billing?.charge_status === "usage_based") return true;
   // "Not charged" can describe caller rollout rather than the service's configuration.
-  return undefined;
+  return configured;
 }
 
 export function latestServiceEdit(connections: readonly KeyInfo[]) {
