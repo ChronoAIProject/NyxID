@@ -201,7 +201,9 @@ export function PoolConnectionPicker({
             className="px-1 text-[11px] text-muted-foreground [@media(max-height:500px)]:sr-only"
           >
             {isCheckingCompatibility
-              ? "Checking compatibility…"
+              ? isError
+                ? "Compatibility check failed."
+                : "Checking compatibility…"
               : "Select multiple connections. Select again to remove."}
           </p>
           <div className="min-h-0 overflow-y-auto overscroll-contain">
@@ -313,7 +315,9 @@ export function PoolConnectionPicker({
                 type="button"
                 className="mt-2 w-full"
                 isLoading={isFetchingNextPage}
-                disabled={isRefreshing || isCheckingCompatibility}
+                disabled={
+                  isFetchingNextPage || isRefreshing || isCheckingCompatibility
+                }
                 onClick={(event) => {
                   restoreLoadMoreFocus.current =
                     document.activeElement === event.currentTarget;

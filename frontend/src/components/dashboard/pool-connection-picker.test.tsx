@@ -320,6 +320,7 @@ it("returns keyboard focus to search after the final page button disappears", as
   rerender(
     <PoolConnectionPicker {...defaults} hasNextPage isFetchingNextPage />,
   );
+  expect(more).toBeDisabled();
   rerender(
     <PoolConnectionPicker
       {...defaults}
@@ -359,6 +360,16 @@ it("blocks stale additions and pagination during compatibility checks while allo
   expect(onLoadMore).not.toHaveBeenCalled();
   await user.click(primary);
   expect(onToggle).toHaveBeenCalledWith(candidate);
+  rerender(
+    <PoolConnectionPicker
+      {...defaults}
+      isCheckingCompatibility
+      isError
+      error={new Error("Temporary failure")}
+    />,
+  );
+  expect(screen.getByText("Compatibility check failed.")).toBeVisible();
+  expect(screen.queryByText("Checking compatibility…")).not.toBeInTheDocument();
   rerender(
     <PoolConnectionPicker {...defaults} onLoadMore={onLoadMore} hasNextPage />,
   );
