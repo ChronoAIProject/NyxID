@@ -1021,5 +1021,88 @@ The canonical-command guard's subscription-stop exception is restricted to
 that exact new endpoint. The disk guard remained above its 18 GiB safety buffer
 through validation; this worktree's target peaked below 9 GiB. No real-platform
 smoke test or deployed gateway compatibility is claimed. Gateway transports
-remain `follow_readiness=unavailable`, email follow remains deferred to E, and
-X public-thread follow remains unsupported for T1.
+remain `follow_readiness=unavailable`, while X public-thread follow remains
+unsupported for T1.
+
+## 16. PR E: Aurinko email thread follow
+
+PR E is stacked on PR C in `feat/channel-thread-follow-email`. Aurinko now
+advertises the private thread capability behind the same default-off
+`nyxbot:thread-follow` flag. A message addressed to the connected mailbox in
+`To`, or a provider-verified reply to a retained NyxID message, is the email
+equivalent of a mention. The child partition is shared by the mailbox
+`threadId`, so participants use one followed conversation; activation never
+merges the owner's private home thread.
+
+The existing private sender gate remains authoritative for every message.
+Guests can participate only when the bot's `private_chats` policy allows it.
+Legacy sender-specific policy or agent overrides that disagree produce the
+stable `thread_policy_conflict` outcome and leave the message on legacy
+routing. Replies still use Aurinko's single-recipient Reply-To/from policy,
+empty CC/BCC, text-only payload and irreversible send barrier. Follow does not
+enable reply-all.
+
+Email history is participant-safe. Provider history and metadata fallback carry
+only bounded participant fingerprints: keyed, domain-separated HMAC-SHA256
+under `email-participant`; a guest sees a message only when provider metadata
+proves that sender participated. If that proof is unavailable, the message is
+represented as metadata or omitted. No additional mailbox scopes are
+requested.
+
+The server initializes the audit-chain HMAC key in `main` before mounting
+webhooks or spawning channel work. Aurinko ingestion runs inline through the
+retryable webhook handler in that process; it has no independent polling or
+ingestion worker. The additive email block is omitted when the key is absent,
+and history without keyed participant proof is partial. RFC reply parents are
+carried in email facts only; the legacy reply field remains `None`.
+
+Private channels without `private_thread` support exit before any flag,
+membership or thread lookup. The optional global dormant-flag ingress guard
+is deferred: existing email children must still receive addressed replies
+after the flag is disabled, and an org-owned bot's flag belongs to the linked
+person, not the bot owner. A guard needs to preserve both cases.
+
+Validation for this PR completed on the final C merge: `cargo +1.98.1 check
+-p nyxid --all-targets` passed at the default stack and with
+`RUST_MIN_STACK=1572864`; the affected follow, Aurinko, adapter, delegation
+and channel-relay suites passed at both stacks (including 10 follow tests, 22
+Aurinko tests, 234 adapter tests, 37 delegation tests and 62 relay tests per
+stack). `cargo +1.98.1 clippy -p nyxid --all-targets -- -D warnings`, Rust
+formatting and the diff check passed. Frontend lint passed with the existing
+29 warnings, all 4,216 tests passed, and production plus credential-accept
+builds passed. No frontend files changed in E, so the wizard bundle was not
+rebuilt here; C's wizard validation remains unchanged.
+
+### Review corrections (2026-10-05)
+
+The v0.57.0 main merge remains resolved and uncommitted. Private direct
+messages on adapters without `private_thread` return before database access;
+a command-observing MongoDB test covers Telegram and the other legacy private
+adapters, including the test adapter override. Missing fingerprint keys leave
+Aurinko's legacy inbound message intact and omit email follow facts; history
+without fingerprints is partial and contains no unproven items. Inbound and
+callback shape assertions cover the unchanged legacy reply field and the
+additive email metadata. Turn validation uses fact-aware sender eligibility
+only when facts exist, falling back to the previous eligibility check otherwise.
+
+Validation uses `CARGO_INCREMENTAL=0`. All 263 selected Aurinko, follow,
+adapter and thread-history tests pass at both the default stack and
+`RUST_MIN_STACK=1572864`, with no failures or ignored tests. The capability
+matrix now includes Aurinko email follow, history and private threads while
+retaining the default-off flag and unsupported-surface assertions. Formatting
+and staged/unstaged diff checks pass, and the final
+`cargo +1.98.1 clippy -p nyxid --all-targets -- -D warnings` run passes.
+
+The backend test executable was built with Rust 1.98.1 using
+`cargo +1.98.1 rustc -p nyxid --bin nyxid-server --profile test -- -C debuginfo=0`
+to limit local build resource use; stack configuration is unchanged. Its
+libtest filters were `aurinko thread_follow channel_adapters
+channel_thread_service --test-threads=2`. MongoDB used the local replica set
+on port 27022. The macOS linker reported a large compact-unwind table, and
+Cargo reported the existing `proc-macro-error2` future-compatibility warning;
+neither prevented compilation or either test run.
+
+The review corrections are ready for review with no commits. The v0.57.0 merge
+remains resolved and uncommitted on `feat/channel-thread-follow-email`.
+At completion, target is 20 GiB, incremental cache is empty, and free disk
+is 47 GiB. The feature flag remains default-off.

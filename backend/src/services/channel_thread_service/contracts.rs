@@ -79,6 +79,9 @@ pub struct ThreadHistoryMessage {
     pub sender_kind: ThreadSenderKind,
     pub created_at: DateTime<Utc>,
     pub text: String,
+    /// Provider proof of who could see this message; populated for private
+    /// email threads and empty for other transports.
+    pub participant_hashes: Vec<String>,
 }
 
 impl std::fmt::Debug for ThreadHistoryMessage {

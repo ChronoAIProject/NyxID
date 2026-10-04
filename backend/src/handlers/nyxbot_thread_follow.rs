@@ -19,11 +19,18 @@ pub(super) static TEST_ADAPTERS: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<String, Adapter>>,
 > = std::sync::LazyLock::new(Default::default);
 fn adapter(state: &AppState, bot: &ChannelBot) -> AppResult<Adapter> {
+    adapter_for(state, &bot.id, &bot.platform)
+}
+
+fn adapter_for(state: &AppState, bot_id: &str, platform: &str) -> AppResult<Adapter> {
+    // Production resolves from the platform alone; tests can substitute the
+    // same adapter for both the capability gate and the later provider calls.
+    let _ = bot_id;
     #[cfg(test)]
-    if let Some(adapter) = TEST_ADAPTERS.lock().unwrap().get(&bot.id).cloned() {
+    if let Some(adapter) = TEST_ADAPTERS.lock().unwrap().get(bot_id).cloned() {
         return Ok(adapter);
     }
-    crate::services::channel_adapters::resolve_adapter(&bot.platform, &state.token_exchange_cache)
+    crate::services::channel_adapters::resolve_adapter(platform, &state.token_exchange_cache)
         .map(std::sync::Arc::from)
 }
 
@@ -41,7 +48,18 @@ pub(super) async fn inbound(
     message: &str,
     text: &str,
 ) -> AppResult<bool> {
-    if row.transport != "direct" || payload["conversation"]["type"] == "private" {
+    if row.transport != "direct" {
+        return Ok(false);
+    }
+    // Resolve the adapter before any database work. Private chats on adapters
+    // without private-thread support are legacy-only, so the dormant follow
+    // path must be a zero-read fast path for them.
+    let private = payload["conversation"]["type"] == "private";
+    let Ok(platform_adapter) = adapter_for(state, &row.channel_bot_id, &row.platform) else {
+        return Ok(false);
+    };
+    let capabilities = platform_adapter.thread_capabilities();
+    if !capabilities.thread_follow || (private && !capabilities.private_thread) {
         return Ok(false);
     }
     let on = enabled(state, &row.user_id).await?;
@@ -59,7 +77,8 @@ pub(super) async fn inbound(
     }
     let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await?;
     let adapter = adapter(state, &bot)?;
-    if !adapter.thread_capabilities().thread_follow {
+    let capabilities = adapter.thread_capabilities();
+    if !capabilities.thread_follow || (private && !capabilities.private_thread) {
         return Ok(false);
     }
     let Some(source) = state
@@ -128,7 +147,11 @@ pub(super) async fn inbound(
     )
     .await?
     {
-        facts.address = ThreadAddress::ReplyToBot;
+        facts.address = if facts.kind == ThreadKind::Email {
+            ThreadAddress::VerifiedReply
+        } else {
+            ThreadAddress::ReplyToBot
+        };
     }
     state.db.collection::<ChannelMessage>(MESSAGES).update_one(doc! {"_id": message,
         "thread_context": bson::to_bson(&source.thread_context).map_err(|_| follow::not_found())?},
@@ -158,19 +181,26 @@ pub(super) async fn inbound(
         return Ok(false);
     };
     let facts = target.facts();
-    if matches!(facts.kind, ThreadKind::Unknown | ThreadKind::Email) {
+    if facts.kind == ThreadKind::Unknown {
         return Ok(false);
     }
     let addressed = matches!(
         facts.address,
-        ThreadAddress::Mention | ThreadAddress::ReplyToBot
+        ThreadAddress::Mention
+            | ThreadAddress::ReplyToBot
+            | ThreadAddress::MailboxTo
+            | ThreadAddress::VerifiedReply
     );
     let kind = chats::chat_kind(payload["conversation"]["type"].as_str().unwrap_or("group"));
     let topic = (facts.kind == ThreadKind::Topic)
         .then_some(facts.native_thread_id.as_deref())
         .flatten();
     let parent_chat = facts.parent_chat_id.as_deref().unwrap_or(&facts.chat_id);
-    let parent_key = chats::group_partition(parent_chat, topic);
+    let parent_key = if facts.kind == ThreadKind::Email {
+        chats::group_partition(&facts.chat_id, facts.root_id.as_deref())
+    } else {
+        chats::group_partition(parent_chat, topic)
+    };
     let mut exact_keys: Vec<String> = [
         facts.native_thread_id.as_deref(),
         facts.root_id.as_deref(),
@@ -198,17 +228,67 @@ pub(super) async fn inbound(
         &parent_key,
         &chats::ChatFacts {
             kind,
-            chat_id: parent_chat.into(),
-            thread_id: topic.map(str::to_owned),
+            chat_id: if facts.kind == ThreadKind::Email {
+                facts.chat_id.clone()
+            } else {
+                parent_chat.into()
+            },
+            thread_id: if facts.kind == ThreadKind::Email {
+                facts.root_id.clone()
+            } else {
+                topic.map(str::to_owned)
+            },
             owner: row.owner_sender_ids.iter().any(|id| id == sender_id),
             title: None,
         },
         None,
     )
     .await?;
-    let settings = exact
-        .filter(|c| c.id != parent.id)
-        .unwrap_or_else(|| parent.clone());
+    // Email remains subject to the existing private-chat sender gate. Check
+    // it before inspecting legacy sender partitions so an unauthorized guest
+    // cannot learn that another sender has conflicting policy.
+    if facts.kind == ThreadKind::Email
+        && follow::eligible_for_facts(row, &parent, facts, sender_id).is_none()
+    {
+        return Ok(true);
+    }
+    let settings = if facts.kind == ThreadKind::Email {
+        match email_settings(
+            state,
+            row,
+            &facts.chat_id,
+            facts.root_id.as_deref(),
+            &parent,
+            sender_id,
+        )
+        .await
+        {
+            Ok(settings) => settings,
+            Err(AppError::Conflict(code)) if code == "thread_policy_conflict" => {
+                let reply = OutboundReply {
+                    text: Some("This email thread has conflicting sender settings; reconcile them before following it.".into()),
+                    attachments: Vec::new(),
+                    reply_to_platform_message_id: None,
+                    metadata: None,
+                };
+                threads::delivery::send_reply(
+                    &state.db,
+                    adapter.as_ref(),
+                    &bot,
+                    &credentials,
+                    &target,
+                    &reply,
+                )
+                .await?;
+                return Ok(true);
+            }
+            Err(error) => return Err(error),
+        }
+    } else {
+        exact
+            .filter(|c| c.id != parent.id)
+            .unwrap_or_else(|| parent.clone())
+    };
     let settings = chats::note_owner_presence(state, row, &settings, sender_id).await?;
     if settings
         .follow
@@ -218,8 +298,9 @@ pub(super) async fn inbound(
     {
         return Ok(false);
     }
-    let Some(_guest) = follow::eligible(row, &settings, sender_id) else {
-        if addressed
+    let Some(_guest) = follow::eligible_for_facts(row, &settings, facts, sender_id) else {
+        if facts.kind != ThreadKind::Email
+            && addressed
             && settings.members.is_none()
             && let Some(hint) = chats::waiting_hint(state, &settings).await?
         {
@@ -353,6 +434,59 @@ pub(super) async fn inbound(
     Ok(true)
 }
 
+async fn email_settings(
+    state: &AppState,
+    row: &NyxbotChannel,
+    chat_id: &str,
+    thread_id: Option<&str>,
+    parent: &NyxbotThread,
+    sender_id: &str,
+) -> AppResult<NyxbotThread> {
+    let rows: Vec<NyxbotThread> = state
+        .db
+        .collection(THREADS)
+        .find(doc! {
+            "channel_id": &row.id,
+            "user_id": &row.user_id,
+            "kind": "private",
+            "platform_chat_id": chat_id,
+            "record_scope": {"$ne": follow::SCOPE},
+            "_id": {"$ne": &parent.id},
+        })
+        .limit(33)
+        .await?
+        .try_collect()
+        .await?;
+    let effective = |chat: &NyxbotThread| {
+        (
+            chat.agent_id.clone(),
+            chat.reply_mode.clone(),
+            chat.members.clone(),
+            chat.allow_posts,
+            chat.follow.threads.clone(),
+        )
+    };
+    // The bounded read must not silently choose a policy when more legacy
+    // sender rows exist than can be compared safely.
+    if rows.len() == 33 {
+        return Err(AppError::Conflict("thread_policy_conflict".into()));
+    }
+    if let Some(first) = rows.first()
+        && rows
+            .iter()
+            .any(|candidate| effective(candidate) != effective(first))
+    {
+        return Err(AppError::Conflict("thread_policy_conflict".into()));
+    }
+    let sender_partition = chats::direct_partition(chat_id, sender_id, thread_id);
+    Ok(rows
+        .iter()
+        .find(|candidate| candidate.partition == sender_partition)
+        .cloned()
+        .or_else(|| rows.first().cloned())
+        .unwrap_or_else(|| parent.clone()))
+}
+
 pub(crate) async fn send(
     state: &AppState,
     owner: &str,
@@ -481,7 +615,7 @@ pub(crate) async fn prelude(
         &bot,
         &credentials,
         &target,
-        &|sender| follow::eligible(&channel, &settings, sender).is_some(),
+        &|sender| follow::eligible_for_facts(&channel, &settings, target.facts(), sender).is_some(),
         deadline - Duration::from_millis(100),
     )
     .await

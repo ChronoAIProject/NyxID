@@ -198,7 +198,7 @@ mod tests {
         assert_eq!(
             aurinko["capabilities"],
             serde_json::json!({"initiated_send":false,"reply_to":true,"thread":false,"edit":false,
-                "thread_reply":false,"thread_follow":false,"thread_history":false,
+                "thread_reply":true,"thread_follow":true,"thread_history":true,"private_thread":true,
                 "media":{"inbound":[],"outbound":[]}})
         );
         assert_eq!(

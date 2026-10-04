@@ -269,3 +269,38 @@ pub(super) fn lark(message: &InboundMessage, own_id: Option<&str>) -> Option<Cha
     };
     Some(facts)
 }
+
+/// Aurinko is private-classified by the legacy router, but its provider
+/// `threadId` is shared by every participant. Keep only keyed HMAC-SHA256
+/// fingerprints of addresses in durable facts so guest history can be proved
+/// without storing recipients or reversible unkeyed digests.
+pub(super) fn aurinko(message: &InboundMessage) -> Option<ChannelThreadFacts> {
+    if message.conversation_type != "private" {
+        return None;
+    }
+    let email = message.raw_data.get("email")?;
+    let thread = string(&email["thread_id"])?;
+    let account = string(&email["account_id"])?;
+    let mut facts = base(message, ThreadKind::Email);
+    facts.chat_id = message.conversation_id.clone();
+    facts.parent_chat_id = Some(account);
+    facts.root_id = Some(thread.clone());
+    facts.native_thread_id = Some(thread);
+    facts.parent_message_id = string(&email["reply_parent_id"]);
+    facts.sender_kind = ThreadSenderKind::Human;
+    facts.sender_hash = email["sender_hash"].as_str().map(str::to_owned);
+    facts.participant_hashes = email["participant_hashes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|hash| hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
+        .map(str::to_owned)
+        .collect();
+    facts.address = if email["mailbox_to"].as_bool().unwrap_or(false) {
+        ThreadAddress::MailboxTo
+    } else {
+        ThreadAddress::NotAddressed
+    };
+    Some(facts)
+}
