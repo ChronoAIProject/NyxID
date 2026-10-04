@@ -34,9 +34,7 @@ import {
   recordedSourceLabel,
 } from "@/lib/service-insights";
 import { formatDateTime } from "@/lib/utils";
-import type { CatalogEntry, KeyInfo } from "@/types/keys";
-import { configuredPlatformPrice } from "@/lib/service-billing-config";
-import { lanePriceLabel } from "@/schemas/platform-keys";
+import type { KeyInfo } from "@/types/keys";
 
 export type InsightPanel = "access" | "requests" | "billing";
 
@@ -72,12 +70,10 @@ function ConnectionBillingPanel({
   connection,
   insight,
   state,
-  catalog,
 }: {
   readonly connection: KeyInfo;
   readonly insight: ServiceInsight;
   readonly state: ServiceInsightsState;
-  readonly catalog?: CatalogEntry;
 }) {
   const [caller, setCaller] = useState("you");
   const selectedState = useServiceInsights(
@@ -89,7 +85,6 @@ function ConnectionBillingPanel({
     caller === "you"
       ? insight.billing
       : selectedState.connections.get(connection.id)?.billing;
-  const platformPrice = configuredPlatformPrice(connection, catalog);
   return (
     <section
       className="space-y-4 p-3"
@@ -125,16 +120,6 @@ function ConnectionBillingPanel({
           )}
         </div>
       </div>
-      {platformPrice && (
-        <div className="rounded-lg border border-border/60 bg-muted/20 p-3 text-xs">
-          <p className="font-medium">NyxID platform billing configured</p>
-          <p className="mt-1">{lanePriceLabel(platformPrice)}</p>
-          <p className="mt-1 text-muted-foreground">
-            This is the service's configured platform price. The connection
-            credential and applicable charges are shown below.
-          </p>
-        </div>
-      )}
       {bill ? (
         <>
           <div className="flex flex-wrap items-center gap-2 text-xs">
@@ -284,13 +269,11 @@ export function ConnectionInsightPanel({
   insight,
   view,
   state,
-  catalog,
 }: {
   readonly connection: KeyInfo;
   readonly insight?: ServiceInsight;
   readonly view: InsightPanel;
   readonly state: ServiceInsightsState;
-  readonly catalog?: CatalogEntry;
 }) {
   const [showAllKeys, setShowAllKeys] = useState(false);
   if (!insight || (view === "billing" ? !insight.billing : !insight.usage))
@@ -302,7 +285,6 @@ export function ConnectionInsightPanel({
         connection={connection}
         insight={insight}
         state={state}
-        catalog={catalog}
       />
     );
   if (!usage) return <InsightsUnavailable state={state} />;

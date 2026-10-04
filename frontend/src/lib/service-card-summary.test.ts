@@ -8,7 +8,7 @@ import { configuredBilling } from "./service-insights-compat";
 import type { KeyInfo } from "@/types/keys";
 import {
   configuredPlatformPrice,
-  configuredBillablePlatformPrice,
+  configuredUsageCharge,
 } from "./service-billing-config";
 
 const connection = {
@@ -25,6 +25,19 @@ const lane = {
   sync_status: "synced" as const,
 };
 describe("card billing categories", () => {
+  it("uses a resolved credential class ahead of a retained supplied OAuth app", () => {
+    const oauth = { ...connection, credential_type: "oauth2", oauth_client_id: "own-app" };
+    const bill = configuredBilling(oauth);
+    expect(connectionBillingCategory(oauth, bill)).toBe("byok");
+    expect(connectionBillingCategory(oauth, {
+      ...bill,
+      credential_class: "nyxid_platform_oauth_app",
+      credit_billing_configured: true,
+    })).toBe("platform");
+    expect(connectionBillingCategory(oauth, {
+      ...bill, status: "restricted",
+    })).toBe("unknown");
+  });
   it("separates confirmed unpriced catalog services from unknown OAuth app ownership", () => {
     const oauth = {
       ...connection,
@@ -140,7 +153,7 @@ describe("card billing categories", () => {
   });
   it("uses the selected agent override instead of the platform connection default", () => {
     const platform = { ...connection, credential_binding: "platform" as const };
-    const bill = { ...configuredBilling(platform), context: "agent_key" };
+    const bill = { ...configuredBilling(platform), context: "agent_key", credential_class: null };
     expect(
       connectionBillingCategory(platform, {
         ...bill,
@@ -158,18 +171,18 @@ describe("card billing configuration", () => {
       slug: "zero",
       billing: { platform_key_pricing: { ...lane, credits_per_unit: "0" } },
     };
-    expect(configuredBillablePlatformPrice(platform, catalog)).toBeUndefined();
+    expect(configuredUsageCharge(platform, catalog)).toBe(false);
     expect(
       connectionBillingCategory(platform, configuredBilling(platform, catalog), catalog),
     ).toBe("not_billable");
     expect(
-      configuredBillablePlatformPrice(platform, {
+      configuredUsageCharge(platform, {
         slug: "charged",
         billing: { platform_key_pricing: lane },
       }),
-    ).toEqual(lane);
+    ).toBe(true);
   });
-  it("reads platform prices from service billing even when the connection uses its own credential", () => {
+  it("keeps a supplied key BYOK when the catalog also offers platform pricing", () => {
     const catalog = {
       slug: "llm-deepseek",
       billing: { platform_key_pricing: lane },
@@ -177,10 +190,11 @@ describe("card billing configuration", () => {
     expect(configuredPlatformPrice(connection, catalog)).toEqual(lane);
     const bill = configuredBilling(connection, catalog);
     expect(connectionBillingCategory(connection, bill, catalog)).toBe(
-      "not_billable",
+      "byok",
     );
-    expect(bill.credential_label).toBe("Stored API key · supplier unverified");
-    expect(bill.provider_billing).toBe("unknown");
+    expect(bill.credential_label).toBe("Your API key (BYOK)");
+    expect(bill.provider_billing).toBe("separate_provider_account");
+    expect(bill.rates).toEqual([]);
   });
   it("counts only the billable connection across five personal apps and one platform connection, including disabled rows", () => {
     const catalog = {

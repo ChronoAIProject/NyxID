@@ -45,8 +45,6 @@ import {
   connectionBillingCategory,
   connectionBillingLabels,
 } from "@/lib/service-card-summary";
-import { configuredBillablePlatformPrice } from "@/lib/service-billing-config";
-import { lanePriceLabel } from "@/schemas/platform-keys";
 import type { ServiceInsight } from "@/schemas/service-insights";
 import {
   useServiceInsights,
@@ -205,7 +203,6 @@ export function ServiceConnectionTable({
           {connections.map((key) => {
             const insight = insights.connections.get(key.id);
             const billing = insight?.billing;
-            const platformPrice = configuredBillablePlatformPrice(key, catalog);
             const billingCategory =
               insights.status === "ready"
                 ? connectionBillingCategory(key, billing, catalog)
@@ -483,35 +480,29 @@ export function ServiceConnectionTable({
                           aria-controls={panelId}
                           aria-label={`Billing for ${key.label}`}
                           aria-description={
-                            billingCategory === "not_billable" && !platformPrice
+                            billingCategory === "not_billable"
                               ? "Not billable by NyxID"
                               : undefined
                           }
                           data-insight-view="billing"
                           data-connection-id={key.id}
-                          className="block w-full rounded-sm text-left text-xs hover:text-primary focus-visible:outline-2 focus-visible:outline-ring"
+                          className={cn(
+                            "block max-w-full rounded-sm text-left text-xs hover:text-primary focus-visible:outline-2 focus-visible:outline-ring",
+                            billingCategory === "not_billable"
+                              ? "w-fit"
+                              : "w-full",
+                          )}
                         >
                           <span className="flex items-start gap-1.5 font-medium">
                             <CreditCard className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
                             <span className="truncate">
-                              {platformPrice
-                                ? "NyxID platform billing"
-                                : insights.status === "ready"
-                                  ? connectionBillingLabels[billingCategory]
-                                  : insightStatusLabel(insights.status, "Billing")}
+                              {insights.status === "ready"
+                                ? connectionBillingLabels[billingCategory]
+                                : insightStatusLabel(insights.status, "Billing")}
                             </span>
                           </span>
-                          {platformPrice && (
-                            <>
-                              <span className="mt-1 block truncate text-[11px] text-muted-foreground">
-                                Configured: {lanePriceLabel(platformPrice)}
-                              </span>
-                              <span className="mt-1 block truncate text-[11px] text-muted-foreground">
-                                Connection: {credentialLabel(key, billing)}
-                              </span>
-                            </>
-                          )}
-                          {billing && billingCategory === "platform" && (
+                          {billing &&
+                            (billingCategory === "platform" || billingCategory === "byok") && (
                             <>
                               <span
                                 className="mt-1 block truncate text-[11px] text-muted-foreground"
@@ -535,11 +526,21 @@ export function ServiceConnectionTable({
                         </button>
                       </TooltipTrigger>
                       <TooltipContent
-                        side="top"
+                        side={
+                          billingCategory === "not_billable"
+                            ? "right"
+                            : "bottom"
+                        }
+                        align={
+                          billingCategory === "not_billable"
+                            ? "center"
+                            : "start"
+                        }
+                        sideOffset={8}
                         collisionPadding={12}
                         className="max-w-xs whitespace-normal"
                       >
-                        {billingCategory === "not_billable" && !platformPrice ? (
+                        {billingCategory === "not_billable" ? (
                           <p>Not billable by NyxID</p>
                         ) : (
                           <>
@@ -642,7 +643,6 @@ export function ServiceConnectionTable({
                         />
                       ) : (
                         <ConnectionInsightPanel
-                          catalog={catalog}
                           key={`${key.id}:${open.view}`}
                           connection={key}
                           insight={insight}

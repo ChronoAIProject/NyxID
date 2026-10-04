@@ -537,8 +537,8 @@ describe("service card billing and caller details", () => {
       screen.getByRole("button", { name: "Billing for Team OpenAI" }),
     );
     expect(cell.getByText("BYOK")).toBeVisible();
-    expect(cell.queryByText("Personal account")).not.toBeInTheDocument();
-    expect(cell.queryByText("Rate: 0.25 credits / request")).not.toBeInTheDocument();
+    expect(cell.getByText("Personal account")).toBeVisible();
+    expect(cell.getByText("Rate: 0.25 credits / request")).toBeVisible();
     await user.click(
       screen.getByRole("button", { name: "Billing for Team OpenAI" }),
     );

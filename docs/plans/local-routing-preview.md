@@ -37,31 +37,32 @@ The backend now reports configured billing separately from execution availabilit
 the production-data preview uses published inventory metadata until that backend
 change is deployed. Missing data remains unverified.
 
-Updated 2 October: the billing summary now checks the published service billing
-configuration before the connection label. A live metadata check confirmed
-Twitter (`api-twitter`) has synced platform pricing of 0.05 credits/request and
-DeepSeek (`llm-deepseek`) has synced platform pricing of 0.000001 credits/token.
-Both connections currently report a user binding. Their cards now show NyxID
-platform billing, and hover/expanded details show the configured price. The UI
-preserves the reported binding and leaves the credential supplier unverified
-where the server has not identified it; a key row alone does not prove BYOK.
-This display fix does not change stored bindings or execution pricing. The
-compatibility catalog read now includes all services so platform services do
-not disappear from billing lookup.
+Updated 5 October: billing is classified per connection. Supplied API keys and
+OAuth developer apps remain **BYOK** even when their catalog service also offers
+NyxID platform credentials. A live metadata read confirmed ChronoAI Twitter has
+its own OAuth app identifier, and the visible DeepSeek connection has a user API
+key. Both are treated as BYOK rather than inheriting the catalog platform price.
+Resolved backend credential classes and selected-agent overrides take precedence.
+On older servers, missing OAuth app ownership stays unknown; an absent client ID
+never proves NyxID owns the app.
 
-Updated 5 October: unpriced services display **—** in the billing row on both
-collapsed cards and expanded connection tables. Hover or keyboard focus reads
-**Not billable by NyxID**. Supplied private keys still show **BYOK**. The UI now
-recognizes that a loaded catalog entry omits `billing` when no configuration
-exists, and that custom services need no catalog entry. Unknown OAuth app
-ownership no longer makes those unpriced services appear billing-unverified.
-Failed/missing catalog reads remain distinct from confirmed absence of charges.
-All-unpriced groups show one dash; mixed groups retain per-connection explanations
-in the tooltip. Zero platform prices do not advertise platform charges. Twitter
-and DeepSeek retain their configured platform-billing labels and rate details.
-All 92 focused frontend tests, production builds, changed-file ESLint and whitespace
-checks passed. The running preview serves the updated modules; signed-in visual
-inspection remains unavailable in this session.
+Mixed cards list every represented billing category with counts, including a dash
+count for unpriced connections. Hover lists each connection's billing and rate;
+expanded rows show each connection's payer and applicable fee. A billing panel
+contains only the selected connection/agent's rates, without a catalog-wide
+platform-price banner. BYOK can still have separately configured NyxID fees.
+
+Unpriced connections display **—**, with **Not billable by NyxID** on hover or
+keyboard focus. A loaded catalog entry with omitted billing means unpriced, as
+does a custom service with no catalog linkage or published prices. Failed/missing
+catalog reads remain distinct from confirmed absence of charges. Supplied keys
+continue to show BYOK. All-unpriced groups show one dash.
+
+The dash tooltip sits beside its icon/value with an 8px gap. Longer billing
+tooltips align below the content. Viewport collision handling remains enabled.
+All 96 focused frontend tests, production builds, changed-file ESLint and whitespace
+checks passed. The running preview serves the updated modules; this session has no
+connected browser for signed-in visual inspection.
 
 Run from `frontend/`:
 

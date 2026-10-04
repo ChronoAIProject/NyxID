@@ -105,6 +105,46 @@ function mount(connections: KeyInfo[] = [personal]) {
 }
 
 describe("deployed service insight compatibility", () => {
+  it("uses the connection's own OAuth app and honors platform-only charge exclusions", () => {
+    const bill = configuredBilling({
+      ...org,
+      credential_type: "oauth2",
+      oauth_client_id: "organization-app",
+    }, {
+      slug: "twitter",
+      billing: {
+        platform_charge_nyxid_credentials_only: true,
+        byok_pricing: { metric: "requests", credits_per_unit: "0.01", sync_status: "synced" },
+        platform_key_pricing: { metric: "requests", credits_per_unit: "0.05", sync_status: "synced" },
+      },
+    });
+    expect(bill).toMatchObject({
+      credential_class: "user_owned",
+      credential_label: "Organization OAuth app (BYOK)",
+      provider_billing: "separate_provider_account",
+      credit_billing_configured: false,
+      rates: [],
+    });
+    expect(bill.notes.join(" ")).not.toContain("does not report whether");
+  });
+
+  it("selects a supplied key's own fee lane when both credential classes are priced", () => {
+    const bill = configuredBilling(personal, {
+      slug: "openai",
+      billing: {
+        byok_pricing: { metric: "requests", credits_per_unit: "0.01", sync_status: "synced" },
+        platform_key_pricing: { metric: "requests", credits_per_unit: "0.05", sync_status: "synced" },
+      },
+    });
+    expect(bill).toMatchObject({
+      credential_class: "user_owned",
+      credential_label: "Your API key (BYOK)",
+      credit_billing_configured: true,
+      rates: [{ credits_per_unit: "0.01" }],
+    });
+    expect(bill.rates).toHaveLength(1);
+  });
+
   it("treats omitted catalog billing as unpriced while retaining OAuth provenance separately", async () => {
     responses.set("/catalog?include_all=true", { entries: [{ slug: "openai" }] });
     const [item] = await loadConfiguredServiceInsights(

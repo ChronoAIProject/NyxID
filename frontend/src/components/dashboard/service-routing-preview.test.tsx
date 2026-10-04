@@ -249,25 +249,11 @@ describe("live grouped services", () => {
   });
 
   it.each([
-    {
-      name: "Twitter / X API",
-      slug: "api-twitter",
-      type: "oauth2",
-      metric: "requests",
-      price: "0.05",
-      rate: "0.05 credits / request",
-    },
-    {
-      name: "DeepSeek API",
-      slug: "llm-deepseek",
-      type: "api_key",
-      metric: "tokens",
-      price: "0.000001",
-      rate: "0.000001 credits / token",
-    },
+    { name: "Twitter / X API", slug: "api-twitter", type: "oauth2", app: "own-app" },
+    { name: "DeepSeek API", slug: "llm-deepseek", type: "api_key", app: null },
   ])(
-    "uses $name platform billing configuration despite its user binding",
-    async ({ name, slug, type, metric, price, rate }) => {
+    "shows $name supplied credentials as BYOK despite a catalog platform price",
+    async ({ name, slug, type, app }) => {
       const connection: KeyInfo = {
         ...records[0]!,
         id: slug,
@@ -278,9 +264,10 @@ describe("live grouped services", () => {
         catalog_service_name: name,
         credential_binding: "user",
         credential_type: type,
+        oauth_client_id: app,
         platform_key_pricing: {
-          metric,
-          credits_per_unit: price,
+          metric: "requests",
+          credits_per_unit: "0.05",
           sync_status: "synced",
         },
         byok_pricing: null,
@@ -294,25 +281,88 @@ describe("live grouped services", () => {
       const user = userEvent.setup();
       render(preview());
       const card = within(screen.getByRole("region", { name }));
-      const summary = card.getByRole("button", {
-        name: `Show billing for ${name}`,
-      });
-      expect(summary).toHaveTextContent("NyxID platform billing");
+      const summary = card.getByRole("button", { name: `Show billing for ${name}` });
+      expect(summary).toHaveTextContent(/^BYOK$/);
       await user.hover(summary);
-      expect(await screen.findByRole("tooltip")).toHaveTextContent(rate);
+      const tooltip = await screen.findByRole("tooltip");
+      expect(tooltip).toHaveTextContent(`${name}: BYOK`);
+      expect(tooltip).not.toHaveTextContent("0.05");
       await user.click(summary);
       const panel = card.getByRole("region", { name: `Billing for ${name}` });
-      expect(
-        within(panel).getByText("NyxID platform billing configured"),
-      ).toBeVisible();
-      expect(within(panel).getByText(rate)).toBeVisible();
-      expect(
-        card.getByText(
-          `Connection: ${type === "oauth2" ? "Connected account · app unverified" : "Stored API key · supplier unverified"}`,
-        ),
-      ).toBeVisible();
+      expect(within(panel).getByText(
+        type === "oauth2" ? "Your OAuth app (BYOK)" : "Your API key (BYOK)",
+      )).toBeVisible();
+      expect(within(panel).getByText("No NyxID usage charges configured")).toBeVisible();
+      expect(panel).not.toHaveTextContent("0.05");
+      expect(card.queryByText("NyxID platform billing configured")).not.toBeInTheDocument();
     },
   );
+
+  it("lists all connection billing types in a shared catalog group and opens each connection's own rates", async () => {
+    const catalog = {
+      slug: "api-twitter",
+      billing: {
+        platform_charge_nyxid_credentials_only: true,
+        platform_key_pricing: { metric: "requests", credits_per_unit: "0.05", sync_status: "synced" as const },
+        byok_pricing: { metric: "requests", credits_per_unit: "0.01", sync_status: "synced" as const },
+      },
+    };
+    const byo: KeyInfo = {
+      ...records[1]!,
+      id: "twitter-byo",
+      label: "ChronoAI Twitter",
+      catalog_service_id: "twitter",
+      catalog_service_slug: "api-twitter",
+      catalog_service_name: "Twitter",
+      credential_binding: "user",
+      credential_type: "oauth2",
+      oauth_client_id: "chrono-app",
+      platform_key_pricing: catalog.billing.platform_key_pricing,
+      byok_pricing: catalog.billing.byok_pricing,
+    };
+    const platform: KeyInfo = {
+      ...byo, id: "twitter-platform", label: "Personal Twitter",
+      credential_source: { type: "personal" }, credential_binding: "platform",
+    };
+    const noCharge: KeyInfo = {
+      ...byo, id: "twitter-unpriced", label: "Public Twitter", auth_method: "none",
+      credential_source: { type: "personal" },
+    };
+    const unknown: KeyInfo = {
+      ...byo, id: "twitter-unknown", label: "Legacy Twitter", oauth_client_id: null,
+    };
+    for (const connection of [byo, platform, noCharge, unknown]) {
+      records.push(connection);
+      insightConnections.set(connection.id, {
+        service_id: connection.id,
+        billing: configuredBilling(connection, catalog),
+        usage: null,
+      });
+    }
+    const user = userEvent.setup();
+    render(preview());
+    const card = within(screen.getByRole("region", { name: "Twitter" }));
+    const summary = card.getByRole("button", { name: "Show billing for Twitter" });
+    expect(summary).toHaveTextContent("1 NyxID · 1 BYOK · 1 — · 1 unverified");
+    await user.hover(summary);
+    const tooltip = await screen.findByRole("tooltip");
+    for (const text of [
+      "ChronoAI Twitter: BYOK", "Personal Twitter: NyxID credentials",
+      "Public Twitter: Not billable by NyxID", "Legacy Twitter: Unverified",
+      "0.05 credits / request",
+    ]) expect(tooltip).toHaveTextContent(text);
+    await user.click(summary);
+    const platformPanel = card.getByRole("region", { name: "Billing for Personal Twitter" });
+    const platformRates = within(platformPanel).getByRole("table", { name: "Configured NyxID rates" });
+    expect(within(platformRates).getByRole("cell", { name: "0.05" })).toBeVisible();
+    expect(within(platformRates).getByRole("cell", { name: "request" })).toBeVisible();
+    await user.click(card.getByRole("button", { name: "Billing for ChronoAI Twitter" }));
+    const byoPanel = card.getByRole("region", { name: "Billing for ChronoAI Twitter" });
+    expect(byoPanel).toHaveTextContent("Organization OAuth app (BYOK)");
+    expect(byoPanel).toHaveTextContent("No NyxID usage charges configured");
+    expect(byoPanel).not.toHaveTextContent("0.05");
+    expect(byoPanel).not.toHaveTextContent("0.01");
+  });
 
   it("shows five supplied apps and one NyxID connection and opens the NyxID member", async () => {
     for (let i = 0; i < 4; i++)

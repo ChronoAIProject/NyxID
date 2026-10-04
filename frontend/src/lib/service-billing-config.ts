@@ -1,4 +1,7 @@
-import type { ConfiguredCatalogEntry } from "@/schemas/service-insights";
+import type {
+  ConfiguredCatalogEntry,
+  ServiceBillingExplanation,
+} from "@/schemas/service-insights";
 import type { KeyInfo } from "@/types/keys";
 
 /** Catalog pricing describes the service's platform offering, not the selected credential. */
@@ -17,15 +20,30 @@ export function positiveUsageRate(rate: string): boolean {
   return /^\d+(?:\.\d+)?$/.test(rate) && /[1-9]/.test(rate);
 }
 
-export function configuredBillablePlatformPrice(
+/** Connection metadata identifies credential supply; catalog prices never do. */
+export function connectionCredentialClass(
   connection: KeyInfo,
-  catalog?: ConfiguredCatalogEntry,
+  billing?: ServiceBillingExplanation | null,
 ) {
-  const price = configuredPlatformPrice(connection, catalog);
-  return price &&
-    configuredUsageCharge(connection, catalog, "nyxid_managed_master")
-    ? price
-    : undefined;
+  if (billing?.status === "restricted") return undefined;
+  if (billing?.credential_class) return billing.credential_class;
+  if (billing?.context === "agent_key") return undefined;
+  if (connection.credential_binding === "platform")
+    return "nyxid_managed_master";
+  if (connection.node_id || connection.has_node_binding) return undefined;
+  if (connection.auth_method === "none") return "no_auth";
+  if (connection.credential_missing) return undefined;
+  if (
+    ["oauth2", "device_code"].includes(connection.credential_type) &&
+    connection.oauth_client_id?.trim()
+  )
+    return "user_owned";
+  if (
+    connection.credential_type === "api_key" &&
+    (connection.api_key_id || connection.credential_binding === "user")
+  )
+    return "user_owned";
+  return undefined;
 }
 
 /** Configured charges, independent of connection status, grants or wallet balance. */
@@ -34,6 +52,7 @@ export function configuredUsageCharge(
   catalog?: ConfiguredCatalogEntry,
   credentialClass?: string | null,
 ): boolean | undefined {
+  credentialClass ??= connectionCredentialClass(connection);
   const platform = credentialClass
     ? credentialClass === "nyxid_managed_master"
     : connection.credential_binding === "platform";

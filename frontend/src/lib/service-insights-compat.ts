@@ -13,6 +13,7 @@ import type { KeyInfo } from "@/types/keys";
 import {
   configuredUsageCharge,
   configuredPlatformPrice,
+  connectionCredentialClass,
 } from "./service-billing-config";
 
 // Read only metadata from the deployed inventory APIs. This projection describes
@@ -26,7 +27,8 @@ export function configuredBilling(
   connection: KeyInfo,
   catalog?: ConfiguredCatalogEntry,
 ): ServiceBillingExplanation {
-  const platform = connection.credential_binding === "platform";
+  const credentialClass = connectionCredentialClass(connection);
+  const platform = credentialClass === "nyxid_managed_master";
   const node = Boolean(connection.node_id || connection.has_node_binding);
   const userCredential =
     !platform &&
@@ -42,12 +44,9 @@ export function configuredBilling(
       ? connection.credential_source
       : null;
   const oauth = ["oauth2", "device_code"].includes(connection.credential_type);
-  const platformPrice = configuredPlatformPrice(connection, catalog);
   const billing = catalog?.billing;
   const configuredLane = platform
-    ? (connection.platform_key_pricing ??
-      catalog?.platform_key?.pricing ??
-      billing?.platform_key_pricing)
+    ? configuredPlatformPrice(connection, catalog)
     : userCredential
       ? (connection.byok_pricing ??
         catalog?.byok_pricing ??
@@ -63,14 +62,13 @@ export function configuredBilling(
     billing?.platform_key_pricing,
   );
   const ownApiKey =
-    userCredential &&
-    !node &&
-    !oauth &&
+    credentialClass === "user_owned" &&
     connection.credential_type === "api_key";
+  const ownOAuthApp = oauth && credentialClass === "user_owned";
   const excludedFromPlatformCharge =
     billing?.platform_charge_nyxid_credentials_only === true &&
     !platform &&
-    (ownApiKey || node || connection.auth_method === "none");
+    (ownApiKey || ownOAuthApp || node || connection.auth_method === "none");
   const lane = excludedFromPlatformCharge ? undefined : configuredLane;
   const legacyConfigured =
     !hasLanes &&
@@ -82,17 +80,17 @@ export function configuredBilling(
       ? "Node credential · supplier unverified"
       : connection.auth_method === "none"
         ? "No credential"
-        : oauth
-          ? "Connected account · app unverified"
-          : ownApiKey && !platformPrice
-            ? `${org ? "Organization" : "Your"} API key (BYOK)`
-            : userCredential && connection.credential_type === "api_key"
-              ? "Stored API key · supplier unverified"
+        : ownOAuthApp
+          ? `${org ? "Organization" : "Your"} OAuth app (BYOK)`
+          : oauth
+            ? "Connected account · app unverified"
+            : ownApiKey
+              ? `${org ? "Organization" : "Your"} API key (BYOK)`
               : "Credential supplier unverified";
   const creditBillingConfigured = configuredUsageCharge(connection, catalog);
   return {
     status: "conditional",
-    credential_class: null,
+    credential_class: credentialClass ?? null,
     credential_label: credentialLabel,
     account: null,
     payer_rule:
@@ -134,7 +132,7 @@ export function configuredBilling(
       ? "nyxid_credential"
       : connection.auth_method === "none"
         ? "no_credential"
-        : ownApiKey && !platformPrice
+        : ownApiKey || ownOAuthApp
           ? "separate_provider_account"
           : "unknown",
     context: "configuration",
@@ -142,7 +140,7 @@ export function configuredBilling(
       creditBillingConfigured === false
         ? "No NyxID usage charges are configured for this connection. The provider may charge separately."
         : "Configured billing for the connection default. The payer and applicable charges are verified at execution; agent credential overrides can change them.",
-      ...(oauth
+      ...(oauth && !platform && !ownOAuthApp
         ? [
             "Signing in does not identify the developer app's owner. This server does not report whether this connection uses your app or NyxID's app.",
           ]

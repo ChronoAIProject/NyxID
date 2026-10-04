@@ -25,6 +25,8 @@ export interface KeyInfo {
   /** The service references a credential row that no longer exists. */
   readonly credential_missing?: boolean;
   readonly credential_type: string;
+  /** Public identifier of the connection's supplied OAuth developer app. */
+  readonly oauth_client_id?: string | null;
   readonly auth_method: string;
   readonly auth_key_name: string;
   readonly status: string;

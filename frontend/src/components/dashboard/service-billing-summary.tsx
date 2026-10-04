@@ -5,9 +5,7 @@ import {
   connectionBillingLabels,
   type ConnectionBillingCategory,
 } from "@/lib/service-card-summary";
-import { insightStatusLabel } from "@/lib/service-insights";
-import { configuredBillablePlatformPrice } from "@/lib/service-billing-config";
-import { lanePriceLabel } from "@/schemas/platform-keys";
+import { insightStatusLabel, nyxidChargeLabel } from "@/lib/service-insights";
 import type { CatalogEntry, KeyInfo } from "@/types/keys";
 import {
   Tooltip,
@@ -31,7 +29,7 @@ export function ServiceBillingSummary({
 }) {
   const rows = connections.map((connection) => ({
     connection,
-    platformPrice: configuredBillablePlatformPrice(connection, catalog),
+    billing: insights.connections.get(connection.id)?.billing,
     category:
       insights.status === "ready"
         ? connectionBillingCategory(
@@ -41,11 +39,10 @@ export function ServiceBillingSummary({
           )
         : ("unknown" as const),
   }));
-  const platformRow = rows.find((row) => row.platformPrice);
-  const platformPrice = platformRow?.platformPrice;
   const categories: ConnectionBillingCategory[] = [
     "platform",
     "byok",
+    "not_billable",
     "unknown",
   ];
   const countLabels = {
@@ -55,9 +52,8 @@ export function ServiceBillingSummary({
     unknown: "unverified",
   };
   const notBillable = rows.every((row) => row.category === "not_billable");
-  const label = platformPrice
-    ? "NyxID platform billing"
-    : insights.status !== "ready"
+  const label =
+    insights.status !== "ready"
       ? insightStatusLabel(insights.status, "Billing")
       : notBillable
         ? "—"
@@ -77,13 +73,12 @@ export function ServiceBillingSummary({
             type="button"
             aria-label={`Show billing for ${serviceName}`}
             aria-description={
-              notBillable && !platformPrice ? "Not billable by NyxID" : undefined
+              notBillable ? "Not billable by NyxID" : undefined
             }
-            className="flex h-6 w-full min-w-0 items-center gap-2 rounded-sm text-left text-xs focus-visible:outline-2 focus-visible:outline-ring"
+            className="flex min-h-6 w-fit min-w-0 max-w-full items-center gap-2 rounded-sm text-left text-xs focus-visible:outline-2 focus-visible:outline-ring"
             onClick={() => {
               const first =
                 rows.find((row) => row.category === "platform") ??
-                platformRow ??
                 rows[0];
               if (first) onOpen(first.connection.id);
             }}
@@ -92,38 +87,36 @@ export function ServiceBillingSummary({
               className="size-3.5 shrink-0 text-muted-foreground"
               aria-hidden="true"
             />
-            <span className="truncate font-medium">{label}</span>
+            <span className="line-clamp-2 font-medium leading-4">{label}</span>
           </button>
         </TooltipTrigger>
         <TooltipContent
+          side={notBillable ? "right" : "bottom"}
+          align={notBillable ? "center" : "start"}
+          sideOffset={8}
           collisionPadding={12}
           className="max-w-[min(22rem,calc(100vw-2rem))] space-y-1 break-words [overflow-wrap:anywhere]"
         >
-          {notBillable && !platformPrice ? (
+          {notBillable ? (
             <p>Not billable by NyxID</p>
           ) : (
             <>
               <p className="font-medium">Connection billing</p>
-              {platformPrice && (
-                <div className="space-y-1 border-b border-border pb-2">
-                  <p className="font-medium">NyxID platform billing configured</p>
-                  <p>{lanePriceLabel(platformPrice)}</p>
-                  <p className="text-muted-foreground">
-                    From this service's billing configuration. The credential selected
-                    for each request determines which rate applies.
-                  </p>
-                </div>
-              )}
-              {rows.map(({ connection, category, platformPrice: rowPrice }) => (
-                <p key={connection.id}>
-                  {connection.label}:{" "}
-                  {rowPrice
-                    ? "NyxID platform billing"
-                    : category === "not_billable"
+              {rows.map(({ connection, category, billing }) => (
+                <div key={connection.id}>
+                  <p>
+                    {connection.label}:{" "}
+                    {category === "not_billable"
                       ? "Not billable by NyxID"
                       : connectionBillingLabels[category]}
-                  {!connection.is_active ? " · disabled" : ""}
-                </p>
+                    {!connection.is_active ? " · disabled" : ""}
+                  </p>
+                  {billing && category !== "not_billable" && (
+                    <p className="text-muted-foreground">
+                      {nyxidChargeLabel(billing)}
+                    </p>
+                  )}
+                </div>
               ))}
               <p className="text-muted-foreground">
                 NyxID supplies the platform key or developer app. BYOK uses a key

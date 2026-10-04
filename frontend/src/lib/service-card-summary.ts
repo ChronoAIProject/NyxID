@@ -5,7 +5,7 @@ import type {
 import type { KeyInfo } from "@/types/keys";
 import {
   configuredUsageCharge,
-  configuredBillablePlatformPrice,
+  connectionCredentialClass,
   positiveUsageRate,
 } from "./service-billing-config";
 
@@ -34,7 +34,7 @@ export function connectionBillingCategory(
   const notBillable =
     connectionBillability(connection, billing, catalog) === false;
   // A resolved caller override takes precedence over the connection default.
-  switch (billing?.credential_class) {
+  switch (connectionCredentialClass(connection, billing)) {
     case "nyxid_managed_master":
     case "nyxid_platform_oauth_app":
       return notBillable ? "not_billable" : "platform";
@@ -52,19 +52,6 @@ export function connectionBillingCategory(
     billing?.provider_billing === "nyxid_credential"
   )
     return notBillable ? "not_billable" : "platform";
-  // A stored user-key row can coexist with platform billing. It does not
-  // establish who supplied that credential on an older server.
-  const platformPrice = configuredBillablePlatformPrice(connection, catalog);
-  if (
-    !platformPrice &&
-    !connection.node_id &&
-    !connection.has_node_binding &&
-    connection.auth_method !== "none" &&
-    connection.credential_type === "api_key" &&
-    !connection.credential_missing &&
-    (connection.api_key_id || connection.credential_binding === "user")
-  )
-    return "byok";
   // Credential provenance can be unknown without billing being unknown.
   return notBillable ? "not_billable" : "unknown";
 }
@@ -77,6 +64,8 @@ export function connectionBillability(
   if (billing?.status === "restricted") return undefined;
   if (billing?.credit_billing_configured != null)
     return billing.credit_billing_configured;
+  if (billing?.context === "agent_key" && !billing.credential_class)
+    return undefined;
   const configured = configuredUsageCharge(
     connection,
     catalog,

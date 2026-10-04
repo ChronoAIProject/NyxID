@@ -66,28 +66,30 @@ Source avatars sit at the bottom right of the card body without a visible label.
 Hovering or focusing a stationary circle brings it forward and shows its source
 name. Extra sources remain reachable through the overflow count.
 
-The body checks the service billing configuration first. A configured platform-key
-price shows **NyxID platform billing**, with its rate and sync state on hover, in
-the expanded table and in the billing panel. Pricing is joined through the catalog
-service, including `/catalog?include_all=true`, and also read from the published
-connection price. The configuration stays visible even when a legacy connection
-reports a `user` binding. A configured platform price is not evidence that a
-specific request selected the platform credential.
+The body classifies each connection using its resolved credential class, or its
+published connection metadata on older servers. Catalog platform availability and
+prices never override that classification. A supplied key or OAuth developer app
+remains **BYOK** even when NyxID also offers managed credentials for that service.
+An explicit platform binding takes precedence over a retained user key; a resolved
+agent override takes precedence over the connection default.
 
-When no platform price is configured, the summary uses credential categories,
-e.g. **1 NyxID · 5 BYOK**.
+The summary lists every billing category represented by the group's connections,
+e.g. **1 NyxID · 5 BYOK · 1 —**, and can wrap onto two lines.
 NyxID means the platform supplies the key or developer app; BYOK means a person
 or organization supplies it. Confirmed absence of configured NyxID usage charges
 shows **—**, with **Not billable by NyxID** on hover or keyboard focus. Supplied
 private keys remain **BYOK**; other unpriced private services show the dash.
 Unknown OAuth app provenance does not make known billing configuration unverified.
 Groups containing only unpriced connections show one dash; mixed summaries count
-the NyxID/BYOK/unverified connections and list unpriced siblings in the tooltip.
+the NyxID/BYOK/unverified connections and include a dash count for unpriced siblings.
 A resolved backend credential class remains authoritative for credential supply. Disabled
 connections retain their classification. Clicking the summary opens the first
 NyxID connection's billing panel, or the first connection when there is none.
-Expanded rows use the same labels and show payer/rates directly for NyxID
-credentials; detailed billing remains available by opening any row.
+Expanded rows use the same labels and show each connection's payer/rates directly
+for both NyxID credentials and BYOK. The tooltip lists each connection and its
+applicable NyxID charges. The detail panel shows only the selected connection or
+agent's rates, without a catalog platform-price banner. Billing tooltips anchor to
+the content: the dash explanation sits beside it, and longer details align below.
 
 Detailed charge configuration is independent of these summary labels. The additive
 `billing.credit_billing_configured` insight field is true/false when known and null
@@ -111,8 +113,9 @@ preparation timestamps are not substituted for edits or usage.
 BYOK means a supplied API key or developer app. A user's OAuth token is not proof
 of their own app: the internal BYOK price lane also includes NyxID's shared OAuth
 app. Verified `nyxid_platform_oauth_app` shows **NyxID developer app**; a master key
-shows **NyxID key**. The older-server compatibility view labels OAuth app ownership
-unverified instead of inferring BYOK from `credential_binding: user` or a token ID.
+shows **NyxID key**. The older-server compatibility view recognizes a supplied
+OAuth app through its public `oauth_client_id`. Its absence does not establish
+platform ownership: an OAuth login or user binding alone cannot identify the app.
 It reads legacy catalog credit pricing as well as credential lanes, honors known
 platform-only exclusions, and never invents free usage or a numeric plan rate.
 
