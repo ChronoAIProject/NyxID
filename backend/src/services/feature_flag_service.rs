@@ -190,6 +190,13 @@ const MACHINE_CONTEXTS_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+pub const AGENT_LEARNING_FLAG_KEY: &str = "assistant:agent-learning";
+const AGENT_LEARNING_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: AGENT_LEARNING_FLAG_KEY,
+    description: "Allows opt-in automatic learning proposals for assistant agents.",
+    default_enabled: false,
+};
+
 pub const INVITATION_CODE_FLAG_KEY: &str = "auth:invitation-code";
 const INVITATION_CODE_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: INVITATION_CODE_FLAG_KEY,
@@ -263,6 +270,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     ASSISTANT_LIVE_TURN_GATE_FLAG,
     MACHINE_CAPABILITIES_FLAG,
     MACHINE_CONTEXTS_FLAG,
+    AGENT_LEARNING_FLAG,
     ORG_AGENTS_FLAG,
     ASSISTANT_VOICE_FLAG,
     VOICE_OPENAI_PLATFORM_FLAG,
@@ -292,6 +300,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     ASSISTANT_LIVE_TURN_GATE_FLAG,
     MACHINE_CAPABILITIES_FLAG,
     MACHINE_CONTEXTS_FLAG,
+    AGENT_LEARNING_FLAG,
     ORG_AGENTS_FLAG,
     ASSISTANT_VOICE_FLAG,
     VOICE_OPENAI_PLATFORM_FLAG,
@@ -1823,6 +1832,7 @@ mod tests {
                 "assistant:live-turn-gate",
                 "assistant:machine-capabilities",
                 "assistant:machine-contexts",
+                "assistant:agent-learning",
                 "assistant:org-agents",
                 "assistant:voice",
                 "assistant:voice-openai-platform",

@@ -121,6 +121,7 @@ describe("feature flag catalog", () => {
       MACHINE_CAPABILITIES: "assistant:machine-capabilities",
       MACHINE_CONTEXTS: "assistant:machine-contexts",
       AGENT_OPERATION_SCOPES: "assistant:operation-scopes",
+      AGENT_LEARNING: "assistant:agent-learning",
       ORG_AGENTS: "assistant:org-agents",
       BILLING: "experimental:billing",
       AEVATAR_CHAT_WIRE_LOG: "experimental:aevatar-chat-wire-log",
