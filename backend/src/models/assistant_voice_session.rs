@@ -25,6 +25,11 @@ pub struct VoiceSession {
     pub conversation_id: String,
     pub client_request_id: String,
     pub preferences: super::assistant_voice::VoicePreferences,
+    /// Absent on Phase 3 rows; provider identity cannot change during recovery.
+    #[serde(default)]
+    pub protocol: Option<super::downstream_service::VoiceProtocol>,
+    #[serde(default)]
+    pub measured_ms: i64,
     pub state: SessionState,
     pub live_slot: bool,
     #[serde(default)]

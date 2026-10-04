@@ -88,6 +88,8 @@ pub async fn admit(
         preferences,
         receipt_message_id: None,
         purge_requested: false,
+        protocol: None,
+        measured_ms: 0,
         state: SessionState::Starting,
         live_slot: true,
         generation: 1,

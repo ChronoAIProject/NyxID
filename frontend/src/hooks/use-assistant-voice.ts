@@ -26,7 +26,10 @@ export function useAssistantVoice(thread: string) {
     [actor, thread],
   );
   const start = useCallback(
-    async (preferences: VoicePreferences) => {
+    async (
+      preferences: VoicePreferences,
+      protocol?: "openai_live" | "xai_realtime",
+    ) => {
       if (client.current) return;
       const ticket = ++generation.current;
       setStarting(true);
@@ -38,6 +41,8 @@ export function useAssistantVoice(thread: string) {
         (value) => {
           if (generation.current === ticket) {
             setSnapshot(value);
+            if (protocol === "xai_realtime")
+              setStarting(value.session.state === "starting");
             setConnected(
               value.session.state === "active" ||
                 value.session.state === "closing",
@@ -56,9 +61,9 @@ export function useAssistantVoice(thread: string) {
         },
       );
       client.current = next;
-      await next.start(preferences);
+      await next.start(preferences, protocol);
       if (generation.current === ticket) {
-        setStarting(false);
+        if (protocol !== "xai_realtime" || next.isClosed) setStarting(false);
         if (next.isClosed) client.current = null;
       }
     },

@@ -70,6 +70,7 @@ export const voiceOptionsSchema = z.object({
       available: z.boolean(),
       unavailable_reason: z.string().nullable(),
       billing_owner: z.string(),
+      reported_token_pricing: priceSchema.extend({ components: z.array(priceSchema) }).nullable().optional(),
       pricing: priceSchema
         .extend({ components: z.array(priceSchema) })
         .nullable(),

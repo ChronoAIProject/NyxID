@@ -2,7 +2,29 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AssistantVoiceClient } from "./assistant-voice-client";
 import { ApiError } from "./api-client";
 import type { VoicePreferences } from "@/schemas/assistant-voice";
-const mocks = vi.hoisted(() => ({ post: vi.fn(), create: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+  post: vi.fn(),
+  create: vi.fn(),
+  capture: vi.fn(),
+  enqueue: vi.fn(),
+  flush: vi.fn(),
+  close: vi.fn(),
+  pcm: undefined as undefined | ((bytes: ArrayBuffer) => void),
+}));
+vi.mock("./grok-audio", () => ({
+  GrokAudio: class {
+    capture = mocks.capture;
+    enqueue = mocks.enqueue;
+    flush = mocks.flush;
+    close = mocks.close;
+    start = vi.fn(async () => {});
+    resume = vi.fn(async () => {});
+    watermark = () => 120;
+    constructor(_audio: HTMLAudioElement, pcm: (bytes: ArrayBuffer) => void) {
+      mocks.pcm = pcm;
+    }
+  },
+}));
 vi.mock("./api-client", async (original) => ({
   ...(await original<typeof import("./api-client")>()),
   api: { post: mocks.post },
@@ -58,7 +80,7 @@ class Socket {
   static OPEN = 1;
   static current: Socket;
   readyState = 1;
-  onmessage?: (e: { data: string }) => void;
+  onmessage?: (e: { data: string | ArrayBuffer }) => void;
   onclose?: () => void;
   send = vi.fn();
   close = vi.fn();
@@ -81,15 +103,17 @@ let microphone: ReturnType<typeof vi.fn>;
 let audio: HTMLAudioElement;
 beforeEach(() => {
   vi.useFakeTimers();
+  mocks.capture.mockReset();
+  mocks.enqueue.mockReset();
+  mocks.flush.mockReset();
+  mocks.close.mockReset();
   mocks.create.mockReset();
   mocks.post.mockReset();
   track = { enabled: true, stop: vi.fn() };
-  microphone = vi
-    .fn()
-    .mockResolvedValue({
-      getAudioTracks: () => [track],
-      getTracks: () => [track],
-    });
+  microphone = vi.fn().mockResolvedValue({
+    getAudioTracks: () => [track],
+    getTracks: () => [track],
+  });
   vi.stubGlobal("RTCPeerConnection", Peer);
   vi.stubGlobal("WebSocket", Socket);
   Object.defineProperty(navigator, "mediaDevices", {
@@ -182,4 +206,48 @@ describe("voice media boundaries", () => {
     expect(client.isClosed).toBe(true);
     expect(track.stop).toHaveBeenCalled();
   });
+});
+
+it("Grok relays only held PCM, pairs bounded output, and commits before mic mute", async () => {
+  const client = new AssistantVoiceClient("thread", vi.fn(), vi.fn());
+  await client.start(
+    { ...preferences, input_mode: "push_to_talk" },
+    "xai_realtime",
+  );
+  expect(mocks.create.mock.calls[0]![1].body.sdp_offer).toBe("");
+  expect(track.enabled).toBe(false);
+  Socket.current.snapshot();
+  client.hold(true);
+  expect(track.enabled).toBe(true);
+  expect(Socket.current.send).toHaveBeenCalledWith(
+    JSON.stringify({ type: "ptt_begin" }),
+  );
+  const pcm = new ArrayBuffer(960);
+  mocks.pcm?.(pcm);
+  expect(Socket.current.send).toHaveBeenCalledWith(pcm);
+  Socket.current.onmessage?.({
+    data: JSON.stringify({ type: "audio", generation: 1, end_ms: 100 }),
+  });
+  Socket.current.onmessage?.({ data: pcm });
+  expect(mocks.enqueue).toHaveBeenCalledWith(pcm, 100);
+  client.muteSpeaker(true);
+  expect(track.enabled).toBe(true);
+  await client.mute(true);
+  expect(Socket.current.send).toHaveBeenCalledWith(
+    JSON.stringify({ type: "ptt_commit" }),
+  );
+  expect(track.enabled).toBe(false);
+  const sent = Socket.current.send.mock.calls.length;
+  mocks.pcm?.(pcm);
+  expect(Socket.current.send.mock.calls).toHaveLength(sent);
+  await client.end();
+  Socket.current.onmessage?.({ data: pcm });
+  expect(mocks.enqueue).toHaveBeenCalledTimes(1);
+  expect(mocks.close).toHaveBeenCalled();
+});
+it("Grok refuses automatic mode before creating a provider session", async () => {
+  const client = new AssistantVoiceClient("thread", vi.fn(), vi.fn());
+  await client.start(preferences, "xai_realtime");
+  expect(mocks.create).not.toHaveBeenCalled();
+  expect(track.stop).toHaveBeenCalled();
 });

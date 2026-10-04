@@ -188,3 +188,91 @@ it("allows lane-less own-key voice and discloses metering-only pricing", async (
     ),
   );
 });
+
+it("labels Grok PTT, gates automatic mode, and discloses tokens when seconds are free", async () => {
+  mock.connected = false;
+  mock.options = [
+    {
+      service_id: "grok-service",
+      connection_id: "connection",
+      key_source: "own",
+      model: "catalog-grok",
+      model_label: "Grok",
+      default_model: true,
+      available: true,
+      billing_owner: "acting_person",
+      pricing: null,
+      reported_token_pricing: {
+        metric: "input_tokens",
+        credits_per_unit: "0.0001",
+        sync_status: "synced",
+        components: [],
+      },
+      voice: {
+        protocol: "xai_realtime",
+        models: [],
+        voices: [{ id: "eve", label: "Eve" }],
+        usage_source: "server_measured",
+        billing_metrics: ["voice_seconds", "input_tokens"],
+      },
+    },
+  ];
+  render(<VoicePanel threadId="thread" onClose={vi.fn()} />);
+  expect(screen.getByText(/Grok private beta/)).toHaveTextContent(
+    "headphones recommended",
+  );
+  expect(screen.getByRole("option", { name: /Automatic/ })).toBeDisabled();
+  expect(screen.getByLabelText("Microphone mode")).toHaveValue("push_to_talk");
+  expect(screen.getByText(/No NyxID duration charge/)).toHaveTextContent(
+    "0.0001 credits per reported",
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Start voice" }));
+  await waitFor(() =>
+    expect(mock.start).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: "catalog-grok",
+        input_mode: "push_to_talk",
+      }),
+      "xai_realtime",
+    ),
+  );
+});
+
+it("discloses configured Grok token prices even when catalog summary omits token metrics", () => {
+  mock.connected = false;
+  mock.options = [
+    {
+      service_id: "grok-service",
+      connection_id: "connection",
+      key_source: "own",
+      model: "catalog-grok",
+      model_label: "Grok",
+      default_model: true,
+      available: true,
+      billing_owner: "acting_person",
+      pricing: {
+        metric: "voice_seconds",
+        credits_per_unit: "0.02",
+        sync_status: "synced",
+        components: [
+          {
+            metric: "input_tokens",
+            credits_per_unit: "0.0001",
+            sync_status: "synced",
+          },
+        ],
+      },
+      voice: {
+        protocol: "xai_realtime",
+        models: [],
+        voices: [{ id: "eve", label: "Eve" }],
+        usage_source: "server_measured",
+        billing_metrics: ["voice_seconds"],
+      },
+    },
+  ];
+  render(<VoicePanel threadId="thread" onClose={vi.fn()} />);
+  expect(screen.getByText(/0.02 credits per second/)).toHaveTextContent(
+    "0.0001",
+  );
+});
