@@ -1581,3 +1581,84 @@ async fn assistant_titles_use_toolless_provider_and_no_route_keeps_provisional()
     assert_eq!(answer, "Visit Kyoto and Tokyo");
     server.abort();
 }
+
+#[tokio::test]
+async fn channel_thread_execution_rechecks_orphaned_binding_before_upstream() {
+    use crate::models::assistant_conversation::{ChannelOrigin, TurnOrigin};
+    use crate::models::channel_thread_follow::ThreadTurnBinding;
+    let (state, calls, server) = setup(None, Duration::ZERO).await;
+    let request =
+        serde_json::from_value::<engine::TurnRequest>(json!({"text":"Question"})).unwrap();
+    let mut row = Box::pin(engine::begin_turn(
+        &state.db,
+        OWNER,
+        &request,
+        &state.encryption_keys,
+    ))
+    .await
+    .unwrap();
+    let mut credential =
+        credentials::load_for_conversation(&state.db, &state.encryption_keys, OWNER, &row.id)
+            .await
+            .unwrap()
+            .unwrap();
+    // A claimed turn can retain this snapshot after its channel is removed
+    // while first-turn history or upload preparation is in flight.
+    row.channel = Some(ChannelOrigin {
+        nyxbot_channel_id: "removed-channel".into(),
+        partition: "thread_v1_removed".into(),
+        platform: "telegram".into(),
+        thread: Some(Box::new(ThreadTurnBinding {
+            child_id: "removed-child".into(),
+            source_message_id: "source".into(),
+            sender_id: "owner".into(),
+            guest: false,
+            revision: 1,
+            generation: 0,
+            channel_generation: 0,
+            agent_id: "agent".into(),
+            queued: false,
+        })),
+    });
+    let auth = test_auth_user(OWNER);
+    let (sender, _receiver) = broadcast::channel(256);
+    let mut events = Events { sender, cursor: 0 };
+    for origin in [TurnOrigin::Channel, TurnOrigin::Event] {
+        row.active_turn.as_mut().unwrap().origin = origin;
+        let result = Box::pin(execute_turn(
+            &state,
+            &auth,
+            &row,
+            "Question with transient history",
+            &mut credential,
+            Some(SERVER_TURN_POLICY),
+            &mut events,
+            "block",
+            &mut String::new(),
+        ))
+        .await;
+        assert!(matches!(result, Err(error) if error.code == "assistant_unavailable"));
+        assert!(
+            calls.lock().await.is_empty(),
+            "revoked binding reached the model"
+        );
+    }
+    // A browser turn remains independent of channel delivery authority.
+    row.active_turn.as_mut().unwrap().origin = TurnOrigin::User;
+    let result = Box::pin(execute_turn(
+        &state,
+        &auth,
+        &row,
+        "Question",
+        &mut credential,
+        Some(SERVER_TURN_POLICY),
+        &mut events,
+        "block",
+        &mut String::new(),
+    ))
+    .await
+    .unwrap();
+    assert!(result.error.is_none());
+    assert_eq!(calls.lock().await.len(), 1);
+    server.abort();
+}

@@ -120,6 +120,9 @@ export interface Conversation {
   readonly llm_model?: string | null;
   /** NyxBot threads that answer one of the user's channel bots. */
   readonly channel?: {
+    readonly parent_chat_id?: string | null;
+    readonly thread_id?: string | null;
+    readonly parent_title?: string | null;
     readonly platform: string;
     /** The channel bot connection; the sidebar groups its chats together. */
     readonly channel_agent_id?: string | null;

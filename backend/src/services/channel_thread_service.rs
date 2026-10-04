@@ -83,6 +83,13 @@ pub(crate) async fn inbound_facts(
         NYXBOT_THREAD_FOLLOW_FLAG_KEY,
     )
     .await?
+        && db
+            .collection::<crate::models::nyxbot_channel::NyxbotThread>(
+                crate::models::nyxbot_channel::THREADS_COLLECTION_NAME,
+            )
+            .find_one(doc! {"channel_id": &channel.id, "record_scope": "platform_thread"})
+            .await?
+            .is_none()
     {
         return Ok(None);
     }
@@ -90,6 +97,6 @@ pub(crate) async fn inbound_facts(
 }
 
 #[cfg(test)]
-mod operation_tests;
+pub(crate) mod operation_tests;
 #[cfg(test)]
 mod tests;

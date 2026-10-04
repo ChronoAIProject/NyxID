@@ -14,6 +14,31 @@ pub async fn context(
     target: &ThreadReplyTarget,
     eligible_human: &(dyn Fn(&str) -> bool + Send + Sync),
 ) -> AppResult<ThreadContext> {
+    context_until(
+        db,
+        adapter,
+        bot,
+        credentials,
+        target,
+        eligible_human,
+        tokio::time::Instant::now() + std::time::Duration::from_secs(HISTORY_SECONDS),
+    )
+    .await
+}
+
+/// Share the caller's total context deadline, retaining metadata when the
+/// provider exhausts the remaining budget after target/credential resolution.
+pub async fn context_until(
+    db: &mongodb::Database,
+    adapter: &dyn PlatformAdapter,
+    bot: &ChannelBot,
+    credentials: &BotCredentials<'_>,
+    target: &ThreadReplyTarget,
+    eligible_human: &(dyn Fn(&str) -> bool + Send + Sync),
+    deadline: tokio::time::Instant,
+) -> AppResult<ThreadContext> {
+    let deadline =
+        deadline.min(tokio::time::Instant::now() + std::time::Duration::from_secs(HISTORY_SECONDS));
     let mut fallback = Vec::new();
     let work = async {
         let source = db
@@ -155,7 +180,7 @@ pub async fn context(
     };
     // An outer bound includes MongoDB and client setup; provider gets only the
     // remaining time. A timed-out fetch retains the already loaded fallback.
-    tokio::time::timeout(std::time::Duration::from_secs(HISTORY_SECONDS), work)
+    tokio::time::timeout_at(deadline, work)
         .await
         .unwrap_or_else(|_| {
             Ok(ThreadContext {
