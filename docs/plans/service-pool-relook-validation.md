@@ -111,8 +111,74 @@ It covers search shrinking and expanding, repeated selection and deselection,
 mobile-to-desktop resizing, and Escape/focus restoration. The 31 focused tests,
 TypeScript, scoped lint, and production build passed after this layout change.
 
+## Grouped selector and routing controls
+
+The grouped selector follow-up includes PR #1732 and is rebased onto
+`ef830db7` from `main`, including the settled-attempt lease fix from PR #1739. Candidate metadata identifies
+the original catalog service while
+preserving each connection's own label. Group identity uses the catalog ID,
+including when multiple services have the same display name; custom connections
+have a separate group. Search includes original service names and slugs before
+connection pagination. Metadata reads retain owner and caller scopes and do not
+materialize credentials.
+
+The form exposes weighted and round-robin cycle ordering, configured weighted
+shares, fallback priorities, and same-priority balancing. These controls use the
+existing runtime contract. The independent real HTTP/CLI/browser smoke passed
+20 checks, including weighted A → A → B, reordered B → A → A, saving midway
+through a cycle without resetting its counter, round-robin ordering,
+disabled-member skipping, actual dispatch from UI-saved configurations, and the
+earlier unavailable-credential behavior. Browser checks create, edit, reopen,
+and delete pools, with zero window, page, or console errors.
+
+Review reproduced a ResizeObserver error when opening Routing during the pool
+dialog's entrance animation (39 errors across 30 fresh dialogs). Disabling only
+this editor's entrance animation removed the race; the shared dialog and select
+components keep their existing behavior. The permanent browser suite covers
+fresh dialogs, repeated selection, resizing, focus restoration, and short
+viewports. Independent production checks passed 30 fresh-dialog cycles and seven
+viewport sizes, including 780×390. Each short viewport fits a complete connection
+row inside the actual scroll area, with no runtime errors or horizontal overflow.
+
+On the rebased branch, all 4,118 frontend tests in 412 files, all three permanent
+production-browser regressions, lint, the production build, Rust formatting,
+and the backend boundary check passed. An initial parallel run timed out in one
+signup test; the complete 18-test signup file and then the entire frontend suite
+passed with bounded concurrency, without changing the test or its timeout.
+The 30 focused pool component tests also passed. The extended backend inspection
+regression passes on MongoDB 8 and verifies literal catalog-name/slug matching,
+pagination, foreign-owner exclusion, service scope, and no credential
+materialization.
+
 ## Verification scope
 
 The local backend runs target service pools and their integration boundaries; they are not a claim that every backend test ran locally. The PR's CI jobs run the full selected backend, CLI, frontend, feature, and coverage suites.
 
 An early local run used unsupported MongoDB 7 and failed during billing bulk writes. That run was discarded and repeated on MongoDB 8. Browser interaction failures found during review were fixed and rerun on stable source. Temporary test identities, signing keys, databases, and servers were cleaned up after the successful runs.
+
+
+## Independent review follow-up
+
+GPT-6-astra and Claude Opus 5.5, both at xhigh, independently reviewed issue #1680
+and PR #1737. Their findings prompted corrections for paginated selection under
+latency, hidden invalid weights, same-priority member ordering, connection renames,
+revision-conflict recovery, routing draft preservation, weighted cycle descriptions,
+keyboard focus after final pagination, and Unicode validation parity. The backend
+inspection tests were split to keep the extended module within the contributing
+guide's file-length limit.
+
+After rebasing onto `d9a53135` from `main`, the full frontend suite passed 4,246 tests
+in 429 files. The production build and lint passed with no lint errors or new
+warnings in changed files. Five permanent Playwright tests passed against the
+production build, including 200 ms candidate responses, two loaded pages,
+repeated selection/deselection without scroll loss, focus after final pagination,
+and selection changes during pagination and cached searches. The final pagination
+corrections also passed 53 focused frontend tests. Candidate pages track the draft
+used for compatibility checks; stale options cannot be added, and a pending next
+page finishes before all loaded pages refresh. Error/retry coverage ensures failed
+refreshes do not loop. All 31 CLI pool tests passed on the rebased code, and the
+dedicated Rust Unicode boundary regression passed.
+The fresh MongoDB 8 run passed all 11 inspection cases, including renaming through
+the key service, matching the Services view, unavailable keys, explicit platform
+bindings with retained keys, foreign references, selected/health views and zero
+credential materialization, last-used writes or provider dispatch during inspection.

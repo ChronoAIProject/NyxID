@@ -17,7 +17,18 @@ billing classification. Pools belong to a person or organization.
 Priority pools have a separate `tier_balance` of `round_robin` or `weighted`.
 Backup tiers advance only when visited, so intermittent primary failures still
 distribute work across backups. Members have weight 1–1000 and may be disabled
-without deleting their connection.
+without deleting their connection. The dashboard can reorder connections within
+each priority tier without changing their priorities or weights. Each tier uses
+a separate counter, and saving configuration restarts these tier cycles.
+
+Round-robin and weighted routing use the saved member order for a repeating
+cycle. Round-robin gives each eligible member one turn. Weighted routing gives
+each member as many consecutive turns as its weight: A with weight 2 followed
+by B with weight 1 produces A → A → B, then repeats. Reordering those members
+produces B → A → A while preserving their 1/3 and 2/3 shares. The next request
+continues from the pool's current counter; saving does not restart the cycle.
+Disabled or unavailable members are omitted at execution time. Ordered retry
+after a failed attempt requires the `priority` strategy.
 
 A priority pool uses one of two request contracts:
 
@@ -268,8 +279,17 @@ primary credential does not block a healthy backup. Inspection checks stored
 state; it does not test credentials against the provider.
 
 Use the dashboard's searchable multi-select dropdown to choose connections.
-Search matches connection names and slugs across the inventory.
-It stays open while selecting; select a checked connection again to remove it.
+Connections are grouped under their original catalog service, with individual
+accounts and keys visible beneath each heading. Custom connections have their
+own group. Search matches connection and original service names and slugs
+across the inventory. Connection names match the Services page, including renamed
+keys. Platform connections use their endpoint label rather than a retained
+personal key's label.
+It stays open while selecting and retains loaded pages and scroll position;
+select a checked connection again to remove it.
+While compatibility is being checked, new selections and pagination wait for the
+result. You can still remove selected connections. An in-flight next page finishes
+before the loaded pages refresh against the latest selection.
 The selected connections appear in the form with priority and model settings.
 Unavailable connections show a repair reason and cannot be added.
 The dashboard requires at least one selected connection when creating a pool.
@@ -299,6 +319,18 @@ instead of silently overwriting concurrent changes. Omitted fields preserve the
 current value. Null clears description/model/failover; a members array replaces
 membership while preserving omitted fields for retained IDs. The dashboard sends
 one PUT, including `expected_revision`, for all edited settings and members.
+After a conflict, **Reload latest** replaces the draft with the current saved
+configuration and revision. The pool list also refreshes, so closing and reopening
+the editor loads the latest settings.
+
+Switching routing modes keeps the draft's priorities, models, balancing and retry
+settings. Saving sends only the fields used by the selected mode. Invalid hidden
+weights are replaced with 1 for an unweighted mode; visible weights must be whole
+numbers from 1 to 1000. Cycle previews show enabled connections and the consecutive
+turns assigned by each weight.
+
+Name, description and model limits are 128, 1024 and 256 Unicode characters,
+respectively, using the same Unicode scalar count in the form and API.
 `set-strategy` can also change tier balancing and uses a revision-checked PUT.
 `add-member` updates existing members while preserving omitted fields; its flags
 cover priority, weight, enabled state, model, `--clear-model` and
@@ -329,9 +361,13 @@ list saved members without claiming that cooldown has been checked.
 The dashboard provides one Create Pool action. New connections get increasing
 priorities so the common primary/backup setup works without editing priority
 numbers. Same API and AI chat choices explain request behavior; switching back to
-Same API clears hidden model mappings. Retry limits, same-priority balancing,
-description and enabled state live under Advanced settings. Search and pagination
-never discard draft members or their compatibility confirmations. Editing saves
+Same API clears hidden model mappings. Same-priority balancing appears beside
+the connection controls. Weighted and round-robin connections have explicit cycle
+positions and move controls; weighted connections also show their configured
+share among enabled connections (within the same priority tier for fallback).
+Retry limits, description and pool enabled state live under Advanced settings.
+Search and pagination never discard draft members or their compatibility
+confirmations. Editing saves
 one revision-checked update; stale revisions remain visible as conflicts.
 
 Responses include `x-nyxid-pool-member` and `x-nyxid-pool-attempts`. Exhaustion
