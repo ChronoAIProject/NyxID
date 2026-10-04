@@ -130,6 +130,7 @@ pub fn receipt(
         operation_id: Uuid::new_v4().to_string(),
         node_id: node.into(),
         agent_id: chat.agent_id.clone(),
+        context_mode: None,
         action: action(operation, args).into(),
         status: "running".into(),
         job_id: args["job_id"]

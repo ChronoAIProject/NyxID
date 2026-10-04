@@ -98,9 +98,11 @@ impl Runtime {
             bail!("browser input cancelled");
         }
         #[cfg(target_os = "linux")]
+        let endpoint = self.display_endpoint(display);
+        #[cfg(target_os = "linux")]
         tokio::task::spawn_blocking(move || -> Result<()> {
             // Dedicated input connection; owner input never queues behind it.
-            let mut input = super::native_desktop::Input::for_display(display)?;
+            let mut input = super::native_desktop::Input::for_display(display, endpoint)?;
             input.stop_when(Some(stopped));
             for (tool, args) in steps {
                 input.send(tool, &args, control.clone(), revision)?;

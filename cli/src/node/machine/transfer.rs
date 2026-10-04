@@ -134,7 +134,13 @@ impl Runtime {
             let file = tempfile::Builder::new()
                 .prefix("nyxid-clipboard-")
                 .suffix(&suffix)
-                .tempfile()?;
+                .tempfile_in(
+                    self.browser_identity
+                        .desktop
+                        .as_ref()
+                        .map(|d| d.runtime.clone())
+                        .unwrap_or_else(std::env::temp_dir),
+                )?;
             let mut target = tokio::fs::File::from_std(file.reopen()?);
             let mut output = child.stdout.take().context("file worker unavailable")?;
             let mut buffer = Zeroizing::new(vec![0; nyxid_machine::STREAM_CHUNK_BYTES]);
@@ -157,7 +163,7 @@ impl Runtime {
                 bail!("clipboard file is outside the agent's workspace or unreadable");
             }
             target.flush().await?;
-            let browser = super::process::Identity::resolve(self.config.browser_user.as_deref())?;
+            let browser = self.browser_identity.clone();
             super::browser::chown(file.path(), browser.uid, browser.gid)?;
             Ok(file)
         })
@@ -191,6 +197,21 @@ impl Runtime {
             }
             None
         };
+        #[cfg(target_os = "linux")]
+        let context = if let Some(a) = authority.as_ref().filter(|a| a.mode == "separated") {
+            Some(Box::pin(self.context_instance(a)).await?)
+        } else {
+            None
+        };
+        #[cfg(target_os = "linux")]
+        let executor = context.as_deref().unwrap_or(self);
+        #[cfg(not(target_os = "linux"))]
+        let executor = {
+            if authority.as_ref().is_some_and(|a| a.mode == "separated") {
+                bail!("separated_requires_linux");
+            }
+            self.as_ref()
+        };
         let _admission = self.operation_admission.read().await;
         if self.upgrading.load(std::sync::atomic::Ordering::Acquire) {
             return Err(super::MachineError::TurnStopped.into());
@@ -200,8 +221,8 @@ impl Runtime {
         if *stopped.borrow_and_update() {
             return Err(super::MachineError::TurnStopped.into());
         }
-        let mut control = self.owner_control.subscribe();
-        let mut dev_control = self.dev_owner_control.subscribe();
+        let mut control = executor.owner_control.subscribe();
+        let mut dev_control = executor.dev_owner_control.subscribe();
         if *control.borrow_and_update() & 1 != 0 || *dev_control.borrow_and_update() & 1 != 0 {
             return Err(super::MachineError::OwnerInControl.into());
         }
@@ -211,7 +232,7 @@ impl Runtime {
             _ = stopped.changed() => Err(super::MachineError::TurnStopped.into()),
             _ = control.changed() => Err(super::MachineError::OwnerInControl.into()),
             _ = dev_control.changed() => Err(super::MachineError::OwnerInControl.into()),
-            result = self.transfer_inner(metadata, upload, sender) => result,
+            result = executor.transfer_inner(metadata, upload, sender) => result,
         };
         if let Some(authority) = authority {
             if !self.authority.live(&authority.lease_id) {

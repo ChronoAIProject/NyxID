@@ -165,6 +165,7 @@ impl Runtime {
         #[cfg(target_os = "linux")]
         {
             let input = desktop.input.clone();
+            let endpoint = self.display_endpoint(display);
             tokio::task::spawn_blocking(move || -> Result<()> {
                 let mut input = input
                     .lock()
@@ -173,7 +174,7 @@ impl Runtime {
                     bail!("desktop controller changed");
                 }
                 if input.is_none() {
-                    *input = Some(native_desktop::Input::for_display(display)?);
+                    *input = Some(native_desktop::Input::for_display(display, endpoint)?);
                 }
                 input
                     .as_mut()
@@ -265,13 +266,19 @@ impl Runtime {
             return Ok(());
         }
         // Neither authority nor session locks are held across capture/encoding.
+        #[cfg(target_os = "linux")]
+        let endpoint = self.display_endpoint(display);
         let encoded = tokio::task::spawn_blocking(move || -> Result<_> {
             let mut state = state
                 .lock()
                 .map_err(|_| anyhow::anyhow!("capture stopped"))?;
             if state.is_none() {
                 *state = Some(CaptureState {
-                    capture: native_desktop::Capture::for_display(display)?,
+                    capture: native_desktop::Capture::for_display(
+                        display,
+                        #[cfg(target_os = "linux")]
+                        endpoint,
+                    )?,
                     encoder: native_desktop::Encoder::new(),
                     session: id,
                     revision,

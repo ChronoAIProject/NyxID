@@ -8,6 +8,8 @@ export const machineAccessSchema = z.object({
   node_id: z.string(), name: z.string(), revision: z.number(), protocol_v2: z.boolean(),
   capabilities: capabilitiesSchema, ceiling: capabilitiesSchema, legacy: z.boolean(),
   can_edit: z.boolean().default(false),
+  mode: z.enum(["shared_legacy", "separated"]).optional(),
+  separated: z.object({ available: z.boolean(), landlock_abi: z.number().nullable(), reason: z.string().nullable() }).nullish(),
   revocation_pending: z.boolean().optional(),
   saved_login_ids: z.array(z.string()).nullable(),
 });

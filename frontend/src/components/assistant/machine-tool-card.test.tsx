@@ -228,3 +228,10 @@ it.each([undefined, null, " "])(
     ).toBeInTheDocument();
   },
 );
+
+it("labels separated receipts without claiming shared sessions or full isolation", () => {
+  render(<MachineToolCard receipt={{ ...receipt, machine_name: "Linux VM", context_mode: "separated" }} />);
+  expect(screen.getByText("Linux VM · Separate workspace and browser for this agent")).toBeInTheDocument();
+  expect(screen.queryByText(/Shared workspace and browser/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/isolated/i)).not.toBeInTheDocument();
+});

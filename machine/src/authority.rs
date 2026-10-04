@@ -85,8 +85,8 @@ pub struct Authority {
 }
 impl Authority {
     pub fn valid(&self, runtime: &str, now_ms: i64) -> bool {
-        self.mode == "shared_legacy"
-            && self.generation == 1
+        ((self.mode == "shared_legacy" && self.generation == 1)
+            || (self.mode == crate::context::MODE && self.generation > 0 && self.require_v2))
             && self.revision > 0
             && self.runtime_id == runtime
             && self.capabilities.valid()

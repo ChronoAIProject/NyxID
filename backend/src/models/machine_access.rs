@@ -73,6 +73,9 @@ pub struct Lease {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Selection {
+    /// Omitted preserves the assignment mode; old writers cannot widen it.
+    #[serde(default)]
+    pub mode: Option<String>,
     pub expected_revision: i64,
     pub capabilities: Capabilities,
     #[serde(default)]

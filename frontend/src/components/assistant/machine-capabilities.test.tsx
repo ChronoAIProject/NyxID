@@ -9,6 +9,12 @@ const off = { shell: false, files: false, browser: false, computer: false, devel
 const machine: MachineAccess = { node_id: "node", name: "Work Mac", revision: 3, protocol_v2: true, can_edit: true, capabilities: off, ceiling: { shell: true, files: true, browser: true, computer: true, developer_browser: true }, legacy: false, saved_login_ids: null };
 beforeEach(() => { vi.clearAllMocks(); feature.mockReturnValue(true); query.mockReturnValue({ data: [machine] }); save.mockResolvedValue([]); });
 describe("machine capability editor", () => {
+  it("labels separated contexts without promising full isolation", () => {
+    render(<MachineCapabilityForm machine={{ ...machine, mode: "separated", saved_login_ids: [] }} agentId="agent" />);
+    expect(screen.getByText("Separate workspace and browser")).toBeInTheDocument();
+    expect(screen.getByText(/Full isolation requires a separate machine container or VM/)).toBeInTheDocument();
+    expect(screen.queryByText("Shared legacy")).not.toBeInTheDocument();
+  });
   it("starts denied, uses names and requires an explicit dirty change", async () => {
     render(<MachineCapabilityForm machine={machine} agentId="agent" />);
     expect(screen.getByText("Work Mac")).toBeInTheDocument();

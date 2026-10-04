@@ -1,6 +1,7 @@
 // Run in the production machine image, with this directory and the `ws` package
 // mounted read-only under /test. All credential values are generated in memory.
 import assert from 'node:assert/strict';
+import {contexts} from './machine_context_e2e.mjs';
 import {spawn,spawnSync} from 'node:child_process';
 import {createHash,createHmac,randomBytes,randomUUID} from 'node:crypto';
 import {once} from 'node:events';
@@ -768,6 +769,7 @@ assert policy['URLBlocklist']==['file://*'] and 'ExtensionInstallForcelist' not 
  assert.equal(expired.status,'finished','lack of renewal stops the background process');
  assert.equal((await call('exec',{job_id:randomUUID(),command:'true',services:[]},authority({revision:3}))).exit_code,0,'fresh revision recovers');
  console.log('Authority v2: capability denial, renewal, revocation, late renewal, expiry and v1 downgrade passed');
+ await contexts({call,frames,profile,conversationId,turnId,origin,browserUrl,certificate:`${testDirectory}/tls.crt`});
  for(const secret of [token,auth,signing.toString('hex')])assert(!output.join('').includes(secret),'node logs must not contain credentials');
  assert(!output.join('').includes('stderr-secret-fixture'),'developer diagnostics must never expose child stderr');
  console.log('| Scenario | Changed frames/s | Frame bytes/s | Actions |\n|---|---:|---:|---:|');

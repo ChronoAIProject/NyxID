@@ -116,6 +116,7 @@ pub mod ws_frame_injection;
 pub mod assistant_acknowledgement;
 pub mod assistant_agent;
 pub mod assistant_agent_credential;
+pub mod assistant_agent_learning;
 pub mod assistant_attachment;
 pub mod assistant_conversation;
 pub mod assistant_group;

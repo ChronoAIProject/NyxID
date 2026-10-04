@@ -3,6 +3,7 @@
 pub mod authority;
 pub mod binary;
 pub mod config;
+pub mod context;
 pub mod desktop;
 pub mod gateway;
 pub mod signing;
@@ -59,6 +60,8 @@ pub struct MachineProfile {
     pub computer: bool,
     pub browser: Option<bool>,
     pub authority_versions: Vec<u32>,
+    /// Absent on old nodes; never inferred from protocol v2 alone.
+    pub separated: Option<context::Support>,
     pub os: String,
     pub arch: String,
     pub roots: Vec<String>,
