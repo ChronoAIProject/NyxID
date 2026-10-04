@@ -329,7 +329,14 @@ function ChannelThreadsGroup({
       </button>
       {open ? (
         <div className="ml-3 space-y-0.5 border-l border-border/60 pl-1.5">
-          {visible.map((thread) => renderThread(thread))}
+          {Array.from(new Set(visible.map((thread) => thread.channel?.parent_chat_id ?? thread.channel?.chat_id ?? thread.id))).map((chatId) => {
+            const children = visible.filter((thread) => (thread.channel?.parent_chat_id ?? thread.channel?.chat_id ?? thread.id) === chatId);
+            const followed = children.some((thread) => thread.channel?.thread_id);
+            return <div key={chatId}>
+              {followed ? <p className="px-3 pt-1 text-[11px] text-text-tertiary">{children.find((thread) => thread.channel?.parent_title)?.channel?.parent_title ?? "Channel chat"}</p> : null}
+              <div className={followed ? "ml-2 border-l border-hairline pl-1" : undefined}>{children.map(renderThread)}</div>
+            </div>;
+          })}
           {hidden > 0 ? (
             <button
               type="button"

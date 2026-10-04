@@ -55,6 +55,7 @@ async fn fixture(protocol: InferenceWireProtocol) -> (AppState, DownstreamServic
         wire_protocol: protocol,
         model_list: true,
         realtime: false,
+        voice: None,
     });
     state
         .db

@@ -263,6 +263,11 @@ pub async fn service_to_response_with_viewer(
     let effective_platform_metric =
         crate::services::billing::metric_resolution::effective_platform_metric(&s);
     let allowance_metrics = crate::services::billing::metric_resolution::allowance_metrics(&s);
+    let capabilities = crate::services::inference_service::capabilities(&s);
+    let inference = s
+        .inference
+        .as_ref()
+        .map(crate::services::inference_service::normalized);
     ServiceResponse {
         provider_config_id: s.provider_config_id.clone(),
         credential_configured: match inspection_keys {
@@ -309,9 +314,9 @@ pub async fn service_to_response_with_viewer(
         homepage_url: s.homepage_url,
         repository_url: s.repository_url,
         issues_url: s.issues_url,
-        capabilities: s.capabilities,
+        capabilities,
         billing: s.billing,
-        inference: s.inference,
+        inference,
         platform_key: s.platform_key,
         effective_platform_metric,
         allowance_metrics,

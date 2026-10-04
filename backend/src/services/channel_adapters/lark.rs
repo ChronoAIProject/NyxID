@@ -846,7 +846,7 @@ impl PlatformAdapter for LarkFamilyAdapter {
         crate::services::channel_platform::ThreadCapabilities {
             thread_reply: true,
             thread_history: true,
-            thread_follow: false,
+            thread_follow: true,
         }
     }
 

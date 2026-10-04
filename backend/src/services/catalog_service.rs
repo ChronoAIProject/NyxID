@@ -7,7 +7,7 @@ use super::ownership_transfer_service::{catalog_owner, catalog_owner_filter};
 use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
-    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, ServiceCapabilities,
+    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
 };
 #[cfg(test)]
 use crate::models::org_membership::OrgMembership;
@@ -89,7 +89,7 @@ pub struct CatalogEntry {
     pub homepage_url: Option<String>,
     pub repository_url: Option<String>,
     pub issues_url: Option<String>,
-    pub capabilities: Option<ServiceCapabilities>,
+    pub capabilities: Option<crate::services::inference_service::ServiceCapabilitiesView>,
     pub billing: Option<ServiceBilling>,
     pub inference: Option<super::inference_service::InferenceView>,
     pub platform_key: super::inference_service::PlatformKeyView,
@@ -150,6 +150,7 @@ fn build_catalog_entry(
         && svc.platform_key.as_ref().is_none_or(|p| {
             p.audience == crate::models::downstream_service::PlatformKeyAudience::Public
         });
+    let capabilities = super::inference_service::capabilities(&svc);
     let inference =
         super::inference_service::view(&svc, provider.map(|p| p.slug.as_str()), platform_available);
     let platform_key = super::inference_service::PlatformKeyView {
@@ -266,7 +267,7 @@ fn build_catalog_entry(
         homepage_url: svc.homepage_url,
         repository_url: svc.repository_url,
         issues_url: svc.issues_url,
-        capabilities: svc.capabilities,
+        capabilities,
         billing: svc.billing,
         auth_notes: svc.auth_notes,
         known_limitations: svc.known_limitations,

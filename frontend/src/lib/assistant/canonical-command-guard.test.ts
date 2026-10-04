@@ -34,6 +34,15 @@ describe("assistant canonical command guard", () => {
           expect(source).toContain('const ROOT = "/assistant/nyxagent"');
           return false;
         }
+        // Following is a channel subscription resource, separate from actor
+        // execution commands. Exempt only this exact owner-scoped endpoint.
+        if (path.basename(file) === "nyxbot-api.ts" && marker === "}/stop") {
+          expect(source).toContain('const ROOT = "/assistant/nyxagent"');
+          return source.replace(
+            "${ROOT}/channels/${encodeURIComponent(channelId)}/chats/${encodeURIComponent(chatId)}/threads/${encodeURIComponent(threadId)}/stop",
+            "",
+          ).includes(marker);
+        }
         return source.includes(marker);
       }).map(
         (marker) => `${path.relative(ASSISTANT_DIR, file)}:${marker}`,

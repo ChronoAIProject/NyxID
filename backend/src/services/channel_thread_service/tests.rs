@@ -216,11 +216,19 @@ async fn lark_family_keeps_root_and_alias_distinct_and_never_guesses_bot_identit
 }
 
 #[tokio::test]
-async fn unsupported_surfaces_and_follow_admission_stay_off() {
+async fn unsupported_surfaces_keep_follow_off() {
     let mut input = parsed("telegram", telegram_event()).await;
     for a in channel_adapters::registered_adapters(&Arc::new(TokenExchangeCache::new())) {
         let flags = a.thread_capabilities();
-        assert!(!flags.thread_follow, "{}", a.platform_id());
+        assert_eq!(
+            flags.thread_follow,
+            matches!(
+                a.platform_id(),
+                "telegram" | "telegram-new" | "slack" | "discord" | "lark" | "feishu"
+            ),
+            "{}",
+            a.platform_id()
+        );
         assert_eq!(
             flags.thread_history,
             matches!(a.platform_id(), "slack" | "discord" | "lark" | "feishu")

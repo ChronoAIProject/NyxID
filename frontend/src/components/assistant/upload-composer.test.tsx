@@ -209,3 +209,16 @@ it("reports the file size limit inline without starting an upload", async () => 
   expect(await screen.findByRole("alert")).toHaveTextContent("20 MB");
   expect(uploadFile).not.toHaveBeenCalled();
 });
+
+it("adopts one draft for overlapping voice gestures without losing typed state", async () => {
+  const onVoice=vi.fn().mockResolvedValue(undefined);
+  let resolve!: (id:string)=>void;
+  vi.mocked(createUploadDraft).mockImplementationOnce(()=>new Promise((done)=>{resolve=done}));
+  render(<UploadComposer {...base} scope={{kind:"conversations",agentId:"specialist"}} onVoice={onVoice} />);
+  fireEvent.click(screen.getByRole("button",{name:"Open voice call"}));
+  fireEvent.click(screen.getByRole("button",{name:"Open voice call"}));
+  expect(createUploadDraft).toHaveBeenCalledTimes(1);
+  await act(async()=>resolve("nyxa-voice"));
+  expect(onVoice).toHaveBeenCalledExactlyOnceWith("nyxa-voice");
+  expect(base.onSend).not.toHaveBeenCalled();
+});

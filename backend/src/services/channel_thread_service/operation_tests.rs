@@ -15,7 +15,7 @@ fn credentials() -> BotCredentials<'static> {
     }
 }
 
-async fn fixture(platform: &str) -> (mongodb::Database, ChannelBot, ChannelMessage) {
+pub(crate) async fn fixture(platform: &str) -> (mongodb::Database, ChannelBot, ChannelMessage) {
     let db =
         crate::test_utils::connect_transaction_test_database("channel_thread_operations").await;
     let bot: ChannelBot=bson::from_document(doc! {
@@ -77,7 +77,7 @@ async fn fixture(platform: &str) -> (mongodb::Database, ChannelBot, ChannelMessa
     (db, bot, source)
 }
 
-async fn enable(db: &mongodb::Database) {
+pub(crate) async fn enable(db: &mongodb::Database) {
     db.collection::<bson::Document>("feature_flag_overrides")
         .insert_one(doc! {
             "_id":"flag","org_user_id":bson::Bson::Null,"flag_key":NYXBOT_THREAD_FOLLOW_FLAG_KEY,
@@ -338,6 +338,36 @@ async fn channel_thread_history_timeout_retains_filtered_metadata_and_sends_no_r
     assert!(start.elapsed() < std::time::Duration::from_secs(9));
     assert_eq!(c.metadata.len(), 1);
     assert!(c.history.partial);
+    // A caller that spent time resolving a target keeps the metadata fallback
+    // under its remaining deadline, rather than cancelling the whole prelude.
+    server.reset().await;
+    Mock::given(path("/conversations.replies"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(std::time::Duration::from_secs(9))
+                .set_body_json(json!({"ok":true,"messages":[]})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    let c = tokio::time::timeout_at(
+        deadline + std::time::Duration::from_secs(1),
+        history::context_until(
+            &db,
+            &adapter,
+            &bot,
+            &credentials(),
+            &target,
+            &|id| id == "human",
+            deadline,
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(c.metadata.len(), 1);
+    assert!(c.history.partial && c.history.messages.is_empty());
     let rows: Vec<bson::Document> = db
         .collection(MESSAGES)
         .find(doc! {})

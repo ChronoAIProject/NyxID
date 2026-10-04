@@ -25,6 +25,7 @@ struct Reader<'a> {
     person: &'a str,
     thread_key: Option<&'a str>,
     scopes: Option<&'a crate::models::agent_operation_scope::OperationScopes>,
+    chat: Option<std::sync::Arc<ChatAuthority>>,
 }
 #[async_trait::async_trait]
 impl skills::OrnnReader for Reader<'_> {
@@ -37,8 +38,9 @@ impl skills::OrnnReader for Reader<'_> {
         let path = path.to_owned();
         let thread_key = self.thread_key.map(str::to_owned);
         let scopes = self.scopes.cloned().unwrap_or_default();
+        let chat = self.chat.clone();
         let task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
-            Box::pin(fetch_ornn(&state, &person, &path, thread_key, scopes)).await
+            Box::pin(fetch_ornn(&state, &person, &path, thread_key, scopes, chat)).await
         }));
         tokio::time::timeout(std::time::Duration::from_secs(30), task)
             .await
@@ -57,6 +59,7 @@ async fn fetch_ornn(
     path: &str,
     thread_key: Option<String>,
     scopes: crate::models::agent_operation_scope::OperationScopes,
+    chat: Option<std::sync::Arc<ChatAuthority>>,
 ) -> AppResult<Vec<u8>> {
     // Fixed catalog selection; no caller-supplied destination, method or headers.
     let service = state
@@ -80,6 +83,8 @@ async fn fetch_ornn(
         auth.api_key_id = Some(key);
     }
     auth.assistant_operation_scopes = scopes;
+    auth.assistant_turn_fence = chat.as_ref().map(|chat| chat.turn_fence());
+    auth.assistant_chat = chat;
     let mut request = Request::builder()
         .uri(format!("/api/v1/proxy/{}{path}", service.id))
         .body(Body::empty())
@@ -143,6 +148,7 @@ pub async fn catalog(
         person: &owner,
         thread_key: None,
         scopes: None,
+        chat: None,
     };
     let value = match (query.skill, query.version) {
         (Some(id), Some(version)) => json!(skills::preview(&reader, &id, &version).await?),
@@ -176,6 +182,7 @@ pub async fn set(
                 person: &owner,
                 thread_key: None,
                 scopes: None,
+                chat: None,
             },
             &owner,
             &id,
@@ -205,6 +212,7 @@ pub(crate) async fn dispatch(
         person: &chat.user_id,
         thread_key: Some(&chat.api_key_id),
         scopes: None,
+        chat: Some(std::sync::Arc::new(chat.clone())),
     };
     let db = &state.db;
     let value = match name {
@@ -238,6 +246,7 @@ pub(crate) async fn dispatch(
                 person: &chat.user_id,
                 thread_key: Some(&chat.api_key_id),
                 scopes: Some(&agent.operation_scopes),
+                chat: Some(std::sync::Arc::new(chat.clone())),
             };
             skills::read(
                 &reader,
@@ -429,6 +438,7 @@ mod tests {
             person: &f.owner,
             thread_key: None,
             scopes: None,
+            chat: None,
         };
         assert!(skills::search(&reader, "private", 1).await.is_ok());
         let requests = upstream.received_requests().await.unwrap();
@@ -481,6 +491,7 @@ mod tests {
                 person: &missing,
                 thread_key: None,
                 scopes: None,
+                chat: None,
             }
             .get("/api/v1/skill-search")
             .await
@@ -542,6 +553,7 @@ mod tests {
                     person: &owner,
                     thread_key: Some(&key),
                     scopes: None,
+                    chat: None,
                 },
                 "native",
                 1,

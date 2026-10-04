@@ -177,6 +177,9 @@ pub struct AgentRefResponse {
 }
 #[derive(Serialize)]
 pub struct ChannelOriginResponse {
+    parent_chat_id: Option<String>,
+    thread_id: Option<String>,
+    parent_title: Option<String>,
     platform: String,
     /// The channel bot connection (`/nyxagent/channels/{id}`).
     channel_agent_id: String,
@@ -239,6 +242,9 @@ impl ConversationResponse {
             channel.chat_id = detail.chat_id.clone();
             channel.chat_kind = detail.kind.clone();
             channel.chat_title = detail.title.clone();
+            channel.parent_chat_id = detail.parent_chat_id.clone();
+            channel.thread_id = detail.thread_id.clone();
+            channel.parent_title = detail.parent_title.clone();
         }
         self
     }
@@ -278,6 +284,9 @@ impl From<AssistantConversation> for ConversationResponse {
             agent: None,
             pending_events: row.pending_events.len(),
             channel: row.channel.map(|channel| ChannelOriginResponse {
+                parent_chat_id: None,
+                thread_id: None,
+                parent_title: None,
                 platform: channel.platform,
                 channel_agent_id: channel.nyxbot_channel_id,
                 bot_label: None,
@@ -289,7 +298,35 @@ impl From<AssistantConversation> for ConversationResponse {
     }
 }
 #[derive(Serialize)]
+struct VoiceTranscriptResponse {
+    session_id: String,
+    segment_id: String,
+    start_ms: i64,
+    end_ms: i64,
+    sealed: bool,
+    complete: bool,
+    delivery: String,
+    request_id: Option<String>,
+    backend_message_id: Option<String>,
+}
+impl From<crate::models::assistant_message::VoiceTranscript> for VoiceTranscriptResponse {
+    fn from(v: crate::models::assistant_message::VoiceTranscript) -> Self {
+        Self {
+            session_id: v.session_id,
+            segment_id: v.segment_id,
+            start_ms: v.start_ms,
+            end_ms: v.end_ms,
+            sealed: v.sealed,
+            complete: v.complete,
+            delivery: v.delivery,
+            request_id: v.request_id,
+            backend_message_id: v.backend_message_id,
+        }
+    }
+}
+#[derive(Serialize)]
 pub struct MessageResponse {
+    voice: Option<VoiceTranscriptResponse>,
     execution_pending: bool,
     id: String,
     seq: i64,
@@ -307,6 +344,7 @@ pub struct MessageResponse {
 impl From<AssistantMessage> for MessageResponse {
     fn from(row: AssistantMessage) -> Self {
         Self {
+            voice: row.voice.map(VoiceTranscriptResponse::from),
             execution_pending: row.execution_pending,
             id: row.id,
             seq: row.seq,
@@ -552,6 +590,8 @@ pub async fn attachment(
 ) -> AppResult<Response> {
     let user_id = auth.user_id.to_string();
     engine::require_enabled(&state.db, &user_id).await?;
+    auth.ensure_live_assistant_turn(&state.db, "assistant.attachment")
+        .await?;
     if Uuid::parse_str(&attachment_id).is_err() {
         return Err(AppError::NotFound("Attachment not found".into()));
     }
@@ -1041,7 +1081,12 @@ pub(crate) async fn start_turn_with_voice(
         ))
         .await?
     };
-    let text = engine::turn_input(&row, start);
+    let mut text = engine::turn_input(&row, start);
+    if start.origin == crate::models::assistant_conversation::TurnOrigin::Channel
+        && let Some(prelude) = Box::pin(super::nyxbot::thread_follow::prelude(state, &row)).await
+    {
+        text.push_str(&prelude);
+    }
     let credential =
         credentials::load_for_conversation(&state.db, &state.encryption_keys, &user_id, &row.id)
             .await?
@@ -1157,6 +1202,9 @@ pub async fn live(State(state): State<AppState>, auth: AuthUser) -> AppResult<Re
                 }
                 Ok(LiveEvent::Group { id, user_id: owner }) if owner == user_id => {
                     ("group", json!({"type": "group", "id": id}))
+                }
+                Ok(LiveEvent::ChannelThread { id, user_id:owner, channel_id, parent_id, conversation_id }) if owner==user_id => {
+                    ("channel_thread",json!({"type":"channel_thread","id":id,"channel_id":channel_id,"parent_id":parent_id,"conversation_id":conversation_id}))
                 }
                 Ok(LiveEvent::ChannelBot { user_id: owner, .. }) if owner == user_id => {
                     ("channels", json!({"type": "channels"}))
@@ -1603,6 +1651,44 @@ async fn execute_turn(
     };
     let mut recovery = engine::Recovery::default();
     loop {
+        // History and upload preparation can outlive the initial admission
+        // check. Recheck every bound source before model execution, including
+        // continuations; stop/expiry alone preserve already admitted work.
+        let turn = row.active_turn.as_ref().expect("claimed turn");
+        let origins: Vec<_> = match turn.origin {
+            crate::models::assistant_conversation::TurnOrigin::Channel => turn
+                .asked_from
+                .as_ref()
+                .or(row.channel.as_ref())
+                .into_iter()
+                .collect(),
+            crate::models::assistant_conversation::TurnOrigin::Event => {
+                let queued: Vec<_> = turn
+                    .events
+                    .iter()
+                    .flat_map(|e| &e.reply_to)
+                    .filter(|o| o.thread.is_some())
+                    .collect();
+                if queued.is_empty() {
+                    row.channel.iter().collect()
+                } else {
+                    queued
+                }
+            }
+            _ => Vec::new(),
+        };
+        for origin in origins.into_iter().filter(|o| o.thread.is_some()) {
+            Box::pin(
+                crate::services::channel_thread_follow_service::validate_delivery(
+                    &state.db,
+                    &row.user_id,
+                    origin,
+                    &row.id,
+                ),
+            )
+            .await
+            .map_err(|_| TurnError::new("assistant_unavailable"))?;
+        }
         let request_key = if continuations.count == 0 {
             turn_id.clone()
         } else {

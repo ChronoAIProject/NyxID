@@ -2087,6 +2087,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             delete(handlers::nyxbot::disconnect_channel).patch(handlers::nyxbot::link_channel),
         )
         .route(
+            "/nyxagent/channels/{id}/chats/{chat_id}/threads",
+            get(handlers::nyxbot::thread_controls::list_threads),
+        )
+        .route(
+            "/nyxagent/channels/{id}/chats/{chat_id}/threads/{thread_id}/stop",
+            post(handlers::nyxbot::thread_controls::stop_thread),
+        )
+        .route(
             "/nyxagent/channels/{id}/chats",
             get(handlers::nyxbot::list_channel_chats),
         )
@@ -2164,7 +2172,20 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .route(
             "/assistant/nyxagent/conversations/{id}/voice-sessions",
-            post(handlers::assistant_voice::start),
+            post(handlers::assistant_voice::start)
+                .layer(axum::extract::DefaultBodyLimit::max(128 * 1024)),
+        )
+        .route(
+            "/assistant/nyxagent/conversations/{id}/voice-sessions/{sid}",
+            get(handlers::assistant_voice::session_status),
+        )
+        .route(
+            "/assistant/nyxagent/conversations/{id}/voice-sessions/{sid}/stream",
+            get(handlers::assistant_voice::stream),
+        )
+        .route(
+            "/assistant/nyxagent/conversations/{id}/voice-sessions/{sid}/control",
+            post(handlers::assistant_voice::control),
         )
         .route(
             "/assistant/nyxagent/conversations/{id}/voice-requests/{rid}",

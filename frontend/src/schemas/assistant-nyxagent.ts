@@ -63,6 +63,7 @@ export type NyxAgentConversationAgent = z.infer<typeof nyxAgentConversationAgent
 // chat runs with Full access, so it is deliberately not parsed.
 /** The channel bot and chat a thread answers. */
 export const nyxAgentChannelOriginSchema = z.object({
+  parent_chat_id: z.string().nullable().optional(), thread_id: z.string().nullable().optional(), parent_title: z.string().nullable().optional(),
   platform: z.string(),
   /** The channel bot connection; groups the bot's chats in the sidebar. */
   channel_agent_id: z.string().nullable().default(null),
@@ -226,8 +227,8 @@ export const voicePreferencesSchema = z.object({
   service_id: z.string().uuid(),
   connection_id: z.string().uuid().nullable(),
   key_source: z.enum(["platform", "own"]),
-  model: z.enum(["gpt-live-1", "grok-voice-think-fast-2.0"]),
-  voice: z.string().max(64).nullable(),
+  model: z.string().min(1).max(128).regex(/^[A-Za-z0-9_.-]+$/),
+  voice: z.string().max(128).nullable(),
   input_mode: z.enum(["push_to_talk", "automatic"]),
   language: z.string().max(35).nullable(),
   notify_on_completion: z.boolean(),
@@ -554,6 +555,14 @@ export const nyxAgentChannelConnectSchema = z.object({
 export type NyxAgentChannelConnect = z.infer<typeof nyxAgentChannelConnectSchema>;
 /** A chat a channel bot is in: a private chat, group, channel or topic. */
 export const nyxAgentChannelChatSchema = z.object({
+  parent_chat_id: z.string().nullable().optional(),
+  has_thread_history: z.boolean().optional(),
+  threads: z.enum(["follow", "off"]).catch("off").optional(),
+  threads_setting: z.enum(["follow", "off"]).nullable().catch(null).optional(),
+  thread_capabilities: z.object({ thread_reply: z.boolean(), thread_follow: z.boolean(), thread_history: z.boolean() }).optional(),
+  followed_thread_count: z.number().int().nonnegative().optional(),
+  follow_readiness: z.string().optional(),
+  follow_guidance: z.string().nullable().optional(),
   id: z.string(),
   channel_agent_id: z.string(),
   platform: z.string(),
@@ -590,6 +599,7 @@ export const nyxAgentChannelChatUpdatedSchema = z.object({
 });
 export type NyxAgentChannelChatUpdated = z.infer<typeof nyxAgentChannelChatUpdatedSchema>;
 export type NyxAgentChannelChatSettings = Partial<{
+  threads: "follow" | "off";
   reply_mode: "mention" | "all";
   /** `default` lets members talk once the user has talked there. */
   members: "everyone" | "owner" | "default";
@@ -713,3 +723,18 @@ export const assistantMemoryNoteSchema = z.object({
     .min(1, "Enter a shared note")
     .max(ASSISTANT_MEMORY_NOTE_MAX),
 });
+
+export const nyxAgentChannelThreadSchema = z.object({
+  busy_count: z.number().optional(), dropped_message_count: z.number().optional(),
+  id: z.string(), parent_chat_id: z.string().nullable(), conversation_id: z.string().nullable(),
+  agent_id: z.string().nullable(), label: z.string(),
+  state: z.enum(["opening", "active", "stopped", "expired", "unavailable"]).catch("unavailable"),
+  kind: z.string().nullable(), followed_at: z.string().nullable(), last_admitted_at: z.string().nullable(),
+  expires_at: z.string().nullable(), context_status: z.string(), context_message_count: z.number(),
+  follow_readiness: z.string(),
+});
+export type NyxAgentChannelThread = z.infer<typeof nyxAgentChannelThreadSchema>;
+export const nyxAgentChannelThreadListSchema = z.object({
+  threads: z.array(nyxAgentChannelThreadSchema), next_cursor: z.string().nullable(),
+});
+export const nyxAgentChannelThreadStoppedSchema = z.object({ thread: nyxAgentChannelThreadSchema });

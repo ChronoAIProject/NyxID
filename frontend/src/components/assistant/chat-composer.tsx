@@ -9,7 +9,7 @@ import {
   type ReactNode,
   type UIEvent,
 } from "react";
-import { Send, Square } from "lucide-react";
+import { Mic, Send, Square } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { AgentAvatar } from "@/components/assistant/nyxbot-agent-avatar";
 import {
@@ -135,6 +135,7 @@ interface ChatComposerProps {
   readonly mentions?: readonly ComposerMention[];
   readonly onSend: (content: string) => Promise<void>;
   readonly onStop: () => Promise<void>;
+  readonly onVoice?: () => void;
 }
 
 interface PendingDraftTransition {
@@ -166,6 +167,7 @@ function DraftedChatComposer({
   mentions,
   onSend,
   onStop,
+  onVoice,
 }: ChatComposerProps) {
   const locked = active && !allowActiveInput;
   const [dragging, setDragging] = useState(false);
@@ -807,6 +809,9 @@ function DraftedChatComposer({
               >
                 <Square className="fill-current" />
               </Button>
+            ) : onVoice && !content.trim() && !hasAttachments && !uploadBlocked ? (
+              <Button type="button" variant="primary" size="icon" disabled={sending || disabled}
+                onClick={onVoice} aria-label="Open voice call"><Mic /></Button>
             ) : (
               <Button
                 type="button"

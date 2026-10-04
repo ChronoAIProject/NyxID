@@ -85,6 +85,7 @@ impl PlatformAdapter for TelegramNewAdapter {
     fn thread_capabilities(&self) -> crate::services::channel_platform::ThreadCapabilities {
         crate::services::channel_platform::ThreadCapabilities {
             thread_reply: true,
+            thread_follow: true,
             ..Default::default()
         }
     }

@@ -10,7 +10,7 @@ use utoipa::{IntoParams, ToSchema};
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
-use crate::models::downstream_service::{CredentialFieldSpec, ServiceCapabilities};
+use crate::models::downstream_service::CredentialFieldSpec;
 use crate::models::service_billing::ServiceBilling;
 use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
 use crate::models::user_service::UserService;
@@ -121,7 +121,7 @@ pub struct CatalogEntryResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub issues_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub capabilities: Option<ServiceCapabilities>,
+    pub capabilities: Option<crate::services::inference_service::ServiceCapabilitiesView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub billing: Option<ServiceBilling>,
     #[serde(skip_serializing_if = "Option::is_none")]
