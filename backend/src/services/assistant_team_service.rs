@@ -364,8 +364,23 @@ pub(crate) async fn create_thread_for_with_access(
     } else {
         super::org_agent_service::require_use(db, actor, agent).await?;
     }
+    let learning_epoch = Box::pin(super::assistant_agent_learning::enrollment_epoch(
+        db,
+        actor,
+        agent,
+        snapshot.map(std::sync::Arc::as_ref),
+    ))
+    .await?;
     Box::pin(create_thread_with_kind(
-        db, keys, actor, agent, title, false, session, snapshot,
+        db,
+        keys,
+        actor,
+        agent,
+        title,
+        false,
+        session,
+        snapshot,
+        learning_epoch,
     ))
     .await
 }
@@ -378,7 +393,7 @@ pub(crate) async fn create_automation_thread(
     title: &str,
     session: &mut ClientSession,
 ) -> AppResult<AssistantConversation> {
-    create_thread_with_kind(db, keys, actor, agent, title, true, session, None).await
+    create_thread_with_kind(db, keys, actor, agent, title, true, session, None, None).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -391,6 +406,7 @@ async fn create_thread_with_kind(
     automation_thread: bool,
     session: &mut ClientSession,
     snapshot: Option<&std::sync::Arc<super::org_agent_service::RequestAccess>>,
+    learning_epoch: Option<i64>,
 ) -> AppResult<AssistantConversation> {
     let now = Utc::now();
     let mut row = AssistantConversation {
@@ -422,6 +438,7 @@ async fn create_thread_with_kind(
         agent_id: Some(agent.id.clone()),
         automation_thread,
         agent_owner_id: (actor != agent.user_id).then(|| agent.user_id.clone()),
+        learning_epoch,
         report_to: None,
         pending_events: Vec::new(),
         event_streak: 0,
@@ -535,6 +552,10 @@ pub async fn home_thread_for(
             .await?;
     }
     let mut session = db.client().start_session().await?;
+    let learning_epoch = Box::pin(super::assistant_agent_learning::enrollment_epoch(
+        db, actor, agent, None,
+    ))
+    .await?;
     let db_owned = db.clone();
     let keys = keys.clone();
     let agent = agent.clone();
@@ -551,6 +572,7 @@ pub async fn home_thread_for(
                 false,
                 session,
                 None,
+                learning_epoch,
             )
             .await;
             transactions::transaction_result(operation)
@@ -894,6 +916,7 @@ pub async fn create_specialist_for(
                     &agent.name,
                     false,
                     session,
+                    None,
                     None,
                 )
                 .await?;
