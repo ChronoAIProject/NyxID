@@ -98,7 +98,8 @@ function mount(connections: KeyInfo[] = [personal]) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
-  return renderHook(() => useServiceInsights(connections), {
+  return renderHook(({ connections }) => useServiceInsights(connections), {
+    initialProps: { connections },
     wrapper: ({ children }: { children: ReactNode }) => (
       <QueryClientProvider client={client}>{children}</QueryClientProvider>
     ),
@@ -326,6 +327,39 @@ describe("deployed service insight compatibility", () => {
       payer_rule: "Your personal account",
       rates: [{ credits_per_unit: "0.12", sync_status: "synced" }],
     });
+  });
+  it("reclassifies a connection when its credential binding changes without changing its id", async () => {
+    const { result, rerender } = mount();
+    await waitFor(() =>
+      expect(
+        result.current.connections.get(personal.id)?.billing
+          ?.credential_supplier,
+      ).toBe("own"),
+    );
+    rerender({
+      connections: [{ ...personal, credential_binding: "platform" }],
+    });
+    await waitFor(() =>
+      expect(
+        result.current.connections.get(personal.id)?.billing
+          ?.credential_supplier,
+      ).toBe("nyxid"),
+    );
+  });
+  it("resolves an unverified OAuth supplier when the same connection gains provenance", async () => {
+    const oauth: KeyInfo = { ...personal, credential_type: "oauth2" };
+    const { result, rerender } = mount([oauth]);
+    await waitFor(() =>
+      expect(
+        result.current.connections.get(oauth.id)?.billing?.credential_supplier,
+      ).toBe("unknown"),
+    );
+    rerender({ connections: [{ ...oauth, oauth_app_source: "platform" }] });
+    await waitFor(() =>
+      expect(
+        result.current.connections.get(oauth.id)?.billing?.credential_supplier,
+      ).toBe("nyxid"),
+    );
   });
   it.each([403, 500])(
     "does not fall back on an insights %s failure",

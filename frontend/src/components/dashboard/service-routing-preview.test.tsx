@@ -10,7 +10,7 @@ import {
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
-import type { KeyInfo } from "@/types/keys";
+import type { CatalogEntry, KeyInfo } from "@/types/keys";
 import type { ServicePool } from "@/schemas/pools";
 import type { ServiceInsight } from "@/schemas/service-insights";
 import { configuredBilling } from "@/lib/service-insights-compat";
@@ -28,6 +28,7 @@ function render(ui: ReactNode) {
   });
 }
 
+const internalCatalog = vi.hoisted(() => [] as Partial<CatalogEntry>[]);
 const { records, account, poolState, insightConnections } = vi.hoisted(() => ({
   insightConnections: new Map<string, ServiceInsight>(),
   account: { id: "user-a" },
@@ -109,7 +110,10 @@ vi.mock("@tanstack/react-router", () => ({
 }));
 vi.mock("@/hooks/use-keys", () => ({
   useKeys: () => ({ data: records, refetch: vi.fn() }),
-  useCatalog: () => ({ data: [], refetch: vi.fn() }),
+  useCatalog: (options?: { includeAll?: boolean }) => ({
+    data: options?.includeAll ? internalCatalog : [],
+    refetch: vi.fn(),
+  }),
 }));
 vi.mock("@/hooks/use-user-services", () => ({
   useUserServices: () => ({ data: [], refetch: vi.fn() }),
@@ -178,6 +182,7 @@ beforeEach(() => {
   poolState.data = [];
   poolState.error = null;
   insightConnections.clear();
+  internalCatalog.splice(0);
 });
 afterEach(() => {
   cleanup();
@@ -185,6 +190,34 @@ afterEach(() => {
 });
 
 describe("live grouped services", () => {
+  it("verifies an internal service's absent billing from the full catalog when insights lack that metadata", () => {
+    const connection: KeyInfo = {
+      ...records[0]!,
+      id: "chrono-llm",
+      label: "Chrono LLM",
+      catalog_service_id: "chrono-llm",
+      catalog_service_slug: "chrono-llm",
+      catalog_service_name: "Chrono LLM",
+    };
+    records.push(connection);
+    internalCatalog.push({
+      slug: "chrono-llm",
+      name: "Chrono LLM",
+      billing: null,
+    });
+    insightConnections.set(connection.id, {
+      service_id: connection.id,
+      billing: configuredBilling(connection),
+      usage: null,
+    });
+    render(preview());
+    const summary = screen.getByRole("button", {
+      name: "Show billing for Chrono LLM",
+    });
+    expect(summary).toHaveTextContent("—");
+    expect(summary).toHaveAccessibleDescription("Not billable by NyxID");
+    expect(summary).not.toHaveTextContent("Unverified");
+  });
   it("shows a dash and exact no-charge tooltip on the card and each expanded connection", async () => {
     for (let i = 0; i < 2; i++) {
       const connection = {

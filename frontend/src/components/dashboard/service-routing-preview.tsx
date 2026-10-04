@@ -16,7 +16,7 @@ export default function ServiceRoutingPreview({
   readonly actions?: ReactNode | ((compact: boolean) => ReactNode);
 }) {
   const keys = useKeys();
-  const catalog = useCatalog();
+  const catalog = useCatalog({ includeAll: true });
   const services = useUserServices();
   const [mountedAt] = useState(Date.now);
   const candidates = (keys.data ?? []).map((key) =>

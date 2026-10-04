@@ -46,6 +46,16 @@ insight supplier field is deployed. Legacy OAuth rows without durable provenance
 will still require evidence from their original authorization records. Missing
 private catalog entries cannot be interpreted as absent billing.
 
+Connected-service cards and overview pages request the full accessible catalog,
+including internal services omitted by the credential-setup catalog. Insights
+cache keys include credential selection, OAuth provenance, owner and connection
+pricing metadata, so changes to those inputs cannot retain an earlier label just
+because the connection UUID is unchanged. Regression tests cover both cases.
+
+On the latest live read, Chrono LLM is present in both catalog variants with no
+billing. These fixes cover reproducible stale/incomplete-data cases; they do not
+establish which case produced the previously reported browser label.
+
 Live checks found Twitter with one supplied organization app and three OAuth rows
 without published provenance; the truthful current preview is one BYOK and three
 Unverified. Anthropic, Chrono LLM and Spotify have no billing configuration and show

@@ -138,7 +138,7 @@ function ExternalServicesTab({
   // future change, the `credential_source` field on KeyInfo will take
   // precedence and this call becomes a no-op.
   const { data: userServices } = useUserServices();
-  const { data: catalog } = useCatalog();
+  const { data: catalog } = useCatalog({ includeAll: true });
 
   const sourceById = useMemo(() => {
     const map = new Map<string, CredentialSource>();
