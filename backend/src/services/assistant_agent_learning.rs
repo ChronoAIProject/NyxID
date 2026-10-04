@@ -294,14 +294,17 @@ pub async fn set_member_opt_in(
 
 /// Return the cohort captured by a newly-created conversation. Legacy rows
 /// and feature-off requests return `None`, so no evidence is enrolled.
+///
+/// Thread creation is a hot path: the learning config is a single `_id`
+/// point read checked first, so agents without learning never pay the flag
+/// resolution (which reads org memberships), and org access reuses the
+/// request's access snapshot when the caller already resolved one.
 pub async fn enrollment_epoch(
     db: &Database,
     actor: &str,
     agent: &AssistantAgent,
+    snapshot: Option<&super::org_agent_service::RequestAccess>,
 ) -> AppResult<Option<i64>> {
-    if !flag_on(db, actor).await? {
-        return Ok(None);
-    }
     let Some(config) = db
         .collection::<AssistantAgentLearning>(CONFIG_COLLECTION_NAME)
         .find_one(doc! {"_id": &agent.id, "owner_id": &agent.user_id, "enabled": true})
@@ -309,12 +312,19 @@ pub async fn enrollment_epoch(
     else {
         return Ok(None);
     };
+    if !flag_on(db, actor).await? {
+        return Ok(None);
+    }
     if agent.user_id == actor {
         return Ok((config.learning_epoch > 0).then_some(config.learning_epoch));
     }
-    if !super::org_agent_service::can_use(
-        &super::org_agent_service::access(db, actor, &agent.user_id).await?,
-    ) {
+    let can_use = match snapshot {
+        Some(access) => access.matches(actor, &agent.user_id),
+        None => super::org_agent_service::can_use(
+            &super::org_agent_service::access(db, actor, &agent.user_id).await?,
+        ),
+    };
+    if !can_use {
         return Ok(None);
     }
     let member = db
@@ -1289,7 +1299,9 @@ mod tests {
             updated_at: now,
         };
         assert_eq!(
-            enrollment_epoch(&db, &agent.user_id, &agent).await.unwrap(),
+            enrollment_epoch(&db, &agent.user_id, &agent, None)
+                .await
+                .unwrap(),
             None
         );
         let learning_collections = [

@@ -1156,7 +1156,10 @@ pub async fn begin_turn_with_voice(
         && start.origin == TurnOrigin::User
     {
         Box::pin(super::assistant_agent_learning::enrollment_epoch(
-            db, user_id, &new_agent,
+            db,
+            user_id,
+            &new_agent,
+            start.org_access.as_deref(),
         ))
         .await?
     } else {

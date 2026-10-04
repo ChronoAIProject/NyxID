@@ -365,7 +365,10 @@ pub(crate) async fn create_thread_for_with_access(
         super::org_agent_service::require_use(db, actor, agent).await?;
     }
     let learning_epoch = Box::pin(super::assistant_agent_learning::enrollment_epoch(
-        db, actor, agent,
+        db,
+        actor,
+        agent,
+        snapshot.map(std::sync::Arc::as_ref),
     ))
     .await?;
     Box::pin(create_thread_with_kind(
@@ -550,7 +553,7 @@ pub async fn home_thread_for(
     }
     let mut session = db.client().start_session().await?;
     let learning_epoch = Box::pin(super::assistant_agent_learning::enrollment_epoch(
-        db, actor, agent,
+        db, actor, agent, None,
     ))
     .await?;
     let db_owned = db.clone();
