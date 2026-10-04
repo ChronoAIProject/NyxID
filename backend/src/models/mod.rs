@@ -155,3 +155,4 @@ pub mod assistant_upload_retention;
 pub mod assistant_voice;
 
 pub mod assistant_voice_session;
+pub mod machine_access;

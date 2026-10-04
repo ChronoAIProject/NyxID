@@ -1162,6 +1162,8 @@ async fn org_agent_machine_gateway_checks_member_and_node_owner_live() {
     )
     .await
     .unwrap();
+    // This fixture represents an existing shared v1 assignment after cutover.
+    f.state.db.collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME).update_one(doc! {"_id": &agent.id},doc! {"$set": {format!("machine_access.assignments.{}",node.id): bson::to_bson(&crate::models::machine_access::Assignment { capabilities: nyxid_machine::authority::Capabilities {shell:true,..Default::default()},legacy:true,..Default::default()}).unwrap()}}).await.unwrap();
     let chat = acks::for_key(&f.state.db, &f.member, Some(&row.credential_api_key_id))
         .await
         .unwrap()

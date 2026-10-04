@@ -129,6 +129,7 @@ impl SlackAdapter {
                         sender_kind: kind,
                         created_at: time,
                         text: text.into(),
+                        participant_hashes: Vec::new(),
                     },
                     before,
                 );

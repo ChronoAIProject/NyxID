@@ -9,9 +9,9 @@ export const machineChoicesSchema = z.object({
     .regex(/^[a-z0-9-]+$/, "Use lowercase letters, numbers and hyphens"),
   where: z.enum(["this_computer", "vm", "docker"]),
   capabilities: z
-    .array(z.enum(["shell", "files", "computer"]))
+    .array(z.enum(["shell", "files", "browser", "computer"]))
     .min(1)
-    .max(3),
+    .max(4),
   grant_to: z.string().nullable(),
   automatic_updates: z.boolean().nullable().optional(),
 });
@@ -21,6 +21,8 @@ export interface MachineProfile {
   shell: boolean;
   files: boolean;
   computer: boolean;
+  browser?: boolean | null;
+  authority_versions?: number[];
   os: string;
   arch: string;
   roots: string[];

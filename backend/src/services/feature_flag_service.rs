@@ -177,6 +177,19 @@ const ASSISTANT_LIVE_TURN_GATE_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+pub const MACHINE_CAPABILITIES_FLAG_KEY: &str = "assistant:machine-capabilities";
+const MACHINE_CAPABILITIES_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: MACHINE_CAPABILITIES_FLAG_KEY,
+    description: "Enable the capability editor and deny-by-default new assignments after upgrading all replicas; stored restrictions are always enforced.",
+    default_enabled: false,
+};
+pub const MACHINE_CONTEXTS_FLAG_KEY: &str = "assistant:machine-contexts";
+const MACHINE_CONTEXTS_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: MACHINE_CONTEXTS_FLAG_KEY,
+    description: "Configure isolated machine contexts on supported nodes (not yet available).",
+    default_enabled: false,
+};
+
 pub const INVITATION_CODE_FLAG_KEY: &str = "auth:invitation-code";
 const INVITATION_CODE_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: INVITATION_CODE_FLAG_KEY,
@@ -248,6 +261,8 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     NYXBOT_THREAD_FOLLOW_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
     ASSISTANT_LIVE_TURN_GATE_FLAG,
+    MACHINE_CAPABILITIES_FLAG,
+    MACHINE_CONTEXTS_FLAG,
     ORG_AGENTS_FLAG,
     ASSISTANT_VOICE_FLAG,
     VOICE_OPENAI_PLATFORM_FLAG,
@@ -275,6 +290,8 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     NYXBOT_THREAD_FOLLOW_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
     ASSISTANT_LIVE_TURN_GATE_FLAG,
+    MACHINE_CAPABILITIES_FLAG,
+    MACHINE_CONTEXTS_FLAG,
     ORG_AGENTS_FLAG,
     ASSISTANT_VOICE_FLAG,
     VOICE_OPENAI_PLATFORM_FLAG,
@@ -1804,6 +1821,8 @@ mod tests {
                 "nyxbot:thread-follow",
                 "assistant:operation-scopes",
                 "assistant:live-turn-gate",
+                "assistant:machine-capabilities",
+                "assistant:machine-contexts",
                 "assistant:org-agents",
                 "assistant:voice",
                 "assistant:voice-openai-platform",

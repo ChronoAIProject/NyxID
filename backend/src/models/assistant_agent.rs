@@ -126,6 +126,8 @@ pub struct AssistantAgent {
     #[serde(default)]
     pub machine_node_ids: Vec<String>,
     #[serde(default)]
+    pub machine_access: Option<Box<super::machine_access::Policy>>,
+    #[serde(default)]
     pub saved_login_ids: Vec<String>,
     /// `user` or `nyxbot`.
     pub created_by: String,

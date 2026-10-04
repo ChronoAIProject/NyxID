@@ -4,7 +4,7 @@ use crate::{
     errors::{AppError, AppResult},
     models::{
         assistant_conversation::{AgentEvent, AssistantConversation, ChannelOrigin},
-        channel_thread::{ThreadKind, ThreadSenderKind},
+        channel_thread::{ChannelThreadFacts, ThreadKind, ThreadSenderKind},
         channel_thread_follow::ThreadTurnBinding,
         nyxbot_channel::{
             COLLECTION_NAME as CHANNELS, NyxbotChannel, NyxbotThread,
@@ -47,7 +47,9 @@ fn supported_child(chat: &NyxbotThread) -> bool {
     chat.follow.thread_identity_version == Some(1)
         && matches!(
             chat.follow.thread_kind,
-            Some(ThreadKind::Native | ThreadKind::Topic | ThreadKind::ReplyChain)
+            Some(
+                ThreadKind::Native | ThreadKind::Topic | ThreadKind::ReplyChain | ThreadKind::Email,
+            )
         )
         && matches!(
             chat.follow.follow_state.as_deref(),
@@ -74,6 +76,21 @@ pub fn eligible(channel: &NyxbotChannel, settings: &NyxbotThread, sender: &str) 
         _ => false,
     };
     allowed.then_some(true)
+}
+
+pub fn eligible_for_facts(
+    channel: &NyxbotChannel,
+    settings: &NyxbotThread,
+    facts: &ChannelThreadFacts,
+    sender: &str,
+) -> Option<bool> {
+    if facts.kind == ThreadKind::Email {
+        if channel.owner_sender_ids.iter().any(|id| id == sender) {
+            return Some(false);
+        }
+        return (channel.private_chats.as_deref() == Some("everyone")).then_some(true);
+    }
+    eligible(channel, settings, sender)
 }
 pub fn not_found() -> AppError {
     AppError::NotFound("Channel thread not found".into())
@@ -121,6 +138,7 @@ fn partition(
         ThreadKind::Native => "native",
         ThreadKind::Topic => "topic",
         ThreadKind::ReplyChain => "reply_chain",
+        ThreadKind::Email => "email",
         _ => "unknown",
     };
     let generations = format!(
@@ -132,7 +150,11 @@ fn partition(
     for part in [
         channel.platform.as_str(),
         &channel.channel_bot_id,
-        &settings.id,
+        if f.kind == ThreadKind::Email {
+            "email_shared"
+        } else {
+            settings.id.as_str()
+        },
         kind,
         f.root_id.as_deref().unwrap_or_default(),
         &generations,
@@ -208,7 +230,7 @@ pub async fn select(
                 .session(&mut *session).await?.ok_or_else(not_found)?;
             if settings.follow.threads.as_deref().is_some_and(|s| s != "follow") { return Ok(Selection::Legacy); }
             if settings.agent_id.as_deref().or(channel.agent_id.as_deref()).is_some_and(|a| a != agent) { return Err(not_found()); }
-            let Some(guest) = eligible(&channel, &settings, sender) else { return Ok(Selection::Quiet); };
+            let Some(guest) = eligible_for_facts(&channel, &settings, target.facts(), sender) else { return Ok(Selection::Quiet); };
             if stop && guest {return Ok(Selection::Quiet);}
             if settings_id!=parent_id {
                 db.collection::<NyxbotThread>(THREADS).update_one(doc! {"_id":settings_id,"user_id":owner,"channel_id":channel_id},
@@ -223,6 +245,11 @@ pub async fn select(
             }
             if !enabled && child.is_none() { return Ok(Selection::Legacy); }
             let active = enabled && child.as_ref().is_some_and(follows);
+            // Aurinko remains a legacy private chat until an addressed message
+            // opens a shared child or an existing child is actively followed.
+            if target.facts().kind == ThreadKind::Email && !active && !addressed {
+                return Ok(Selection::Legacy);
+            }
             if stop && !guest && (active || addressed) {
                 if let Some(mut child) = child {
                     stop_in_session(db, &mut child, "owner", session).await?;

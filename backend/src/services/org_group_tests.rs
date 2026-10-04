@@ -484,6 +484,7 @@ async fn org_group_cards_leave_revocation_and_queue_drop() {
     let thread_key = key(&f, &row).await;
     assert!(thread_key.is_active);
     finish(&f, &row).await;
+    // Retry immediately: the active-turn refusal must have awaited its abort.
     groups::update(&f.state.db, b, None, None, None, None, true)
         .await
         .unwrap();
@@ -1338,6 +1339,7 @@ async fn org_group_manager_must_remain_and_last_leave_cascades() {
     ));
     assert!(key(&f, &row).await.is_active);
     finish(&f, &row).await;
+    // Last-participant deletion must release its rejected transaction too.
     groups::update(&f.state.db, a, None, None, None, None, true)
         .await
         .unwrap();

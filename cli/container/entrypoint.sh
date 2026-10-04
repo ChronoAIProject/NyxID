@@ -10,8 +10,8 @@ ulimit -c 0
 if [ "$#" -eq 0 ]; then set -- --machine --computer; fi
 for MACHINE_OPTION in "$@"; do
     case "$MACHINE_OPTION" in
-        --machine|--shell|--files|--computer) ;;
-        *) printf '%s\n' 'Choose --shell, --files, --computer or --machine.' >&2; exit 2 ;;
+        --machine|--shell|--files|--browser|--computer) ;;
+        *) printf '%s\n' 'Choose --shell, --files, --browser, --computer or --machine.' >&2; exit 2 ;;
     esac
 done
 unset MACHINE_OPTION

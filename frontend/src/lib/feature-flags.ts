@@ -27,6 +27,8 @@ export const FEATURE_FLAG = {
   VOICE_OPENAI_PLATFORM: "assistant:voice-openai-platform",
   NYXAGENT_ENGINE: "assistant:nyxagent-engine",
   ORG_AGENTS: "assistant:org-agents",
+  MACHINE_CAPABILITIES: "assistant:machine-capabilities",
+  MACHINE_CONTEXTS: "assistant:machine-contexts",
   AGENT_OPERATION_SCOPES: "assistant:operation-scopes",
   NYXBOT_THREAD_FOLLOW: "nyxbot:thread-follow",
   NYXBOT_GATEWAY_LARK: "nyxbot:gateway-lark",

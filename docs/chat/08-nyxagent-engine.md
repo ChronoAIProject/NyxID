@@ -927,3 +927,14 @@ requests that never yield a response. The existing identifier-only conversation 
 stream refreshes titles in the sidebar and active thread without a reload.
 Sidebar Rename is an inline editor with optimistic metadata updates and rollback
 on failure; it does not interrupt a running turn.
+
+Machine tool discovery and execution intersect explicit per-agent capability
+assignments, node-local ceilings and live actor authority. With capability editing
+enabled for the acting person, new selection enables nothing. With it disabled,
+NyxBot reachability and specialist Grants selection snapshot legacy capabilities
+under the live ACL. Existing snapshots survive enabling the editor, and explicit
+restrictions survive disabling it. `nyxid__machine_capabilities` lists the current revision and
+proposes owner-reviewed widening; it cannot approve its own request. A v2 node
+receives signed, 45-second authority renewed every ten seconds, and stops work on revocation
+or lease expiry even after socket loss. Legacy assignments remain visibly shared;
+context IDs in this phase do not isolate files or browser sessions.

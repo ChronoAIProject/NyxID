@@ -1518,8 +1518,14 @@ async fn handle_tools_list(
         tool_defs.retain(|t| !SSH_META_TOOL_NAMES.contains(&t.name.as_str()));
     }
 
-    if auth.chat.as_ref().is_some_and(|chat| !chat.guest) {
-        tool_defs.extend(crate::services::machine_tools::definitions());
+    if let Some(chat) = auth.chat.as_ref().filter(|chat| !chat.guest) {
+        tool_defs.extend(
+            Box::pin(crate::services::machine_access_service::definitions(
+                &state.db, chat,
+            ))
+            .await
+            .unwrap_or_default(),
+        );
         tool_defs.push(crate::services::assistant_upload_service::definition());
     }
 
@@ -3086,19 +3092,23 @@ async fn handle_meta_search(
         })
         .collect();
 
-    if auth.chat.as_ref().is_some_and(|chat| !chat.guest) {
+    if let Some(chat) = auth.chat.as_ref().filter(|chat| !chat.guest) {
         let matcher = mcp_service::ToolSearch::new(query);
-        let mut tools: Vec<_> = crate::services::machine_tools::definitions()
-            .into_iter()
-            .chain(std::iter::once(
-                crate::services::assistant_upload_service::definition(),
-            ))
-            .filter_map(|tool| {
-                matcher
-                    .rank(&tool.name, &tool.description)
-                    .map(|rank| (rank, tool))
-            })
-            .collect();
+        let mut tools: Vec<_> = Box::pin(crate::services::machine_access_service::definitions(
+            &state.db, chat,
+        ))
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .chain(std::iter::once(
+            crate::services::assistant_upload_service::definition(),
+        ))
+        .filter_map(|tool| {
+            matcher
+                .rank(&tool.name, &tool.description)
+                .map(|rank| (rank, tool))
+        })
+        .collect();
         tools.sort_by_key(|(rank, _)| std::cmp::Reverse(*rank));
         results.extend(tools.into_iter().map(|(_, tool)| {
             serde_json::json!({

@@ -6,7 +6,7 @@ use crate::{
     mw::auth::AuthUser,
     services::{
         billing::{BillingIngress, route_inventory::BillingRoutePolicy},
-        key_service, node_service,
+        node_service,
         node_ws_manager::NodeOutboundMessage,
     },
 };
@@ -391,6 +391,21 @@ async fn authorize_and_execute(
     )
     .await?;
     let auth = job_auth(state, &job).await?;
+    let binding = state
+        .db
+        .collection::<mongodb::bson::Document>(JOBS)
+        .find_one(doc! {"_id":&job.id})
+        .projection(doc! {"machine_authority":1})
+        .await?;
+    if let Some(authority) = binding
+        .as_ref()
+        .and_then(|r| r.get_document("machine_authority").ok())
+        && p["authority_binding"]
+            != json!({"context_id":authority.get_str("context_id").unwrap_or_default(),"revision":authority.get_i64("revision").unwrap_or_default(),"lease_id":authority.get_str("lease_id").unwrap_or_default()})
+    {
+        return Err(AppError::MachineAuthorityStale);
+    }
+
     crate::services::machine_desktop_service::agent_allowed(&state.db, node_id).await?;
     let raw_path = p["path"]
         .as_str()
@@ -552,70 +567,10 @@ async fn authorize_and_execute(
 }
 
 pub(crate) async fn job_auth(state: &AppState, job: &MachineJob) -> AppResult<AuthUser> {
-    let key = key_service::get_api_key(&state.db, &job.user_id, &job.api_key_id).await?;
-    if key.expires_at.is_some_and(|at| at <= chrono::Utc::now()) {
-        return Err(AppError::Forbidden("The job's chat key expired".into()));
-    }
-    let bound = state
-        .db
-        .collection::<mongodb::bson::Document>(
-            crate::models::assistant_agent_credential::COLLECTION_NAME,
-        )
-        .find_one(doc! {
-            "user_id":&job.user_id,
-            "conversation_id":&job.conversation_id,
-            "api_key_id":&job.api_key_id
-        })
-        .await?;
-    if bound.is_none() {
-        return Err(AppError::Forbidden(
-            "The job's chat key is no longer bound to its conversation".into(),
-        ));
-    }
-    let node = node_service::get_node_by_id(&state.db, &job.node_id)
-        .await?
-        .ok_or_else(|| AppError::NodeNotFound("Machine unavailable".into()))?;
-    if !node.is_active {
-        return Err(AppError::MachineNotAllowed);
-    }
-    crate::services::machine_service::capable(&node, nyxid_machine::Operation::ServiceCall)?;
-    if job.runtime_id.is_empty()
-        || node
-            .machine
-            .as_ref()
-            .is_none_or(|profile| profile.runtime_id != job.runtime_id)
-    {
-        return Err(AppError::Forbidden(
-            "The machine restarted; start a new job".into(),
-        ));
-    }
-    let auth = crate::mw::auth::api_key_auth_user(&state.db, &key, None, None, None).await?;
-    let agent = if let Some(access) = auth.org_agent_access.as_deref() {
-        access.agent(&state.db, &job.user_id, &job.agent_id).await?
-    } else {
-        crate::services::assistant_team_service::agent(&state.db, &job.user_id, &job.agent_id)
-            .await?
-    };
-    if agent.user_id != job.user_id {
-        if auth.org_agent_access.is_none() || node.user_id != agent.user_id {
-            return Err(AppError::MachineNotAllowed);
-        }
-    } else if !crate::services::org_service::resolve_owner_access(
-        &state.db,
-        &job.user_id,
-        &node.user_id,
-    )
-    .await?
-    .can_write()
-    {
-        return Err(AppError::Forbidden("Machine ownership changed".into()));
-    }
-    if agent.destroyed_at.is_some()
-        || (!agent.is_nyxbot() && !agent.machine_node_ids.contains(&job.node_id))
-    {
-        return Err(AppError::Forbidden("Machine grant was removed".into()));
-    }
-    Ok(auth)
+    Box::pin(crate::services::machine_gateway_service::job_auth(
+        &state.db, job,
+    ))
+    .await
 }
 
 async fn verify(

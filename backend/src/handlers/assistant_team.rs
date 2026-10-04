@@ -859,7 +859,11 @@ pub(crate) async fn execute_tool(
         // strict as either webhook policy; do not consume a second digest.
         if !matches!(
             name,
-            "set_agent_operations" | "set_agent_skills" | "decide_permission" | "machine_update"
+            "set_agent_operations"
+                | "set_agent_skills"
+                | "decide_permission"
+                | "machine_update"
+                | "machine_capabilities"
         ) && let Some(refusal) = acks::webhook_action_gate(
             &state.db,
             chat,
@@ -965,6 +969,7 @@ fn dispatch<'a>(
         | "disconnect_channel_bot" => Box::pin(dispatch_channels(state, chat, name, args)),
         "machine_setup_link" => Box::pin(super::machine_setup::link_tool(state, chat, args)),
         "machine_update" => Box::pin(super::machine_update::tool(state, chat, args)),
+        "machine_capabilities" => Box::pin(super::machine_access::native(state, chat, args)),
         "machine_pair" => Box::pin(super::machine_setup::pair_tool(state, chat, args)),
         _ => Box::pin(async { Err(AppError::NotFound("NyxBot tool not found".into())) }),
     }

@@ -256,7 +256,7 @@ pub enum AppError {
     #[error("External provider not configured: {0}")]
     ExternalProviderNotConfigured(String),
 
-    // 12400–12418: machine access, controller privacy and saved-login filling.
+    // 12400–12422: machine access, controller privacy and saved-login filling.
     #[error("Machine capability is disabled; the owner must enable it on the node")]
     MachineCapabilityDisabled,
 
@@ -315,6 +315,21 @@ pub enum AppError {
     MachineDisplayUnavailable,
     #[error("The owner stopped this turn; wait for a new turn")]
     MachineTurnStopped,
+    #[error("Machine authority v2 is required; update the machine before configuring capabilities")]
+    MachineAuthorityUnsupported,
+    #[error(
+        "Machine permission was revoked or is not granted; request the capability from the owner through NyxBot"
+    )]
+    MachinePermissionRevoked,
+    #[error(
+        "Machine authority lease expired or revision changed; start a freshly authorized operation"
+    )]
+    MachineAuthorityStale,
+
+    #[error(
+        "This machine has too many active operations; retry when an operation finishes. Running work continues."
+    )]
+    MachineAuthorityBusy,
 
     #[error("Node not found: {0}")]
     NodeNotFound(String),
@@ -795,6 +810,10 @@ impl AppError {
             Self::MachineComputerPermissionMissing => StatusCode::FORBIDDEN,
             Self::MachineComputerToolUnsupported => StatusCode::BAD_REQUEST,
             Self::MachineTurnStopped => StatusCode::CONFLICT,
+            Self::MachineAuthorityUnsupported => StatusCode::CONFLICT,
+            Self::MachinePermissionRevoked => StatusCode::FORBIDDEN,
+            Self::MachineAuthorityStale => StatusCode::CONFLICT,
+            Self::MachineAuthorityBusy => StatusCode::TOO_MANY_REQUESTS,
             Self::NodeNotFound(_) => StatusCode::NOT_FOUND,
             Self::NodeOffline(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::NodeProxyTimeout => StatusCode::GATEWAY_TIMEOUT,
@@ -1013,6 +1032,10 @@ impl AppError {
             Self::MachineComputerToolUnsupported => 12416,
             Self::MachineDisplayUnavailable => 12417,
             Self::MachineTurnStopped => 12418,
+            Self::MachineAuthorityUnsupported => 12419,
+            Self::MachinePermissionRevoked => 12420,
+            Self::MachineAuthorityStale => 12421,
+            Self::MachineAuthorityBusy => 12422,
             Self::NodeNotFound(_) => 8000,
             Self::NodeOffline(_) => 8001,
             Self::NodeProxyTimeout => 8002,
@@ -1269,6 +1292,10 @@ impl AppError {
             Self::MachineComputerToolUnsupported => "computer_tool_not_supported",
             Self::MachineDisplayUnavailable => "display_unavailable",
             Self::MachineTurnStopped => "machine_turn_stopped",
+            Self::MachineAuthorityUnsupported => "machine_authority_unsupported",
+            Self::MachinePermissionRevoked => "machine_permission_revoked",
+            Self::MachineAuthorityStale => "machine_authority_stale",
+            Self::MachineAuthorityBusy => "machine_authority_busy",
             Self::NodeNotFound(_) => "node_not_found",
             Self::NodeOffline(_) => "node_offline",
             Self::NodeProxyTimeout => "node_proxy_timeout",

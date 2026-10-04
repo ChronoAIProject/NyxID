@@ -157,6 +157,7 @@ pub async fn ensure_nyxbot(db: &Database, owner: &str) -> AppResult<AssistantAge
         skills: Vec::new(),
         skills_revision: 0,
         skill_metadata: BTreeMap::new(),
+        machine_access: Some(Box::default()),
         machine_node_ids: Vec::new(),
         saved_login_ids: Vec::new(),
         id: Uuid::new_v4().to_string(),
@@ -790,6 +791,16 @@ pub async fn create_specialist_for(
         skills: Vec::new(),
         skills_revision: 0,
         skill_metadata: BTreeMap::new(),
+        machine_access: Some(Box::new(crate::models::machine_access::Policy {
+            assignments: Box::pin(super::machine_access_service::new_assignments(
+                db,
+                actor,
+                &machine_node_ids,
+                1,
+            ))
+            .await?,
+            ..Default::default()
+        })),
         machine_node_ids,
         saved_login_ids,
         id: Uuid::new_v4().to_string(),
@@ -1235,6 +1246,18 @@ pub async fn apply_grants_in_session(
             }
         }
     }
+    if matches!(change, GrantChange::Machine { .. }) {
+        let logins_changed = previous_logins != agent.saved_login_ids;
+        Box::pin(super::machine_access_service::membership_changed(
+            db,
+            owner,
+            &mut agent,
+            &previous_machines,
+            logins_changed,
+            session,
+        ))
+        .await?;
+    }
     let (grants, guest_access) = change.apply(&agent.grants, &agent.guest_access);
     let removed: Vec<String> = agent
         .grants
@@ -1254,6 +1277,10 @@ pub async fn apply_grants_in_session(
     let mut set = doc! {"grants": encode(bson::to_bson(&agent.grants))?,
     "guest_access": encode(bson::to_bson(&agent.guest_access))?, "updated_at": bson::DateTime::now()};
     if matches!(change, GrantChange::Machine { .. }) {
+        set.insert(
+            "machine_access",
+            encode(bson::to_bson(&agent.machine_access))?,
+        );
         set.insert(
             "machine_node_ids",
             bson::to_bson(&agent.machine_node_ids)
@@ -1276,6 +1303,10 @@ pub async fn apply_grants_in_session(
         .await?;
     let rows: Vec<AssistantConversation> = cursor.stream(&mut *session).try_collect().await?;
     sync_thread_authority(db, &agent, &rows, session).await?;
+    if previous_machines != agent.machine_node_ids || previous_logins != agent.saved_login_ids {
+        let ids: Vec<&str> = rows.iter().map(|row| row.id.as_str()).collect();
+        db.collection::<bson::Document>(ACKS).update_many(doc! {"conversation_id":{"$in":ids},"status":{"$in":["pending","allowed"]},"tool_name":{"$regex":"^(nyx__machine_|nyxid__machine_)"}},doc! {"$set":{"status":"expired"}}).session(&mut *session).await?;
+    }
     let mut expire = Vec::new();
     if !removed.is_empty() {
         expire.push(doc! {"kind": "service", "service_id": {"$in": &removed}});
@@ -1366,7 +1397,7 @@ pub async fn destroy(db: &Database, owner: &str, agent_id: &str) -> AppResult<As
             let operation: AppResult<_> = async {
                 let current = maintained_agent(db, owner, &agent_id).await?;
                 let now = Utc::now();
-                let agent = db
+                let mut agent = db
                     .collection::<AssistantAgent>(AGENTS)
                     .find_one_and_update(
                         doc! {"_id": &agent_id, "user_id": &current.user_id, "kind": "specialist",
@@ -1378,6 +1409,10 @@ pub async fn destroy(db: &Database, owner: &str, agent_id: &str) -> AppResult<As
                     .session(&mut *session)
                     .await?
                     .ok_or_else(not_found)?;
+                Box::pin(super::machine_access_service::destroyed_in_session(
+                    db, &mut agent, session,
+                ))
+                .await?;
                 let conversations = db.collection::<AssistantConversation>(CONVERSATIONS);
                 let mut cursor = conversations
                     .find(doc! {"agent_id": &agent.id})

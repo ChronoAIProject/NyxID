@@ -39,6 +39,7 @@ struct Binding {
     job_id: String,
     conversation_id: String,
     report: Option<(String, Instant)>,
+    authority_binding: Value,
 }
 struct Pending {
     job_id: String,
@@ -107,6 +108,8 @@ impl Gateway {
                 continue;
             }
             let mut request = nyxid_machine::Request {
+                version: 1,
+                authority: None,
                 // Retain the correlation ID until acknowledged. A slow server
                 // may acknowledge an earlier attempt after this retry is sent.
                 request_id: binding
@@ -221,6 +224,7 @@ impl Gateway {
                 job_id: job_id.into(),
                 conversation_id: conversation_id.into(),
                 report: None,
+                authority_binding: Value::Null,
             },
         );
         let mut env = BTreeMap::from([
@@ -283,6 +287,16 @@ impl Gateway {
             }
         }
         Ok(env)
+    }
+    pub async fn bind_authority(&self, job_id: &str, authority: &Value) {
+        let mut tokens = self.tokens.lock().await;
+        for binding in tokens.values_mut().filter(|b| b.job_id == job_id) {
+            binding.authority_binding = if authority.is_object() {
+                json!({"context_id":authority["context_id"],"revision":authority["revision"],"lease_id":authority["lease_id"]})
+            } else {
+                Value::Null
+            };
+        }
     }
     pub async fn response(&self, id: &str, metadata: Value) {
         if let Ok(id) = Uuid::parse_str(id)
@@ -377,12 +391,16 @@ async fn forward_inner(
         })
         .unwrap_or_default();
     let hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
-    let (job_id, conversation_id) = {
+    let (job_id, conversation_id, authority_binding) = {
         let tokens = gateway.tokens.lock().await;
         let Some(binding) = tokens.get(&hash) else {
             return Ok((StatusCode::UNAUTHORIZED, axum::Json(json!({"error":{"code":12401,"message":"A live job gateway token is required"}}))).into_response());
         };
-        (binding.job_id.clone(), binding.conversation_id.clone())
+        (
+            binding.job_id.clone(),
+            binding.conversation_id.clone(),
+            binding.authority_binding.clone(),
+        )
     };
     let jobs = gateway.jobs.upgrade().context("machine stopped")?;
     if !jobs.running(&job_id).await {
@@ -434,10 +452,12 @@ async fn forward_inner(
     }
     let id = Uuid::new_v4();
     let mut signed = nyxid_machine::Request {
+        version: 1,
+        authority: None,
         request_id: id.to_string(),
         node_id: gateway.node_id.clone(),
         operation: Operation::ServiceCall,
-        parameters: json!({"job_id":job_id,"conversation_id":conversation_id,"runtime_id":gateway.runtime_id,"path":path,"method":request.method().as_str(),"headers":headers}),
+        parameters: json!({"job_id":job_id,"conversation_id":conversation_id,"authority_binding":authority_binding,"runtime_id":gateway.runtime_id,"path":path,"method":request.method().as_str(),"headers":headers}),
         timestamp: chrono::Utc::now().timestamp(),
         nonce: Uuid::new_v4().to_string(),
         signature: String::new(),

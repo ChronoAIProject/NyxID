@@ -420,6 +420,8 @@ async fn machine_tools_add_no_database_work_for_non_chat_callers() {
 #[tokio::test]
 async fn machine_mcp_tools_are_only_discovered_and_called_by_owner_chat_keys() {
     let f = orchestrator_fixture("machine_mcp_audience").await;
+    // Execution tools require an assignment as well as the correct audience.
+    node(&f, &f.owner).await;
     let list = JsonRpcRequest {
         jsonrpc: JSONRPC_VERSION.into(),
         id: Some(json!(1)),
@@ -462,6 +464,21 @@ async fn machine_mcp_tools_are_only_discovered_and_called_by_owner_chat_keys() {
         assert_eq!(value["result"]["isError"], true);
     }
     let specialist = fixture("machine_mcp_specialist").await;
+    let machine = node(&specialist, &specialist.owner).await;
+    use crate::services::assistant_team_service as team;
+    Box::pin(team::set_grants(
+        &specialist.state.db,
+        &specialist.owner,
+        &specialist.chat.agent_id,
+        team::GrantChange::Machine {
+            base: Box::new(team::GrantChange::Add(Default::default())),
+            machines: Some(vec![machine.id]),
+            logins: None,
+            mode: team::MachineGrantMode::Add,
+        },
+    ))
+    .await
+    .unwrap();
     for (state, chat) in [(&f.state, &f.chat), (&specialist.state, &specialist.chat)] {
         for guest in [false, true] {
             let mut auth = McpAuthContext::user(chat.user_id.clone(), AuthMethod::ApiKey);

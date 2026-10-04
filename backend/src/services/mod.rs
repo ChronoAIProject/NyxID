@@ -269,4 +269,8 @@ pub mod assistant_voice;
 #[cfg(test)]
 mod org_group_tests;
 
+pub mod machine_access_service;
 pub mod voice;
+
+#[cfg(test)]
+mod machine_access_tests;

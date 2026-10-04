@@ -1,6 +1,7 @@
 //! Aurinko's documented account-token email and signed notification contracts.
 //! Production requests have one fixed origin and never follow redirects.
 
+use crate::models::channel_thread::{ChannelThreadFacts, ThreadKind, ThreadSenderKind};
 use crate::services::{
     channel_platform::*,
     channel_registration::{BOT_TOKEN_FIELD, RegistrationField},
@@ -83,6 +84,55 @@ fn address(value: &Value) -> Option<&str> {
                 .chars()
                 .any(|c| c.is_control() || c.is_whitespace() || matches!(c, ',' | ';' | '<' | '>'))
     })
+}
+
+fn addresses(value: &Value) -> Vec<String> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            entry
+                .as_str()
+                .or_else(|| entry["address"].as_str())
+                .filter(|value| address(&json!({"address": value})).is_some())
+                .map(|value| value.to_ascii_lowercase())
+        })
+        .collect()
+}
+
+fn header(message: &Value, name: &str) -> Option<String> {
+    message["internetHeaders"]
+        .as_array()?
+        .iter()
+        .find_map(|entry| {
+            (entry["name"].as_str()?.eq_ignore_ascii_case(name))
+                .then(|| {
+                    entry["value"]
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|v| !v.is_empty())
+                })
+                .flatten()
+                .map(str::to_owned)
+        })
+}
+
+fn reply_parent(message: &Value) -> Option<String> {
+    let value = message["inReplyTo"]
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| header(message, "in-reply-to"))?;
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
+fn hash_email(address: &str, key: Option<&[u8]>) -> Option<String> {
+    crate::services::audit_service::keyed_fingerprint(
+        key,
+        b"email-participant",
+        address.trim().to_ascii_lowercase().as_bytes(),
+    )
 }
 
 impl AurinkoAdapter {
@@ -310,6 +360,20 @@ fn normalize(
     account: &Value,
     message: &Value,
 ) -> AppResult<Option<InboundMessage>> {
+    normalize_with_key(
+        bot,
+        account,
+        message,
+        crate::services::audit_service::audit_chain_hmac_key(),
+    )
+}
+
+fn normalize_with_key(
+    bot: &ChannelBot,
+    account: &Value,
+    message: &Value,
+    audit_key: Option<&[u8]>,
+) -> AppResult<Option<InboundMessage>> {
     let labels = message["sysLabels"].as_array().ok_or_else(upstream)?;
     if labels
         .iter()
@@ -362,6 +426,32 @@ fn normalize(
     }
     // Attachment bytes and recipient lists are not forwarded automatically.
     // The AI Service offers authenticated attachment reads under its own scope.
+    let mailbox = mailbox_addresses(account);
+    let from = sender.to_ascii_lowercase();
+    let to = addresses(&message["to"]);
+    let cc = addresses(&message["cc"]);
+    let mut participants = vec![from.clone()];
+    participants.extend(to.iter().cloned());
+    participants.extend(cc.iter().cloned());
+    participants.sort();
+    participants.dedup();
+    participants.truncate(64);
+    let parent = reply_parent(message).filter(|value| opaque(value).is_ok());
+    let mut raw_data = json!({"account_id": bot.platform_bot_id, "message_id": id, "thread_id": thread, "subject": subject, "has_attachments": message["hasAttachments"].as_bool().unwrap_or(false)});
+    // Fingerprints are additive follow metadata. If the process has not yet
+    // initialized its audit key, keep the legacy message intact and let the
+    // thread-facts adapter return None.
+    if let (Some(sender_hash), Some(participant_hashes)) = (
+        hash_email(&from, audit_key),
+        participants
+            .iter()
+            .map(|p| hash_email(p, audit_key))
+            .collect::<Option<Vec<_>>>(),
+    ) {
+        raw_data["email"] = json!({"account_id": bot.platform_bot_id, "thread_id": thread,
+            "reply_parent_id": parent, "mailbox_to": to.iter().any(|address| mailbox.iter().any(|own| own.eq_ignore_ascii_case(address))),
+            "sender_hash": sender_hash, "participant_hashes": participant_hashes});
+    }
     Ok(Some(InboundMessage {
         platform_message_id: id.into(),
         conversation_id: conversation_id(&bot.platform_bot_id, thread),
@@ -373,8 +463,64 @@ fn normalize(
         attachments: vec![],
         reply_to_platform_message_id: None,
         thread_id: Some(thread.into()),
-        raw_data: json!({"account_id": bot.platform_bot_id, "message_id": id, "thread_id": thread, "subject": subject, "has_attachments": message["hasAttachments"].as_bool().unwrap_or(false)}),
+        raw_data,
     }))
+}
+
+fn email_history(
+    messages: &[Value],
+    thread: &str,
+    before: DateTime<Utc>,
+    audit_key: Option<&[u8]>,
+) -> crate::services::channel_thread_service::ThreadHistory {
+    let mut history = crate::services::channel_thread_service::ThreadHistory::default();
+    for message in messages {
+        let (Some(id), Some(sender), Some(received)) = (
+            message["id"].as_str(),
+            address(&message["from"]),
+            message["receivedAt"].as_str(),
+        ) else {
+            history.partial = true;
+            continue;
+        };
+        let Ok(created_at) = received.parse::<DateTime<Utc>>() else {
+            history.partial = true;
+            continue;
+        };
+        if message["threadId"].as_str() != Some(thread) {
+            history.partial = true;
+            continue;
+        }
+        let mut participants = vec![sender.to_ascii_lowercase()];
+        for field in ["to", "cc"] {
+            participants.extend(addresses(&message[field]));
+        }
+        participants.sort();
+        participants.dedup();
+        participants.truncate(64);
+        let Some(participant_hashes) = participants
+            .iter()
+            .map(|p| hash_email(p, audit_key))
+            .collect::<Option<Vec<_>>>()
+        else {
+            history.partial = true;
+            continue;
+        };
+        let body = message["body"].as_str().unwrap_or_default().to_owned();
+        let item = crate::services::channel_thread_service::ThreadHistoryMessage {
+            message_id: id.to_owned(),
+            sender_id: sender.to_owned(),
+            sender_kind: ThreadSenderKind::Human,
+            created_at,
+            text: body,
+            participant_hashes,
+        };
+        if item.created_at >= before {
+            continue;
+        }
+        crate::services::channel_adapters::thread_support::push(&mut history, item, before);
+    }
+    history
 }
 
 #[async_trait::async_trait]
@@ -391,6 +537,97 @@ impl PlatformAdapter for AurinkoAdapter {
             ..OutboundCapabilities::NONE
         }
     }
+    fn thread_capabilities(&self) -> crate::services::channel_platform::ThreadCapabilities {
+        crate::services::channel_platform::ThreadCapabilities {
+            thread_reply: true,
+            thread_follow: true,
+            thread_history: true,
+            private_thread: true,
+        }
+    }
+    fn thread_facts(
+        &self,
+        inbound: &InboundMessage,
+        _: &ChannelBot,
+        _: Option<&str>,
+    ) -> Option<ChannelThreadFacts> {
+        super::thread_facts::aurinko(inbound)
+    }
+    async fn resolve_thread(
+        &self,
+        _http: &reqwest::Client,
+        credentials: &BotCredentials<'_>,
+        facts: &ChannelThreadFacts,
+        _ancestors: &[ChannelThreadFacts],
+    ) -> AppResult<Option<ChannelThreadFacts>> {
+        if facts.kind != ThreadKind::Email {
+            return Ok(None);
+        }
+        let Some(message) = self.message(credentials.token, &facts.message_id).await? else {
+            return Ok(None);
+        };
+        if message["threadId"].as_str() != facts.root_id.as_deref() {
+            return Ok(None);
+        }
+        let mut resolved = facts.clone();
+        resolved.root_id = message["threadId"].as_str().map(str::to_owned);
+        resolved.native_thread_id = resolved.root_id.clone();
+        Ok(Some(resolved))
+    }
+    async fn send_bound_thread_reply(
+        &self,
+        db: &mongodb::Database,
+        _http: &reqwest::Client,
+        bot: &ChannelBot,
+        original: &ChannelMessage,
+        credentials: &BotCredentials<'_>,
+        conversation_id: &str,
+        _target: &crate::services::channel_thread_service::ThreadReplyTarget,
+        reply: &OutboundReply,
+    ) -> AppResult<Option<String>> {
+        channel_retry_ingress::with_lifecycle(
+            db,
+            true,
+            &bot.id,
+            self.reply_once(db, bot, original, credentials, conversation_id, reply),
+        )
+        .await
+    }
+    async fn thread_history(
+        &self,
+        _http: &reqwest::Client,
+        credentials: &BotCredentials<'_>,
+        target: &crate::services::channel_thread_service::ThreadReplyTarget,
+        before: DateTime<Utc>,
+    ) -> AppResult<crate::services::channel_thread_service::ThreadHistory> {
+        let facts = target.facts();
+        let Some(thread) = facts.root_id.as_deref() else {
+            return Err(crate::services::channel_thread_service::unavailable());
+        };
+        let (status, value) = self
+            .request(
+                Method::GET,
+                credentials.token,
+                &["email", "threads", thread],
+                &[("bodyType", "text")],
+                None,
+            )
+            .await?;
+        if !status.is_success() {
+            return Err(crate::services::channel_thread_service::unavailable());
+        }
+        let messages = value["messages"]
+            .as_array()
+            .or_else(|| value["records"].as_array())
+            .ok_or_else(crate::services::channel_thread_service::unavailable)?;
+        Ok(email_history(
+            messages,
+            thread,
+            before,
+            crate::services::audit_service::audit_chain_hmac_key(),
+        ))
+    }
+
     fn media_capabilities(&self) -> MediaCapabilities {
         MediaCapabilities::NONE
     }

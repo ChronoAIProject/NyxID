@@ -389,6 +389,7 @@ impl PlatformAdapter for SlackAdapter {
             thread_reply: true,
             thread_follow: true,
             thread_history: true,
+            ..Default::default()
         }
     }
 
