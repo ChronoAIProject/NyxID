@@ -3,6 +3,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { useWatch } from "react-hook-form";
 import { Check } from "lucide-react";
 import { toast } from "sonner";
+import { ApiError } from "@/lib/api-client";
 import { firstNestedErrorMessage } from "@/lib/form-errors";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { Button } from "@/components/ui/button";
@@ -25,7 +26,11 @@ import {
   FormMessage,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
-import { useCreateServicePool, useUpdateServicePool } from "@/hooks/use-pools";
+import {
+  useCreateServicePool,
+  useUpdateServicePool,
+  useReloadServicePool,
+} from "@/hooks/use-pools";
 import {
   createServicePoolSchema,
   defaultFailoverPolicy,
@@ -33,6 +38,7 @@ import {
   type FailoverPolicy,
   type ServicePool,
 } from "@/schemas/pools";
+import { poolEditorDefaults, poolEditorPayload } from "./pool-editor-state";
 import { PoolConnectionsEditor } from "./pool-connections-editor";
 import { Choice, PolicyEditor, Toggle } from "./pool-controls";
 import { message, strategyLabels } from "./pool-labels";
@@ -53,28 +59,22 @@ export function PoolEditor({
 }) {
   const create = useCreateServicePool();
   const update = useUpdateServicePool();
+  const reload = useReloadServicePool();
+  const [revision, setRevision] = useState(pool?.config_revision ?? 0);
+  const [conflict, setConflict] = useState(false);
   const form = useAppForm<CreateServicePoolInput>({
-    resolver: zodResolver(
-      createServicePoolSchema.refine(
-        (input) => Boolean(pool) || input.members.length > 0,
-        {
-          path: ["members"],
-          message: "Add at least one connection to create a pool.",
-        },
-      ),
-    ),
+    resolver: (input, context, options) =>
+      zodResolver(
+        createServicePoolSchema.refine(
+          (input) => Boolean(pool) || input.members.length > 0,
+          {
+            path: ["members"],
+            message: "Add at least one connection to create a pool.",
+          },
+        ),
+      )(poolEditorPayload(input), context, options),
     mode: "onChange",
-    defaultValues: {
-      slug: pool?.slug ?? "",
-      name: pool?.name ?? "",
-      description: pool?.description ?? "",
-      strategy: pool?.strategy ?? "priority",
-      tier_balance: pool?.tier_balance ?? "round_robin",
-      member_contract: pool?.member_contract ?? "same_api",
-      failover: pool?.failover ?? null,
-      members: pool?.members ?? [],
-      is_active: pool?.is_active ?? true,
-    },
+    defaultValues: poolEditorDefaults(pool),
   });
   const values = useWatch({ control: form.control });
   const priority = values.strategy === "priority";
@@ -93,19 +93,18 @@ export function PoolEditor({
   function setStrategy(value: string) {
     const strategy = value as CreateServicePoolInput["strategy"];
     form.setValue("strategy", strategy);
-    if (strategy !== "priority") {
-      setContract("same_api");
-      form.setValue("tier_balance", "round_robin");
-      form.setValue("failover", null);
-      form.setValue(
-        "members",
-        form.getValues("members").map((m) => ({
-          ...m,
-          priority: 0,
-          model: null,
-          same_api_compatible: false,
-        })),
-      );
+    void form.trigger();
+  }
+  async function reloadLatest() {
+    if (!pool) return;
+    try {
+      const latest = await reload.mutateAsync(pool.id);
+      form.reset(poolEditorDefaults(latest));
+      setRevision(latest.config_revision ?? 0);
+      setConflict(false);
+      setOperation(null);
+    } catch (error) {
+      form.setError("root", { message: message(error) });
     }
   }
   async function save(input: CreateServicePoolInput) {
@@ -121,7 +120,7 @@ export function PoolEditor({
         await update.mutateAsync({
           ...normalized,
           poolId: pool.id,
-          expected_revision: pool.config_revision ?? 0,
+          expected_revision: revision,
           description: input.description?.trim() || null,
         });
       else
@@ -133,10 +132,11 @@ export function PoolEditor({
       toast.success(pool ? "Service pool saved" : "Service pool created");
       onClose();
     } catch (error) {
+      if (error instanceof ApiError && error.status === 409) setConflict(true);
       form.setError("root", { message: message(error) });
     }
   }
-  const pending = create.isPending || update.isPending;
+  const pending = create.isPending || update.isPending || reload.isPending;
   const { isDirty, isValid, errors } = form.formState;
   const rootError = errors.root?.message ?? firstNestedErrorMessage(errors);
   return (
@@ -149,7 +149,7 @@ export function PoolEditor({
       <DialogContent
         onCloseAutoFocus={onCloseAutoFocus}
         scrollMode="body"
-        className="md:max-w-2xl [&_input:focus-visible]:border-primary [&_input:focus-visible]:ring-1 [&_input:focus-visible]:ring-primary/40"
+        className="data-[state=open]:!animate-none md:data-[state=open]:!animate-none md:max-w-2xl [&_input:focus-visible]:border-primary [&_input:focus-visible]:ring-1 [&_input:focus-visible]:ring-primary/40"
       >
         <DialogHeader>
           <DialogTitle>
@@ -303,20 +303,6 @@ export function PoolEditor({
                   />
                   {priority && (
                     <>
-                      <Choice
-                        label="Connections with the same priority"
-                        value={values.tier_balance ?? "round_robin"}
-                        options={[
-                          ["round_robin", "Take turns"],
-                          ["weighted", "Share by weight"],
-                        ]}
-                        onChange={(v) =>
-                          form.setValue(
-                            "tier_balance",
-                            v as "round_robin" | "weighted",
-                          )
-                        }
-                      />
                       <Toggle
                         label="Customize retry settings"
                         checked={values.failover != null}
@@ -345,6 +331,24 @@ export function PoolEditor({
               </details>
             </DialogBody>
             {rootError && <ErrorBanner message={rootError} />}
+            {conflict && (
+              <div className="flex items-center gap-3 pt-2">
+                <p className="flex-1 text-[12px] text-muted-foreground">
+                  This pool changed elsewhere. Reload the latest settings to
+                  replace this draft before saving.
+                </p>
+                <Button
+                  type="button"
+                  variant="outline"
+                  isLoading={reload.isPending}
+                  onClick={() => {
+                    void reloadLatest();
+                  }}
+                >
+                  Reload latest
+                </Button>
+              </div>
+            )}
             <DialogFooter className="pt-3 md:pt-3">
               <Button
                 type="button"
@@ -358,7 +362,7 @@ export function PoolEditor({
                 type="submit"
                 variant="primary"
                 isLoading={pending}
-                disabled={!isDirty || !isValid}
+                disabled={!isDirty || !isValid || conflict || pending}
               >
                 {pool ? "Save" : "Create pool"}
               </Button>

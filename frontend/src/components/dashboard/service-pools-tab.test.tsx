@@ -9,6 +9,7 @@ import {
 import type { PoolCandidate, ServicePool } from "@/schemas/pools";
 const mocks = vi.hoisted(() => ({
   update: vi.fn(),
+  reload: vi.fn(),
   create: vi.fn(),
   candidates: vi.fn(),
   health: vi.fn(),
@@ -18,6 +19,7 @@ const mocks = vi.hoisted(() => ({
 }));
 vi.mock("@/hooks/use-pools", () => ({
   useUpdateServicePool: () => ({ mutateAsync: mocks.update, isPending: false }),
+  useReloadServicePool: () => ({ mutateAsync: mocks.reload, isPending: false }),
   useCreateServicePool: () => ({ mutateAsync: mocks.create, isPending: false }),
   usePoolCandidates: mocks.candidates,
   useDeleteServicePool: () => ({ isPending: false }),

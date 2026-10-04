@@ -17,14 +17,36 @@ const candidates = ids.map((id, index) => ({
       : "compatibility_declaration_required",
   credential_binding: index === 2 ? "user" : "none",
   protocol: null,
-  catalog_service_id: null,
+  catalog_service_id: index === 2 ? "catalog-failed" : "catalog-shared",
+  group_name: "Shared service",
+  group_slug: index === 2 ? "failed-service" : "shared-service",
   requires_compatibility_declaration: true,
   cooldown_until: null,
   consecutive_failures: 0,
   last_status: null,
 }));
+const manyCandidates = Array.from({ length: 12 }, (_, index) => ({
+  ...candidates[0]!,
+  user_service_id: `44444444-4444-4444-8444-${String(index + 1).padStart(12, "0")}`,
+  name: `Responsive member ${index + 1}`,
+  slug: `responsive-member-${index + 1}`,
+  catalog_service_id: `catalog-${index % 3}`,
+  group_name: `Service group ${(index % 3) + 1}`,
+  group_slug: `service-group-${(index % 3) + 1}`,
+  eligible: true,
+  reason: null,
+  requires_compatibility_declaration: false,
+}));
 
-async function mockConnections(page: Page) {
+async function mockConnections(
+  page: Page,
+  sourceRows = candidates,
+  options: {
+    pageSize?: number;
+    delayMs?: number;
+    peerSensitive?: boolean;
+  } = {},
+) {
   await page.route("**/api/v1/**", async (route) => {
     const url = new URL(route.request().url());
     const path = url.pathname.replace("/api/v1", "");
@@ -46,15 +68,36 @@ async function mockConnections(page: Page) {
     else if (path.endsWith("/candidates")) {
       const search = (url.searchParams.get("search") ?? "").toLowerCase();
       const peers = (url.searchParams.get("peer_ids") ?? "").split(",");
+      const selectedOnly = url.searchParams.get("selected_only") === "true";
+      const filtered = sourceRows.filter((row) =>
+        url.searchParams.get("selected_only") === "true"
+          ? peers.includes(row.user_service_id)
+          : row.name.toLowerCase().includes(search) ||
+            row.slug.includes(search) ||
+            row.group_name.toLowerCase().includes(search) ||
+            row.group_slug.includes(search),
+      );
+      if (!selectedOnly && options.delayMs)
+        await new Promise((resolve) => setTimeout(resolve, options.delayMs));
+      const offset = selectedOnly
+        ? 0
+        : Number(url.searchParams.get("after") ?? 0);
+      const limit = selectedOnly
+        ? filtered.length
+        : (options.pageSize ?? filtered.length);
+      const hasMore = offset + limit < filtered.length;
       body = {
-        candidates: candidates.filter((row) =>
-          url.searchParams.get("selected_only") === "true"
-            ? peers.includes(row.user_service_id)
-            : row.name.toLowerCase().includes(search) ||
-              row.slug.includes(search),
-        ),
-        has_more: false,
-        next_cursor: null,
+        candidates: filtered
+          .slice(offset, offset + limit)
+          .map((row) =>
+            options.peerSensitive &&
+            peers.some(Boolean) &&
+            !peers.includes(row.user_service_id)
+              ? { ...row, eligible: false, reason: "incompatible_protocol" }
+              : row,
+          ),
+        has_more: hasMore,
+        next_cursor: hasMore ? String(offset + limit) : null,
         operation_checked: false,
         method: null,
         path: null,
@@ -119,6 +162,16 @@ test("pool multi-select survives responsive resize and changing member cards wit
   await expect(
     picker.getByRole("option", { name: "Failed connection", exact: true }),
   ).toHaveAttribute("aria-disabled", "true");
+  await expect(
+    picker.getByRole("group", {
+      name: "Shared service (shared-service) (2 loaded)",
+    }),
+  ).toBeVisible();
+  await expect(
+    picker.getByRole("group", {
+      name: "Shared service (failed-service) (1 loaded)",
+    }),
+  ).toBeVisible();
   await page.screenshot({
     path: testInfo.outputPath("picker-desktop.png"),
     animations: "disabled",
@@ -186,4 +239,251 @@ test("pool multi-select survives responsive resize and changing member cards wit
         (window as Window & { poolLayoutErrors: string[] }).poolLayoutErrors,
     ),
   ).toEqual([]);
+});
+
+test("opening routing in a fresh pool dialog does not produce observer errors", async ({
+  page,
+}) => {
+  const runtimeErrors: string[] = [];
+  await page.addInitScript(() => {
+    const errors: string[] = [];
+    Object.assign(window, { poolLayoutErrors: errors });
+    window.addEventListener(
+      "error",
+      (event) => {
+        if (event.message) errors.push(event.message);
+      },
+      true,
+    );
+  });
+  page.on("pageerror", (error) => runtimeErrors.push(error.message));
+  page.on("console", (entry) => {
+    if (entry.type() === "error") runtimeErrors.push(entry.text());
+  });
+  await mockConnections(page);
+  await page.goto("/keys?tab=pools");
+
+  for (let cycle = 0; cycle < 10; cycle++) {
+    await page.getByRole("button", { name: /^Create pool$/i }).click();
+    const form = page.getByRole("dialog", {
+      name: "Create service pool",
+      exact: true,
+    });
+    await form.getByLabel("Name", { exact: true }).fill(`Routing ${cycle}`);
+    await form.getByRole("combobox", { name: "Routing" }).click();
+    await page
+      .getByRole("option", { name: "Weighted balancing", exact: true })
+      .click();
+    await form.getByRole("button", { name: "Close" }).click();
+    await expect(form).toBeHidden();
+  }
+
+  expect(runtimeErrors).toEqual([]);
+  expect(
+    await page.evaluate(
+      () =>
+        (window as Window & { poolLayoutErrors: string[] }).poolLayoutErrors,
+    ),
+  ).toEqual([]);
+});
+
+test("keeps a long picker within short landscape and mobile viewports", async ({
+  page,
+}) => {
+  const runtimeErrors: string[] = [];
+  await page.addInitScript(() => {
+    const errors: string[] = [];
+    Object.assign(window, { poolLayoutErrors: errors });
+    window.addEventListener(
+      "error",
+      (event) => {
+        if (event.message) errors.push(event.message);
+      },
+      true,
+    );
+  });
+  page.on("pageerror", (error) => runtimeErrors.push(error.message));
+  page.on("console", (entry) => {
+    if (entry.type() === "error") runtimeErrors.push(entry.text());
+  });
+  await mockConnections(page, manyCandidates);
+  await page.setViewportSize({ width: 1024, height: 600 });
+  await page.goto("/keys?tab=pools");
+  await page.getByRole("button", { name: /^Create pool$/i }).click();
+  const form = page.getByRole("dialog", {
+    name: "Create service pool",
+    exact: true,
+  });
+  await form.getByLabel("Name", { exact: true }).fill("Short viewport pool");
+  await form.getByRole("button", { name: "Choose connections" }).click();
+  const picker = page.getByRole("dialog", {
+    name: "Choose pool connections",
+    exact: true,
+  });
+  await expect(picker.getByRole("option")).toHaveCount(12);
+
+  for (const [width, height] of [
+    [1024, 600],
+    [780, 390],
+    [390, 480],
+  ] as const) {
+    await page.setViewportSize({ width, height });
+    await expect
+      .poll(async () => {
+        const box = await picker.boundingBox();
+        return Boolean(
+          box &&
+          box.x >= 0 &&
+          box.y >= 0 &&
+          box.x + box.width <= width + 1 &&
+          box.y + box.height <= height + 1,
+        );
+      })
+      .toBe(true);
+    expect(
+      await picker.evaluate((node) => node.scrollWidth <= node.clientWidth + 1),
+    ).toBe(true);
+    const firstOption = picker.getByRole("option").first();
+    const scrollViewport = picker.getByRole("listbox").locator("..");
+    await firstOption.scrollIntoViewIfNeeded();
+    await expect
+      .poll(async () => {
+        const listBox = await scrollViewport.boundingBox();
+        const optionBox = await firstOption.boundingBox();
+        return Boolean(
+          listBox &&
+          optionBox &&
+          optionBox.y >= listBox.y - 1 &&
+          optionBox.y + optionBox.height <= listBox.y + listBox.height + 1,
+        );
+      })
+      .toBe(true);
+  }
+  expect(runtimeErrors).toEqual([]);
+  expect(
+    await page.evaluate(
+      () =>
+        (window as Window & { poolLayoutErrors: string[] }).poolLayoutErrors,
+    ),
+  ).toEqual([]);
+});
+
+test("selection preserves delayed inventory pages and scroll, and final pagination restores keyboard focus", async ({
+  page,
+}) => {
+  const rows = Array.from({ length: 40 }, (_, index) => ({
+    ...manyCandidates[0]!,
+    user_service_id: `55555555-5555-4555-8555-${String(index + 1).padStart(12, "0")}`,
+    name: `Account ${index + 1}`,
+    slug: `account-${index + 1}`,
+  }));
+  await mockConnections(page, rows, { pageSize: 20, delayMs: 200 });
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.goto("/keys?tab=pools");
+  await page.getByRole("button", { name: /^Create pool$/i }).click();
+  await page.getByRole("button", { name: "Choose connections" }).click();
+  const picker = page.getByRole("dialog", {
+    name: "Choose pool connections",
+    exact: true,
+  });
+  const search = picker.getByRole("combobox");
+  await expect(picker.getByRole("option")).toHaveCount(20);
+  await search.press("Tab");
+  await expect(
+    picker.getByRole("button", { name: "Load more connections" }),
+  ).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(picker.getByRole("option")).toHaveCount(40);
+  await expect(search).toBeFocused();
+  const last = picker.getByRole("option", { name: "Account 40", exact: true });
+  await last.scrollIntoViewIfNeeded();
+  const scrollTop = () =>
+    picker
+      .getByRole("listbox")
+      .evaluate((node) => node.parentElement!.scrollTop);
+  const before = await scrollTop();
+  expect(before).toBeGreaterThan(0);
+  for (const selected of ["true", "false", "true"]) {
+    const refreshedLastPage = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return (
+        url.pathname.endsWith("/candidates") &&
+        url.searchParams.get("after") === "20"
+      );
+    });
+    await last.click();
+    await expect(last).toHaveAttribute("aria-selected", selected);
+    await expect(picker.getByRole("option")).toHaveCount(40);
+    await refreshedLastPage;
+    await expect(picker.getByRole("option")).toHaveCount(40);
+    await expect.poll(scrollTop).toBe(before);
+    await expect(search).toBeFocused();
+  }
+  expect(errors).toEqual([]);
+});
+
+test("pagination and selection finish without stale options or dropped pages", async ({
+  page,
+}) => {
+  const rows = manyCandidates.slice(0, 8).map((row) => ({
+    ...row,
+    catalog_service_id: "shared",
+    group_name: "Shared service",
+    group_slug: "shared",
+  }));
+  await mockConnections(page, rows, {
+    pageSize: 3,
+    delayMs: 500,
+    peerSensitive: true,
+  });
+  await page.goto("/keys?tab=pools");
+  await page.getByRole("button", { name: /^Create pool$/i }).click();
+  await page.getByRole("button", { name: "Choose connections" }).click();
+  const picker = page.getByRole("dialog", {
+    name: "Choose pool connections",
+    exact: true,
+  });
+  const primary = picker.getByRole("option", {
+    name: rows[0]!.name,
+    exact: true,
+  });
+  const second = picker.getByRole("option", {
+    name: rows[1]!.name,
+    exact: true,
+  });
+  const more = picker.getByRole("button", { name: "Load more connections" });
+  await expect(picker.getByRole("option")).toHaveCount(3);
+  await more.click();
+  await primary.click();
+  await expect(second).toHaveAttribute("aria-disabled", "true");
+  await expect(picker.getByRole("listbox")).toHaveAttribute(
+    "aria-busy",
+    "false",
+  );
+  await expect(picker.getByRole("option")).toHaveCount(6);
+  await expect(second).toHaveAttribute("aria-disabled", "true");
+  await primary.click();
+  await expect(more).toBeDisabled();
+  await expect(second).toHaveAttribute("aria-disabled", "true");
+  await expect(second).toHaveAttribute("aria-disabled", "false");
+  await expect(more).toBeEnabled();
+  await more.click();
+  await expect(picker.getByRole("option")).toHaveCount(8);
+  const search = picker.getByRole("combobox");
+  await search.fill(rows[0]!.name);
+  await expect(picker.getByRole("option")).toHaveCount(1);
+  await primary.click();
+  await expect(picker.getByRole("listbox")).toHaveAttribute(
+    "aria-busy",
+    "false",
+  );
+  await search.clear();
+  await expect(picker.getByRole("option")).toHaveCount(8);
+  await expect(second).toHaveAttribute("aria-disabled", "true");
+  await expect(picker.getByRole("listbox")).toHaveAttribute(
+    "aria-busy",
+    "false",
+  );
+  await expect(second).toHaveAttribute("aria-disabled", "true");
 });

@@ -1,6 +1,7 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { Check, ChevronsUpDown } from "lucide-react";
 import { ErrorBanner } from "@/components/shared/error-banner";
+import { ServiceIcon } from "@/components/service-icon";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -19,6 +20,8 @@ type Props = {
   onToggle: (row: PoolCandidate) => void;
   isLoading: boolean;
   isSearching: boolean;
+  isCheckingCompatibility?: boolean;
+  isRefreshing?: boolean;
   isError: boolean;
   error: unknown;
   onRetry: () => void;
@@ -35,6 +38,8 @@ export function PoolConnectionPicker({
   onToggle,
   isLoading,
   isSearching,
+  isCheckingCompatibility = false,
+  isRefreshing = false,
   isError,
   error,
   onRetry,
@@ -48,7 +53,57 @@ export function PoolConnectionPicker({
   const listId = `${id}-list`;
   const input = useRef<HTMLInputElement>(null);
   const list = useRef<HTMLDivElement>(null);
-  const activeIndex = rows.findIndex((row) => row.user_service_id === activeId);
+  const loadMoreButton = useRef<HTMLButtonElement>(null);
+  const restoreLoadMoreFocus = useRef(false);
+  useEffect(() => {
+    if (isFetchingNextPage || !restoreLoadMoreFocus.current) return;
+    restoreLoadMoreFocus.current = false;
+    if (document.activeElement === document.body)
+      (hasNextPage ? loadMoreButton.current : input.current)?.focus();
+  }, [isFetchingNextPage, hasNextPage, rows]);
+  const groups = useMemo(() => {
+    const grouped = new Map<
+      string,
+      {
+        key: string;
+        name: string;
+        slug: string | null;
+        rows: PoolCandidate[];
+      }
+    >();
+    const seen = new Set<string>();
+    for (const row of rows) {
+      if (seen.has(row.user_service_id)) continue;
+      seen.add(row.user_service_id);
+      const key = row.catalog_service_id ?? "custom";
+      const existing = grouped.get(key);
+      if (existing) {
+        existing.rows.push(row);
+        continue;
+      }
+      grouped.set(key, {
+        key,
+        name:
+          row.group_name?.trim() ||
+          (row.catalog_service_id ? "Catalog service" : "Custom connections"),
+        slug: row.group_slug ?? null,
+        rows: [row],
+      });
+    }
+    return [...grouped.values()];
+  }, [rows]);
+  const displayRows = useMemo(
+    () => groups.flatMap((group) => group.rows),
+    [groups],
+  );
+  const displayIndex = useMemo(
+    () =>
+      new Map(displayRows.map((row, index) => [row.user_service_id, index])),
+    [displayRows],
+  );
+  const activeIndex = displayRows.findIndex(
+    (row) => row.user_service_id === activeId,
+  );
   const busy = isLoading || isSearching;
   useEffect(() => {
     if (activeIndex >= 0)
@@ -59,7 +114,8 @@ export function PoolConnectionPicker({
   function disabled(row: PoolCandidate) {
     return (
       !selectedIds.includes(row.user_service_id) &&
-      (selectedIds.length >= 50 ||
+      (isCheckingCompatibility ||
+        selectedIds.length >= 50 ||
         (!row.eligible && row.reason !== "compatibility_declaration_required"))
     );
   }
@@ -68,14 +124,14 @@ export function PoolConnectionPicker({
     input.current?.focus();
   }
   function navigate(direction: number) {
-    if (!rows.length) return;
+    if (!displayRows.length) return;
     const next =
       activeIndex < 0
         ? direction > 0
           ? 0
-          : rows.length - 1
-        : (activeIndex + direction + rows.length) % rows.length;
-    setActiveId(rows[next]!.user_service_id);
+          : displayRows.length - 1
+        : (activeIndex + direction + displayRows.length) % displayRows.length;
+    setActiveId(displayRows[next]!.user_service_id);
   }
   return (
     <div className="space-y-2">
@@ -99,7 +155,7 @@ export function PoolConnectionPicker({
           align="start"
           collisionPadding={12}
           aria-label="Choose pool connections"
-          className="flex max-h-[min(28rem,var(--radix-popover-content-available-height))] w-[var(--radix-popover-trigger-width)] max-w-[calc(100vw-1.5rem)] flex-col gap-2 p-2 data-[state=closed]:hidden data-[state=closed]:animate-none"
+          className="flex max-h-[min(28rem,calc(50dvh-2rem))] w-[var(--radix-popover-trigger-width)] max-w-[calc(100vw-1.5rem)] flex-col gap-2 p-2 [@media(max-height:500px)]:gap-1 [@media(max-height:500px)]:p-1.5 data-[state=closed]:hidden data-[state=closed]:animate-none"
           onOpenAutoFocus={(event) => {
             event.preventDefault();
             input.current?.focus();
@@ -136,12 +192,19 @@ export function PoolConnectionPicker({
                 navigate(event.key === "ArrowDown" ? 1 : -1);
               } else if (event.key === "Enter") {
                 event.preventDefault();
-                if (activeIndex >= 0) choose(rows[activeIndex]!);
+                if (activeIndex >= 0) choose(displayRows[activeIndex]!);
               }
             }}
           />
-          <p className="px-1 text-[11px] text-muted-foreground">
-            Select multiple connections. Select again to remove.
+          <p
+            aria-live="polite"
+            className="px-1 text-[11px] text-muted-foreground [@media(max-height:500px)]:sr-only"
+          >
+            {isCheckingCompatibility
+              ? isError
+                ? "Compatibility check failed."
+                : "Checking compatibility…"
+              : "Select multiple connections. Select again to remove."}
           </p>
           <div className="min-h-0 overflow-y-auto overscroll-contain">
             {isError && (
@@ -163,51 +226,78 @@ export function PoolConnectionPicker({
               role="listbox"
               aria-label="Connections"
               aria-multiselectable="true"
-              aria-busy={busy}
+              aria-busy={busy || isCheckingCompatibility}
             >
-              {rows.map((row, index) => {
-                const selected = selectedIds.includes(row.user_service_id);
-                const unavailable = disabled(row);
-                return (
-                  <div
-                    key={row.user_service_id}
-                    id={`${id}-option-${index}`}
-                    data-index={index}
-                    role="option"
-                    aria-label={row.name || row.slug}
-                    aria-describedby={`${id}-description-${index}`}
-                    aria-selected={selected}
-                    aria-disabled={unavailable}
-                    className={`flex items-start gap-2 rounded-lg p-2 text-left ${activeIndex === index ? "bg-accent ring-1 ring-inset ring-primary/40" : "hover:bg-accent/50"} ${unavailable ? "cursor-not-allowed" : "cursor-pointer"}`}
-                    onPointerDown={(event) => event.preventDefault()}
-                    onClick={() => choose(row)}
-                  >
-                    <span
-                      aria-hidden="true"
-                      className={`mt-0.5 flex size-4 shrink-0 items-center justify-center rounded border ${unavailable ? "opacity-50" : ""} ${selected ? "border-primary bg-primary text-primary-foreground" : "border-muted-foreground/50"}`}
-                    >
-                      {selected && <Check className="size-3" />}
+              {groups.map((group) => (
+                <div
+                  key={group.key}
+                  role="group"
+                  aria-label={`${group.name}${group.slug ? ` (${group.slug})` : ""} (${group.rows.length} loaded)`}
+                  className="border-b border-border/40 last:border-b-0"
+                >
+                  <div className="flex min-w-0 items-center gap-2 px-2 pb-1 pt-2 text-[11px] font-semibold text-muted-foreground">
+                    <ServiceIcon slug={group.slug} size="xs" />
+                    <span className="min-w-0 flex-1 break-words">
+                      {group.name}
                     </span>
-                    <div className="min-w-0 flex-1">
-                      <p className="break-words text-[12px] font-medium">
-                        {row.name || row.slug}
-                      </p>
-                      <div
-                        id={`${id}-description-${index}`}
-                        className="break-words text-[11px] text-muted-foreground"
-                      >
-                        <p>
-                          {row.slug} · {bindingLabel(row.credential_binding)}
-                          {row.protocol
-                            ? ` · ${protocolLabel(row.protocol)}`
-                            : ""}
-                        </p>
-                        {row.reason && <p className="mt-0.5">{reason(row)}</p>}
-                      </div>
-                    </div>
+                    {group.slug && (
+                      <span className="max-w-[35%] shrink-0 break-all font-normal">
+                        {group.slug}
+                      </span>
+                    )}
+                    <span className="shrink-0 font-normal">
+                      {group.rows.length} loaded
+                    </span>
                   </div>
-                );
-              })}
+                  {group.rows.map((row) => {
+                    const index = displayIndex.get(row.user_service_id) ?? 0;
+                    const selected = selectedIds.includes(row.user_service_id);
+                    const unavailable = disabled(row);
+                    return (
+                      <div
+                        key={row.user_service_id}
+                        id={`${id}-option-${index}`}
+                        data-index={index}
+                        role="option"
+                        aria-label={row.name || row.slug}
+                        aria-describedby={`${id}-description-${index}`}
+                        aria-selected={selected}
+                        aria-disabled={unavailable}
+                        className={`flex min-w-0 items-start gap-2 rounded-lg p-2 text-left ${activeIndex === index ? "bg-accent ring-1 ring-inset ring-primary/40" : "hover:bg-accent/50"} ${unavailable ? "cursor-not-allowed" : "cursor-pointer"}`}
+                        onPointerDown={(event) => event.preventDefault()}
+                        onClick={() => choose(row)}
+                      >
+                        <span
+                          aria-hidden="true"
+                          className={`mt-0.5 flex size-4 shrink-0 items-center justify-center rounded border ${unavailable ? "opacity-50" : ""} ${selected ? "border-primary bg-primary text-primary-foreground" : "border-muted-foreground/50"}`}
+                        >
+                          {selected && <Check className="size-3" />}
+                        </span>
+                        <div className="min-w-0 flex-1">
+                          <p className="break-words text-[12px] font-medium">
+                            {row.name || row.slug}
+                          </p>
+                          <div
+                            id={`${id}-description-${index}`}
+                            className="break-words text-[11px] text-muted-foreground"
+                          >
+                            <p>
+                              {row.slug} ·{" "}
+                              {bindingLabel(row.credential_binding)}
+                              {row.protocol
+                                ? ` · ${protocolLabel(row.protocol)}`
+                                : ""}
+                            </p>
+                            {row.reason && (
+                              <p className="mt-0.5">{reason(row)}</p>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ))}
             </div>
             {!busy && !isError && rows.length === 0 && (
               <p
@@ -221,10 +311,18 @@ export function PoolConnectionPicker({
             )}
             {hasNextPage && (
               <Button
+                ref={loadMoreButton}
                 type="button"
                 className="mt-2 w-full"
                 isLoading={isFetchingNextPage}
-                onClick={onLoadMore}
+                disabled={
+                  isFetchingNextPage || isRefreshing || isCheckingCompatibility
+                }
+                onClick={(event) => {
+                  restoreLoadMoreFocus.current =
+                    document.activeElement === event.currentTarget;
+                  void onLoadMore();
+                }}
               >
                 Load more connections
               </Button>
