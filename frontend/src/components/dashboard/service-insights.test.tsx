@@ -95,6 +95,7 @@ const insight: ServiceInsight = {
   billing: {
     status: "resolved",
     credential_class: "nyxid_managed_master",
+    service_billing_configured: true,
     credential_label: "NyxID credential",
     account: { id: "person", kind: "personal", name: "Your personal account" },
     charge_status: "usage_based",
@@ -341,7 +342,7 @@ describe("service card billing and caller details", () => {
         screen.getByRole("button", { name: "Recent requests for Team OpenAI" }),
       ).getByText(/Codex CI/),
     ).toBeVisible();
-    expect(screen.getByText("NyxID credentials")).toBeVisible();
+    expect(screen.getByText("NyxID")).toBeVisible();
     expect(screen.getByText("Rate: 0.25 credits / request")).toBeVisible();
     expect(screen.getByText(/· 1 override$/)).toBeVisible();
     expect(screen.getByTitle(/^Your keys with access/)).toBeVisible();

@@ -205,51 +205,79 @@ describe("live grouped services", () => {
     }
     const user = userEvent.setup();
     render(preview());
-    const card = within(screen.getByRole("region", { name: "Unpriced service" }));
-    const summary = card.getByRole("button", { name: "Show billing for Unpriced service" });
+    const card = within(
+      screen.getByRole("region", { name: "Unpriced service" }),
+    );
+    const summary = card.getByRole("button", {
+      name: "Show billing for Unpriced service",
+    });
     expect(summary).toHaveTextContent(/^—$/);
     expect(summary).not.toHaveTextContent(/unverified/i);
     await user.hover(summary);
-    expect(await screen.findByRole("tooltip")).toHaveTextContent(/^Not billable by NyxID$/);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      /^Not billable by NyxID$/,
+    );
     await user.click(summary);
-    const billing = card.getByRole("region", { name: "Billing for Unpriced account 0" });
-    expect(within(billing).getByText("No NyxID usage charges configured")).toBeVisible();
-    expect(within(billing).queryByText("Credit billing unverified")).not.toBeInTheDocument();
-    const row = card.getByRole("button", { name: "Billing for Unpriced account 1" });
+    const billing = card.getByRole("region", {
+      name: "Billing for Unpriced account 0",
+    });
+    expect(
+      within(billing).getByText("No NyxID usage charges configured"),
+    ).toBeVisible();
+    expect(
+      within(billing).queryByText("Credit billing unverified"),
+    ).not.toBeInTheDocument();
+    const row = card.getByRole("button", {
+      name: "Billing for Unpriced account 1",
+    });
     expect(row).toHaveTextContent(/^—$/);
     await user.hover(row);
-    expect(await screen.findByRole("tooltip")).toHaveTextContent(/^Not billable by NyxID$/);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      /^Not billable by NyxID$/,
+    );
   });
 
   it.each([
-    { type: "api_key", auth: "bearer", label: "BYOK" },
+    { type: "api_key", auth: "bearer", label: "—" },
     { type: "api_key", auth: "none", label: "—" },
     { type: "oauth2", auth: "bearer", label: "—" },
-  ])("shows $label for a private $type service using $auth auth", ({ type, auth, label }) => {
-    const connection: KeyInfo = {
-      ...records[0]!,
-      id: "private",
-      label: "Private service",
-      slug: "private",
-      source: "custom",
-      catalog_service_id: null,
-      catalog_service_slug: null,
-      catalog_service_name: null,
-      credential_type: type,
-      auth_method: auth,
-    };
-    records.push(connection);
-    insightConnections.set(connection.id, {
-      service_id: connection.id,
-      billing: configuredBilling(connection),
-      usage: null,
-    });
-    render(preview());
-    expect(screen.getByRole("button", { name: "Show billing for Private service" })).toHaveTextContent(label);
-  });
+  ])(
+    "shows $label for a private $type service using $auth auth",
+    ({ type, auth, label }) => {
+      const connection: KeyInfo = {
+        ...records[0]!,
+        id: "private",
+        label: "Private service",
+        slug: "private",
+        source: "custom",
+        catalog_service_id: null,
+        catalog_service_slug: null,
+        catalog_service_name: null,
+        credential_type: type,
+        auth_method: auth,
+      };
+      records.push(connection);
+      insightConnections.set(connection.id, {
+        service_id: connection.id,
+        billing: configuredBilling(connection),
+        usage: null,
+      });
+      render(preview());
+      expect(
+        screen.getByRole("button", {
+          name: "Show billing for Private service",
+        }),
+      ).toHaveTextContent(label);
+    },
+  );
 
   it.each([
-    { name: "Twitter / X API", slug: "api-twitter", type: "oauth2", app: "own-app" },
+    {
+      name: "Twitter / X API",
+      slug: "api-twitter",
+      type: "oauth2",
+      app: "own-app",
+    },
     { name: "DeepSeek API", slug: "llm-deepseek", type: "api_key", app: null },
   ])(
     "shows $name supplied credentials as BYOK despite a catalog platform price",
@@ -275,13 +303,18 @@ describe("live grouped services", () => {
       records.push(connection);
       insightConnections.set(connection.id, {
         service_id: connection.id,
-        billing: configuredBilling(connection),
+        billing: configuredBilling(connection, {
+          slug: connection.catalog_service_slug ?? "custom",
+          billing: { platform_billable: true },
+        }),
         usage: null,
       });
       const user = userEvent.setup();
       render(preview());
       const card = within(screen.getByRole("region", { name }));
-      const summary = card.getByRole("button", { name: `Show billing for ${name}` });
+      const summary = card.getByRole("button", {
+        name: `Show billing for ${name}`,
+      });
       expect(summary).toHaveTextContent(/^BYOK$/);
       await user.hover(summary);
       const tooltip = await screen.findByRole("tooltip");
@@ -289,12 +322,18 @@ describe("live grouped services", () => {
       expect(tooltip).not.toHaveTextContent("0.05");
       await user.click(summary);
       const panel = card.getByRole("region", { name: `Billing for ${name}` });
-      expect(within(panel).getByText(
-        type === "oauth2" ? "Your OAuth app (BYOK)" : "Your API key (BYOK)",
-      )).toBeVisible();
-      expect(within(panel).getByText("No NyxID usage charges configured")).toBeVisible();
+      expect(
+        within(panel).getByText(
+          type === "oauth2" ? "Your OAuth app (BYOK)" : "Your API key (BYOK)",
+        ),
+      ).toBeVisible();
+      expect(
+        within(panel).getByText("No NyxID usage charges configured"),
+      ).toBeVisible();
       expect(panel).not.toHaveTextContent("0.05");
-      expect(card.queryByText("NyxID platform billing configured")).not.toBeInTheDocument();
+      expect(
+        card.queryByText("NyxID platform billing configured"),
+      ).not.toBeInTheDocument();
     },
   );
 
@@ -303,8 +342,16 @@ describe("live grouped services", () => {
       slug: "api-twitter",
       billing: {
         platform_charge_nyxid_credentials_only: true,
-        platform_key_pricing: { metric: "requests", credits_per_unit: "0.05", sync_status: "synced" as const },
-        byok_pricing: { metric: "requests", credits_per_unit: "0.01", sync_status: "synced" as const },
+        platform_key_pricing: {
+          metric: "requests",
+          credits_per_unit: "0.05",
+          sync_status: "synced" as const,
+        },
+        byok_pricing: {
+          metric: "requests",
+          credits_per_unit: "0.01",
+          sync_status: "synced" as const,
+        },
       },
     };
     const byo: KeyInfo = {
@@ -321,15 +368,24 @@ describe("live grouped services", () => {
       byok_pricing: catalog.billing.byok_pricing,
     };
     const platform: KeyInfo = {
-      ...byo, id: "twitter-platform", label: "Personal Twitter",
-      credential_source: { type: "personal" }, credential_binding: "platform",
+      ...byo,
+      id: "twitter-platform",
+      label: "Personal Twitter",
+      credential_source: { type: "personal" },
+      credential_binding: "platform",
     };
     const noCharge: KeyInfo = {
-      ...byo, id: "twitter-unpriced", label: "Public Twitter", auth_method: "none",
+      ...byo,
+      id: "twitter-unpriced",
+      label: "Public Twitter",
+      auth_method: "none",
       credential_source: { type: "personal" },
     };
     const unknown: KeyInfo = {
-      ...byo, id: "twitter-unknown", label: "Legacy Twitter", oauth_client_id: null,
+      ...byo,
+      id: "twitter-unknown",
+      label: "Legacy Twitter",
+      oauth_client_id: null,
     };
     for (const connection of [byo, platform, noCharge, unknown]) {
       records.push(connection);
@@ -342,22 +398,39 @@ describe("live grouped services", () => {
     const user = userEvent.setup();
     render(preview());
     const card = within(screen.getByRole("region", { name: "Twitter" }));
-    const summary = card.getByRole("button", { name: "Show billing for Twitter" });
+    const summary = card.getByRole("button", {
+      name: "Show billing for Twitter",
+    });
     expect(summary).toHaveTextContent("1 NyxID · 1 BYOK · 1 — · 1 unverified");
     await user.hover(summary);
     const tooltip = await screen.findByRole("tooltip");
     for (const text of [
-      "ChronoAI Twitter: BYOK", "Personal Twitter: NyxID credentials",
-      "Public Twitter: Not billable by NyxID", "Legacy Twitter: Unverified",
+      "ChronoAI Twitter: BYOK",
+      "Personal Twitter: NyxID",
+      "Public Twitter: Not billable by NyxID",
+      "Legacy Twitter: Unverified",
       "0.05 credits / request",
-    ]) expect(tooltip).toHaveTextContent(text);
+    ])
+      expect(tooltip).toHaveTextContent(text);
     await user.click(summary);
-    const platformPanel = card.getByRole("region", { name: "Billing for Personal Twitter" });
-    const platformRates = within(platformPanel).getByRole("table", { name: "Configured NyxID rates" });
-    expect(within(platformRates).getByRole("cell", { name: "0.05" })).toBeVisible();
-    expect(within(platformRates).getByRole("cell", { name: "request" })).toBeVisible();
-    await user.click(card.getByRole("button", { name: "Billing for ChronoAI Twitter" }));
-    const byoPanel = card.getByRole("region", { name: "Billing for ChronoAI Twitter" });
+    const platformPanel = card.getByRole("region", {
+      name: "Billing for Personal Twitter",
+    });
+    const platformRates = within(platformPanel).getByRole("table", {
+      name: "Configured NyxID rates",
+    });
+    expect(
+      within(platformRates).getByRole("cell", { name: "0.05" }),
+    ).toBeVisible();
+    expect(
+      within(platformRates).getByRole("cell", { name: "request" }),
+    ).toBeVisible();
+    await user.click(
+      card.getByRole("button", { name: "Billing for ChronoAI Twitter" }),
+    );
+    const byoPanel = card.getByRole("region", {
+      name: "Billing for ChronoAI Twitter",
+    });
     expect(byoPanel).toHaveTextContent("Organization OAuth app (BYOK)");
     expect(byoPanel).toHaveTextContent("No NyxID usage charges configured");
     expect(byoPanel).not.toHaveTextContent("0.05");
@@ -379,6 +452,7 @@ describe("live grouped services", () => {
         service_id: connection.id,
         billing: {
           ...configuredBilling(connection),
+          service_billing_configured: true,
           credit_billing_configured: connection.id === "extra-3",
         },
         usage: null,
@@ -393,15 +467,24 @@ describe("live grouped services", () => {
       screen.getByRole("region", { name: "Billing for App 3" }),
     ).toBeVisible();
     expect(screen.getByText("NyxID usage charges configured")).toBeVisible();
-    expect(screen.getByText("NyxID credentials")).toBeVisible();
+    expect(screen.getByText("NyxID")).toBeVisible();
   });
   it("identifies supplied API keys without requiring published prices", () => {
     insightConnections.set("mine", {
       service_id: "mine",
       billing: {
         ...configuredBilling(records[0]!),
+        service_billing_configured: true,
         credit_billing_configured: true,
       },
+      usage: null,
+    });
+    insightConnections.set("team", {
+      service_id: "team",
+      billing: configuredBilling(records[1]!, {
+        slug: "openai",
+        billing: { platform_billable: true },
+      }),
       usage: null,
     });
     render(preview());
@@ -459,7 +542,10 @@ describe("live grouped services", () => {
     for (const connection of records) {
       insightConnections.set(connection.id, {
         service_id: connection.id,
-        billing: configuredBilling(connection),
+        billing: configuredBilling(connection, {
+          slug: connection.catalog_service_slug ?? "custom",
+          billing: { platform_billable: true },
+        }),
         usage: null,
       });
     }
@@ -531,7 +617,10 @@ describe("live grouped services", () => {
   it("shows configured agent associations and identifies credential supply on hover", async () => {
     insightConnections.set("mine", {
       service_id: "mine",
-      billing: configuredBilling(records[0]!),
+      billing: configuredBilling(records[0]!, {
+        slug: "openai",
+        billing: { platform_billable: true },
+      }),
       usage: {
         access: {
           basis: "configuration",
@@ -1540,7 +1629,10 @@ describe("saved routing in service cards", () => {
     for (const connection of records)
       insightConnections.set(connection.id, {
         service_id: connection.id,
-        billing: configuredBilling(connection),
+        billing: configuredBilling(connection, {
+          slug: connection.catalog_service_slug ?? "custom",
+          billing: { platform_billable: true },
+        }),
         usage: null,
       });
     render(preview());

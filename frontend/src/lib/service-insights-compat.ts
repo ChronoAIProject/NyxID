@@ -14,6 +14,8 @@ import {
   configuredUsageCharge,
   configuredPlatformPrice,
   connectionCredentialClass,
+  credentialSupplier,
+  serviceBillingConfigured,
 } from "./service-billing-config";
 
 // Read only metadata from the deployed inventory APIs. This projection describes
@@ -29,6 +31,9 @@ export function configuredBilling(
 ): ServiceBillingExplanation {
   const credentialClass = connectionCredentialClass(connection);
   const platform = credentialClass === "nyxid_managed_master";
+  const supplier = credentialSupplier(connection);
+  const sharedOAuth = credentialClass === "nyxid_platform_oauth_app";
+  const serviceConfigured = serviceBillingConfigured(connection, catalog);
   const node = Boolean(connection.node_id || connection.has_node_binding);
   const userCredential =
     !platform &&
@@ -64,11 +69,12 @@ export function configuredBilling(
   const ownApiKey =
     credentialClass === "user_owned" &&
     connection.credential_type === "api_key";
-  const ownOAuthApp = oauth && credentialClass === "user_owned";
+  const ownOAuthApp = oauth && supplier === "own";
   const excludedFromPlatformCharge =
     billing?.platform_charge_nyxid_credentials_only === true &&
     !platform &&
-    (ownApiKey || ownOAuthApp || node || connection.auth_method === "none");
+    supplier !== "nyxid" &&
+    (supplier === "own" || supplier === "none");
   const lane = excludedFromPlatformCharge ? undefined : configuredLane;
   const legacyConfigured =
     !hasLanes &&
@@ -76,17 +82,23 @@ export function configuredBilling(
     billing?.platform_billable === true;
   const credentialLabel = platform
     ? "NyxID key"
-    : node
-      ? "Node credential · supplier unverified"
-      : connection.auth_method === "none"
-        ? "No credential"
-        : ownOAuthApp
-          ? `${org ? "Organization" : "Your"} OAuth app (BYOK)`
-          : oauth
-            ? "Connected account · app unverified"
-            : ownApiKey
-              ? `${org ? "Organization" : "Your"} API key (BYOK)`
-              : "Credential supplier unverified";
+    : sharedOAuth
+      ? "NyxID OAuth app"
+      : node
+        ? supplier === "own"
+          ? "Node credential"
+          : "Node credential · supplier unverified"
+        : connection.auth_method === "none"
+          ? "No credential"
+          : ownOAuthApp
+            ? `${org ? "Organization" : "Your"} OAuth app (BYOK)`
+            : oauth
+              ? "Connected account · app unverified"
+              : ownApiKey
+                ? `${org ? "Organization" : "Your"} API key (BYOK)`
+                : supplier === "own"
+                  ? `${org ? "Organization" : "Your"} credential (BYOK)`
+                  : "Credential supplier unverified";
   const creditBillingConfigured = configuredUsageCharge(connection, catalog);
   return {
     status: "conditional",
@@ -106,41 +118,57 @@ export function configuredBilling(
     charge_status:
       creditBillingConfigured === false ? "not_charged" : "conditional",
     credit_billing_configured: creditBillingConfigured,
-    rates: lane
-      ? [lane, ...(lane.components ?? [])].map((rate) => ({
-          layer: "platform",
-          metric: rate.metric,
-          credits_per_unit: rate.credits_per_unit,
-          currency: "credits",
-          source: "configuration",
-          sync_status: rate.sync_status ?? "unknown",
-        }))
-      : legacyConfigured && billing?.platform_metric
-        ? [
-            {
-              layer: "platform",
-              metric: billing.platform_metric,
-              credits_per_unit:
-                billing.platform_pricing?.credits_per_unit ?? null,
-              currency: "credits",
-              source: "configuration",
-              sync_status: billing.platform_pricing?.sync_status ?? "unknown",
-            },
-          ]
-        : [],
-    provider_billing: platform
-      ? "nyxid_credential"
-      : connection.auth_method === "none"
-        ? "no_credential"
-        : ownApiKey || ownOAuthApp
-          ? "separate_provider_account"
-          : "unknown",
+    service_billing_configured: serviceConfigured,
+    credential_supplier: supplier,
+    rates:
+      lane &&
+      creditBillingConfigured !== undefined &&
+      (credentialClass || oauth)
+        ? [lane, ...(lane.components ?? [])].map((rate) => ({
+            layer: "platform",
+            metric: rate.metric,
+            credits_per_unit: rate.credits_per_unit,
+            currency: "credits",
+            source: "configuration",
+            sync_status: rate.sync_status ?? "unknown",
+          }))
+        : legacyConfigured &&
+            creditBillingConfigured === true &&
+            billing?.platform_metric
+          ? [
+              {
+                layer: "platform",
+                metric: billing.platform_metric,
+                credits_per_unit:
+                  billing.platform_pricing?.credits_per_unit ?? null,
+                currency: "credits",
+                source: "configuration",
+                sync_status: billing.platform_pricing?.sync_status ?? "unknown",
+              },
+            ]
+          : [],
+    provider_billing:
+      platform || sharedOAuth
+        ? "nyxid_credential"
+        : connection.auth_method === "none"
+          ? "no_credential"
+          : supplier === "own"
+            ? "separate_provider_account"
+            : "unknown",
     context: "configuration",
     notes: [
+      ...(serviceConfigured === undefined
+        ? ["Billing configuration unavailable for this service."]
+        : []),
+      ...(sharedOAuth && serviceConfigured && creditBillingConfigured === false
+        ? [
+            "NyxID supplies the OAuth app, but this connection has no configured NyxID usage charge. The service’s platform-key price does not apply to OAuth.",
+          ]
+        : []),
       creditBillingConfigured === false
         ? "No NyxID usage charges are configured for this connection. The provider may charge separately."
         : "Configured billing for the connection default. The payer and applicable charges are verified at execution; agent credential overrides can change them.",
-      ...(oauth && !platform && !ownOAuthApp
+      ...(oauth && supplier === "unknown"
         ? [
             "Signing in does not identify the developer app's owner. This server does not report whether this connection uses your app or NyxID's app.",
           ]

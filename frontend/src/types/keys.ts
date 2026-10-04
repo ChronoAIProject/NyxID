@@ -27,6 +27,8 @@ export interface KeyInfo {
   readonly credential_type: string;
   /** Public identifier of the connection's supplied OAuth developer app. */
   readonly oauth_client_id?: string | null;
+  /** Durable selection of NyxID’s OAuth app or a supplied developer app. */
+  readonly oauth_app_source?: "platform" | "byo" | null;
   readonly auth_method: string;
   readonly auth_key_name: string;
   readonly status: string;
@@ -164,7 +166,10 @@ export interface ScopeCatalogEntry {
 export interface CatalogEntry {
   readonly billing?: import("./api").ServiceBilling | null;
   readonly inference?: InferenceView | null;
-  readonly platform_key?: { readonly available: boolean; readonly pricing?: LanePricingView | null };
+  readonly platform_key?: {
+    readonly available: boolean;
+    readonly pricing?: LanePricingView | null;
+  };
   readonly byok_pricing?: LanePricingView | null;
   readonly slug: string;
   readonly resource_uri: string;

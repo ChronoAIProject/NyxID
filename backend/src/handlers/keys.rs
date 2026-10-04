@@ -501,6 +501,8 @@ pub struct KeyResponse {
     /// — so safe to surface. The `client_secret` is never returned by the API.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub oauth_client_id: Option<String>,
+    /// Durable OAuth app selection: platform or byo; absent for legacy rows.
+    pub oauth_app_source: Option<String>,
     /// Scopes currently granted on this OAuth connection (NyxID#917 follow-up),
     /// parsed from the backing `UserApiKey.token_scopes`. The connect UIs
     /// pre-select and lock these when adding scopes to an existing connection
@@ -2771,6 +2773,10 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
         // wizard can call `GET /keys/:id` immediately after create if
         // it needs the field rendered.
         oauth_client_id: None,
+        oauth_app_source: result
+            .api_key
+            .as_ref()
+            .and_then(|key| key.credential_source.clone()),
         // Fresh create: an OAuth connection has no granted scopes until the
         // authorize callback completes, so there's nothing to surface yet.
         granted_scopes: None,
@@ -2889,6 +2895,7 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
         custom_user_agent: view.custom_user_agent,
         connection_id: view.connection_id,
         oauth_client_id: view.oauth_client_id,
+        oauth_app_source: view.oauth_app_source,
         granted_scopes: view.granted_scopes,
         last_authorized_at: view.last_authorized_at,
         default_request_headers: crate::models::default_request_header::redact_list_for_response(
@@ -3249,6 +3256,36 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn billing_metadata_read_only_key_exposes_oauth_selection_without_app_id() {
+        let mut key = make_blank_api_key();
+        key.credential_type = "oauth2".into();
+        key.credential_source = Some("platform".into());
+        let result = crate::services::unified_key_service::CreateKeyResult {
+            endpoint: test_user_endpoint(
+                "endpoint",
+                "owner",
+                "Twitter",
+                "https://example.test",
+                None,
+                None,
+            ),
+            api_key: Some(key),
+            service: test_user_service("service", "owner", "twitter", "endpoint", None, None),
+            ssh_host: None,
+            ssh_port: None,
+            ssh_ca_public_key: None,
+            ssh_allowed_principals: None,
+            ssh_certificate_ttl_minutes: None,
+        };
+        let mut response = super::key_response_from_result(&result);
+        response.can_edit_configuration = false;
+        super::restrict_connection_configuration(&mut response);
+        assert_eq!(response.oauth_app_source.as_deref(), Some("platform"));
+        assert!(response.oauth_client_id.is_none());
+        assert_aevatar_secret_free(&serde_json::to_value(&response).unwrap());
     }
 
     #[test]

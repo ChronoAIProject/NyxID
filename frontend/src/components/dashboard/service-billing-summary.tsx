@@ -61,7 +61,9 @@ export function ServiceBillingSummary({
           ? connectionBillingLabels[rows[0]!.category]
           : categories
               .flatMap((category) => {
-                const count = rows.filter((row) => row.category === category).length;
+                const count = rows.filter(
+                  (row) => row.category === category,
+                ).length;
                 return count ? [`${count} ${countLabels[category]}`] : [];
               })
               .join(" · ");
@@ -72,14 +74,11 @@ export function ServiceBillingSummary({
           <button
             type="button"
             aria-label={`Show billing for ${serviceName}`}
-            aria-description={
-              notBillable ? "Not billable by NyxID" : undefined
-            }
+            aria-description={notBillable ? "Not billable by NyxID" : undefined}
             className="flex min-h-6 w-fit min-w-0 max-w-full items-center gap-2 rounded-sm text-left text-xs focus-visible:outline-2 focus-visible:outline-ring"
             onClick={() => {
               const first =
-                rows.find((row) => row.category === "platform") ??
-                rows[0];
+                rows.find((row) => row.category === "platform") ?? rows[0];
               if (first) onOpen(first.connection.id);
             }}
           >
@@ -111,6 +110,13 @@ export function ServiceBillingSummary({
                       : connectionBillingLabels[category]}
                     {!connection.is_active ? " · disabled" : ""}
                   </p>
+                  {category === "unknown" && (
+                    <p className="text-muted-foreground">
+                      {billing?.service_billing_configured === true
+                        ? "Credential supplier unverified"
+                        : "Billing configuration unavailable"}
+                    </p>
+                  )}
                   {billing && category !== "not_billable" && (
                     <p className="text-muted-foreground">
                       {nyxidChargeLabel(billing)}
@@ -119,9 +125,11 @@ export function ServiceBillingSummary({
                 </div>
               ))}
               <p className="text-muted-foreground">
-                NyxID supplies the platform key or developer app. BYOK uses a key
-                or app supplied by you or your organization. A dash means no
-                configured NyxID usage charge; the provider may charge separately.
+                On services with billing configured, NyxID supplies the key or
+                developer app; BYOK uses one supplied by you or your
+                organization. Applicable NyxID charges are listed separately. A
+                dash means not billable by NyxID; the provider may charge
+                separately.
               </p>
             </>
           )}

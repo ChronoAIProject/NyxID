@@ -24,6 +24,7 @@ vi.mock("@/stores/auth-store", () => ({
 }));
 const personal = {
   id: "personal",
+  api_key_id: "stored-api-key",
   label: "OpenAI",
   catalog_service_slug: "openai",
   credential_source: { type: "personal" },
@@ -106,18 +107,29 @@ function mount(connections: KeyInfo[] = [personal]) {
 
 describe("deployed service insight compatibility", () => {
   it("uses the connection's own OAuth app and honors platform-only charge exclusions", () => {
-    const bill = configuredBilling({
-      ...org,
-      credential_type: "oauth2",
-      oauth_client_id: "organization-app",
-    }, {
-      slug: "twitter",
-      billing: {
-        platform_charge_nyxid_credentials_only: true,
-        byok_pricing: { metric: "requests", credits_per_unit: "0.01", sync_status: "synced" },
-        platform_key_pricing: { metric: "requests", credits_per_unit: "0.05", sync_status: "synced" },
+    const bill = configuredBilling(
+      {
+        ...org,
+        credential_type: "oauth2",
+        oauth_client_id: "organization-app",
       },
-    });
+      {
+        slug: "twitter",
+        billing: {
+          platform_charge_nyxid_credentials_only: true,
+          byok_pricing: {
+            metric: "requests",
+            credits_per_unit: "0.01",
+            sync_status: "synced",
+          },
+          platform_key_pricing: {
+            metric: "requests",
+            credits_per_unit: "0.05",
+            sync_status: "synced",
+          },
+        },
+      },
+    );
     expect(bill).toMatchObject({
       credential_class: "user_owned",
       credential_label: "Organization OAuth app (BYOK)",
@@ -132,8 +144,16 @@ describe("deployed service insight compatibility", () => {
     const bill = configuredBilling(personal, {
       slug: "openai",
       billing: {
-        byok_pricing: { metric: "requests", credits_per_unit: "0.01", sync_status: "synced" },
-        platform_key_pricing: { metric: "requests", credits_per_unit: "0.05", sync_status: "synced" },
+        byok_pricing: {
+          metric: "requests",
+          credits_per_unit: "0.01",
+          sync_status: "synced",
+        },
+        platform_key_pricing: {
+          metric: "requests",
+          credits_per_unit: "0.05",
+          sync_status: "synced",
+        },
       },
     });
     expect(bill).toMatchObject({
@@ -146,7 +166,9 @@ describe("deployed service insight compatibility", () => {
   });
 
   it("treats omitted catalog billing as unpriced while retaining OAuth provenance separately", async () => {
-    responses.set("/catalog?include_all=true", { entries: [{ slug: "openai" }] });
+    responses.set("/catalog?include_all=true", {
+      entries: [{ slug: "openai" }],
+    });
     const [item] = await loadConfiguredServiceInsights(
       [{ ...personal, credential_type: "oauth2" }],
       "person",
@@ -169,17 +191,23 @@ describe("deployed service insight compatibility", () => {
         "/catalog?include_all=true",
         failure === "missing" ? { entries: [] } : unavailable(failure),
       );
-      const [catalogService, customService] = await loadConfiguredServiceInsights(
-        [personal, {
-          ...personal,
-          id: "custom",
-          source: "custom",
-          catalog_service_id: null,
-          catalog_service_slug: null,
-        }],
-        "person",
-      );
-      expect(catalogService!.billing!.credit_billing_configured).toBeUndefined();
+      const [catalogService, customService] =
+        await loadConfiguredServiceInsights(
+          [
+            personal,
+            {
+              ...personal,
+              id: "custom",
+              source: "custom",
+              catalog_service_id: null,
+              catalog_service_slug: null,
+            },
+          ],
+          "person",
+        );
+      expect(
+        catalogService!.billing!.credit_billing_configured,
+      ).toBeUndefined();
       expect(catalogService!.billing!.charge_status).toBe("conditional");
       expect(customService!.billing!.credit_billing_configured).toBe(false);
       expect(customService!.billing!.charge_status).toBe("not_charged");

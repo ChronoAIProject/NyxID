@@ -23,7 +23,7 @@ and whitespace checks passed. Signed-in visual review is still outstanding.
 
 Updated 2 October: collapsed service cards are 288px tall with two description
 lines and the existing icon/name/count and footer navigation. The body shows a
-configured billable-connection count (including disabled connections), pool
+billing summary (including disabled connections), pool
 member count/strategy and failover, deduplicated agent-key count, last-use time,
 and latest recorded edit. Source avatars sit at the body's bottom right. The
 expanded table exposes per-connection billing, pool membership, access/use, and
@@ -37,32 +37,38 @@ The backend now reports configured billing separately from execution availabilit
 the production-data preview uses published inventory metadata until that backend
 change is deployed. Missing data remains unverified.
 
-Updated 5 October: billing is classified per connection. Supplied API keys and
-OAuth developer apps remain **BYOK** even when their catalog service also offers
-NyxID platform credentials. A live metadata read confirmed ChronoAI Twitter has
-its own OAuth app identifier, and the visible DeepSeek connection has a user API
-key. Both are treated as BYOK rather than inheriting the catalog platform price.
-Resolved backend credential classes and selected-agent overrides take precedence.
-On older servers, missing OAuth app ownership stays unknown; an absent client ID
-never proves NyxID owns the app.
+Updated 5 October after an Opus 5.5 xhigh review: billing checks the service-wide
+configuration first, then the connection's credential supplier. Unpriced services
+show **—** even when a person supplied an API key. A billable service can contain
+NyxID, BYOK and Unverified connections. The connection's fee is a separate fact.
+See [the decision table and backend contract](service-billing-labels.md).
 
-Mixed cards list every represented billing category with counts, including a dash
-count for unpriced connections. Hover lists each connection's billing and rate;
-expanded rows show each connection's payer and applicable fee. A billing panel
-contains only the selected connection/agent's rates, without a catalog-wide
-platform-price banner. BYOK can still have separately configured NyxID fees.
+Read-only live metadata verification through the actual classifier produced:
 
-Unpriced connections display **—**, with **Not billable by NyxID** on hover or
-keyboard focus. A loaded catalog entry with omitted billing means unpriced, as
-does a custom service with no catalog linkage or published prices. Failed/missing
-catalog reads remain distinct from confirmed absence of charges. Supplied keys
-continue to show BYOK. All-unpriced groups show one dash.
+- Anthropic: all 30 connections unpriced, so one dash on the card.
+- Chrono LLM and Spotify: dash.
+- Twitter: one BYOK organization app and three Unverified OAuth connections.
+  Production does not yet expose their durable OAuth app selection. They must not
+  be guessed as either NyxID or BYOK from the presence of a token record.
+- DeepSeek: one stored API-key connection on the supplied-key path, so BYOK.
+- Custom MacBook SSH: dash. Three other MacBook connections refer to private
+  catalog entries unavailable through production discovery, so billing remains
+  Unverified until the backend insight projection is deployed.
 
-The dash tooltip sits beside its icon/value with an 8px gap. Longer billing
-tooltips align below the content. Viewport collision handling remains enabled.
-All 96 focused frontend tests, production builds, changed-file ESLint and whitespace
-checks passed. The running preview serves the updated modules; this session has no
-connected browser for signed-in visual inspection.
+The backend additions expose OAuth app provenance on `/keys` and the service-wide
+billing gate plus selected supplier on `/service-insights`. These are additive,
+read-only changes. They have not been deployed to production. Twitter's currently
+configured 0.05 credits/request platform-key price does not apply to OAuth under
+the existing execution rules; this revision does not change prices or charging.
+
+The dash tooltip remains beside the icon/value with an 8px gap. Longer details
+align below the content with viewport collision handling. The local frontend uses
+production metadata; signed-in visual inspection is unavailable in this session
+because no browser is connected.
+
+Validation for the billing correction: 110 focused frontend tests and four backend
+metadata regressions passed, along with TypeScript, production/credential-accept
+builds, changed-file ESLint and whitespace checks. The backend test target compiled.
 
 Run from `frontend/`:
 

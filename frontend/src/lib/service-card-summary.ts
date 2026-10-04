@@ -5,7 +5,8 @@ import type {
 import type { KeyInfo } from "@/types/keys";
 import {
   configuredUsageCharge,
-  connectionCredentialClass,
+  credentialSupplier,
+  serviceBillingConfigured,
   positiveUsageRate,
 } from "./service-billing-config";
 
@@ -19,7 +20,7 @@ export const connectionBillingLabels: Record<
   ConnectionBillingCategory,
   string
 > = {
-  platform: "NyxID credentials",
+  platform: "NyxID",
   byok: "BYOK",
   not_billable: "—",
   unknown: "Unverified",
@@ -31,29 +32,31 @@ export function connectionBillingCategory(
   catalog?: ConfiguredCatalogEntry,
 ): ConnectionBillingCategory {
   if (billing?.status === "restricted") return "unknown";
-  const notBillable =
-    connectionBillability(connection, billing, catalog) === false;
-  // A resolved caller override takes precedence over the connection default.
-  switch (connectionCredentialClass(connection, billing)) {
-    case "nyxid_managed_master":
-    case "nyxid_platform_oauth_app":
-      return notBillable ? "not_billable" : "platform";
-    case "user_owned":
-    case "agent_override_user_owned":
-    case "node_managed":
+  const serviceConfigured =
+    billing?.service_billing_configured ??
+    serviceBillingConfigured(connection, catalog) ??
+    (billing?.credit_billing_configured === true ||
+    billing?.charge_status === "usage_based"
+      ? true
+      : undefined);
+  if (serviceConfigured === false) return "not_billable";
+  if (serviceConfigured !== true) return "unknown";
+  switch (credentialSupplier(connection, billing)) {
+    case "nyxid":
+      return "platform";
+    case "own":
       return "byok";
-    case "no_auth":
-      return notBillable ? "not_billable" : "unknown";
+    case "none": {
+      const charge = connectionBillability(connection, billing, catalog);
+      return charge === false
+        ? "not_billable"
+        : charge === true
+          ? "platform"
+          : "unknown";
+    }
+    default:
+      return "unknown";
   }
-  if (billing?.context === "agent_key")
-    return notBillable ? "not_billable" : "unknown";
-  if (
-    connection.credential_binding === "platform" ||
-    billing?.provider_billing === "nyxid_credential"
-  )
-    return notBillable ? "not_billable" : "platform";
-  // Credential provenance can be unknown without billing being unknown.
-  return notBillable ? "not_billable" : "unknown";
 }
 
 export function connectionBillability(

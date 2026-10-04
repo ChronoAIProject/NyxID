@@ -9,10 +9,13 @@ import type { KeyInfo } from "@/types/keys";
 import {
   configuredPlatformPrice,
   configuredUsageCharge,
+  serviceBillingConfigured,
 } from "./service-billing-config";
 
 const connection = {
   id: "personal",
+  catalog_service_id: "catalog",
+  catalog_service_slug: "service",
   credential_binding: "user",
   credential_type: "api_key",
   api_key_id: "key",
@@ -24,143 +27,164 @@ const lane = {
   credits_per_unit: "1",
   sync_status: "synced" as const,
 };
-describe("card billing categories", () => {
-  it("uses a resolved credential class ahead of a retained supplied OAuth app", () => {
-    const oauth = { ...connection, credential_type: "oauth2", oauth_client_id: "own-app" };
-    const bill = configuredBilling(oauth);
-    expect(connectionBillingCategory(oauth, bill)).toBe("byok");
-    expect(connectionBillingCategory(oauth, {
-      ...bill,
-      credential_class: "nyxid_platform_oauth_app",
-      credit_billing_configured: true,
-    })).toBe("platform");
-    expect(connectionBillingCategory(oauth, {
-      ...bill, status: "restricted",
-    })).toBe("unknown");
+const twitter = {
+  slug: "api-twitter",
+  billing: {
+    platform_billable: true,
+    platform_charge_nyxid_credentials_only: false,
+    platform_key_pricing: { ...lane, credits_per_unit: "0.05" },
+    byok_pricing: null,
+  },
+};
+const oauth = { ...connection, credential_type: "oauth2" };
+
+describe("billing gate before credential supply — reviewed acceptance cases", () => {
+  it.each([
+    connection,
+    { ...connection, credential_binding: "platform" as const },
+    oauth,
+    { ...oauth, oauth_app_source: "platform" as const },
+    { ...connection, node_id: "node", credential_type: "node_managed" },
+    { ...connection, is_active: false },
+  ])("shows a dash for every credential on an unpriced service: %j", (row) => {
+    const catalog = { slug: "llm-anthropic", billing: null };
+    expect(
+      connectionBillingCategory(row, configuredBilling(row, catalog), catalog),
+    ).toBe("not_billable");
   });
-  it("separates confirmed unpriced catalog services from unknown OAuth app ownership", () => {
-    const oauth = {
-      ...connection,
-      credential_type: "oauth2",
-      catalog_service_slug: "oauth",
-    };
-    const catalog = { slug: "oauth" };
-    const bill = configuredBilling(oauth, catalog);
-    expect(bill.credit_billing_configured).toBe(false);
-    expect(bill.credential_label).toContain("app unverified");
-    expect(connectionBillingCategory(oauth, bill, catalog)).toBe("not_billable");
-    expect(connectionBillingCategory(oauth, configuredBilling(oauth))).toBe(
-      "unknown",
-    );
+
+  it.each([
+    {
+      row: { ...oauth, oauth_app_source: "platform" as const },
+      category: "platform",
+    },
+    { row: { ...oauth, oauth_app_source: "byo" as const }, category: "byok" },
+    { row: { ...oauth, oauth_client_id: "org-app" }, category: "byok" },
+    { row: oauth, category: "unknown" },
+    { row: connection, category: "byok" },
+    { row: { ...connection, api_key_id: null }, category: "unknown" },
+    { row: { ...connection, credential_missing: true }, category: "unknown" },
+    {
+      row: { ...connection, credential_binding: "platform" as const },
+      category: "platform",
+    },
+    {
+      row: { ...connection, node_id: "node", credential_type: "node_managed" },
+      category: "byok",
+    },
+    { row: { ...oauth, node_id: "node" }, category: "unknown" },
+  ])(
+    "uses proven provenance on a billable service: $category %j",
+    ({ row, category }) => {
+      for (const is_active of [true, false]) {
+        const item = { ...row, is_active };
+        expect(
+          connectionBillingCategory(
+            item,
+            configuredBilling(item, twitter),
+            twitter,
+          ),
+        ).toBe(category);
+      }
+    },
+  );
+
+  it("keeps Twitter OAuth's supplier separate from its absent price lane", () => {
+    const row = { ...oauth, oauth_app_source: "platform" as const };
+    const bill = configuredBilling(row, twitter);
+    expect(bill).toMatchObject({
+      service_billing_configured: true,
+      credential_supplier: "nyxid",
+      credit_billing_configured: false,
+      rates: [],
+    });
+    expect(connectionBillingCategory(row, bill, twitter)).toBe("platform");
+    const legacy = configuredBilling(oauth, twitter);
+    expect(legacy.credit_billing_configured).toBe(false);
+    expect(
+      connectionBillingCategory(
+        oauth,
+        { ...legacy, credential_class: "user_owned" },
+        twitter,
+      ),
+    ).toBe("unknown");
   });
-  it("classifies custom services as BYOK or not billable without a catalog", () => {
-    const custom = {
-      ...connection,
-      source: "custom" as const,
-      catalog_service_id: null,
-      catalog_service_slug: null,
-    };
-    expect(connectionBillingCategory(custom, configuredBilling(custom))).toBe(
-      "byok",
-    );
-    for (const patch of [
-      { auth_method: "none", api_key_id: null },
-      { credential_type: "oauth2" },
-      { credential_missing: true },
-    ]) {
-      const unpriced = { ...custom, ...patch };
-      expect(connectionBillability(unpriced, configuredBilling(unpriced))).toBe(
-        false,
-      );
-      expect(
-        connectionBillingCategory(unpriced, configuredBilling(unpriced)),
-      ).toBe("not_billable");
-    }
-  });
-  it("does not hide published rates when a custom service lacks catalog pricing", () => {
-    const custom = {
-      ...connection,
-      catalog_service_id: null,
-      catalog_service_slug: null,
+
+  it("uses durable OAuth selection ahead of retained app hints", () => {
+    const row = {
+      ...oauth,
+      oauth_app_source: "platform" as const,
+      oauth_client_id: "retained-app",
     };
     expect(
-      connectionBillability(custom, {
-        ...configuredBilling(custom),
-        credit_billing_configured: undefined,
-        charge_status: "usage_based",
-        rates: [{
-          layer: "platform",
-          metric: "requests",
-          credits_per_unit: "1",
-          currency: "credits",
-          source: "service_price",
-        }],
-      }),
-    ).toBe(true);
-  });
-  it("identifies NyxID's shared OAuth app without calling a personal OAuth login BYOK", () => {
-    const oauth = { ...connection, credential_type: "oauth2" };
-    const bill = configuredBilling(oauth);
-    expect(connectionBillingCategory(oauth, bill)).toBe("unknown");
-    expect(
-      connectionBillingCategory(oauth, {
-        ...bill,
-        credential_class: "nyxid_platform_oauth_app",
-      }),
+      connectionBillingCategory(row, configuredBilling(row, twitter)),
     ).toBe("platform");
-    expect(
-      connectionBillingCategory(oauth, {
-        ...bill,
-        credential_class: "user_owned",
-      }),
-    ).toBe("byok");
   });
-  it("keeps a supplied key BYOK when NyxID charges apply or credits cover its usage", () => {
+
+  it("does not mistake retained keys for the selected agent override", () => {
+    const row = { ...connection, credential_binding: "platform" as const };
+    const bill = {
+      ...configuredBilling(row, twitter),
+      context: "agent_key",
+      credential_class: "agent_override_user_owned",
+      credential_supplier: "own" as const,
+    };
+    expect(connectionBillingCategory(row, bill)).toBe("byok");
     expect(
-      connectionBillingCategory(connection, {
-        ...configuredBilling(connection),
-        credit_billing_configured: true,
-        charge_status: "not_charged",
-      }),
-    ).toBe("byok");
-  });
-  it("does not call missing credentials, restricted data, or legacy charges not billable", () => {
-    const noAuth = { ...connection, auth_method: "none", api_key_id: null };
-    const bill = configuredBilling(noAuth);
-    expect(connectionBillingCategory(noAuth, bill)).toBe("unknown");
-    expect(
-      connectionBillingCategory(noAuth, {
+      connectionBillingCategory(row, {
         ...bill,
-        credit_billing_configured: false,
+        credential_supplier: "unknown",
+      }),
+    ).toBe("unknown");
+    expect(
+      connectionBillingCategory(row, {
+        ...bill,
+        service_billing_configured: false,
       }),
     ).toBe("not_billable");
+  });
+
+  it("does not label missing catalog data or restricted rows as free", () => {
     expect(
-      connectionBillingCategory(noAuth, {
-        ...bill,
-        credit_billing_configured: true,
-      }),
+      connectionBillingCategory(connection, configuredBilling(connection)),
     ).toBe("unknown");
     expect(
       connectionBillingCategory(connection, {
-        ...bill,
+        ...configuredBilling(connection, twitter),
         status: "restricted",
-        credential_class: "user_owned",
       }),
     ).toBe("unknown");
-    expect(
-      connectionBillingCategory({ ...connection, credential_missing: true }),
-    ).toBe("unknown");
+    const custom = {
+      ...connection,
+      catalog_service_id: null,
+      catalog_service_slug: null,
+      node_id: "node",
+    };
+    expect(connectionBillingCategory(custom, configuredBilling(custom))).toBe(
+      "not_billable",
+    );
   });
-  it("uses the selected agent override instead of the platform connection default", () => {
-    const platform = { ...connection, credential_binding: "platform" as const };
-    const bill = { ...configuredBilling(platform), context: "agent_key", credential_class: null };
+
+  it("retains the distinction for no-auth legacy charges", () => {
+    const row = { ...connection, auth_method: "none", api_key_id: null };
     expect(
-      connectionBillingCategory(platform, {
-        ...bill,
-        credential_class: "agent_override_user_owned",
+      connectionBillingCategory(row, configuredBilling(row, twitter)),
+    ).toBe("not_billable");
+    const legacy = { slug: "legacy", billing: { platform_billable: true } };
+    expect(connectionBillingCategory(row, configuredBilling(row, legacy))).toBe(
+      "platform",
+    );
+  });
+
+  it("recognizes service-wide charges without requiring this connection's lane", () => {
+    expect(serviceBillingConfigured(oauth, twitter)).toBe(true);
+    expect(
+      serviceBillingConfigured(connection, {
+        slug: "chrono-llm",
+        billing: null,
       }),
-    ).toBe("byok");
-    expect(connectionBillingCategory(platform, bill)).toBe("unknown");
+    ).toBe(false);
+    expect(serviceBillingConfigured(connection)).toBeUndefined();
   });
 });
 
@@ -173,7 +197,11 @@ describe("card billing configuration", () => {
     };
     expect(configuredUsageCharge(platform, catalog)).toBe(false);
     expect(
-      connectionBillingCategory(platform, configuredBilling(platform, catalog), catalog),
+      connectionBillingCategory(
+        platform,
+        configuredBilling(platform, catalog),
+        catalog,
+      ),
     ).toBe("not_billable");
     expect(
       configuredUsageCharge(platform, {
@@ -189,9 +217,7 @@ describe("card billing configuration", () => {
     };
     expect(configuredPlatformPrice(connection, catalog)).toEqual(lane);
     const bill = configuredBilling(connection, catalog);
-    expect(connectionBillingCategory(connection, bill, catalog)).toBe(
-      "byok",
-    );
+    expect(connectionBillingCategory(connection, bill, catalog)).toBe("byok");
     expect(bill.credential_label).toBe("Your API key (BYOK)");
     expect(bill.provider_billing).toBe("separate_provider_account");
     expect(bill.rates).toEqual([]);

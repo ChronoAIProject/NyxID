@@ -25,7 +25,12 @@ export function credentialLabel(
   if (billing) {
     if (billing.status === "restricted" || billing.status === "unavailable")
       return billing.credential_label;
-    if (billing.context === "configuration") return billing.credential_label;
+    if (
+      billing.context === "configuration" ||
+      billing.context === "agent_key" ||
+      billing.credential_supplier === "unknown"
+    )
+      return billing.credential_label;
     if (billing.credential_class === "nyxid_platform_oauth_app")
       return "NyxID developer app";
     if (billing.credential_class === "nyxid_managed_master") return "NyxID key";
@@ -181,8 +186,12 @@ export function providerBillingLabel(
 ): string {
   if (billing?.status === "restricted") return "Provider billing restricted";
   if (billing?.status === "unavailable") return "Provider billing unavailable";
+  if (billing?.credential_supplier === "unknown")
+    return "Credential supplier unverified";
   if (billing?.credential_class === "nyxid_platform_oauth_app")
     return "NyxID supplies the developer app; signing in connects your provider account";
+  if (billing?.credential_supplier === "nyxid")
+    return "NyxID supplies the key or developer app";
   if (billing?.provider_billing === "separate_provider_account")
     return "Provider billed separately";
   if (billing?.provider_billing === "nyxid_credential")
@@ -198,8 +207,10 @@ export function billingModelLabel(
   if (!billing) return "Billing not reported";
   if (billing.status === "restricted") return "Billing restricted";
   if (billing.status === "unavailable") return "Billing unavailable";
-  if (billing.credit_billing_configured === false)
+  if (billing.service_billing_configured === false)
     return "Not billable by NyxID";
+  if (billing.credit_billing_configured === false)
+    return "No NyxID charge for this connection";
   switch (billing.charge_status) {
     case "usage_based":
       return "NyxID credits";
@@ -249,15 +260,20 @@ export function billingExplanation(billing: ServiceBillingExplanation): string {
   if (billing.status === "restricted" || billing.status === "unavailable")
     return billingModelLabel(billing);
   const supply =
-    billing.credential_class === "nyxid_platform_oauth_app"
-      ? "NyxID supplies the developer app. Signing into your provider account is not BYOK."
-      : billing.provider_billing === "nyxid_credential"
-        ? "NyxID supplies the provider key."
-        : billing.provider_billing === "separate_provider_account"
-          ? "Your supplied credential uses a separate provider account. Any NyxID fees are additional to the provider's charges."
-          : billing.provider_billing === "no_credential"
-            ? "No provider credential is required."
-            : "The supplier of this connection's key or developer app is unverified.";
+    billing.credential_supplier === "unknown"
+      ? "The supplier of this connection's key or developer app is unverified."
+      : billing.credential_supplier === "nyxid" &&
+          billing.credential_class === "agent_override_user_owned"
+        ? "The selected agent credential uses NyxID's developer app."
+        : billing.credential_class === "nyxid_platform_oauth_app"
+          ? "NyxID supplies the developer app. Signing into your provider account is not BYOK."
+          : billing.provider_billing === "nyxid_credential"
+            ? "NyxID supplies the provider key."
+            : billing.provider_billing === "separate_provider_account"
+              ? "Your supplied credential uses a separate provider account. Any NyxID fees are additional to the provider's charges."
+              : billing.provider_billing === "no_credential"
+                ? "No provider credential is required."
+                : "The supplier of this connection's key or developer app is unverified.";
   const charges =
     billing.credit_billing_configured === false
       ? "No NyxID usage charges are configured for this connection."

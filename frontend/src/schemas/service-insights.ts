@@ -37,6 +37,8 @@ export const serviceBillingExplanationSchema = z.object({
   ]),
   context: z.string(),
   credit_billing_configured: z.boolean().nullish(),
+  service_billing_configured: z.boolean().nullish(),
+  credential_supplier: z.enum(["nyxid", "own", "none", "unknown"]).nullish(),
   payer_rule: z.string().optional(),
   notes: z.array(z.string()),
 });

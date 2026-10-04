@@ -66,42 +66,52 @@ Source avatars sit at the bottom right of the card body without a visible label.
 Hovering or focusing a stationary circle brings it forward and shows its source
 name. Extra sources remain reachable through the overflow count.
 
-The body classifies each connection using its resolved credential class, or its
-published connection metadata on older servers. Catalog platform availability and
-prices never override that classification. A supplied key or OAuth developer app
-remains **BYOK** even when NyxID also offers managed credentials for that service.
-An explicit platform binding takes precedence over a retained user key; a resolved
-agent override takes precedence over the connection default.
+Billing checks the service configuration before credential supply. A service with
+no configured NyxID usage charge shows **—** for every connection, including
+supplied API keys, OAuth apps, disabled connections and nodes. Its tooltip is
+exactly **Not billable by NyxID**. For a service with billing configured, a
+connection shows **NyxID** when NyxID supplies the selected key or
+OAuth developer app, **BYOK** when the person or organization supplies it, and
+**Unverified** when the supplier or service configuration cannot be established.
+A no-auth connection in lane mode remains uncharged; legacy no-auth charges are
+shown as NyxID. Grants and caller rollout do not change this classification.
 
-The summary lists every billing category represented by the group's connections,
-e.g. **1 NyxID · 5 BYOK · 1 —**, and can wrap onto two lines.
-NyxID means the platform supplies the key or developer app; BYOK means a person
-or organization supplies it. Confirmed absence of configured NyxID usage charges
-shows **—**, with **Not billable by NyxID** on hover or keyboard focus. Supplied
-private keys remain **BYOK**; other unpriced private services show the dash.
-Unknown OAuth app provenance does not make known billing configuration unverified.
-Groups containing only unpriced connections show one dash; mixed summaries count
-the NyxID/BYOK/unverified connections and include a dash count for unpriced siblings.
-A resolved backend credential class remains authoritative for credential supply. Disabled
-connections retain their classification. Clicking the summary opens the first
-NyxID connection's billing panel, or the first connection when there is none.
-Expanded rows use the same labels and show each connection's payer/rates directly
-for both NyxID credentials and BYOK. The tooltip lists each connection and its
-applicable NyxID charges. The detail panel shows only the selected connection or
-agent's rates, without a catalog platform-price banner. Billing tooltips anchor to
-the content: the dash explanation sits beside it, and longer details align below.
+The service-wide gate is true if any credential class has a configured charge.
+It is distinct from the selected connection's price lane: a service can have
+platform pricing while a BYOK connection has no NyxID fee. Grouped cards count all
+represented categories, including disabled connections; all-unpriced groups show
+one dash. Hover lists each connection and its actual/configured charge separately.
+Clicking opens the first NyxID connection's billing panel, or the first connection
+when none uses NyxID credentials. Expanded rows use the same classifier.
 
-Detailed charge configuration is independent of these summary labels. The additive
-`billing.credit_billing_configured` insight field is true/false when known and null
-when unverifiable or restricted. It uses the selected credential class, positive
-primary/component prices, legacy charge configuration, and independent resale
-configuration. Older servers use permitted catalog/connection metadata where
-available. A successfully loaded catalog entry with omitted billing means no
-configured charge, as does a custom service with no catalog link or published price.
-Failed or missing catalog reads for a catalog-backed service remain unverified;
-absence of a rate alone does not override published charge configuration. External provider
-invoices are separate. Grants, allowances and caller rollout do not change the
-credential supplier or configured charges.
+The additive insight fields `service_billing_configured` and `credential_supplier`
+carry the service-wide gate and selected credential provenance. Existing
+`credit_billing_configured`, `rates` and `charge_status` describe the connection's
+charges. Restricted metadata stays null. Disabled connections preserve known
+configuration/provenance; unavailable agent overrides never borrow the default
+connection's supplier. None of these reads decrypts a credential or changes billing.
+
+`/keys` also exposes `oauth_app_source` from the stored OAuth app selection
+(`platform` or `byo`), separately from personal/organization ownership. This source
+wins over retained OAuth app hints. Explicit platform binding wins over a retained
+user key. A legacy OAuth execution class of `user_owned` does not prove BYOK:
+source-less OAuth stays unverified unless an embedded supplied app is known.
+Non-OAuth stored key records identify the supplied-key path; a user binding alone
+does not prove a credential exists. Agent provenance comes from the selected
+override rather than the connection default.
+
+Older servers use permitted catalog/connection metadata. Successfully loaded
+catalog entries without billing and custom services without catalog links show
+**—**. Missing or failed catalog reads remain unknown, including private catalog
+entries omitted from discovery. OAuth connections without published provenance
+remain unverified until the backend field is deployed. The dash tooltip stays
+beside its content; longer details align below, with viewport collision handling.
+
+The label is not evidence of a settled debit. Shared-app OAuth currently uses the
+BYOK price lane in execution. A service with only platform-key pricing therefore
+has no OAuth usage fee even when the credential supplier is NyxID. The UI must not
+attach the platform-key price to that OAuth connection. See the reviewed decision
+table and rollout limitations in [Billing labels](plans/service-billing-labels.md).
 
 Agent keys are counted once across the group's connections; partial inventories
 show a `+`. Agent key count and last-use time share one compact line. Hover or

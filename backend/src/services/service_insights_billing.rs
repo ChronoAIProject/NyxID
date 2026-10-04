@@ -72,6 +72,15 @@ pub enum ProviderBillingDisclosure {
     Unknown,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialSupplier {
+    Nyxid,
+    Own,
+    None,
+    Unknown,
+}
+
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct ServiceBillingExplanation {
     pub status: BillingExplanationStatus,
@@ -81,6 +90,10 @@ pub struct ServiceBillingExplanation {
     pub charge_status: ConnectionChargeStatus,
     /// Saved usage-charge configuration, independent of availability and caller rollout.
     pub credit_billing_configured: Option<bool>,
+    /// Whether any credential class has a configured charge for this service.
+    pub service_billing_configured: Option<bool>,
+    /// Credential supply is distinct from the execution price-lane classification.
+    pub credential_supplier: Option<CredentialSupplier>,
     pub rates: Vec<ServiceBillingRate>,
     pub provider_billing: ProviderBillingDisclosure,
     /// "for_you" uses the viewer's default; "agent_key" includes that key's override.
@@ -542,6 +555,16 @@ async fn explain_connections_in_context(
             billing.resale_enabled(),
             billing.lago_configured(),
         );
+        explanation.credential_supplier = Some(
+            if credential_class == CredentialClass::AgentOverrideUserOwned {
+                overrides
+                    .get(service.id.as_str())
+                    .and_then(|binding| credentials.get(&binding.user_api_key_id))
+                    .map_or(CredentialSupplier::Unknown, stored_credential_supplier)
+            } else {
+                connection_credential_supplier(service, credential)
+            },
+        );
         annotate_transport_pricing(&mut explanation, catalog_service);
         if credential_class == CredentialClass::NodeManaged {
             explanation.status = BillingExplanationStatus::Conditional;
@@ -583,8 +606,41 @@ fn annotate_configured_charge(
 ) {
     if explanation.status == BillingExplanationStatus::Restricted
         || (service.catalog_service_id.is_some() && catalog.is_none())
-        || (agent_context && explanation.credential_class.is_none())
     {
+        return;
+    }
+    let configuration = catalog.and_then(|service| service.billing.as_ref());
+    explanation.service_billing_configured = Some(service_billing_configured(configuration));
+    if explanation.credential_supplier.is_none() {
+        explanation.credential_supplier = Some(if agent_context {
+            CredentialSupplier::Unknown
+        } else {
+            connection_credential_supplier(service, credential)
+        });
+    }
+    if matches!(
+        explanation.status,
+        BillingExplanationStatus::Resolved | BillingExplanationStatus::Conditional
+    ) {
+        match explanation.credential_supplier {
+            Some(CredentialSupplier::Unknown) => {
+                explanation.provider_billing = ProviderBillingDisclosure::Unknown;
+                explanation.credential_label = "Credential supplier unverified".into();
+            }
+            Some(CredentialSupplier::Nyxid) => {
+                explanation.provider_billing = ProviderBillingDisclosure::NyxidCredential;
+                explanation.credential_label =
+                    if explanation.credential_class == Some(CredentialClass::NyxidManagedMaster) {
+                        "NyxID key"
+                    } else {
+                        "NyxID OAuth app"
+                    }
+                    .into();
+            }
+            _ => {}
+        }
+    }
+    if agent_context && explanation.credential_class.is_none() {
         return;
     }
     let stored = credential.filter(|key| key.user_id == service.user_id);
@@ -605,12 +661,55 @@ fn annotate_configured_charge(
             stored.map(|key| default_credential_class(service, key, true))
         }
     });
-    let configuration = catalog.and_then(|service| service.billing.as_ref());
     explanation.credit_billing_configured = if configuration.is_none() {
         Some(false)
     } else {
         class.map(|class| configured_usage_charge(configuration, class))
     };
+}
+
+fn connection_credential_supplier(
+    service: &UserService,
+    credential: Option<&UserApiKey>,
+) -> CredentialSupplier {
+    if uses_platform_binding(service) {
+        return CredentialSupplier::Nyxid;
+    }
+    if service.auth_method == "none" && service.node_id.is_none() {
+        return CredentialSupplier::None;
+    }
+    credential
+        .filter(|key| key.user_id == service.user_id)
+        .map_or(CredentialSupplier::Unknown, stored_credential_supplier)
+}
+
+fn stored_credential_supplier(key: &UserApiKey) -> CredentialSupplier {
+    if matches!(key.credential_type.as_str(), "oauth2" | "device_code") {
+        match key.credential_source.as_deref() {
+            Some("platform") => CredentialSupplier::Nyxid,
+            Some("byo") => CredentialSupplier::Own,
+            _ if key.user_oauth_client_id_encrypted.is_some() => CredentialSupplier::Own,
+            _ => CredentialSupplier::Unknown,
+        }
+    } else if matches!(
+        key.credential_type.as_str(),
+        "api_key" | "bearer" | "basic" | "token_exchange" | "ssh_certificate" | "node_managed"
+    ) {
+        CredentialSupplier::Own
+    } else {
+        CredentialSupplier::Unknown
+    }
+}
+
+fn service_billing_configured(configuration: Option<&ServiceBilling>) -> bool {
+    [
+        CredentialClass::NyxidManagedMaster,
+        CredentialClass::NyxidPlatformOauthApp,
+        CredentialClass::UserOwned,
+        CredentialClass::NoAuth,
+    ]
+    .into_iter()
+    .any(|class| configured_usage_charge(configuration, class))
 }
 
 fn configured_usage_charge(configuration: Option<&ServiceBilling>, class: CredentialClass) -> bool {
@@ -709,6 +808,8 @@ fn restricted() -> ServiceBillingExplanation {
         account: None,
         charge_status: ConnectionChargeStatus::Restricted,
         credit_billing_configured: None,
+        service_billing_configured: None,
+        credential_supplier: None,
         rates: Vec::new(),
         provider_billing: ProviderBillingDisclosure::Unknown,
         context: "for_you".into(),
@@ -799,6 +900,8 @@ fn project_billing(
         account: Some(account),
         charge_status: ConnectionChargeStatus::NotCharged,
         credit_billing_configured: Some(configured_usage_charge(configuration, credential_class)),
+        service_billing_configured: Some(service_billing_configured(configuration)),
+        credential_supplier: None,
         rates: Vec::new(),
         provider_billing,
         context: "for_you".into(),
@@ -932,6 +1035,110 @@ mod tests {
             sync_error: None,
             components: Vec::new(),
         }
+    }
+
+    fn metadata_credential(kind: &str) -> UserApiKey {
+        bson::from_document(doc! {
+            "_id": "credential", "user_id": "owner", "label": "Connection",
+            "credential_type": kind, "status": "active",
+            "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn billing_metadata_service_gate_is_independent_of_twitter_oauth_lane() {
+        let config = ServiceBilling {
+            platform_billable: true,
+            platform_key_pricing: Some(lane(BillingMetric::Requests, "0.05", "twitter-pk")),
+            ..Default::default()
+        };
+        assert!(service_billing_configured(Some(&config)));
+        let oauth = project_billing(
+            &connection(),
+            Some(&config),
+            CredentialClass::NyxidPlatformOauthApp,
+            account(BillingAccountKind::Personal),
+            true,
+            false,
+            true,
+        );
+        assert_eq!(oauth.service_billing_configured, Some(true));
+        assert_eq!(oauth.credit_billing_configured, Some(false));
+        assert_eq!(oauth.charge_status, ConnectionChargeStatus::NotCharged);
+        assert!(oauth.rates.is_empty());
+        assert!(!service_billing_configured(None));
+        assert!(!service_billing_configured(Some(&ServiceBilling {
+            platform_key_pricing: Some(lane(BillingMetric::Requests, "0", "zero")),
+            ..Default::default()
+        })));
+    }
+
+    #[test]
+    fn billing_metadata_supplier_uses_durable_oauth_provenance() {
+        let service = connection();
+        let mut key = metadata_credential("oauth2");
+        assert_eq!(
+            default_credential_class(&service, &key, true),
+            CredentialClass::UserOwned
+        );
+        assert_eq!(
+            stored_credential_supplier(&key),
+            CredentialSupplier::Unknown
+        );
+        key.credential_source = Some("byo".into());
+        assert_eq!(stored_credential_supplier(&key), CredentialSupplier::Own);
+        key.user_oauth_client_id_encrypted = Some(vec![1, 2, 3]);
+        key.credential_source = Some("platform".into());
+        assert_eq!(stored_credential_supplier(&key), CredentialSupplier::Nyxid);
+        key.credential_source = None;
+        assert_eq!(stored_credential_supplier(&key), CredentialSupplier::Own);
+        assert_eq!(
+            stored_credential_supplier(&metadata_credential("api_key")),
+            CredentialSupplier::Own
+        );
+        assert_eq!(
+            stored_credential_supplier(&metadata_credential("node_managed")),
+            CredentialSupplier::Own
+        );
+        assert_eq!(
+            connection_credential_supplier(&service, None),
+            CredentialSupplier::Unknown
+        );
+        let mut platform = service.clone();
+        platform.credential_binding = Some("platform".into());
+        assert_eq!(
+            connection_credential_supplier(&platform, Some(&key)),
+            CredentialSupplier::Nyxid
+        );
+    }
+
+    #[test]
+    fn billing_metadata_disabled_and_agent_preserve_service_gate() {
+        let mut service = connection();
+        service.is_active = false;
+        let mut key = metadata_credential("oauth2");
+        key.credential_source = Some("platform".into());
+        let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+        catalog.billing = Some(ServiceBilling {
+            platform_key_pricing: Some(lane(BillingMetric::Requests, "0.05", "twitter-pk")),
+            ..Default::default()
+        });
+        let mut result = unavailable("Disabled");
+        annotate_configured_charge(&mut result, &service, Some(&catalog), Some(&key), false);
+        assert_eq!(result.service_billing_configured, Some(true));
+        assert_eq!(result.credential_supplier, Some(CredentialSupplier::Nyxid));
+        let mut agent = unavailable("Override unavailable");
+        annotate_configured_charge(&mut agent, &service, Some(&catalog), Some(&key), true);
+        assert_eq!(agent.service_billing_configured, Some(true));
+        assert_eq!(agent.credential_supplier, Some(CredentialSupplier::Unknown));
+        catalog.billing = None;
+        annotate_configured_charge(&mut agent, &service, Some(&catalog), Some(&key), true);
+        assert_eq!(agent.service_billing_configured, Some(false));
+        let mut hidden = restricted();
+        annotate_configured_charge(&mut hidden, &service, Some(&catalog), Some(&key), false);
+        assert!(hidden.service_billing_configured.is_none());
+        assert!(hidden.credential_supplier.is_none());
     }
 
     #[test]

@@ -617,6 +617,8 @@ pub struct KeyView {
     /// re-typing the credential. `None` otherwise. The client_secret is
     /// never surfaced (write-only across the API).
     pub oauth_client_id: Option<String>,
+    /// Stored OAuth app selection, without exposing app credentials.
+    pub oauth_app_source: Option<String>,
     /// Scopes currently granted on this OAuth connection, parsed from the
     /// backing `UserApiKey.token_scopes`. Lets the connect UIs pre-select and
     /// lock the existing grant when adding scopes to an existing connection
@@ -4525,6 +4527,7 @@ fn build_key_view(
         // `EncryptionKeys` operations are async and `build_key_view`
         // is intentionally sync.
         oauth_client_id: None,
+        oauth_app_source: ak.and_then(|key| key.credential_source.clone()),
         // OAuth providers echo scopes using either spaces or commas. Normalize
         // both forms at the read boundary while preserving the raw provider
         // response in storage and the first-occurrence display order.
