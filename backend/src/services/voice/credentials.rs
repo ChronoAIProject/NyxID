@@ -15,7 +15,7 @@ use crate::{
     },
 };
 use mongodb::bson::doc;
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 use zeroize::Zeroizing;
 
 pub struct Resolved {
@@ -63,7 +63,8 @@ pub async fn resolve(
             {
                 return Err(AppError::VoiceProviderUnavailable);
             }
-            let revision = hex::encode(Sha256::digest(&service.credential_encrypted));
+            let revision =
+                keyed_fingerprint(state, b"credential-revision", &service.credential_encrypted);
             let target = Box::pin(proxy::resolve_catalog_platform_target(
                 &state.db,
                 &state.encryption_keys,
@@ -172,20 +173,38 @@ pub async fn resolve(
         voice_billing,
         false,
     );
-    let identity = hex::encode(Sha256::digest(format!(
-        "{}:{}:{}:{}:{}",
-        thread.credential_api_key_id,
-        service.id,
-        owner,
-        p.connection_id.as_deref().unwrap_or("platform"),
-        revision
-    )));
+    let identity = keyed_fingerprint(
+        state,
+        b"session-identity",
+        format!(
+            "{}:{}:{}:{}:{}",
+            thread.credential_api_key_id,
+            service.id,
+            owner,
+            p.connection_id.as_deref().unwrap_or("platform"),
+            revision
+        )
+        .as_bytes(),
+    );
     Ok(Resolved {
         voice,
         key,
         identity,
         billing,
     })
+}
+
+/// Keyed, domain-separated fingerprint for change detection. Never a password
+/// hash: inputs may include credential ciphertext, so an unkeyed digest is not used.
+fn keyed_fingerprint(state: &AppState, domain: &[u8], material: &[u8]) -> String {
+    use hmac::{Hmac, Mac};
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(state.audit_chain_hmac_key.as_slice())
+        .expect("HMAC accepts any key length");
+    mac.update(b"nyxid-voice-");
+    mac.update(domain);
+    mac.update(b"\0");
+    mac.update(material);
+    hex::encode(mac.finalize().into_bytes())
 }
 
 fn official_origin(base: &str) -> bool {
