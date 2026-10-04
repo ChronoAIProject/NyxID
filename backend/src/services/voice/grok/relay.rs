@@ -231,8 +231,10 @@ impl Grok {
                     input.echo_samples += bytes.len() / 2;
                 }
                 input.voiced += bytes
-                    .chunks_exact(2)
-                    .filter(|b| i16::from_le_bytes([b[0], b[1]]).unsigned_abs() > 512)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .filter(|b| i16::from_le_bytes(**b).unsigned_abs() > 512)
                     .count();
                 input.end = now;
                 if input.samples > 24_000 * 15

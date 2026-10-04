@@ -8,9 +8,11 @@ pub struct EchoReference {
 impl EchoReference {
     pub fn output(&mut self, pcm: &[u8]) {
         self.samples.extend(
-            pcm.chunks_exact(2)
+            pcm.as_chunks::<2>()
+                .0
+                .iter()
                 .step_by(12)
-                .map(|b| i16::from_le_bytes([b[0], b[1]])),
+                .map(|b| i16::from_le_bytes(*b)),
         );
         while self.samples.len() > 4000 {
             self.samples.pop_front();
@@ -18,9 +20,11 @@ impl EchoReference {
     }
     pub fn matches(&self, pcm: &[u8]) -> bool {
         let input: Vec<f64> = pcm
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .step_by(12)
-            .map(|b| f64::from(i16::from_le_bytes([b[0], b[1]])))
+            .map(|b| f64::from(i16::from_le_bytes(*b)))
             .collect();
         if input.len() < 20 || self.samples.len() < input.len() {
             return false;
