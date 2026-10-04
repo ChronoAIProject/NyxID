@@ -914,3 +914,112 @@ been shut down; the disk guard never reached its stop threshold. At completion,
 A+B is ready for review with no new commits. Provider delivery is covered by
 request fixtures; no real-platform smoke test or deployed gateway compatibility
 is claimed in A+B. Direct follow admission, owner controls and UI remain PR C.
+
+## 15. PR C: direct follow and owner controls
+
+PR C is stacked on `691ac03b` (v0.51.0, A+B PR #1750) in
+`feat/channel-thread-follow-c`. It does not change the A+B branch or enable
+`nyxbot:thread-follow` by default. The working tree also contains an
+uncommitted merge of `origin/main` at `655ae214` (v0.54.0); the voice beta and
+live-turn gate are retained. No commit was made.
+
+Direct Slack, Discord, Lark/Feishu and Telegram/telegram-new adapters now declare
+follow support. A supported direct link with the owner's flag enabled can
+create a child after positive address evidence. Unmentioned human messages
+enter only an active child or an existing child allowed by Every message.
+Private chats, unsupported surfaces and `threads=off` retain legacy routing.
+Gateway transports remain unavailable pending the external gateway contract;
+email is deferred to E, and X public threads remain unsupported for T1.
+
+Children inherit live policy from the enclosing chat/topic, unless an exact
+pre-existing legacy thread row supplies an override. Canonical root and native
+alias lookups preserve those overrides even when the triggering root message
+has no legacy `thread_id`. Ambiguous old aliases retain legacy routing.
+Existing override IDs and transcripts remain intact and can be displayed under
+the enclosing chat. Telegram forum topics retain their topic-wide boundary.
+
+Reservation, activation, stop, settings changes and expiry use the channel's
+transactional coordination revision. The unique child partition binds the
+canonical scope and effective agent generation. Activation is part of the
+engine's persisted turn claim, or of admission to its existing owner queue.
+Reservations expire after 60 seconds; no new body queue is introduced. Limits
+remain 32/chat, 256/bot, 10/chat/hour and 100/bot/hour, without eviction.
+
+Each admitted event retains its original source, sender classification and
+binding generation. Queue drain and every outbound component recheck live
+sender/link/route/agent authority. Stop and idle expiry preserve already admitted
+work; reassignment and revoked authority prevent stale delivery. Known addressed
+children remain usable during flag rollback, without creating or renewing a
+follow. Deferred replies use their admitted event targets rather than the most
+recent inbound message. Busy/drop counters retain numbers only, and an unqueued
+message gets a retry notice rather than a promise of queued work.
+
+Repeated owner questions coalesce inside their child under the same admission
+fence, without adding a new reply destination to the queued or running answer.
+That answer already targets the native thread. Queued owner requests use their
+own authority when the preceding guest loses access; fully revoked queues are
+pruned before spending an event-turn budget. Native discovery rechecks live
+org-admin access even before the org-loss sweep updates the link.
+
+The first claimed child turn receives bounded context directly in the upstream
+request. Neither provider history nor fallback metadata is appended to stored
+turn text, notes or queue events. Context remains limited to 20 messages,
+32 KiB, three provider requests and eight seconds; unavailable history never
+causes an automatic scope request. Metadata-only context is supported.
+Target resolution and history share one deadline so a slow provider leaves
+time to return the metadata fallback. Context and overload metadata changes
+also trigger the existing coalesced UI refresh.
+
+Owner controls comprise the parent `threads` PATCH setting, paginated child
+list and idempotent stop endpoints, NyxBot-native list/stop tools, and the exact
+owner command `stop following`. Guests cannot stop a follow. Agent overrides,
+relinks, destruction, disconnect and conversation deletion close the appropriate
+binding; stop/expiry retain the transcript. After a stop, Every message still
+permits replies in the existing child.
+
+The UI adds Followed threads, active/history pages, native topic labels, idle
+expiry, context availability and Stop following feedback. Chat history remains
+accessible. A reservation has no transcript link until a real conversation is
+present. Optional parent/child metadata groups branches in the sidebar.
+Identifier-only `channel_thread` live events use the existing coalesced query
+invalidation. Older-server schemas remain accepted.
+
+Release notes for this unit: direct thread follow is available behind the
+existing default-off flag. Gateway and email follow are not enabled by this
+unit. X public-thread follow is not supported. Stopping follow keeps history and
+does not cancel work already admitted; Every message remains an independent
+reply policy. Provider history can fall back to metadata without extra scopes.
+
+The execution path rechecks every bound channel/event origin immediately before
+each upstream request, including continuations. A revoked sender, route or
+agent therefore cannot reach the model after transient history preparation;
+ordinary browser turns remain independent. The Telegram-new adapter now
+advertises the approved follow capability through its existing Telegram
+transport.
+
+Validation results (2026-10-04, merged 0.54.0 tree):
+
+- Focused backend scope: 35/35 passed at the default stack and
+  `RUST_MIN_STACK=1572864`.
+- Broad NyxBot/channel/adapter/delegation/Aurinko/feature-flag/assistant scope:
+  930/930 passed at both stacks. This includes the delegation and Aurinko
+  regressions requested for the 1.5 MiB stack. The isolated Mongo replica set
+  was used; no retries or exclusions were applied.
+- `cargo +1.98.1 clippy -p nyxid --all-targets -- -D warnings` passed. The
+  repository format check passed. Cargo emitted only its existing
+  future-incompatibility notice for `proc-macro-error2`.
+- Frontend: 4,203 tests in 423 files passed serially, lint passed with zero
+  errors and 29 existing warnings, and production/credential-accept builds
+  passed with the mock-footprint assertion. The test run used one worker and
+  the local 15-second timeout to accommodate cold router imports on the loaded
+  host; no repository timeout configuration changed.
+- The wizard build and bundle installation passed; its committed freshness
+  hash was regenerated by the existing script. The CSS optimizer emitted its
+  existing pseudo-class warning only.
+
+The canonical-command guard's subscription-stop exception is restricted to
+that exact new endpoint. The disk guard remained above its 18 GiB safety buffer
+through validation; this worktree's target peaked below 9 GiB. No real-platform
+smoke test or deployed gateway compatibility is claimed. Gateway transports
+remain `follow_readiness=unavailable`, email follow remains deferred to E, and
+X public-thread follow remains unsupported for T1.

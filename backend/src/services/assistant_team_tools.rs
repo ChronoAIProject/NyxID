@@ -46,6 +46,8 @@ pub const TOOL_NAMES: &[&str] = &[
     "list_channel_agents",
     "disconnect_channel_bot",
     "list_channel_chats",
+    "list_channel_threads",
+    "stop_following_thread",
     "update_channel_chat",
     "update_channel_access",
 ];
@@ -161,6 +163,7 @@ pub fn read_only(name: &str) -> bool {
             | "list_groups"
             | "list_channel_agents"
             | "list_channel_chats"
+            | "list_channel_threads"
     )
 }
 
@@ -368,8 +371,15 @@ pub fn schema(name: &str) -> Value {
                 "description": "Only this channel bot's chats (from nyxid__list_channel_agents)"}}),
             vec![],
         ),
+        "list_channel_threads" => (
+            json!({"channel_agent_id":string(64),"chat_id":string(64),"state":{"type":"string","enum":["active","all"]},
+                "cursor":string(100),"limit":{"type":"integer","minimum":1,"maximum":50}}),
+            vec![],
+        ),
+        "stop_following_thread" => (json!({"thread_id":string(64)}), vec!["thread_id"]),
         "update_channel_chat" => (
             json!({"chat_id": string(64),
+                "threads":{"type":"string","enum":["follow","off"]},
                 "reply_mode": {"type": "string", "enum": ["mention", "all"],
                     "description": "Groups and channels: answer only when mentioned or \
                     replied to (mention), or every message (all)"},
@@ -690,6 +700,12 @@ fn description(name: &str) -> &'static str {
             group appears once the bot gets a message there): never ask the user for chat \
             IDs or whether a chat is a group. Use the chat id with nyxid__update_channel_chat \
             and nyxid__post_to_chat."
+        }
+        "list_channel_threads" => {
+            "List followed platform threads and retained thread history. Returns metadata only, with conversation links, state and idle expiry. Optional channel/chat filters and bounded cursor pagination."
+        }
+        "stop_following_thread" => {
+            "Stop following one platform thread without deleting its transcript or cancelling admitted work. Every message mode still allows replies. Only the verified owner may stop a follow."
         }
         "update_channel_chat" => {
             "Change one chat's settings when the user asks: answer every message or only \

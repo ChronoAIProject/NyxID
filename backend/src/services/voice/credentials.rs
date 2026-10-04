@@ -4,7 +4,7 @@ use crate::{
     errors::{AppError, AppResult},
     models::{
         assistant_voice::{VoiceKeySource, VoicePreferences},
-        downstream_service::{COLLECTION_NAME as SERVICES, DownstreamService},
+        downstream_service::{COLLECTION_NAME as SERVICES, DownstreamService, VoiceProtocol},
         service_billing::{BillingMetric, ServiceBilling},
         usage_meter::CredentialClass,
         user_service::{COLLECTION_NAME as CONNECTIONS, UserService},
@@ -23,6 +23,8 @@ pub struct Resolved {
     pub identity: String,
     pub voice: String,
     pub billing: BillingRouteContext,
+    pub token_billing: BillingRouteContext,
+    pub protocol: VoiceProtocol,
 }
 
 pub async fn resolve(
@@ -45,11 +47,26 @@ pub async fn resolve(
         .and_then(|i| i.voice.as_ref())
         .ok_or(AppError::VoiceProviderUnavailable)?;
     let voice = super::selected_voice(metadata, &p.model, p.voice.as_deref())?;
-    if !official_origin(&service.base_url) {
+    let protocol = metadata.protocol;
+    if protocol == VoiceProtocol::XaiRealtime {
+        if p.input_mode != crate::models::assistant_voice::VoiceInputMode::PushToTalk {
+            return Err(AppError::ValidationError("Grok beta requires Hold to talk with headphones; automatic speaker mode is not verified".into()));
+        }
+        if !super::super::feature_flag_service::personal_flag_enabled(
+            &state.db,
+            user,
+            super::super::feature_flag_service::VOICE_GROK_FLAG_KEY,
+        )
+        .await?
+        {
+            return Err(AppError::VoiceProviderUnavailable);
+        }
+    }
+    if !official_provider_origin(&service.base_url, &protocol) {
         return Err(AppError::VoiceProviderUnavailable);
     }
     let voice_billing = duration_billing(&p.key_source, service.billing.as_ref())?;
-    authorize_inference(state, &thread, &service).await?;
+    authorize_inference(&state.db, &thread, &service).await?;
     let resource_owner = thread.agent_owner_id.as_deref().unwrap_or(user);
     let (mut target, class, owner, key_id, revision) = match p.key_source {
         VoiceKeySource::Platform => {
@@ -57,7 +74,7 @@ pub async fn resolve(
             if !super::super::feature_flag_service::personal_flag_enabled(
                 &state.db,
                 user,
-                super::super::feature_flag_service::VOICE_OPENAI_PLATFORM_FLAG_KEY,
+                platform_flag(&protocol),
             )
             .await?
             {
@@ -110,7 +127,7 @@ pub async fn resolve(
             .ok_or(AppError::VoiceProviderUnavailable)?;
             if snapshot.node_id.is_some()
                 || snapshot.master_credential
-                || !official_origin(&snapshot.target.base_url)
+                || !official_provider_origin(&snapshot.target.base_url, &protocol)
             {
                 return Err(AppError::VoiceProviderUnavailable);
             }
@@ -130,7 +147,7 @@ pub async fn resolve(
             .ok_or(AppError::VoiceProviderUnavailable)?;
             if resolved.node_id.is_some()
                 || resolved.master_credential
-                || !official_origin(&resolved.target.base_url)
+                || !official_provider_origin(&resolved.target.base_url, &protocol)
             {
                 return Err(AppError::VoiceProviderUnavailable);
             }
@@ -160,9 +177,9 @@ pub async fn resolve(
     let billing = BillingRouteContext::new(
         BillingIngress::LlmProvider,
         uuid::Uuid::new_v4().to_string(),
-        payer.owner_id,
+        payer.owner_id.clone(),
         user.into(),
-        key_id,
+        key_id.clone(),
         p.connection_id.clone(),
         Some(service.id.clone()),
         Some(service.slug.clone()),
@@ -173,9 +190,32 @@ pub async fn resolve(
         voice_billing,
         false,
     );
+    let token_billing = BillingRouteContext::new(
+        BillingIngress::LlmProvider,
+        uuid::Uuid::new_v4().to_string(),
+        payer.owner_id,
+        user.into(),
+        key_id,
+        p.connection_id.clone(),
+        Some(service.id.clone()),
+        Some(service.slug.clone()),
+        NodeIntent::Direct,
+        "bearer".into(),
+        class,
+        BillingMetric::Tokens,
+        service.billing.as_ref().filter(|b| match p.key_source {
+            VoiceKeySource::Own => b.byok_pricing.is_some(),
+            VoiceKeySource::Platform => b.platform_key_pricing.is_some(),
+        }),
+        false,
+    );
     let identity = keyed_fingerprint(
         state,
-        b"session-identity",
+        if protocol == VoiceProtocol::XaiRealtime {
+            b"session-identity-xai-realtime"
+        } else {
+            b"session-identity"
+        },
         format!(
             "{}:{}:{}:{}:{}",
             thread.credential_api_key_id,
@@ -191,6 +231,8 @@ pub async fn resolve(
         key,
         identity,
         billing,
+        token_billing,
+        protocol,
     })
 }
 
@@ -207,10 +249,22 @@ fn keyed_fingerprint(state: &AppState, domain: &[u8], material: &[u8]) -> String
     hex::encode(mac.finalize().into_bytes())
 }
 
-fn official_origin(base: &str) -> bool {
+pub fn platform_flag(protocol: &VoiceProtocol) -> &'static str {
+    if *protocol == VoiceProtocol::XaiRealtime {
+        super::super::feature_flag_service::VOICE_GROK_PLATFORM_FLAG_KEY
+    } else {
+        super::super::feature_flag_service::VOICE_OPENAI_PLATFORM_FLAG_KEY
+    }
+}
+pub fn official_provider_origin(base: &str, protocol: &VoiceProtocol) -> bool {
     url::Url::parse(base).is_ok_and(|u| {
         u.scheme() == "https"
-            && u.host_str() == Some("api.openai.com")
+            && u.host_str()
+                == Some(if *protocol == VoiceProtocol::XaiRealtime {
+                    "api.x.ai"
+                } else {
+                    "api.openai.com"
+                })
             && u.port_or_known_default() == Some(443)
             && u.username().is_empty()
             && u.password().is_none()
@@ -220,18 +274,15 @@ fn official_origin(base: &str) -> bool {
     })
 }
 
-async fn authorize_inference(
-    state: &AppState,
+pub(crate) async fn authorize_inference(
+    db: &mongodb::Database,
     thread: &crate::models::assistant_conversation::AssistantConversation,
     service: &DownstreamService,
 ) -> AppResult<()> {
-    let key = super::super::key_service::get_api_key(
-        &state.db,
-        &thread.user_id,
-        &thread.credential_api_key_id,
-    )
-    .await?;
-    let auth = crate::mw::auth::api_key_auth_user(&state.db, &key, None, None, None).await?;
+    let key =
+        super::super::key_service::get_api_key(db, &thread.user_id, &thread.credential_api_key_id)
+            .await?;
+    let auth = crate::mw::auth::api_key_auth_user(db, &key, None, None, None).await?;
     auth.ensure_llm_proxy_access()?;
     if auth
         .api_key_service_scope()
@@ -241,27 +292,36 @@ async fn authorize_inference(
             "This agent cannot use the selected voice service".into(),
         ));
     }
-    let path =
-        super::super::proxy_authorization::CanonicalPath::from_mcp_literal("/live/sessions")?;
-    super::super::proxy_authorization::authorize_proxy_operation(service, "POST", &path)?;
+    let grok = service
+        .inference
+        .as_ref()
+        .and_then(|i| i.voice.as_ref())
+        .is_some_and(|v| v.protocol == VoiceProtocol::XaiRealtime);
+    let method = if grok { "GET" } else { "POST" };
+    let path = super::super::proxy_authorization::CanonicalPath::from_mcp_literal(if grok {
+        "/realtime"
+    } else {
+        "/live/sessions"
+    })?;
+    super::super::proxy_authorization::authorize_proxy_operation(service, method, &path)?;
     super::super::agent_operation_scope_service::authorize(
         &auth.assistant_operation_scopes,
         &service.id,
         Some(&service.id),
         None,
-        "POST",
+        method,
         &path,
         false,
-        false,
+        grok,
     )?;
     if !auth.assistant_operation_scopes.is_empty() {
         Box::pin(
             super::super::agent_operation_scope_service::check_non_mcp_context(
-                &state.db,
+                db,
                 &auth,
                 &service.id,
                 Some(&service.id),
-                "POST",
+                method,
                 &path,
             ),
         )

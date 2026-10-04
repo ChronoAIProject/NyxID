@@ -14,6 +14,7 @@ pub const ANCESTORS: usize = 16;
 
 /// Created only by the service from a retained inbound row and adapter proof.
 /// Native adapters can read the facts, but callers cannot deserialize a target.
+#[derive(Clone)]
 pub struct ThreadReplyTarget {
     pub(super) bot_id: String,
     pub(super) owner_id: String,
@@ -21,6 +22,11 @@ pub struct ThreadReplyTarget {
     pub(super) route_key_id: String,
     pub(super) platform: String,
     pub(super) facts: ChannelThreadFacts,
+    pub(super) admitted: Option<(
+        String,
+        crate::models::assistant_conversation::ChannelOrigin,
+        String,
+    )>,
 }
 
 impl ThreadReplyTarget {
@@ -33,6 +39,7 @@ impl ThreadReplyTarget {
             route_key_id: "key".into(),
             platform: platform.into(),
             facts,
+            admitted: None,
         }
     }
     pub fn facts(&self) -> &ChannelThreadFacts {

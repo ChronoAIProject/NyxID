@@ -51,6 +51,7 @@ pub mod channel_registration;
 pub mod channel_relay_service;
 pub mod channel_routing_service;
 pub mod channel_send_service;
+pub mod channel_thread_follow_service;
 pub mod channel_thread_service;
 pub mod channel_verification_service;
 #[cfg(test)]

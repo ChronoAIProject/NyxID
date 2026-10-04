@@ -1,5 +1,7 @@
 import { assistantJson } from "@/lib/assistant/assistant-http";
 import {
+  nyxAgentChannelThreadListSchema,
+  nyxAgentChannelThreadStoppedSchema,
   assistantAgentCreatedSchema,
   assistantAgentDestroyedSchema,
   assistantAgentDetailSchema,
@@ -125,6 +127,18 @@ export const nyxBotApi = {
     return nyxAgentChannelChatListSchema.parse(
       await assistantJson(`${ROOT}/channels/${encodeURIComponent(channelAgentId)}/chats`),
     ).chats;
+  },
+  async channelThreads(channelId: string, chatId: string, state: "active" | "all", cursor?: string) {
+    const query = new URLSearchParams({ state, limit: "25", ...(cursor ? { cursor } : {}) });
+    return nyxAgentChannelThreadListSchema.parse(await assistantJson(
+      `${ROOT}/channels/${encodeURIComponent(channelId)}/chats/${encodeURIComponent(chatId)}/threads?${query}`,
+    ));
+  },
+  async stopChannelThread(channelId: string, chatId: string, threadId: string) {
+    return nyxAgentChannelThreadStoppedSchema.parse(await assistantJson(
+      `${ROOT}/channels/${encodeURIComponent(channelId)}/chats/${encodeURIComponent(chatId)}/threads/${encodeURIComponent(threadId)}/stop`,
+      { method: "POST" },
+    ));
   },
   async updateChannelChat(
     channelAgentId: string,

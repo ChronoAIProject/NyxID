@@ -667,33 +667,14 @@ pub(super) async fn carry_over(
     to: &str,
     agent_changed: bool,
 ) -> AppResult<()> {
-    let from = from.id.as_str();
-    let stable = doc! {"$not": {"$regex": "^conv_"}};
-    let threads = state.db.collection::<NyxbotThread>(THREADS);
-    if agent_changed {
-        threads
-            .update_many(
-                doc! {"channel_id": from, "user_id": owner, "agent_id": bson::Bson::Null},
-                doc! {"$set": {"conversation_id": bson::Bson::Null}},
-            )
-            .await?;
-    }
-    threads
-        .update_many(
-            doc! {"channel_id": from, "user_id": owner, "partition": stable.clone()},
-            doc! {"$set": {"channel_id": to}},
-        )
-        .await?;
-    state
-        .db
-        .collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
-        .update_many(
-            doc! {"user_id": owner, "channel.nyxbot_channel_id": from,
-            "channel.partition": stable},
-            doc! {"$set": {"channel.nyxbot_channel_id": to}},
-        )
-        .await?;
-    Ok(())
+    crate::services::channel_thread_follow_service::carry_over(
+        &state.db,
+        owner,
+        &from.id,
+        to,
+        agent_changed,
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -812,6 +793,7 @@ async fn push_gateway_groups(
 
 #[derive(Serialize)]
 pub struct ChannelChatResponse {
+    parent_chat_id: Option<String>,
     id: String,
     channel_agent_id: String,
     platform: String,
@@ -837,10 +819,25 @@ pub struct ChannelChatResponse {
     allow_posts: bool,
     conversation_id: Option<String>,
     last_message_at: Option<chrono::DateTime<Utc>>,
+    has_thread_history: bool,
+    threads: &'static str,
+    threads_setting: Option<String>,
+    thread_capabilities: crate::services::channel_platform::ThreadCapabilities,
+    followed_thread_count: i64,
+    follow_readiness: &'static str,
+    follow_guidance: Option<String>,
 }
 
 fn chat_response(row: &NyxbotChannel, chat: &NyxbotThread) -> ChannelChatResponse {
     ChannelChatResponse {
+        parent_chat_id: chat.follow.parent_chat_id.clone(),
+        has_thread_history: chat.follow.has_thread_history,
+        follow_guidance: None,
+        threads: "off",
+        threads_setting: chat.follow.threads.clone(),
+        thread_capabilities: Default::default(),
+        followed_thread_count: 0,
+        follow_readiness: "unavailable",
         id: chat.id.clone(),
         channel_agent_id: row.id.clone(),
         platform: row.platform.clone(),
@@ -869,6 +866,47 @@ fn chat_response(row: &NyxbotChannel, chat: &NyxbotThread) -> ChannelChatRespons
     }
 }
 
+fn follow_response(
+    state: &AppState,
+    row: &NyxbotChannel,
+    chat: &NyxbotThread,
+    on: bool,
+    count: i64,
+) -> ChannelChatResponse {
+    let mut dto = chat_response(row, chat);
+    dto.thread_capabilities = super::thread_controls::capabilities(state, row, on, is_group(chat));
+    dto.threads = if on && chat.follow.threads.as_deref().unwrap_or("follow") == "follow" {
+        "follow"
+    } else {
+        "off"
+    };
+    dto.follow_guidance = if on && is_group(chat) {
+        Some(if row.transport == "gateway" {
+            "Thread follow is unavailable on this gateway version.".into()
+        } else if let Ok(a) = crate::services::channel_adapters::resolve_adapter(
+            &row.platform,
+            &state.token_exchange_cache,
+        ) {
+            if a.thread_capabilities().thread_follow {
+                a.thread_follow_guidance().into()
+            } else {
+                "This platform does not support thread follow.".into()
+            }
+        } else {
+            "Thread follow is unavailable.".into()
+        })
+    } else {
+        None
+    };
+    dto.followed_thread_count = count;
+    dto.follow_readiness = if dto.thread_capabilities.thread_follow {
+        "ready"
+    } else {
+        "unavailable"
+    };
+    dto
+}
+
 /// Chats of the owner's channels (optionally one channel), most recent
 /// first. Gateway sender partitions of a group are not chats.
 pub(crate) async fn list_chats(
@@ -890,7 +928,7 @@ pub(crate) async fn list_chats(
     let chats: Vec<NyxbotThread> = state
         .db
         .collection::<NyxbotThread>(THREADS)
-        .find(doc! {"user_id": owner, "channel_id": {"$in": ids},
+        .find(doc! {"user_id": owner, "channel_id": {"$in": ids}, "record_scope":{"$ne":"platform_thread"},
         "$or": [{"kind": {"$ne": bson::Bson::Null}},
             {"conversation_id": {"$ne": bson::Bson::Null}}]})
         .sort(doc! {"last_message_at": -1, "updated_at": -1})
@@ -898,13 +936,24 @@ pub(crate) async fn list_chats(
         .await?
         .try_collect()
         .await?;
+    let on = super::thread_follow::enabled(state, owner).await?;
+    let counts = crate::services::channel_thread_follow_service::counts(
+        &state.db,
+        owner,
+        &chats.iter().map(|c| c.id.clone()).collect::<Vec<_>>(),
+    )
+    .await?;
     Ok(chats
         .iter()
         .filter_map(|chat| {
-            channels
-                .iter()
-                .find(|row| row.id == chat.channel_id)
-                .map(|row| chat_response(row, chat))
+            let row = channels.iter().find(|row| row.id == chat.channel_id)?;
+            Some(follow_response(
+                state,
+                row,
+                chat,
+                on,
+                *counts.get(&chat.id).unwrap_or(&0),
+            ))
         })
         .collect())
 }
@@ -917,7 +966,7 @@ async fn load_chat(
     let chat = state
         .db
         .collection::<NyxbotThread>(THREADS)
-        .find_one(doc! {"_id": chat_id, "user_id": owner})
+        .find_one(doc! {"_id": chat_id, "user_id": owner,"record_scope":{"$ne":"platform_thread"}})
         .await?
         .ok_or_else(|| AppError::NotFound("Chat not found".into()))?;
     let row = load_channel(state, owner, &chat.channel_id).await?;
@@ -931,11 +980,17 @@ async fn load_chat(
 #[derive(Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChatSettings {
+    #[serde(default, deserialize_with = "non_null_threads")]
+    pub threads: Option<String>,
     pub reply_mode: Option<String>,
     pub members: Option<String>,
     pub allow_posts: Option<bool>,
     /// An agent ID, or `default` for the channel's agent.
     pub agent_id: Option<String>,
+}
+
+fn non_null_threads<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    <String as serde::Deserialize>::deserialize(d).map(Some)
 }
 
 pub(crate) async fn update_chat(
@@ -955,6 +1010,14 @@ pub(crate) async fn update_chat(
     }
     let mut set = doc! {"updated_at": bson::DateTime::now()};
     let mut unset = doc! {};
+    if let Some(threads) = settings.threads.as_deref() {
+        if !matches!(threads, "follow" | "off") || !group {
+            return Err(AppError::ValidationError(
+                "threads must be follow or off on a group chat".into(),
+            ));
+        }
+        set.insert("threads", threads);
+    }
     if let Some(mode) = settings.reply_mode.as_deref() {
         if !matches!(mode, "mention" | "all") {
             return Err(AppError::ValidationError(
@@ -1026,13 +1089,19 @@ pub(crate) async fn update_chat(
     if !unset.is_empty() {
         update.insert("$unset", unset);
     }
-    let updated = state
-        .db
-        .collection::<NyxbotThread>(THREADS)
-        .find_one_and_update(doc! {"_id": &chat.id, "user_id": owner}, update)
-        .return_document(mongodb::options::ReturnDocument::After)
-        .await?
-        .ok_or_else(|| AppError::NotFound("Chat not found".into()))?;
+    if agent_changed.is_some() {
+        update.insert("$inc", doc! {"binding_generation":1});
+    }
+    let updated = crate::services::channel_thread_follow_service::update_settings(
+        &state.db,
+        owner,
+        &row.id,
+        &chat.id,
+        update,
+        settings.threads.as_deref() == Some("off"),
+        agent_changed.is_some(),
+    )
+    .await?;
     let gateway_error = if settings.reply_mode.is_some() {
         sync_gateway_groups(state, &row, true).await?
     } else {
@@ -1044,10 +1113,17 @@ pub(crate) async fn update_chat(
         "nyxbot_channel_chat_updated",
         json!({"channel_agent_id": &row.id, "chat_id": &chat.id,
             "reply_mode": settings.reply_mode, "members": settings.members,
-            "allow_posts": settings.allow_posts, "agent_changed": agent_changed.is_some()}),
+            "allow_posts": settings.allow_posts, "threads":settings.threads, "agent_changed": agent_changed.is_some()}),
     )
     .await;
-    let mut result = json!({"chat": chat_response(&row, &updated)});
+    let on = super::thread_follow::enabled(state, owner).await?;
+    let counts = crate::services::channel_thread_follow_service::counts(
+        &state.db,
+        owner,
+        std::slice::from_ref(&updated.id),
+    )
+    .await?;
+    let mut result = json!({"chat": follow_response(state,&row,&updated,on,*counts.get(&updated.id).unwrap_or(&0))});
     if let Some(code) = gateway_error {
         result["warning"] = json!(format!(
             "Saved, but the gateway did not accept the change ({code}); the bot keeps \
@@ -1293,19 +1369,14 @@ pub(crate) async fn release_agent_chats(
     owner: &str,
     agent_id: &str,
 ) -> AppResult<()> {
-    state
-        .db
-        .collection::<NyxbotThread>(THREADS)
-        .update_many(
-            doc! {"user_id": owner, "agent_id": agent_id},
-            doc! {"$unset": {"agent_id": ""}, "$set": {"conversation_id": bson::Bson::Null}},
-        )
-        .await?;
-    Ok(())
+    crate::services::channel_thread_follow_service::release_agent(&state.db, owner, agent_id).await
 }
 
 /// A channel thread's bot and chat, for thread listings.
 pub(crate) struct ChatDetails {
+    pub parent_chat_id: Option<String>,
+    pub thread_id: Option<String>,
+    pub parent_title: Option<String>,
     pub bot_label: String,
     pub chat_id: Option<String>,
     pub kind: Option<String>,
@@ -1313,7 +1384,7 @@ pub(crate) struct ChatDetails {
 }
 
 /// Bot labels and chats of the channel threads among `rows`, by
-/// conversation ID. Two queries, whatever the page size.
+/// conversation ID. Bounded batch queries, whatever the page size.
 pub(crate) async fn thread_details(
     state: &AppState,
     owner: &str,
@@ -1350,6 +1421,9 @@ pub(crate) async fn thread_details(
         .await?
         .try_collect()
         .await?;
+    let parents:Vec<NyxbotThread>=state.db.collection(THREADS).find(doc! {"user_id":owner,
+        "_id":{"$in":chats.iter().filter_map(|c|c.follow.parent_chat_id.as_deref()).collect::<Vec<_>>()}})
+        .await?.try_collect().await?;
     for row in rows {
         let Some(origin) = row.channel.as_ref() else {
             continue;
@@ -1366,6 +1440,17 @@ pub(crate) async fn thread_details(
         details.insert(
             row.id.clone(),
             ChatDetails {
+                parent_chat_id: chat.and_then(|c| c.follow.parent_chat_id.clone()),
+                thread_id: chat
+                    .filter(|c| crate::services::channel_thread_follow_service::is_child(c))
+                    .map(|c| c.id.clone()),
+                parent_title: chat
+                    .and_then(|c| {
+                        parents
+                            .iter()
+                            .find(|p| Some(&p.id) == c.follow.parent_chat_id.as_ref())
+                    })
+                    .and_then(|p| p.title.clone()),
                 bot_label: channel.bot_label.clone(),
                 chat_id: chat.map(|chat| chat.id.clone()),
                 kind: chat.and_then(|chat| chat.kind.clone()),

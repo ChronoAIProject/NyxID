@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { nyxBotApi } from "@/lib/assistant/nyxbot-api";
 import type {
   AssistantAgent,
@@ -255,4 +255,23 @@ export function useRememberNyxBotMemory() {
       replaceId?: string;
     }) => nyxBotApi.remember(agentId, text, replaceId),
   );
+}
+
+
+export function useNyxBotChannelThreads(channelId: string, chatId: string, state: "active" | "all", enabled: boolean) {
+  const userId = useAuthStore((s) => s.user?.id);
+  const live = useNyxAgentLiveConnected();
+  return useInfiniteQuery({
+    queryKey: [...nyxBotQueryKeys.channelChats(userId, channelId), chatId, "threads", state],
+    queryFn: ({ pageParam }) => nyxBotApi.channelThreads(channelId, chatId, state, pageParam),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (page) => page.next_cursor ?? undefined,
+    enabled: enabled && Boolean(userId), retry: false,
+    refetchInterval: livePollInterval(15_000, live),
+  });
+}
+
+export function useStopNyxBotChannelThread() {
+  return useAgentsMutation(({ channelId, chatId, threadId }: { channelId: string; chatId: string; threadId: string }) =>
+    nyxBotApi.stopChannelThread(channelId, chatId, threadId), true);
 }

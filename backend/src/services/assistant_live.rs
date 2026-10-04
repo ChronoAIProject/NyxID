@@ -31,6 +31,7 @@ use crate::models::{
     connect_link::COLLECTION_NAME as CONNECT_LINKS,
 };
 
+const CHANNEL_THREADS: &str = crate::models::nyxbot_channel::THREADS_COLLECTION_NAME;
 const MACHINES: &str = crate::models::node::COLLECTION_NAME;
 const MACHINE_DESKTOPS: &str = crate::models::machine_desktop::COLLECTION_NAME;
 const MACHINE_SETUPS: &str = crate::models::machine_setup::COLLECTION_NAME;
@@ -75,6 +76,13 @@ pub enum LiveEvent {
         user_id: String,
         status: String,
     },
+    ChannelThread {
+        id: String,
+        user_id: String,
+        channel_id: String,
+        parent_id: Option<String>,
+        conversation_id: Option<String>,
+    },
     /// A channel bot was created or changed.
     ChannelBot {
         id: String,
@@ -116,6 +124,7 @@ impl LiveEvent {
             | Self::OrgGroup { user_id, .. }
             | Self::ConnectLink { user_id, .. }
             | Self::ChannelBot { user_id, .. }
+            | Self::ChannelThread { user_id, .. }
             | Self::Machine { user_id, .. }
             | Self::MachineUpdate { user_id, .. }
             | Self::MachineSetup { user_id, .. }
@@ -402,6 +411,18 @@ fn pipeline() -> Vec<Document> {
             "operationType": {"$in": ["insert", "update", "replace"]},
             "$or": [
                 {"ns.coll": {"$in": [CONVERSATIONS, GROUPS, GROUP_MESSAGES]}},
+                {"ns.coll": CHANNEL_THREADS,"$or":[
+                    {"operationType":{"$in":["insert","replace"]}},
+                    {"updateDescription.updatedFields.follow_state":{"$exists":true}},
+                    {"updateDescription.updatedFields.follow_revision":{"$exists":true}},
+                    {"updateDescription.updatedFields.follow_expires_at":{"$exists":true}},
+                    {"updateDescription.updatedFields.context_status":{"$exists":true}},
+                    {"updateDescription.updatedFields.follow_busy_count":{"$exists":true}},
+                    {"updateDescription.updatedFields.follow_drop_count":{"$exists":true}},
+                    {"updateDescription.updatedFields.threads":{"$exists":true}},
+                    {"updateDescription.updatedFields.members":{"$exists":true}},
+                    {"updateDescription.updatedFields.agent_id":{"$exists":true}},
+                ]},
                 {"ns.coll": crate::models::approval_request::COLLECTION_NAME, "fullDocument.assistant_group.group_id": {"$type":"string"}},
                 {"ns.coll": crate::models::machine_update::COLLECTION_NAME, "fullDocument.attempt_id": {"$type":"string"}},
                 // Replacing an already-online socket can leave status unchanged.
@@ -426,6 +447,8 @@ fn pipeline() -> Vec<Document> {
             "fullDocument.assistant_group.group_id": 1,
             "fullDocument.status": 1, "fullDocument.is_active": 1,
             "fullDocument.setup_watch_id": 1,
+            "fullDocument.channel_id":1,"fullDocument.parent_chat_id":1,"fullDocument.conversation_id":1,
+
             "fullDocument.attempt_id": 1, "fullDocument.requested_by": 1,
             "fullDocument.active_turn.turn_id": 1, "fullDocument.message_count": 1,
             // Signal metadata invalidation without projecting the title text.
@@ -510,6 +533,13 @@ fn decode(change: &ChangeStreamEvent<Document>) -> Option<LiveEvent> {
             id: key,
             user_id,
             status: full.get_str("status").unwrap_or_default().to_owned(),
+        },
+        CHANNEL_THREADS => LiveEvent::ChannelThread {
+            id: key,
+            user_id,
+            channel_id: full.get_str("channel_id").ok()?.into(),
+            parent_id: full.get_str("parent_chat_id").ok().map(str::to_owned),
+            conversation_id: full.get_str("conversation_id").ok().map(str::to_owned),
         },
         CHANNEL_BOTS => LiveEvent::ChannelBot {
             id: key,
