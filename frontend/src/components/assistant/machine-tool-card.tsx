@@ -78,7 +78,7 @@ export function MachineToolCard({
       <p className="break-all text-[10px] text-muted-foreground">
         {receipt.machine_name?.trim() ||
           `Machine ${receipt.node_id.slice(0, 8)}`}{" "}
-        · Shared workspace and browser
+        · {receipt.context_mode === "separated" ? "Separate workspace and browser for this agent" : "Shared workspace and browser"}
       </p>
       <details className="text-[10px] text-muted-foreground">
         <summary className="cursor-pointer">Correlation IDs</summary>

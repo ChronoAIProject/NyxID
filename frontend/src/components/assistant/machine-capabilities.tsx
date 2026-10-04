@@ -33,8 +33,8 @@ export function MachineCapabilityForm({ machine, agentId, disabled = false }: { 
     try { await mutation.mutateAsync({ node: machine.node_id, selection }); form.reset(selection); }
     catch { setError("Could not save capabilities. Reload if access changed."); }
   })}>
-    <div className="flex flex-wrap items-center gap-2"><span className="text-[13px] font-medium">{machine.name}</span><Badge variant="secondary">Shared legacy</Badge></div>
-    <p className="text-[12px] text-muted-foreground">Workspace and browser sessions are shared with other agents on this machine.</p>
+    <div className="flex flex-wrap items-center gap-2"><span className="text-[13px] font-medium">{machine.name}</span><Badge variant="secondary">{machine.mode === "separated" ? "Separate workspace and browser" : "Shared legacy"}</Badge></div>
+    <p className="text-[12px] text-muted-foreground">{machine.mode === "separated" ? "This agent has its own workspace and browser profiles. Full isolation requires a separate machine container or VM per agent." : "Workspace and browser sessions are shared with other agents on this machine."}</p>
     {machine.revocation_pending ? <p role="status" className="text-[12px] text-muted-foreground">Revocation pending on machine. Online revocation is immediate. If delivery is interrupted, v2 leased work stops within 45 seconds.</p> : null}
     {!machine.can_edit ? <p role="status" className="text-[12px]">Only the machine owner or an organization admin can edit this access.</p> : null}
     {!machine.protocol_v2 ? <p role="status" className="text-[12px]">Update this machine before changing capabilities. Its existing access continues.</p> : null}

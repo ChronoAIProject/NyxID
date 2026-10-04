@@ -6,6 +6,8 @@ pub struct MachineReceipt {
     pub operation_id: String,
     pub node_id: String,
     pub agent_id: String,
+    #[serde(default)]
+    pub context_mode: Option<String>,
     pub action: String,
     pub status: String,
     pub job_id: Option<String>,

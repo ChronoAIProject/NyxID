@@ -149,10 +149,11 @@ impl DevBrowser {
         }
         let fd = unsafe { OwnedFd::from_raw_fd(fd) };
         #[cfg(target_os = "linux")]
-        let mut command = if container {
-            // Container policy files are readable only by their browser group.
-            // Docker/AppArmor already supplies the mount boundary; no bwrap mount
-            // is needed or permitted. Chromium still establishes its own sandbox.
+        let mut command = if container || identity.desktop.is_some() {
+            // Container policies use browser groups; native separated contexts
+            // use supervisor-managed per-UID policy ACLs. Both use dedicated
+            // users and private DAC gates without bwrap policy mounts, while
+            // Chromium still establishes its own sandbox.
             Command::new(secure_binary)
         } else {
             let mut cmd = Command::new("bwrap");
@@ -203,16 +204,21 @@ impl DevBrowser {
         };
         identity.prepare(&mut command).context(Failure::Identity)?;
         identity.desktop_env(&mut command);
-        command
-            .env_remove("DBUS_SESSION_BUS_ADDRESS")
-            .env_remove("AT_SPI_BUS_ADDRESS");
+        if identity.desktop.is_none() {
+            command
+                .env_remove("DBUS_SESSION_BUS_ADDRESS")
+                .env_remove("AT_SPI_BUS_ADDRESS");
+        }
         #[cfg(target_os = "linux")]
         {
-            super::dev_display::ensure(identity)
-                .await
-                .context(Failure::Display)?;
-            let (display, authority) = super::dev_display::endpoint().context(Failure::Display)?;
-            command.env("DISPLAY", display).env("XAUTHORITY", authority);
+            if identity.desktop.is_none() {
+                super::dev_display::ensure(identity)
+                    .await
+                    .context(Failure::Display)?;
+                let (display, authority) =
+                    super::dev_display::endpoint().context(Failure::Display)?;
+                command.env("DISPLAY", display).env("XAUTHORITY", authority);
+            }
             // Remove the cookie copied by older versions. Never share X11 trust.
             match std::fs::remove_file(profile.join("Xauthority")) {
                 Ok(()) => {}
@@ -236,13 +242,15 @@ impl DevBrowser {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
+        #[cfg(target_os = "linux")]
+        let direct = container || identity.desktop.is_some();
         unsafe {
             command.pre_exec(move || {
                 // Bubblewrap preserves stdio, but closes other descriptors.
                 // Its fixed wrapper moves these to Chromium's CDP slots after
                 // the namespace is established. Neither is exposed to jobs.
                 #[cfg(target_os = "linux")]
-                let (read_fd, write_fd) = if container { (3, 4) } else { (0, 1) };
+                let (read_fd, write_fd) = if direct { (3, 4) } else { (0, 1) };
                 #[cfg(target_os = "macos")]
                 let (read_fd, write_fd) = (3, 4);
                 if libc::dup2(fd.as_raw_fd(), read_fd) < 0

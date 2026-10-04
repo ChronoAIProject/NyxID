@@ -20,7 +20,14 @@ mkdir -p "$MACHINE_STATE/node" "$MACHINE_STATE/desktop" /workspace /tmp/.X11-uni
 chmod 1777 /tmp/.X11-unix
 chmod 0711 "$MACHINE_STATE" "$MACHINE_STATE/desktop"
 chmod 0700 "$MACHINE_STATE/node"
-chown agent:agent /workspace
+if [ -e "$MACHINE_STATE/node/machine-contexts.json" ]; then
+    # Context UIDs must never traverse legacy roots, even after a restart and
+    # before the first separated request. Keep the opt-in DAC gate intact.
+    chown root:agent /workspace
+    chmod 0770 /workspace
+else
+    chown agent:agent /workspace
+fi
 # Each browser has an independent display and authentication cookie.
 export NYXID_DEV_DISPLAY=:100
 export NYXID_DEV_XAUTHORITY=/home/devbrowser/.Xauthority

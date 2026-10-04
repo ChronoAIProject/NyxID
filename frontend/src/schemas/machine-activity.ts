@@ -5,6 +5,7 @@ export const machineReceiptSchema = z.object({
   node_id: z.string(),
   machine_name: z.string().nullish(),
   agent_id: z.string(),
+  context_mode: z.enum(["shared_legacy", "separated"]).nullish(),
   action: z.string(),
   status: z.enum([
     "running",

@@ -23,6 +23,16 @@ struct Identity {
     owner: String,
     actor: String,
     group: Option<String>,
+    #[serde(default = "shared_mode")]
+    mode: String,
+    #[serde(default = "first_generation")]
+    generation: u64,
+}
+fn shared_mode() -> String {
+    "shared_legacy".into()
+}
+fn first_generation() -> u64 {
+    1
 }
 struct Lease {
     authority: Box<Authority>,
@@ -113,12 +123,22 @@ impl Fences {
             owner: authority.owner_id.clone(),
             actor: authority.actor_id.clone(),
             group: authority.group_id.clone(),
+            mode: authority.mode.clone(),
+            generation: authority.generation,
         };
         if state
             .durable
             .contexts
             .get(&authority.context_id)
-            .is_some_and(|old| *old != identity)
+            .is_some_and(|old| {
+                old.agent != identity.agent
+                    || old.owner != identity.owner
+                    || old.actor != identity.actor
+                    || old.group != identity.group
+                    || (old.mode == "separated"
+                        && identity.mode == "separated"
+                        && old.generation > identity.generation)
+            })
         {
             bail!("context identity mismatch");
         }
@@ -129,7 +149,7 @@ impl Fences {
             bail!("authority capacity");
         }
         let changed = (authority.require_v2 && !state.durable.enrolled)
-            || !state.durable.contexts.contains_key(&authority.context_id)
+            || state.durable.contexts.get(&authority.context_id) != Some(&identity)
             || state.durable.revisions.get(&authority.agent_id) != Some(&authority.revision);
         if changed {
             let mut durable = state.durable.clone();

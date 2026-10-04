@@ -3,12 +3,29 @@ use std::{collections::BTreeMap, ffi::CString, path::PathBuf};
 use anyhow::{Result, bail};
 use tokio::process::Command;
 
+#[cfg(target_os = "linux")]
+#[path = "context_sandbox.rs"]
+pub mod context_sandbox;
+
 #[derive(Clone)]
 pub struct Identity {
     pub uid: u32,
     pub gid: u32,
     pub name: String,
     pub home: PathBuf,
+    /// Supervisor-selected policy groups only; command contexts leave this empty.
+    pub policy_groups: Vec<u32>,
+    pub desktop: Option<DesktopEnvironment>,
+    #[cfg(target_os = "linux")]
+    pub sandbox: Option<std::sync::Arc<context_sandbox::Sandbox>>,
+}
+
+#[derive(Clone)]
+pub struct DesktopEnvironment {
+    pub display: String,
+    pub authority: PathBuf,
+    pub bus: String,
+    pub runtime: PathBuf,
 }
 
 impl Identity {
@@ -105,11 +122,23 @@ impl Identity {
             gid: record.pw_gid,
             name: string(record.pw_name),
             home: PathBuf::from(string(record.pw_dir)),
+            policy_groups: Vec::new(),
+            desktop: None,
+            #[cfg(target_os = "linux")]
+            sandbox: None,
         })
     }
 
     /// Desktop-only environment. Commands/file workers never call this method.
     pub fn desktop_env(&self, command: &mut Command) {
+        if let Some(desktop) = &self.desktop {
+            command
+                .env("DISPLAY", &desktop.display)
+                .env("XAUTHORITY", &desktop.authority)
+                .env("DBUS_SESSION_BUS_ADDRESS", &desktop.bus)
+                .env("XDG_RUNTIME_DIR", &desktop.runtime);
+            return;
+        }
         for key in [
             "DISPLAY",
             "XAUTHORITY",
@@ -158,10 +187,11 @@ impl Identity {
             .env("SHELL", "/bin/sh")
             .env("TERM", "dumb");
         if supervisor == 0 && uid != 0 {
+            let groups = self.policy_groups.clone();
             // SAFETY: only async-signal-safe syscalls in the post-fork child.
             unsafe {
                 command.pre_exec(move || {
-                    if libc::setgroups(0, std::ptr::null()) != 0
+                    if libc::setgroups(groups.len() as _, groups.as_ptr()) != 0
                         || libc::setgid(gid) != 0
                         || libc::setuid(uid) != 0
                     {
@@ -181,6 +211,10 @@ impl Identity {
                 }
                 Ok(())
             });
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(sandbox) = &self.sandbox {
+            sandbox.prepare(command);
         }
         command.process_group(0).kill_on_drop(true);
         Ok(())
