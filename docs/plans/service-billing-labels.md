@@ -34,15 +34,21 @@ configured is also NyxID; an absent connection price is separate from the label.
   classes, independent of caller rollout, health or wallet funding.
 - `billing.credential_supplier`: `nyxid`, `own`, `none` or `unknown` for the selected
   context. Restricted results omit it. Agent overrides use the override's metadata.
-- `KeyResponse.oauth_app_source`: stored `platform` or `byo` OAuth app selection;
-  null/absent on legacy rows. It exposes no credential material or developer app ID.
+- `KeyResponse.oauth_app_source`: resolved `platform` or `byo` OAuth app source.
+  Both `/keys` and insights use `oauth_app_source::load`: explicit selection first;
+  unmarked modern connections use their embedded app or provider app, matching
+  the refresh path; legacy connections use the matching provider token's
+  `credential_user_id`. No credentials are decrypted or returned by this lookup.
 - Existing `credit_billing_configured`, `rates` and `charge_status` keep their
   connection-specific meaning and never decide the service-wide label gate.
 
 Explicit platform binding selects NyxID even when an old personal key is retained.
-Durable OAuth source wins over retained app hints. OAuth without a source or known
-supplied app stays unverified: the execution class `UserOwned` is also the legacy
-fallback, so it is not proof of app ownership. For non-OAuth connections, a stored
+Durable OAuth source wins over retained app hints. Missing the newer marker alone
+does not mean unverified. Legacy token matching checks owner and provider and
+honors the original migration source ID; missing or ambiguous token evidence
+remains unknown. Legacy embedded app hints alone cannot override that token's
+source. The execution class `UserOwned` is also the legacy fallback, so it is not
+proof of app ownership. For non-OAuth connections, a stored
 API-key record follows the supplied-key path; NyxID master credentials are kept
 in the catalog and selected by platform binding. A user binding without a stored
 key is insufficient. Node routing alone does not establish credential provenance.
@@ -51,8 +57,8 @@ key is insufficient. Node routing alone does not establish credential provenance
 
 The current preview can classify unpriced services and supplied keys from existing
 APIs. It cannot prove NyxID OAuth app selection until `oauth_app_source` or the
-insight supplier field is deployed. Legacy OAuth rows without durable provenance
-will still require evidence from their original authorization records. Missing
+insight supplier field is deployed. Legacy OAuth rows can be resolved from their
+provider-token records; missing or ambiguous records still need reconciliation. Missing
 private catalog entries cannot be interpreted as absent billing.
 
 Connected-service cards and overview pages request the full accessible catalog,
@@ -65,9 +71,15 @@ On the latest live read, Chrono LLM is present in both catalog variants with no
 billing. These fixes cover reproducible stale/incomplete-data cases; they do not
 establish which case produced the previously reported browser label.
 
-Live checks found Twitter with one supplied organization app and three OAuth rows
-without published provenance; the truthful current preview is one BYOK and three
-Unverified. Anthropic, Chrono LLM and Spotify have no billing configuration and show
+Live checks found Twitter with one supplied organization app and three personal
+OAuth rows without published app provenance. Two carry a connection ID; the
+disabled third uses legacy storage. The owner confirms all three used NyxID's app,
+so the expected card is **3 NyxID · 1 BYOK**. Production omits the source field
+and returns HTTP 404 for `/service-insights`; the compatibility path consequently
+reports three Unverified until the backend resolver is deployed.
+Available history does not supply that missing source. The legacy token's exact
+contents could not be inspected through existing public metadata APIs.
+Anthropic, Chrono LLM and Spotify have no billing configuration and show
 a dash. DeepSeek has a stored supplied-key connection and platform-only pricing,
 so its label is BYOK with no applicable NyxID fee.
 

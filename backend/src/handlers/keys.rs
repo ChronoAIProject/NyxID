@@ -501,7 +501,7 @@ pub struct KeyResponse {
     /// — so safe to surface. The `client_secret` is never returned by the API.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub oauth_client_id: Option<String>,
-    /// Durable OAuth app selection: platform or byo; absent for legacy rows.
+    /// Resolved OAuth app source: platform or byo; absent only when unestablished.
     pub oauth_app_source: Option<String>,
     /// Scopes currently granted on this OAuth connection (NyxID#917 follow-up),
     /// parsed from the backing `UserApiKey.token_scopes`. The connect UIs
@@ -2776,7 +2776,8 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
         oauth_app_source: result
             .api_key
             .as_ref()
-            .and_then(|key| key.credential_source.clone()),
+            .and_then(crate::services::oauth_app_source::from_key)
+            .map(|source| source.as_str().to_owned()),
         // Fresh create: an OAuth connection has no granted scopes until the
         // authorize callback completes, so there's nothing to surface yet.
         granted_scopes: None,

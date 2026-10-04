@@ -94,11 +94,14 @@ charges. Restricted metadata stays null. Disabled connections preserve known
 configuration/provenance; unavailable agent overrides never borrow the default
 connection's supplier. None of these reads decrypts a credential or changes billing.
 
-`/keys` also exposes `oauth_app_source` from the stored OAuth app selection
-(`platform` or `byo`), separately from personal/organization ownership. This source
-wins over retained OAuth app hints. Explicit platform binding wins over a retained
-user key. A legacy OAuth execution class of `user_owned` does not prove BYOK:
-source-less OAuth stays unverified unless an embedded supplied app is known.
+`/keys` also exposes `oauth_app_source` (`platform` or `byo`), separately from
+personal/organization ownership. The shared read-only resolver honors explicit
+app selection, resolves unmarked modern keys from their embedded/provider app
+layout, and batch-loads legacy provider-token app-source metadata. Legacy matches
+must agree on owner, provider and any original migration source ID; missing or
+ambiguous matches remain unknown. The resolver loads no encrypted token material.
+Explicit platform binding wins over a retained user key. A legacy OAuth execution
+class of `user_owned` does not prove BYOK.
 Non-OAuth stored key records identify the supplied-key path; a user binding alone
 does not prove a credential exists. Agent provenance comes from the selected
 override rather than the connection default.

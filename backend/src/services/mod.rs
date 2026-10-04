@@ -105,6 +105,7 @@ pub mod node_routing_service;
 pub mod node_service;
 pub mod node_ws_manager;
 pub mod notification_service;
+pub mod oauth_app_source;
 pub mod oauth_broker_service;
 pub mod oauth_client_service;
 pub mod oauth_consent_request_service;

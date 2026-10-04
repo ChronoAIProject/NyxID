@@ -297,6 +297,8 @@ async fn explain_connections_in_context(
                 .await
         },
     )?;
+    let app_sources =
+        super::oauth_app_source::load(db, &credentials.iter().collect::<Vec<_>>()).await?;
     let catalog: HashMap<_, _> = catalog.into_iter().map(|s| (s.id.clone(), s)).collect();
     let credentials: HashMap<_, _> = credentials.into_iter().map(|k| (k.id.clone(), k)).collect();
     let owners: HashMap<_, _> = owners.into_iter().map(|u| (u.id.clone(), u)).collect();
@@ -560,9 +562,20 @@ async fn explain_connections_in_context(
                 overrides
                     .get(service.id.as_str())
                     .and_then(|binding| credentials.get(&binding.user_api_key_id))
-                    .map_or(CredentialSupplier::Unknown, stored_credential_supplier)
+                    .map_or(CredentialSupplier::Unknown, |key| {
+                        resolved_credential_supplier(key, &app_sources)
+                    })
             } else {
-                connection_credential_supplier(service, credential)
+                let supplier = connection_credential_supplier(service, credential);
+                if supplier == CredentialSupplier::Unknown {
+                    credential
+                        .filter(|key| key.user_id == service.user_id)
+                        .map_or(supplier, |key| {
+                            resolved_credential_supplier(key, &app_sources)
+                        })
+                } else {
+                    supplier
+                }
             },
         );
         annotate_transport_pricing(&mut explanation, catalog_service);
@@ -580,6 +593,19 @@ async fn explain_connections_in_context(
         let Some(explanation) = explanations.get_mut(&service.id) else {
             continue;
         };
+        if agent_key.is_none()
+            && explanation.status != BillingExplanationStatus::Restricted
+            && explanation.credential_supplier.is_none()
+            && !uses_platform_binding(service)
+            && service.auth_method != "none"
+        {
+            explanation.credential_supplier = service
+                .api_key_id
+                .as_ref()
+                .and_then(|id| credentials.get(id))
+                .filter(|key| key.user_id == service.user_id)
+                .map(|key| resolved_credential_supplier(key, &app_sources));
+        }
         annotate_configured_charge(
             explanation,
             service,
@@ -685,11 +711,10 @@ fn connection_credential_supplier(
 
 fn stored_credential_supplier(key: &UserApiKey) -> CredentialSupplier {
     if matches!(key.credential_type.as_str(), "oauth2" | "device_code") {
-        match key.credential_source.as_deref() {
-            Some("platform") => CredentialSupplier::Nyxid,
-            Some("byo") => CredentialSupplier::Own,
-            _ if key.user_oauth_client_id_encrypted.is_some() => CredentialSupplier::Own,
-            _ => CredentialSupplier::Unknown,
+        match super::oauth_app_source::from_key(key) {
+            Some(super::oauth_app_source::OAuthAppSource::Platform) => CredentialSupplier::Nyxid,
+            Some(super::oauth_app_source::OAuthAppSource::Byo) => CredentialSupplier::Own,
+            None => CredentialSupplier::Unknown,
         }
     } else if matches!(
         key.credential_type.as_str(),
@@ -698,6 +723,17 @@ fn stored_credential_supplier(key: &UserApiKey) -> CredentialSupplier {
         CredentialSupplier::Own
     } else {
         CredentialSupplier::Unknown
+    }
+}
+
+fn resolved_credential_supplier(
+    key: &UserApiKey,
+    sources: &HashMap<String, super::oauth_app_source::OAuthAppSource>,
+) -> CredentialSupplier {
+    match sources.get(&key.id) {
+        Some(super::oauth_app_source::OAuthAppSource::Platform) => CredentialSupplier::Nyxid,
+        Some(super::oauth_app_source::OAuthAppSource::Byo) => CredentialSupplier::Own,
+        None => stored_credential_supplier(key),
     }
 }
 
@@ -1092,7 +1128,26 @@ mod tests {
         key.credential_source = Some("platform".into());
         assert_eq!(stored_credential_supplier(&key), CredentialSupplier::Nyxid);
         key.credential_source = None;
+        key.connection_id = Some("connection".into());
+        key.provider_config_id = Some("provider".into());
         assert_eq!(stored_credential_supplier(&key), CredentialSupplier::Own);
+        key.user_oauth_client_id_encrypted = None;
+        assert_eq!(stored_credential_supplier(&key), CredentialSupplier::Nyxid);
+        // Legacy selection must use the provider token, including for disabled
+        // connections and selected agent overrides, not a retained client hint.
+        key.connection_id = None;
+        assert_eq!(
+            stored_credential_supplier(&key),
+            CredentialSupplier::Unknown
+        );
+        let sources = HashMap::from([(
+            key.id.clone(),
+            super::super::oauth_app_source::OAuthAppSource::Platform,
+        )]);
+        assert_eq!(
+            resolved_credential_supplier(&key, &sources),
+            CredentialSupplier::Nyxid
+        );
         assert_eq!(
             stored_credential_supplier(&metadata_credential("api_key")),
             CredentialSupplier::Own

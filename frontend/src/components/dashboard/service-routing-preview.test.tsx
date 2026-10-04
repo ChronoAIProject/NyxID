@@ -190,6 +190,47 @@ afterEach(() => {
 });
 
 describe("live grouped services", () => {
+  it("shows three NyxID OAuth connections and one supplied X app, including the disabled connection", () => {
+    const catalog = {
+      slug: "api-twitter",
+      billing: {
+        platform_billable: true,
+        platform_key_pricing: {
+          metric: "requests",
+          credits_per_unit: "0.05",
+          sync_status: "synced" as const,
+        },
+      },
+    };
+    for (let index = 0; index < 4; index++) {
+      const connection: KeyInfo = {
+        ...records[index === 3 ? 1 : 0]!,
+        id: `x-${index}`,
+        label: index === 3 ? "Organization X app" : "NyxID X app",
+        catalog_service_id: "x",
+        catalog_service_slug: "api-twitter",
+        catalog_service_name: "Twitter / X API",
+        credential_binding: "user",
+        credential_type: "oauth2",
+        oauth_app_source: index === 3 ? "byo" : "platform",
+        is_active: index !== 2,
+      };
+      records.push(connection);
+      insightConnections.set(connection.id, {
+        service_id: connection.id,
+        billing: configuredBilling(connection, catalog),
+        usage: null,
+      });
+    }
+    render(preview());
+    const card = within(
+      screen.getByRole("region", { name: "Twitter / X API" }),
+    );
+    expect(
+      card.getByRole("button", { name: "Show billing for Twitter / X API" }),
+    ).toHaveTextContent(/^3 NyxID · 1 BYOK$/);
+    expect(card.getByText("1 disabled")).toBeVisible();
+  });
   it("verifies an internal service's absent billing from the full catalog when insights lack that metadata", () => {
     const connection: KeyInfo = {
       ...records[0]!,

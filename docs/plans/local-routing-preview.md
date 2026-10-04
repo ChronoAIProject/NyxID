@@ -47,9 +47,12 @@ Read-only live metadata verification through the actual classifier produced:
 
 - Anthropic: all 30 connections unpriced, so one dash on the card.
 - Chrono LLM and Spotify: dash.
-- Twitter: one BYOK organization app and three Unverified OAuth connections.
-  Production does not yet expose their durable OAuth app selection. They must not
-  be guessed as either NyxID or BYOK from the presence of a token record.
+- Twitter: expected **3 NyxID · 1 BYOK**: the owner confirms the three personal
+  OAuth connections used NyxID's app. Production still omits their app source,
+  so the current preview reports three Unverified until the shared backend
+  resolver is deployed. It covers unmarked modern keys and legacy provider-token
+  provenance. Unresolved metadata must not be guessed as either NyxID or BYOK
+  from the presence of a token record.
 - DeepSeek: one stored API-key connection on the supplied-key path, so BYOK.
 - Custom MacBook SSH: dash. Three other MacBook connections refer to private
   catalog entries unavailable through production discovery, so billing remains

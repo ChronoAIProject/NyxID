@@ -27,7 +27,7 @@ export interface KeyInfo {
   readonly credential_type: string;
   /** Public identifier of the connection's supplied OAuth developer app. */
   readonly oauth_client_id?: string | null;
-  /** Durable selection of NyxID’s OAuth app or a supplied developer app. */
+  /** Resolved OAuth app source, including supported legacy connections. */
   readonly oauth_app_source?: "platform" | "byo" | null;
   readonly auth_method: string;
   readonly auth_key_name: string;
