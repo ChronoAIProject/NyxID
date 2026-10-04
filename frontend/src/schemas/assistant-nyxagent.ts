@@ -1,5 +1,6 @@
 import { DEFAULT_SCHEDULE_MINIMUM_MINUTES } from "@/lib/automation-limits";
 import { z } from "zod";
+import { machineReceiptSchema } from "./machine-activity";
 
 const conversationId = z.string().regex(/^nyxa-[a-f0-9]{32}$/);
 
@@ -7,6 +8,7 @@ export const nyxAgentTitleSchema = z.object({ title: z.string().trim().min(1).ma
 
 /// A tool call the assistant made during a turn: identifier and status only.
 export const nyxAgentTurnActivitySchema = z.object({
+  machine: machineReceiptSchema.nullable().optional(),
   id: z.string(),
   label: z.string(),
   status: z.enum(["running", "completed", "error"]),
@@ -502,6 +504,7 @@ export const assistantAgentDestroyedSchema = z.object({ id: z.string(), destroye
 
 /** A channel bot that reaches one of the owner's agents. */
 export const nyxAgentChannelAgentSchema = z.object({
+  follow_readiness: z.enum(["ready", "unavailable"]).catch("unavailable").optional(),
   id: z.string(),
   channel_bot_id: z.string(),
   platform: z.string(),
@@ -636,6 +639,7 @@ export type AssistantGroup = z.infer<typeof assistantGroupSchema>;
 export const assistantGroupListSchema = z.object({ groups: z.array(assistantGroupSchema) });
 
 export const assistantGroupMessageSchema = z.object({
+  activities: z.array(nyxAgentTurnActivitySchema).optional(),
   author: groupPersonSchema.optional(),
   attachments: z.array(nyxAgentAttachmentSchema).optional(),
   id: z.string(),

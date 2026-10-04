@@ -82,6 +82,8 @@ pub struct ChannelOrigin {
 /// the label is a tool identifier, never arguments, results, or secrets.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TurnActivity {
+    #[serde(default)]
+    pub machine: Option<Box<super::machine_receipt::MachineReceipt>>,
     pub id: String,
     pub label: String,
     /// `running`, `completed`, or `error`.
@@ -183,6 +185,9 @@ pub enum TitleSource {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantConversation {
+    /// Human opt-in only; command previews are encrypted and expire within 30 days.
+    #[serde(default)]
+    pub machine_previews: bool,
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,

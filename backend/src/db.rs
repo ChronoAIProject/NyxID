@@ -484,6 +484,24 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
     )
     .await?;
 
+    // Bounded machine metadata pages, with and without an agent filter.
+    for keys in [
+        doc! {"event_type":1,"event_data.node_id":1,"created_at":-1,"_id":-1},
+        doc! {"event_type":1,"event_data.node_id":1,"event_data.agent_id":1,"created_at":-1,"_id":-1},
+    ] {
+        db.collection::<mongodb::bson::Document>("audit_log")
+            .create_index(
+                IndexModel::builder()
+                    .keys(keys)
+                    .options(
+                        IndexOptions::builder()
+                            .partial_filter_expression(doc! {"event_type":"machine_operation"})
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await?;
+    }
     // ── audit_log ──
     let audit = db.collection::<mongodb::bson::Document>("audit_log");
     audit
@@ -2415,6 +2433,31 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
     crate::services::channel_activity_service::ensure_indexes(db).await?;
     crate::services::channel_delivery_service::ensure_indexes(db).await?;
     let channel_msgs = db.collection::<mongodb::bson::Document>("channel_messages");
+    for (name, keys) in [
+        (
+            "channel_messages_thread_root_v1",
+            doc! {
+                "channel_bot_id": 1, "platform_conversation_id": 1,
+                "thread_context.root_id": 1, "created_at": -1,
+            },
+        ),
+        (
+            "channel_messages_thread_parent_v1",
+            doc! {
+                "channel_bot_id": 1, "platform_conversation_id": 1,
+                "platform_message_id": 1,
+            },
+        ),
+    ] {
+        channel_msgs
+            .create_index(
+                IndexModel::builder()
+                    .keys(keys)
+                    .options(IndexOptions::builder().name(name.to_string()).build())
+                    .build(),
+            )
+            .await?;
+    }
     channel_msgs
         .create_index(
             IndexModel::builder()

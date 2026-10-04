@@ -1377,6 +1377,7 @@ async fn deliver_async_reply(
             },
             platform_conversation_id,
             &outbound,
+            None,
         )
         .await;
     let mut outcome = match send_result {
@@ -2020,7 +2021,9 @@ mod tests {
             credentials: &crate::services::channel_platform::BotCredentials<'_>,
             target: &str,
             reply: &OutboundReply,
+            thread_target: Option<&crate::services::channel_thread_service::ThreadReplyTarget>,
         ) -> AppResult<crate::services::channel_platform::SendOutcome> {
+            assert!(thread_target.is_none());
             if self.whatsapp_base.is_some() {
                 self.send_reply_outcome(http, credentials, target, reply)
                     .await
@@ -3708,6 +3711,7 @@ mod tests {
         };
 
         let message = ChannelMessage {
+            thread_context: None,
             activity: None,
             platform_send: None,
             attachments: vec![],
@@ -3734,6 +3738,7 @@ mod tests {
         };
 
         let outbound_message = ChannelMessage {
+            thread_context: None,
             activity: None,
             platform_send: None,
             attachments: vec![],
@@ -3934,6 +3939,7 @@ mod tests {
         let db = fixture.state.db.clone();
 
         let other_message = ChannelMessage {
+            thread_context: None,
             activity: None,
             platform_send: None,
             attachments: vec![],

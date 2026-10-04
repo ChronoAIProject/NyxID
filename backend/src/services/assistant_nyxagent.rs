@@ -1142,6 +1142,7 @@ pub async fn begin_turn_with_voice(
                         .ok_or_else(not_found)?
                 } else {
                     AssistantConversation {
+                        machine_previews: false,
                         automation_thread: false,
                         agent_owner_id: (new_agent.user_id != user_id)
                             .then(|| new_agent.user_id.clone()),
@@ -1739,6 +1740,9 @@ pub async fn finish_turn(
                     .unwrap_or_default()
                     .into_iter()
                     .map(|mut activity| {
+                        super::machine_activity_service::settle_activity(
+                            &mut activity, error.as_ref().map(|e| e.code),
+                        );
                         if activity.status == "running" {
                             activity.status = if error.is_some() {
                                 "error"
@@ -2107,6 +2111,23 @@ pub async fn activity_finished(
             }},
         )
         .await?;
+    if !ok {
+        // A failure after node execution (for example, attachment storage) can
+        // leave an unfinished receipt. Preserve specific outcomes and Stop.
+        db.collection::<AssistantConversation>(CONVERSATIONS)
+            .update_one(
+                doc! {
+                    "_id": conversation_id,
+                    "user_id": user_id,
+                    "active_turn.stop_requested": false,
+                    "active_turn.activities": {"$elemMatch": {
+                        "id": activity_id, "machine.status": "running",
+                    }},
+                },
+                doc! {"$set": {"active_turn.activities.$.machine.status": "error"}},
+            )
+            .await?;
+    }
     Ok(())
 }
 

@@ -218,7 +218,8 @@ pub(crate) async fn member_settled(
         let request=groups::request(&state.db,&access,id).await?;
         let agent=crate::services::assistant_team_service::agent_for_conversation(&state.db,row).await?;
         if error.is_none() && !text.trim().is_empty() {
-            groups::append(&state.db,&access,"agent",Some(&agent),text,Some(id),&[],None).await?;
+            let message=groups::append(&state.db,&access,"agent",Some(&agent),text,Some(id),&[],None).await?;
+            Box::pin(crate::services::machine_activity_service::publish_group(&state.db,row,&message)).await?;
             let agents=groups::resolve_agents(&state.db,&access.group.user_id,&access.group.member_agent_ids).await?;
             let per_hour=crate::services::assistant_settings_service::get(&state.db,&access.actor).await?.max_group_handoffs_per_hour.max(0) as u64;
             for target in personal::mentions(text,&agents).into_iter().filter(|id|id!=&agent.id) {
@@ -229,7 +230,8 @@ pub(crate) async fn member_settled(
                     doc! {"$inc":{"hops_remaining":-1},"$addToSet":{"pending_agent_ids":target}}).await?;
             }
         } else if error.is_some() {
-            groups::append(&state.db,&access,"notice",None,"An agent could not finish this request.",Some(id),&[],None).await?;
+            let message=groups::append(&state.db,&access,"notice",Some(&agent),"An agent could not finish this request.",Some(id),&[],None).await?;
+            Box::pin(crate::services::machine_activity_service::publish_group(&state.db,row,&message)).await?;
         }
         Ok(())
     }).await;

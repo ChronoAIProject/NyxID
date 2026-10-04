@@ -146,7 +146,12 @@ fn bound_at(row: &Document) -> Option<DateTime<Utc>> {
 }
 
 fn age_expired(row: &Document, policy: Policy, now: DateTime<Utc>) -> bool {
-    let (start, duration) = if !user_upload(row) {
+    let (start, duration) = if row.get_str("origin").ok() == Some("machine_preview") {
+        (
+            date(row, "created_at"),
+            Some(Duration::days(i64::from(policy.document_days.min(30)))),
+        )
+    } else if !user_upload(row) {
         (
             date(row, "created_at"),
             policy.tool_image_days.map(|v| Duration::days(i64::from(v))),

@@ -27,6 +27,7 @@ pub mod channel_conversation;
 pub mod channel_event_log;
 pub mod channel_message;
 pub mod channel_send_claim;
+pub mod channel_thread;
 pub mod cli_pairing;
 pub mod connect_link;
 pub mod consent;
@@ -138,6 +139,7 @@ pub mod billing_lago_carry;
 
 pub mod machine_desktop;
 pub mod machine_job;
+pub mod machine_receipt;
 pub mod saved_login;
 
 pub mod machine_setup;

@@ -34,11 +34,13 @@ interface LiveTurn {
 
 function toolCalls(
   activities: readonly NyxAgentTurnActivity[] | undefined,
+  conversationId?: string,
 ): { toolCalls?: RuntimeToolCallInfo[] } {
   if (!activities?.length) return {};
   return {
     toolCalls: activities.map((activity) => ({
       id: activity.id,
+      ...(activity.machine ? { machine: activity.machine, conversationId } : {}),
       name: activity.label,
       status:
         activity.status === "running" ? "running" : activity.status === "error" ? "error" : "done",
@@ -408,7 +410,7 @@ export class NyxAgentTransport {
         turnId: message.turn_id,
         status: failed ? "error" : "complete",
         error: failed ? storedError(message.error_code) : undefined,
-        ...toolCalls(message.activities),
+        ...toolCalls(message.activities, id),
         ...images(id, message.attachments),
         via: message.via,
       };
@@ -419,7 +421,7 @@ export class NyxAgentTransport {
     const polledTurn = history?.conversation.active_turn;
     const liveActivity =
       polledTurn && (!liveTurnId || polledTurn.turn_id === liveTurnId)
-        ? { ...toolCalls(polledTurn.activities), ...images(id, polledTurn.attachments) }
+        ? { ...toolCalls(polledTurn.activities, id), ...images(id, polledTurn.attachments) }
         : {};
     const settledImages = new Map(
       (history?.messages ?? []).map((message) => [message.id, images(id, message.attachments)]),

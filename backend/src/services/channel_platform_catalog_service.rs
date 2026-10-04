@@ -47,6 +47,7 @@ pub async fn list(
             capabilities: ChannelCapabilities {
                 outbound: adapter.outbound_capabilities(),
                 media: adapter.media_capabilities(),
+                threads: adapter.thread_capabilities(),
             },
         });
     }

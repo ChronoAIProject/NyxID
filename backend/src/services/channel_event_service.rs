@@ -627,6 +627,7 @@ fn build_device_callback_payload(
         .map_err(|e| AppError::Internal(format!("failed to serialize event envelope: {e}")))?;
 
     Ok(CallbackPayload {
+        thread_context: None,
         activity: None,
         // NyxID-assigned message id so async replies via /channel-relay/reply
         // resolve to the persisted ChannelMessage. The client-supplied

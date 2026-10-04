@@ -62,6 +62,20 @@ struct JsonRpcError {
 // Response helpers
 // ---------------------------------------------------------------------------
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ToolOutcome {
+    Completed,
+    Error,
+}
+
+fn tool_succeeded(response: &Response) -> bool {
+    response.status().is_success()
+        && matches!(
+            response.extensions().get::<ToolOutcome>(),
+            Some(ToolOutcome::Completed)
+        )
+}
+
 #[derive(Clone)]
 struct ToolResultDigest(String);
 
@@ -72,6 +86,11 @@ fn result_digest(value: &serde_json::Value) -> ToolResultDigest {
 }
 
 fn rpc_success(id: Option<serde_json::Value>, result: serde_json::Value) -> Response {
+    let outcome = if result["isError"] == true {
+        ToolOutcome::Error
+    } else {
+        ToolOutcome::Completed
+    };
     let digest = result_digest(&result);
     let mut response = axum::Json(JsonRpcResponse {
         jsonrpc: JSONRPC_VERSION.into(),
@@ -81,6 +100,7 @@ fn rpc_success(id: Option<serde_json::Value>, result: serde_json::Value) -> Resp
     })
     .into_response();
     response.extensions_mut().insert(digest);
+    response.extensions_mut().insert(outcome);
     response
 }
 
@@ -98,6 +118,7 @@ fn rpc_error(id: Option<serde_json::Value>, code: i32, message: &str) -> Respons
     })
     .into_response();
     response.extensions_mut().insert(digest);
+    response.extensions_mut().insert(ToolOutcome::Error);
     response
 }
 
@@ -273,6 +294,11 @@ fn content_result_with_notifications(
     let digest = result_digest(result.result.as_ref().expect("tool result"));
     let mut response = Sse::new(tokio_stream::iter(events)).into_response();
     response.extensions_mut().insert(digest);
+    response.extensions_mut().insert(if is_error {
+        ToolOutcome::Error
+    } else {
+        ToolOutcome::Completed
+    });
     response
 }
 
@@ -1607,15 +1633,19 @@ async fn handle_tools_call(
     };
     // Keep native dispatch out of the progress-tracking wrapper's frame.
     // Universal calls add another dispatch layer before transactional cards.
-    let response = Box::pin(dispatch_tools_call(
-        state,
-        auth,
-        session_id,
-        request,
-        client_accepts_sse,
-        billing_egress_permit,
-    ))
-    .await;
+    let response = crate::services::machine_activity_service::ACTIVITY_ID
+        .scope(
+            activity.as_ref().map(|(_, id)| id.clone()),
+            Box::pin(dispatch_tools_call(
+                state,
+                auth,
+                session_id,
+                request,
+                client_accepts_sse,
+                billing_egress_permit,
+            )),
+        )
+        .await;
     if let (Some(chat), Some(window), Some(params), Some(digest)) = (
         auth.chat.as_ref(),
         window.as_ref(),
@@ -1649,7 +1679,7 @@ async fn handle_tools_call(
             &chat.user_id,
             &chat.conversation_id,
             &id,
-            response.status().is_success(),
+            tool_succeeded(&response),
         )
         .await;
     }
@@ -2694,7 +2724,11 @@ async fn handle_attachment_read(
     )
     .await
     {
-        Ok(value) => tool_result(id, &value.to_string(), value.get("error").is_some()),
+        Ok(value) => tool_result(
+            id,
+            &value.to_string(),
+            value.get("error").is_some() || value["isError"] == true,
+        ),
         Err(error) => tool_result(
             id,
             &crate::services::assistant_account_tools::error_result(error)
@@ -2726,7 +2760,11 @@ async fn handle_machine_tool(
     ))
     .await
     {
-        Ok(value) => tool_result(request_id, &value.to_string(), value.get("error").is_some()),
+        Ok(value) => tool_result(
+            request_id,
+            &value.to_string(),
+            value.get("error").is_some() || value["isError"] == true,
+        ),
         Err(error) => tool_result(
             request_id,
             &crate::services::assistant_account_tools::error_result(error)
@@ -6128,6 +6166,76 @@ mod org_agent_mcp_tests {
         assert_eq!(memberships.load(Ordering::SeqCst), 2);
         assert!(authenticate_mcp(&f.state, &headers, true).await.is_err());
         assert_eq!(memberships.load(Ordering::SeqCst), 3);
+        f.state.db.drop().await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod typed_outcome_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn every_mcp_response_family_uses_typed_outcome_not_http_status() {
+        for error in [false, true] {
+            for response in [
+                tool_result(Some(json!(1)), "fixture", error),
+                content_result(
+                    Some(json!(1)),
+                    vec![json!({"type":"text","text":"fixture"})],
+                    error,
+                ),
+                tool_result_with_notifications(
+                    Some(json!(1)),
+                    "fixture",
+                    error,
+                    vec![json!({"method":"notifications/tools/list_changed"})],
+                ),
+                rpc_success(Some(json!(1)), json!({"content":[],"isError":error})),
+            ] {
+                assert_eq!(response.status(), StatusCode::OK);
+                assert_eq!(tool_succeeded(&response), !error);
+            }
+        }
+        let error = rpc_error(Some(json!(1)), -32601, "Unknown tool");
+        assert_eq!(error.status(), StatusCode::OK);
+        assert!(!tool_succeeded(&error));
+        assert!(!tool_succeeded(
+            &StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        ));
+        // Missing typed provenance must not invent a successful tool outcome.
+        assert!(!tool_succeeded(&StatusCode::OK.into_response()));
+    }
+
+    #[tokio::test]
+    async fn non_machine_tool_error_is_recorded_as_error_on_live_turn() {
+        let f =
+            crate::services::assistant_authority_tests::orchestrator_fixture("typed_mcp_activity")
+                .await;
+        let auth = super::machine_mcp_tests::authenticated_machine_chat(&f).await;
+        let response = Box::pin(handle_tools_call(
+            &f.state,
+            &auth,
+            None,
+            &JsonRpcRequest {
+                jsonrpc: JSONRPC_VERSION.into(),
+                id: Some(json!(1)),
+                method: "tools/call".into(),
+                params: Some(json!({"name":"nyx__call_tool","arguments":{}})),
+            },
+            false,
+            crate::services::billing::route_inventory::internal_node_dispatch_permit(),
+        ))
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(!tool_succeeded(&response));
+        let row = crate::services::assistant_nyxagent::get(&f.state.db, &f.owner, &f.row.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            row.active_turn.unwrap().activities.last().unwrap().status,
+            "error"
+        );
         f.state.db.drop().await.unwrap();
     }
 }

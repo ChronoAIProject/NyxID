@@ -35,3 +35,8 @@ export function MachineIsolationDetails({
     </div>
   );
 }
+
+/** Distinct from command-vs-node credential isolation. All current contexts share. */
+export function MachineSharingBadge() {
+  return <Badge variant="warning" title="Agents granted this machine share its workspace and authenticated browser sessions.">Shared workspace and browser</Badge>;
+}

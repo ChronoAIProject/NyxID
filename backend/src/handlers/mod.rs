@@ -136,6 +136,7 @@ pub(crate) mod org_group;
 pub mod service_history;
 
 pub mod channel_activities;
+pub mod machine_activity;
 pub mod machine_cancel;
 pub mod machine_tools;
 pub mod machine_update;
