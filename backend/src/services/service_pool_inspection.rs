@@ -2,18 +2,36 @@
 use super::{proxy_service, service_pool_health_service as health, service_pool_service};
 use crate::{
     crypto::aes::EncryptionKeys,
-    errors::AppResult,
+    errors::{AppError, AppResult},
     models::{
+        downstream_service::COLLECTION_NAME as DOWNSTREAM_SERVICES,
         service_pool::{PoolMemberContract, PoolStrategy, ServicePool},
         user_service::UserService,
     },
 };
 use futures::TryStreamExt;
 use mongodb::bson::doc;
+use serde::Deserialize;
 use std::collections::HashSet;
+
+#[derive(Debug, Deserialize)]
+struct CatalogDisplayMetadata {
+    #[serde(rename = "_id")]
+    id: String,
+    name: String,
+    slug: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConnectionDisplayMetadata {
+    #[serde(rename = "_id")]
+    id: String,
+    label: String,
+}
 
 pub struct CandidateInspection {
     pub user_service_id: String,
+    pub name: String,
     pub slug: String,
     pub is_active: bool,
     pub eligible: bool,
@@ -21,6 +39,8 @@ pub struct CandidateInspection {
     pub credential_binding: String,
     pub protocol: Option<crate::models::downstream_service::InferenceWireProtocol>,
     pub catalog_service_id: Option<String>,
+    pub group_name: String,
+    pub group_slug: Option<String>,
     pub requires_compatibility_declaration: bool,
     pub cooldown_until: Option<chrono::DateTime<chrono::Utc>>,
     pub consecutive_failures: i64,
@@ -38,6 +58,8 @@ pub struct InspectionQuery<'a> {
     pub search: Option<&'a str>,
     pub limit: u32,
     pub members_only: bool,
+    pub inventory_only: bool,
+    pub selected_only: bool,
     pub peer_ids: Option<&'a [String]>,
     pub declared_peer_ids: Option<&'a str>,
 }
@@ -68,6 +90,11 @@ pub async fn inspect(
     } else {
         contract
     };
+    let saved_operation = !query.inventory_only
+        && (query.members_only
+            || (query.peer_ids.is_none()
+                && query.declared_peer_ids.is_none()
+                && pool.is_some_and(|p| p.strategy == strategy && p.member_contract == contract)));
     let priority = strategy == PoolStrategy::Priority;
     let contract = if priority {
         contract
@@ -90,6 +117,7 @@ pub async fn inspect(
     }
     let offset = query
         .after
+        .filter(|_| !query.members_only && !query.selected_only)
         .map(str::parse::<u64>)
         .transpose()
         .map_err(|_| crate::errors::AppError::BadRequest("Invalid candidate cursor".into()))?
@@ -101,31 +129,91 @@ pub async fn inspect(
     }
     if query.members_only {
         filter.insert("_id", doc! { "$in": pool.map(|p| p.members.iter().filter(|m| allowed_services.is_none_or(|a| a.contains(&m.user_service_id))).map(|m| m.user_service_id.clone()).collect::<Vec<_>>()).unwrap_or_default() });
-    } else {
-        if let Some(search) = query.search.filter(|s| !s.is_empty()) {
-            filter.insert(
-                "slug",
-                doc! { "$regex": regex::escape(search), "$options":"i" },
-            );
-        }
+    } else if query.selected_only {
+        filter.insert("_id", doc! {"$in": query.peer_ids.unwrap_or_default().iter().filter(|id| allowed_services.is_none_or(|allowed| allowed.contains(*id))).cloned().collect::<Vec<_>>()});
     }
-    let limit = if query.members_only {
+    let limit = if query.members_only || query.selected_only {
         50
     } else {
         query.limit.clamp(1, 100) as usize
     };
-    let mut services: Vec<UserService> =
+    let search = query
+        .search
+        .filter(|search| !query.members_only && !query.selected_only && !search.is_empty());
+    let mut services: Vec<UserService> = if let Some(search) = search {
+        search_services(db, filter, owner, search, offset, limit + 1).await?
+    } else {
         crate::services::service_history::collection(db, "user_services")
             .find(filter)
             .sort(doc! {"_id":1})
-            .skip(if query.members_only { 0 } else { offset })
+            .skip(offset)
             .limit((limit + 1) as i64)
             .await?
             .try_collect()
-            .await?;
+            .await?
+    };
     let has_more = services.len() > limit;
     services.truncate(limit);
     let next_cursor = has_more.then(|| (offset + limit as u64).to_string());
+
+    // Resolve only the bounded page's safe display metadata. This keeps a
+    // failed credential from hiding its connection label and lets the picker
+    // group by the authoritative catalog identity without materializing any
+    // credential or broadening the inventory ACL.
+    let catalog_ids: Vec<String> = services
+        .iter()
+        .filter_map(|service| service.catalog_service_id.clone())
+        .collect();
+    let catalog_metadata: std::collections::HashMap<String, (String, String)> =
+        if catalog_ids.is_empty() {
+            std::collections::HashMap::new()
+        } else {
+            db.collection::<CatalogDisplayMetadata>(DOWNSTREAM_SERVICES)
+                .find(doc! {"_id": {"$in": &catalog_ids}})
+                .projection(doc! {"_id": 1, "name": 1, "slug": 1})
+                .await?
+                .try_collect::<Vec<_>>()
+                .await?
+                .into_iter()
+                .map(|service| (service.id, (service.name, service.slug)))
+                .collect()
+        };
+    let endpoint_ids: Vec<String> = services
+        .iter()
+        .map(|service| service.endpoint_id.clone())
+        .filter(|id| !id.is_empty())
+        .collect();
+    let endpoint_labels: std::collections::HashMap<String, String> = if endpoint_ids.is_empty() {
+        std::collections::HashMap::new()
+    } else {
+        db.collection::<ConnectionDisplayMetadata>("user_endpoints")
+            .find(doc! {"_id": {"$in": &endpoint_ids}, "user_id": owner})
+            .projection(doc! {"_id": 1, "label": 1})
+            .await?
+            .try_collect::<Vec<_>>()
+            .await?
+            .into_iter()
+            .map(|endpoint| (endpoint.id, endpoint.label))
+            .collect()
+    };
+    let key_ids: Vec<String> = services
+        .iter()
+        .filter(|service| super::platform_key_service::binding(service) != "platform")
+        .filter_map(|service| service.api_key_id.clone())
+        .collect();
+    let key_labels: std::collections::HashMap<String, String> = if key_ids.is_empty() {
+        std::collections::HashMap::new()
+    } else {
+        db.collection::<ConnectionDisplayMetadata>("user_api_keys")
+            .find(doc! {"_id": {"$in": &key_ids}, "user_id": owner})
+            .projection(doc! {"_id": 1, "label": 1})
+            .await?
+            .try_collect::<Vec<_>>()
+            .await?
+            .into_iter()
+            .map(|key| (key.id, key.label))
+            .collect()
+    };
     let selected = if let Some(peers) = query.peer_ids.filter(|_| !query.members_only) {
         let members: Vec<_> = peers
             .iter()
@@ -159,6 +247,15 @@ pub async fn inspect(
         });
         let mut row = CandidateInspection {
             user_service_id: service.id.clone(),
+            name: service
+                .api_key_id
+                .as_ref()
+                .filter(|_| super::platform_key_service::binding(&service) != "platform")
+                .and_then(|id| key_labels.get(id))
+                .or_else(|| endpoint_labels.get(&service.endpoint_id))
+                .filter(|label| !label.is_empty())
+                .cloned()
+                .unwrap_or_else(|| service.slug.clone()),
             slug: service.slug.clone(),
             is_active: service.is_active,
             eligible: true,
@@ -169,6 +266,17 @@ pub async fn inspect(
                 .unwrap_or_else(|| "user".into()),
             protocol: None,
             catalog_service_id: service.catalog_service_id.clone(),
+            group_name: match service.catalog_service_id.as_ref() {
+                Some(id) => catalog_metadata
+                    .get(id)
+                    .map(|metadata| metadata.0.clone())
+                    .unwrap_or_else(|| "Unavailable catalog service".into()),
+                None => "Custom connections".into(),
+            },
+            group_slug: service
+                .catalog_service_id
+                .as_ref()
+                .and_then(|id| catalog_metadata.get(id).map(|metadata| metadata.1.clone())),
             requires_compatibility_declaration: service.catalog_service_id.is_none(),
             cooldown_until: None,
             consecutive_failures: 0,
@@ -226,10 +334,19 @@ pub async fn inspect(
                             member
                                 .and_then(|m| m.model.as_deref())
                                 .unwrap_or("candidate-model"),
-                            &http::Method::from_bytes(method.as_bytes()).map_err(|_| {
+                            &http::Method::from_bytes(if query.inventory_only {
+                                b"POST"
+                            } else {
+                                method.as_bytes()
+                            })
+                            .map_err(|_| {
                                 crate::errors::AppError::BadRequest("Invalid method".into())
                             })?,
-                            path,
+                            if query.inventory_only {
+                                "chat/completions"
+                            } else {
+                                path
+                            },
                             br#"{"messages":[{"role":"user","content":""}]}"#,
                         ) {
                             Ok(prepared) => prepared.path,
@@ -241,7 +358,7 @@ pub async fn inspect(
                     } else {
                         path.to_owned()
                     };
-                    if row.reason.is_none() {
+                    if !query.inventory_only && row.reason.is_none() {
                         let canonical =
                             super::proxy_authorization::CanonicalPath::from_rest_decoded(
                                 &native_path,
@@ -256,61 +373,74 @@ pub async fn inspect(
                             row.reason = Some("operation_unsupported".into());
                         }
                     }
-                    if row.reason.is_none() {
-                        let credential_override = if let Some(agent) = agent_key {
-                            proxy_service::read_agent_credential_override_identity(
-                                db,
-                                actor,
-                                agent,
-                                &service.id,
-                                &resolution.target,
-                            )
-                            .await?
-                        } else {
-                            None
-                        };
-                        if let Some(pool) = pool {
-                            let scope = health::scope_from_resolution(
-                                db,
-                                &pool.id,
-                                owner,
-                                pool.config_revision,
-                                &resolution,
-                                member.and_then(|m| m.model.clone()),
-                                credential_override.as_ref(),
-                                method,
-                                &native_path,
-                            )
-                            .await;
-                            match scope {
-                                Ok(scope) => {
-                                    if let Some(current) =
-                                        health::load_for_scope(db, &scope).await?
-                                    {
-                                        row.cooldown_until = current
-                                            .cooldown_until
-                                            .filter(|until| *until > chrono::Utc::now());
-                                        row.consecutive_failures =
-                                            current.consecutive_failures as i64;
-                                        row.last_status = current.last_status;
-                                    }
-                                }
-                                Err(error) if service_pool_service::member_unavailable(&error) => {
-                                    row.reason = Some("operation_unsupported".into())
-                                }
-                                Err(error) => return Err(error),
+                    let credential_override = if let Some(agent) = agent_key {
+                        match proxy_service::read_agent_credential_override_identity(
+                            db,
+                            actor,
+                            agent,
+                            &service.id,
+                            &resolution.target,
+                        )
+                        .await
+                        {
+                            Ok(identity) => identity,
+                            Err(AppError::CredentialUnavailable(_)) => {
+                                row.reason = Some("credential_unavailable".into());
+                                None
                             }
+                            Err(error) => return Err(error),
+                        }
+                    } else {
+                        None
+                    };
+                    if saved_operation
+                        && priority
+                        && row.reason.is_none()
+                        && let Some(pool) = pool
+                    {
+                        let scope = health::scope_from_resolution(
+                            db,
+                            &pool.id,
+                            owner,
+                            pool.config_revision,
+                            &resolution,
+                            member.and_then(|m| m.model.clone()),
+                            credential_override.as_ref(),
+                            method,
+                            &native_path,
+                        )
+                        .await;
+                        match scope {
+                            Ok(scope) => {
+                                if let Some(current) = health::load_for_scope(db, &scope).await? {
+                                    row.cooldown_until = current
+                                        .cooldown_until
+                                        .filter(|until| *until > chrono::Utc::now());
+                                    row.consecutive_failures = current.consecutive_failures as i64;
+                                    row.last_status = current.last_status;
+                                }
+                            }
+                            Err(error) if service_pool_service::member_unavailable(&error) => {
+                                row.reason = Some("operation_unsupported".into())
+                            }
+                            Err(error) => return Err(error),
                         }
                     }
                 }
                 Ok(None) => row.reason = Some("unavailable".into()),
+                Err(AppError::CredentialUnavailable(_)) => {
+                    row.reason = Some("credential_unavailable".into())
+                }
                 Err(error) if service_pool_service::member_unavailable(&error) => {
                     row.reason = Some("unavailable".into())
                 }
                 Err(error) => return Err(error),
             }
         }
-        if row.reason.is_none() && member.is_some_and(|m| !m.enabled) {
+        if (query.members_only || saved_operation)
+            && row.reason.is_none()
+            && member.is_some_and(|m| !m.enabled)
+        {
             row.reason = Some("disabled".into());
         }
         if row.reason.is_none() && row.cooldown_until.is_some() {
@@ -341,6 +471,7 @@ pub async fn inspect(
             }
             result.push(CandidateInspection {
                 user_service_id: member.user_service_id.clone(),
+                name: "Unavailable connection".into(),
                 slug: "Unavailable member".into(),
                 is_active: false,
                 eligible: false,
@@ -348,6 +479,8 @@ pub async fn inspect(
                 credential_binding: "unavailable".into(),
                 protocol: None,
                 catalog_service_id: None,
+                group_name: "Custom connections".into(),
+                group_slug: None,
                 requires_compatibility_declaration: false,
                 cooldown_until: None,
                 consecutive_failures: 0,
@@ -401,4 +534,60 @@ pub async fn inspect(
         candidates: result,
         next_cursor,
     })
+}
+
+/// Search connection and original catalog labels before pagination.
+/// Lookups project display metadata only, after owner and caller scope filtering.
+async fn search_services(
+    db: &mongodb::Database,
+    filter: mongodb::bson::Document,
+    owner: &str,
+    search: &str,
+    offset: u64,
+    limit: usize,
+) -> AppResult<Vec<UserService>> {
+    let pattern = doc! {"$regex":regex::escape(search),"$options":"i"};
+    Ok(db
+        .collection::<UserService>("user_services")
+        .aggregate([
+            doc! {"$match":filter},
+            doc! {"$sort":{"_id":1}},
+            doc! {"$lookup":{
+                "from":"user_endpoints","localField":"endpoint_id","foreignField":"_id",
+                "pipeline":[
+                    {"$match":{"user_id":owner}},
+                    {"$project":{"_id":0,"label":1}},
+                ],"as":"search_endpoint",
+            }},
+            doc! {"$lookup":{
+                "from":DOWNSTREAM_SERVICES,"localField":"catalog_service_id","foreignField":"_id",
+                "pipeline":[{"$project":{"_id":0,"name":1,"slug":1}}],"as":"search_catalog",
+            }},
+            doc! {"$lookup":{
+                "from":"user_api_keys","localField":"api_key_id","foreignField":"_id",
+                "let":{"binding":"$credential_binding"},
+                "pipeline":[
+                    {"$match":{"user_id":owner,"$expr":{"$ne":[{"$ifNull":["$$binding","user"]},"platform"]}}},
+                    {"$project":{"_id":0,"label":1}},
+                ],"as":"search_key",
+            }},
+            doc! {"$set":{"search_label":{"$ifNull":[
+                {"$arrayElemAt":["$search_key.label",0]},
+                {"$arrayElemAt":["$search_endpoint.label",0]},
+            ]}}},
+            doc! {"$match":{"$or":[
+                {"slug":&pattern},
+                {"search_label":&pattern},
+                {"search_catalog.name":&pattern},
+                {"search_catalog.slug":&pattern},
+            ]}},
+            doc! {"$skip":offset as i64},
+            doc! {"$limit":limit as i64},
+            doc! {"$unset":["search_endpoint","search_catalog","search_key","search_label"]},
+        ])
+        .max_time(std::time::Duration::from_secs(5))
+        .await?
+        .with_type::<UserService>()
+        .try_collect()
+        .await?)
 }

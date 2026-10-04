@@ -31,6 +31,13 @@ async fn setup(
     error: Option<(u16, &'static str)>,
     delay: Duration,
 ) -> (AppState, Captures, tokio::task::JoinHandle<()>) {
+    setup_script(error, delay, Vec::new()).await
+}
+async fn setup_script(
+    error: Option<(u16, &'static str)>,
+    delay: Duration,
+    failures: Vec<&'static str>,
+) -> (AppState, Captures, tokio::task::JoinHandle<()>) {
     let db = connect_transaction_test_database("nyxa_http").await;
     engine::ensure_indexes(&db).await.unwrap();
     db.collection(USERS)
@@ -46,9 +53,12 @@ async fn setup(
             move |uri: Uri, headers: HeaderMap, Json(body): Json<Value>| {
                 let sink = sink.clone();
                 let attempts = attempts.clone();
+                let failures = failures.clone();
                 async move {
                     sink.lock().await.push(Capture { uri, headers, body });
-                    if attempts.fetch_add(1, Ordering::SeqCst) == 0
+                    let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                    let failure = failures.get(attempt).copied();
+                    if attempt == 0
                         && let Some((status, code)) = error
                     {
                         return (
@@ -69,12 +79,13 @@ async fn setup(
                         yield Ok::<_, Infallible>(Event::default().data(delta.to_string()));
                         tokio::time::sleep(delay).await;
                         let completed = json!({
-                            "type": "response.completed",
+                            "type": if failure.is_some() { "response.failed" } else { "response.completed" },
                             "sequence_number": 1,
                             "response": {
                                 "id": RESPONSE,
                                 "conversation": {"id": SESSION},
-                                "status": "completed",
+                                "status": if failure.is_some() { "failed" } else { "completed" },
+                                "error": failure.map(|code| json!({"code":code,"message":"SECRET upstream prose"})),
                                 "output": [{
                                     "type": "message",
                                     "role": "assistant",
@@ -213,6 +224,7 @@ async fn stop_persists_partial_reply_clears_binding_and_emits_cancelled() {
         .await
         .unwrap()
         .remove(0);
+    let stopped_at = std::time::Instant::now();
     assert_eq!(
         stop(
             State(state.clone()),
@@ -232,6 +244,17 @@ async fn stop_persists_partial_reply_clears_binding_and_emits_cancelled() {
     .unwrap();
     let events = String::from_utf8(bytes.to_vec()).unwrap();
     assert!(events.contains("\"status\":\"cancelled\""));
+    assert!(
+        stopped_at.elapsed()
+            < Duration::from_secs(
+                if std::env::var("NYXID_MACHINE_STRICT_BENCHMARK").as_deref() == Ok("1") {
+                    1
+                } else {
+                    5
+                }
+            ),
+        "stop must interrupt a quiet 30 second stream (CI sanity ceiling)"
+    );
     let row = settled(&state).await;
     assert!(row.nyxagent_session_id.is_none());
     assert_eq!(row.context_reset_reason.as_deref(), Some("turn_failed"));
@@ -256,6 +279,7 @@ async fn lost_session_rebinds_with_recap_and_same_turn_id() {
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
             text: "old question".into(),
@@ -512,6 +536,7 @@ async fn stale_fences_are_hidden_in_index_and_history_dtos() {
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
             text: "interrupted".into(),
@@ -562,6 +587,7 @@ async fn settlement_failure_is_bounded_emits_terminal_error_and_releases_permit(
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
             text: "question".into(),
@@ -691,6 +717,7 @@ async fn model_fallbacks_are_uncached_and_successes_are_cached() {
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
             text: "models".into(),
@@ -739,6 +766,7 @@ async fn invalid_and_wrong_owner_turns_do_not_consume_rate_limit() {
         &state.db,
         "other",
         &engine::TurnRequest {
+            attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
             text: "private".into(),
@@ -937,6 +965,7 @@ async fn history_surfaces_pending_proxy_approvals_raised_by_the_chat_key() {
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
             text: "read my github profile".into(),
@@ -952,6 +981,7 @@ async fn history_surfaces_pending_proxy_approvals_raised_by_the_chat_key() {
             .await
             .unwrap();
     let request = |label: &str, status: &str, minutes: i64| ApprovalRequest {
+        assistant_group: None,
         id: uuid::Uuid::new_v4().to_string(),
         user_id: OWNER.to_string(),
         service_id: uuid::Uuid::new_v4().to_string(),
@@ -1024,6 +1054,7 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
             text: "use github".into(),
@@ -1039,6 +1070,10 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
         .unwrap()
         .unwrap();
     let ack = |kind: &str, status: &str, decided: Option<DateTime<Utc>>| AssistantAcknowledgement {
+        voice_request_id: None,
+        continuation_receipt_id: None,
+        skill_selection: None,
+        operation_selection: None,
         id: Uuid::new_v4().to_string(),
         conversation_id: row.id.clone(),
         user_id: OWNER.into(),
@@ -1169,4 +1204,461 @@ fn upstream_error_code_reads_nested_and_flat_insufficient_credits_envelopes() {
     let unknown = json!({"error":{"code":"brand_new_code"}});
     assert_eq!(upstream_error_code(402, &unknown), "brand_new_code");
     assert_eq!(upstream_error_code(402, &Value::Null), "");
+}
+
+#[tokio::test]
+async fn budget_and_time_limits_continue_the_same_session_without_reset_or_extra_messages() {
+    for code in ["tool_budget_exhausted", "turn_timeout"] {
+        let (state, calls, server) = setup_script(None, Duration::ZERO, vec![code]).await;
+        let response = turns(
+            State(state.clone()),
+            test_auth_user(OWNER),
+            turn_request(None),
+        )
+        .await
+        .unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 100_000)
+            .await
+            .unwrap();
+        let events = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(events.contains("turn.continuing"));
+        assert!(!events.contains("turn.notice") && !events.contains("SECRET"));
+        let row = settled(&state).await;
+        assert_eq!(row.nyxagent_session_id.as_deref(), Some(SESSION));
+        assert!(row.context_reset_at.is_none());
+        let messages = engine::messages(&state.db, OWNER, &row.id, 10, None)
+            .await
+            .unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].turn_id, messages[1].turn_id);
+        assert!(messages[1].error_code.is_none());
+        let calls = calls.lock().await;
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1].body["conversation"], SESSION);
+        assert_eq!(
+            calls[0].headers["authorization"],
+            calls[1].headers["authorization"]
+        );
+        assert_eq!(calls[0].body["instructions"], calls[1].body["instructions"]);
+        assert!(
+            calls[1].headers["idempotency-key"]
+                .to_str()
+                .unwrap()
+                .ends_with(":continuation:1")
+        );
+        assert_eq!(
+            calls[1].body["input"],
+            crate::services::assistant_continuation::INSTRUCTION
+        );
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn continuation_limit_and_no_progress_preserve_context_and_a_diagnostic_code() {
+    for (limit, expected, attempts) in [
+        (0, "tool_budget_exhausted", 1),
+        (1, "tool_budget_exhausted", 2),
+        (8, "continuation_no_progress", 2),
+    ] {
+        let (state, calls, server) =
+            setup_script(None, Duration::ZERO, vec!["tool_budget_exhausted"; 4]).await;
+        crate::services::assistant_settings_service::update(
+            &state.db,
+            OWNER,
+            crate::services::assistant_settings_service::Update {
+                max_auto_continuations: Some(limit),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let response = turns(
+            State(state.clone()),
+            test_auth_user(OWNER),
+            turn_request(None),
+        )
+        .await
+        .unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 100_000)
+            .await
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("turn.notice"));
+        let row = settled(&state).await;
+        assert_eq!(row.nyxagent_session_id.as_deref(), Some(SESSION));
+        assert!(row.context_reset_at.is_none());
+        let messages = engine::messages(&state.db, OWNER, &row.id, 10, None)
+            .await
+            .unwrap();
+        assert_eq!(messages[1].error_code.as_deref(), Some(expected));
+        assert_eq!(calls.lock().await.len(), attempts);
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn attachments_on_old_nyxagent_persist_fallback_and_do_not_reset_context() {
+    let (state, calls, server) = setup(None, Duration::ZERO).await;
+    let draft = super::super::assistant_uploads::draft(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        Json(super::super::assistant_uploads::Draft { agent_id: None }),
+    )
+    .await
+    .unwrap()
+    .0;
+    let id = draft["id"].as_str().unwrap();
+    let warmup = turns(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        turn_request(Some(id)),
+    )
+    .await
+    .unwrap();
+    drop(warmup);
+    assert_eq!(
+        settled(&state).await.nyxagent_session_id.as_deref(),
+        Some(SESSION)
+    );
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::RgbImage::new(2, 2)
+        .write_to(&mut png, image::ImageFormat::Png)
+        .unwrap();
+    let attachment = crate::services::assistant_upload_service::upload(
+        &state.db,
+        &state.encryption_keys,
+        OWNER,
+        id,
+        "photo.png",
+        png.into_inner(),
+    )
+    .await
+    .unwrap();
+    let mut req = Request::builder()
+        .method("POST")
+        .body(Body::from(
+            json!({"conversation_id":id,"text":"","attachment_ids":[attachment.id]}).to_string(),
+        ))
+        .unwrap();
+    req.extensions_mut().insert(SERVER_TURN_POLICY);
+    let response = turns(State(state.clone()), test_auth_user(OWNER), req)
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let row = settled(&state).await;
+    assert!(
+        row.context_reset_at.is_none(),
+        "{:?}",
+        row.context_reset_reason
+    );
+    assert_eq!(row.nyxagent_session_id.as_deref(), Some(SESSION));
+    let captured = calls.lock().await;
+    assert_eq!(captured.len(), 2);
+    assert_eq!(captured[1].body["conversation"], SESSION);
+    assert!(
+        captured[1].body["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("cannot view")
+    );
+    assert!(
+        captured[1].body["input"]
+            .as_str()
+            .unwrap()
+            .contains("attachments")
+    );
+    let messages = engine::messages(&state.db, OWNER, id, 20, None)
+        .await
+        .unwrap();
+    let user = messages
+        .iter()
+        .find(|m| m.role == "user" && m.attachments.iter().any(|a| a.id == attachment.id))
+        .expect("message with the uploaded image");
+    assert_eq!(
+        user.attachments[0].image_input.as_deref(),
+        Some("unavailable")
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn assistant_titles_use_toolless_provider_and_no_route_keeps_provisional() {
+    use crate::services::assistant_title_service as titles;
+    use crate::services::channel_x_tests::billing::{enable_billing_with_entitlement, settled};
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+    let (mut state, _, server) = setup(None, Duration::ZERO).await;
+    let auth = test_auth_user(OWNER);
+    let request =
+        serde_json::from_value::<engine::TurnRequest>(json!({"text":"Plan a week in Japan"}))
+            .unwrap();
+    let start: engine::TurnStart = (&request).into();
+    let row = Box::pin(engine::begin_turn(
+        &state.db,
+        OWNER,
+        &start,
+        &state.encryption_keys,
+    ))
+    .await
+    .unwrap();
+    Box::pin(engine::finish_turn(
+        &state.db,
+        &row,
+        &row.credential_api_key_id,
+        &Uuid::new_v4().to_string(),
+        &engine::TurnResult {
+            text: "Visit Kyoto and Tokyo".into(),
+            session_id: Some(SESSION.into()),
+            response_id: Some(RESPONSE.into()),
+            error: None,
+        },
+    ))
+    .await
+    .unwrap();
+    let mock = MockServer::start().await;
+    enable_billing_with_entitlement(&mut state, OWNER, "title-provider").await;
+    state
+        .db
+        .collection::<mongodb::bson::Document>("billing_rate_cache")
+        .insert_many(["platform_requests", "platform_tokens"].map(|metric| {
+            doc! {
+                "_id":format!("{metric}:*"),"lago_metric_code":metric,"credits_per_unit_pico":1_i64,
+                "credits_per_unit_micros":0_i64,"synced_at":mongodb::bson::DateTime::now(),
+            }
+        }))
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<mongodb::bson::Document>(SERVICES)
+        .update_one(
+            doc! {"slug":engine::SERVICE_SLUG},
+            doc! {"$set": {"slug":"title-provider", "base_url":mock.uri(),
+                "inference":{"wire_protocol":"openai_responses","model_list":true}, "billing": {
+                "platform_billable": true,
+                "platform_charge_nyxid_credentials_only": false,
+            }}},
+        )
+        .await
+        .unwrap();
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"data":[{"id":"text-mini"}]})),
+        )
+        .mount(&mock)
+        .await;
+    Mock::given(method("POST")).and(path("/responses")).respond_with(ResponseTemplate::new(200).set_body_json(json!({
+        "status":"completed","usage":{"input_tokens":4,"output_tokens":2,"total_tokens":6},"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"\"Planning a Japan trip.\""}]}],
+    }))).mount(&mock).await;
+    use tracing::instrument::WithSubscriber;
+    let capture = tempfile::NamedTempFile::new().unwrap();
+    let writer = capture.reopen().unwrap();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::TRACE)
+        .with_writer(move || writer.try_clone().unwrap())
+        .finish();
+    Box::pin(super::super::assistant_titles::generate(
+        &state, &auth, &row.id,
+    ))
+    .with_subscriber(subscriber)
+    .await
+    .unwrap();
+    let logs = std::fs::read_to_string(capture.path()).unwrap();
+    for secret in [
+        "Plan a week in Japan",
+        "Visit Kyoto and Tokyo",
+        "Planning a Japan trip",
+    ] {
+        assert!(
+            !logs.contains(secret),
+            "Title generation must not log content"
+        );
+    }
+    let current = engine::get(&state.db, OWNER, &row.id).await.unwrap();
+    assert_eq!(current.title, "Planning a Japan trip");
+    assert_eq!(
+        current.title_source,
+        crate::models::assistant_conversation::TitleSource::Generated
+    );
+    assert_eq!(current.nyxagent_session_id.as_deref(), Some(SESSION));
+    assert_eq!(current.nyxagent_last_response_id.as_deref(), Some(RESPONSE));
+    let usage = settled(&state).await;
+    assert_eq!(
+        usage.len(),
+        2,
+        "Model discovery and the plain title request are metered"
+    );
+    for row in &usage {
+        assert_eq!(row.billing_owner_id, OWNER);
+        let tokens = row.metric == crate::models::service_billing::BillingMetric::Tokens;
+        assert_eq!(row.quantity, Some(if tokens { 6 } else { 1 }));
+        assert_eq!(
+            row.funding.as_ref().unwrap().wallet_funded,
+            Some(
+                if tokens {
+                    "0.000000000006"
+                } else {
+                    "0.000000000001"
+                }
+                .parse()
+                .unwrap()
+            )
+        );
+    }
+    let requests = mock.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2);
+    let body: Value = requests[1].body_json().unwrap();
+    assert_eq!(body["model"], "text-mini");
+    assert_eq!(body["store"], false);
+    assert_eq!(body["stream"], false);
+    assert!(body.get("tool_choice").is_none());
+    assert!(body.get("tools").is_none());
+    assert!(body.get("conversation").is_none());
+    assert!(body.get("session_id").is_none());
+    assert!(body.get("previous_response_id").is_none());
+    assert!(
+        !requests[1].headers.contains_key("authorization"),
+        "The thread key never reaches the model"
+    );
+    assert!(body["instructions"].as_str().unwrap().contains("untrusted"));
+    // Unavailable direct inference must keep the provisional title.
+    state
+        .db
+        .collection::<mongodb::bson::Document>(
+            crate::models::assistant_conversation::COLLECTION_NAME,
+        )
+        .update_one(
+            doc! {"_id":&row.id},
+            doc! {"$set":{"title_source":"provisional","title":"Provisional"}},
+        )
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<mongodb::bson::Document>(SERVICES)
+        .delete_many(doc! {"slug":"title-provider"})
+        .await
+        .unwrap();
+    assert!(
+        Box::pin(super::super::assistant_titles::generate(
+            &state, &auth, &row.id
+        ))
+        .await
+        .is_ok()
+    );
+    assert_eq!(
+        engine::get(&state.db, OWNER, &row.id).await.unwrap().title,
+        "Provisional"
+    );
+    assert_eq!(mock.received_requests().await.unwrap().len(), 2);
+    assert!(
+        titles::first_exchange(&state.db, OWNER, &row.id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    // An attachment-only owner message can derive its topic from the reply;
+    // title generation never fetches the uploaded payload.
+    state
+        .db
+        .collection::<mongodb::bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
+        .update_one(
+            doc! {"conversation_id":&row.id,"role":"user"},
+            doc! {"$set":{"text":""}},
+        )
+        .await
+        .unwrap();
+    let (_, question, answer) = titles::first_exchange(&state.db, OWNER, &row.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(question.is_empty());
+    assert_eq!(answer, "Visit Kyoto and Tokyo");
+    server.abort();
+}
+
+#[tokio::test]
+async fn channel_thread_execution_rechecks_orphaned_binding_before_upstream() {
+    use crate::models::assistant_conversation::{ChannelOrigin, TurnOrigin};
+    use crate::models::channel_thread_follow::ThreadTurnBinding;
+    let (state, calls, server) = setup(None, Duration::ZERO).await;
+    let request =
+        serde_json::from_value::<engine::TurnRequest>(json!({"text":"Question"})).unwrap();
+    let mut row = Box::pin(engine::begin_turn(
+        &state.db,
+        OWNER,
+        &request,
+        &state.encryption_keys,
+    ))
+    .await
+    .unwrap();
+    let mut credential =
+        credentials::load_for_conversation(&state.db, &state.encryption_keys, OWNER, &row.id)
+            .await
+            .unwrap()
+            .unwrap();
+    // A claimed turn can retain this snapshot after its channel is removed
+    // while first-turn history or upload preparation is in flight.
+    row.channel = Some(ChannelOrigin {
+        nyxbot_channel_id: "removed-channel".into(),
+        partition: "thread_v1_removed".into(),
+        platform: "telegram".into(),
+        thread: Some(Box::new(ThreadTurnBinding {
+            child_id: "removed-child".into(),
+            source_message_id: "source".into(),
+            sender_id: "owner".into(),
+            guest: false,
+            revision: 1,
+            generation: 0,
+            channel_generation: 0,
+            agent_id: "agent".into(),
+            queued: false,
+        })),
+    });
+    let auth = test_auth_user(OWNER);
+    let (sender, _receiver) = broadcast::channel(256);
+    let mut events = Events { sender, cursor: 0 };
+    for origin in [TurnOrigin::Channel, TurnOrigin::Event] {
+        row.active_turn.as_mut().unwrap().origin = origin;
+        let result = Box::pin(execute_turn(
+            &state,
+            &auth,
+            &row,
+            "Question with transient history",
+            &mut credential,
+            Some(SERVER_TURN_POLICY),
+            &mut events,
+            "block",
+            &mut String::new(),
+        ))
+        .await;
+        assert!(matches!(result, Err(error) if error.code == "assistant_unavailable"));
+        assert!(
+            calls.lock().await.is_empty(),
+            "revoked binding reached the model"
+        );
+    }
+    // A browser turn remains independent of channel delivery authority.
+    row.active_turn.as_mut().unwrap().origin = TurnOrigin::User;
+    let result = Box::pin(execute_turn(
+        &state,
+        &auth,
+        &row,
+        "Question",
+        &mut credential,
+        Some(SERVER_TURN_POLICY),
+        &mut events,
+        "block",
+        &mut String::new(),
+    ))
+    .await
+    .unwrap();
+    assert!(result.error.is_none());
+    assert_eq!(calls.lock().await.len(), 1);
+    server.abort();
 }

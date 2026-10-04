@@ -26,14 +26,22 @@ use crate::{
 #[derive(Clone, Debug)]
 pub enum KeyAuthority {
     Orchestrator,
-    Subagent(AgentGrants),
+    Subagent(
+        AgentGrants,
+        crate::models::agent_operation_scope::OperationScopes,
+        String,
+    ),
 }
 
 impl KeyAuthority {
     pub fn for_agent(agent: &AssistantAgent) -> Self {
         match agent.kind {
             AgentKind::Nyxbot => Self::Orchestrator,
-            AgentKind::Specialist => Self::Subagent(agent.grants.clone()),
+            AgentKind::Specialist => Self::Subagent(
+                agent.grants.clone(),
+                agent.operation_scopes.clone(),
+                agent.user_id.clone(),
+            ),
         }
     }
 
@@ -42,12 +50,16 @@ impl KeyAuthority {
     pub fn key_fields(&self) -> bson::Document {
         match self {
             Self::Orchestrator => doc! {
+                "assistant_agent_owner_id": bson::Bson::Null,
+                "assistant_operation_scopes": bson::Document::new(),
                 "allow_all_services": true,
                 "allow_all_nodes": true,
                 "allow_auto_connected_services": true,
                 "scopes": format!("{ASSISTANT_SCOPES} {ASSISTANT_ACCOUNT_SCOPE}"),
             },
-            Self::Subagent(grants) => doc! {
+            Self::Subagent(grants, scopes, owner) => doc! {
+                "assistant_agent_owner_id": owner,
+                "assistant_operation_scopes": bson::to_bson(scopes).expect("operation scope serialization"),
                 "allow_all_services": false,
                 "allow_all_nodes": true,
                 "allow_auto_connected_services": false,
@@ -92,16 +104,65 @@ pub async fn authority_in_session(
     conversation: &AssistantConversation,
     session: &mut ClientSession,
 ) -> AppResult<KeyAuthority> {
+    Box::pin(authority_with_access(db, conversation, session, None)).await
+}
+
+pub(crate) async fn authority_with_access(
+    db: &Database,
+    conversation: &AssistantConversation,
+    session: &mut ClientSession,
+    snapshot: Option<&std::sync::Arc<super::org_agent_service::RequestAccess>>,
+) -> AppResult<KeyAuthority> {
     let Some(agent_id) = conversation.agent_id.as_deref() else {
         return Ok(KeyAuthority::Orchestrator);
     };
     let agents = db.collection::<AssistantAgent>(AGENTS);
-    let filter = doc! {"_id": agent_id, "user_id": &conversation.user_id};
+    let filter = doc! {"_id": agent_id};
     let agent = agents
         .find_one(filter.clone())
         .session(&mut *session)
         .await?
         .ok_or_else(|| AppError::NotFound("Agent not found".into()))?;
+    if agent.user_id != conversation.user_id && conversation.group_id.is_some() {
+        let access = match snapshot {
+            Some(access) if access.matches(&conversation.user_id, &agent.user_id) => access.clone(),
+            Some(_) => return Err(super::org_group_service::missing()),
+            None => super::org_agent_service::resolve_key_access(
+                db,
+                &conversation.user_id,
+                Some(&agent.user_id),
+            )
+            .await?
+            .ok_or_else(super::org_group_service::missing)?,
+        };
+        super::org_group_service::check_thread_participation(db, conversation, &access).await?;
+        let group = super::org_group_service::get(
+            db,
+            &conversation.user_id,
+            conversation.group_id.as_deref().unwrap_or_default(),
+            Some(&access),
+        )
+        .await?;
+        if group.org.is_some() {
+            super::org_group_service::fence(db, &group, session).await?;
+            if let Some(request) = &conversation.group_request_id {
+                super::org_group_service::request(db, &group, request).await?;
+            }
+        }
+    } else if let Some(access) = snapshot {
+        if !access.matches(&conversation.user_id, &agent.user_id) {
+            return Err(super::org_group_service::missing());
+        }
+    } else {
+        super::org_agent_service::require_use(db, &conversation.user_id, &agent).await?;
+    }
+    if agent.user_id != conversation.user_id
+        && (conversation.guest_turn || conversation.channel.is_some())
+    {
+        return Err(AppError::Forbidden(
+            "Organization agents require a private member thread".into(),
+        ));
+    }
     let destroyed =
         || AppError::Conflict("This agent was destroyed; its threads are read-only".into());
     if agent.destroyed_at.is_some() {
@@ -356,7 +417,9 @@ pub async fn load_or_provision_in_session(
     let created = key_service::create_api_key_with_security_class_and_id(
         db,
         user_id,
-        Some(user_id),
+        // Empty bootstrap grants need no visibility enumeration. The checked
+        // agent authority is applied below in the same transaction.
+        None,
         None,
         &name,
         ASSISTANT_SCOPES,
@@ -624,6 +687,7 @@ mod tests {
             &state.db,
             owner,
             &engine::TurnRequest {
+                attachment_ids: Vec::new(),
                 agent_id: None,
                 conversation_id: None,
                 text: "hello".into(),

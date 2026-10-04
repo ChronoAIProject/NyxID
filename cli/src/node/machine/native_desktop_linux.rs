@@ -7,16 +7,67 @@ use x11rb::{
     rust_connection::RustConnection,
 };
 
+fn connect(
+    display: nyxid_machine::desktop::Display,
+    endpoint: Option<(String, std::path::PathBuf)>,
+) -> Result<(RustConnection, usize)> {
+    if endpoint.is_none() && display == nyxid_machine::desktop::Display::Secure {
+        return Ok(x11rb::connect(None)?);
+    }
+    let (name, authority) = match endpoint {
+        Some(endpoint) => endpoint,
+        None => crate::node::machine::dev_display::endpoint()?,
+    };
+    let number: u16 = name
+        .strip_prefix(':')
+        .context("Local display required")?
+        .parse()?;
+    let auth = std::fs::read(authority)?;
+    anyhow::ensure!(auth.len() <= 65536, "Xauthority limit exceeded");
+    let mut bytes = auth.as_slice();
+    while bytes.len() >= 2 {
+        bytes = &bytes[2..]; // family
+        let mut fields = Vec::new();
+        for _ in 0..4 {
+            anyhow::ensure!(bytes.len() >= 2, "Invalid Xauthority");
+            let len = u16::from_be_bytes([bytes[0], bytes[1]]) as usize;
+            anyhow::ensure!(bytes.len() >= len + 2, "Invalid Xauthority");
+            fields.push(&bytes[2..2 + len]);
+            bytes = &bytes[2 + len..];
+        }
+        if (fields[1].is_empty() || fields[1] == number.to_string().as_bytes())
+            && fields[2] == b"MIT-MAGIC-COOKIE-1"
+        {
+            let stream =
+                std::os::unix::net::UnixStream::connect(format!("/tmp/.X11-unix/X{number}"))?;
+            let (stream, _) = x11rb::rust_connection::DefaultStream::from_unix_stream(stream)?;
+            return Ok((
+                RustConnection::connect_to_stream_with_auth_info(
+                    stream,
+                    0,
+                    fields[2].to_vec(),
+                    fields[3].to_vec(),
+                )?,
+                0,
+            ));
+        }
+    }
+    bail!("Developer display cookie unavailable")
+}
+
 pub struct Capture {
     connection: RustConnection,
     root: Window,
 }
 impl Capture {
-    pub fn new() -> Result<Self> {
+    pub fn for_display(
+        display: nyxid_machine::desktop::Display,
+        endpoint: Option<(String, std::path::PathBuf)>,
+    ) -> Result<Self> {
         // The supervisor owns the browser's Xauthority; no DISPLAY/cookie is
         // passed to agent command children. Capture and input use separate X
         // connections, so an outstanding GetImage never blocks owner input.
-        let (connection, screen) = x11rb::connect(None)?;
+        let (connection, screen) = connect(display, endpoint)?;
         let root = connection.setup().roots[screen].root;
         connection.xfixes_query_version(5, 0)?.reply()?;
         Ok(Self { connection, root })
@@ -78,19 +129,30 @@ pub struct Input {
     connection: RustConnection,
     root: Window,
     authority: Option<(tokio::sync::watch::Receiver<u64>, u64)>,
+    stopped: Option<tokio::sync::watch::Receiver<bool>>,
 }
 impl Input {
-    pub fn new() -> Result<Self> {
-        let (connection, screen) = x11rb::connect(None)?;
+    pub fn for_display(
+        display: nyxid_machine::desktop::Display,
+        endpoint: Option<(String, std::path::PathBuf)>,
+    ) -> Result<Self> {
+        let (connection, screen) = connect(display, endpoint)?;
         let root = connection.setup().roots[screen].root;
         connection.xtest_get_version(2, 2)?.reply()?;
         Ok(Self {
             connection,
             root,
             authority: None,
+            stopped: None,
         })
     }
+    pub fn stop_when(&mut self, stopped: Option<tokio::sync::watch::Receiver<bool>>) {
+        self.stopped = stopped;
+    }
     fn event(&self, kind: u8, detail: u8, x: i16, y: i16) -> Result<()> {
+        if self.stopped.as_ref().is_some_and(|s| *s.borrow()) {
+            bail!("machine turn stopped");
+        }
         if self
             .authority
             .as_ref()
@@ -210,41 +272,91 @@ impl Input {
                     .iter()
                     .map(|name| self.keycode(name.as_str().context("invalid key")?))
                     .collect::<Result<Vec<_>>>()?;
-                for code in &codes {
-                    self.event(KEY_PRESS_EVENT, *code, 0, 0)?;
+                let mut pressed = Vec::new();
+                let result = (|| -> Result<()> {
+                    for code in &codes {
+                        self.event(KEY_PRESS_EVENT, *code, 0, 0)?;
+                        pressed.push(*code);
+                    }
+                    Ok(())
+                })();
+                for code in pressed.iter().rev() {
+                    self.connection
+                        .xtest_fake_input(KEY_RELEASE_EVENT, *code, 0, self.root, 0, 0, 0)?
+                        .check()?;
                 }
-                for code in codes.iter().rev() {
-                    self.event(KEY_RELEASE_EVENT, *code, 0, 0)?;
-                }
+                result?;
             }
             "type_text" => {
                 let text = args["text"]
                     .as_str()
                     .filter(|s| s.len() <= 8192)
                     .context("invalid text")?;
-                // Unicode keysyms produce real keyboard events without clipboard
-                // or disk writes. Restore the spare keycode even on failure.
-                let code = self.connection.setup().max_keycode;
-                let old = self.connection.get_keyboard_mapping(code, 1)?.reply()?;
-                let result = (|| -> Result<()> {
-                    for ch in text.chars() {
-                        let symbol = match ch {
-                            '\n' => 0xff0d,
-                            '\t' => 0xff09,
-                            c if (c as u32) <= 255 => c as u32,
-                            c => 0x01000000 | c as u32,
-                        };
+                // Use the real keyboard map for ordinary text. Rebinding a
+                // single key between events races Chromium's map notifications.
+                let setup = self.connection.setup();
+                let map = self
+                    .connection
+                    .get_keyboard_mapping(
+                        setup.min_keycode,
+                        setup.max_keycode - setup.min_keycode + 1,
+                    )?
+                    .reply()?;
+                let width = map.keysyms_per_keycode as usize;
+                let shift = self.keycode("SHIFT")?;
+                for ch in text.chars() {
+                    let symbol = match ch {
+                        '\n' => 0xff0d,
+                        '\t' => 0xff09,
+                        c if (c as u32) <= 255 => c as u32,
+                        c => 0x01000000 | c as u32,
+                    };
+                    let mapped = map
+                        .keysyms
+                        .chunks(width)
+                        .enumerate()
+                        .find_map(|(index, syms)| {
+                            syms.iter()
+                                .take(2)
+                                .position(|s| *s == symbol)
+                                .map(|level| (setup.min_keycode + index as u8, level == 1))
+                        });
+                    if let Some((code, shifted)) = mapped {
+                        if shifted {
+                            self.event(KEY_PRESS_EVENT, shift, 0, 0)?;
+                        }
+                        let result = self.stroke(code);
+                        if shifted {
+                            // Release our modifier even when takeover cancels
+                            // typing, so the human never inherits a stuck Shift.
+                            self.connection
+                                .xtest_fake_input(KEY_RELEASE_EVENT, shift, 0, self.root, 0, 0, 0)?
+                                .check()?;
+                        }
+                        result?;
+                    } else {
+                        // Chromium on Linux supports Unicode entry through the
+                        // input method only on some desktops. Use one stable
+                        // temporary keysym with a delivery pause on each side.
+                        let code = setup.max_keycode;
+                        let old = self.connection.get_keyboard_mapping(code, 1)?.reply()?;
                         self.connection
                             .change_keyboard_mapping(1, code, 1, &[symbol])?
                             .check()?;
-                        self.stroke(code)?;
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                        let result = self.stroke(code);
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                        self.connection
+                            .change_keyboard_mapping(
+                                1,
+                                code,
+                                old.keysyms_per_keycode,
+                                &old.keysyms,
+                            )?
+                            .check()?;
+                        result?;
                     }
-                    Ok(())
-                })();
-                self.connection
-                    .change_keyboard_mapping(1, code, old.keysyms_per_keycode, &old.keysyms)?
-                    .check()?;
-                result?;
+                }
             }
             _ => bail!("unsupported owner input"),
         }

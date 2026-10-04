@@ -1,3 +1,4 @@
+import { useVerifiedUpdaterImage } from "@/hooks/use-machines";
 import { useEffect, useRef, useState } from "react";
 import { Link, useSearch } from "@tanstack/react-router";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -46,6 +47,7 @@ import {
 const labels = {
   shell: "Commands — run code and use connected services",
   files: "Files — read, edit and move files in workspace roots",
+  browser: "Browser — use the managed browser",
   computer: "Computer — operate the desktop and browser",
 };
 const states: Record<string, string> = {
@@ -79,6 +81,7 @@ export function MachineSetupPage() {
       where: "vm",
       capabilities: ["shell", "files"],
       grant_to: null,
+      automatic_updates: true,
     },
   });
   const prefilled = useRef<string | undefined>(undefined);
@@ -88,7 +91,10 @@ export function MachineSetupPage() {
       prefilled.current !== setup.data.id
     ) {
       prefilled.current = setup.data.id;
-      form.reset(setup.data.choices);
+      form.reset({
+        ...setup.data.choices,
+        automatic_updates: setup.data.choices.automatic_updates ?? true,
+      });
     }
   }, [setup.data, form]);
   useEffect(() => {
@@ -98,6 +104,7 @@ export function MachineSetupPage() {
     )
       setCommand(undefined);
   }, [setup.data]);
+  const updater = useVerifiedUpdaterImage();
   const where = form.watch("where");
   const capabilities = form.watch("capabilities");
   const locked =
@@ -112,6 +119,8 @@ export function MachineSetupPage() {
         throw new Error(
           "Server release version is unavailable. Reload before creating the Docker command.",
         );
+      if (choices.where === "docker" && (!updater.data?.image || updater.data.version !== config.data?.version))
+        throw new Error("Verifying the updater image, try again shortly.");
       const row = id ? { id } : await create.mutateAsync(choices);
       setId(row.id);
       const issued = await issueMachineSetup(row.id, choices);
@@ -119,7 +128,7 @@ export function MachineSetupPage() {
         config.data?.node_ws_url ??
         `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/api/v1/nodes/ws`;
       setCommand(
-        machineSetupCommand(choices, issued.token, wsUrl, config.data?.version),
+        machineSetupCommand(choices, issued.token, wsUrl, config.data?.version, updater.data?.image ?? undefined),
       );
       issued.token = "";
     } catch (cause) {
@@ -196,9 +205,9 @@ export function MachineSetupPage() {
           />
           <fieldset disabled={locked} className="space-y-3">
             <legend className="mb-2 text-[12px] font-medium">
-              Let agents use
+              Enable on this machine
             </legend>
-            {(["shell", "files", "computer"] as const).map((capability) => (
+            {(["shell", "files", "browser", "computer"] as const).map((capability) => (
               <label
                 key={capability}
                 className="flex items-center gap-2 text-[12px]"
@@ -223,7 +232,7 @@ export function MachineSetupPage() {
             name="grant_to"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>Also let a specialist use this machine</FormLabel>
+                <FormLabel>Select a specialist for this machine</FormLabel>
                 <Select
                   value={field.value ?? "none"}
                   disabled={locked}
@@ -237,7 +246,7 @@ export function MachineSetupPage() {
                     </SelectTrigger>
                   </FormControl>
                   <SelectContent>
-                    <SelectItem value="none">NyxBot only</SelectItem>
+                    <SelectItem value="none">No specialist assignment</SelectItem>
                     {agents.data?.agents
                       .filter(
                         (agent) =>
@@ -255,7 +264,31 @@ export function MachineSetupPage() {
               </FormItem>
             )}
           />
-          {where !== "docker" && capabilities.includes("computer") ? (
+          <p className="text-[12px] text-muted-foreground">Agent permissions are configured separately in agent settings. New assignments start with no allowed capabilities.</p>
+          <label className="flex items-start gap-2 text-[12px]">
+            <Checkbox
+              checked={form.watch("automatic_updates") ?? true}
+              disabled={locked}
+              onCheckedChange={(value) =>
+                form.setValue("automatic_updates", value === true)
+              }
+            />
+            <span>
+              Update automatically when idle (recommended). Updates wait for
+              work and desktop sessions to end, and notify you.
+            </span>
+          </label>
+          {where === "docker" ? (
+            <p className="text-[12px] text-muted-foreground">
+              The command also installs a small updater companion. Its Docker
+              socket grants host-root access; only the node supervisor can
+              request an update, and the helper accepts only a release version,
+              verifies the official image attestation and restores the previous
+              container if reconnection fails. Your identity and workspace
+              volumes are preserved.
+            </p>
+          ) : null}
+          {where !== "docker" && (capabilities.includes("computer") || capabilities.includes("browser")) ? (
             <p className="text-[12px] text-muted-foreground">
               {SINGLE_USER_WARNING} Saved-login typing starts off; allow it
               later in Nodes settings. Setup asks once for administrator access
@@ -299,6 +332,7 @@ export function MachinePairPage() {
   const [code, setCode] = useState(search.code ?? "");
   const [details, setDetails] = useState<MachineSetup>();
   const [confirmed, setConfirmed] = useState(false);
+  const [automatic, setAutomatic] = useState(true);
   const preview = useMachinePairPreview();
   const decision = useMachinePairDecision();
   const status = useMachineSetup(decision.data?.id);
@@ -308,7 +342,7 @@ export function MachinePairPage() {
     setConfirmed(false);
   }
   async function decide(approve: boolean) {
-    await decision.mutateAsync({ code, approve });
+    await decision.mutateAsync({ code, approve, automatic_updates: automatic });
   }
   return (
     <div className="max-w-xl space-y-6">
@@ -353,6 +387,17 @@ export function MachinePairPage() {
             <dd>{details.choices.capabilities.join(", ")}</dd>
           </dl>
           <p className="text-muted-foreground">{MACHINE_SAFETY}</p>
+          <label className="flex items-start gap-2">
+            <Checkbox
+              checked={automatic}
+              disabled={Boolean(decision.data)}
+              onCheckedChange={(value) => setAutomatic(value === true)}
+            />
+            <span>
+              Update automatically when idle (recommended). Waits for jobs,
+              turns and live desktop sessions to end, and notifies you.
+            </span>
+          </label>
           {!decision.data ? (
             <>
               <label className="flex items-center gap-2">
@@ -430,7 +475,7 @@ function SetupProgress({ setup }: { readonly setup: MachineSetup }) {
       {setup.machine ? (
         <p>
           Enabled:{" "}
-          {(["shell", "files", "computer"] as const)
+          {(["shell", "files", "browser", "computer"] as const)
             .filter((c) => setup.machine?.[c])
             .join(", ")}
         </p>

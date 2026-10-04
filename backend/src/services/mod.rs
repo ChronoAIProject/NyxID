@@ -3,6 +3,7 @@ pub mod admin_audit_service;
 pub mod admin_usage_service;
 pub mod admin_user_service;
 pub mod agent_binding_service;
+pub mod agent_operation_scope_service;
 pub mod anonymous_endpoint_service;
 pub mod api_docs_service;
 pub mod api_key_credential_service;
@@ -13,6 +14,7 @@ pub mod approval_policy;
 pub mod approval_service;
 pub mod assistant_action_execution_service;
 pub mod assistant_action_receipts;
+pub mod assistant_agent_learning;
 pub mod assistant_direct;
 pub mod assistant_links;
 pub mod assistant_readiness_service;
@@ -50,6 +52,8 @@ pub mod channel_registration;
 pub mod channel_relay_service;
 pub mod channel_routing_service;
 pub mod channel_send_service;
+pub mod channel_thread_follow_service;
+pub mod channel_thread_service;
 pub mod channel_verification_service;
 #[cfg(test)]
 pub(crate) mod channel_x_tests;
@@ -182,6 +186,9 @@ pub mod ws_frame_injector;
 pub mod catalog_skill_service;
 pub mod curation_grant_service;
 pub mod inference_service;
+pub mod inference_voice;
+#[cfg(test)]
+mod inference_voice_tests;
 pub mod options_service;
 pub mod platform_key_service;
 pub mod service_account_scope_service;
@@ -191,6 +198,7 @@ pub mod channel_platform_catalog_service;
 pub mod assistant_account_tools;
 pub mod assistant_acknowledgement_service;
 pub mod assistant_agent_credential_service;
+pub mod assistant_continuation;
 pub mod assistant_group_service;
 pub mod assistant_live;
 pub mod assistant_nyxagent;
@@ -213,10 +221,12 @@ pub mod catalog_editor_service;
 
 pub mod channel_activity_callback_service;
 pub mod channel_activity_service;
+pub mod machine_activity_service;
 pub mod machine_desktop_service;
 pub mod machine_gateway_service;
 pub mod machine_service;
 pub mod machine_tools;
+pub mod machine_update_service;
 pub mod saved_login_service;
 
 pub mod machine_setup_service;
@@ -240,4 +250,29 @@ pub mod service_pool_contract;
 
 pub mod service_pool_routing;
 
+#[cfg(test)]
+mod agent_operation_scope_tests;
 pub mod permission_policy_service;
+
+pub mod agent_skill_service;
+pub mod assistant_upload_retention;
+pub mod assistant_upload_service;
+pub mod attachment_extraction;
+
+pub mod org_agent_service;
+pub mod org_group_service;
+
+#[cfg(test)]
+pub(crate) mod org_agent_tests;
+
+pub(crate) mod assistant_oneshot_inference;
+pub mod assistant_title_service;
+pub mod assistant_voice;
+#[cfg(test)]
+mod org_group_tests;
+
+pub mod machine_access_service;
+pub mod voice;
+
+#[cfg(test)]
+mod machine_access_tests;

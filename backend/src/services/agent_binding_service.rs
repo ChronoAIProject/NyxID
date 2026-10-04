@@ -151,6 +151,15 @@ async fn create_binding_with_scope_authorization_inner(
                     ));
                 }
 
+                if api_key
+                    .assistant_agent_owner_id
+                    .as_deref()
+                    .is_some_and(|owner| owner != user_id)
+                {
+                    return Err(AppError::Forbidden(
+                        "Organization agent threads cannot bind personal credentials".into(),
+                    ));
+                }
                 let authorization = ScopeAuthorization::for_actor(actor_id.as_deref());
                 api_key_scope_service::validate_owner_service_write_with_session(
                     &db,
@@ -659,6 +668,9 @@ mod tests {
             description: None,
             allowed_service_ids: vec![],
             allowed_platform_service_ids: Vec::new(),
+            assistant_group_id: None,
+            assistant_agent_owner_id: None,
+            assistant_operation_scopes: Default::default(),
             allowed_node_ids: vec![],
             allow_all_services: allow_all,
             allow_auto_connected_services: false,

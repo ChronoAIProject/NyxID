@@ -1,4 +1,5 @@
 pub mod agent_key_login_request;
+pub mod agent_operation_scope;
 pub mod agent_service_binding;
 pub mod anonymous_endpoint_usage;
 pub mod api_key;
@@ -26,6 +27,8 @@ pub mod channel_conversation;
 pub mod channel_event_log;
 pub mod channel_message;
 pub mod channel_send_claim;
+pub mod channel_thread;
+pub mod channel_thread_follow;
 pub mod cli_pairing;
 pub mod connect_link;
 pub mod consent;
@@ -113,6 +116,7 @@ pub mod ws_frame_injection;
 pub mod assistant_acknowledgement;
 pub mod assistant_agent;
 pub mod assistant_agent_credential;
+pub mod assistant_agent_learning;
 pub mod assistant_attachment;
 pub mod assistant_conversation;
 pub mod assistant_group;
@@ -137,11 +141,20 @@ pub mod billing_lago_carry;
 
 pub mod machine_desktop;
 pub mod machine_job;
+pub mod machine_receipt;
 pub mod saved_login;
 
 pub mod machine_setup;
+pub mod machine_update;
 pub mod pool_recovery_diagnostic;
 pub mod trigger_run;
 pub mod trigger_schedule;
 
+pub mod assistant_upload;
+pub mod assistant_upload_retention;
 pub mod permission_policy;
+
+pub mod assistant_voice;
+
+pub mod assistant_voice_session;
+pub mod machine_access;

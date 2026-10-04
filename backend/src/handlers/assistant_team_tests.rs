@@ -152,6 +152,7 @@ async fn server_started_turn_preserves_picocredits_and_obeys_cutover() {
                 .unwrap();
         }
         let start = TurnStart::from(&engine::TurnRequest {
+            attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
             text: "A server-started billed turn".into(),
@@ -219,6 +220,7 @@ async fn user_turn(
         state,
         test_auth_user(OWNER),
         &TurnStart::from(&engine::TurnRequest {
+            attachment_ids: Vec::new(),
             agent_id: agent_id.map(str::to_owned),
             conversation_id: conversation_id.map(str::to_owned),
             text: text.into(),
@@ -246,6 +248,7 @@ async fn orchestrator(state: &AppState) -> (AssistantConversation, ChatAuthority
         state,
         test_auth_user(OWNER),
         &TurnStart::from(&engine::TurnRequest {
+            attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
             text: "Research the topic with helpers".into(),
@@ -483,6 +486,7 @@ async fn specialists_keep_memory_but_not_team_tools_and_destroyed_agents_are_rea
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: Some(home.id.clone()),
             text: "are you there?".into(),
@@ -548,6 +552,7 @@ async fn owners_create_specialists_within_limits_and_grants_resolve_only_visible
         State(state.clone()),
         test_auth_user(OWNER),
         Json(CreateAgentRequest {
+            org: None,
             machines: None,
             logins: None,
             name: "coder".into(),
@@ -837,6 +842,7 @@ async fn permission_requests_reach_nyxbot_and_its_decision_resumes_the_specialis
         &state.db,
         OWNER,
         &engine::TurnRequest {
+            attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: Some(home.id.clone()),
             text: "Please review my open GitHub PRs".into(),

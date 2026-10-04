@@ -1,5 +1,5 @@
 import { getProviderBrand } from "@/lib/provider-branding";
-import type { AssistantAgentKind } from "@/schemas/assistant-nyxagent";
+import type { AssistantAgent, AssistantAgentKind } from "@/schemas/assistant-nyxagent";
 import type { Conversation } from "@/types/assistant";
 
 const PLATFORM_NAMES: Readonly<Record<string, string>> = {
@@ -291,4 +291,26 @@ export function groupWithDisplayNames<
   readonly members: (G["members"][number] & { readonly display_name: string | null })[];
 } {
   return { ...group, members: group.members.map((member) => withDisplayName(member, agents)) };
+}
+
+/** Owner sections retain server order within each organization. */
+export function agentOwnerSections(agents: readonly AssistantAgent[]) {
+  const groups = new Map<
+    string,
+    { id: string; label: string; agents: AssistantAgent[] }
+  >();
+  for (const agent of agents) {
+    const id =
+      agent.owner_kind === "org" ? (agent.owner_id ?? "org") : "personal";
+    const section = groups.get(id) ?? {
+      id,
+      label: id === "personal" ? "Personal" : (agent.owner_name ?? id),
+      agents: [],
+    };
+    section.agents.push(agent);
+    groups.set(id, section);
+  }
+  return [...groups.values()].sort(
+    (a, b) => Number(b.id === "personal") - Number(a.id === "personal"),
+  );
 }

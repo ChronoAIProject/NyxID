@@ -1,3 +1,4 @@
+import { agentOwnerSections } from "@/lib/assistant/nyxbot-labels";
 import { useState, type ReactNode } from "react";
 import { MessageSquare, Plus } from "lucide-react";
 import { AgentAvatar, AgentAvatarStack } from "@/components/assistant/nyxbot-agent-avatar";
@@ -58,7 +59,9 @@ function AwayList({
 }) {
   const items = awayItems(agents);
   if (!items.length) {
-    return <Quiet>All caught up. Replies and requests from your specialists show up here.</Quiet>;
+    return (
+      <Quiet>All caught up. Replies and requests from your specialists show up here.</Quiet>
+    );
   }
   return (
     <ul className="divide-y divide-border/30 overflow-hidden rounded-xl border border-border/50 bg-card">
@@ -149,7 +152,8 @@ function MemoryPreview({
         </ul>
       ) : (
         <Quiet>
-          Nothing yet. Tell NyxBot &ldquo;Remember …&rdquo; and it keeps that across every chat.
+          Nothing yet. Tell NyxBot &ldquo;Remember …&rdquo; and it keeps that
+          across every chat.
         </Quiet>
       )}
     </Section>
@@ -175,7 +179,9 @@ function RosterCard({
               {agentTitle(agent)}
             </span>
             {handle ? (
-              <span className="shrink-0 text-[11px] text-text-tertiary">{handle}</span>
+              <span className="shrink-0 text-[11px] text-text-tertiary">
+                {handle}
+              </span>
             ) : null}
           </p>
           <p className="flex items-center gap-1.5 text-[11px] text-text-tertiary">
@@ -207,6 +213,7 @@ function RosterCard({
           size="sm"
           variant="outline"
           aria-label={`Chat with ${agentTitle(agent)}`}
+          disabled={agent.can_use === false}
           onClick={() => onChat(agent)}
         >
           <MessageSquare aria-hidden="true" />
@@ -242,8 +249,11 @@ function GroupCard({
             </span>
           ) : null}
         </div>
-        <span className="truncate text-[13px] font-semibold text-foreground">{group.name}</span>
+        <span className="truncate text-[13px] font-semibold text-foreground">
+          {group.name}
+        </span>
         <span className="truncate text-[11px] text-text-tertiary">
+          {group.owner?.type === "org" ? `${group.owner.name} · ` : ""}
           {group.members.map((member) => agentTitle(member)).join(", ")}
           {group.last_message_at ? ` · ${formatRelativeTime(group.last_message_at)}` : ""}
         </span>
@@ -306,7 +316,8 @@ export function NyxBotHome({
               {firstName ? `, ${firstName}` : ""}
             </h1>
             <p className="text-[12px] text-muted-foreground">
-              NyxBot is your personal agent. Ask it anything below, or check in on your team.
+              NyxBot is your personal agent. Ask it anything below, or check in
+              on your team.
             </p>
           </div>
         </header>
@@ -336,13 +347,28 @@ export function NyxBotHome({
           }
         >
           {roster.length ? (
-            <ul aria-label="Agents" className="grid gap-3 sm:grid-cols-2">
-              {roster.map((agent) => (
+            <div aria-label="Agents" className="space-y-4">
+              {agentOwnerSections(roster).map((section) => (
+                <section
+                  key={section.id}
+                  aria-label={section.label}
+                  className="space-y-2"
+                >
+                  <h3 className="text-[10px] font-semibold uppercase tracking-[1.5px] text-text-tertiary">
+                    {section.label}
+                  </h3>
+                  <ul className="grid gap-3 sm:grid-cols-2">
+              {section.agents.map((agent) => (
                 <RosterCard key={agent.id} agent={agent} onChat={onChat} />
               ))}
             </ul>
+                </section>
+              ))}
+            </div>
           ) : (
-            <Quiet>{agentsLoading ? "Loading your agents..." : "No agents yet."}</Quiet>
+            <Quiet>
+              {agentsLoading ? "Loading your agents..." : "No agents yet."}
+            </Quiet>
           )}
         </Section>
 
@@ -364,8 +390,8 @@ export function NyxBotHome({
             </ul>
           ) : (
             <Quiet>
-              Put several agents in one chat. Mention one with @ to ask it directly; NyxBot
-              answers the rest.
+              Put several agents in one chat. Mention one with @ to ask it
+              directly; NyxBot answers the rest.
             </Quiet>
           )}
         </Section>

@@ -1,5 +1,7 @@
 //! Native machine MCP adapter. No token, credential, output, or path is audited.
 use crate::services::assistant_links::AssistantPage;
+use crate::services::machine_access_service as access;
+use crate::services::machine_activity_service as receipts;
 use crate::{
     AppState,
     errors::{AppError, AppResult},
@@ -12,6 +14,7 @@ use crate::{
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use chrono::Utc;
+use nyxid_machine::authority::Authority;
 use nyxid_machine::{Operation, Request};
 use serde_json::{Value, json};
 
@@ -70,13 +73,22 @@ pub async fn call(
         } else {
             "No machine is available. Ask NyxBot for a machine setup link."
         };
+        let visible = Box::pin(access::visible_assignments(&state.db, chat))
+            .await?
+            .into_iter()
+            .map(|(node, assignment)| {
+                let mut row = machines::metadata(&node);
+                if assignment.mode == "separated" {
+                    row["machine"]["roots"] = json!(["."]);
+                    row["context_note"] = json!("Paths are relative to this agent context workspace; the secure and developer browsers are separate from other contexts. Full isolation requires a separate machine container or VM.");
+                }
+                row["access"] = json!(assignment);
+                row
+            })
+            .collect();
         return tools::list_page(
             "machines",
-            nodes
-                .iter()
-                .filter(|node| machines::granted(chat, node))
-                .map(machines::metadata)
-                .collect(),
+            visible,
             &arguments,
             json!({
                 "services": services.iter().map(|service| service.slug.as_str()).collect::<Vec<_>>(),
@@ -98,12 +110,33 @@ pub async fn call(
             "Several machines have this name; use the ID".into(),
         ));
     }
-    if !machines::granted(chat, &node) {
-        return permission(state, chat, "machine", &node.id, &node.name).await;
-    }
     let operation = tools::operation(name)
         .ok_or_else(|| AppError::NotFound("Machine tool not found".into()))?;
+    let mut separated = false;
+    if operation != Operation::JobCancel {
+        match Box::pin(access::assignment(&state.db, chat, &node)).await {
+            Ok(assignment) => separated = assignment.mode == "separated",
+            Err(AppError::MachinePermissionRevoked) => {
+                return permission(state, chat, "machine", &node.id, &node.name).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
     machines::capable(&node, operation)?;
+    if operation == Operation::Browser
+        && !node
+            .machine
+            .as_ref()
+            .is_some_and(|profile| profile.browser_tools)
+    {
+        return Ok(json!({
+            "error": {
+                "code": 12416,
+                "message": "This machine predates the managed browser tools. Offer nyxid__machine_update: it raises an owner card and guides the host step if needed. Do not ask the owner to diagnose browser settings."
+            },
+            "settings_path": AssistantPage::MachineSettings {node: &node.id}.path(),
+        }));
+    }
     if operation == Operation::Computer
         && !node.machine.as_ref().is_some_and(|profile| {
             arguments["tool"]
@@ -111,14 +144,51 @@ pub async fn call(
                 .is_some_and(|tool| profile.computer_tools.iter().any(|allowed| allowed == tool))
         })
     {
-        return Err(AppError::MachineComputerUnavailable);
+        return Ok(json!({
+            "error": {
+                "code": AppError::MachineComputerToolUnsupported.error_code(),
+                "message": "computer_tool_not_supported: choose a tool from computer_tools below. For page content use nyx__machine_browser action=snapshot; owner screenshot attachments use browser=dev action=screenshot.",
+                "computer_tools": node.machine.as_ref().map(|p| p.computer_tools.iter()
+                    .take(64).map(|tool| tool.chars().take(128).collect::<String>()).collect::<Vec<_>>()).unwrap_or_default(),
+            },
+        }));
     }
     if name != "nyx__machine_request_control" {
-        crate::services::machine_desktop_service::agent_allowed(&state.db, &node.id).await?;
+        if matches!(
+            operation,
+            Operation::Browser | Operation::Computer | Operation::FillLogin
+        ) {
+            let display = if operation == Operation::Browser && arguments["browser"] == "dev" {
+                nyxid_machine::desktop::Display::Dev
+            } else {
+                nyxid_machine::desktop::Display::Secure
+            };
+            if node
+                .machine
+                .as_ref()
+                .is_some_and(|profile| profile.os == "linux")
+            {
+                crate::services::machine_desktop_service::agent_display_allowed(
+                    &state.db, &node.id, display,
+                )
+                .await?;
+            } else {
+                // Native macOS browsers share a physical desktop.
+                crate::services::machine_desktop_service::agent_allowed(&state.db, &node.id)
+                    .await?;
+            }
+        } else {
+            crate::services::machine_desktop_service::agent_allowed(&state.db, &node.id).await?;
+        }
     }
     arguments["machine"] = json!(node.id);
     let mut login = None;
     if operation == Operation::FillLogin {
+        if arguments.get("browser").is_some_and(|v| v != "secure") {
+            return Err(AppError::ValidationError(
+                "Saved logins are available only in the secure browser".into(),
+            ));
+        }
         let selector = argument(&arguments, "login")?;
         let rows =
             crate::services::saved_login_service::available(&state.db, &chat.user_id).await?;
@@ -145,12 +215,16 @@ pub async fn call(
                 "settings_path": AssistantPage::Machines.path()
             }));
         }
-        if !node.machine.as_ref().is_some_and(|p| p.saved_login_ready) {
+        if !separated && !node.machine.as_ref().is_some_and(|p| p.saved_login_ready) {
             return Err(AppError::MachineBrowserUnavailable);
         }
         arguments["login"] = json!(row.id);
         login = Some(row);
     }
+    Box::pin(access::authorize(
+        &state.db, chat, &node, operation, &arguments,
+    ))
+    .await?;
     let declared_services = if operation == Operation::Exec {
         let requested: Vec<String> = serde_json::from_value(
             arguments
@@ -177,6 +251,11 @@ pub async fn call(
     } else {
         Vec::new()
     };
+    arguments["machine_access_revision"] = json!(
+        Box::pin(access::policy(&state.db, &chat.agent_id))
+            .await?
+            .revision
+    );
     // Arbitrary commands, writes and mutating desktop input can destroy data.
     // Filling a checked login field and asking the owner for control change
     // state, but do not themselves remove data or grant arbitrary execution.
@@ -184,7 +263,8 @@ pub async fn call(
     let destructive = matches!(
         operation,
         Operation::Exec | Operation::WriteFile | Operation::SaveAttachment | Operation::JobCancel
-    ) || (operation == Operation::Computer && !read_only);
+    ) || (matches!(operation, Operation::Computer | Operation::Browser)
+        && !read_only);
     let webhook_confirmation = acks::webhook_confirmation_required(chat, read_only, destructive);
     if webhook_confirmation {
         if let Some(refusal) =
@@ -235,21 +315,45 @@ pub async fn call(
             return Ok(acks::refusal(&row));
         }
     }
+    // Fence against Stop/settlement before issuing any signed machine work.
+    let turn_id = chat
+        .turn_id
+        .as_deref()
+        .filter(|_| !chat.turn_stopped)
+        .ok_or(AppError::MachineTurnStopped)?;
+    let admitted = state.db.collection::<crate::models::assistant_conversation::AssistantConversation>(
+        crate::models::assistant_conversation::COLLECTION_NAME,
+    ).update_one(
+        mongodb::bson::doc! {"_id":&chat.conversation_id,"user_id":&chat.user_id,"active_turn.turn_id":turn_id,"active_turn.stop_requested":false},
+        mongodb::bson::doc! {"$addToSet":{"active_turn.machine_node_ids":&node.id}},
+    ).await?;
+    if admitted.matched_count != 1 {
+        return Err(AppError::MachineTurnStopped);
+    }
+    arguments["conversation_id"] = json!(chat.conversation_id);
+    arguments["turn_id"] = json!(turn_id);
     if name == "nyx__machine_request_control" {
         return super::machine_desktop::request_control(
             state,
             chat,
             &node,
             argument(&arguments, "reason")?,
+            nyxid_machine::desktop::Display::from_parameters(&arguments)
+                .map_err(|message| AppError::ValidationError(message.into()))?,
         )
         .await;
     }
-    if operation == Operation::Computer {
-        crate::services::machine_desktop_service::open(
+    if matches!(operation, Operation::Computer | Operation::Browser) {
+        crate::services::machine_desktop_service::open_display(
             &state.db,
             &chat.user_id,
             &node.id,
             Some(&chat.conversation_id),
+            if operation == Operation::Browser && arguments["browser"] == "dev" {
+                nyxid_machine::desktop::Display::Dev
+            } else {
+                nyxid_machine::desktop::Display::Secure
+            },
         )
         .await?;
     }
@@ -275,6 +379,28 @@ pub async fn call(
     } else {
         None
     };
+    let authority = match Box::pin(access::admit(
+        &state.db,
+        chat,
+        &node,
+        operation,
+        &arguments,
+        job.as_ref().map(|job| job.id.as_str()),
+    ))
+    .await
+    {
+        Ok(authority) => authority,
+        Err(error) => {
+            if let Some(job) = &job {
+                machines::finish(&state.db, &job.id).await?;
+            }
+            return Err(error);
+        }
+    };
+    if let (Some(job), Some(authority)) = (&job, &authority) {
+        state.db.collection::<mongodb::bson::Document>(crate::models::machine_job::COLLECTION_NAME)
+            .update_one(mongodb::bson::doc!{"_id":&job.id},mongodb::bson::doc!{"$set":{"machine_authority":mongodb::bson::to_bson(authority).map_err(|_|AppError::MachineAuthorityStale)?}}).await?;
+    }
     if let Some(login) = &login {
         let field = argument(&arguments, "field")?.to_owned();
         let value = crate::services::saved_login_service::materialize(
@@ -287,12 +413,55 @@ pub async fn call(
         arguments["value"] = json!(value.as_str());
         arguments["allowed_origins"] = json!(login.allowed_origins);
     }
+    let mut receipt = receipts::receipt(chat, &node.id, operation, &arguments);
+    receipt.context_mode = Some(
+        if separated {
+            "separated"
+        } else {
+            "shared_legacy"
+        }
+        .into(),
+    );
+    receipt.preview_enabled = receipts::preview_enabled(&state.db, chat).await?;
+    receipts::record(&state.db, chat, &receipt).await?;
     let started = std::time::Instant::now();
-    let result = match operation {
-        Operation::SaveAttachment => save_attachment(state, chat, &node, &arguments).await,
-        Operation::ShareFile => share_file(state, chat, &node, &arguments).await,
-        _ => dispatch(state, &node, operation, arguments.clone()).await,
+    let mut result = match operation {
+        Operation::SaveAttachment => {
+            save_attachment(state, chat, &node, &arguments, authority.clone()).await
+        }
+        Operation::ShareFile => share_file(state, chat, &node, &arguments, authority.clone()).await,
+        _ => {
+            dispatch_authorized(
+                state,
+                &node,
+                operation,
+                arguments.clone(),
+                authority.clone(),
+            )
+            .await
+        }
     };
+    if let Some(authority) = &authority
+        && operation != Operation::JobCancel
+    {
+        let current = state.db.collection::<mongodb::bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+            .find_one(mongodb::bson::doc! {"_id":&authority.agent_id,"destroyed_at":mongodb::bson::Bson::Null,format!("machine_access.assignments.{}.revision",node.id):authority.revision})
+            .projection(mongodb::bson::doc! {"_id":1}).await?;
+        if current.is_none() {
+            result = Err(AppError::MachinePermissionRevoked);
+        }
+    }
+    if let Some(authority) = &authority
+        && (job.is_none()
+            || result.as_ref().is_ok_and(|r| r["status"] == "finished")
+            || result.is_err())
+    {
+        let _ = state
+            .db
+            .collection::<mongodb::bson::Document>(crate::models::machine_access::LEASES)
+            .delete_one(mongodb::bson::doc! {"_id":&authority.lease_id})
+            .await;
+    }
     if let Some(job) = job
         && (result.is_err()
             || result
@@ -314,6 +483,15 @@ pub async fn call(
     let mut result = match result {
         Ok(result) => result,
         Err(error) => {
+            receipt.status = if error.error_code() == 12418 {
+                "cancelled"
+            } else {
+                "error"
+            }
+            .into();
+            receipt.error_code = Some(error.error_code());
+            receipt.duration_ms = Some(started.elapsed().as_millis() as u64);
+            let _ = receipts::record(&state.db, chat, &receipt).await;
             audit_service::log_async(
                 state.db.clone(),
                 Some(chat.user_id.clone()),
@@ -321,6 +499,11 @@ pub async fn call(
                 Some(json!({
                     "node_id":node.id,
                     "operation":operation,
+                    "operation_id":receipt.operation_id,
+                    "activity_id":receipts::activity_id(),
+                    "agent_id":chat.agent_id,
+                    "action":receipt.action,
+                    "job_id":receipt.job_id,
                     "conversation_id":chat.conversation_id,
                     "agent_role":chat.role,
                     "services":declared_services.iter().map(|row|row.slug.as_str()).collect::<Vec<_>>(),
@@ -337,8 +520,8 @@ pub async fn call(
             return Err(error);
         }
     };
-    if operation == Operation::Computer {
-        attach_computer_images(state, chat, &mut result).await?;
+    if matches!(operation, Operation::Computer | Operation::Browser) {
+        receipt.screenshot_id = attach_computer_images(state, chat, &mut result).await?;
     }
     if let Some(login) = login {
         if result["status"] == "filled" {
@@ -379,6 +562,35 @@ pub async fn call(
             None,
         );
     }
+    receipt.status = receipts::outcome(&result, operation).into();
+    receipt.exit_code = result["exit_code"].as_i64();
+    receipt.bytes = receipts::transferred_bytes(operation, &arguments, &result);
+    receipt.duration_ms = Some(started.elapsed().as_millis() as u64);
+    receipt.error_code = result["error"]["code"]
+        .as_u64()
+        .and_then(|n| u32::try_from(n).ok());
+    if let (Some(job_id), Some(exit_code)) = (&receipt.job_id, receipt.exit_code) {
+        // Additional outcome metadata; do not resurrect a cancelled job.
+        let _ = state.db.collection::<mongodb::bson::Document>(crate::models::machine_job::COLLECTION_NAME)
+            .update_one(mongodb::bson::doc!{"_id":job_id,"user_id":&chat.user_id,"conversation_id":&chat.conversation_id,"state":{"$ne":"cancelled"}},
+                mongodb::bson::doc!{"$set":{"exit_code":exit_code}}).await;
+    }
+    if operation == Operation::JobCancel
+        && receipt.status == "cancelled"
+        && let Some(job_id) = &receipt.job_id
+    {
+        // Presentation only: the existing job lifecycle remains authoritative.
+        let _ = state.db.collection::<mongodb::bson::Document>(crate::models::machine_job::COLLECTION_NAME)
+            .update_one(mongodb::bson::doc!{"_id":job_id,"user_id":&chat.user_id,"conversation_id":&chat.conversation_id},
+                mongodb::bson::doc!{"$set":{"receipt_cancelled":true}}).await;
+    }
+    if receipts::record(&state.db, chat, &receipt).await.is_err()
+        || receipts::store_preview(state, chat, &mut receipt, &result)
+            .await
+            .is_err()
+    {
+        tracing::warn!("Machine receipt preview could not be retained");
+    }
     audit_service::log_async(
         state.db.clone(),
         Some(chat.user_id.clone()),
@@ -386,14 +598,15 @@ pub async fn call(
         Some(json!({
             "node_id":node.id,
             "operation":operation,
+            "operation_id":receipt.operation_id,
+            "activity_id":receipts::activity_id(),
+            "agent_id":chat.agent_id,
+            "action":receipt.action,
+            "job_id":receipt.job_id,
             "conversation_id":chat.conversation_id,
             "agent_role":chat.role,
             "services":declared_services.iter().map(|row|row.slug.as_str()).collect::<Vec<_>>(),
-            "outcome":if result.get("error").is_some(){
-                "refused"
-            }else{
-                "completed"
-            },
+            "outcome":receipt.status,
             "exit_code":result["exit_code"].as_i64(),
             "duration_ms":started.elapsed().as_millis() as u64,
             "bytes":result.to_string().len(),
@@ -407,7 +620,7 @@ pub async fn call(
     Ok(tools::bounded_result(result))
 }
 
-async fn permission(
+pub(crate) async fn permission(
     state: &AppState,
     chat: &ChatAuthority,
     kind: &str,
@@ -439,7 +652,16 @@ pub async fn dispatch(
     operation: Operation,
     parameters: Value,
 ) -> AppResult<Value> {
-    let request = signed_request(state, node, operation, parameters).await?;
+    dispatch_authorized(state, node, operation, parameters, None).await
+}
+async fn dispatch_authorized(
+    state: &AppState,
+    node: &Node,
+    operation: Operation,
+    parameters: Value,
+    authority: Option<Box<Authority>>,
+) -> AppResult<Value> {
+    let request = signed_request(state, node, operation, parameters, authority).await?;
     Ok(state
         .node_dispatch
         .machine_request_with_node(request, node)
@@ -452,10 +674,13 @@ async fn signed_request(
     node: &Node,
     operation: Operation,
     parameters: Value,
+    authority: Option<Box<Authority>>,
 ) -> AppResult<Request> {
     machines::capable(node, operation)?;
     let secret = node_service::signing_secret_from_node(&state.encryption_keys, node).await?;
     let mut request = Request {
+        version: if authority.is_some() { 2 } else { 1 },
+        authority,
         request_id: uuid::Uuid::new_v4().to_string(),
         node_id: node.id.clone(),
         operation,
@@ -472,7 +697,8 @@ async fn attach_computer_images(
     state: &AppState,
     chat: &ChatAuthority,
     result: &mut Value,
-) -> AppResult<()> {
+) -> AppResult<Option<String>> {
+    let mut screenshot_id = None;
     if let Some(content) = result["content"].as_array_mut() {
         for item in content {
             if item["type"] != "image" {
@@ -502,6 +728,7 @@ async fn attach_computer_images(
                 &media.bytes,
             )
             .await?;
+            screenshot_id = attached.as_ref().map(|meta| meta.id.clone());
             *item = json!({
                 "type":"text",
                 "text":if attached.is_some(){
@@ -512,7 +739,7 @@ async fn attach_computer_images(
             });
         }
     }
-    Ok(())
+    Ok(screenshot_id)
 }
 
 async fn save_attachment(
@@ -520,16 +747,36 @@ async fn save_attachment(
     chat: &ChatAuthority,
     node: &Node,
     args: &Value,
+    authority: Option<Box<Authority>>,
 ) -> AppResult<Value> {
-    let (_, bytes) = engine::read_attachment(
-        &state.db,
-        &state.encryption_keys,
-        &chat.user_id,
-        &chat.conversation_id,
-        argument(args, "attachment_id")?,
-    )
-    .await?;
-    if bytes.len() > crate::services::mcp_service::MAX_TOOL_IMAGE_BYTES {
+    let id = argument(args, "attachment_id")?;
+    let is_upload = state
+        .db
+        .collection::<mongodb::bson::Document>(crate::models::assistant_attachment::COLLECTION_NAME)
+        .find_one(mongodb::bson::doc! {"_id": id, "origin": "user_upload"})
+        .projection(mongodb::bson::doc! {"_id":1})
+        .await?
+        .is_some();
+    let (_, bytes) = if is_upload {
+        crate::services::assistant_upload_service::chat_bytes(
+            &state.db,
+            &state.encryption_keys,
+            chat,
+            id,
+            false,
+        )
+        .await?
+    } else {
+        engine::read_attachment(
+            &state.db,
+            &state.encryption_keys,
+            &chat.user_id,
+            &chat.conversation_id,
+            argument(args, "attachment_id")?,
+        )
+        .await?
+    };
+    if bytes.len() > crate::services::attachment_extraction::MAX_BYTES {
         return Err(AppError::ValidationError(
             "Attachment exceeds the transfer limit".into(),
         ));
@@ -537,6 +784,8 @@ async fn save_attachment(
     use sha2::{Digest, Sha256};
     let parameters = json!({
         "path":args["path"],
+        "conversation_id":args["conversation_id"],
+        "turn_id":args["turn_id"],
         "size":bytes.len(),
         "sha256":hex::encode(Sha256::digest(&bytes))
     });
@@ -547,6 +796,7 @@ async fn save_attachment(
         parameters,
         axum::body::Body::from(bytes),
         4096,
+        authority,
     )
     .await?;
     serde_json::from_slice(&result)
@@ -558,14 +808,16 @@ async fn share_file(
     chat: &ChatAuthority,
     node: &Node,
     args: &Value,
+    authority: Option<Box<Authority>>,
 ) -> AppResult<Value> {
     let bytes = transfer(
         state,
         node,
         Operation::ShareFile,
-        json!({"path":args["path"]}),
+        json!({"path":args["path"],"conversation_id":args["conversation_id"],"turn_id":args["turn_id"]}),
         axum::body::Body::empty(),
         crate::services::mcp_service::MAX_TOOL_IMAGE_BYTES,
+        authority,
     )
     .await?;
     let kind = ["image/png", "image/jpeg", "image/gif", "image/webp"]
@@ -591,7 +843,22 @@ async fn share_file(
     }))
 }
 
-/// The attachment store encrypts one bounded image buffer. The node socket and
+fn attachment_transfer_limit(operation: Operation, parameters: &Value) -> AppResult<u64> {
+    match operation {
+        // Sign the actual file size, so existing <=5 MiB saves still work on
+        // older nodes. Updated nodes accept user documents/images up to 20 MiB.
+        Operation::SaveAttachment => parameters["size"]
+            .as_u64()
+            .filter(|size| {
+                *size > 0 && *size <= crate::services::attachment_extraction::MAX_BYTES as u64
+            })
+            .ok_or(AppError::MachineLimitExceeded),
+        Operation::ShareFile => Ok(crate::services::mcp_service::MAX_TOOL_IMAGE_BYTES as u64),
+        _ => Err(AppError::MachineLimitExceeded),
+    }
+}
+
+/// The attachment store encrypts bounded buffers. The node socket and
 /// cross-replica hop carry bounded raw chunks, with no base64 body copies.
 async fn transfer(
     state: &AppState,
@@ -600,10 +867,11 @@ async fn transfer(
     mut parameters: Value,
     body: axum::body::Body,
     result_limit: usize,
+    authority: Option<Box<Authority>>,
 ) -> AppResult<Vec<u8>> {
     use crate::services::node_ws_manager::{ProxyResponseType, StreamChunk};
-    parameters["max_bytes"] = json!(crate::services::mcp_service::MAX_TOOL_IMAGE_BYTES);
-    let request = signed_request(state, node, operation, parameters).await?;
+    parameters["max_bytes"] = json!(attachment_transfer_limit(operation, &parameters)?);
+    let request = signed_request(state, node, operation, parameters, authority).await?;
     let response = state
         .node_dispatch
         .proxy_upload(request, body)
@@ -630,11 +898,48 @@ async fn transfer(
                 bytes.extend_from_slice(&data);
             }
             StreamChunk::End if started => return Ok(bytes),
+            // The node emits fixed protocol reason codes, never child stderr.
+            StreamChunk::Error(reason) if reason == "machine_authority_stale" => {
+                return Err(AppError::MachineAuthorityStale);
+            }
+            StreamChunk::Error(reason) if reason == "machine_turn_stopped" => {
+                return Err(AppError::MachineTurnStopped);
+            }
+            StreamChunk::Error(reason) if reason == "owner_in_control" => {
+                return Err(AppError::MachineOwnerInControl);
+            }
             _ => {
                 return Err(AppError::ValidationError(
                     "Machine file transfer refused or interrupted".into(),
                 ));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod attachment_transfer_tests {
+    use super::*;
+
+    #[test]
+    fn assistant_attachment_transfers_preserve_legacy_images_and_bound_large_uploads() {
+        let upload = crate::services::attachment_extraction::MAX_BYTES as u64;
+        assert_eq!(
+            attachment_transfer_limit(Operation::SaveAttachment, &json!({"size": 512})).unwrap(),
+            512
+        );
+        assert_eq!(
+            attachment_transfer_limit(Operation::SaveAttachment, &json!({"size": upload})).unwrap(),
+            upload
+        );
+        assert!(
+            attachment_transfer_limit(Operation::SaveAttachment, &json!({"size": upload + 1}))
+                .is_err()
+        );
+        assert!(attachment_transfer_limit(Operation::SaveAttachment, &json!({})).is_err());
+        assert_eq!(
+            attachment_transfer_limit(Operation::ShareFile, &json!({"size": upload})).unwrap(),
+            5 * 1024 * 1024
+        );
     }
 }

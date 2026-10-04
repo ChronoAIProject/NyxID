@@ -36,6 +36,7 @@ COPY permissions/ permissions/
 COPY mcp-demo/ mcp-demo/
 COPY nyxid-crypto/ nyxid-crypto/
 COPY machine/ machine/
+COPY machine-updater/ machine-updater/
 COPY docs/AI_AGENT_PLAYBOOK.md docs/AI_AGENT_PLAYBOOK.md
 
 # Build only the CLI binary (includes node agent subcommand)

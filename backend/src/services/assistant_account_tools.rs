@@ -416,6 +416,7 @@ pub fn error_result(error: AppError) -> ToolResult {
         AppError::Conflict(_) => {
             "The resource changed. Inspect it and request a new acknowledgement."
         }
+        AppError::AssistantAttachmentExpired => body.message.as_str(),
         _ => "The account operation could not be completed. Review it in the NyxID UI.",
     };
     ToolResult {
@@ -478,8 +479,16 @@ fn route_view(row: &ChannelConversation) -> Value {
 impl AccountTools<'_> {
     pub async fn execute(&self, auth: &AuthUser, tool_name: &str, args: &Value) -> ToolResult {
         let user = auth.user_id.to_string();
-        let chat = if auth.auth_method == AuthMethod::ApiKey {
-            acks::for_key(self.db, &user, auth.api_key_id.as_deref()).await
+        let chat = if let Some(chat) = auth.assistant_chat.as_deref() {
+            Ok(Some(chat.clone()))
+        } else if auth.auth_method == AuthMethod::ApiKey {
+            Box::pin(acks::for_key_with_access(
+                self.db,
+                &user,
+                auth.api_key_id.as_deref(),
+                auth.org_agent_access.as_ref(),
+            ))
+            .await
         } else {
             Ok(None)
         };
@@ -494,7 +503,7 @@ impl AccountTools<'_> {
             .and_then(|chat| chat.as_ref())
             .map(|chat| chat.conversation_id.clone());
         let result = match chat {
-            Ok(Some(chat)) => self.execute_authorized(&chat, auth, tool_name, args).await,
+            Ok(Some(chat)) => Box::pin(self.execute_authorized(&chat, auth, tool_name, args)).await,
             Ok(None) => Err(AppError::Forbidden("Conversation key required".into())),
             Err(error) => Err(error),
         };
@@ -616,7 +625,7 @@ impl AccountTools<'_> {
                 });
             }
         }
-        let value = Box::pin(self.dispatch(&chat.user_id, auth, name, args)).await?;
+        let value = self.dispatch(&chat.user_id, auth, name, args).await?;
         Ok(ToolResult {
             permission_request: None,
             value,
@@ -784,13 +793,42 @@ impl AccountTools<'_> {
         })
     }
 
-    async fn dispatch(
-        &self,
-        user: &str,
-        auth: &AuthUser,
-        name: &str,
-        args: &Value,
-    ) -> AppResult<Value> {
+    // Provisioning and channel lifecycle futures must not share a poll frame
+    // with every native account tool, even when the dispatcher itself is boxed.
+    fn dispatch<'a>(
+        &'a self,
+        user: &'a str,
+        auth: &'a AuthUser,
+        name: &'a str,
+        args: &'a Value,
+    ) -> futures::future::BoxFuture<'a, AppResult<Value>> {
+        match name {
+            "list_agent_keys"
+            | "get_agent_key"
+            | "update_agent_key"
+            | "delete_agent_key"
+            | "list_agent_key_bindings"
+            | "bind_agent_key_credential"
+            | "unbind_agent_key_credential" => Box::pin(self.dispatch_keys(user, name, args)),
+            "list_channel_bots"
+            | "get_channel_bot"
+            | "update_channel_bot"
+            | "delete_channel_bot"
+            | "list_channel_routes"
+            | "set_channel_route"
+            | "delete_channel_route" => Box::pin(self.dispatch_channels(user, name, args)),
+            "list_my_services" | "set_service_enabled" | "delete_service" => {
+                Box::pin(self.dispatch_services(user, auth, name, args))
+            }
+            "list_nodes" | "delete_node" => Box::pin(self.dispatch_nodes(user, name, args)),
+            "list_approval_configs" | "set_approval_mode" | "list_pending_approvals" => {
+                Box::pin(self.dispatch_approvals(user, name, args))
+            }
+            _ => Box::pin(async { Err(AppError::NotFound("Account tool not found".into())) }),
+        }
+    }
+
+    async fn dispatch_keys(&self, user: &str, name: &str, args: &Value) -> AppResult<Value> {
         match name {
             "list_agent_keys" => Ok(bounded_list(
                 key_service::list_api_keys(self.db, user)
@@ -904,6 +942,12 @@ impl AccountTools<'_> {
                 .await?;
                 Ok(json!({"deleted": true}))
             }
+            _ => Err(AppError::NotFound("Account tool not found".into())),
+        }
+    }
+
+    async fn dispatch_channels(&self, user: &str, name: &str, args: &Value) -> AppResult<Value> {
+        match name {
             "list_channel_bots" => {
                 // The user's own bots and those of organizations they administer.
                 let bots = channel_bot_service::list_all_bots(self.db, user).await?;
@@ -1032,6 +1076,18 @@ impl AccountTools<'_> {
                     .await?;
                 Ok(json!({"deleted": true}))
             }
+            _ => Err(AppError::NotFound("Account tool not found".into())),
+        }
+    }
+
+    async fn dispatch_services(
+        &self,
+        user: &str,
+        auth: &AuthUser,
+        name: &str,
+        args: &Value,
+    ) -> AppResult<Value> {
+        match name {
             "list_my_services" => {
                 let providers = platform_key_service::load_providers(self.db).await?;
                 let services =
@@ -1095,6 +1151,12 @@ impl AccountTools<'_> {
                 .await?;
                 Ok(json!({"deleted": true}))
             }
+            _ => Err(AppError::NotFound("Account tool not found".into())),
+        }
+    }
+
+    async fn dispatch_nodes(&self, user: &str, name: &str, args: &Value) -> AppResult<Value> {
+        match name {
             "list_nodes" => {
                 let nodes = node_service::list_user_nodes(self.db, user).await?;
                 Ok(bounded_list(
@@ -1119,6 +1181,12 @@ impl AccountTools<'_> {
                     .await;
                 Ok(json!({"deleted": true}))
             }
+            _ => Err(AppError::NotFound("Account tool not found".into())),
+        }
+    }
+
+    async fn dispatch_approvals(&self, user: &str, name: &str, args: &Value) -> AppResult<Value> {
+        match name {
             "list_approval_configs" => {
                 let rows = approval_service::list_service_approval_configs(self.db, user).await?;
                 Ok(bounded_list(

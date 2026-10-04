@@ -46,7 +46,7 @@ use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 /// the `return Err(...)` sites in this file.
 fn proxy_error_telemetry_fields(err: &AppError) -> (u16, u32) {
     match err {
-        AppError::BadRequest(_) => (400, 1000),
+        AppError::BadRequest(_) | AppError::CredentialUnavailable(_) => (400, 1000),
         AppError::Unauthorized(_) => (401, 1001),
         AppError::Forbidden(_) => (403, 1002),
         AppError::NotFound(_) => (404, 1003),
@@ -1015,14 +1015,16 @@ pub async fn proxy_request(
         .insert(ProxyExchangeStartedAt(started_at));
     let request_id = ensure_proxy_request_id(request.headers_mut());
     let mut resolved_slug = String::new();
-    let mut result = proxy_request_inner(
+    // Keep nested proxy dispatch off the handler frame (also called by
+    // assistant operation-scope checks through the full router).
+    let mut result = Box::pin(proxy_request_inner(
         &state,
         &auth_user,
         &service_id,
         &path,
         request,
         &mut resolved_slug,
-    )
+    ))
     .await;
     if let Ok(response) = &mut result {
         apply_proxy_request_id_header(response, &request_id);
@@ -1052,7 +1054,7 @@ pub async fn proxy_request(
     result
 }
 
-async fn proxy_request_inner(
+pub(crate) async fn proxy_request_inner(
     state: &AppState,
     auth_user: &AuthUser,
     service_id: &str,
@@ -1062,6 +1064,9 @@ async fn proxy_request_inner(
 ) -> AppResult<Response> {
     validate_original_proxy_request_path(&request)?;
     auth_user.ensure_rest_proxy_access()?;
+    auth_user
+        .ensure_live_assistant_turn(&state.db, "proxy.uuid")
+        .await?;
 
     if auth_user.auth_method == AuthMethod::ServiceAccount {
         let sa = crate::services::service_account_service::get_service_account(
@@ -1106,7 +1111,7 @@ async fn proxy_request_inner(
             )
             .await?;
             let slug = target.service.slug.clone();
-            return execute_proxy_inner(
+            return Box::pin(execute_proxy_inner(
                 state,
                 auth_user,
                 service_id,
@@ -1128,7 +1133,7 @@ async fn proxy_request_inner(
                 TargetMode::CallerAddressed,
                 Vec::new(),
                 resolved_slug,
-            )
+            ))
             .await;
         }
     }
@@ -1136,7 +1141,7 @@ async fn proxy_request_inner(
     let user_id_str = auth_user.proxy_resolution_user_id();
     let via_service = extract_via_service(&request);
 
-    preflight_proxy_deny_before_resolution(
+    Box::pin(preflight_proxy_deny_before_resolution(
         state,
         auth_user,
         via_service.as_deref(),
@@ -1144,14 +1149,14 @@ async fn proxy_request_inner(
         Some(service_id),
         path,
         request.method().as_str(),
-    )
+    ))
     .await?;
 
     // Direct resolution by UserService ID if ?_nyxid_via= is present.
     // Constrained to the catalog service_id in the route path so the
     // override cannot silently proxy through a different service.
     if let Some(ref us_id) = via_service {
-        if let Some(resolved) = proxy_service::resolve_proxy_target_by_user_service_id(
+        if let Some(resolved) = Box::pin(proxy_service::resolve_proxy_target_by_user_service_id(
             &state.db,
             &state.encryption_keys,
             &user_id_str,
@@ -1162,7 +1167,7 @@ async fn proxy_request_inner(
                 Some(&state.connection_expiry_notifier),
                 state.platform_user_rate_limit,
             ),
-        )
+        ))
         .await?
         {
             let effective_service_id = resolved.target.service.id.clone();
@@ -1219,7 +1224,7 @@ async fn proxy_request_inner(
     }
 
     // Try new UserService path first (lookup by catalog_service_id)
-    if let Some(resolved) = proxy_service::resolve_proxy_target_from_user_service(
+    if let Some(resolved) = Box::pin(proxy_service::resolve_proxy_target_from_user_service(
         &state.db,
         &state.encryption_keys,
         &state.node_ws_manager,
@@ -1230,7 +1235,7 @@ async fn proxy_request_inner(
             Some(&state.connection_expiry_notifier),
             state.platform_user_rate_limit,
         ),
-    )
+    ))
     .await?
     {
         let effective_service_id = resolved.target.service.id.clone();
@@ -1442,10 +1447,14 @@ fn mark_pool_attempt_dispatched(state: Option<&PoolAttemptDispatchState>) {
 
 fn pool_no_redirect_http_client() -> &'static reqwest::Client {
     static CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
-        reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .expect("pool HTTP client")
+        let builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
+        // Tests share this process-wide client while starting and dropping many
+        // local mock servers whose ports the OS reuses. A pooled idle socket to
+        // a dropped server would then fail after dispatch and look like an
+        // upstream transport error, so tests never keep idle connections.
+        #[cfg(test)]
+        let builder = builder.pool_max_idle_per_host(0);
+        builder.build().expect("pool HTTP client")
     });
     &CLIENT
 }
@@ -1636,14 +1645,14 @@ async fn select_slug_metadata(
     actor: &str,
     slug: &str,
 ) -> AppResult<SlugMetadataRoute> {
-    crate::services::service_pool_routing::select_slug_metadata(
+    Box::pin(crate::services::service_pool_routing::select_slug_metadata(
         &state.db,
         &state.encryption_keys,
         (!auth.allow_all_services).then_some(auth.allowed_service_ids.as_slice()),
         (!auth.allow_all_nodes).then_some(auth.allowed_node_ids.as_slice()),
         actor,
         slug,
-    )
+    ))
     .await
 }
 
@@ -1654,7 +1663,7 @@ pub(super) async fn find_pool_for_proxy_actor(
     slug: &str,
 ) -> AppResult<Option<crate::models::service_pool::ServicePool>> {
     Ok(
-        match select_slug_metadata(state, auth, actor, slug).await? {
+        match Box::pin(select_slug_metadata(state, auth, actor, slug)).await? {
             SlugMetadataRoute::Pool(pool) => Some(*pool),
             _ => None,
         },
@@ -1807,7 +1816,7 @@ async fn proxy_request_through_pool(
         overall_deadline
             .checked_duration_since(std::time::Instant::now())
             .ok_or(AppError::ServicePoolDeadlineExceeded { attempts: vec![] })?,
-        service_pool_service::plan_candidates_with_allowlist(
+        Box::pin(service_pool_service::plan_candidates_with_allowlist(
             &state.db,
             &state.encryption_keys,
             &actor_user_id,
@@ -1820,7 +1829,7 @@ async fn proxy_request_through_pool(
             Some(&body),
             allowed_services.as_ref(),
             allowed_nodes.as_ref(),
-        ),
+        )),
     )
     .await
     .map_err(|_| AppError::ServicePoolDeadlineExceeded { attempts: vec![] })??;
@@ -1877,11 +1886,11 @@ async fn proxy_request_through_pool(
             tier_tick = pool_attempt::within_deadline(
                 overall_deadline,
                 &summaries,
-                service_pool_service::order_visited_tier(
+                Box::pin(service_pool_service::order_visited_tier(
                     &state.db,
                     &plan.pool,
                     &mut plan.candidates[index..],
-                ),
+                )),
             )
             .await?;
             visited_tier = Some(plan.candidates[index].tier);
@@ -1904,10 +1913,10 @@ async fn proxy_request_through_pool(
         let dispatch_state = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let ticket = tokio::time::timeout_at(
             tokio::time::Instant::from_std(attempt_deadline),
-            service_pool_health_service::issue_observation_ticket(
+            Box::pin(service_pool_health_service::issue_observation_ticket(
                 &state.db,
                 candidate.health_scope.clone(),
-            ),
+            )),
         )
         .await
         .map_err(|_| AppError::ServicePoolDeadlineExceeded {
@@ -1947,6 +1956,7 @@ async fn proxy_request_through_pool(
             ticket: ticket.clone(),
             policy: policy.clone(),
             lease_lost: Default::default(),
+            settling: Default::default(),
             timed_out: Default::default(),
             status: std::sync::Arc::new(std::sync::atomic::AtomicU16::new(0)),
             node_dispatched: Default::default(),
@@ -2027,13 +2037,13 @@ async fn proxy_request_through_pool(
             Ok(result) => result,
             Err(_) => {
                 accounting.audit.record("cancelled", None, "cancelled");
-                pool_attempt::finish_attempt(
+                Box::pin(pool_attempt::finish_attempt(
                     &state.db,
                     &accounting,
                     crate::models::usage_meter::PoolAttemptOutcome::Unknown,
                     overall_deadline,
                     &summaries,
-                )
+                ))
                 .await?;
                 return Err(AppError::ClientDisconnected);
             }
@@ -2061,13 +2071,13 @@ async fn proxy_request_through_pool(
                     reason,
                     upstream_status: observed_status.map(|status| status.as_u16()),
                 });
-                pool_attempt::finish_attempt(
+                Box::pin(pool_attempt::finish_attempt(
                     &state.db,
                     &accounting,
                     crate::models::usage_meter::PoolAttemptOutcome::Unknown,
                     overall_deadline,
                     &summaries,
-                )
+                ))
                 .await?;
                 // Preparation, policy, approval, billing, and credential
                 // admission timeouts are terminal for this attempt. Only a
@@ -2091,12 +2101,12 @@ async fn proxy_request_through_pool(
                 pool_attempt::within_deadline(
                     overall_deadline,
                     &summaries,
-                    accounting.observe_failure(
+                    Box::pin(accounting.observe_failure(
                         &state.db,
                         evidence,
                         observed_status,
                         accounting.retry_after(),
-                    ),
+                    )),
                 )
                 .await?;
                 if has_backup && pool_should_retry(evidence, &method, &policy) {
@@ -2155,16 +2165,21 @@ async fn proxy_request_through_pool(
                 pool_attempt::within_deadline(
                     overall_deadline,
                     &summaries,
-                    accounting.observe_failure(&state.db, evidence, Some(status), retry_after),
+                    Box::pin(accounting.observe_failure(
+                        &state.db,
+                        evidence,
+                        Some(status),
+                        retry_after,
+                    )),
                 )
                 .await?;
-                pool_attempt::finish_attempt(
+                Box::pin(pool_attempt::finish_attempt(
                     &state.db,
                     &accounting,
                     crate::models::usage_meter::PoolAttemptOutcome::Unknown,
                     overall_deadline,
                     &summaries,
-                )
+                ))
                 .await?;
                 if pool_cancellation.is_cancelled() {
                     return Err(AppError::ClientDisconnected);
@@ -2207,7 +2222,7 @@ async fn proxy_request_through_pool(
                     None,
                     "failed",
                 );
-                pool_attempt::finish_attempt(
+                Box::pin(pool_attempt::finish_attempt(
                     &state.db,
                     &accounting,
                     if matches!(
@@ -2220,7 +2235,7 @@ async fn proxy_request_through_pool(
                     },
                     overall_deadline,
                     &summaries,
-                )
+                ))
                 .await?;
                 let Some(evidence) = pool_attempt_evidence(&error) else {
                     return Err(error);
@@ -2242,7 +2257,7 @@ async fn proxy_request_through_pool(
                 pool_attempt::within_deadline(
                     overall_deadline,
                     &summaries,
-                    accounting.observe_failure(&state.db, evidence, None, None),
+                    Box::pin(accounting.observe_failure(&state.db, evidence, None, None)),
                 )
                 .await?;
                 if has_backup && pool_should_retry(evidence, &method, &policy) {
@@ -2286,7 +2301,12 @@ async fn proxy_request_through_pool(
             pool_attempt::within_deadline(
                 overall_deadline,
                 &summaries,
-                accounting.observe_failure(&state.db, evidence, Some(status), retry_after),
+                Box::pin(accounting.observe_failure(
+                    &state.db,
+                    evidence,
+                    Some(status),
+                    retry_after,
+                )),
             )
             .await?;
         }
@@ -2314,16 +2334,16 @@ async fn proxy_request_through_pool(
                 pool_attempt::within_deadline(
                     overall_deadline,
                     &summaries,
-                    accounting.observe_failure(
+                    Box::pin(accounting.observe_failure(
                         &state.db,
                         evidence,
                         Some(status),
                         accounting.retry_after(),
-                    ),
+                    )),
                 )
                 .await?;
             }
-            pool_attempt::finish_attempt(
+            Box::pin(pool_attempt::finish_attempt(
                 &state.db,
                 &accounting,
                 if status == StatusCode::TOO_MANY_REQUESTS {
@@ -2333,7 +2353,7 @@ async fn proxy_request_through_pool(
                 },
                 overall_deadline,
                 &summaries,
-            )
+            ))
             .await?;
             continue;
         }
@@ -2374,7 +2394,7 @@ async fn proxy_request_by_selected_member(
     us_id: &str,
 ) -> AppResult<Response> {
     let user_id_str = auth_user.proxy_resolution_user_id();
-    preflight_proxy_deny_before_resolution(
+    Box::pin(preflight_proxy_deny_before_resolution(
         state,
         auth_user,
         Some(us_id),
@@ -2382,20 +2402,22 @@ async fn proxy_request_by_selected_member(
         None,
         path,
         request.method().as_str(),
-    )
+    ))
     .await?;
     let exact = request.extensions().get::<PoolExactMember>().cloned();
     let resolved = if exact.is_some() {
-        proxy_service::read_proxy_authority_snapshot_by_user_service_id(
-            &state.db,
-            &state.encryption_keys,
-            &user_id_str,
-            us_id,
-            Some(slug),
+        Box::pin(
+            proxy_service::read_proxy_authority_snapshot_by_user_service_id(
+                &state.db,
+                &state.encryption_keys,
+                &user_id_str,
+                us_id,
+                Some(slug),
+            ),
         )
         .await?
     } else {
-        proxy_service::resolve_proxy_target_by_user_service_id(
+        Box::pin(proxy_service::resolve_proxy_target_by_user_service_id(
             &state.db,
             &state.encryption_keys,
             &user_id_str,
@@ -2406,7 +2428,7 @@ async fn proxy_request_by_selected_member(
                 Some(&state.connection_expiry_notifier),
                 state.platform_user_rate_limit,
             ),
-        )
+        ))
         .await?
     };
     if let Some(mut resolved) = resolved {
@@ -2414,14 +2436,14 @@ async fn proxy_request_by_selected_member(
         if let Some(exact) = exact {
             let pool_id = exact.selection.pool_id.clone();
             resolved.pool_selection = Some(exact.selection);
-            let scope = pool_scope_for_resolution(
+            let scope = Box::pin(pool_scope_for_resolution(
                 state,
                 auth_user,
                 &resolved,
                 exact.scope.as_ref(),
                 request.method().as_str(),
                 path,
-            )
+            ))
             .await?;
             if exact
                 .scope
@@ -2507,6 +2529,9 @@ pub(crate) async fn proxy_request_by_slug_inner(
     } else {
         auth_user.ensure_rest_proxy_access()?;
     }
+    auth_user
+        .ensure_live_assistant_turn(&state.db, "proxy.slug")
+        .await?;
 
     if auth_user.auth_method == AuthMethod::ServiceAccount {
         let sa = crate::services::service_account_service::get_service_account(
@@ -2546,7 +2571,7 @@ pub(crate) async fn proxy_request_by_slug_inner(
     let user_id_str = auth_user.proxy_resolution_user_id();
     let via_service = extract_via_service(&request);
     let route = if via_service.is_none() {
-        select_slug_metadata(state, auth_user, &user_id_str, slug).await?
+        Box::pin(select_slug_metadata(state, auth_user, &user_id_str, slug)).await?
     } else {
         SlugMetadataRoute::Legacy
     };
@@ -2600,10 +2625,13 @@ pub(crate) async fn proxy_request_by_slug_inner(
         }
         // Reserve legacy balancing exactly once before policy preflight. This
         // request carries the selected identity through every remaining gate.
-        let (member, selection) =
-            service_pool_service::resolve_member(&state.db, &pool.user_id, slug)
-                .await?
-                .ok_or_else(|| AppError::ServicePoolNoViableMember(slug.into()))?;
+        let (member, selection) = Box::pin(service_pool_service::resolve_member(
+            &state.db,
+            &pool.user_id,
+            slug,
+        ))
+        .await?
+        .ok_or_else(|| AppError::ServicePoolNoViableMember(slug.into()))?;
         let (mut parts, body) = request.into_parts();
         let query = parts
             .uri
@@ -2654,7 +2682,7 @@ pub(crate) async fn proxy_request_by_slug_inner(
         .await;
     }
 
-    preflight_proxy_deny_before_resolution(
+    Box::pin(preflight_proxy_deny_before_resolution(
         state,
         auth_user,
         via_service.as_deref(),
@@ -2662,7 +2690,7 @@ pub(crate) async fn proxy_request_by_slug_inner(
         None,
         path,
         request.method().as_str(),
-    )
+    ))
     .await?;
 
     // Direct resolution by UserService ID if ?_nyxid_via= is present.
@@ -2682,7 +2710,7 @@ pub(crate) async fn proxy_request_by_slug_inner(
     }
 
     // Try new UserService path first (by slug)
-    if let Some(resolved) = proxy_service::resolve_proxy_target_from_user_service(
+    if let Some(resolved) = Box::pin(proxy_service::resolve_proxy_target_from_user_service(
         &state.db,
         &state.encryption_keys,
         &state.node_ws_manager,
@@ -2693,7 +2721,7 @@ pub(crate) async fn proxy_request_by_slug_inner(
             Some(&state.connection_expiry_notifier),
             state.platform_user_rate_limit,
         ),
-    )
+    ))
     .await?
     {
         let effective_service_id = resolved.target.service.id.clone();
@@ -3120,21 +3148,23 @@ async fn preflight_proxy_deny_before_resolution(
 ) -> AppResult<()> {
     let approval_owner_user_id = auth_user.effective_approval_owner_user_id();
     let hint = if let Some(user_service_id) = via_service {
-        proxy_service::find_approval_resolution_hint_by_user_service_id(
-            &state.db,
-            &approval_owner_user_id,
-            user_service_id,
-            slug,
-            catalog_service_id,
+        Box::pin(
+            proxy_service::find_approval_resolution_hint_by_user_service_id(
+                &state.db,
+                &approval_owner_user_id,
+                user_service_id,
+                slug,
+                catalog_service_id,
+            ),
         )
         .await?
     } else {
-        proxy_service::find_approval_resolution_hint(
+        Box::pin(proxy_service::find_approval_resolution_hint(
             &state.db,
             &approval_owner_user_id,
             slug,
             catalog_service_id,
-        )
+        ))
         .await?
     };
 
@@ -3160,6 +3190,39 @@ async fn preflight_proxy_deny_before_resolution(
     let Some(hint) = hint else {
         return Ok(());
     };
+
+    if !auth_user.assistant_operation_scopes.is_empty() {
+        // Approval hints use catalog identity. An explicitly selected instance
+        // (including a pool member) must keep its own scope, without intersecting
+        // unrelated sibling connections to the same catalog.
+        let (scope_id, catalog) =
+            crate::services::agent_operation_scope_service::execution_identity(
+                auth_user,
+                via_service,
+                &hint.service_id,
+            );
+        if crate::services::agent_operation_scope_service::applicable(
+            &auth_user.assistant_operation_scopes,
+            scope_id,
+            catalog,
+        )
+        .next()
+        .is_some()
+        {
+            let canonical =
+                crate::services::proxy_authorization::CanonicalPath::from_rest_decoded(path)?;
+            crate::services::agent_operation_scope_service::authorize(
+                &auth_user.assistant_operation_scopes,
+                scope_id,
+                catalog,
+                None,
+                method,
+                &canonical,
+                false,
+                false,
+            )?;
+        }
+    }
 
     let operation = operation_descriptor::build_http_descriptor(method, path, None);
     let denied = approval_service::evaluate_deny_only(
@@ -3228,13 +3291,78 @@ async fn execute_proxy_inner(
     auth_user: &AuthUser,
     service_id: &str,
     path: &str,
-    request: Request<Body>,
+    mut request: Request<Body>,
+    pre_resolved: Option<PreResolved>,
+    target_mode: TargetMode,
+    extra_outbound_headers: Vec<(String, String)>,
+    resolved_slug: &mut String,
+) -> AppResult<Response> {
+    // Poll resolution and forwarding sequentially so their debug frames never
+    // stack, including when a machine request is nested in pool dispatch.
+    let (resolved, extra_outbound_headers) = resolve_proxy_execution(
+        state,
+        auth_user,
+        service_id,
+        path,
+        &mut request,
+        pre_resolved,
+        target_mode,
+        extra_outbound_headers,
+    )
+    .await?;
+    execute_resolved_proxy(
+        state,
+        auth_user,
+        service_id,
+        path,
+        request,
+        extra_outbound_headers,
+        resolved_slug,
+        resolved,
+    )
+    .await
+}
+
+// Construct the boxed future outside the caller's poll frame: Box::pin at
+// the await site still reserves stack space for the unboxed temporary.
+/// Boxed so callers do not embed the resolution state machine in their frames.
+type ResolvedProxyExecutionFuture<'a> =
+    futures::future::BoxFuture<'a, AppResult<(ResolvedProxyExecution, Vec<(String, String)>)>>;
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_proxy_execution<'a>(
+    state: &'a AppState,
+    auth_user: &'a AuthUser,
+    service_id: &'a str,
+    path: &'a str,
+    request: &'a mut Request<Body>,
+    pre_resolved: Option<PreResolved>,
+    target_mode: TargetMode,
+    extra_outbound_headers: Vec<(String, String)>,
+) -> ResolvedProxyExecutionFuture<'a> {
+    Box::pin(resolve_proxy_execution_inner(
+        state,
+        auth_user,
+        service_id,
+        path,
+        request,
+        pre_resolved,
+        target_mode,
+        extra_outbound_headers,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn resolve_proxy_execution_inner(
+    state: &AppState,
+    auth_user: &AuthUser,
+    service_id: &str,
+    path: &str,
+    request: &mut Request<Body>,
     pre_resolved: Option<PreResolved>,
     target_mode: TargetMode,
     mut extra_outbound_headers: Vec<(String, String)>,
-    resolved_slug: &mut String,
-) -> AppResult<Response> {
-    let permission_ingress = request.extensions().get::<PermissionIngress>().cloned();
+) -> AppResult<(ResolvedProxyExecution, Vec<(String, String)>)> {
     let permission_bound =
         auth_user.api_key_purpose == crate::models::api_key::ApiKeyPurpose::PermissionBound;
     if permission_bound && request.extensions().get::<PermissionIngress>().is_none() {
@@ -3284,11 +3412,15 @@ async fn execute_proxy_inner(
         .get::<ProxyExchangeStartedAt>()
         .map(|started| started.0)
         .unwrap_or_else(std::time::Instant::now);
-    let downstream_cancellation = request_cancellation(&request);
-    let billing_egress_permit = enforce_proxy_billing_classification(&request)?;
-    let require_identity_assertion = pre_resolved
-        .as_ref()
-        .is_some_and(|target| target.require_identity_assertion);
+    let downstream_cancellation = request_cancellation(request);
+    let billing_egress_permit = enforce_proxy_billing_classification(request)?;
+    let require_identity_assertion = request
+        .extensions()
+        .get::<super::agent_skills::OrnnSkillRead>()
+        .is_some()
+        || pre_resolved
+            .as_ref()
+            .is_some_and(|target| target.require_identity_assertion);
 
     let user_id_str = auth_user.user_id.to_string();
 
@@ -3335,7 +3467,7 @@ async fn execute_proxy_inner(
     let mut agent_override_applied = false;
     let (
         node_route,
-        mut target,
+        target,
         has_server_credential,
         master_credential,
         resolved_user_service_id,
@@ -3501,8 +3633,12 @@ async fn execute_proxy_inner(
         // the user has bound a different credential for this service, swap it in.
         if !permission_bound
             && pool_authority.is_none()
+            && auth_user
+                .assistant_agent_owner_id
+                .as_deref()
+                .is_none_or(|owner| owner == user_id_str)
             && let (Some(ak_id), Some(us_id)) = (&auth_user.api_key_id, &pre.user_service_id)
-            && let Some(override_cred) = proxy_service::resolve_agent_credential_override(
+            && let Some(override_cred) = Box::pin(proxy_service::resolve_agent_credential_override(
                 &state.db,
                 &state.encryption_keys,
                 &user_id_str,
@@ -3510,7 +3646,7 @@ async fn execute_proxy_inner(
                 us_id,
                 &pre.target,
                 Some(&state.connection_expiry_notifier),
-            )
+            ))
             .await?
         {
             pre.target.credential = override_cred;
@@ -3601,7 +3737,13 @@ async fn execute_proxy_inner(
             has_server_credential,
             resolved_user_service_id,
             node_routing_required,
-        ) = resolve_via_downstream_service(state, auth_user, &user_id_str, service_id).await?;
+        ) = Box::pin(resolve_via_downstream_service(
+            state,
+            auth_user,
+            &user_id_str,
+            service_id,
+        ))
+        .await?;
         let catalog_service_slug = Some(target.service.slug.clone());
         // Legacy path resolution succeeded — this is still personal
         // routing (caller's own DownstreamService + provider token), so
@@ -3623,6 +3765,130 @@ async fn execute_proxy_inner(
             None,
         )
     };
+
+    Ok((
+        ResolvedProxyExecution {
+            machine_ingress,
+            machine_git,
+            pool_authority,
+            pool_accounting,
+            is_pool_attempt,
+            pool_dispatch_state,
+            exchange_started_at,
+            downstream_cancellation,
+            billing_egress_permit,
+            require_identity_assertion,
+            user_id_str,
+            approval_owner_user_id,
+            effective_owner_for_approval,
+            effective_billing_owner_id,
+            is_auto_connected_for_approval,
+            agent_override_applied,
+            node_route,
+            target,
+            has_server_credential,
+            master_credential,
+            resolved_user_service_id,
+            node_routing_required,
+            catalog_service_slug,
+            credential_source,
+        },
+        extra_outbound_headers,
+    ))
+}
+
+struct ResolvedProxyExecution {
+    machine_ingress: Option<crate::services::machine_gateway_service::Ingress>,
+    machine_git: bool,
+    pool_authority: Option<PoolExecutionAuthority>,
+    pool_accounting: Option<pool_attempt::AttemptContext>,
+    is_pool_attempt: bool,
+    pool_dispatch_state: Option<PoolAttemptDispatchState>,
+    exchange_started_at: std::time::Instant,
+    downstream_cancellation: tokio_util::sync::CancellationToken,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+    require_identity_assertion: bool,
+    user_id_str: String,
+    approval_owner_user_id: String,
+    effective_owner_for_approval: Option<String>,
+    effective_billing_owner_id: Option<String>,
+    is_auto_connected_for_approval: bool,
+    agent_override_applied: bool,
+    node_route: Option<node_routing_service::NodeRoute>,
+    target: proxy_service::ProxyTarget,
+    has_server_credential: bool,
+    master_credential: bool,
+    resolved_user_service_id: Option<String>,
+    node_routing_required: bool,
+    catalog_service_slug: Option<String>,
+    credential_source: Option<String>,
+}
+
+// Construct the boxed future outside the caller's poll frame: Box::pin at
+// the await site still reserves stack space for the unboxed temporary.
+#[allow(clippy::too_many_arguments)]
+fn execute_resolved_proxy<'a>(
+    state: &'a AppState,
+    auth_user: &'a AuthUser,
+    service_id: &'a str,
+    path: &'a str,
+    request: Request<Body>,
+    extra_outbound_headers: Vec<(String, String)>,
+    resolved_slug: &'a mut String,
+    resolved: ResolvedProxyExecution,
+) -> futures::future::BoxFuture<'a, AppResult<Response>> {
+    Box::pin(execute_resolved_proxy_inner(
+        state,
+        auth_user,
+        service_id,
+        path,
+        request,
+        extra_outbound_headers,
+        resolved_slug,
+        resolved,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_resolved_proxy_inner(
+    state: &AppState,
+    auth_user: &AuthUser,
+    service_id: &str,
+    path: &str,
+    request: Request<Body>,
+    mut extra_outbound_headers: Vec<(String, String)>,
+    resolved_slug: &mut String,
+    resolved: ResolvedProxyExecution,
+) -> AppResult<Response> {
+    let permission_ingress = request.extensions().get::<PermissionIngress>().cloned();
+    let permission_bound =
+        auth_user.api_key_purpose == crate::models::api_key::ApiKeyPurpose::PermissionBound;
+    let ResolvedProxyExecution {
+        machine_ingress,
+        machine_git,
+        pool_authority,
+        pool_accounting,
+        is_pool_attempt,
+        pool_dispatch_state,
+        exchange_started_at,
+        downstream_cancellation,
+        billing_egress_permit,
+        require_identity_assertion,
+        user_id_str,
+        approval_owner_user_id,
+        effective_owner_for_approval,
+        effective_billing_owner_id,
+        is_auto_connected_for_approval,
+        agent_override_applied,
+        node_route,
+        mut target,
+        has_server_credential,
+        master_credential,
+        resolved_user_service_id,
+        node_routing_required,
+        catalog_service_slug,
+        credential_source,
+    } = resolved;
 
     if let Some(ingress) = &machine_ingress {
         let resolved_id = if let Some(authority) = &pool_authority {
@@ -3703,6 +3969,23 @@ async fn execute_proxy_inner(
         )?;
     }
 
+    // Dedicated skill reads must retain the person's signed Ornn identity and
+    // must never dispatch with a shared catalog credential, even after fallback.
+    if request
+        .extensions()
+        .get::<super::agent_skills::OrnnSkillRead>()
+        .is_some()
+        && (master_credential
+            || proxy_service::uses_server_held_master(&target)
+            || catalog_service_slug.as_deref() != Some("ornn-api")
+            || !matches!(
+                target.service.identity_propagation_mode.as_str(),
+                "jwt" | "both"
+            ))
+    {
+        return Err(AppError::Forbidden("Ornn skills require your own signed identity; shared master credentials are not supported".into()));
+    }
+
     // Record the resolved service slug so the outer wrapper can attach it
     // to `TelemetryEvent::ProxyError` if any downstream error branch fires
     // before the handler returns `Ok`.
@@ -3712,6 +3995,60 @@ async fn execute_proxy_inner(
     // REST method/path before approval, billing, credential injection, node
     // transport, or forwarding. Rows without a policy retain the legacy path
     // bytes and behavior unchanged.
+    // Preserve the existing authenticated model-transport exception. Machine
+    // jobs never receive it; explicitly granted inference instances still use
+    // the organization's resource boundary.
+    let implicit_model_transport = machine_ingress.is_none()
+        && target.service.inference.is_some()
+        && !auth_user.allow_all_services
+        && !auth_user.allowed_service_ids.iter().any(|id| {
+            id == resolved_user_service_id
+                .as_deref()
+                .unwrap_or(&target.service.id)
+        });
+    if !implicit_model_transport {
+        Box::pin(crate::services::org_agent_service::authorize_execution(
+            &state.db,
+            auth_user,
+            resolved_user_service_id.as_deref(),
+        ))
+        .await?;
+    }
+    let operation_target_id = target.service.id.clone();
+    let (operation_scope_id, operation_catalog_id) =
+        crate::services::agent_operation_scope_service::execution_identity(
+            auth_user,
+            resolved_user_service_id.as_deref(),
+            &operation_target_id,
+        );
+    let operation_scoped = crate::services::agent_operation_scope_service::applicable(
+        &auth_user.assistant_operation_scopes,
+        operation_scope_id,
+        operation_catalog_id,
+    )
+    .next()
+    .is_some();
+    let scoped_forward_path = if operation_scoped {
+        let canonical =
+            crate::services::proxy_authorization::CanonicalPath::from_rest_decoded(path)?;
+        crate::services::agent_operation_scope_service::authorize(
+            &auth_user.assistant_operation_scopes,
+            operation_scope_id,
+            operation_catalog_id,
+            None,
+            request.method().as_str(),
+            &canonical,
+            crate::services::mcp_service::http_carries_method_override(
+                request.method().as_str(),
+                request.headers(),
+                request.uri().query(),
+                &[],
+            ),
+            is_ws_upgrade_request(&request),
+        )?
+    } else {
+        None
+    };
     let pool_authority_path = path;
     let canonical_forward_path = if target.service.proxy_operation_policy.is_some()
         || !target.service.destination_targets.is_empty()
@@ -3727,7 +4064,10 @@ async fn execute_proxy_inner(
     } else {
         None
     };
-    let path = canonical_forward_path.as_deref().unwrap_or(path);
+    let path = canonical_forward_path
+        .as_deref()
+        .or(scoped_forward_path.as_deref())
+        .unwrap_or(path);
     let mut destination_audit = crate::services::destination_routing::DestinationAudit::new(
         &state.db,
         audit_service::AuditActor::from_auth_user(auth_user),
@@ -3914,6 +4254,33 @@ async fn execute_proxy_inner(
         (bytes, None, None, None)
     };
 
+    let operation_guest = if operation_scoped {
+        crate::services::agent_operation_scope_service::validate_target(&target, method.as_str())?;
+        if crate::services::mcp_service::http_carries_method_override(
+            method.as_str(),
+            &all_headers,
+            query.as_deref(),
+            &body_bytes,
+        ) {
+            return Err(AppError::ApiKeyScopeForbidden(
+                "Specialist operation scopes forbid method overrides".into(),
+            ));
+        }
+        Box::pin(
+            crate::services::agent_operation_scope_service::check_non_mcp_context(
+                &state.db,
+                auth_user,
+                operation_scope_id,
+                operation_catalog_id,
+                method.as_str(),
+                &crate::services::proxy_authorization::CanonicalPath::from_mcp_built(path)?,
+            ),
+        )
+        .await?
+    } else {
+        false
+    };
+
     proxy_service::validate_ifttt_request(
         &target,
         &method,
@@ -3951,7 +4318,7 @@ async fn execute_proxy_inner(
     let service_owner_for_approval = effective_owner_for_approval
         .as_deref()
         .unwrap_or(&approval_owner_user_id);
-    let approval_outcome = approval_service::evaluate_and_check(
+    let approval_outcome = Box::pin(approval_service::evaluate_and_check(
         &state.db,
         &approval_owner_user_id,
         service_owner_for_approval,
@@ -3961,9 +4328,13 @@ async fn execute_proxy_inner(
         &auth_user.approval_requester_id(),
         auth_user.auth_method == crate::mw::auth::AuthMethod::Session,
         is_auto_connected_for_approval,
-    )
+    ))
     .await?;
 
+    crate::services::agent_operation_scope_service::check_guest_approval(
+        operation_guest,
+        &approval_outcome,
+    )?;
     let durable_candidate = scheduled_api_key_id.is_some();
     let enforce_approval = match &approval_outcome {
         approval_service::ApprovalOutcome::Allowed { required } => {
@@ -4013,11 +4384,19 @@ async fn execute_proxy_inner(
                 notification_service::get_or_create_channel(&state.db, &timeout_recipient).await?;
 
             let timeout_secs = channel.approval_timeout_secs;
-            let request_operation = approval_service::ApprovalRequestOperation::from_descriptor(
+            let mut request_operation = approval_service::ApprovalRequestOperation::from_descriptor(
                 &operation,
                 pending.resolution.grant_scope.clone(),
             );
-            let approval_request = approval_service::create_approval_request(
+            request_operation.assistant_group =
+                crate::services::org_group_service::approval_binding(
+                    &state.db,
+                    auth_user.assistant_group_id.as_deref(),
+                    &auth_user.user_id.to_string(),
+                    auth_user.api_key_id.as_deref(),
+                )
+                .await?;
+            let approval_request = Box::pin(approval_service::create_approval_request(
                 &state.db,
                 &state.config,
                 &state.http_client,
@@ -4035,7 +4414,7 @@ async fn execute_proxy_inner(
                 timeout_secs,
                 notify_user_ids,
                 pending.resolution.from_org_policy,
-            )
+            ))
             .await?;
 
             // Block until the user approves/rejects or timeout expires
@@ -4075,23 +4454,25 @@ async fn execute_proxy_inner(
     if let Some(authority) = &pool_authority {
         let actor = auth_user.proxy_resolution_user_id();
         let service = &authority.scope.user_service_id;
-        let snapshot = proxy_service::read_proxy_authority_snapshot_by_user_service_id(
-            &state.db,
-            &state.encryption_keys,
-            &actor,
-            service,
-            Some(&authority.member_slug),
+        let snapshot = Box::pin(
+            proxy_service::read_proxy_authority_snapshot_by_user_service_id(
+                &state.db,
+                &state.encryption_keys,
+                &actor,
+                service,
+                Some(&authority.member_slug),
+            ),
         )
         .await?
         .ok_or_else(|| AppError::Conflict("Pool member was removed during admission".into()))?;
-        if pool_scope_for_resolution(
+        if Box::pin(pool_scope_for_resolution(
             state,
             auth_user,
             &snapshot,
             Some(&authority.scope),
             method.as_str(),
             pool_authority_path,
-        )
+        ))
         .await?
             != authority.scope
         {
@@ -4099,7 +4480,7 @@ async fn execute_proxy_inner(
                 "Pool member authority changed during admission".into(),
             ));
         }
-        let resolved = proxy_service::resolve_proxy_target_by_user_service_id(
+        let resolved = Box::pin(proxy_service::resolve_proxy_target_by_user_service_id(
             &state.db,
             &state.encryption_keys,
             &actor,
@@ -4110,17 +4491,17 @@ async fn execute_proxy_inner(
                 Some(&state.connection_expiry_notifier),
                 state.platform_user_rate_limit,
             ),
-        )
+        ))
         .await?
         .ok_or_else(|| AppError::Conflict("Pool member was removed during admission".into()))?;
-        if pool_scope_for_resolution(
+        if Box::pin(pool_scope_for_resolution(
             state,
             auth_user,
             &resolved,
             Some(&authority.scope),
             method.as_str(),
             pool_authority_path,
-        )
+        ))
         .await?
             != authority.scope
         {
@@ -4129,8 +4510,12 @@ async fn execute_proxy_inner(
             ));
         }
         target.credential = resolved.target.credential;
-        if let Some(key) = auth_user.api_key_id.as_deref()
-            && let Some(credential) = proxy_service::resolve_agent_credential_override(
+        if auth_user
+            .assistant_agent_owner_id
+            .as_deref()
+            .is_none_or(|owner| owner == actor)
+            && let Some(key) = auth_user.api_key_id.as_deref()
+            && let Some(credential) = Box::pin(proxy_service::resolve_agent_credential_override(
                 &state.db,
                 &state.encryption_keys,
                 &actor,
@@ -4138,30 +4523,32 @@ async fn execute_proxy_inner(
                 service,
                 &target,
                 Some(&state.connection_expiry_notifier),
-            )
+            ))
             .await?
         {
             target.credential = credential;
         }
-        let snapshot = proxy_service::read_proxy_authority_snapshot_by_user_service_id(
-            &state.db,
-            &state.encryption_keys,
-            &actor,
-            service,
-            Some(&authority.member_slug),
+        let snapshot = Box::pin(
+            proxy_service::read_proxy_authority_snapshot_by_user_service_id(
+                &state.db,
+                &state.encryption_keys,
+                &actor,
+                service,
+                Some(&authority.member_slug),
+            ),
         )
         .await?
         .ok_or_else(|| {
             AppError::Conflict("Pool member was removed during credential resolution".into())
         })?;
-        if pool_scope_for_resolution(
+        if Box::pin(pool_scope_for_resolution(
             state,
             auth_user,
             &snapshot,
             Some(&authority.scope),
             method.as_str(),
             pool_authority_path,
-        )
+        ))
         .await?
             != authority.scope
         {
@@ -4201,13 +4588,13 @@ async fn execute_proxy_inner(
         let delegated_owner = effective_owner_for_approval
             .as_deref()
             .unwrap_or(&user_id_str);
-        match delegation_service::resolve_delegated_credentials(
+        match Box::pin(delegation_service::resolve_delegated_credentials(
             &state.db,
             &state.encryption_keys,
             delegated_owner,
             service_id,
             Some(&state.connection_expiry_notifier),
-        )
+        ))
         .await
         {
             Ok(creds) => creds,
@@ -4367,7 +4754,9 @@ async fn execute_proxy_inner(
 
     let mut billing_ctx = billing_ctx.with_request_body(body.as_deref());
     billing_ctx.pool_attempt = pool_accounting.as_ref().map(|ctx| ctx.metadata.clone());
-    let metered = state.billing.open(&billing_ctx).await?;
+    // Billing and durable-grant admission carry their own database state.
+    // Do not reserve it in every proxy poll, including early scope refusals.
+    let metered = Box::pin(state.billing.open(&billing_ctx)).await?;
 
     let durable_reservation = if let Some(api_key_id) = scheduled_api_key_id {
         let grant_id = match durable_grant_id.as_deref() {
@@ -4437,7 +4826,7 @@ async fn execute_proxy_inner(
                 &prepared_authorization.delegated_headers,
                 &extra_outbound_headers,
             ))?;
-        let reservation = durable_operation_grant_service::authorize_and_reserve(
+        let reservation = Box::pin(durable_operation_grant_service::authorize_and_reserve(
             &state.db,
             &state.node_ws_manager,
             &user_id_str,
@@ -4451,7 +4840,7 @@ async fn execute_proxy_inner(
             grant_id,
             operation_id,
             is_ws,
-        )
+        ))
         .await;
         match reservation {
             Ok(reservation) => {
@@ -4536,7 +4925,7 @@ async fn execute_proxy_inner(
         // Node-routed WS passthrough: tunnel through the management WS.
         if let Some(ref node_route) = node_route {
             let proxy_actor_user_id = auth_user.proxy_resolution_user_id();
-            return handle_ws_passthrough_via_node(
+            return Box::pin(handle_ws_passthrough_via_node(
                 ws_upgrade,
                 state,
                 auth_user,
@@ -4553,12 +4942,12 @@ async fn execute_proxy_inner(
                 collect_realtime_llm_usage,
                 metered.clone(),
                 billing_egress_permit,
-            )
+            ))
             .await;
         }
 
         // Direct WS passthrough: connect to downstream directly.
-        return handle_ws_passthrough(
+        return Box::pin(handle_ws_passthrough(
             ws_upgrade,
             state,
             auth_user,
@@ -4573,7 +4962,7 @@ async fn execute_proxy_inner(
             collect_realtime_llm_usage,
             metered.clone(),
             billing_egress_permit,
-        )
+        ))
         .await;
     }
 
@@ -4753,6 +5142,8 @@ async fn execute_proxy_inner(
                         .map_or(state.config.proxy_max_body_size, |meter| meter.limit)
                 );
                 let mut signed = nyxid_machine::Request {
+                    version: 1,
+                    authority: None,
                     request_id: attempt_request.request_id,
                     node_id: (*node_id).into(),
                     operation: nyxid_machine::Operation::ProxyUpload,
@@ -5061,7 +5452,7 @@ async fn execute_proxy_inner(
                                 "upstream_error",
                             );
                             if let Some(reservation) = durable_reservation.as_ref() {
-                                finish_durable_operation(
+                                Box::pin(finish_durable_operation(
                                     state,
                                     auth_user,
                                     reservation,
@@ -5069,7 +5460,7 @@ async fn execute_proxy_inner(
                                     None,
                                     Some(node_id),
                                     "node response failed after dispatch",
-                                )
+                                ))
                                 .await;
                                 return Err(AppError::DurableOperationOutcomeUncertain);
                             }
@@ -5107,7 +5498,7 @@ async fn execute_proxy_inner(
                         } else {
                             DurableExecutionStatus::Failed
                         };
-                        finish_durable_operation(
+                        Box::pin(finish_durable_operation(
                             state,
                             auth_user,
                             reservation,
@@ -5115,7 +5506,7 @@ async fn execute_proxy_inner(
                             Some(response_status),
                             Some(node_id),
                             "downstream response received",
-                        )
+                        ))
                         .await;
                     }
 
@@ -5150,7 +5541,7 @@ async fn execute_proxy_inner(
                     });
 
                     if let Some(reservation) = durable_reservation.as_ref() {
-                        finish_durable_operation(
+                        Box::pin(finish_durable_operation(
                             state,
                             auth_user,
                             reservation,
@@ -5158,7 +5549,7 @@ async fn execute_proxy_inner(
                             None,
                             Some(node_id),
                             "node rejected the request before downstream credential use",
-                        )
+                        ))
                         .await;
                         return Err(if is_pool_attempt {
                             pool_node_failure(err, dispatched)
@@ -5200,7 +5591,7 @@ async fn execute_proxy_inner(
                     });
 
                     if let Some(reservation) = durable_reservation.as_ref() {
-                        finish_durable_operation(
+                        Box::pin(finish_durable_operation(
                             state,
                             auth_user,
                             reservation,
@@ -5208,7 +5599,7 @@ async fn execute_proxy_inner(
                             None,
                             Some(node_id),
                             "node transport failed after dispatch",
-                        )
+                        ))
                         .await;
                         return Err(AppError::DurableOperationOutcomeUncertain);
                     }
@@ -5257,7 +5648,7 @@ async fn execute_proxy_inner(
                         }
                     }
                     if let Some(reservation) = durable_reservation.as_ref() {
-                        finish_durable_operation(
+                        Box::pin(finish_durable_operation(
                             state,
                             auth_user,
                             reservation,
@@ -5265,7 +5656,7 @@ async fn execute_proxy_inner(
                             None,
                             Some(node_id),
                             "node request failed after dispatch",
-                        )
+                        ))
                         .await;
                         return Err(AppError::DurableOperationOutcomeUncertain);
                     }
@@ -5450,7 +5841,7 @@ async fn execute_proxy_inner(
         destination_audit.dispatch();
         let response_result = until_client_disconnect(
             &downstream_cancellation,
-            chatgpt_translator::send_to_chatgpt(
+            Box::pin(chatgpt_translator::send_to_chatgpt(
                 &translated.body,
                 &bearer_token,
                 is_streaming,
@@ -5468,14 +5859,14 @@ async fn execute_proxy_inner(
                 }),
                 Some(usage_complete),
                 billing_egress_permit,
-            ),
+            )),
         )
         .await;
         let mut response = match response_result {
             Ok(Ok(response)) => response,
             Ok(Err(error)) => {
                 if let Some(reservation) = durable_reservation.as_ref() {
-                    finish_durable_operation(
+                    Box::pin(finish_durable_operation(
                         state,
                         auth_user,
                         reservation,
@@ -5483,7 +5874,7 @@ async fn execute_proxy_inner(
                         None,
                         None,
                         "direct transport failed after dispatch",
-                    )
+                    ))
                     .await;
                     return Err(AppError::DurableOperationOutcomeUncertain);
                 }
@@ -5494,7 +5885,7 @@ async fn execute_proxy_inner(
             }
             Err(_) => {
                 if let Some(reservation) = durable_reservation.as_ref() {
-                    finish_durable_operation(
+                    Box::pin(finish_durable_operation(
                         state,
                         auth_user,
                         reservation,
@@ -5502,7 +5893,7 @@ async fn execute_proxy_inner(
                         None,
                         None,
                         "client disconnected after dispatch",
-                    )
+                    ))
                     .await;
                     return Err(AppError::DurableOperationOutcomeUncertain);
                 }
@@ -5534,7 +5925,7 @@ async fn execute_proxy_inner(
         );
 
         if let Some(reservation) = durable_reservation.as_ref() {
-            finish_durable_operation(
+            Box::pin(finish_durable_operation(
                 state,
                 auth_user,
                 reservation,
@@ -5546,7 +5937,7 @@ async fn execute_proxy_inner(
                 Some(status.as_u16()),
                 None,
                 "downstream response received",
-            )
+            ))
             .await;
         }
 
@@ -5575,7 +5966,7 @@ async fn execute_proxy_inner(
     let downstream_started_at = std::time::Instant::now();
     let downstream_result = until_client_disconnect(
         &downstream_cancellation,
-        proxy_service::forward_request_with_extra_outbound_headers(
+        Box::pin(proxy_service::forward_request_with_extra_outbound_headers(
             if is_pool_attempt {
                 pool_no_redirect_http_client()
             } else {
@@ -5597,7 +5988,7 @@ async fn execute_proxy_inner(
             &state.cloud_response_cache,
             extra_outbound_headers,
             billing_egress_permit,
-        ),
+        )),
     )
     .await;
     let downstream_result = match upload_meter.as_ref().filter(|meter| meter.exceeded()) {
@@ -5618,7 +6009,7 @@ async fn execute_proxy_inner(
                 "upstream_error",
             );
             if let Some(reservation) = durable_reservation.as_ref() {
-                finish_durable_operation(
+                Box::pin(finish_durable_operation(
                     state,
                     auth_user,
                     reservation,
@@ -5626,7 +6017,7 @@ async fn execute_proxy_inner(
                     None,
                     None,
                     "direct transport failed after dispatch",
-                )
+                ))
                 .await;
                 return Err(AppError::DurableOperationOutcomeUncertain);
             }
@@ -5644,7 +6035,7 @@ async fn execute_proxy_inner(
                 "client_disconnect",
             );
             if let Some(reservation) = durable_reservation.as_ref() {
-                finish_durable_operation(
+                Box::pin(finish_durable_operation(
                     state,
                     auth_user,
                     reservation,
@@ -5652,7 +6043,7 @@ async fn execute_proxy_inner(
                     None,
                     None,
                     "client disconnected after dispatch",
-                )
+                ))
                 .await;
                 return Err(AppError::DurableOperationOutcomeUncertain);
             }
@@ -5671,7 +6062,7 @@ async fn execute_proxy_inner(
     .map(|context| context.pin_pool_member(pool_authority.as_ref()));
 
     if let Some(reservation) = durable_reservation.as_ref() {
-        finish_durable_operation(
+        Box::pin(finish_durable_operation(
             state,
             auth_user,
             reservation,
@@ -5683,7 +6074,7 @@ async fn execute_proxy_inner(
             Some(status.as_u16()),
             None,
             "downstream response received",
-        )
+        ))
         .await;
     }
 
@@ -9535,7 +9926,12 @@ mod tests {
     fn proxy_error_telemetry_fields_maps_common_errors() {
         use super::proxy_error_telemetry_fields;
         use crate::errors::AppError;
-
+        assert_eq!(
+            proxy_error_telemetry_fields(&AppError::CredentialUnavailable(
+                "API key is failed".into()
+            )),
+            (400, 1000),
+        );
         assert_eq!(
             proxy_error_telemetry_fields(&AppError::BadRequest("x".into())),
             (400, 1000)
@@ -11042,6 +11438,12 @@ mod proxy_resolution_integration_tests {
 
     fn service_account_auth(service_account_id: &str, owner_user_id: &str) -> AuthUser {
         AuthUser {
+            org_agent_access: None,
+            assistant_group_id: None,
+            assistant_agent_owner_id: None,
+            assistant_operation_scopes: Default::default(),
+            assistant_turn_fence: None,
+            assistant_chat: None,
             user_id: Uuid::parse_str(service_account_id).expect("valid service account id"),
             session_id: None,
             scope: "proxy".to_string(),
@@ -11068,6 +11470,12 @@ mod proxy_resolution_integration_tests {
 
     fn access_token_auth(user_id: &str) -> AuthUser {
         AuthUser {
+            org_agent_access: None,
+            assistant_group_id: None,
+            assistant_agent_owner_id: None,
+            assistant_operation_scopes: Default::default(),
+            assistant_turn_fence: None,
+            assistant_chat: None,
             user_id: Uuid::parse_str(user_id).expect("valid user id"),
             session_id: None,
             scope: "proxy".to_string(),

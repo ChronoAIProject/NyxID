@@ -99,6 +99,11 @@ Merged edits compare `config_revision` and commit settings/members together.
 Inspection is owner-scoped, read-only and paginated without leaking excluded IDs
 in cursors. Health reads saved members directly rather than sampling an inventory
 page. Draft strategy/contract/declarations apply only to candidate inspection.
+Inventory inspection explicitly opts out of operation checks; old REST defaults
+remain unchanged. Selected draft rows use an ID-bounded query independent of
+inventory pagination. Draft candidates do not inherit saved member disable or
+cooldown state; explicit saved operation checks retain both, and legacy strategies
+never load priority cooldown. No inspection mode materializes credentials.
 A deleted connection remains removable/resettable; Disable does not require stale
 metadata to become executable again.
 

@@ -1,3 +1,4 @@
+import { ChannelThreads } from "./nyxbot-channel-threads";
 import { useState } from "react";
 import { ChevronRight, Megaphone, User, Users } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -63,7 +64,7 @@ function SettingSelect<T extends string>({
       <SelectTrigger aria-label={label} className="h-7 w-full max-w-[220px] rounded-md px-2 text-[12px]">
         <SelectValue />
       </SelectTrigger>
-      <SelectContent className="z-[90]">
+      <SelectContent>
         {options.map((option) => (
           <SelectItem key={option.value} value={option.value}>
             {option.label}
@@ -122,7 +123,7 @@ function ChatRow({
       : `A private chat with ${title}, as a guest`;
 
   return (
-    <li className="space-y-2 rounded-md bg-overlay px-2.5 py-2">
+    <div className="space-y-2 rounded-md bg-overlay px-2.5 py-2">
       <div className="flex items-center gap-2">
         <ChatKindIcon kind={chat.kind} className="h-3.5 w-3.5 shrink-0 text-text-tertiary" />
         <p className="min-w-0 flex-1 truncate text-[12px] font-medium text-foreground">{title}</p>
@@ -152,6 +153,12 @@ function ChatRow({
               ]}
               onChange={(reply_mode) => void change({ reply_mode })}
             />
+            {chat.thread_capabilities?.thread_follow ? <>
+              <span>Threads</span>
+              <SettingSelect label={`Thread follow in ${title}`} value={chat.threads ?? "off"} disabled={update.isPending}
+                options={[{ value: "follow", label: "Follow when addressed" }, { value: "off", label: "Off" }]}
+                onChange={(threads) => void change({ threads })} />
+            </> : null}
             <span>Who can talk</span>
             <SettingSelect
               label={`Who can talk in ${title}`}
@@ -188,8 +195,10 @@ function ChatRow({
           onCheckedChange={(allow_posts) => void change({ allow_posts })}
         />
       </div>
+      {group && chat.follow_guidance ? <p className="text-[11px] text-muted-foreground">{chat.follow_guidance}</p> : null}
+      {group && (chat.thread_capabilities?.thread_follow || chat.has_thread_history || (chat.followed_thread_count ?? 0) > 0) ? <ChannelThreads chat={chat} /> : null}
       {notice ? <p className="text-[11px] text-muted-foreground">{notice}</p> : null}
-    </li>
+    </div>
   );
 }
 
@@ -212,6 +221,7 @@ export function ChannelChats({
   const chats = useNyxBotChannelChats(channel.id, open);
   const access = useSetNyxBotPrivateChats();
   const rows = chats.data ?? [];
+  const roots = rows.filter((chat) => !chat.parent_chat_id || !rows.some((parent) => parent.id === chat.parent_chat_id));
 
   async function setAccess(privateChats: "owner" | "everyone") {
     setError(undefined);
@@ -272,7 +282,8 @@ export function ChannelChats({
             <p className="text-[11px] text-text-tertiary">Loading chats...</p>
           ) : rows.length ? (
             <ul aria-label={`Chats of ${channel.bot_label}`} className="space-y-1.5">
-              {rows.slice(0, shown).map((chat) => (
+              {roots.slice(0, shown).map((chat) => (
+                <li key={chat.id}>
                 <ChatRow
                   key={chat.id}
                   channel={channel}
@@ -281,6 +292,11 @@ export function ChannelChats({
                   botAgentName={botAgentName}
                   onError={setError}
                 />
+                {rows.filter((child) => child.parent_chat_id === chat.id).map((child) => <div key={child.id} className="ml-3 mt-1 border-l border-hairline pl-2">
+                  <p className="mb-1 text-[11px] text-text-tertiary">Earlier thread settings</p>
+                  <ChatRow channel={channel} chat={child} agents={agents} botAgentName={botAgentName} onError={setError} />
+                </div>)}
+                </li>
               ))}
             </ul>
           ) : (
@@ -288,13 +304,13 @@ export function ChannelChats({
               No chats yet. Message the bot, or add it to a group and mention it.
             </p>
           )}
-          {rows.length > shown ? (
+          {roots.length > shown ? (
             <Button
               size="sm"
               variant="ghost"
               onClick={() => setShown((value) => value + CHATS_SHOWN * 2)}
             >
-              Show {Math.min(rows.length - shown, CHATS_SHOWN * 2)} more
+              Show {Math.min(roots.length - shown, CHATS_SHOWN * 2)} more
             </Button>
           ) : null}
         </div>

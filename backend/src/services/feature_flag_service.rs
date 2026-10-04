@@ -116,11 +116,85 @@ const DIRECT_CHAT_ENGINE_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+pub const VOICE_GROK_FLAG_KEY: &str = "assistant:voice-grok";
+const VOICE_GROK_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: VOICE_GROK_FLAG_KEY,
+    description: "Grok voice private beta (push-to-talk/headphones only).",
+    default_enabled: false,
+};
+pub const VOICE_GROK_PLATFORM_FLAG_KEY: &str = "assistant:voice-grok-platform";
+const VOICE_GROK_PLATFORM_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: VOICE_GROK_PLATFORM_FLAG_KEY,
+    description: "Paid platform Grok voice; enable only after provider invoice validation.",
+    default_enabled: false,
+};
+
+pub const VOICE_OPENAI_PLATFORM_FLAG_KEY: &str = "assistant:voice-openai-platform";
+const VOICE_OPENAI_PLATFORM_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: VOICE_OPENAI_PLATFORM_FLAG_KEY,
+    description: "Allows platform GPT-Live only after forced-close and invoice reconciliation validation.",
+    default_enabled: false,
+};
+
+pub const ASSISTANT_VOICE_FLAG_KEY: &str = "assistant:voice";
+const ASSISTANT_VOICE_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: ASSISTANT_VOICE_FLAG_KEY,
+    description: "Enables private assistant voice foundations; provider adapters require a later rollout.",
+    default_enabled: false,
+};
+
+pub const NYXBOT_THREAD_FOLLOW_FLAG_KEY: &str = "nyxbot:thread-follow";
+const NYXBOT_THREAD_FOLLOW_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: NYXBOT_THREAD_FOLLOW_FLAG_KEY,
+    description: "Staged direct-relay channel thread follow. Gateway follow remains unavailable until a compatible gateway is negotiated.",
+    default_enabled: false,
+};
+
 pub const NYXAGENT_ENGINE_FLAG_KEY: &str = "assistant:nyxagent-engine";
 const NYXAGENT_ENGINE_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: NYXAGENT_ENGINE_FLAG_KEY,
     description: "Routes assistant chat through NyxAgent (catalog slug llm-nyx) instead of Aevatar.",
     default_enabled: true,
+};
+
+const ORG_AGENTS_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: "assistant:org-agents",
+    description: "Allows organization specialist creation after all replicas enforce live member authority.",
+    default_enabled: false,
+};
+
+pub const AGENT_OPERATION_SCOPES_FLAG_KEY: &str = "assistant:operation-scopes";
+const AGENT_OPERATION_SCOPES_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: AGENT_OPERATION_SCOPES_FLAG_KEY,
+    description: "Allows configuring specialist operation scopes after every replica supports enforcement. Existing scopes are always enforced.",
+    default_enabled: false,
+};
+
+pub const ASSISTANT_LIVE_TURN_GATE_FLAG_KEY: &str = "assistant:live-turn-gate";
+const ASSISTANT_LIVE_TURN_GATE_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: ASSISTANT_LIVE_TURN_GATE_FLAG_KEY,
+    description: "Require assistant conversation keys to have a live turn before execution.",
+    default_enabled: false,
+};
+
+pub const MACHINE_CAPABILITIES_FLAG_KEY: &str = "assistant:machine-capabilities";
+const MACHINE_CAPABILITIES_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: MACHINE_CAPABILITIES_FLAG_KEY,
+    description: "Enable the capability editor and deny-by-default new assignments after upgrading all replicas; stored restrictions are always enforced.",
+    default_enabled: false,
+};
+pub const MACHINE_CONTEXTS_FLAG_KEY: &str = "assistant:machine-contexts";
+const MACHINE_CONTEXTS_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: MACHINE_CONTEXTS_FLAG_KEY,
+    description: "Opt in to separate workspaces and browsers on supported Linux nodes with owner approval. Full isolation requires a separate machine container or VM.",
+    default_enabled: false,
+};
+
+pub const AGENT_LEARNING_FLAG_KEY: &str = "assistant:agent-learning";
+const AGENT_LEARNING_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: AGENT_LEARNING_FLAG_KEY,
+    description: "Allows opt-in automatic learning proposals for assistant agents.",
+    default_enabled: false,
 };
 
 pub const INVITATION_CODE_FLAG_KEY: &str = "auth:invitation-code";
@@ -191,6 +265,17 @@ const NYXBOT_GATEWAY_FLAG_DEFS: [FeatureFlagDef; 7] = [
 pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     INVITATION_CODE_FLAG,
     NYXAGENT_ENGINE_FLAG,
+    NYXBOT_THREAD_FOLLOW_FLAG,
+    AGENT_OPERATION_SCOPES_FLAG,
+    ASSISTANT_LIVE_TURN_GATE_FLAG,
+    MACHINE_CAPABILITIES_FLAG,
+    MACHINE_CONTEXTS_FLAG,
+    AGENT_LEARNING_FLAG,
+    ORG_AGENTS_FLAG,
+    ASSISTANT_VOICE_FLAG,
+    VOICE_OPENAI_PLATFORM_FLAG,
+    VOICE_GROK_FLAG,
+    VOICE_GROK_PLATFORM_FLAG,
     AI_ASSISTANT_FLAG,
     BILLING_FLAG,
     AEVATAR_CHAT_WIRE_LOG_FLAG,
@@ -210,6 +295,17 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
 pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     INVITATION_CODE_FLAG,
     NYXAGENT_ENGINE_FLAG,
+    NYXBOT_THREAD_FOLLOW_FLAG,
+    AGENT_OPERATION_SCOPES_FLAG,
+    ASSISTANT_LIVE_TURN_GATE_FLAG,
+    MACHINE_CAPABILITIES_FLAG,
+    MACHINE_CONTEXTS_FLAG,
+    AGENT_LEARNING_FLAG,
+    ORG_AGENTS_FLAG,
+    ASSISTANT_VOICE_FLAG,
+    VOICE_OPENAI_PLATFORM_FLAG,
+    VOICE_GROK_FLAG,
+    VOICE_GROK_PLATFORM_FLAG,
     AI_ASSISTANT_FLAG,
     BILLING_FLAG_TEST,
     AEVATAR_CHAT_WIRE_LOG_FLAG,
@@ -1731,6 +1827,17 @@ mod tests {
             vec![
                 "auth:invitation-code",
                 "assistant:nyxagent-engine",
+                "nyxbot:thread-follow",
+                "assistant:operation-scopes",
+                "assistant:live-turn-gate",
+                "assistant:machine-capabilities",
+                "assistant:machine-contexts",
+                "assistant:agent-learning",
+                "assistant:org-agents",
+                "assistant:voice",
+                "assistant:voice-openai-platform",
+                "assistant:voice-grok",
+                "assistant:voice-grok-platform",
                 "experimental:ai-assistant",
                 "experimental:billing",
                 "experimental:aevatar-chat-wire-log",
@@ -1747,6 +1854,12 @@ mod tests {
         assert_eq!(
             AEVATAR_CHAT_WIRE_LOG_FLAG_KEY,
             "experimental:aevatar-chat-wire-log"
+        );
+        assert!(
+            !find_flag(ASSISTANT_VOICE_FLAG_KEY)
+                .expect("voice flag is registered")
+                .default_enabled,
+            "voice must default to off"
         );
         assert!(
             !find_flag(AEVATAR_CHAT_WIRE_LOG_FLAG_KEY)

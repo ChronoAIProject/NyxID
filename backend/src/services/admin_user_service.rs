@@ -526,6 +526,8 @@ async fn delete_user_cascade_internal(
         crate::models::machine_setup::COLLECTION_NAME,
         crate::models::machine_job::COLLECTION_NAME,
         crate::models::machine_desktop::COLLECTION_NAME,
+        crate::models::machine_update::COLLECTION_NAME,
+        crate::models::machine_update::ATTEMPTS_COLLECTION_NAME,
         crate::models::channel_activity::NOTIFICATIONS_COLLECTION,
         crate::models::channel_email::SUBSCRIPTIONS,
         crate::models::channel_email::SENDS,
@@ -540,6 +542,7 @@ async fn delete_user_cascade_internal(
         crate::models::assistant_group::COLLECTION_NAME,
         crate::models::assistant_group::MESSAGES_COLLECTION_NAME,
         crate::models::assistant_attachment::COLLECTION_NAME,
+        crate::models::assistant_upload_retention::TOMBSTONES,
         crate::models::assistant_agent_credential::COLLECTION_NAME,
         crate::models::assistant_conversation::COLLECTION_NAME,
         crate::models::assistant_message::COLLECTION_NAME,
@@ -566,6 +569,15 @@ async fn delete_user_cascade_internal(
             .await?;
     }
     // NyxBot settings are keyed by the user ID itself.
+    db.collection::<bson::Document>(crate::models::assistant_voice_session::COLLECTION_NAME)
+        .update_many(
+            doc! {"user_id":target_user_id},
+            doc! {"$set":{"end_requested":true,"purge_requested":true}},
+        )
+        .await?;
+    db.collection::<bson::Document>(crate::models::assistant_voice::REQUESTS)
+        .delete_many(doc! {"user_id": target_user_id})
+        .await?;
     db.collection::<bson::Document>(crate::models::assistant_settings::COLLECTION_NAME)
         .delete_one(doc! {"_id": target_user_id})
         .await?;

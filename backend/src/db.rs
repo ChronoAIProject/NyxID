@@ -118,9 +118,49 @@ pub async fn require_transactions(db: &Database) -> Result<(), mongodb::error::E
 /// Uses `create_index` which is idempotent -- if the index already exists
 /// with the same specification it is a no-op.
 pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
+    // Poll index groups and migrations sequentially without retaining the
+    // large index-construction frame while a migration calls into MongoDB.
+    Box::pin(ensure_core_indexes(db)).await?;
+    Box::pin(ensure_service_indexes(db)).await?;
+    backfill_downstream_service_types(db).await?;
+    migrate_legacy_ssh_auth_mode(db).await?;
+    backfill_org_scope_sources(db).await?;
+    purge_legacy_channel_message_content(db).await?;
+
+    Ok(())
+}
+
+async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
+    db.collection::<Document>("assistant_upload_limits")
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"expires_at": 1})
+                .options(IndexOptions::builder().expire_after(Duration::ZERO).build())
+                .build(),
+        )
+        .await?;
+    db.collection::<Document>("assistant_attachments")
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"parent_attachment_id": 1, "chunk_index": 1})
+                .options(IndexOptions::builder().unique(true).sparse(true).build())
+                .build(),
+        )
+        .await?;
+    Box::pin(crate::services::assistant_upload_retention::ensure_indexes(
+        db,
+    ))
+    .await
+    .map_err(|_| mongodb::error::Error::custom("Attachment retention index migration failed"))?;
     crate::services::service_history::relay::ensure_indexes(db).await?;
     crate::services::catalog_skill_service::ensure_indexes(db).await?;
     crate::services::assistant_nyxagent::ensure_indexes(db).await?;
+    crate::services::assistant_agent_learning::ensure_indexes(db).await?;
+    crate::services::assistant_voice::ensure_indexes(db).await?;
+    crate::services::voice::session::ensure_indexes(db).await?;
+    Box::pin(crate::services::machine_access_service::ensure_indexes(db))
+        .await
+        .map_err(|_| mongodb::error::Error::custom("Machine authority index migration failed"))?;
     // Best effort: a failure only leaves bad home pointers for lazy repair.
     if let Err(error) = crate::services::assistant_nyxagent::repair_channel_homes(db).await {
         tracing::warn!(%error, "NyxBot home repair deferred");
@@ -453,6 +493,24 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     )
     .await?;
 
+    // Bounded machine metadata pages, with and without an agent filter.
+    for keys in [
+        doc! {"event_type":1,"event_data.node_id":1,"created_at":-1,"_id":-1},
+        doc! {"event_type":1,"event_data.node_id":1,"event_data.agent_id":1,"created_at":-1,"_id":-1},
+    ] {
+        db.collection::<mongodb::bson::Document>("audit_log")
+            .create_index(
+                IndexModel::builder()
+                    .keys(keys)
+                    .options(
+                        IndexOptions::builder()
+                            .partial_filter_expression(doc! {"event_type":"machine_operation"})
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await?;
+    }
     // ── audit_log ──
     let audit = db.collection::<mongodb::bson::Document>("audit_log");
     audit
@@ -1393,6 +1451,35 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .build(),
         )
         .await?;
+    db.collection::<bson::Document>(crate::models::machine_update::COLLECTION_NAME)
+        .create_indexes([
+            IndexModel::builder()
+                .keys(doc! {"attempt_id":1})
+                .options(
+                    IndexOptions::builder()
+                        .unique(true)
+                        .partial_filter_expression(doc! {"attempt_id":{"$type":"string"}})
+                        .build(),
+                )
+                .build(),
+            IndexModel::builder()
+                .keys(doc! {"automatic":1,"phase":1,"updated_at":1})
+                .build(),
+        ])
+        .await?;
+    db.collection::<bson::Document>(crate::models::machine_update::ATTEMPTS_COLLECTION_NAME)
+        .create_indexes([
+            IndexModel::builder().keys(doc! {"user_id": 1}).build(),
+            IndexModel::builder()
+                .keys(doc! {"state.updated_at": 1})
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(std::time::Duration::from_secs(90 * 86400))
+                        .build(),
+                )
+                .build(),
+        ])
+        .await?;
     // Machine records carry metadata only; ephemeral setup proofs are HMACs.
     let setups = db.collection::<bson::Document>(crate::models::machine_setup::COLLECTION_NAME);
     for field in ["code_hmac", "device_hmac"] {
@@ -1963,6 +2050,10 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    Ok(())
+}
+
+async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
     // Drop old sparse unique indexes that conflict with partial filter indexes
     // (MongoDB won't replace an index with different options on the same keys)
     let _ = db
@@ -2351,6 +2442,31 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     crate::services::channel_activity_service::ensure_indexes(db).await?;
     crate::services::channel_delivery_service::ensure_indexes(db).await?;
     let channel_msgs = db.collection::<mongodb::bson::Document>("channel_messages");
+    for (name, keys) in [
+        (
+            "channel_messages_thread_root_v1",
+            doc! {
+                "channel_bot_id": 1, "platform_conversation_id": 1,
+                "thread_context.root_id": 1, "created_at": -1,
+            },
+        ),
+        (
+            "channel_messages_thread_parent_v1",
+            doc! {
+                "channel_bot_id": 1, "platform_conversation_id": 1,
+                "platform_message_id": 1,
+            },
+        ),
+    ] {
+        channel_msgs
+            .create_index(
+                IndexModel::builder()
+                    .keys(keys)
+                    .options(IndexOptions::builder().name(name.to_string()).build())
+                    .build(),
+            )
+            .await?;
+    }
     channel_msgs
         .create_index(
             IndexModel::builder()
@@ -3183,11 +3299,6 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .build(),
         )
         .await?;
-
-    backfill_downstream_service_types(db).await?;
-    migrate_legacy_ssh_auth_mode(db).await?;
-    backfill_org_scope_sources(db).await?;
-    purge_legacy_channel_message_content(db).await?;
 
     Ok(())
 }

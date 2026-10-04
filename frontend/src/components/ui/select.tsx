@@ -1,6 +1,8 @@
 import * as React from "react";
 import * as SelectPrimitive from "@radix-ui/react-select";
 import { Check, ChevronDown, ChevronUp } from "lucide-react";
+import { OverlayLayer } from "@/components/ui/overlay-layer";
+import { useOverlayLayer } from "@/lib/overlay-layer";
 import { cn } from "@/lib/utils";
 
 /* ── NyxID Select Components ── */
@@ -67,7 +69,10 @@ SelectScrollDownButton.displayName =
 const SelectContent = React.forwardRef<
   React.ComponentRef<typeof SelectPrimitive.Content>,
   React.ComponentPropsWithoutRef<typeof SelectPrimitive.Content>
->(({ className, children, position = "popper", ...props }, ref) => (
+>(({ className, children, position = "popper", style, ...props }, ref) => {
+  const layer = useOverlayLayer();
+  return (
+  <OverlayLayer layer={layer}>
   <SelectPrimitive.Portal>
     <SelectPrimitive.Content
       ref={ref}
@@ -79,6 +84,7 @@ const SelectContent = React.forwardRef<
       )}
       position={position}
       {...props}
+      style={{ ...style, zIndex: layer }}
     >
       <SelectScrollUpButton />
       <SelectPrimitive.Viewport
@@ -93,7 +99,9 @@ const SelectContent = React.forwardRef<
       <SelectScrollDownButton />
     </SelectPrimitive.Content>
   </SelectPrimitive.Portal>
-));
+  </OverlayLayer>
+  );
+});
 SelectContent.displayName = SelectPrimitive.Content.displayName;
 
 const SelectLabel = React.forwardRef<

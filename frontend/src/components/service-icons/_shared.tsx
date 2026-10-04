@@ -10,10 +10,12 @@
 //
 // Sources:
 //   - OpenAI, Anthropic, Mistral AI, DeepSeek, X (Twitter), Google, GitHub,
-//     Facebook, WhatsApp, Discord, Spotify, Slack, Microsoft, TikTok, Twitch,
+//     Facebook, WhatsApp, Discord, Spotify, Slack, TikTok, Twitch,
 //     Reddit, Telegram, ElevenLabs, Twilio, AWS — path data hand-extracted from Simple
 //     Icons (https://simpleicons.org, CC0 1.0). No runtime dependency on the
 //     `simple-icons` npm package.
+//   - Microsoft 365 — product mark from Microsoft Corporation via Wikimedia
+//     Commons (https://commons.wikimedia.org/wiki/File:Microsoft_365_(2022).svg).
 //   - xAI — supplied polygon mark, tightened to its painted bounds for the
 //     monochrome catalog grid.
 //   - Cohere, Lark, Feishu, OpenClaw — hand-built glyphs (these brands have no
@@ -218,6 +220,17 @@ export function FacebookGlyph(props: GlyphProps) {
 }
 
 /**
+ * LinkedIn mark. (Simple Icons: linkedin)
+ */
+export function LinkedinGlyph(props: GlyphProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" {...props}>
+      <path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V8.999h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.287zM5.337 7.433a2.062 2.062 0 1 1 0-4.124 2.062 2.062 0 0 1 0 4.124zM7.119 20.452H3.555V8.999h3.564v11.453zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.225 0z" />
+    </svg>
+  );
+}
+
+/**
  * WhatsApp mark (Simple Icons: whatsapp), flattened to currentColor for the
  * catalog's monochrome treatment.
  */
@@ -263,12 +276,14 @@ export function SlackGlyph(props: GlyphProps) {
 }
 
 /**
- * Microsoft 4-square monochrome mark. (Simple Icons: microsoft)
+ * Microsoft 365 product mark, rendered in the catalog's monochrome style.
  */
-export function MicrosoftGlyph(props: GlyphProps) {
+export function Microsoft365Glyph(props: GlyphProps) {
   return (
-    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" {...props}>
-      <path d="M0 0v11.408h11.408V0zm12.594 0v11.408H24V0zM0 12.594V24h11.408V12.594zm12.594 0V24H24V12.594z" />
+    <svg viewBox="4 2 40 44" fill="currentColor" aria-hidden="true" {...props}>
+      <path d="M20.0842 3.02588L19.8595 3.16179C19.5021 3.37799 19.1654 3.61972 18.8512 3.88385L19.4993 3.42798H25L26 11L21 16L16 19.4754V23.4829C16 26.2819 17.4629 28.8774 19.8574 30.3268L25.1211 33.5129L14 40.0002H11.8551L7.85737 37.5804C5.46286 36.131 4 33.5355 4 30.7365V17.2606C4 14.4607 5.46379 11.8645 7.85952 10.4154L19.8595 3.15687C19.9339 3.11189 20.0088 3.06823 20.0842 3.02588Z" />
+      <path d="M32 19V23.4803C32 26.2793 30.5371 28.8748 28.1426 30.3242L16.1426 37.5878C13.6878 39.0737 10.6335 39.1273 8.1355 37.7487L19.8573 44.844C22.4039 46.3855 25.5959 46.3855 28.1426 44.844L40.1426 37.5803C42.5371 36.1309 43.9999 33.5354 43.9999 30.7364V27.5L42.9999 26L32 19Z" />
+      <path d="M40.1405 10.4153L28.1405 3.15678C25.6738 1.66471 22.6021 1.61849 20.0979 3.01811L19.8595 3.16231C17.4638 4.61143 16 7.20757 16 10.0075V19.4914L19.8595 17.1568C22.4051 15.6171 25.5949 15.6171 28.1405 17.1568L40.1405 24.4153C42.4613 25.8192 43.9076 28.2994 43.9957 30.9985C43.9986 30.9113 44 30.824 44 30.7364V17.2605C44 14.4606 42.5362 11.8644 40.1405 10.4153Z" />
     </svg>
   );
 }

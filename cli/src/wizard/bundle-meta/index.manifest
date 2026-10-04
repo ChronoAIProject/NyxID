@@ -45,6 +45,7 @@ frontend/src/components/service-icons/api-ifttt-mcp.tsx
 frontend/src/components/service-icons/api-ifttt.tsx
 frontend/src/components/service-icons/api-lark-bot.tsx
 frontend/src/components/service-icons/api-lark.tsx
+frontend/src/components/service-icons/api-linkedin.tsx
 frontend/src/components/service-icons/api-microsoft.tsx
 frontend/src/components/service-icons/api-notion.tsx
 frontend/src/components/service-icons/api-reddit.tsx
@@ -95,6 +96,7 @@ frontend/src/components/ui/checkbox.tsx
 frontend/src/components/ui/form.tsx
 frontend/src/components/ui/input.tsx
 frontend/src/components/ui/label.tsx
+frontend/src/components/ui/overlay-layer.tsx
 frontend/src/components/ui/popover.tsx
 frontend/src/components/ui/select.tsx
 frontend/src/components/ui/skeleton.tsx
@@ -112,6 +114,7 @@ frontend/src/lib/assistant/identity.ts
 frontend/src/lib/credits-denial.ts
 frontend/src/lib/form-errors.ts
 frontend/src/lib/navigation.ts
+frontend/src/lib/overlay-layer.ts
 frontend/src/lib/parse-additional-scopes.ts
 frontend/src/lib/public-paths.ts
 frontend/src/lib/telemetry.ts

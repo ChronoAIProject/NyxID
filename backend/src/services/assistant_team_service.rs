@@ -142,8 +142,22 @@ pub async fn ensure_nyxbot(db: &Database, owner: &str) -> AppResult<AssistantAge
     {
         return Ok(agent);
     }
+    if db
+        .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+        .find_one(doc! {"_id": owner, "user_type": "org"})
+        .await?
+        .is_some()
+    {
+        return Err(AppError::Forbidden(
+            "Organizations cannot own NyxBot".into(),
+        ));
+    }
     let now = Utc::now();
     let agent = AssistantAgent {
+        skills: Vec::new(),
+        skills_revision: 0,
+        skill_metadata: BTreeMap::new(),
+        machine_access: Some(Box::default()),
         machine_node_ids: Vec::new(),
         saved_login_ids: Vec::new(),
         id: Uuid::new_v4().to_string(),
@@ -154,6 +168,8 @@ pub async fn ensure_nyxbot(db: &Database, owner: &str) -> AppResult<AssistantAge
         specialty: None,
         grants: AgentGrants::default(),
         guest_access: BTreeMap::new(),
+        operation_scopes: Default::default(),
+        operation_scope_revisions: Default::default(),
         created_by: "user".into(),
         model: routing::model_for(db, RouteRole::Orchestrator, engine::DEFAULT_MODEL).await,
         home_conversation_id: None,
@@ -180,17 +196,38 @@ pub async fn agent(db: &Database, owner: &str, id: &str) -> AppResult<AssistantA
     if Uuid::parse_str(id).is_err() {
         return Err(not_found());
     }
-    db.collection::<AssistantAgent>(AGENTS)
-        .find_one(doc! {"_id": id, "user_id": owner})
+    let agent = db
+        .collection::<AssistantAgent>(AGENTS)
+        .find_one(doc! {"_id": id})
         .await?
-        .ok_or_else(not_found)
+        .ok_or_else(not_found)?;
+    if !super::org_agent_service::access(db, owner, &agent.user_id)
+        .await?
+        .can_read()
+        || (owner != agent.user_id && agent.is_nyxbot())
+    {
+        return Err(not_found());
+    }
+    Ok(agent)
+}
+
+pub async fn maintained_agent(db: &Database, actor: &str, id: &str) -> AppResult<AssistantAgent> {
+    let agent = agent(db, actor, id).await?;
+    super::org_agent_service::require_maintain(db, actor, &agent).await?;
+    Ok(agent)
 }
 
 /// A specialist by ID or name; a live agent wins over a destroyed namesake.
 pub async fn specialist(db: &Database, owner: &str, name_or_id: &str) -> AppResult<AssistantAgent> {
-    let filter = if Uuid::parse_str(name_or_id).is_ok() {
-        doc! {"_id": name_or_id, "user_id": owner, "kind": "specialist"}
-    } else if valid_name(name_or_id) {
+    if Uuid::parse_str(name_or_id).is_ok() {
+        let agent = agent(db, owner, name_or_id).await?;
+        return if agent.is_nyxbot() {
+            Err(not_found())
+        } else {
+            Ok(agent)
+        };
+    }
+    let filter = if valid_name(name_or_id) {
         doc! {"user_id": owner, "kind": "specialist", "name": name_or_id}
     } else {
         return Err(not_found());
@@ -221,7 +258,9 @@ pub async fn agents(
     owner: &str,
     include_destroyed: bool,
 ) -> AppResult<Vec<AssistantAgent>> {
-    let mut filter = doc! {"user_id": owner};
+    let owners = super::org_agent_service::visible_owners(db, owner).await?;
+    let mut filter =
+        doc! {"user_id": {"$in": owners}, "$or": [{"user_id": owner}, {"kind": "specialist"}]};
     if !include_destroyed {
         filter.insert("destroyed_at", bson::Bson::Null);
     }
@@ -243,32 +282,52 @@ pub async fn agent_for_conversation(
     row: &AssistantConversation,
 ) -> AppResult<AssistantAgent> {
     match row.agent_id.as_deref() {
-        Some(id) => agent(db, &row.user_id, id).await,
+        Some(id) => {
+            let agent = agent(db, &row.user_id, id).await?;
+            super::org_agent_service::require_use(db, &row.user_id, &agent).await?;
+            if agent.user_id != row.user_id && (row.guest_turn || row.channel.is_some()) {
+                return Err(AppError::Forbidden(
+                    "Organization agents require a private member thread".into(),
+                ));
+            }
+            Ok(agent)
+        }
         None => ensure_nyxbot(db, &row.user_id).await,
     }
 }
 
 /// An agent's own threads. Hidden group member threads are the group's, not
 /// the agent's, and never listed as threads.
-pub fn thread_filter(agent: &AssistantAgent) -> bson::Document {
+pub fn thread_filter_for(actor: &str, agent: &AssistantAgent) -> bson::Document {
     if agent.is_nyxbot() {
-        doc! {"user_id": &agent.user_id, "group_id": bson::Bson::Null, "$or": [
+        doc! {"user_id": actor, "group_id": bson::Bson::Null, "$or": [
             {"agent_id": &agent.id}, {"agent_id": bson::Bson::Null},
         ]}
     } else {
-        doc! {"user_id": &agent.user_id, "agent_id": &agent.id, "group_id": bson::Bson::Null}
+        doc! {"user_id": actor, "agent_id": &agent.id, "group_id": bson::Bson::Null}
     }
 }
 
 /// Threads of an agent, newest first. Legacy rows count as NyxBot threads.
+#[cfg(test)]
 pub async fn threads(
     db: &Database,
     agent: &AssistantAgent,
     limit: i64,
 ) -> AppResult<Vec<AssistantConversation>> {
+    threads_for(db, &agent.user_id, agent, limit).await
+}
+
+pub async fn threads_for(
+    db: &Database,
+    actor: &str,
+    agent: &AssistantAgent,
+    limit: i64,
+) -> AppResult<Vec<AssistantConversation>> {
+    super::org_agent_service::require_use(db, actor, agent).await?;
     Ok(db
         .collection::<AssistantConversation>(CONVERSATIONS)
-        .find(thread_filter(agent))
+        .find(thread_filter_for(actor, agent))
         .sort(doc! {"updated_at": -1})
         .limit(limit)
         .await?
@@ -278,39 +337,88 @@ pub async fn threads(
 
 /// Create a thread row (no turn yet) with its key and credential, and make
 /// it the agent's home when it has none.
-pub(crate) async fn create_thread(
+pub(crate) async fn create_thread_for(
     db: &Database,
     keys: &EncryptionKeys,
+    actor: &str,
     agent: &AssistantAgent,
     title: &str,
     session: &mut ClientSession,
 ) -> AppResult<AssistantConversation> {
-    create_thread_with_kind(db, keys, agent, title, false, session).await
+    create_thread_for_with_access(db, keys, actor, agent, title, session, None).await
+}
+
+pub(crate) async fn create_thread_for_with_access(
+    db: &Database,
+    keys: &EncryptionKeys,
+    actor: &str,
+    agent: &AssistantAgent,
+    title: &str,
+    session: &mut ClientSession,
+    snapshot: Option<&std::sync::Arc<super::org_agent_service::RequestAccess>>,
+) -> AppResult<AssistantConversation> {
+    if let Some(access) = snapshot {
+        if !access.matches(actor, &agent.user_id) {
+            return Err(super::org_group_service::missing());
+        }
+    } else {
+        super::org_agent_service::require_use(db, actor, agent).await?;
+    }
+    let learning_epoch = Box::pin(super::assistant_agent_learning::enrollment_epoch(
+        db,
+        actor,
+        agent,
+        snapshot.map(std::sync::Arc::as_ref),
+    ))
+    .await?;
+    Box::pin(create_thread_with_kind(
+        db,
+        keys,
+        actor,
+        agent,
+        title,
+        false,
+        session,
+        snapshot,
+        learning_epoch,
+    ))
+    .await
 }
 
 pub(crate) async fn create_automation_thread(
     db: &Database,
     keys: &EncryptionKeys,
+    actor: &str,
     agent: &AssistantAgent,
     title: &str,
     session: &mut ClientSession,
 ) -> AppResult<AssistantConversation> {
-    create_thread_with_kind(db, keys, agent, title, true, session).await
+    create_thread_with_kind(db, keys, actor, agent, title, true, session, None, None).await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn create_thread_with_kind(
     db: &Database,
     keys: &EncryptionKeys,
+    actor: &str,
     agent: &AssistantAgent,
     title: &str,
     automation_thread: bool,
     session: &mut ClientSession,
+    snapshot: Option<&std::sync::Arc<super::org_agent_service::RequestAccess>>,
+    learning_epoch: Option<i64>,
 ) -> AppResult<AssistantConversation> {
     let now = Utc::now();
     let mut row = AssistantConversation {
+        machine_previews: false,
         id: format!("nyxa-{}", Uuid::new_v4().simple()),
-        user_id: agent.user_id.clone(),
-        title: title.chars().take(40).collect(),
+        user_id: actor.to_owned(),
+        title: super::assistant_title_service::provisional(title),
+        title_source: if automation_thread {
+            crate::models::assistant_conversation::TitleSource::User
+        } else {
+            crate::models::assistant_conversation::TitleSource::Provisional
+        },
         model: agent.model.clone(),
         access_mode: AccessMode::Full,
         nyxagent_session_id: None,
@@ -329,11 +437,14 @@ async fn create_thread_with_kind(
         },
         agent_id: Some(agent.id.clone()),
         automation_thread,
+        agent_owner_id: (actor != agent.user_id).then(|| agent.user_id.clone()),
+        learning_epoch,
         report_to: None,
         pending_events: Vec::new(),
         event_streak: 0,
         channel: None,
         group_id: None,
+        group_request_id: None,
         group_seen_seq: 0,
         guest_turn: false,
         reply_channel: None,
@@ -341,12 +452,16 @@ async fn create_thread_with_kind(
     };
     let collection = db.collection::<AssistantConversation>(CONVERSATIONS);
     collection.insert_one(&row).session(&mut *session).await?;
+    let authority = Box::pin(credentials::authority_with_access(
+        db, &row, session, snapshot,
+    ))
+    .await?;
     let credential = credentials::load_or_provision_in_session(
         db,
         keys,
-        &agent.user_id,
+        actor,
         &row.id,
-        &KeyAuthority::for_agent(agent),
+        &authority,
         &mut *session,
     )
     .await?;
@@ -358,7 +473,7 @@ async fn create_thread_with_kind(
         )
         .session(&mut *session)
         .await?;
-    if !automation_thread {
+    if !automation_thread && actor == agent.user_id {
         db.collection::<AssistantAgent>(AGENTS)
             .update_one(
                 doc! {"_id": &agent.id, "home_conversation_id": bson::Bson::Null},
@@ -377,27 +492,47 @@ pub async fn home_thread(
     keys: &std::sync::Arc<EncryptionKeys>,
     agent: &AssistantAgent,
 ) -> AppResult<AssistantConversation> {
+    ensure_nyxbot(db, &agent.user_id).await?;
+    // Permission requests reach this through nested MCP dispatch. The member
+    // thread provisioning transaction must not enlarge each caller's future.
+    Box::pin(home_thread_for(db, keys, &agent.user_id, agent)).await
+}
+
+pub async fn home_thread_for(
+    db: &Database,
+    keys: &std::sync::Arc<EncryptionKeys>,
+    actor: &str,
+    agent: &AssistantAgent,
+) -> AppResult<AssistantConversation> {
+    super::org_agent_service::require_use(db, actor, agent).await?;
     // An agent's home is one of its own threads, never a chat app channel
     // thread (a group's, or someone else's private chat), nor an isolated
     // automation thread whose untrusted context must stay separate.
     if let Some(id) = agent.home_conversation_id.as_deref()
         && let Some(row) = db
             .collection::<AssistantConversation>(CONVERSATIONS)
-            .find_one(doc! {"_id": id, "user_id": &agent.user_id,
+            .find_one(doc! {"_id": id, "user_id": actor,
             "channel": bson::Bson::Null, "automation_thread": {"$ne": true}})
             .await?
     {
         return Ok(row);
     }
-    let mut own = thread_filter(agent);
+    let mut own = thread_filter_for(actor, agent);
     own.insert("channel", bson::Bson::Null);
     own.insert("automation_thread", doc! {"$ne": true});
     let newest = db
         .collection::<AssistantConversation>(CONVERSATIONS)
         .find_one(own)
-        .sort(doc! {"updated_at": -1})
+        .sort(if actor == agent.user_id {
+            doc! {"updated_at": -1}
+        } else {
+            doc! {"created_at": 1, "_id": 1}
+        })
         .await?;
     if let Some(row) = newest {
+        if actor != agent.user_id {
+            return Ok(row);
+        }
         db.collection::<AssistantAgent>(AGENTS)
             .update_one(
                 doc! {"_id": &agent.id},
@@ -408,20 +543,38 @@ pub async fn home_thread(
     }
     // The pointer referenced a deleted thread (or none exists): clear it so
     // the new thread becomes home inside the transaction.
-    db.collection::<AssistantAgent>(AGENTS)
-        .update_one(
-            doc! {"_id": &agent.id},
-            doc! {"$set": {"home_conversation_id": bson::Bson::Null}},
-        )
-        .await?;
+    if actor == agent.user_id {
+        db.collection::<AssistantAgent>(AGENTS)
+            .update_one(
+                doc! {"_id": &agent.id},
+                doc! {"$set": {"home_conversation_id": bson::Bson::Null}},
+            )
+            .await?;
+    }
     let mut session = db.client().start_session().await?;
+    let learning_epoch = Box::pin(super::assistant_agent_learning::enrollment_epoch(
+        db, actor, agent, None,
+    ))
+    .await?;
     let db_owned = db.clone();
     let keys = keys.clone();
     let agent = agent.clone();
+    let actor = actor.to_owned();
     session
         .start_transaction()
         .and_run2(async move |session| {
-            let operation = create_thread(&db_owned, &keys, &agent, &agent.name, session).await;
+            let operation = create_thread_with_kind(
+                &db_owned,
+                &keys,
+                &actor,
+                &agent,
+                &agent.name,
+                false,
+                session,
+                None,
+                learning_epoch,
+            )
+            .await;
             transactions::transaction_result(operation)
         })
         .await
@@ -596,12 +749,26 @@ fn validate_profile(name: &str, description: &str) -> AppResult<()> {
 /// Create a persistent specialist with its home thread, key and encrypted
 /// credential in one transaction. Fencing the owner's NyxBot serializes
 /// concurrent creation so the owner's live-agent limit holds.
+#[cfg(test)]
 pub async fn create_specialist(
     db: &Database,
     keys: &std::sync::Arc<EncryptionKeys>,
     owner: &str,
     request: CreateRequest,
 ) -> AppResult<Result<(AssistantAgent, AssistantConversation), TeamRefusal>> {
+    create_specialist_for(db, keys, owner, owner, request).await
+}
+
+pub async fn create_specialist_for(
+    db: &Database,
+    keys: &std::sync::Arc<EncryptionKeys>,
+    actor: &str,
+    owner: &str,
+    request: CreateRequest,
+) -> AppResult<Result<(AssistantAgent, AssistantConversation), TeamRefusal>> {
+    if actor != owner {
+        super::org_agent_service::require_creation_enabled(db, actor).await?;
+    }
     let description = request.description.trim().to_owned();
     validate_profile(&request.name, &description)?;
     if request
@@ -629,7 +796,7 @@ pub async fn create_specialist(
         } => (machines.unwrap_or_default(), logins.unwrap_or_default()),
         _ => (Vec::new(), Vec::new()),
     };
-    let nyxbot = ensure_nyxbot(db, owner).await?;
+    let nyxbot = ensure_nyxbot(db, actor).await?;
     let limit = assistant_settings_service::get(db, owner)
         .await?
         .max_live_subagents;
@@ -643,6 +810,19 @@ pub async fn create_specialist(
     .await;
     let now = Utc::now();
     let agent = AssistantAgent {
+        skills: Vec::new(),
+        skills_revision: 0,
+        skill_metadata: BTreeMap::new(),
+        machine_access: Some(Box::new(crate::models::machine_access::Policy {
+            assignments: Box::pin(super::machine_access_service::new_assignments(
+                db,
+                actor,
+                &machine_node_ids,
+                1,
+            ))
+            .await?,
+            ..Default::default()
+        })),
         machine_node_ids,
         saved_login_ids,
         id: Uuid::new_v4().to_string(),
@@ -657,6 +837,8 @@ pub async fn create_specialist(
             account_read: request.account_read,
         },
         guest_access: BTreeMap::new(),
+        operation_scopes: Default::default(),
+        operation_scope_revisions: Default::default(),
         created_by: request.created_by.into(),
         model,
         home_conversation_id: None,
@@ -677,6 +859,8 @@ pub async fn create_specialist(
         created_at: now,
         updated_at: now,
     };
+    Box::pin(super::org_agent_service::validate_grants(db, actor, &agent)).await?;
+    let actor_owned = actor.to_owned();
     let mut session = db.client().start_session().await?;
     let db_owned = db.clone();
     let keys_owned = keys.clone();
@@ -688,7 +872,17 @@ pub async fn create_specialist(
             let agent = agent.clone();
             let operation: AppResult<_> = async {
                 let collection = db.collection::<AssistantAgent>(AGENTS);
-                // Serialize team changes on the owner's NyxBot row.
+                super::org_agent_service::require_maintain(db, &actor_owned, &agent).await?;
+                if actor_owned != agent.user_id {
+                    db.collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+                        .update_one(
+                            doc! {"_id": &agent.user_id, "is_active": true},
+                            doc! {"$inc": {"agent_team_fence": 1}},
+                        )
+                        .session(&mut *session)
+                        .await?;
+                }
+                // Serialize personal team changes on the person's NyxBot.
                 collection
                     .update_one(
                         doc! {"_id": &nyxbot_id, "user_id": &agent.user_id},
@@ -714,9 +908,22 @@ pub async fn create_specialist(
                     return Ok(Err(TeamRefusal::NameTaken));
                 }
                 collection.insert_one(&agent).session(&mut *session).await?;
-                let home = create_thread(db, &keys_owned, &agent, &agent.name, session).await?;
+                let home = create_thread_with_kind(
+                    db,
+                    &keys_owned,
+                    &actor_owned,
+                    &agent,
+                    &agent.name,
+                    false,
+                    session,
+                    None,
+                    None,
+                )
+                .await?;
                 let mut agent = agent;
-                agent.home_conversation_id = Some(home.id.clone());
+                if actor_owned == agent.user_id {
+                    agent.home_conversation_id = Some(home.id.clone());
+                }
                 Ok(Ok((agent, home)))
             }
             .await;
@@ -727,10 +934,10 @@ pub async fn create_specialist(
     if let Ok((agent, _)) = &outcome {
         audit(
             db,
-            owner,
+            actor,
             "assistant_agent_created",
             serde_json::json!({
-                "agent_id": &agent.id, "created_by": &agent.created_by,
+                "owner_id": &agent.user_id, "agent_id": &agent.id, "created_by": &agent.created_by,
                 "service_ids": &agent.grants.service_ids,
                 "platform_service_ids": &agent.grants.platform_service_ids,
                 "account_read": agent.grants.account_read,
@@ -781,7 +988,9 @@ pub async fn update_agent(
     description: Option<&str>,
     style: AgentStyle<'_>,
 ) -> AppResult<AssistantAgent> {
-    let current = agent(db, owner, id).await?;
+    let current = maintained_agent(db, owner, id).await?;
+    let actor = owner;
+    let owner = current.user_id.as_str();
     if current.destroyed_at.is_some() {
         return Err(AppError::Conflict("That agent was destroyed".into()));
     }
@@ -848,11 +1057,14 @@ pub async fn update_agent(
     if !unset.is_empty() {
         update.insert("$unset", unset);
     }
-    db.collection::<AssistantAgent>(AGENTS)
+    let updated = db
+        .collection::<AssistantAgent>(AGENTS)
         .find_one_and_update(doc! {"_id": id, "user_id": owner}, update)
         .return_document(ReturnDocument::After)
         .await?
-        .ok_or_else(not_found)
+        .ok_or_else(not_found)?;
+    super::org_agent_service::audit_change(db, actor, &updated, "profile").await;
+    Ok(updated)
 }
 
 /// A change to a specialist's grants. Merged inside the transaction against
@@ -960,7 +1172,7 @@ impl GrantChange {
 /// Every key a set of threads may hold: the credential row's key, which is
 /// authoritative after rotation or an in-turn replacement, and the key the
 /// thread recorded at its last turn start.
-async fn thread_key_ids(
+pub(crate) async fn thread_key_ids(
     db: &Database,
     owner: &str,
     rows: &[AssistantConversation],
@@ -986,6 +1198,25 @@ async fn thread_key_ids(
     Ok(keys)
 }
 
+/// Synchronize all private member threads, retaining each key's person owner.
+pub(crate) async fn sync_thread_authority(
+    db: &Database,
+    agent: &AssistantAgent,
+    rows: &[AssistantConversation],
+    session: &mut ClientSession,
+) -> AppResult<()> {
+    let authority = KeyAuthority::for_agent(agent);
+    for row in rows {
+        for key in thread_key_ids(db, &row.user_id, std::slice::from_ref(row), session).await? {
+            match credentials::apply_authority(db, &row.user_id, &key, &authority, session).await {
+                Ok(()) | Err(AppError::NotFound(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Apply a grant change to a live specialist inside the caller's transaction.
 /// The agent row and every thread key converge together; requests for
 /// targets the change removes expire.
@@ -996,8 +1227,9 @@ pub async fn apply_grants_in_session(
     change: &GrantChange,
     session: &mut ClientSession,
 ) -> AppResult<AssistantAgent> {
+    let current = maintained_agent(db, owner, agent_id).await?;
     let collection = db.collection::<AssistantAgent>(AGENTS);
-    let filter = doc! {"_id": agent_id, "user_id": owner, "kind": "specialist",
+    let filter = doc! {"_id": agent_id, "user_id": &current.user_id, "kind": "specialist",
     "destroyed_at": bson::Bson::Null};
     let mut agent = collection
         .find_one(filter.clone())
@@ -1037,6 +1269,18 @@ pub async fn apply_grants_in_session(
             }
         }
     }
+    if matches!(change, GrantChange::Machine { .. }) {
+        let logins_changed = previous_logins != agent.saved_login_ids;
+        Box::pin(super::machine_access_service::membership_changed(
+            db,
+            owner,
+            &mut agent,
+            &previous_machines,
+            logins_changed,
+            session,
+        ))
+        .await?;
+    }
     let (grants, guest_access) = change.apply(&agent.grants, &agent.guest_access);
     let removed: Vec<String> = agent
         .grants
@@ -1049,12 +1293,17 @@ pub async fn apply_grants_in_session(
     let lost_account = agent.grants.account_read && !grants.account_read;
     agent.grants = grants;
     agent.guest_access = guest_access;
+    Box::pin(super::org_agent_service::validate_grants(db, owner, &agent)).await?;
     let encode = |value: bson::ser::Result<bson::Bson>| {
         value.map_err(|_| AppError::Internal("Grant encoding failed".into()))
     };
     let mut set = doc! {"grants": encode(bson::to_bson(&agent.grants))?,
     "guest_access": encode(bson::to_bson(&agent.guest_access))?, "updated_at": bson::DateTime::now()};
     if matches!(change, GrantChange::Machine { .. }) {
+        set.insert(
+            "machine_access",
+            encode(bson::to_bson(&agent.machine_access))?,
+        );
         set.insert(
             "machine_node_ids",
             bson::to_bson(&agent.machine_node_ids)
@@ -1072,17 +1321,14 @@ pub async fn apply_grants_in_session(
         .await?;
     let mut cursor = db
         .collection::<AssistantConversation>(CONVERSATIONS)
-        .find(doc! {"user_id": owner, "agent_id": &agent.id})
+        .find(doc! {"agent_id": &agent.id})
         .session(&mut *session)
         .await?;
     let rows: Vec<AssistantConversation> = cursor.stream(&mut *session).try_collect().await?;
-    let authority = KeyAuthority::for_agent(&agent);
-    for key in thread_key_ids(db, owner, &rows, session).await? {
-        match credentials::apply_authority(db, owner, &key, &authority, &mut *session).await {
-            // Revoked predecessors of rotated keys no longer match.
-            Ok(()) | Err(AppError::NotFound(_)) => {}
-            Err(error) => return Err(error),
-        }
+    sync_thread_authority(db, &agent, &rows, session).await?;
+    if previous_machines != agent.machine_node_ids || previous_logins != agent.saved_login_ids {
+        let ids: Vec<&str> = rows.iter().map(|row| row.id.as_str()).collect();
+        db.collection::<bson::Document>(ACKS).update_many(doc! {"conversation_id":{"$in":ids},"status":{"$in":["pending","allowed"]},"tool_name":{"$regex":"^(nyx__machine_|nyxid__machine_)"}},doc! {"$set":{"status":"expired"}}).session(&mut *session).await?;
     }
     let mut expire = Vec::new();
     if !removed.is_empty() {
@@ -1104,7 +1350,7 @@ pub async fn apply_grants_in_session(
         let ids: Vec<&str> = rows.iter().map(|row| row.id.as_str()).collect();
         db.collection::<bson::Document>(ACKS)
             .update_many(
-                doc! {"user_id": owner, "conversation_id": {"$in": ids},
+                doc! {"conversation_id": {"$in": ids},
                 "status": "pending", "$or": expire},
                 doc! {"$set": {"status": "expired"}},
             )
@@ -1128,8 +1374,14 @@ pub async fn set_grants(
     let agent = session
         .start_transaction()
         .and_run2(async move |session| {
-            let operation =
-                apply_grants_in_session(&db_owned, &owner_owned, &agent_id, &change, session).await;
+            let operation = Box::pin(apply_grants_in_session(
+                &db_owned,
+                &owner_owned,
+                &agent_id,
+                &change,
+                session,
+            ))
+            .await;
             transactions::transaction_result(operation)
         })
         .await
@@ -1139,7 +1391,7 @@ pub async fn set_grants(
         owner,
         "assistant_agent_grants_changed",
         serde_json::json!({
-            "agent_id": &agent.id,
+            "agent_id": &agent.id, "owner_id": &agent.user_id,
             "service_ids": &agent.grants.service_ids,
             "platform_service_ids": &agent.grants.platform_service_ids,
             "account_read": agent.grants.account_read,
@@ -1166,11 +1418,12 @@ pub async fn destroy(db: &Database, owner: &str, agent_id: &str) -> AppResult<As
             let db = &db_owned;
             let owner = owner_owned.as_str();
             let operation: AppResult<_> = async {
+                let current = maintained_agent(db, owner, &agent_id).await?;
                 let now = Utc::now();
-                let agent = db
+                let mut agent = db
                     .collection::<AssistantAgent>(AGENTS)
                     .find_one_and_update(
-                        doc! {"_id": &agent_id, "user_id": owner, "kind": "specialist",
+                        doc! {"_id": &agent_id, "user_id": &current.user_id, "kind": "specialist",
                         "destroyed_at": bson::Bson::Null},
                         doc! {"$set": {"destroyed_at": bson::DateTime::from_chrono(now),
                         "updated_at": bson::DateTime::from_chrono(now)}},
@@ -1179,27 +1432,36 @@ pub async fn destroy(db: &Database, owner: &str, agent_id: &str) -> AppResult<As
                     .session(&mut *session)
                     .await?
                     .ok_or_else(not_found)?;
+                Box::pin(super::machine_access_service::destroyed_in_session(
+                    db, &mut agent, session,
+                ))
+                .await?;
                 let conversations = db.collection::<AssistantConversation>(CONVERSATIONS);
                 let mut cursor = conversations
-                    .find(doc! {"user_id": owner, "agent_id": &agent.id})
+                    .find(doc! {"agent_id": &agent.id})
                     .session(&mut *session)
                     .await?;
                 let rows: Vec<AssistantConversation> =
                     cursor.stream(&mut *session).try_collect().await?;
                 let mut children = Vec::new();
-                for key in thread_key_ids(db, owner, &rows, &mut *session).await? {
-                    match key_service::delete_api_key_in_session(
-                        db,
-                        owner,
-                        &key,
-                        None,
-                        Some(&mut *session),
-                    )
-                    .await
+                for row in &rows {
+                    for key in
+                        thread_key_ids(db, &row.user_id, std::slice::from_ref(row), &mut *session)
+                            .await?
                     {
-                        Ok(revoked) => children.extend(revoked),
-                        Err(AppError::NotFound(_)) => {}
-                        Err(error) => return Err(error),
+                        match key_service::delete_api_key_in_session(
+                            db,
+                            &row.user_id,
+                            &key,
+                            None,
+                            Some(&mut *session),
+                        )
+                        .await
+                        {
+                            Ok(revoked) => children.extend(revoked),
+                            Err(AppError::NotFound(_)) => {}
+                            Err(error) => return Err(error),
+                        }
                     }
                 }
                 for row in rows {
@@ -1212,18 +1474,21 @@ pub async fn destroy(db: &Database, owner: &str, agent_id: &str) -> AppResult<As
                         set.insert("active_turn.stop_requested", true);
                     }
                     conversations
-                        .update_one(doc! {"_id": &row.id, "user_id": owner}, doc! {"$set": set})
+                        .update_one(
+                            doc! {"_id": &row.id, "user_id": &row.user_id},
+                            doc! {"$set": set},
+                        )
                         .session(&mut *session)
                         .await?;
                     db.collection::<bson::Document>(
                         crate::models::assistant_agent_credential::COLLECTION_NAME,
                     )
-                    .delete_many(doc! {"user_id": owner, "conversation_id": &row.id})
+                    .delete_many(doc! {"user_id": &row.user_id, "conversation_id": &row.id})
                     .session(&mut *session)
                     .await?;
                     db.collection::<bson::Document>(ACKS)
                         .update_many(
-                            doc! {"user_id": owner, "conversation_id": &row.id,
+                            doc! {"user_id": &row.user_id, "conversation_id": &row.id,
                             "status": {"$in": ["pending", "allowed"]}},
                             doc! {"$set": {"status": "expired"}},
                         )
@@ -1246,7 +1511,7 @@ pub async fn destroy(db: &Database, owner: &str, agent_id: &str) -> AppResult<As
         db,
         owner,
         "assistant_agent_destroyed",
-        serde_json::json!({"agent_id": &agent.id}),
+        serde_json::json!({"agent_id": &agent.id, "owner_id": &agent.user_id}),
     )
     .await;
     Ok(agent)
@@ -1254,37 +1519,40 @@ pub async fn destroy(db: &Database, owner: &str, agent_id: &str) -> AppResult<As
 
 /// Permanently delete a destroyed specialist and all of its threads.
 pub async fn purge(db: &Database, owner: &str, agent_id: &str) -> AppResult<()> {
-    let agent = agent(db, owner, agent_id).await?;
+    let agent = maintained_agent(db, owner, agent_id).await?;
     if agent.destroyed_at.is_none() {
         return Err(AppError::Conflict(
             "Destroy the agent before deleting it".into(),
         ));
     }
-    // It leaves its groups; its hidden group threads go with its own.
-    super::assistant_group_service::remove_agent(db, owner, &agent.id).await?;
-    let mut rows = threads(db, &agent, 1000).await?;
-    rows.extend(
-        db.collection::<AssistantConversation>(CONVERSATIONS)
-            .find(doc! {"user_id": owner, "agent_id": &agent.id,
-            "group_id": {"$ne": bson::Bson::Null}})
-            .await?
-            .try_collect::<Vec<_>>()
-            .await?,
-    );
+    // Remove membership from every person's private groups without reading their transcripts.
+    let group_owners = db
+        .collection::<bson::Document>(crate::models::assistant_group::COLLECTION_NAME)
+        .distinct("user_id", doc! {"member_agent_ids": &agent.id})
+        .await?;
+    for person in group_owners.iter().filter_map(bson::Bson::as_str) {
+        super::assistant_group_service::remove_agent(db, person, &agent.id).await?;
+    }
+    let rows: Vec<AssistantConversation> = db
+        .collection(CONVERSATIONS)
+        .find(doc! {"agent_id": &agent.id})
+        .await?
+        .try_collect()
+        .await?;
     for row in rows {
-        match engine::delete(db, owner, &row.id).await {
+        match engine::delete(db, &row.user_id, &row.id).await {
             Ok(_) | Err(AppError::NotFound(_)) => {}
             Err(error) => return Err(error),
         }
     }
     db.collection::<AssistantAgent>(AGENTS)
-        .delete_one(doc! {"_id": &agent.id, "user_id": owner})
+        .delete_one(doc! {"_id": &agent.id, "user_id": &agent.user_id})
         .await?;
     audit(
         db,
         owner,
         "assistant_agent_deleted",
-        serde_json::json!({"agent_id": &agent.id}),
+        serde_json::json!({"agent_id": &agent.id, "owner_id": &agent.user_id}),
     )
     .await;
     Ok(())
@@ -1334,6 +1602,9 @@ pub async fn remember(
     text: &str,
     replace_id: Option<&str>,
 ) -> AppResult<MemoryNote> {
+    let current = maintained_agent(db, owner, agent_id).await?;
+    let actor = owner;
+    let owner = current.user_id.as_str();
     let text = text.trim();
     if text.is_empty() || text.chars().count() > MAX_MEMORY_NOTE_CHARS {
         return Err(AppError::ValidationError(format!(
@@ -1358,7 +1629,8 @@ pub async fn remember(
         if updated.matched_count != 1 {
             return Err(AppError::NotFound("Memory note not found".into()));
         }
-        let agent = agent(db, owner, agent_id).await?;
+        super::org_agent_service::audit_change(db, actor, &current, "memory").await;
+        let agent = agent(db, actor, agent_id).await?;
         return agent
             .memory
             .into_iter()
@@ -1389,10 +1661,14 @@ pub async fn remember(
             "Memory holds at most {MAX_MEMORY_NOTES} notes; forget or replace one first"
         )));
     }
+    super::org_agent_service::audit_change(db, actor, &current, "memory").await;
     Ok(note)
 }
 
 pub async fn forget(db: &Database, owner: &str, agent_id: &str, note_id: &str) -> AppResult<()> {
+    let current = maintained_agent(db, owner, agent_id).await?;
+    let actor = owner;
+    let owner = current.user_id.as_str();
     let result = db
         .collection::<AssistantAgent>(AGENTS)
         .update_one(
@@ -1403,6 +1679,7 @@ pub async fn forget(db: &Database, owner: &str, agent_id: &str, note_id: &str) -
     if result.matched_count != 1 {
         return Err(AppError::NotFound("Memory note not found".into()));
     }
+    super::org_agent_service::audit_change(db, actor, &current, "memory").await;
     Ok(())
 }
 
@@ -1447,6 +1724,12 @@ pub struct ReplySummary {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct AgentSummary {
+    pub owner_id: String,
+    pub owner_name: Option<String>,
+    pub owner_kind: &'static str,
+    pub org_role: Option<crate::models::org_membership::OrgRole>,
+    pub can_maintain: bool,
+    pub can_use: bool,
     pub machines: Vec<String>,
     pub logins: Vec<String>,
     pub id: String,
@@ -1480,6 +1763,8 @@ pub struct RequestSummary {
     pub agent_id: Option<String>,
     pub conversation_id: String,
     pub kind: String,
+    pub operation_selection: Option<crate::models::agent_operation_scope::OperationSelection>,
+    pub skill_selection: Option<crate::models::assistant_agent::SkillSelection>,
     pub service_slug: Option<String>,
     pub summary: String,
     pub requested_by: Option<String>,
@@ -1496,6 +1781,8 @@ pub fn request_summary(
         agent_id: agent.map(|agent| agent.id.clone()),
         conversation_id: row.conversation_id.clone(),
         kind: row.kind.clone(),
+        operation_selection: row.operation_selection.clone(),
+        skill_selection: row.skill_selection.clone(),
         service_slug: row.service_slug.clone(),
         summary: row.summary.clone(),
         requested_by: row.request_excerpt.clone(),
@@ -1655,7 +1942,45 @@ pub async fn summaries(
     let by_thread = request_agents(db, owner, &requests, &rows).await?;
     let running = running_agents(db, owner).await?;
     let mut out = Vec::with_capacity(rows.len());
-    for agent in rows {
+    for mut agent in rows {
+        let acl = super::org_agent_service::access(db, owner, &agent.user_id).await?;
+        let org_owned = owner != agent.user_id;
+        if org_owned {
+            let visible: Vec<crate::models::user_service::UserService> = db
+                .collection(crate::models::user_service::COLLECTION_NAME)
+                .find(doc! {"_id": {"$in": &agent.grants.service_ids}, "user_id": &agent.user_id})
+                .await?
+                .try_collect()
+                .await?;
+            agent.grants.service_ids.retain(|id| {
+                acl.allows_resource(id)
+                    && visible
+                        .iter()
+                        .any(|s| &s.id == id && (!s.admin_only || acl.can_write()))
+            });
+        }
+        let owner_name = if org_owned {
+            db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+                .find_one(doc! {"_id": &agent.user_id})
+                .await?
+                .and_then(|u| u.display_name)
+        } else {
+            None
+        };
+        let home_id = if !super::org_agent_service::can_use(&acl) {
+            None
+        } else if org_owned {
+            db.collection::<AssistantConversation>(CONVERSATIONS)
+                .find_one(
+                    doc! {"user_id": owner, "agent_id": &agent.id, "channel": bson::Bson::Null,
+                    "group_id": bson::Bson::Null, "automation_thread": {"$ne": true}},
+                )
+                .sort(doc! {"created_at": 1})
+                .await?
+                .map(|r| r.id)
+        } else {
+            agent.home_conversation_id.clone()
+        };
         let status = if agent.destroyed_at.is_some() {
             "destroyed"
         } else if running.contains(&agent.id) {
@@ -1663,11 +1988,17 @@ pub async fn summaries(
         } else {
             "idle"
         };
-        let last_reply = match (reply_chars, agent.home_conversation_id.as_deref()) {
+        let last_reply = match (reply_chars, home_id.as_deref()) {
             (0, _) | (_, None) => None,
             (chars, Some(home)) => last_reply(db, owner, home, chars).await?,
         };
         out.push(AgentSummary {
+            owner_id: agent.user_id.clone(),
+            owner_name,
+            owner_kind: if org_owned { "org" } else { "person" },
+            org_role: super::org_agent_service::role(&acl),
+            can_maintain: super::org_agent_service::can_maintain(&acl),
+            can_use: super::org_agent_service::can_use(&acl),
             machines: agent.machine_node_ids.clone(),
             logins: agent.saved_login_ids.clone(),
             services: agent
@@ -1675,7 +2006,13 @@ pub async fn summaries(
                 .service_ids
                 .iter()
                 .chain(&agent.grants.platform_service_ids)
-                .map(|id| names.get(id).cloned().unwrap_or_else(|| id.clone()))
+                .map(|id| {
+                    if org_owned {
+                        id.clone()
+                    } else {
+                        names.get(id).cloned().unwrap_or_else(|| id.clone())
+                    }
+                })
                 .collect(),
             account_read: agent.grants.account_read,
             guest_access: agent
@@ -1683,6 +2020,7 @@ pub async fn summaries(
                 .service_ids
                 .iter()
                 .chain(&agent.grants.platform_service_ids)
+                .filter(|_| !org_owned)
                 .map(|id| {
                     let name = names.get(id).cloned().unwrap_or_else(|| id.clone());
                     let level = agent.guest_access.get(id).copied().unwrap_or_default();
@@ -1707,8 +2045,12 @@ pub async fn summaries(
             description: agent.description.clone(),
             specialty: agent.specialty.clone(),
             created_by: agent.created_by.clone(),
-            home_conversation_id: agent.home_conversation_id.clone(),
-            memory_count: agent.memory.len(),
+            home_conversation_id: home_id,
+            memory_count: if super::org_agent_service::can_maintain(&acl) {
+                agent.memory.len()
+            } else {
+                0
+            },
             created_at: agent.created_at,
             last_active_at: agent.updated_at,
             destroyed_at: agent.destroyed_at,
@@ -1725,10 +2067,23 @@ pub async fn read(
     agent: &AssistantAgent,
     limit: i64,
 ) -> AppResult<Vec<ReplySummary>> {
-    let Some(home) = agent.home_conversation_id.as_deref() else {
+    super::org_agent_service::require_use(db, owner, agent).await?;
+    let home = if owner == agent.user_id {
+        agent.home_conversation_id.clone()
+    } else {
+        db.collection::<AssistantConversation>(CONVERSATIONS)
+            .find_one(
+                doc! {"user_id": owner, "agent_id": &agent.id, "group_id": bson::Bson::Null,
+                "channel": bson::Bson::Null, "automation_thread": {"$ne": true}},
+            )
+            .sort(doc! {"created_at": 1})
+            .await?
+            .map(|r| r.id)
+    };
+    let Some(home) = home else {
         return Ok(Vec::new());
     };
-    let rows = match engine::messages(db, owner, home, limit.clamp(1, READ_LIMIT), None).await {
+    let rows = match engine::messages(db, owner, &home, limit.clamp(1, READ_LIMIT), None).await {
         Ok(rows) => rows,
         Err(AppError::NotFound(_)) => Vec::new(),
         Err(error) => return Err(error),
@@ -1751,11 +2106,16 @@ pub async fn direct_chats_note(
     owner: &str,
     since: DateTime<Utc>,
 ) -> AppResult<String> {
-    let specialists: Vec<AssistantAgent> = agents(db, owner, false)
-        .await?
-        .into_iter()
-        .filter(|agent| !agent.is_nyxbot())
-        .collect();
+    let mut specialists = Vec::new();
+    for agent in agents(db, owner, false).await? {
+        if !agent.is_nyxbot()
+            && super::org_agent_service::can_use(
+                &super::org_agent_service::access(db, owner, &agent.user_id).await?,
+            )
+        {
+            specialists.push(agent);
+        }
+    }
     if specialists.is_empty() {
         return Ok(String::new());
     }

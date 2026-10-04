@@ -1,3 +1,4 @@
+import type { UploadedMessage } from "@/lib/assistant/uploads";
 import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { nyxAgentTransport } from "@/lib/assistant/nyxagent-transport";
@@ -40,10 +41,19 @@ function liveSend(
   text: string,
   onAdopt: (id: string) => void,
   agent?: NyxAgentConversationAgent,
+  attachmentIds?: string[],
+  adoptExisting?: boolean,
 ) {
   const actorId = currentCreditsActor();
   const onFailed = (id: string, turnId: string, code: string) =>
     notifyTurnCredits(id, turnId, code, actorId);
+  if (attachmentIds?.length) {
+    return nyxAgentTransport.send(conversationId, text, onAdopt, onFailed, {
+      ...(!conversationId && agent ? { agent } : {}),
+      attachmentIds,
+      adoptExisting,
+    });
+  }
   return conversationId || !agent
     ? nyxAgentTransport.send(conversationId, text, onAdopt, onFailed)
     : nyxAgentTransport.send(undefined, text, onAdopt, onFailed, { agent });
@@ -56,6 +66,10 @@ export function continuationText(acknowledgement: NyxAgentAcknowledgement): stri
       return `Approved: this chat may use ${
         acknowledgement.service_name ?? acknowledgement.service_slug ?? "the service"
       }. Continue.`;
+    case "skills":
+      return `Skill proposal reviewed: ${acknowledgement.summary} NyxBot must still attach it through the owner confirmation flow.`;
+    case "operations":
+      return `Approved: ${acknowledgement.summary} Continue within the updated operation scope.`;
     case "account":
       return "Approved: account management for this chat. Continue.";
     case "action":
@@ -147,9 +161,13 @@ export function useNyxAgentAssistantChat({
       ),
   });
   const send = useCallback(
-    async (text: string) => {
+    async (text: string, uploads?: UploadedMessage) => {
       try {
-        await liveSend(selectedConversationId, text, onConversationAdopted, draftAgent);
+        const id = selectedConversationId ?? uploads?.conversationId;
+        await liveSend(
+          id, text, onConversationAdopted, draftAgent,
+          uploads?.attachmentIds, Boolean(id && !selectedConversationId),
+        );
       } finally {
         // A new thread changes its agent's summary. (Model routing is
         // server-side, so there is no profile list to refresh.)
@@ -207,6 +225,7 @@ export function useNyxAgentAssistantChat({
       // approval, and it cannot wait for the decision inside its own turn. A
       // specialist's request routed to NyxBot is resumed by the server itself.
       if (
+        acknowledgement.continuation_owner === "server" ||
         acknowledgement.decider === "orchestrator" ||
         acknowledgement.trigger_run_id
       )
@@ -298,6 +317,7 @@ export function useNyxAgentAssistantChat({
     /** The selected thread's row, once loaded. */
     conversation: selected,
     session: nyxAgentTransport.session(selectedConversationId),
+    continuations: nyxAgentTransport.continuations(selectedConversationId),
     isStreaming: nyxAgentTransport.isRunning(selectedConversationId),
     isLoading: history.isLoading,
     error: history.error?.message ?? threads.error?.message ?? agents.error?.message,

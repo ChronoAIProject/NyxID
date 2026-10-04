@@ -1,11 +1,12 @@
 import { useState } from "react";
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, expect, it, vi } from "vitest";
 import { EMPTY_FILTERS } from "@/lib/usage-analytics";
 import type { AnalyticsFilters } from "@/schemas/usage-analytics";
 import { FilterBar, type SampleOptions } from "./controls";
+import { api } from "@/lib/api-client";
 
 const services = Array.from({ length: 22 }, (_, index) => ({
   id: `svc-${index}`,
@@ -43,6 +44,40 @@ function renderBar(initial: Partial<AnalyticsFilters> = {}) {
 const picker = () => within(screen.getByRole("dialog"));
 
 describe("admin usage FilterBar picker", () => {
+  it("loads and caches every dropdown before any is opened", async () => {
+    const get = vi
+      .spyOn(api, "get")
+      .mockImplementation(async (path) =>
+        path === "/services"
+          ? { services: [{ id: "svc-1", name: "Service One", slug: "one" }] }
+          : { users: [], total: 0 },
+      );
+    try {
+      render(
+        <QueryClientProvider client={new QueryClient()}>
+          <FilterBar filters={EMPTY_FILTERS} onChange={vi.fn()} />
+        </QueryClientProvider>,
+      );
+      await waitFor(() => expect(get).toHaveBeenCalledTimes(4));
+      expect(get).toHaveBeenCalledWith("/services");
+      expect(get).toHaveBeenCalledWith(
+        "/admin/users?page=1&per_page=50&user_type=org&search=",
+      );
+      expect(get).toHaveBeenCalledWith(
+        "/admin/users?page=1&per_page=50&user_type=person&search=",
+      );
+      await userEvent.click(
+        screen.getByRole("button", { name: "Filter services" }),
+      );
+      expect(
+        await picker().findByRole("button", { name: /Service One/ }),
+      ).toBeVisible();
+      expect(get).toHaveBeenCalledTimes(4);
+    } finally {
+      get.mockRestore();
+    }
+  });
+
   it("matches a selected slug to its service and keeps it through Apply", async () => {
     const onChange = renderBar({ services: ["service-3"] });
     await userEvent.click(

@@ -8,6 +8,9 @@ pub struct Capture {
     latest: Arc<Mutex<Option<Pixels>>>,
 }
 impl Capture {
+    pub fn for_display(_display: nyxid_machine::desktop::Display) -> Result<Self> {
+        Self::new()
+    }
     pub fn new() -> Result<Self> {
         let content = SCShareableContent::get()?;
         let display = content

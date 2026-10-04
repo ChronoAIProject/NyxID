@@ -617,6 +617,10 @@ async fn schedule_specialist_authority_threads_and_guest_refusal() {
     assert!(key.allowed_service_ids.is_empty());
     assert!(key.allowed_platform_service_ids.is_empty());
     let chat = ChatAuthority {
+        org_agent_access: None,
+        turn_id: None,
+        turn_stopped: false,
+        turn_live: true,
         machine_node_ids: Vec::new(),
         saved_login_ids: Vec::new(),
         confirmation_policy: None,
@@ -1058,6 +1062,10 @@ async fn schedule_confirmation_waits_and_resumes_without_another_budget() {
         .db
         .collection::<AssistantAcknowledgement>(ACKS)
         .insert_one(AssistantAcknowledgement {
+            voice_request_id: None,
+            continuation_receipt_id: None,
+            skill_selection: None,
+            operation_selection: None,
             id: ack_id.clone(),
             conversation_id: thread.id.clone(),
             user_id: OWNER.into(),

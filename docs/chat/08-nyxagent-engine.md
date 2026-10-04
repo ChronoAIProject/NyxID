@@ -20,6 +20,30 @@ handler independently enforces the effective per-person engine flag. Disabled
 routes and another person's conversation return not-found-shaped responses.
 No request accepts an owner, upstream URL, secret, or upstream session ID.
 
+### Conversation-key live-turn gate
+
+Every per-thread `nyxid-assistant` credential carries a request-time
+`AssistantTurnFence` loaded with its conversation. When the runtime flag
+`assistant:live-turn-gate` is enabled, MCP tool execution, provider/proxy
+execution, pinned skill reads, conversation attachment reads, exact-approval
+redemption and Oracle submission require `live_turn` and
+`active_turn.stop_requested=false`. Discovery/list/search, human session
+routes and Stop remain available. Dedicated channel-agent keys are a separate
+credential class and are not subject to this gate; a conversation credential
+must not be used as a channel route or event-gateway key.
+
+The fence uses the existing 2,100-second execution plus settlement lease and
+adds no grace period. A request admitted before a concurrent Stop keeps its
+request snapshot; the next request is refused with `assistant_turn_required`.
+Voice delegation must enter through `begin_turn` on the same thread and must
+not call tools with the bare key after the voice session or turn ends.
+
+The flag is default-off for rollout safety: deploy every auth, MCP, proxy, LLM
+and worker replica with fence support, then enable `assistant:live-turn-gate`.
+Rollback disables the flag before rolling back binaries. Existing fences are
+always computed, and ordinary API keys, sessions, service accounts and public
+requests keep their no-extra-read path.
+
 ## Deployment prerequisites
 
 The active admin-managed catalog row `llm-nyx` supplies the destination.
@@ -457,6 +481,10 @@ Discovery does not provision a key: users without one initially see the default
 profile. The browser refreshes profiles after a send, so provisioning makes the
 upstream list available immediately. No new NyxID environment variable is introduced.
 
+## User uploads
+
+[10 — Assistant uploads](10-uploads.md) defines owner uploads for conversations and groups. Documents are read through `nyx__attachment_read`; user images use the advertised `nyxagent-input-image-v1` protocol and the exact thread key. Older deployments explicitly report that images cannot be viewed. This does not change tool-image delivery below.
+
 ## Tool images
 
 Machine screenshots and shared images use this same owner-only attachment
@@ -514,9 +542,9 @@ role, text, completed/failed status, optional stable error and date. Unique inde
 conversation + seq. All dates use the repository BSON date helpers.
 
 Before egress, a transaction writes the user message and claims `active_turn`.
-A competing send gets `turn_active` while the fence is live. A fence expires at
+A competing send gets `turn_active` while the fence is live. A fence initially expires at
 `started_at + ACTIVE_TURN_TTL_SECS` (1800 seconds execution + 300 seconds settlement
-grace). One shared `live_turn` check governs admission, Rename, Delete, Stop and
+grace). Automatic continuation refreshes `lease_expires_at` on that same turn. One shared `live_turn` check governs admission, Rename, Delete, Stop and
 DTOs; an expired fence appears as `active_turn: null`. The next send transactionally
 inserts an empty failed reply for the lost turn (`error_code=turn_lost`), clears
 the binding with `turn_failed`, inserts the new user message and claims its fence.
@@ -543,6 +571,9 @@ drops the upstream stream, saves partial text as failed/error `cancelled`, clear
 the binding with `turn_failed`, then emits `turn.completed(cancelled)`. A Stop
 committed before settlement wins the transaction race. There is no NyxAgent Stop
 API: stream cancellation is the supported upstream cancellation mechanism.
+Stop also signs a conversation-scoped node cancel: cua, process groups and
+gateway streams stop immediately, and stopped-turn machine calls are refused.
+A standalone desktop Stop applies to all agent activity on that machine.
 
 Upstream request, rebuilt entirely by NyxID:
 
@@ -569,7 +600,8 @@ messages are labeled. The current user message is excluded from the recap.
 
 First-byte deadline is 30 seconds including request setup. Idle timeout is
 120 seconds (upstream keepalive is 15 seconds). Turn execution is capped at
-30 minutes; stream bytes at 8 MiB and output text at 2 MiB. Incremental decoding
+610 seconds per possible upstream turn, bounded by the continuation hard cap
+(32 continuations); each stream is capped at 8 MiB and total output text at 2 MiB. Incremental decoding
 handles split UTF-8 and LF/CRLF frames. Unknown event types are ignored; malformed
 recognized events, invalid IDs, or nonmonotonic recognized sequence numbers fail
 closed. Cached upstream replay may contain only a terminal response, so terminal
@@ -578,7 +610,7 @@ stored on success. Locally guessing the first session ID is incorrect.
 
 NyxID events have a strictly increasing `cursor`: `turn.status` (also carries
 `conversation_id`), `message.started`, `block.started`, `block.delta`,
-`block.completed`, `message.completed`, `turn.completed`. They reuse the Direct
+`block.completed`, `message.completed`, `turn.completed`, and `turn.continuing`. They reuse the Direct
 text-event grammar. Terminal status is `completed`, `failed`, or `cancelled`;
 error is null or a stable `{code,message}`. The additive `turn.notice` carries
 `code=context_reset` and the fixed message:
@@ -592,7 +624,9 @@ error is null or a stable `{code,message}`. The additive `turn.notice` carries
 | 401/403 or `agent_key_required` | Replace credential, clear binding, emit notice, retry once with recap |
 | `stale_response`, `outcome_unknown` | Fail without retry; discard binding |
 | `insufficient_credits` (typed `AppError::InsufficientCredits`, nested `error.code`, NyxID's flat 402 `{"error":"insufficient_credits"}`, or `response.failed`) | Fail without credential replacement, retry, backoff or rebind, with the fixed message "There aren't enough credits to run this turn." During a rolling deploy old replicas keep reporting `assistant_unavailable`; existing failed rows are not backfilled |
-| Any failed turn, timeout, invalid stream, cancellation or other error | Persist failed partial reply; discard binding immediately with `turn_failed` |
+| `tool_budget_exhausted`, `turn_timeout` | Continue automatically on the same session, with the same grants/TriggerRun, up to `max_auto_continuations` (default 8, hard cap 32). Preserve context if the bound is reached |
+| Identical full call/result sequence and unchanged reply text | Stop with `continuation_no_progress`; preserve the session |
+| Other failed turn, invalid stream or cancellation | Persist failed partial reply; discard binding immediately with `turn_failed` |
 
 The transcript displays one inline system note for the latest reset, before the
 first message whose `created_at` is strictly greater than `context_reset_at`, or
@@ -602,8 +636,9 @@ message. Rebind resets occur during execution and precede that turn's reply.
 Live `turn.notice` displays the same note immediately and refreshes the persisted
 reset timestamp; subsequent reloads retain its transcript position without a banner.
 
-The next turn after any reset sends a recap and emits the notice. There is no
-retry after an upstream stream has started. Generic allowlisted messages replace
+The next turn after any reset sends a recap and emits the notice. There is no replay of an uncertain action after an upstream stream has started.
+Explicit budget/time terminal errors start a new continuation request on the same
+session with an idempotency key suffixed `:continuation:N`; they do not reset or recap. Generic allowlisted messages replace
 all raw upstream error bodies. The raw current key is redacted from reflected
 assistant output, including split deltas. Wire-log capture is disabled for this
 surface.
@@ -635,8 +670,8 @@ but the operator must configure NyxAgent's recursion guard there separately.
 The brief's statement that upstream cannot cancel and will always commit is
 superseded by its D5 addendum and `api.rs:142–144`: dropping SSE cancels runtime.
 Browser disconnect therefore drops only the subscription; explicit Stop drops
-the worker's stream. `responses.rs:503–524` poisons every failed session, so every
-failure invalidates the binding immediately. The numbered [6]/[7] header block
+the worker's stream. Explicit upstream budget/time errors retain a resumable session; other failures
+invalidate the binding immediately. The numbered [6]/[7] header block
 mentioned in D4 is WebSocket assembly in this checkout; the actual HTTP overwrite
 was `proxy_service`'s bearer forwarding after shared assembly. Both HTTP paths now
 use the shared guard and the ordering test. The exact scope correction and models
@@ -783,3 +818,123 @@ standalone under `/assistant/machines/{id}/desktop`. Studio Nodes shows only a
 read-only machine summary linking to assistant settings; Developer → Triggers
 retains secrets/replay. `/automations` redirects with `setup` and `agent` intact.
 Server-generated browser URLs use `services::assistant_links::AssistantPage`.
+Machine turns use the compact browser tool for ordinary web work. Explicit NyxAgent `tool_budget_exhausted` and `turn_timeout` results continue the existing session under the owner-configured continuation bound; they do not reset context. Stop fences the turn and cancels in-flight machine work.
+
+Machine updates use `nyxid__machine_update` and always require an owner action
+card, including requests from granted specialists. Ungranted specialists request
+machine permission through NyxBot. Legacy containers receive a token-free link to
+the prefilled host command; the agent ends its turn while a durable
+`machine_update` watch waits for reconnect/failure/expiry. On wake, verify the
+version, AX state and browser snapshot before resuming. An owner-identified,
+different granted native machine may run the command after metadata-only Docker
+inspection; the card binds both machines and the inspected container ID. Offer
+this assistance proactively for Update available or missing old-node capabilities.
+The server release is the supported update target. New setup recommends idle
+automatic updates; existing machines require explicit owner opt-in.
+
+Continuation progress is derived server-side at MCP completion from tool name,
+canonical arguments and result hashes. Only a rolling digest and call count are
+stored on the active turn, fenced by turn and continuation IDs. The activity UI's
+bounded labels are not a progress signal. Issued/completed counters exclude incomplete windows from loop detection. Different arguments/results or reply
+text continue even when every call uses the same tool.
+
+Machine browser snapshots aggregate visible frames and support query/offset/scope
+paging. Trusted native input follows extension hit-testing; explicit DOM fallback
+is labelled. Secure and dev Linux desktops have separate X servers and cookies,
+with a live-panel display switcher and per-display owner control. On macOS the
+physical desktop is shared and takeover locks both views.
+
+
+Machine browser recovery (0.41.1): secure-browser extension startup is event-driven
+on persisted profiles, with automatic handshake repair/relaunch and a specific
+12413 recovery message if it fails. The status CLI reads cached daemon state and
+never launches another browser. A 12416 unsupported computer call includes the
+bounded advertised `computer_tools`; use `nyx__machine_browser` snapshot for page
+content, or dev screenshot for an owner attachment. Machine discovery shares
+service-tool word matching, including full-match-first ranking.
+
+## Thread titles
+
+New owner threads have `title_source: provisional`. Their first owner message
+supplies an immediate title: first nonempty line, collapsed whitespace, at most
+60 Unicode characters, cut at a word boundary where possible. Existing rows
+without `title_source` deserialize as `user` and are never automatically renamed.
+Guest/channel threads, automation threads and hidden group-member threads keep
+their existing naming. User renames set `title_source: user`, remain allowed
+during a turn, and always win over a late generated title. The conditional write
+matches only `provisional`; settlement preserves concurrent metadata changes.
+
+**Model-route decision (U1 review):** do not use NyxAgent for titles.
+Its `POST /v1/responses` `store:false` controls persistence only; it still runs
+an agent with the thread key's MCP authority. `Request` rejects unknown fields
+and has no `tools` switch. A prompt forbidding tools cannot isolate that run,
+especially when the first reply quotes untrusted web or tool content.
+
+`services/assistant_oneshot_inference.rs::one_shot_text` instead calls a provider
+text endpoint directly. Its typed input/limits interface accepts no tool schema,
+agent key, session or arbitrary provider JSON. Requests omit both `tools` and
+`tool_choice`, use `stream:false`, and bound output tokens. Only OpenAI Responses
+sends `store:false`; Chat Completions and Anthropic Messages omit it for provider
+compatibility. Without a tools array, providers reject `tool_choice`. Compatible
+Chat Completions providers can also reject `store` as an unknown field.
+The helper rejects tool calls and non-text content; it never executes them.
+Responses reasoning metadata is ignored, retaining only the text answer. The
+three catalog `inference.wire_protocol` values are supported: Responses, Chat
+Completions and Anthropic Messages. Redirects are disabled and responses are
+capped at 64 KiB.
+
+Discovery considers at most 32 active inference services with model-list support,
+prioritizing available platform routes. Credential selection uses the same
+`resolve_proxy_target_from_user_service`, legacy resolver/viewer guard and
+provider delegation helpers as the LLM gateway: an explicit personal
+`credential_binding` wins, platform grants are checked before decryption, and
+org BYOK is reachable only through the acting person's live role and service
+scope. No credential is provisioned and `llm-nyx` is excluded. Model discovery
+uses the resolved service's `models` endpoint (3-second bound), prefers advertised
+nano/mini/haiku/flash/small/fast models, excludes non-text families and falls back
+to another advertised text model. This small-model preference is a heuristic,
+not a policy decision. There is no hardcoded vendor model fallback. A bounded
+in-process cache holds only the chosen model ID for each (service ID, credential
+class), for 10 minutes and at most 128 entries, evicting the oldest selection.
+Cache hits skip model discovery and its metering; they still resolve credentials,
+ACLs and grants afresh. No credentials or authority are cached. Inference 4xx
+responses (including 404) invalidate that model choice for the next call; 5xx
+and transport errors leave it until expiry. No available route/models, provider
+refusal or timeout leaves the provisional title. There is no retry of a
+dispatched inference request.
+
+Both model discovery and inference use the existing billing admission and
+settlement path and `BillingOwnerResolver::resolve_for_execution`. This metadata
+task bills the acting person, including platform use and authorized org BYOK;
+it never charges an agent or an org wallet. Org-agent titles retain the B3a
+actor checks both before inference and before the conditional title update.
+Provider processing policies still apply. This internal helper is also suitable
+for bounded text classification; callers must independently authorize the task.
+
+After the first successful owner exchange settles, start title generation in a
+detached task. A replica permits at most four concurrent requests, with no queue
+or retries and a 20-second overall deadline (15 seconds for inference, including
+discovery, and 128 output tokens for titles). This never holds the turn permit or
+delays settlement. Supply only bounded text excerpts of the first user/reply
+pair (2,000 characters each), marked as untrusted data, with instructions to
+produce a 3–6 word title in the user's language. Tool isolation comes from the
+provider request contract, not these instructions. Send no images, attachments or session binding.
+Sanitize and bound output to 60 characters and render it as text. Never log
+excerpts or titles; errors are silently best effort and the credential cannot be
+reflected into the title; reflected resolved provider credentials are rejected.
+Cancellation retains metering cleanup, including a usage estimate for dispatched
+requests that never yield a response. The existing identifier-only conversation change
+stream refreshes titles in the sidebar and active thread without a reload.
+Sidebar Rename is an inline editor with optimistic metadata updates and rollback
+on failure; it does not interrupt a running turn.
+
+Machine tool discovery and execution intersect explicit per-agent capability
+assignments, node-local ceilings and live actor authority. With capability editing
+enabled for the acting person, new selection enables nothing. With it disabled,
+NyxBot reachability and specialist Grants selection snapshot legacy capabilities
+under the live ACL. Existing snapshots survive enabling the editor, and explicit
+restrictions survive disabling it. `nyxid__machine_capabilities` lists the current revision and
+proposes owner-reviewed widening; it cannot approve its own request. A v2 node
+receives signed, 45-second authority renewed every ten seconds, and stops work on revocation
+or lease expiry even after socket loss. Legacy assignments remain visibly shared;
+context IDs in this phase do not isolate files or browser sessions.

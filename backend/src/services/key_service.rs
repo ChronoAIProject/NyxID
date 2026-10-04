@@ -646,6 +646,9 @@ pub(crate) async fn create_api_key_with_security_class_and_id(
         description: description.map(|s| s.to_string()),
         allowed_service_ids: svc_ids.clone(),
         allowed_platform_service_ids: Vec::new(),
+        assistant_group_id: None,
+        assistant_agent_owner_id: None,
+        assistant_operation_scopes: Default::default(),
         allowed_node_ids: node_ids.clone(),
         allow_all_services: all_svcs,
         allow_auto_connected_services: allow_auto_connected_services.unwrap_or(false),
@@ -714,6 +717,23 @@ pub async fn effective_allowed_service_ids(
     db: &mongodb::Database,
     key: &ApiKey,
 ) -> AppResult<Vec<String>> {
+    let access = super::org_agent_service::resolve_key_access(
+        db,
+        &key.user_id,
+        key.assistant_agent_owner_id.as_deref(),
+    )
+    .await?;
+    effective_allowed_service_ids_with_access(db, key, access.as_deref()).await
+}
+
+pub async fn effective_allowed_service_ids_with_access(
+    db: &mongodb::Database,
+    key: &ApiKey,
+    access: Option<&super::org_agent_service::RequestAccess>,
+) -> AppResult<Vec<String>> {
+    if let Some(ids) = super::org_agent_service::key_services(db, key, access).await? {
+        return Ok(ids);
+    }
     let mut ids = key.allowed_service_ids.clone();
     if !key.allowed_platform_service_ids.is_empty() {
         ids.extend(key.allowed_platform_service_ids.iter().cloned());
@@ -1157,6 +1177,9 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                     description: old_key.description.clone(),
                     allowed_service_ids: old_key.allowed_service_ids.clone(),
                     allowed_platform_service_ids: Vec::new(),
+                    assistant_group_id: None,
+                    assistant_agent_owner_id: None,
+                    assistant_operation_scopes: Default::default(),
                     allowed_node_ids: old_key.allowed_node_ids.clone(),
                     allow_all_services: old_key.allow_all_services,
                     allow_auto_connected_services: old_key.allow_auto_connected_services,
@@ -1239,18 +1262,47 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                     match &authority {
                         super::assistant_agent_credential_service::KeyAuthority::Subagent(
                             grants,
+                            scopes,
+                            owner,
                         ) => {
+                            successor.assistant_agent_owner_id = Some(owner.clone());
+                            successor.assistant_operation_scopes = scopes.clone();
                             successor.allowed_service_ids = grants.service_ids.clone();
                             successor.allowed_platform_service_ids =
                                 grants.platform_service_ids.clone();
                         }
                         super::assistant_agent_credential_service::KeyAuthority::Orchestrator => {
+                            successor.assistant_operation_scopes.clear();
                             successor.allowed_service_ids.clear();
                             successor.allowed_platform_service_ids.clear();
                         }
                     }
                     successor.allowed_node_ids.clear();
+                    successor.assistant_group_id = conversation
+                        .group_request_id
+                        .as_ref()
+                        .and(conversation.group_id.clone());
+                    if successor.assistant_group_id.is_some() {
+                        // Group authentication binds the key to its hidden
+                        // thread. Move that binding with the encrypted successor,
+                        // rather than waiting for the next turn to refresh it.
+                        db.collection::<bson::Document>(
+                            crate::models::assistant_conversation::COLLECTION_NAME,
+                        )
+                        .update_one(
+                            doc! {"_id": &conversation.id, "user_id": &user_id,
+                            "credential_api_key_id": &old_key.id},
+                            doc! {"$set": {"credential_api_key_id": &successor.id}},
+                        )
+                        .session(&mut *session)
+                        .await?;
+                    }
                     let mut update = fields;
+                    update.insert(
+                        "assistant_group_id",
+                        bson::to_bson(&successor.assistant_group_id)
+                            .expect("group binding serialization"),
+                    );
                     update.insert("allowed_node_ids", bson::Bson::Array(Vec::new()));
                     if !update.contains_key("allowed_service_ids") {
                         update.insert("allowed_service_ids", bson::Bson::Array(Vec::new()));
@@ -1427,6 +1479,24 @@ pub async fn update_api_key_scope_with_expected_state_version(
     if existing.purpose == ApiKeyPurpose::PermissionBound {
         return Err(AppError::Forbidden("Permission-bound key authority is immutable; use /permission-keys to pause or reissue it".into()));
     }
+    if existing
+        .assistant_agent_owner_id
+        .as_deref()
+        .is_some_and(|owner| owner != user_id)
+        && (scopes.is_some()
+            || allowed_service_ids.is_some()
+            || allowed_node_ids.is_some()
+            || allow_all_services.is_some()
+            || allow_all_nodes.is_some()
+            || allow_auto_connected_services.is_some()
+            || platform.is_some()
+            || callback_url.is_some())
+    {
+        return Err(AppError::Forbidden(
+            "Organization thread authority is managed through the agent's grants".into(),
+        ));
+    }
+
     if existing.purpose == ApiKeyPurpose::ScheduledInvocation
         && (allow_auto_connected_services.is_some()
             || scopes.is_some()

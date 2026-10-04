@@ -377,6 +377,10 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
         _ => "Your final reply stays in the web thread.",
     };
     let start = engine::TurnStart {
+        org_access: None,
+        attachment_ids: Vec::new(),
+        group_request_id: None,
+        group_attachments: Vec::new(),
         trigger: Some(schedules::TurnClaim {
             trigger_updated_at: trigger.updated_at,
             continuation,
@@ -902,7 +906,7 @@ pub(crate) async fn webhook(
     let policy =
         thread_policy.unwrap_or_else(|| schedules::default_thread_policy(trigger.source, &agent));
     let home = if policy == crate::models::trigger_schedule::ThreadPolicy::Home {
-        Some(team::home_thread(&state.db, &state.encryption_keys, &agent).await?)
+        Some(team::home_thread_for(&state.db, &state.encryption_keys, &run.user_id, &agent).await?)
     } else {
         None
     };
@@ -957,6 +961,8 @@ pub(crate) async fn webhook(
                     .db
                     .collection::<AssistantMessage>(MESSAGES)
                     .insert_one(AssistantMessage {
+                        voice: None,
+                        execution_pending: false,
                         id: message_id,
                         conversation_id: row.id.clone(),
                         user_id: run.user_id.clone(),

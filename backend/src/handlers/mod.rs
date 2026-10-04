@@ -10,6 +10,7 @@ pub mod admin_roles;
 pub mod admin_sa_connections;
 pub mod admin_sa_providers;
 pub mod admin_service_accounts;
+pub mod admin_upload_retention;
 pub mod admin_usage;
 pub mod agent_bindings;
 pub mod api_keys;
@@ -130,11 +131,15 @@ pub mod channel_platforms;
 mod curation_tests;
 pub mod nyxbot;
 pub mod options;
+pub(crate) mod org_group;
 
 pub mod service_history;
 
 pub mod channel_activities;
+pub mod machine_activity;
+pub mod machine_cancel;
 pub mod machine_tools;
+pub mod machine_update;
 pub mod saved_logins;
 
 pub mod machine_desktop;
@@ -148,4 +153,11 @@ pub mod assistant_schedules;
 
 pub(crate) mod trigger_schedule_dto;
 
+pub mod agent_skills;
+pub mod assistant_uploads;
 pub mod permission_keys;
+
+mod assistant_titles;
+pub mod assistant_voice;
+
+pub mod machine_access;

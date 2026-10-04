@@ -1,6 +1,6 @@
 [package]
 name = "nyxid"
-version = "0.40.0"
+version = "0.60.0"
 edition = "2024"
 rust-version.workspace = true
 license.workspace = true
@@ -18,6 +18,12 @@ name = "nyxid-server"
 path = "src/main.rs"
 
 [dependencies]
+lopdf = { version = "0.38", default-features = false }
+zip = { version = "6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+quick-xml = "0.41"
+image = { version = "0.25.9", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+csv = "1"
+libc = "0.2"
 mime = "0.3.17"
 axum = { workspace = true }
 tower = "0.5.3"
@@ -68,6 +74,8 @@ async-trait = "0.1"
 regex = "1.12.3"
 globset = "0.4.18"
 serde_bytes = "0.11"
+# YAML OpenAPI/AsyncAPI specs; maintained, pure Rust, with alias-expansion budgets.
+serde-saphyr = { version = "1.3", default-features = false, features = ["deserialize"] }
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["rt"] }
 dashmap = "6"
@@ -81,6 +89,7 @@ nyxid-cloud-auth = { path = "../cloud-auth" }
 nyxid-service-adapters = { path = "../service-adapters" }
 nyxid-machine = { path = "../machine" }
 nyxid-permissions = { path = "../permissions" }
+nyxid-machine-updater = { path = "../machine-updater" }
 http = "1.4"
 http-body-util = "0.1"
 httpdate = "1"
@@ -109,10 +118,6 @@ tokio-rustls = "0.26"
 tokio = { workspace = true, features = ["test-util"] }
 nyxid-service-adapters = { path = "../service-adapters", features = ["test-support"] }
 wiremock = "0.6"
-# Used only by `test_utils` (compiled under `#[cfg(test)]`) to register an
-# `atexit` hook that drops the per-test databases at process exit. Already in
-# the dependency tree transitively, so this adds no new compilation.
-libc = "0.2"
 nyxid-node-proxy-test = { package = "nyxid-cli", path = "../cli", features = ["node-proxy-test"] }
 
 [features]

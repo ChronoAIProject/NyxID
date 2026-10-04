@@ -791,3 +791,22 @@ it("shows pending proxy approvals raised by the chat key as cards at the tail", 
   expect(card?.content).toBe("GET /user");
   expect(transport.getHistory(id)?.approvals[0]?.approval_mode).toBe("per_request");
 });
+
+it("optimistically renames during a turn and rolls back on failure without losing activity", async () => {
+  let finish!: (response: Response) => void;
+  const activeRow = { ...conversation(), active_turn: { turn_id: "running", started_at: start, stop_requested: false, continuations: 0, activities: [], attachments: [] } };
+  globalThis.__nyxidAssistantHttpMock = ({ init }) => init.method === "PATCH"
+    ? new Promise<Response>((resolve) => { finish = resolve; })
+    : json({ ...history(), conversation: activeRow });
+  const transport = new NyxAgentTransport();
+  await transport.history(id);
+  const pending = transport.rename(id, "My chosen title");
+  expect(transport.getConversations()[0]!.title).toBe("My chosen title");
+  expect(transport.session(id).title).toBe("My chosen title");
+  await transport.history(id); // stale server metadata cannot overwrite the optimistic title
+  expect(transport.session(id).title).toBe("My chosen title");
+  finish(json({ error: { message: "Try again" } }, 500));
+  await expect(pending).rejects.toThrow();
+  expect(transport.session(id).title).toBe("Question");
+  expect(transport.isRunning(id)).toBe(true);
+});

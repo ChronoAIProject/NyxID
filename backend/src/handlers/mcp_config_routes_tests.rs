@@ -236,8 +236,15 @@ async fn assert_parity(state: &AppState, headers: &HeaderMap, rest: &Value) {
         ));
     }
     let mut definitions = mcp_service::generate_tool_definitions(&services, None);
-    if auth.chat.as_ref().is_some_and(|chat| !chat.guest) {
-        definitions.extend(crate::services::machine_tools::definitions());
+    if let Some(chat) = auth.chat.as_ref().filter(|chat| !chat.guest) {
+        definitions.extend(
+            Box::pin(crate::services::machine_access_service::definitions(
+                &state.db, chat,
+            ))
+            .await
+            .unwrap(),
+        );
+        definitions.push(crate::services::assistant_upload_service::definition());
     }
     let expected: Vec<Value> = definitions
         .iter()

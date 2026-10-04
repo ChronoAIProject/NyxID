@@ -1,5 +1,7 @@
 import { assistantJson } from "@/lib/assistant/assistant-http";
 import {
+  nyxAgentChannelThreadListSchema,
+  nyxAgentChannelThreadStoppedSchema,
   assistantAgentCreatedSchema,
   assistantAgentDestroyedSchema,
   assistantAgentDetailSchema,
@@ -70,6 +72,12 @@ export const nyxBotApi = {
   async deleteAgent(id: string) {
     await assistantJson(agentPath(id), { method: "DELETE" });
   },
+  async remember(agentId: string, text: string, replaceId?: string) {
+    await assistantJson(`${agentPath(agentId)}/memory`, {
+      method: "POST",
+      body: { text, ...(replaceId ? { replace_id: replaceId } : {}) },
+    });
+  },
   async forget(agentId: string, noteId: string) {
     await assistantJson(`${agentPath(agentId)}/memory/${encodeURIComponent(noteId)}`, {
       method: "DELETE",
@@ -120,6 +128,18 @@ export const nyxBotApi = {
       await assistantJson(`${ROOT}/channels/${encodeURIComponent(channelAgentId)}/chats`),
     ).chats;
   },
+  async channelThreads(channelId: string, chatId: string, state: "active" | "all", cursor?: string) {
+    const query = new URLSearchParams({ state, limit: "25", ...(cursor ? { cursor } : {}) });
+    return nyxAgentChannelThreadListSchema.parse(await assistantJson(
+      `${ROOT}/channels/${encodeURIComponent(channelId)}/chats/${encodeURIComponent(chatId)}/threads?${query}`,
+    ));
+  },
+  async stopChannelThread(channelId: string, chatId: string, threadId: string) {
+    return nyxAgentChannelThreadStoppedSchema.parse(await assistantJson(
+      `${ROOT}/channels/${encodeURIComponent(channelId)}/chats/${encodeURIComponent(chatId)}/threads/${encodeURIComponent(threadId)}/stop`,
+      { method: "POST" },
+    ));
+  },
   async updateChannelChat(
     channelAgentId: string,
     chatId: string,
@@ -165,9 +185,9 @@ export const nyxBotApi = {
     );
   },
   /** Accepted (202): replies arrive later as new messages. */
-  async postGroupMessage(id: string, text: string) {
+  async postGroupMessage(id: string, text: string, attachmentIds?: string[]) {
     return assistantGroupPostedSchema.parse(
-      await assistantJson(`${groupPath(id)}/messages`, { method: "POST", body: { text } }),
+      await assistantJson(`${groupPath(id)}/messages`, { method: "POST", body: { text, ...(attachmentIds?.length ? { attachment_ids: attachmentIds } : {}) } }),
     );
   },
 };

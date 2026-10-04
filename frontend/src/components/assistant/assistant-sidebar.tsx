@@ -1,3 +1,4 @@
+import { agentOwnerSections } from "@/lib/assistant/nyxbot-labels";
 import { useState, type ReactNode } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useAppForm } from "@/components/ui/form";
@@ -206,10 +207,9 @@ function ConversationRow({
           </button>
         </DropdownMenuTrigger>
         {/* Above the z-[80] mobile sidebar drawer this can be opened from. */}
-        <DropdownMenuContent align="end" className="z-[90] min-w-[160px]">
+        <DropdownMenuContent align="end" className="min-w-[160px]">
           {onRequestRename ? (
             <DropdownMenuItem
-              disabled={Boolean(conversation.active_turn)}
               onSelect={onRequestRename}
             >
               <PencilLine aria-hidden="true" />
@@ -329,7 +329,14 @@ function ChannelThreadsGroup({
       </button>
       {open ? (
         <div className="ml-3 space-y-0.5 border-l border-border/60 pl-1.5">
-          {visible.map((thread) => renderThread(thread))}
+          {Array.from(new Set(visible.map((thread) => thread.channel?.parent_chat_id ?? thread.channel?.chat_id ?? thread.id))).map((chatId) => {
+            const children = visible.filter((thread) => (thread.channel?.parent_chat_id ?? thread.channel?.chat_id ?? thread.id) === chatId);
+            const followed = children.some((thread) => thread.channel?.thread_id);
+            return <div key={chatId}>
+              {followed ? <p className="px-3 pt-1 text-[11px] text-text-tertiary">{children.find((thread) => thread.channel?.parent_title)?.channel?.parent_title ?? "Channel chat"}</p> : null}
+              <div className={followed ? "ml-2 border-l border-hairline pl-1" : undefined}>{children.map(renderThread)}</div>
+            </div>;
+          })}
           {hidden > 0 ? (
             <button
               type="button"
@@ -426,7 +433,9 @@ function AgentRow({
         >
           {threads.own.map((conversation) => renderThread(conversation))}
           {model.threadsLoading && !model.threads.length ? (
-            <p className="px-3 py-1.5 text-[11px] text-text-tertiary">Loading threads...</p>
+            <p className="px-3 py-1.5 text-[11px] text-text-tertiary">
+              Loading threads...
+            </p>
           ) : null}
           {threads.bots.map((group) => (
             <ChannelThreadsGroup
@@ -436,7 +445,7 @@ function AgentRow({
               renderThread={renderThread}
             />
           ))}
-          {agent.status === "destroyed" ? null : (
+          {agent.status === "destroyed" || agent.can_use === false ? null : (
             <button
               type="button"
               onClick={() => model.onNewThread(agent.id)}
@@ -470,7 +479,12 @@ function AgentsSection({
     .sort((a, b) => Number(b.kind === "nyxbot") - Number(a.kind === "nyxbot"));
   return (
     <div className="space-y-0.5">
-      {visible.map((agent) => (
+      {agentOwnerSections(visible).map((section) => (
+        <section key={section.id} aria-label={section.label}>
+          <p className="px-3 pb-1 pt-3 text-[10px] font-semibold uppercase tracking-[1.5px] text-text-tertiary">
+            {section.label}
+          </p>
+          {section.agents.map((agent) => (
         <AgentRow
           key={agent.id}
           agent={agent}
@@ -479,6 +493,8 @@ function AgentsSection({
           activeThreadId={activeThreadId}
           renderThread={renderThread}
         />
+          ))}
+        </section>
       ))}
       {destroyed.length ? (
         <button
@@ -495,9 +511,16 @@ function AgentsSection({
 }
 
 function GroupsSection({ model }: { readonly model: SidebarGroups }) {
+  const sections = new Map<string, typeof model.groups>();
+  for (const group of model.groups) {
+    const key = group.owner?.type === "org" ? group.owner.id : "personal";
+    sections.set(key, [...(sections.get(key) ?? []), group]);
+  }
   return (
     <div className="space-y-0.5">
-      {model.groups.map((group) => {
+      {[...sections.entries()].map(([owner, groups]) => <div key={owner}>
+        <p className="px-3 pt-2 pb-1 text-[10px] font-medium text-text-tertiary">{owner === "personal" ? "Personal" : groups[0]?.owner?.name}</p>
+        {groups.map((group) => {
         const working = group.working_agent_ids.length;
         const selected = group.id === model.selectedGroupId;
         return (
@@ -526,7 +549,7 @@ function GroupsSection({ model }: { readonly model: SidebarGroups }) {
             ) : null}
           </button>
         );
-      })}
+      })}</div>)}
       {model.loading && !model.groups.length ? (
         <p className="px-3 py-1.5 text-[11px] text-text-tertiary">Loading groups...</p>
       ) : null}
@@ -559,7 +582,8 @@ export function AssistantSidebar({
 }: {
   readonly conversations: readonly Conversation[];
   readonly activeConversationId: string | undefined;
-  readonly activeView?: "chat" | "plugins" | "approvals" | "automations" | "machines";
+  readonly activeView?:
+    | "chat" | "plugins" | "approvals" | "automations" | "machines";
   readonly deletingId?: string;
   readonly notice?: string;
   readonly onNewChat: () => void;
@@ -614,6 +638,10 @@ export function AssistantSidebar({
   }
 
   function renderRow(conversation: Conversation) {
+    if (renameTarget?.id === conversation.id && onRename) {
+      return <RenameChatInline key={conversation.id} conversation={conversation}
+        onClose={() => setRenameTarget(undefined)} onRename={onRename} />;
+    }
     return (
       <ConversationRow
         key={conversation.id}
@@ -845,25 +873,13 @@ export function AssistantSidebar({
         </div>
       </div>
 
-      {renameTarget && onRename ? (
-        <RenameChatDialog
-          key={renameTarget.id}
-          conversation={renameTarget}
-          onClose={() => setRenameTarget(undefined)}
-          onRename={onRename}
-        />
-      ) : null}
       <Dialog
         open={deleteTarget !== undefined}
         onOpenChange={(open) => {
           if (!open) setDeleteTarget(undefined);
         }}
       >
-        {/* Lifts the panel over the z-[80] mobile sidebar drawer this can be
-            opened from. Dialog's own overlay stays at z-50 and so sits under
-            that drawer, which only shows during the slide transition -- the
-            settled mobile panel is opaque and full-screen. */}
-        <DialogContent className="z-[90] md:max-w-md">
+        <DialogContent className="md:max-w-md">
           <DialogHeader>
             <DialogTitle>Delete chat?</DialogTitle>
             <DialogDescription>
@@ -898,7 +914,7 @@ export function AssistantSidebar({
   );
 }
 
-function RenameChatDialog({
+function RenameChatInline({
   conversation,
   onClose,
   onRename,
@@ -913,15 +929,7 @@ function RenameChatDialog({
   });
   const [error, setError] = useState<string>();
   return (
-    <Dialog open onOpenChange={(open) => {
-      if (!open) onClose();
-    }}>
-      <DialogContent className="z-[90] md:max-w-md">
-        <DialogHeader>
-          <DialogTitle>Rename chat</DialogTitle>
-          <DialogDescription>Choose a title for this conversation.</DialogDescription>
-        </DialogHeader>
-        <form onSubmit={form.handleSubmit(async ({ title }) => {
+        <form className="space-y-2 rounded-lg border border-hairline p-2" aria-label="Rename chat" onKeyDown={(event) => { if (event.key === "Escape") onClose(); }} onSubmit={form.handleSubmit(async ({ title }) => {
           try {
             await onRename(conversation.id, title);
             onClose();
@@ -929,11 +937,19 @@ function RenameChatDialog({
             setError("Could not rename this chat. Try again.");
           }
         })}>
-          <label htmlFor="chat-title" className="text-[12px]">Title</label>
-          <Input id="chat-title" maxLength={200} {...form.register("title")} />
-          {error ? <p role="alert" className="mt-2 text-[12px] text-destructive">{error}</p> : null}
-          <DialogFooter className="mt-4">
-            <Button type="button" variant="ghost" onClick={onClose}>Cancel</Button>
+          <label htmlFor="chat-title" className="text-[12px]">
+            Title
+          </label>
+          <Input autoFocus id="chat-title" maxLength={200} {...form.register("title")} />
+          {error ? (
+            <p role="alert" className="mt-2 text-[12px] text-destructive">
+              {error}
+            </p>
+          ) : null}
+          <div className="flex justify-end gap-1">
+            <Button type="button" variant="ghost" onClick={onClose}>
+              Cancel
+            </Button>
             <Button
               type="submit"
               variant="primary"
@@ -942,9 +958,7 @@ function RenameChatDialog({
             >
               Save
             </Button>
-          </DialogFooter>
+          </div>
         </form>
-      </DialogContent>
-    </Dialog>
   );
 }

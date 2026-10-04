@@ -93,6 +93,7 @@ import {
   AdminAuditLogPage,
   AdminUsagePage,
   AdminFeatureFlagsPage,
+  AdminUploadRetentionPage,
   AdminPlatformCredentialsPage,
   AdminIntegrityPage,
   AdminCreditsPage,
@@ -1095,6 +1096,16 @@ const adminPlatformCredentialsRoute = createRoute({
   component: AdminPlatformCredentialsPage,
 });
 
+const adminUploadRetentionRoute = createRoute({
+  path: "upload-retention",
+  getParentRoute: () => adminLayout,
+  beforeLoad: () => {
+    const { user, isLoading } = useAuthStore.getState();
+    if (!isLoading && !canAdminWrite(user)) throw redirect({ to: "/dashboard" });
+  },
+  component: AdminUploadRetentionPage,
+});
+
 const adminFeatureFlagsRoute = createRoute({
   path: "feature-flags",
   getParentRoute: () => adminLayout,
@@ -1202,6 +1213,7 @@ const routeTree = rootRoute.addChildren([
       adminCreditsRoute,
       adminInviteCodesRoute,
       adminFeatureFlagsRoute,
+      adminUploadRetentionRoute,
       adminPlatformCredentialsRoute,
     ]),
   ]),
