@@ -403,6 +403,7 @@ impl PlatformAdapter for DiscordAdapter {
             thread_reply: true,
             thread_history: true,
             thread_follow: true,
+            ..Default::default()
         }
     }
 

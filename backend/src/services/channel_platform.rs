@@ -259,6 +259,14 @@ pub struct ThreadCapabilities {
     pub thread_reply: bool,
     pub thread_follow: bool,
     pub thread_history: bool,
+    /// The platform classifies the thread as private while still exposing a
+    /// durable shared thread (Aurinko mailbox threads).
+    #[serde(skip_serializing_if = "is_false")]
+    pub private_thread: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// What the native outbound transport actually preserves. Contract-tested in channel_adapters.
@@ -460,7 +468,16 @@ pub trait PlatformAdapter: Send + Sync {
                 return Err(super::channel_thread_service::unavailable());
             }
             return self
-                .send_thread_reply(http, credentials, target, reply)
+                .send_bound_thread_reply(
+                    db,
+                    http,
+                    bot,
+                    original,
+                    credentials,
+                    conversation_id,
+                    target,
+                    reply,
+                )
                 .await
                 .map(SendOutcome::legacy);
         }
@@ -512,6 +529,24 @@ pub trait PlatformAdapter: Send + Sync {
         _reply: &OutboundReply,
     ) -> AppResult<Option<String>> {
         Err(super::channel_thread_service::unavailable())
+    }
+
+    /// Bound replies may need adapter-owned persistence barriers in addition
+    /// to native thread targeting. The default preserves the PR C path.
+    #[allow(clippy::too_many_arguments)]
+    async fn send_bound_thread_reply(
+        &self,
+        _db: &mongodb::Database,
+        http: &reqwest::Client,
+        _bot: &crate::models::channel_bot::ChannelBot,
+        _original: &crate::models::channel_message::ChannelMessage,
+        credentials: &BotCredentials<'_>,
+        _conversation_id: &str,
+        target: &super::channel_thread_service::ThreadReplyTarget,
+        reply: &OutboundReply,
+    ) -> AppResult<Option<String>> {
+        self.send_thread_reply(http, credentials, target, reply)
+            .await
     }
 
     async fn thread_history(

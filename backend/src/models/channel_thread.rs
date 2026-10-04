@@ -29,6 +29,10 @@ pub enum ThreadSenderKind {
 pub enum ThreadAddress {
     Mention,
     ReplyToBot,
+    /// An Aurinko message explicitly addresses the connected mailbox in To.
+    MailboxTo,
+    /// An Aurinko message is a verified reply to a retained NyxID message.
+    VerifiedReply,
     NotAddressed,
     #[default]
     #[serde(other)]
@@ -48,6 +52,15 @@ pub struct ChannelThreadFacts {
     pub parent_message_id: Option<String>,
     pub sender_kind: ThreadSenderKind,
     pub address: ThreadAddress,
+    /// Keyed HMAC-SHA256 fingerprints of provider participants (email only),
+    /// domain-separated as `email-participant`. These prove guest visibility
+    /// without retaining recipient addresses or reversible unkeyed digests.
+    #[serde(default)]
+    pub participant_hashes: Vec<String>,
+    /// Keyed HMAC-SHA256 fingerprint of the inbound sender, used as the
+    /// requesting participant proof.
+    #[serde(default)]
+    pub sender_hash: Option<String>,
 }
 
 impl std::fmt::Debug for ChannelThreadFacts {

@@ -184,8 +184,9 @@ impl Peer {
                                 requests.spawn(async move {
                                     let request_id = request.request_id.clone();
                                     let operation = request.operation;
-                                    let revision =
-                                        active.control_revision(operation, &request.parameters);
+                                    let revision = active
+                                        .control_revision(operation, &request.parameters)
+                                        .await;
                                     let mut parameters = request.parameters.clone();
                                     parameters["_signed_authority"] =
                                         serde_json::to_value(&request.authority).unwrap();

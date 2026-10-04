@@ -2,6 +2,12 @@ mod authority;
 pub mod browser;
 mod browser_input;
 mod cancellation;
+#[cfg(target_os = "linux")]
+mod context_dispatch;
+#[cfg(target_os = "linux")]
+mod context_policy;
+#[cfg(target_os = "linux")]
+pub mod context_runtime;
 pub mod cua;
 mod desktop;
 #[cfg(all(test, target_os = "macos"))]
@@ -153,14 +159,22 @@ fn cache_status(
 pub struct Runtime {
     update_directory: PathBuf,
     status_directory: PathBuf,
-    upgrading: std::sync::atomic::AtomicBool,
-    operation_admission: tokio::sync::RwLock<()>,
+    upgrading: Arc<std::sync::atomic::AtomicBool>,
+    operation_admission: Arc<tokio::sync::RwLock<()>>,
     config: Config,
     node_id: String,
     runtime_id: String,
     excluded: Vec<PathBuf>,
     roots: files::Roots,
     identity: process::Identity,
+    browser_identity: process::Identity,
+    dev_identity: Option<process::Identity>,
+    #[cfg(target_os = "linux")]
+    contexts: Mutex<context_dispatch::Contexts>,
+    #[cfg(target_os = "linux")]
+    context_resources: Option<context_runtime::BrowserResources>,
+    #[cfg(target_os = "linux")]
+    context_binding: Option<nyxid_machine::authority::Authority>,
     jobs: Arc<jobs::Jobs>,
     gateway: tokio::sync::OnceCell<Arc<gateway::Gateway>>,
     driver: Option<cua::Driver>,
@@ -175,7 +189,7 @@ pub struct Runtime {
     redactor: Arc<Mutex<Redactor>>,
     owner_control: tokio::sync::watch::Sender<u64>,
     dev_owner_control: tokio::sync::watch::Sender<u64>,
-    turns: cancellation::Turns,
+    turns: Arc<cancellation::Turns>,
     authority: authority::Fences,
     authority_watch: std::sync::atomic::AtomicBool,
 }
@@ -207,19 +221,29 @@ impl Runtime {
             .cua_driver
             .as_ref()
             .filter(|_| config.computer || config.browser_enabled())
-            .map(|path| cua::Driver::new(path.clone(), browser, config.computer_mode).for_human());
+            .map(|path| {
+                cua::Driver::new(path.clone(), browser.clone(), config.computer_mode).for_human()
+            });
         let redactor = Arc::new(Mutex::new(Redactor::default()));
         let runtime = Arc::new(Self {
             update_directory: update::directory(config, config_dir),
             status_directory: config_dir.to_owned(),
-            upgrading: std::sync::atomic::AtomicBool::new(false),
-            operation_admission: tokio::sync::RwLock::new(()),
+            upgrading: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            operation_admission: Arc::new(tokio::sync::RwLock::new(())),
             config: config.clone(),
             node_id: node_id.into(),
             runtime_id: uuid::Uuid::new_v4().to_string(),
             excluded,
             roots,
             identity,
+            browser_identity: browser,
+            dev_identity: process::Identity::resolve(config.effective_dev_browser_user()).ok(),
+            #[cfg(target_os = "linux")]
+            contexts: Mutex::new(context_dispatch::Contexts::default()),
+            #[cfg(target_os = "linux")]
+            context_resources: None,
+            #[cfg(target_os = "linux")]
+            context_binding: None,
             jobs: Arc::new(jobs::Jobs::new(config, redactor.clone())),
             gateway: tokio::sync::OnceCell::new(),
             driver,
@@ -234,7 +258,7 @@ impl Runtime {
             redactor,
             owner_control: tokio::sync::watch::channel(0).0,
             dev_owner_control: tokio::sync::watch::channel(0).0,
-            turns: cancellation::Turns::default(),
+            turns: Arc::new(cancellation::Turns::default()),
             authority: authority::Fences::open(config_dir)?,
             authority_watch: std::sync::atomic::AtomicBool::new(false),
         });
@@ -259,7 +283,14 @@ impl Runtime {
             .await?;
         gateway.connect(sender.clone()).await;
         *self.desktop.sender.lock().await = Some(sender.clone());
-        *self.dev_desktop.sender.lock().await = Some(sender);
+        *self.dev_desktop.sender.lock().await = Some(sender.clone());
+        #[cfg(target_os = "linux")]
+        for child in self.context_children().await {
+            *child.desktop.sender.lock().await = Some(sender.clone());
+            *child.dev_desktop.sender.lock().await = Some(sender.clone());
+            *child.desktop_secret.lock().await =
+                Some(zeroize::Zeroizing::new(signing_secret.to_vec()));
+        }
         *self.desktop_secret.lock().await = Some(zeroize::Zeroizing::new(signing_secret.to_vec()));
         if self.config.computer || self.config.browser_enabled() {
             self.start_capture(nyxid_machine::desktop::Display::Secure);
@@ -268,6 +299,11 @@ impl Runtime {
         Ok(())
     }
     pub async fn disconnect(&self) {
+        #[cfg(target_os = "linux")]
+        for child in self.context_children().await {
+            *child.desktop.sender.lock().await = None;
+            *child.dev_desktop.sender.lock().await = None;
+        }
         *self.desktop.sender.lock().await = None;
         *self.dev_desktop.sender.lock().await = None;
         if let Some(gateway) = self.gateway.get() {
@@ -345,6 +381,7 @@ impl Runtime {
             computer: self.config.computer,
             browser: self.config.browser,
             authority_versions: vec![2],
+            separated: Some(self.context_support().await),
             os: std::env::consts::OS.into(),
             arch: std::env::consts::ARCH.into(),
             roots: self
@@ -367,6 +404,60 @@ impl Runtime {
             tracing::warn!("machine_status_snapshot_unavailable");
         }
         profile
+    }
+
+    fn developer_identity(&self) -> Result<std::borrow::Cow<'_, process::Identity>> {
+        if let Some(identity) = &self.dev_identity {
+            return Ok(std::borrow::Cow::Borrowed(identity));
+        }
+        // Shared installations may create the developer user after the daemon
+        // starts. Retry that lookup at launch, retaining its typed diagnostic.
+        // A separated context must use its supervisor-provisioned identity.
+        #[cfg(target_os = "linux")]
+        anyhow::ensure!(
+            self.context_binding.is_none(),
+            dev_browser::Failure::Identity
+        );
+        anyhow::ensure!(
+            self.browser_identity.desktop.is_none(),
+            dev_browser::Failure::Identity
+        );
+        process::Identity::resolve(self.config.effective_dev_browser_user())
+            .map(std::borrow::Cow::Owned)
+            .context(dev_browser::Failure::Identity)
+    }
+
+    fn dev_directory(&self, config: &nyxid_machine::config::ManagedBrowserConfig) -> PathBuf {
+        if self.browser_identity.desktop.is_some() {
+            self.dev_identity
+                .as_ref()
+                .and_then(|i| i.home.parent())
+                .unwrap_or(&config.data_dir)
+                .to_owned()
+        } else {
+            config.data_dir.clone()
+        }
+    }
+    #[cfg(target_os = "linux")]
+    fn display_endpoint(
+        &self,
+        display: nyxid_machine::desktop::Display,
+    ) -> Option<(String, PathBuf)> {
+        let identity = match display {
+            nyxid_machine::desktop::Display::Secure => Some(&self.browser_identity),
+            nyxid_machine::desktop::Display::Dev => self.dev_identity.as_ref(),
+        };
+        identity
+            .and_then(|i| i.desktop.as_ref())
+            .map(|d| (d.display.clone(), d.authority.clone()))
+    }
+    #[cfg(not(target_os = "linux"))]
+    async fn context_support(&self) -> nyxid_machine::context::Support {
+        nyxid_machine::context::Support {
+            available: false,
+            landlock_abi: None,
+            reason: Some("separated_requires_linux".into()),
+        }
     }
 
     fn desktop_for(&self, display: nyxid_machine::desktop::Display) -> &desktop::Desktop {
@@ -414,8 +505,20 @@ impl Runtime {
             _ => (&self.owner_control, &self.dev_owner_control),
         }
     }
-    pub fn control_revision(&self, operation: Operation, parameters: &Value) -> u64 {
-        let (a, b) = self.control_channels(operation, parameters);
+    pub async fn control_revision(&self, operation: Operation, parameters: &Value) -> u64 {
+        #[cfg(target_os = "linux")]
+        let child = self.result_context(operation, parameters).await;
+        #[cfg(target_os = "linux")]
+        if child.is_none() && parameters["_signed_authority"]["mode"] == "separated" {
+            // An unprovisioned context starts with its own revision zero. The
+            // legacy display's history is unrelated to its first operation.
+            return 0;
+        }
+        #[cfg(target_os = "linux")]
+        let runtime = child.as_deref().unwrap_or(self);
+        #[cfg(not(target_os = "linux"))]
+        let runtime = self;
+        let (a, b) = runtime.control_channels(operation, parameters);
         (*a.borrow() << 32) | *b.borrow()
     }
 
@@ -434,13 +537,24 @@ impl Runtime {
         // Reserve first: a full socket queue must not let an old result escape
         // after takeover. This short read guard spans only serialization and
         // nonblocking enqueue, never socket I/O.
+        #[cfg(target_os = "linux")]
+        let child = self.result_context(operation, parameters).await;
+        #[cfg(target_os = "linux")]
+        let unprovisioned =
+            child.is_none() && parameters["_signed_authority"]["mode"] == "separated";
+        #[cfg(not(target_os = "linux"))]
+        let unprovisioned = false;
+        #[cfg(target_os = "linux")]
+        let runtime = child.as_deref().unwrap_or(self);
+        #[cfg(not(target_os = "linux"))]
+        let runtime = self;
         let scope = serde_json::from_value(parameters.clone()).unwrap_or_default();
         let stopped = self.turns.subscribe(&scope);
         let cancelled = stopped.borrow();
-        let (a, b) = self.control_channels(operation, parameters);
+        let (a, b) = runtime.control_channels(operation, parameters);
         let a = a.borrow();
         let b = b.borrow();
-        let current = (*a << 32) | *b;
+        let current = if unprovisioned { 0 } else { (*a << 32) | *b };
         if !matches!(
             operation,
             Operation::AuthorityRenew
@@ -579,6 +693,16 @@ impl Runtime {
                 request.operation,
                 Operation::AuthorityRenew | Operation::AuthorityRevoke
             ) {
+                #[cfg(target_os = "linux")]
+                if request.operation == Operation::AuthorityRevoke
+                    && request.parameters["quarantine_profiles"] == true
+                    && self
+                        .quarantine_profiles(&authority.agent_id, authority.revision)
+                        .await
+                        .is_err()
+                {
+                    return json!({"error":{"code":12421,"message":"context_quarantine_pending: retry revocation"}});
+                }
                 return json!({"accepted":true});
             }
         } else if self.authority.enrolled()
@@ -597,6 +721,53 @@ impl Runtime {
         {
             return json!({"error":{"code":12419,"message":"machine_authority_unsupported: v2 required for agent work"}});
         }
+        #[cfg(target_os = "linux")]
+        let context_runtime = if let Some(authority) =
+            request.authority.as_ref().filter(|a| a.mode == "separated")
+        {
+            match Box::pin(self.context_instance(authority)).await {
+                Ok(runtime) => Some(runtime),
+                Err(error) => {
+                    let stage = context_dispatch::failure_stage(&error);
+                    tracing::warn!(
+                        stage,
+                        reason = "context_preparation_failed",
+                        "separated context unavailable"
+                    );
+                    return json!({"error":{"code":12419,"stage":stage,"message":"separated_context_unavailable: verify Linux Landlock ABI 6, separate users, private legacy roots and browser setup; shared fallback is disabled"}});
+                }
+            }
+        } else if let Some(id) = request.parameters["context_id"].as_str().filter(|_| {
+            matches!(
+                request.operation,
+                Operation::DesktopOpen
+                    | Operation::DesktopClose
+                    | Operation::DesktopControl
+                    | Operation::DesktopInput
+            )
+        }) {
+            match self.contexts.lock().await.runtimes.get(id).cloned() {
+                Some(runtime) => Some(runtime),
+                None => {
+                    return json!({"error":{"code":12419,"message":"separated_context_unavailable: context is not running"}});
+                }
+            }
+        } else {
+            None
+        };
+        #[cfg(target_os = "linux")]
+        let executor = context_runtime.as_deref().unwrap_or(self);
+        #[cfg(not(target_os = "linux"))]
+        let executor = {
+            if request
+                .authority
+                .as_ref()
+                .is_some_and(|a| a.mode == "separated")
+            {
+                return json!({"error":{"code":12419,"message":"separated_requires_linux: use a separate machine container or VM"}});
+            }
+            self.as_ref()
+        };
         request.parameters["_machine_authority"] =
             serde_json::to_value(&request.authority).unwrap_or(Value::Null);
         let agent_operation = !matches!(
@@ -609,16 +780,21 @@ impl Runtime {
                 | Operation::DesktopOpen
                 | Operation::DesktopInput
         );
-        let (first, second) = self.control_channels(request.operation, &request.parameters);
+        let (first, second) = executor.control_channels(request.operation, &request.parameters);
         let revision = (*first.borrow(), *second.borrow());
         let result = if let Some(mut stopped) = authority_stop {
+            if *stopped.borrow_and_update() {
+                return json!({"error":{"code":12421,"message":"machine_authority_stale: acquire fresh authority"}});
+            }
             tokio::select! {
                 biased;
                 _=stopped.changed()=>Err(MachineError::AuthorityStale),
-                value=self.execute(request.operation,request.parameters)=>value,
+                value=executor.execute(request.operation,request.parameters)=>value,
             }
         } else {
-            self.execute(request.operation, request.parameters).await
+            executor
+                .execute(request.operation, request.parameters)
+                .await
         };
         if let Some(authority) = &request.authority
             && !self.authority.live(&authority.lease_id)
@@ -766,7 +942,8 @@ impl Runtime {
                 }
                 let automatic = parameters["automatic"] == true;
                 if automatic
-                    && (self.owner_in_control()
+                    && (self.contexts_busy().await
+                        || self.owner_in_control()
                         || self.desktop.session.lock().await.is_some()
                         || self.dev_desktop.session.lock().await.is_some()
                         || self.jobs.any_running().await
@@ -945,12 +1122,10 @@ impl Runtime {
                         let mut browser = match guard.take() {
                             Some(browser) => browser,
                             None => {
+                                let identity = self.developer_identity()?;
                                 dev_browser::DevBrowser::launch(
-                                    &config.data_dir,
-                                    &process::Identity::resolve(
-                                        self.config.effective_dev_browser_user(),
-                                    )
-                                    .context(dev_browser::Failure::Identity)?,
+                                    &self.dev_directory(config),
+                                    identity.as_ref(),
                                     &config.binary,
                                     config.container,
                                 )
@@ -1101,7 +1276,7 @@ impl Runtime {
                     {
                         driver.stop().await;
                     }
-                    self.jobs.preempt().await;
+                    self.jobs.preempt_identity(self.identity.uid).await;
                 }
                 if !text.is_empty() {
                     self.redactor
@@ -1183,11 +1358,11 @@ impl Runtime {
             .context(MachineError::Browser)?;
         let mut browser = self.dev_browser.lock().await;
         if browser.is_none() {
+            let identity = self.developer_identity()?;
             *browser = Some(
                 dev_browser::DevBrowser::launch(
-                    &config.data_dir,
-                    &process::Identity::resolve(self.config.effective_dev_browser_user())
-                        .context(dev_browser::Failure::Identity)?,
+                    &self.dev_directory(config),
+                    identity.as_ref(),
                     &config.binary,
                     config.container,
                 )
@@ -1213,7 +1388,7 @@ impl Runtime {
                 *browser = Some(
                     browser::Browser::launch(
                         &config.data_dir,
-                        &process::Identity::resolve(self.config.browser_user.as_deref())?,
+                        &self.browser_identity,
                         &config.binary,
                         config.update_port,
                         config.container,
@@ -1339,6 +1514,34 @@ impl Runtime {
 
     pub async fn shutdown(&self) {
         self.jobs.cancel_all().await;
+        #[cfg(target_os = "linux")]
+        for child in self.context_children().await {
+            child.stop_local().await;
+        }
+        self.stop_local().await;
+    }
+
+    async fn contexts_busy(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        for child in self.context_children().await {
+            if child.owner_in_control()
+                || child.desktop.session.lock().await.is_some()
+                || child.dev_desktop.session.lock().await.is_some()
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    async fn stop_local(&self) {
+        if let Some(task) = self.dev_desktop.capture.get() {
+            task.abort();
+        }
+        if let Some(browser) = self.browser.lock().await.take() {
+            browser.stop().await;
+        }
+        self.dev_browser.lock().await.take();
         if let Some(task) = self.desktop.capture.get() {
             task.abort();
         }
@@ -1448,6 +1651,198 @@ pub async fn worker() -> Result<()> {
 #[cfg(test)]
 mod readiness_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn developer_identity_retries_shared_lookup_but_never_replaces_context_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let mut runtime = Runtime::new(
+            &Config {
+                roots: vec![root.path().into()],
+                ..Default::default()
+            },
+            "node",
+            &root.path().join("node"),
+        )
+        .unwrap();
+        let runtime = Arc::get_mut(&mut runtime).unwrap();
+        let expected = runtime.dev_identity.take().unwrap();
+        let resolved = runtime.developer_identity().unwrap();
+        assert_eq!(resolved.uid, expected.uid);
+        assert!(matches!(resolved, std::borrow::Cow::Owned(_)));
+        drop(resolved);
+        runtime.config.dev_browser_user = Some("nyxid-no-such-developer-user".into());
+        assert!(
+            runtime
+                .developer_identity()
+                .err()
+                .unwrap()
+                .is::<dev_browser::Failure>()
+        );
+        runtime.dev_identity = Some(expected.clone());
+        assert!(matches!(
+            runtime.developer_identity().unwrap(),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        runtime.dev_identity = None;
+        runtime.config.dev_browser_user = None;
+        runtime.browser_identity.desktop = Some(process::DesktopEnvironment {
+            display: ":123".into(),
+            authority: root.path().join("authority"),
+            bus: "private".into(),
+            runtime: root.path().into(),
+        });
+        assert!(
+            runtime
+                .developer_identity()
+                .err()
+                .unwrap()
+                .is::<dev_browser::Failure>()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn context_shared_developer_user_created_after_daemon_start_is_resolved() {
+        if unsafe { libc::geteuid() } != 0 {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let user = format!(
+            "nyxlate{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..12]
+        );
+        let runtime = Runtime::new(
+            &Config {
+                roots: vec![root.path().into()],
+                dev_browser_user: Some(user.clone()),
+                ..Default::default()
+            },
+            "node",
+            &root.path().join("node"),
+        )
+        .unwrap();
+        assert!(runtime.dev_identity.is_none());
+        assert!(runtime.developer_identity().is_err());
+        assert!(
+            std::process::Command::new("useradd")
+                .args([
+                    "--system",
+                    "--user-group",
+                    "--no-create-home",
+                    "--no-log-init",
+                    &user
+                ])
+                .status()
+                .unwrap()
+                .success()
+        );
+        struct RemoveUser(String);
+        impl Drop for RemoveUser {
+            fn drop(&mut self) {
+                let _ = std::process::Command::new("userdel").arg(&self.0).status();
+            }
+        }
+        let _cleanup = RemoveUser(user.clone());
+        let resolved = runtime.developer_identity().unwrap();
+        assert_eq!(resolved.name, user);
+        assert_ne!(resolved.uid, 0);
+        assert!(matches!(resolved, std::borrow::Cow::Owned(_)));
+        assert!(
+            runtime.dev_identity.is_none(),
+            "no daemon restart or cached identity was needed"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn new_context_ignores_legacy_control_history_but_fences_its_own_takeover() {
+        let root = tempfile::tempdir().unwrap();
+        let config = Config {
+            roots: vec![root.path().into()],
+            ..Default::default()
+        };
+        let runtime = Runtime::new(&config, "node", &root.path().join("node")).unwrap();
+        runtime.owner_control.send_replace(4);
+        let context = uuid::Uuid::new_v4().to_string();
+        let parameters = json!({"_signed_authority":{"mode":"separated","context_id":context}});
+        let revision = runtime
+            .control_revision(Operation::ReadFile, &parameters)
+            .await;
+        assert_eq!(revision, 0);
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        // A preparation refusal must also retain its real error code.
+        runtime
+            .send_result(
+                &sender,
+                "request",
+                Operation::ReadFile,
+                revision,
+                &parameters,
+                json!({"error":{"code":12419}}),
+            )
+            .await;
+        let crate::node::ws_client::NodeWsMessage::Text(message) = receiver.recv().await.unwrap()
+        else {
+            panic!("result")
+        };
+        assert_eq!(
+            serde_json::from_str::<Value>(&message).unwrap()["result"]["error"]["code"],
+            12419
+        );
+        let child = Runtime::new(&config, "node", &root.path().join("child")).unwrap();
+        runtime
+            .contexts
+            .lock()
+            .await
+            .runtimes
+            .insert(context.clone(), child.clone());
+        runtime.owner_control.send_replace(7);
+        let shared = json!({"_signed_authority":{"mode":"shared_legacy","context_id":context}});
+        assert_eq!(
+            runtime.control_revision(Operation::ReadFile, &shared).await,
+            7 << 32
+        );
+        let untrusted = json!({"context_id":context});
+        assert_eq!(
+            runtime
+                .control_revision(Operation::ReadFile, &untrusted)
+                .await,
+            7 << 32
+        );
+        assert_eq!(
+            runtime
+                .control_revision(Operation::DesktopOpen, &untrusted)
+                .await,
+            0
+        );
+        for takeover in [false, true] {
+            if takeover {
+                child.owner_control.send_replace(1);
+            }
+            runtime
+                .send_result(
+                    &sender,
+                    "request",
+                    Operation::ReadFile,
+                    revision,
+                    &parameters,
+                    json!({"content":"context result"}),
+                )
+                .await;
+            let crate::node::ws_client::NodeWsMessage::Text(message) =
+                receiver.recv().await.unwrap()
+            else {
+                panic!("result")
+            };
+            let result: Value = serde_json::from_str(&message).unwrap();
+            if takeover {
+                assert_eq!(result["result"]["error"]["code"], 12408);
+                assert!(!message.contains("context result"));
+            } else {
+                assert_eq!(result["result"]["content"], "context result");
+            }
+        }
+    }
 
     #[tokio::test]
     async fn queued_agent_results_are_fenced_at_enqueue_after_takeover() {

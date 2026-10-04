@@ -49,6 +49,15 @@ pub(crate) fn valid_facts(facts: &ChannelThreadFacts, inbound: &InboundMessage) 
         ]
         .into_iter()
         .all(|id| id.as_deref().is_none_or(valid_id))
+        && facts.participant_hashes.len() <= 64
+        && facts
+            .participant_hashes
+            .iter()
+            .all(|hash| hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
+        && facts
+            .sender_hash
+            .as_ref()
+            .is_none_or(|hash| hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
         && (facts.kind != ThreadKind::Unknown || facts.root_id.is_none())
 }
 

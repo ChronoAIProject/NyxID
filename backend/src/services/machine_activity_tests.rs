@@ -7,6 +7,20 @@ use axum::extract::{Path, Query, State};
 use serde_json::json;
 
 #[test]
+fn machine_receipt_context_mode_is_additive_and_survives_response_projection() {
+    let mut value = json!({"operation_id":"operation","node_id":"node","agent_id":"agent",
+        "action":"browser.navigate","status":"completed","job_id":null,"exit_code":null,
+        "bytes":null,"duration_ms":null,"error_code":null,"screenshot_id":null,
+        "preview_id":null,"preview_enabled":false});
+    let legacy: MachineReceipt = serde_json::from_value(value.clone()).unwrap();
+    assert!(legacy.context_mode.is_none());
+    value["context_mode"] = json!("separated");
+    let row: MachineReceipt = serde_json::from_value(value).unwrap();
+    let response = crate::handlers::assistant_nyxagent::MachineReceiptResponse::from(row);
+    assert_eq!(response.context_mode.as_deref(), Some("separated"));
+}
+
+#[test]
 fn machine_receipt_action_and_excerpt_exclude_privacy_sentinels() {
     assert_eq!(
         action(

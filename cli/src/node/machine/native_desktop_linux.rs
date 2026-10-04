@@ -7,11 +7,17 @@ use x11rb::{
     rust_connection::RustConnection,
 };
 
-fn connect(display: nyxid_machine::desktop::Display) -> Result<(RustConnection, usize)> {
-    if display == nyxid_machine::desktop::Display::Secure {
+fn connect(
+    display: nyxid_machine::desktop::Display,
+    endpoint: Option<(String, std::path::PathBuf)>,
+) -> Result<(RustConnection, usize)> {
+    if endpoint.is_none() && display == nyxid_machine::desktop::Display::Secure {
         return Ok(x11rb::connect(None)?);
     }
-    let (name, authority) = crate::node::machine::dev_display::endpoint()?;
+    let (name, authority) = match endpoint {
+        Some(endpoint) => endpoint,
+        None => crate::node::machine::dev_display::endpoint()?,
+    };
     let number: u16 = name
         .strip_prefix(':')
         .context("Local display required")?
@@ -54,11 +60,14 @@ pub struct Capture {
     root: Window,
 }
 impl Capture {
-    pub fn for_display(display: nyxid_machine::desktop::Display) -> Result<Self> {
+    pub fn for_display(
+        display: nyxid_machine::desktop::Display,
+        endpoint: Option<(String, std::path::PathBuf)>,
+    ) -> Result<Self> {
         // The supervisor owns the browser's Xauthority; no DISPLAY/cookie is
         // passed to agent command children. Capture and input use separate X
         // connections, so an outstanding GetImage never blocks owner input.
-        let (connection, screen) = connect(display)?;
+        let (connection, screen) = connect(display, endpoint)?;
         let root = connection.setup().roots[screen].root;
         connection.xfixes_query_version(5, 0)?.reply()?;
         Ok(Self { connection, root })
@@ -123,8 +132,11 @@ pub struct Input {
     stopped: Option<tokio::sync::watch::Receiver<bool>>,
 }
 impl Input {
-    pub fn for_display(display: nyxid_machine::desktop::Display) -> Result<Self> {
-        let (connection, screen) = connect(display)?;
+    pub fn for_display(
+        display: nyxid_machine::desktop::Display,
+        endpoint: Option<(String, std::path::PathBuf)>,
+    ) -> Result<Self> {
+        let (connection, screen) = connect(display, endpoint)?;
         let root = connection.setup().roots[screen].root;
         connection.xtest_get_version(2, 2)?.reply()?;
         Ok(Self {

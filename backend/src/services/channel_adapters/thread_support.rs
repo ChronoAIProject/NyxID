@@ -69,7 +69,7 @@ pub(super) fn slack_time(value: &str) -> Option<DateTime<Utc>> {
     )
 }
 
-pub(super) fn push(
+pub(crate) fn push(
     history: &mut ThreadHistory,
     mut message: ThreadHistoryMessage,
     before: DateTime<Utc>,

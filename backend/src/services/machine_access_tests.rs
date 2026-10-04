@@ -47,6 +47,7 @@ async fn v2(f: &Fixture) -> crate::models::node::Node {
 }
 fn selection(revision: i64, caps: Capabilities) -> Selection {
     Selection {
+        mode: None,
         expected_revision: revision,
         capabilities: caps,
         saved_login_ids: None,
@@ -1478,6 +1479,322 @@ async fn machine_access_admission_is_per_node_counts_only_live_v2_and_keeps_canc
         .await
         .unwrap()
         .is_some()
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn machine_access_separated_requires_support_flag_card_and_keeps_mode_with_old_writer() {
+    let f = orchestrator_fixture("machine_access_separated").await;
+    enable(&f).await;
+    let mut n = v2(&f).await;
+    let caps = Capabilities {
+        browser: true,
+        files: true,
+        ..Default::default()
+    };
+    let mut selected = selection(1, caps);
+    selected.mode = Some("separated".into());
+    selected.saved_login_ids = Some(vec![]);
+    assert!(
+        Box::pin(access::configure(
+            &f.state.db,
+            &f.owner,
+            &f.chat.agent_id,
+            &n.id,
+            selected.clone()
+        ))
+        .await
+        .is_err()
+    );
+    super::feature_flag_service::set_platform_override(
+        &f.state.db,
+        access::CONTEXT_FLAG,
+        &super::feature_flag_service::FlagTarget::Global,
+        true,
+        &f.owner,
+    )
+    .await
+    .unwrap();
+    assert!(
+        Box::pin(access::configure(
+            &f.state.db,
+            &f.owner,
+            &f.chat.agent_id,
+            &n.id,
+            selected.clone()
+        ))
+        .await
+        .is_err(),
+        "v2 alone is insufficient"
+    );
+    n.machine.as_mut().unwrap().separated = Some(nyxid_machine::context::Support {
+        available: true,
+        landlock_abi: Some(6),
+        reason: None,
+    });
+    f.state
+        .db
+        .collection::<Document>(crate::models::node::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&n.id},
+            doc! {"$set":{"machine":bson::to_bson(&n.machine).unwrap()}},
+        )
+        .await
+        .unwrap();
+    let args = json!({"machine":n.id,"selection":selected});
+    let (card, pending) = Box::pin(crate::handlers::machine_access::native(
+        &f.state, &f.chat, &args,
+    ))
+    .await
+    .unwrap();
+    assert!(pending);
+    assert!(
+        Box::pin(access::policy(&f.state.db, &f.chat.agent_id))
+            .await
+            .unwrap()
+            .assignments
+            .is_empty()
+    );
+    let id = card["acknowledgement_id"].as_str().unwrap();
+    super::assistant_acknowledgement_service::decide(
+        &f.state.db,
+        &f.owner,
+        &f.chat.conversation_id,
+        id,
+        true,
+    )
+    .await
+    .unwrap();
+    let mut approved = args;
+    approved["acknowledgement_id"] = id.into();
+    assert!(
+        !Box::pin(crate::handlers::machine_access::native(
+            &f.state, &f.chat, &approved
+        ))
+        .await
+        .unwrap()
+        .1
+    );
+    let a = Box::pin(access::admit(
+        &f.state.db,
+        &f.chat,
+        &n,
+        Operation::Browser,
+        &json!({}),
+        None,
+    ))
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(a.mode, "separated");
+    assert!(a.require_v2);
+    assert_eq!(a.generation, 1);
+    super::feature_flag_service::set_platform_override(
+        &f.state.db,
+        access::CONTEXT_FLAG,
+        &super::feature_flag_service::FlagTarget::Global,
+        false,
+        &f.owner,
+    )
+    .await
+    .unwrap();
+    let mut old_writer = selection(2, caps);
+    old_writer.saved_login_ids = Some(vec![]);
+    let policy = Box::pin(access::configure(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        &n.id,
+        old_writer,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(policy.assignments[&n.id].mode, "separated");
+    let effective = Box::pin(access::assignment(&f.state.db, &f.chat, &n))
+        .await
+        .unwrap();
+    assert_eq!(effective.mode, "separated");
+    let visible = Box::pin(access::visible_assignments(&f.state.db, &f.chat))
+        .await
+        .unwrap();
+    assert!(
+        visible
+            .iter()
+            .any(|(node, assignment)| node.id == n.id && assignment.mode == "separated")
+    );
+    // Existing Grants removal/re-addition must retain the separated preference,
+    // with all capabilities off, even when its creation flag has been disabled.
+    let mut agent = f
+        .state
+        .db
+        .collection::<AssistantAgent>(AGENTS)
+        .find_one(doc! {"_id":&f.chat.agent_id})
+        .await
+        .unwrap()
+        .unwrap();
+    let before = agent.machine_node_ids.clone();
+    agent.machine_node_ids.clear();
+    let mut session = f.state.db.client().start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    Box::pin(access::membership_changed(
+        &f.state.db,
+        &f.owner,
+        &mut agent,
+        &before,
+        false,
+        &mut session,
+    ))
+    .await
+    .unwrap();
+    agent.machine_node_ids.push(n.id.clone());
+    Box::pin(access::membership_changed(
+        &f.state.db,
+        &f.owner,
+        &mut agent,
+        &[],
+        false,
+        &mut session,
+    ))
+    .await
+    .unwrap();
+    let retained = &agent.machine_access.as_ref().unwrap().assignments[&n.id];
+    assert_eq!(retained.mode, "separated");
+    assert_eq!(retained.capabilities, Capabilities::default());
+    assert!(!retained.legacy);
+    session.abort_transaction().await.unwrap();
+    n.machine.as_mut().unwrap().separated = None;
+    assert!(matches!(
+        Box::pin(access::assignment(&f.state.db, &f.chat, &n)).await,
+        Err(AppError::MachineAuthorityUnsupported)
+    ));
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn machine_access_separated_login_binding_and_delete_quarantine_are_atomic() {
+    let f = orchestrator_fixture("machine_access_context_login").await;
+    enable(&f).await;
+    let mut n = v2(&f).await;
+    n.machine.as_mut().unwrap().separated = Some(nyxid_machine::context::Support {
+        available: true,
+        landlock_abi: Some(6),
+        reason: None,
+    });
+    f.state
+        .db
+        .collection::<Document>(crate::models::node::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&n.id},
+            doc! {"$set":{"machine":bson::to_bson(&n.machine).unwrap()}},
+        )
+        .await
+        .unwrap();
+    super::feature_flag_service::set_platform_override(
+        &f.state.db,
+        access::CONTEXT_FLAG,
+        &super::feature_flag_service::FlagTarget::Global,
+        true,
+        &f.owner,
+    )
+    .await
+    .unwrap();
+    let login = super::saved_login_service::put(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.owner,
+        &f.owner,
+        None,
+        super::saved_login_service::Input {
+            label: "Fixture".into(),
+            allowed_origins: vec!["https://example.test".into()],
+            username: zeroize::Zeroizing::new("private-fixture".into()),
+            password: None,
+            totp_secret: None,
+            confirm_each_sign_in: false,
+        },
+    )
+    .await
+    .unwrap();
+    let mut s = selection(
+        1,
+        Capabilities {
+            browser: true,
+            ..Default::default()
+        },
+    );
+    s.mode = Some("separated".into());
+    s.saved_login_ids = Some(vec![login.id.clone()]);
+    Box::pin(access::configure(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        &n.id,
+        s,
+    ))
+    .await
+    .unwrap();
+    let a = Box::pin(access::admit(
+        &f.state.db,
+        &f.chat,
+        &n,
+        Operation::FillLogin,
+        &json!({"login":login.id}),
+        None,
+    ))
+    .await
+    .unwrap()
+    .unwrap();
+    let row = f
+        .state
+        .db
+        .collection::<Document>(model::CONTEXTS)
+        .find_one(doc! {"_id":&a.context_id,"login_ids":&login.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!format!("{row:?}").contains("private-fixture"));
+    Box::pin(super::saved_login_service::delete(
+        &f.state.db,
+        &f.owner,
+        &login.id,
+    ))
+    .await
+    .unwrap();
+    let context = f
+        .state
+        .db
+        .collection::<model::Context>(model::CONTEXTS)
+        .find_one(doc! {"_id":&a.context_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(context.generation, 2);
+    assert!(f.state.db.collection::<Document>(model::OUTBOX).find_one(doc!{"agent_id":&f.chat.agent_id,"quarantine_profiles":true,"revision":{"$gt":a.revision}}).await.unwrap().is_some());
+    let next = Box::pin(access::admit(
+        &f.state.db,
+        &f.chat,
+        &n,
+        Operation::Browser,
+        &json!({}),
+        None,
+    ))
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(next.generation, 2);
+    assert!(next.revision > a.revision);
+    assert!(
+        Box::pin(access::admit(
+            &f.state.db,
+            &f.chat,
+            &n,
+            Operation::FillLogin,
+            &json!({"login":login.id}),
+            None
+        ))
+        .await
+        .is_err()
     );
     f.state.db.drop().await.unwrap();
 }

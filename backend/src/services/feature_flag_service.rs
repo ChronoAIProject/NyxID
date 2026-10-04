@@ -186,7 +186,7 @@ const MACHINE_CAPABILITIES_FLAG: FeatureFlagDef = FeatureFlagDef {
 pub const MACHINE_CONTEXTS_FLAG_KEY: &str = "assistant:machine-contexts";
 const MACHINE_CONTEXTS_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: MACHINE_CONTEXTS_FLAG_KEY,
-    description: "Configure isolated machine contexts on supported nodes (not yet available).",
+    description: "Opt in to separate workspaces and browsers on supported Linux nodes with owner approval. Full isolation requires a separate machine container or VM.",
     default_enabled: false,
 };
 

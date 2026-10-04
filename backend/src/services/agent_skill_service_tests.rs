@@ -130,6 +130,18 @@ async fn agent_skill_invisible_cannot_be_pinned_and_removal_needs_no_ornn() {
     .await
     .unwrap();
     assert_eq!(result.revision, 1);
+    assert_eq!(
+        f.state
+            .db
+            .collection::<mongodb::bson::Document>(
+                crate::models::assistant_agent_learning::ROOTS_COLLECTION_NAME,
+            )
+            .count_documents(mongodb::bson::doc! {})
+            .await
+            .unwrap(),
+        0,
+        "ordinary B2 pinning must not touch dormant learning provenance"
+    );
     let remove = Selection {
         expected_revision: 1,
         skills: vec![],

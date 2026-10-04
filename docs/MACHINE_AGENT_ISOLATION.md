@@ -1,12 +1,12 @@
 # M1 draft: agent-scoped machine workspaces, authority, and visibility
 
-Status: design approved on 2026-10-03; M1.1 implementation authorized. Started incrementally at `/tmp/m1-design.md`, moved here with owner authorization after #1747 merged.
+Status: design approved on 2026-10-03; revised M1.3 backend/runtime slice ready for review. Owner rollout is incomplete; see §8.7. Started incrementally at `/tmp/m1-design.md`, moved here with owner authorization after #1747 merged.
 Date: 2026-10-03.
 Initial audit baseline: NyxID `origin/main` = `52aa526550db3ef84946b6032795f5ec36c20166` (v0.47.0, #1746). After #1747 merged, fetched and branched from `36e3ef04b571f80bafab0fee88cc2b77ac5abaf8` (v0.48.0). Reviewed the intervening diff: the machine isolation findings are unchanged; the UI design now explicitly uses U1’s overlay primitives. Source line references below refer to the initial audit unless a symbol/link identifies the final baseline. OpenDots downloaded reference plus GitHub client source fetched at HEAD `c2569bb6a13a22e565cf3eb791c62267d06babb1` (2026-10-02). The supplied five reference files and both fetched client files were verified byte-for-byte against GitHub blob hashes at that OpenDots revision. `computer-store.ts` was also fetched pinned to that revision. Initial research used `git show origin/main:<path>` without branch or repository mutation. The authorized design branch is now `feat/machine-agent-isolation`; M1.1 proceeds on this branch without new machine authority.
 
 ## 1. Executive recommendation
 
-Adopt agent-scoped machine grants and execution contexts, plus contextual chat cards and a metadata-only activity view. Do not call a directory prefix or a Chromium profile an isolation boundary: shell commands need enforced OS separation, and browser contexts need separate displays, sockets and buses. Keep today's shared behavior explicitly labeled for existing installations; make new grants deny-by-default and offer isolated contexts only on nodes that can enforce them. Defer a Docker-socket supervisor to a later, optional feature; separate existing machine containers already provide a stronger boundary today.
+Adopt agent-scoped machine grants and execution contexts, plus contextual chat cards and a metadata-only activity view. Do not call a directory prefix or a Chromium profile an isolation boundary: shell commands need enforced OS separation, and browser contexts need separate displays, sockets and buses. Keep today's shared behavior explicitly labeled for existing installations; make new grants deny-by-default and offer separated contexts only on nodes that can enforce them. Defer a Docker-socket supervisor to a later, optional feature; separate existing machine containers already provide a stronger boundary today.
 
 Recommended priority: make the current sharing visible; add explicit capability grants and immediate revocation; deliver enforced Linux execution contexts; then add per-context browsers and saved-login boundaries. Safe cards/activity can ship first and do not require container orchestration.
 
@@ -63,30 +63,82 @@ OpenDots is ahead in per-agent lifecycle/UX and continuously rechecked capabilit
 
 ## 3. Proposed behavior and security boundaries
 
-### 3.1 Execution identity, workspace isolation, and browser contexts
+### 3.1 Separate workspace and browser for this agent
 
-**Normative identity.** The server derives a context from the authenticated `ChatAuthority`, agent owner and node; the model never supplies an agent ID, UID, profile directory, display address or socket path. Personal contexts persist across that agent's threads. Org-agent contexts default to a distinct acting-person partition, `(node, agent owner, agent, acting person)`, because B3 private member threads must not accidentally share browser sessions through a common org specialist. A genuinely shared org project context would be a separate explicit opt-in, not this default. Group member threads additionally partition by group ID so a shared group task does not inherit an agent’s private-thread workspace or cookies; guests still have no machine access. Use opaque UUID context IDs and generation counters, never mutable agent names or API key IDs.
+The owner-approved mode is `separated`; the UI label is **Separate workspace and
+browser for this agent**. It combines the former workspace and browser phases.
+`shared_legacy` remains the default. **Full isolation requires a separate machine
+container or VM per agent.** Never label this mode “isolated”.
 
-**Two visible modes:**
+#### What separated does and does not guarantee
 
-1. `shared_legacy`: today's node-wide workspace/profile; clearly say “Shared workspace and browser sessions with other agents on this machine.” Existing installations remain here until the owner chooses otherwise. It is not labeled agent-isolated.
-2. `isolated`: an enforced context with its own workspace, HOME, temp/cache directories, command identity, secure browser identity/profile/display, and dev identity/profile/display. Fail closed if the node cannot enforce any granted capability. Never silently downgrade to `shared_legacy`.
+Each server-derived agent/person/group context receives command, secure-browser
+and developer-browser OS users whose UIDs are never reused. Workspace, home, tmp,
+browser profiles and native sockets have private DAC boundaries. Supervisor-owned
+ancestors prevent a context from widening access to siblings by chmod or rename.
+Legacy roots become supervisor-owned with only the legacy group able to traverse
+them; world-writable files below them remain unreachable to context UIDs. This
+change happens only as part of the owner's explicit opt-in, not on upgrade.
 
-**Workspace implementation on Linux (recommended).** A supervisor-owned base contains `<context UUID>/workspace`, `home`, `tmp` and separate browser state. On the official container use a new protected directory inside the existing persistent state volume, e.g. `/var/lib/nyxid-machine/contexts`; do not put it below agent-owned `/workspace`, whose owner could rename/replace a supposedly protected child. Native separated installs choose an equivalent supervisor-owned base. Ancestors, mapping files and generation markers must be verified with descriptor-relative no-follow/ownership checks. Each context command UID alone owns its 0700 workspace/home/tmp; umask 0077. Keep today's `Roots` implementation and excluded config/credential paths, selecting only that context's roots. Relative paths are recommended; return the actual isolated root in machine metadata and `NYX_WORKSPACE`. Do not claim that legacy absolute `/workspace/...` paths are automatically mapped inside arbitrary shell scripts.
+Linux Landlock ABI **6 or later**, verified by a real execution probe, provides
+additional read/write/execute restrictions and signal/abstract-socket scoping.
+Command and file-worker execution keeps no-new-privileges, the existing namespace-denying agent
+seccomp filter, a cleared environment, private temporary directory and descriptor
+cleanup using CLOEXEC/close_range. Its runtime allowlist is narrow and read-only.
+Browser processes keep Chromium’s own sandbox, NNP, private DAC gates, descriptor
+cleanup and Landlock signal/abstract-socket scopes. They do not receive the command
+filesystem ruleset: Chromium must write child `/proc` namespace mappings to create
+its own sandbox, which a read-only `/proc` grant prevents. We neither disable that
+sandbox nor pretend a broad writable `/proc` grant is a narrow runtime allowlist.
+These mechanisms are cumulative: UID separation alone is not this mode.
 
-A per-agent directory **alone is not sufficient**. Provision a bounded durable UID/GID allocation (separate command/secure/dev identities per context; no supplementary groups), never reused while a context's files/processes remain. Do not grant all contexts membership in the existing agent or browser groups. Apply NNP and the existing agent seccomp before exec. Add an actual filesystem sandbox for command/file workers, and role-specific restrictions for browser children, on supported Linux (recommended: Landlock with a narrow read-only system-runtime allowlist and only context-owned writable directories, inherited by descendants). The shipped outer seccomp already allows Landlock syscalls; feature-detect its required ABI and verify access, do not infer success from a config flag. No bwrap mounts, privileged container, added capabilities or AppArmor exception are needed for the container path. Native bwrap may provide an equivalent tested boundary when available.
+`/dev/shm` is intentionally available for POSIX semaphores and Python process
+pools. Distinct UIDs, mode 0600 and the sticky directory protect other contexts'
+segments. Names are visible and capacity is shared, so exhaustion is possible.
+Landlock does not mediate all metadata operations: world-writable system files
+outside private DAC ancestors may permit timestamp changes, and files owned by
+the context UID outside its allowlist may permit chmod. Public pathname Unix
+sockets remain reachable; private sockets require protected ancestors. Network,
+PID and IPC namespaces, kernel, supervisor and resource capacity remain shared.
+Browser runtimes need `/proc` for Chromium and accessibility; DAC/ptrace checks
+protect other UIDs’ environment, memory and descriptors, but process metadata
+(including command lines) can be visible. Keep secrets out of command-line arguments.
+This is not hostile multi-tenant isolation or protection from kernel exploits,
+shared-host DoS, public local services, or shared remote-account state.
 
-Landlock support and compatibility with common compilers, git, Python/Node, `/proc` and device files require an implementation spike and e2e acceptance before advertising `isolated`. Do not allow entire `/home`, `/var`, `/tmp` or legacy workspace trees just to make a test pass. Block sibling/legacy roots even when files were created world-readable; close inherited descriptors and test `/proc/.../fd` escapes. Pre-provisioned runtime files may be read-only shared. Browser allowlists include only their own profile/runtime directories plus required shared executable/font/library resources; an isolated browser UID must not inherit read access to world-readable legacy workspaces. Local services and network endpoints remain shared unless separately restricted: do not advertise process/filesystem isolation as a network sandbox, and never expose a context’s unauthenticated debugging or file service on a shared loopback port. Explicit owner-approved shared project roots are separate read-only/read-write mounts/allowlist entries with a visible sharing warning; they are not silently included from `config.roots`. If required enforcement is unavailable, offer a separate existing machine container, or the labeled shared mode.
+Each context has secure and dev browser UIDs, separate profiles, Xvfb displays,
+Xauthority cookies and D-Bus sessions. DevTools is dev-only. Command children
+receive no display cookie, native socket or browser credentials. Saved-login fills
+bind to the signed context and secure-profile generation; revocation closes and
+quarantines that generation before a fresh profile can be used. Profiles and
+cookies are never copied from the legacy browser or between contexts. Private X
+servers disable their abstract listener and retain the cookie-authenticated
+pathname socket, so Landlock scoping never requires a shared display exception.
+D-Bus and accessibility activation receive the context's own display and private
+runtime directory; their children also inherit scoped execution. The private
+AT-SPI service is activated and enabled before Chromium starts, including for a
+fresh OS user. Container startup preserves the legacy workspace's supervisor-owned
+DAC gate once a context allocation journal exists.
 
-**Browser context implementation.** Refactor the singleton runtime into a bounded registry of context runtimes, reusing jobs/gateway infrastructure and root supervisor identity. Each isolated context needs its own secure profile, native socket/lock, peer-UID verification, nonce binding, D-Bus/AT-SPI session, Xvfb + Xauthority and window manager. The developer browser needs a different UID, profile and display from that context's secure browser and from all other contexts. Its CDP pipe stays supervisor-only. A different profile on the same X display is explicitly insufficient. Browser policy must remain root-owned and correct per secure/dev process without requiring container mount operations. The CRX update endpoint can serve the same immutable package; routing/native manifests must bind to the exact context, not a globally substituted `filler.sock`.
+On native Linux, new developer UIDs receive named-user POSIX ACL denials on secure
+policy/native-host files and read access to a private developer policy. Existing
+profiles retain their policy access. ACL setup errors refuse the context rather
+than weakening another profile. The durable allocation journal retains UID and
+profile-generation tombstones; the current bounds are 128 contexts and 128
+browser generations per context. Exhaustion refuses provisioning, never reuses a
+UID. Preserve this journal with the machine identity/workspace volume.
 
-Display capture, trusted input and cua must take an explicit resolved context endpoint instead of global `DISPLAY`, `dev_display::SERVER`, or machine-wide secure/dev enums alone. Cua remains warm on its context's secure display; dev uses CDP. Neither command/file child receives Xauthority, D-Bus or CDP descriptors. Probe two contexts simultaneously for cross-socket, profile and display denial before reporting readiness.
+macOS, single-user Linux and Linux without a successful ABI 6 probe cannot enable
+`separated`. Return an explicit unavailable reason; never fall back to shared
+execution. Protocol v2 alone is insufficient: the node must separately advertise
+verified separated support. The default-off `assistant:machine-contexts` flag gates
+new opt-ins, and an owner action card names the fresh workspace/browser and the
+interruption of existing work. Stored enforcement remains active with the flag off.
 
-**Task concurrency.** Use a node-enforced, server-fenced browser/desktop lease per `(context, display)` owned by the turn, with a short renewal while active. Serialize browser task windows across threads of one agent; do not let their independent clicks race shared tabs. Another thread receives typed busy/retry metadata, not another thread's conversation contents. Lease expiry cancels input before reassignment; handback, restart, navigation/context change invalidate observation epochs. Ref actions bind `{context, display, tab, document, observation_epoch}`; require a fresh snapshot after handback. This borrows OpenDots' snapshot-ID discipline while retaining NyxID's hit tests and frame refs.
-
-**Limits and lifetime.** Start with local maximum 8 persisted contexts and 2 active browser contexts per node (configurable, measured before making these product defaults), retaining node-wide job caps plus per-context fairness. Create browsers lazily; keep active tasks warm; evict only idle processes, never profiles. Exceeding capacity returns actionable `context_capacity` rather than reclaiming active work. Do not reuse a context UUID for a recreated specialist of the same name. Destroying/revoking an agent cancels its work and closes browsers; data is retained for explicit owner cleanup/export, and owner purge has a durable cleanup request. An offline node cannot be claimed to have securely erased local data.
-
-**Platform scope.** Enforced mode initially targets the official Linux container and root-supervised `--separate-users` Linux VMs. Native macOS and single-user Linux can have organizational subdirectories/profiles, but remain `shared_legacy`/not agent-isolated because the same OS user can read them and macOS shares the physical desktop. Keep the existing warning pattern and recommend separate containers/VMs for private agent contexts. Do not emulate isolation with prompt instructions.
+The original spike's failed stronger boundary remains documented in
+[MACHINE_CONTEXT_SPIKE.md](MACHINE_CONTEXT_SPIKE.md). Revised adversarial tests must
+retain the metadata, public pathname-socket and shared-memory residuals as explicit
+**allowed-by-design controls**, alongside cross-context denials and tooling tests.
 
 ### 3.2 Capability grants, saved logins, and NyxBot policy
 
@@ -102,17 +154,17 @@ Store explicit per-(agent,machine) grants beside `machine_node_ids`, not inside 
 
 These are tool/API permissions, not magical behavioral sandboxes. Shell necessarily reads/writes its allowed filesystem even if the file-tool switch is off; full desktop control can manipulate apps through their UI. Explain these implications inline. If owners need no terminal execution through a desktop, recommend browser-only access, not `computer`. Scope trust to a context, not to whether the agent selected a particular tool name.
 
-Add an optional node-local `browser` switch, defaulting to the existing `computer` value only when absent, to preserve legacy config. New setup exposes the choice. Server settings can only narrow this ceiling; disabling a local capability always wins. In isolated mode, owner control blocks browser/computer input for the selected display and shell/files within that context; another context cannot reach that display. Shared legacy and macOS retain today’s broader shell/files fence. Switching tools or opening another browser in the same controlled context must not bypass takeover.
+Add an optional node-local `browser` switch, defaulting to the existing `computer` value only when absent, to preserve legacy config. New setup exposes the choice. Server settings can only narrow this ceiling; disabling a local capability always wins. In separated mode, owner control blocks browser/computer input for the selected display and shell/files within that context; another context cannot reach that display. Shared legacy and macOS retain today’s broader shell/files fence. Switching tools or opening another browser in the same controlled context must not bypass takeover.
 
-**NyxBot.** Retain its existing machine reachability for old machines via explicit migrated compatibility grants. For v2 machines NyxBot gets its own context and explicit capability set from owner setup; no automatic access to every specialist's private context. New machine setup may recommend shell/files/browser with clear checkboxes, but does not silently grant them merely by selecting the machine. NyxBot can coordinate work by handing it to the specialist, or ask for owner-approved file transfer. Crossing into another context/browser, granting developer evaluation, widening a capability, switching isolated to shared, or adopting a shared login session requires an owner action card. Narrowing/revocation can be done immediately within existing authorized grant-management rules. This preserves the established request-to-NyxBot flow without allowing delegation to bypass the owner's per-capability restrictions. Organization grants still require current org management rights.
+**NyxBot.** Retain its existing machine reachability for old machines via explicit migrated compatibility grants. For v2 machines NyxBot gets its own context and explicit capability set from owner setup; no automatic access to every specialist's private context. New machine setup may recommend shell/files/browser with clear checkboxes, but does not silently grant them merely by selecting the machine. NyxBot can coordinate work by handing it to the specialist, or ask for owner-approved file transfer. Crossing into another context/browser, granting developer evaluation, widening a capability, switching separated to shared, or adopting a shared login session requires an owner action card. Narrowing/revocation can be done immediately within existing authorized grant-management rules. This preserves the established request-to-NyxBot flow without allowing delegation to bypass the owner's per-capability restrictions. Organization grants still require current org management rights.
 
-**Saved logins.** Keep the existing `saved_login_ids` authority and the B3 prohibition on personal saved logins for organization agents (`docs/ORG_AGENTS.md`); M1 does not introduce organization saved logins. Add a per-assignment optional allowlist that can only narrow it, and bind every fill to the resolved secure context/generation. Absent machine-local narrowing inherits the agent's existing login list; empty means none. NyxBot's existing “all owned logins” behavior remains only in its migrated/shared context; new isolated contexts require explicit owner selection. No cookie/profile cloning between agents. Granting the same saved login to two agents intentionally permits both to log into the same external account, but their cookie stores remain separate. Sites themselves can expose shared account/server state; local separation cannot prevent that.
+**Saved logins.** Keep the existing `saved_login_ids` authority and the B3 prohibition on personal saved logins for organization agents (`docs/ORG_AGENTS.md`); M1 does not introduce organization saved logins. Add a per-assignment optional allowlist that can only narrow it, and bind every fill to the resolved secure context/generation. Absent machine-local narrowing inherits the agent's existing login list; empty means none. NyxBot's existing “all owned logins” behavior remains only in its migrated/shared context; new separated contexts require explicit owner selection. No cookie/profile cloning between agents. Granting the same saved login to two agents intentionally permits both to log into the same external account, but their cookie stores remain separate. Sites themselves can expose shared account/server state; local separation cannot prevent that.
 
 Revoking a login cannot undo remote sessions or data already read. Close and quarantine the affected context's entire secure profile generation before it can be reused; create a clean generation after admission resumes. Origin-only cookie clearing is insufficient for OAuth/SSO domains, service workers and open tabs. Keep workspace data; explain that other logins in that profile need signing in again. Deleting a saved login applies the same reset to contexts that used it, and warns that site-side session revocation may still be required. Maintain a metadata-only usage binding `(login ID, context ID, generation)` to find them. In shared legacy mode, offer an explicit whole-browser reset and state the limitation; never promise per-agent revocation of already-shared cookies.
 
 **Immediate revocation.** Commit a monotonic assignment revision/tombstone and a durable revocation outbox in the same transaction as the grant change. A leased, fenced dispatcher/change stream plus sweep backstop sends a signed context/capability cancel, and the local runtime refuses old revisions, kills affected process groups/cua work, aborts gateway streams and prevents late results. Pending cards bind the revision/context and expire on change. Reductions do not need owner approval and cannot be delayed behind active browser locks.
 
-The current scoped Stop identity is conversation/turn (plus an unscoped machine-wide Stop). Add context/revision/capability cancellation without weakening existing chat Stop or machine-wide emergency Stop. Each running job/stream has a short authority lease (proposed 5 s, renewable by the server's fresh DB authorization); a disconnected node stops that work when the lease expires. Server APIs stop accepting work immediately; the UI says “revocation pending on offline machine” until acknowledged or locally expired. Normal online delivery targets the current sub-second Stop behavior, but distributed/network failure is never described as instantaneous. Reconnect syncs the current policy before admitting work. Late outbox workers are fenced and cannot restore an older revision.
+The current scoped Stop identity is conversation/turn (plus an unscoped machine-wide Stop). Add context/revision/capability cancellation without weakening existing chat Stop or machine-wide emergency Stop. Each running v2 job/stream has a 45-second authority lease, renewed every ten seconds through the server's fresh DB authorization (§8.4); a disconnected node stops that work when the lease expires. V1 legacy work does not acquire this lease. Server APIs stop accepting work immediately; the UI says “revocation pending on offline machine” until acknowledged or locally expired. Normal online delivery targets the current sub-second Stop behavior, but distributed/network failure is never described as instantaneous. Reconnect syncs the current policy before admitting work. Late outbox workers are fenced and cannot restore an older revision.
 
 ### 3.3 Inline cards and per-agent activity
 
@@ -128,7 +180,7 @@ Preview reads use the conversation/attachment ACL, not merely a machine grant. P
 
 **Machine activity.** Project the existing metadata audit and jobs into a cursor-paginated machine view, filterable by stable agent ID, context, operation kind, time and outcome. Add agent/actor/context/request/activity/job correlation to new `machine_operation` audit rows; record only bounded enum sub-actions such as `browser.navigate`, not navigation URLs. Join job state by ID so long-running jobs have current outcomes without duplicating output. Start with the existing audit/job stores and indexes; a separate event collection is unnecessary until measured query cost requires it. Use `(node_id, created_at, id)` pagination and an agent-filtered index appropriate to the existing audit schema; bounded default 50/max 100 rows, no unbounded in-memory union. Audit retention remains unchanged. Old rows without agent attribution display “Unknown (older node)”; do not infer an agent from a mutable name or expose an unrelated conversation while trying to fill the gap.
 
-Machine owners and authorized organization machine managers see operation metadata under existing machine-management ACLs. Links to a private thread, previews or command output require their separate thread ACL; omit inaccessible links and conversation titles. An agent sees only its authorized context/task receipts, not a machine-wide activity feed. The page visibly distinguishes `Shared legacy` from `Isolated context`, and readiness from capability support. Keep a context picker above the existing Secure browser / Dev browser switch, with takeover/Stop scope clearly named. Machine-wide Stop remains separately available. Follow DESIGN.md and U1 overlay inheritance, keyboard/focus rules, responsive padding and compact transcript width; no per-dialog z-index patches.
+Machine owners and authorized organization machine managers see operation metadata under existing machine-management ACLs. Links to a private thread, previews or command output require their separate thread ACL; omit inaccessible links and conversation titles. An agent sees only its authorized context/task receipts, not a machine-wide activity feed. The page visibly distinguishes `Shared legacy` from `Separated context`, and readiness from capability support. Keep a context picker above the existing Secure browser / Dev browser switch, with takeover/Stop scope clearly named. Machine-wide Stop remains separately available. Follow DESIGN.md and U1 overlay inheritance, keyboard/focus rules, responsive padding and compact transcript width; no per-dialog z-index patches.
 
 ### 3.4 Optional per-agent container supervisor
 
@@ -167,7 +219,7 @@ Introduce an explicitly negotiated context/authority protocol version with signe
 
 A new command authenticates the node/runtime, context/generation, agent/owner/actor/group identity, conversation/turn or job, required capability, grant revision, task/control epoch, bounded authority expiry, request ID and existing nonce/timestamp. Extend signature canonicalization with an explicit version/domain: all authority fields are covered, not separately trusted JSON. The model supplies only the operation arguments. Replayed renewals cannot extend a lease: persist the highest authority/task epoch and derive a bounded monotonic local deadline from the signed expiry; apply expiry even if the socket stays connected but renewals stop. Validate the signed context identity against its local map before opening any file, socket or browser. No untrusted profile selector can cross contexts. Gateway tokens additionally bind the context/revision; effective declared services and B1 checks remain unchanged.
 
-Advertise support separately from current readiness: context protocol versions, enforced backend/platform limitations, capability ceilings, isolation probe result, configured capacity and supported browser actions. Per-context status reports browser/driver readiness, busy/owner-controlled and bounded failure codes. Do not expose another actor's context names or paths in general discovery, and do not empty supported tool lists during driver recovery. `commands_isolated` continues to mean commands cannot read node secrets; add a distinct agent-context-isolation fact rather than repurposing it. `browser_isolated` retains its saved-login meaning.
+Advertise support separately from current readiness: context protocol versions, enforced backend/platform limitations, capability ceilings, isolation probe result, configured capacity and supported browser actions. Per-context status reports browser/driver readiness, busy/owner-controlled and bounded failure codes. Do not expose another actor's context names or paths in general discovery, and do not empty supported tool lists during driver recovery. `commands_isolated` continues to mean commands cannot read node secrets; add a distinct agent-context-separation fact rather than repurposing it. `browser_isolated` retains its saved-login meaning.
 
 Add typed, retry-aware outcomes for unsupported context protocol, unavailable isolation backend, context busy/capacity, stale authority, permission revoked and context quarantined. Allocate numeric codes only during implementation in `errors/mod.rs`, the authoritative table. Preserve existing driver restarting/permission/display/tool-not-supported/browser-unavailable/Stop codes. Updates and human machine administration retain their own owner-card protocol and are not implicitly granted by `shell` or `browser`.
 
@@ -179,28 +231,28 @@ Backward compatibility means existing accepted work keeps its explicitly shared 
 
 | Server / node | Permitted behavior |
 |---|---|
-| Old server + old or dual-protocol node | Existing v1 shared behavior only. An upgraded node blocks v1 for enrolled restricted/isolated contexts; an old node cannot enforce them and cannot be used for that policy (see rollback gate below). |
+| Old server + old or dual-protocol node | Existing v1 shared behavior only. An upgraded node blocks v1 for enrolled restricted/separated contexts; an old node cannot enforce them and cannot be used for that policy (see rollback gate below). |
 | Upgraded server + v1 node | Unmodified migrated legacy assignments continue to work and show the sharing warning. Switching to restricted/context enforcement requires node upgrade; show an update action, never pretend the old node enforces context leases. |
-| Upgraded server + context-capable node | Explicit capability grants, revocation leases and supported context modes enforced at both ends. A Linux probe failure disables isolated admission, not legacy readiness. |
+| Upgraded server + context-capable node | Explicit capability grants, revocation leases and supported context modes enforced at both ends. A Linux probe failure disables separated admission, not legacy readiness. |
 | Mixed server fleet | Read-only visibility additions are safe; do not enable new restriction/context writes until every auth, API, MCP, worker, gateway and WS replica supports enforcement. |
 | Disabled creation flag after rollout | Existing assignments/contexts/revocations still enforced. Disabling a flag never widens authority or switches a context back to shared. |
 
-Proposed feature flags: `assistant:machine-capabilities` for new assignment configuration and `assistant:machine-contexts` for isolated-context setup. Both start off. A separate presentation flag can stage cards/activity without changing authority. Enforcement depends on stored policy, not feature flag evaluation. Node-local enablement and successful isolation probes are required in addition to server flags. Record per-replica supported schema/protocol in readiness diagnostics; require deployment readiness/draining of old replicas before enabling writes, following the B1/B3 rollout pattern.
+Proposed feature flags: `assistant:machine-capabilities` for new assignment configuration and `assistant:machine-contexts` for separated-context setup. Both start off. A separate presentation flag can stage cards/activity without changing authority. Enforcement depends on stored policy, not feature flag evaluation. Node-local enablement and successful isolation probes are required in addition to server flags. Record per-replica supported schema/protocol in readiness diagnostics; require deployment readiness/draining of old replicas before enabling writes, following the B1/B3 rollout pattern.
 
 ### 5.2 Ordered migration
 
 1. Deploy additive readers, dual-protocol support and enforcement to the entire server fleet with creation flags off. Preserve the sibling-field write discipline. Install indexes through existing boxed DB phases once, before enabling context writes. Drain old long-lived WS/MCP workers; routing only the settings page to new replicas is insufficient.
 2. Run an idempotent bounded, leased/fenced migration of existing agent-machine memberships. Snapshot current compatibility authority as explicit `shared_legacy` assignments, with all historically permitted tool families intersected by local authority. Materialize NyxBot's existing implicit reachability for the person's currently accessible machines (including eligible organization nodes), even if its flat membership list was empty; execution still rechecks live owner/org access. Record a policy cutover epoch and migration provenance; the cutover migration itself never sweeps in post-cutover machines/agents; while the capability flag is off, the live pairing/Grants compatibility path can create their authorized legacy snapshots (§8.4). Serialize migration with grant mutations so it never revives a removal.
 3. Set each agent's access-version marker atomically with its migration. Before that marker only the exact pre-cutover compatibility path is allowed. Afterwards absent assignment means deny unless the flag-off NyxBot compatibility path first materializes an authorized legacy snapshot (§8.4); missing fields themselves never grant authority. Both modern and legacy grant endpoints must preserve existing restrictions; adding a `machine_node_ids` entry creates an all-off pending assignment with the editor enabled, or a legacy capability snapshot with it disabled. Reject stale writers that attempt to undo context state. Surface only the capabilities the node can actually enforce.
-4. Upgrade nodes through the existing attested updater flow; do not manually replace its trust or hand-off protocol. An upgrade alone does not opt an owner into isolated workspaces or move files. New compatible installs recommend isolated mode; initial capability toggles stay off until explicitly confirmed. Old and single-user nodes keep the honest legacy warning and upgrade/separate-container guidance.
-5. Owner opts an assignment into isolated mode using a reviewable card/settings action showing root change, clean browser, capacity and effects on running work. Drain/cancel its current jobs and desktop input, provision a fresh context, verify enforcement, then commit the new assignment revision. On failure retain the old assignment only with its old explicit policy; never execute an isolated request in the old workspace as a fallback. Existing agent tasks may continue in shared mode until their owner elects migration.
+4. Upgrade nodes through the existing attested updater flow; do not manually replace its trust or hand-off protocol. An upgrade alone does not opt an owner into separated workspaces or move files. New compatible installs recommend separated mode; initial capability toggles stay off until explicitly confirmed. Old and single-user nodes keep the honest legacy warning and upgrade/separate-container guidance.
+5. Owner opts an assignment into separated mode using a reviewable card/settings action showing root change, clean browser, capacity and effects on running work. Drain/cancel its current jobs and desktop input, provision a fresh context, verify enforcement, then commit the new assignment revision. On failure retain the old assignment only with its old explicit policy; never execute a separated request in the old workspace as a fallback. Existing agent tasks may continue in shared mode until their owner elects migration.
 6. Do not clone legacy cookies, native sockets, credentials or an entire HOME. Offer explicit selected workspace-file transfer using existing validated file/attachment paths, scan/reject symlinks/special files and exclude caches/secrets; copies are owner-reviewed and do not imply inherited execution permission. The old shared workspace/profile remains available to explicitly shared assignments. Reauthenticate approved saved logins in each new secure context.
 
-**Opt-out/reset.** Isolated to shared is an explicit authority widening: owner confirmation, stop that context, increment revisions, and state that other agents may use the shared files/sessions. Do not merge private context data or cookies into the shared profile. Retain isolated data for explicit export/destruction. Revocation and deletion are distinct from opt-out. Existing machines default shared; new supported setups recommend isolated, with consent and deny-by-default capability selection. Never surprise an existing machine with an empty workspace after an automatic update.
+**Opt-out/reset.** Separated to shared is an explicit authority widening: owner confirmation, stop that context, increment revisions, and state that other agents may use the shared files/sessions. Do not merge private context data or cookies into the shared profile. Retain separated data for explicit export/destruction. Revocation and deletion are distinct from opt-out. Existing machines default shared; new supported setups recommend separated, with consent and deny-by-default capability selection. Never surprise an existing machine with an empty workspace after an automatic update.
 
 ### 5.3 Rollback and local lifecycle
 
-Once a restricted/isolated assignment exists, rollback to an old server or node binary is not a transparent operation. Disable new creation, stop/drain affected turns/jobs/streams, revoke thread/job credentials as required, and keep context/preview/history routes on compatible replicas while their data needs new ACLs. Old binaries must not serve new private group/context previews. Retain tombstones and local minimum-protocol markers; old signed commands cannot restart work. Node automatic rollback may restore availability for legacy contexts but must keep restricted contexts blocked pending a compatible version. An explicit owner choice to return to legacy is a separate reviewed migration, not the updater's failure fallback.
+Once a restricted/separated assignment exists, rollback to an old server or node binary is not a transparent operation. Disable new creation, stop/drain affected turns/jobs/streams, revoke thread/job credentials as required, and keep context/preview/history routes on compatible replicas while their data needs new ACLs. Old binaries must not serve new private group/context previews. Retain tombstones and local minimum-protocol markers; old signed commands cannot restart work. Node automatic rollback may restore availability for legacy contexts but must keep restricted contexts blocked pending a compatible version. An explicit owner choice to return to legacy is a separate reviewed migration, not the updater's failure fallback.
 
 Use the existing persistent state volume for context maps/profiles and preserve it through container recreation. A node-local v1-unaware binary may not enforce a new marker itself: before shipping context mode, the update admission/rollback controller must refuse to start such a binary against enabled contexts, and the upgraded server must refuse every operation to that runtime. Do not claim a marker unread by an old binary is a security boundary. Rollout acceptance includes attempted downgrade and replay, not just happy-path forward updates.
 
@@ -216,7 +268,7 @@ This is the acceptance plan for implementation PRs. No runtime, container or per
 | Capability authority | Every capability on/off combination, local ceiling off, false/absent/defaulted fields, forged assignment/context, destroyed/recreated agent, guest, mismatched owner/node, expired job and missing live turn. Browser denial cannot be bypassed with cua; shell/file permission implications documented and tested. Saved-login/dev and org-personal-resource prohibitions preserved. |
 | B1/B3 | Native machine tools remain native rather than catalog service operations. Final gateway calls preserve service operation scopes, grants, membership/platform ACL and person billing. Two members using the same org agent, two groups and private/group tasks cannot read each other's contexts, cards or outputs. Membership and participant removal stop new work and cancel affected running authority. |
 | Linux adversarial isolation | Two specialists plus legacy agent, hostile shell and browser process under each role UID: absolute/relative traversal, rename/symlink/hardlink, inherited fd and `/proc/.../fd`, same-name recreation, credential/config/store read and write, cookies, D-Bus, CDP/native sockets, Xauthority, process signal/ptrace and shared temp access. Verify actual failure, not just mode bits. Sibling profiles/displays and legacy roots remain inaccessible even with world-readable files or writable parent tricks. |
-| Unsupported platforms | Missing Landlock/required ABI, restricted user provisioning or broken ownership probes return isolation unavailable; no fallback. macOS/single-user labeled accurately. An unavailable isolated backend must not hide valid legacy tools or break machine update. |
+| Unsupported platforms | Missing Landlock/required ABI, restricted user provisioning or broken ownership probes return separation unavailable; no fallback. macOS/single-user labeled accurately. An unavailable separated backend must not hide valid legacy tools or break machine update. |
 | Revocation and races | Remove shell during foreground/background exec and gateway streaming; browser/computer during long action; files during transfer. Verify correct scope, no surviving child process groups, blocked old revisions and late replies, unrelated context continues. Exercise two replicas, stale outbox holder, rollback/re-add, duplicate/reordered messages, disconnect and authority expiry; reconnect cannot resurrect cancelled work. Revoked login quarantines the right generation, including SSO tabs. |
 | Context lifecycle | Concurrent provisioning, failure at each local-map write, daemon/container restart, idle eviction, capacity, agent deletion/purge, never-reused UID and local-data export/cleanup. Owner takeover and Stop names the context/display, works during browser locks, and invalidates stale observation refs on handback. |
 | Browser regression | Trusted clicks/activation, overlay hit test, cross-origin frames, protected fields, 500-row paging, secure DevTools disabled, dev evaluation working. Persistent-profile extension reconnect/package repair, secure-browser kill/relaunch, container restart/update, missing package and read-only machine status in at least two simultaneous contexts. Both displays stream for each selected context without cross-input. |
@@ -237,8 +289,8 @@ Each implementation PR runs fmt, workspace clippy, focused backend authority/mac
 |---|---|---|
 | M1.1 — Visibility and receipts | Honest shared-session badge, action-specific metadata cards, existing screenshot thumbnails, bounded encrypted previews, metadata activity page with agent filter; typed failure/job outcomes. Reuse desktop and attachment retention. | No new machine authority. ACL, privacy, retention, frontend responsiveness and bounded-query tests. Can ship on legacy nodes; unattributed history stays unknown. |
 | M1.2 — Capability authority | Explicit per-agent machine capability editor/tool cards; compatibility migration; dual protocol, signed revisions, context identifiers, revocation outbox and authority leases. Initially operates labeled shared contexts on upgraded nodes. | Whole-server rollout before configuration flag; capable nodes required for new restrictions. Older nodes retain only migrated legacy mode with upgrade guidance. Revoke/Stop/gateway/B1/B3 and mixed-fleet tests pass. |
-| M1.3 — Enforced Linux workspaces | Opt-in isolated shell/files, durable UID map, protected roots, role sandbox enforcement, local probes, context lifecycle and updater downgrade guard. Browser/computer unavailable in these contexts until M1.4. | Linux sandbox feasibility spike is part of this PR’s acceptance, not a promise based on directory names. Two-agent adversarial tests pass on both architectures/profiles. No fallback into the shared browser. |
-| M1.4 — Isolated browsers and handback | Secure/dev profiles, identities, displays/buses, warm drivers, browser task leases/observation epochs, context picker, explicit login binding and revocation quarantine. | M1.2–3; persisted-profile/restart/update/Stop suite, login secrecy, cross-display denial and quiet-host capacity benchmarks. Enables a complete isolated context; finalizes limits and new-install recommendation. |
+| M1.3 — Separate workspace and browser (revised) | Opt-in separated shell/files and secure/dev browsers, durable UID map, protected roots, runtime probes, context lifecycle and profile quarantine. | Revised boundary in §3.1; adversarial controls and two simultaneous browser contexts. No shared fallback. |
+| M1.4 — Folded into revised M1.3 | Browser separation and handback are implemented with the workspace boundary, per the owner decision in §8.6. | Full isolation still requires a separate container/VM per agent. |
 | M1.5 — Optional container provisioning (decision gate) | A separately approved Docker supervisor with fixed templates, unique child identities and per-child lifecycle. | Not necessary to complete M1.1–4. Proceed only if owners need stronger namespace separation/one-click fleet creation and accept the host-root companion plus resource cost. New security review and attested lifecycle tests. |
 
 Each PR includes its migration, docs and tests; disabled creation flags leave a complete backward-compatible release. Do not combine all context, browser and supervisor changes into a single mandatory upgrade. If the OS sandbox spike cannot meet the threat model on supported hosts, ship capability/visibility improvements and recommend separate existing machine containers; return for a decision rather than weaken the meaning of “isolated.”
@@ -351,7 +403,7 @@ message and signing domain. The signed envelope binds the server-derived opaque
 context, agent/owner/acting person/group, runtime, turn, revision, capabilities
 and 45-second authority lease, renewed every ten seconds. Context IDs are persisted UUIDv4 values behind a
 unique node/owner/agent/person/group identity index. These context IDs partition authority only in
-M1.2: files and browser sessions remain visibly shared. No isolated mode is
+M1.2: files and browser sessions remain visibly shared. No separated mode is
 accepted until its later enforcement work is complete.
 
 Capability writes and revocations append a transactional outbox. A change stream
@@ -387,3 +439,153 @@ expired local deadline. The compatibility snapshot uses bounded driver batches, 
 new-assignment limits to existing access. Node fence storage is private, capped at 2 MiB and
 persisted before activation. Context metadata remains separate from process or
 filesystem isolation.
+
+### 8.5 M1.3 feasibility gate (2026-10-04)
+
+The Linux workspace spike did **not** pass the approved acceptance gate. The
+tested UID/Landlock/NNP/seccomp combination permits outside metadata writes and
+blocks ordinary Python process pools when shared `/dev/shm` remains inaccessible.
+The original full-isolation proposal was stopped; §8.6 records the revised decision. See [MACHINE_CONTEXT_SPIKE.md](MACHINE_CONTEXT_SPIKE.md)
+for counterexamples, ABI/kernel requirements, tooling results and reproduction.
+The meaning of `isolated`, the shared-legacy default and the default-off context
+flag are unchanged; stronger enforcement requires a new design decision.
+
+### 8.6 Revised M1.3 decision (2026-10-04)
+
+The owner chose **Separate users + browsers** after reviewing the failed original
+spike. M1.3 now combines the former M1.3 and M1.4, with the narrower `separated`
+boundary in §3.1. The original failed gate is historical, not a claim that its
+counterexamples have disappeared. M1.5 remains deferred; separate machine
+containers/VMs remain the recommendation for full isolation. No existing machine
+or assignment changes mode without owner opt-in.
+
+### 8.7 Backend/runtime review slice
+
+This slice implements signed context selection, durable UID allocation and
+generation quarantine, workspace enforcement, separate secure/developer browser
+resources, context-bound login fills and the native owner-card opt-in flow. The
+existing capability form and historical tool cards show the stored mode without
+calling it isolated. The context flag remains off by default.
+
+Provisioning is lazy on the first signed operation after the owner card changes
+the policy. If provisioning fails, that assignment remains separated and refuses
+work; it does not automatically restore shared access. A future preflight UI can
+prepare the resources before completing the visible setup flow.
+
+The human context picker, graphical opt-in flow and context selection in the live
+desktop HTTP/WebSocket API and UI are still follow-up work before the complete
+feature ships. The runtime routes signed context desktop commands and applies takeover to that context
+(including only jobs started under its supervisor-selected command UID), but
+the current human desktop API and page still select the legacy desktop. Do not
+enable this review slice for owners before that routing and selector are complete.
+A separate native Linux VM browser run remains part of release validation; container evidence and native
+policy ACL unit tests do not substitute for that host check.
+
+### 8.8 Runtime validation evidence (2026-10-04)
+
+The revised adversarial harness passed **44 checks on each seccomp profile** on
+native arm64 LinuxKit 7.0.14 (Landlock ABI 8): the shipped profile and a profile
+that additionally denies mount, umount2 and pivot_root. The controls explicitly
+permit the documented system-metadata, public pathname-socket and shared-memory
+residuals; these are not isolation claims. Git, Python Process/Pool and venv, Node,
+npm, cargo, C/C++/make and pip ran under the command filesystem ruleset.
+
+The complete machine-container e2e passed both profiles, using the production
+launcher and compiled runtime. The added context cases exercise two workspaces,
+six distinct role UIDs, four simultaneous display streams, private AT-SPI trees,
+secure/dev profile and socket denial, mutual X authentication refusal, scoped
+running-job takeover, saved-login binding and generation quarantine. Entrypoint
+filesystem initialization preserves the legacy DAC gate. Existing shared-browser
+relaunch, repair, trusted-input, driver recovery, Stop and v2 revocation checks
+remain in the same run. CI sanity ceilings were used; these busy-host runs are
+not strict quiet-host performance benchmarks.
+
+An earlier run produced a transient generic error during first secure-context
+navigation; the subsequent full runs passed. No root cause is claimed for that
+observation. Secure native-transport failures now have fixed typed read/write,
+timeout and invalid-response diagnostics (12413), with no page content in logs.
+The earlier one-off context file-write error also did not recur; the fixture
+includes bounded workspace metadata on failure. Repeat this matrix in CI and on
+a native separate-users Linux host before enabling the feature for owners.
+
+### 8.9 Backend/runtime validation (2026-10-05)
+
+Rust tests used 1.98.1 at the default stack and `RUST_MIN_STACK=1572864`.
+The backend used the private MongoDB replica set on port 27020 only. Counts
+below are per stack; backend filters overlap and should not be summed as unique
+tests.
+
+| Suite/filter | Default stack | Reduced stack |
+|---|---:|---:|
+| Host CLI + machine | 1,506 passed, 6 ignored | 1,506 passed, 6 ignored |
+| Linux arm64 CLI + machine | 1,511 passed, 4 ignored | 1,511 passed, 4 ignored |
+| Linux privileged context/ACL checks | 5 passed | 5 passed |
+| Backend `machine` | 99 passed, 3 ignored | 99 passed, 3 ignored |
+| Backend `saved_login` | 6 passed | 6 passed |
+| Backend `chat_authority` | 24 passed | 24 passed |
+| Backend `assistant_team` | 12 passed | 12 passed |
+
+The privileged Linux checks were executed separately as root; the ordinary
+suite runs as an unprivileged user. One reduced-stack backend run hit the test
+helper's MongoDB reachability deadline before entering a test's assertions. The
+unchanged filter passed on rerun; neither stack sizes nor deadlines were raised.
+
+Frontend validation passed **4,226 tests in 427 files**, lint (zero errors,
+29 existing warnings), and the production build. Wizard freshness passed; the
+wizard source and bundle were not changed. The adversarial and complete native
+arm64 container results are recorded in §8.8. Native separate-users VM browser
+validation and the missing owner desktop/opt-in surfaces remain release gates
+in §8.7.
+
+`cargo +1.98.1 clippy --workspace --all-targets -- -D warnings` passed on
+the host; Linux arm64 CLI/machine Clippy passed with the same toolchain and
+warning policy. Workspace fmt and `git diff --check` passed. Test containers,
+images and the dedicated builder/cache were removed; `target/` remains about
+8 GiB. No versions or commits were created for this review slice; the main merge
+remains uncommitted.
+
+### 8.10 Review corrections and shipping decision (2026-10-05)
+
+The owner approved shipping this backend/runtime milestone with
+`assistant:machine-contexts` still default-off. Graphical opt-in, the human
+desktop API/context selector and native separate-users VM browser validation
+continue as **M1.3b on the same branch after this milestone merges**. The rollout
+restrictions in §8.7 and the 12407 diagnostic observations in §8.8 still apply.
+
+The latest main (`d9a53135`, v0.58.0) was merged without committing, preserving
+agent learning, its flags, conversation fields and enrollment snapshots. The
+optional mode now belongs to `machine_capabilities.selection`, while the
+`request_agent_skills` schema matches main. Validation also accepts the already
+advertised nullable saved-login list. Node-advertised support accepts future
+fields and defaults missing support to denied; durable local context records
+remain strict. Shared developer-browser launches retry a missing cached user;
+separated contexts never substitute that shared identity. CLAUDE.md documents
+the authority codes and the owner-card-only separated-mode boundary.
+
+Review revalidation used Rust 1.98.1, `CARGO_INCREMENTAL=0`, the default
+stack and `RUST_MIN_STACK=1572864`. Counts below are per stack; backend filters
+overlap. Every listed run passed without retries or stack/deadline increases.
+
+| Suite/filter | Default stack | Reduced stack |
+|---|---:|---:|
+| Host CLI + machine | 1,509 passed, 6 ignored | 1,509 passed, 6 ignored |
+| Linux arm64 CLI + machine | 1,515 passed, 4 ignored | 1,515 passed, 4 ignored |
+| Linux privileged context/ACL checks | 7 passed | 7 passed |
+| Backend `machine` | 101 passed, 3 ignored | 101 passed, 3 ignored |
+| Backend `saved_login` | 6 passed | 6 passed |
+| Backend `chat_authority` | 24 passed | 24 passed |
+| Backend `assistant_team` | 14 passed | 14 passed |
+| Backend `assistant_agent_learning` | 3 passed | 3 passed |
+
+The Linux privileged checks include creating the shared developer-browser user
+after runtime startup and resolving it without a daemon restart. The wire tests
+cover unknown node support fields, missing support defaulting to unavailable,
+and strict durable records. Frontend validation passed **4,226 tests in 427
+files** and lint (zero errors, 29 existing warnings). Wizard freshness passed.
+
+Host workspace/all-targets and Linux arm64 CLI/machine Clippy passed with
+`cargo +1.98.1` and `-D warnings`; workspace fmt and staged/unstaged diff checks
+also passed. The private MongoDB container and dedicated Linux builder/cache
+were removed. `target/` stayed below 10 GiB and free disk stayed above the
+15 GiB cutoff. No commit or additional version bump was made; main's v0.58.0
+version files remain unchanged and the merge is uncommitted.

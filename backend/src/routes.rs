@@ -2034,6 +2034,35 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::agent_skills::get).put(handlers::agent_skills::set),
         )
         .route(
+            "/nyxagent/agents/{id}/learning",
+            get(handlers::assistant_agent_learning::status)
+                .put(handlers::assistant_agent_learning::configure),
+        )
+        .route(
+            "/nyxagent/agents/{id}/learning/consent",
+            put(handlers::assistant_agent_learning::consent),
+        )
+        .route(
+            "/nyxagent/agents/{id}/learning/proposals",
+            get(handlers::assistant_agent_learning::list),
+        )
+        .route(
+            "/nyxagent/agents/{id}/learning/run",
+            post(handlers::assistant_agent_learning::run_now),
+        )
+        .route(
+            "/nyxagent/agents/{id}/learning/proposals/{proposal_id}/reject",
+            post(handlers::assistant_agent_learning::reject),
+        )
+        .route(
+            "/nyxagent/agents/{id}/learning/proposals/{proposal_id}",
+            axum::routing::put(handlers::assistant_agent_learning::edit),
+        )
+        .route(
+            "/nyxagent/agents/{id}/learning/proposals/{proposal_id}/approve",
+            post(handlers::assistant_agent_learning::approve),
+        )
+        .route(
             "/nyxagent/agents/{id}/machines",
             get(handlers::machine_access::get),
         )

@@ -224,16 +224,20 @@ async fn unsupported_surfaces_keep_follow_off() {
             flags.thread_follow,
             matches!(
                 a.platform_id(),
-                "telegram" | "telegram-new" | "slack" | "discord" | "lark" | "feishu"
+                "telegram" | "telegram-new" | "slack" | "discord" | "lark" | "feishu" | "aurinko"
             ),
             "{}",
             a.platform_id()
         );
         assert_eq!(
             flags.thread_history,
-            matches!(a.platform_id(), "slack" | "discord" | "lark" | "feishu")
+            matches!(
+                a.platform_id(),
+                "slack" | "discord" | "lark" | "feishu" | "aurinko"
+            )
         );
-        if matches!(a.platform_id(), "whatsapp" | "x" | "openclaw" | "aurinko") {
+        assert_eq!(flags.private_thread, a.platform_id() == "aurinko");
+        if matches!(a.platform_id(), "whatsapp" | "x" | "openclaw") {
             assert!(!flags.thread_reply);
             assert!(
                 a.thread_facts(&input, &bot(a.platform_id()), None)

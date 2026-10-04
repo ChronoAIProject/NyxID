@@ -22,6 +22,8 @@ pub struct MachineOption {
     capabilities: nyxid_machine::authority::Capabilities,
     ceiling: nyxid_machine::authority::Capabilities,
     legacy: bool,
+    mode: String,
+    separated: Option<nyxid_machine::context::Support>,
     saved_login_ids: Option<Vec<String>>,
     revocation_pending: bool,
 }
@@ -73,6 +75,8 @@ pub async fn options(
                 capabilities: assignment.capabilities,
                 ceiling: nyxid_machine::authority::Capabilities::legacy(&profile),
                 legacy: assignment.legacy,
+                mode: assignment.mode,
+                separated: profile.separated.clone(),
                 saved_login_ids: assignment.saved_login_ids,
             })
         })
@@ -96,6 +100,12 @@ pub async fn put(
 ) -> AppResult<Json<Vec<MachineOption>>> {
     super::login_client_context::require_first_party_human(&auth)?;
     let actor = auth.user_id.to_string();
+    if selection.mode.is_some() {
+        return Err(AppError::ValidationError(
+            "Request a machine context change in the assistant and approve its owner action card"
+                .into(),
+        ));
+    }
     let revision = Box::pin(access::configure(
         &state.db, &actor, &agent, &node, selection,
     ))
@@ -178,8 +188,30 @@ pub async fn native(
     if !selection.capabilities.valid() || !selection.capabilities.subset_of(machine.ceiling) {
         return Err(AppError::MachineCapabilityDisabled);
     }
+    if selection.mode.is_some()
+        && !crate::services::feature_flag_service::personal_flag_enabled(
+            &state.db,
+            &chat.user_id,
+            access::CONTEXT_FLAG,
+        )
+        .await?
+    {
+        return Err(AppError::ValidationError(
+            "Machine context setup is not enabled; existing separation still applies".into(),
+        ));
+    }
+    if selection.mode.as_deref() == Some("separated")
+        && machine.separated.as_ref().is_none_or(|s| !s.available)
+    {
+        return Err(AppError::MachineAuthorityUnsupported);
+    }
     let old = policy.assignments.get(node).cloned().unwrap_or_default();
-    let widens = !selection.capabilities.subset_of(old.capabilities)
+    let changes_mode = selection
+        .mode
+        .as_ref()
+        .is_some_and(|mode| *mode != old.mode);
+    let widens = changes_mode
+        || !selection.capabilities.subset_of(old.capabilities)
         || match (&old.saved_login_ids, &selection.saved_login_ids) {
             (Some(old), Some(new)) => new.iter().any(|id| !old.contains(id)),
             (Some(_), None) => true,
@@ -197,8 +229,13 @@ pub async fn native(
                 || "inherit the agent's saved-login grants".to_owned(),
                 |ids| format!("limit saved logins to {} selected", ids.len()),
             );
+            let mode_note = if changes_mode {
+                " Separate workspace and browser uses fresh profiles; full isolation requires a separate machine container or VM. Changing mode stops current work and does not copy files or cookies."
+            } else {
+                ""
+            };
             let card=acks::request(&state.db,chat,acks::Request{kind:"action",service:None,tool:Some(tool),arguments:Some(args),
-                summary:&format!("Change {} on machine {}: shell={}, files={}, browser={}, computer={}, developer browser={}; {}. Current work for this agent on this machine will stop.",agent.name,machine.name,selection.capabilities.shell,selection.capabilities.files,selection.capabilities.browser,selection.capabilities.computer,selection.capabilities.developer_browser,login_scope),platform:false}).await?;
+                summary:&format!("Change {} on machine {}: shell={}, files={}, browser={}, computer={}, developer browser={}; {}. Current work for this agent on this machine will stop.{mode_note}",agent.name,machine.name,selection.capabilities.shell,selection.capabilities.files,selection.capabilities.browser,selection.capabilities.computer,selection.capabilities.developer_browser,login_scope),platform:false}).await?;
             return Ok((acks::refusal(&card), true));
         }
     }

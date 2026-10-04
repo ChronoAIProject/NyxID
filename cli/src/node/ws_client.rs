@@ -1186,11 +1186,10 @@ async fn connect_and_serve(
                     tokio::spawn(async move {
                         let request_id = request.request_id.clone();
                         let operation = request.operation;
-                        let revision =
-                            machine.control_revision(request.operation, &request.parameters);
                         let mut parameters = request.parameters.clone();
                         parameters["_signed_authority"] = serde_json::to_value(&request.authority)
                             .unwrap_or(serde_json::Value::Null);
+                        let revision = machine.control_revision(operation, &parameters).await;
                         let signing_bytes = zeroize::Zeroizing::new(
                             hex::decode(secret.as_str()).unwrap_or_default(),
                         );

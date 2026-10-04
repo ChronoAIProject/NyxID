@@ -847,6 +847,7 @@ impl PlatformAdapter for LarkFamilyAdapter {
             thread_reply: true,
             thread_history: true,
             thread_follow: true,
+            ..Default::default()
         }
     }
 

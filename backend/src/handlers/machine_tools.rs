@@ -78,6 +78,10 @@ pub async fn call(
             .into_iter()
             .map(|(node, assignment)| {
                 let mut row = machines::metadata(&node);
+                if assignment.mode == "separated" {
+                    row["machine"]["roots"] = json!(["."]);
+                    row["context_note"] = json!("Paths are relative to this agent context workspace; the secure and developer browsers are separate from other contexts. Full isolation requires a separate machine container or VM.");
+                }
                 row["access"] = json!(assignment);
                 row
             })
@@ -108,9 +112,10 @@ pub async fn call(
     }
     let operation = tools::operation(name)
         .ok_or_else(|| AppError::NotFound("Machine tool not found".into()))?;
+    let mut separated = false;
     if operation != Operation::JobCancel {
         match Box::pin(access::assignment(&state.db, chat, &node)).await {
-            Ok(_) => {}
+            Ok(assignment) => separated = assignment.mode == "separated",
             Err(AppError::MachinePermissionRevoked) => {
                 return permission(state, chat, "machine", &node.id, &node.name).await;
             }
@@ -210,7 +215,7 @@ pub async fn call(
                 "settings_path": AssistantPage::Machines.path()
             }));
         }
-        if !node.machine.as_ref().is_some_and(|p| p.saved_login_ready) {
+        if !separated && !node.machine.as_ref().is_some_and(|p| p.saved_login_ready) {
             return Err(AppError::MachineBrowserUnavailable);
         }
         arguments["login"] = json!(row.id);
@@ -409,6 +414,14 @@ pub async fn call(
         arguments["allowed_origins"] = json!(login.allowed_origins);
     }
     let mut receipt = receipts::receipt(chat, &node.id, operation, &arguments);
+    receipt.context_mode = Some(
+        if separated {
+            "separated"
+        } else {
+            "shared_legacy"
+        }
+        .into(),
+    );
     receipt.preview_enabled = receipts::preview_enabled(&state.db, chat).await?;
     receipts::record(&state.db, chat, &receipt).await?;
     let started = std::time::Instant::now();

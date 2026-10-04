@@ -24,6 +24,7 @@ pub mod assistant_action_effects_org;
 pub mod assistant_action_effects_providers;
 pub mod assistant_action_effects_services;
 pub mod assistant_actions;
+pub mod assistant_agent_learning;
 pub mod assistant_direct;
 pub mod assistant_readiness;
 pub mod auth;

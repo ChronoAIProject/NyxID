@@ -49,6 +49,8 @@ struct State {
 
 pub struct Job {
     scope: super::cancellation::Scope,
+    // Selected by the supervisor, never supplied by the command request.
+    uid: u32,
     state: Mutex<State>,
     cancel: watch::Sender<bool>,
     changed: Notify,
@@ -147,6 +149,7 @@ impl Jobs {
         let (cancel, mut cancelled) = watch::channel(false);
         let job = Arc::new(Job {
             scope: request.scope,
+            uid: identity.uid,
             state: Mutex::new(State {
                 stdout: OutputRing::with_head(self.output_bytes / 2),
                 stderr: OutputRing::with_head(self.output_bytes / 2),
@@ -218,10 +221,17 @@ impl Jobs {
         Ok(json!({"job_id":id,"cancel_requested":true}))
     }
 
-    /// Emergency takeover: signal every process group immediately. Do not wait
+    /// Emergency takeover: signal this runtime's process groups immediately. Do not wait
     /// for output readers, exit status collection or graceful termination.
-    pub async fn preempt(&self) {
-        let jobs: Vec<_> = self.jobs.lock().await.values().cloned().collect();
+    pub async fn preempt_identity(&self, uid: u32) {
+        let jobs: Vec<_> = self
+            .jobs
+            .lock()
+            .await
+            .values()
+            .filter(|job| job.uid == uid)
+            .cloned()
+            .collect();
         for job in jobs {
             if job.running.load(Ordering::Acquire) {
                 signal_group(job.pid, libc::SIGKILL);
@@ -431,7 +441,11 @@ mod tests {
         .await
         .unwrap();
         assert!(jobs.running(&id).await);
-        jobs.cancel(&id).await.unwrap();
+        jobs.preempt_identity(identity.uid.wrapping_add(1)).await;
+        assert!(jobs.running(&id).await);
+        assert!(!*jobs.jobs.lock().await[&id].cancel.borrow());
+        jobs.preempt_identity(identity.uid).await;
+        assert!(*jobs.jobs.lock().await[&id].cancel.borrow());
         let result = jobs.result(&id, 5, 0, 0).await.unwrap();
         assert_eq!(result["status"], "finished");
         assert!(!jobs.running(&id).await);

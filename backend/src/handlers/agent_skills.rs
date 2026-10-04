@@ -13,19 +13,32 @@ use axum::{
     Json,
     body::{Body, to_bytes},
     extract::{Path, Query, State},
-    http::Request,
+    http::{self, Request},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 #[derive(Clone)]
 pub(crate) struct OrnnSkillRead;
-struct Reader<'a> {
+#[derive(Clone, Copy)]
+pub(crate) struct OrnnSkillPublication;
+pub(crate) struct Reader<'a> {
+    pub(crate) state: &'a AppState,
+    pub(crate) person: &'a str,
+    pub(crate) thread_key: Option<&'a str>,
+    pub(crate) scopes: Option<&'a crate::models::agent_operation_scope::OperationScopes>,
+    pub(crate) chat: Option<std::sync::Arc<ChatAuthority>>,
+}
+
+struct OrnnFetch<'a> {
     state: &'a AppState,
     person: &'a str,
-    thread_key: Option<&'a str>,
-    scopes: Option<&'a crate::models::agent_operation_scope::OperationScopes>,
+    path: &'a str,
+    thread_key: Option<String>,
+    scopes: crate::models::agent_operation_scope::OperationScopes,
     chat: Option<std::sync::Arc<ChatAuthority>>,
+    method: http::Method,
+    body: Body,
 }
 #[async_trait::async_trait]
 impl skills::OrnnReader for Reader<'_> {
@@ -40,27 +53,68 @@ impl skills::OrnnReader for Reader<'_> {
         let scopes = self.scopes.cloned().unwrap_or_default();
         let chat = self.chat.clone();
         let task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
-            Box::pin(fetch_ornn(&state, &person, &path, thread_key, scopes, chat)).await
+            Box::pin(fetch_ornn(OrnnFetch {
+                state: &state,
+                person: &person,
+                path: &path,
+                thread_key,
+                scopes,
+                chat,
+                method: http::Method::GET,
+                body: Body::empty(),
+            }))
+            .await
         }));
         tokio::time::timeout(std::time::Duration::from_secs(30), task)
             .await
-            .map_err(|_| {
-                AppError::Forbidden("Ornn is unavailable; skill read timed out, retry later".into())
-            })?
-            .map_err(|_| {
-                AppError::Forbidden("Ornn is unavailable; retry the skill read later".into())
-            })?
+            .map_err(|_| AppError::ServicePoolInfrastructureUnavailable)?
+            .map_err(|_| AppError::ServicePoolInfrastructureUnavailable)?
+    }
+
+    async fn request(&self, method: http::Method, path: &str, body: Vec<u8>) -> AppResult<Vec<u8>> {
+        let state = self.state.clone();
+        let person = self.person.to_owned();
+        let path = path.to_owned();
+        let thread_key = self.thread_key.map(str::to_owned);
+        let scopes = self.scopes.cloned().unwrap_or_default();
+        let chat = self.chat.clone();
+        let task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            Box::pin(fetch_ornn(OrnnFetch {
+                state: &state,
+                person: &person,
+                path: &path,
+                thread_key,
+                scopes,
+                chat,
+                method,
+                body: Body::from(body),
+            }))
+            .await
+        }));
+        tokio::time::timeout(std::time::Duration::from_secs(30), task)
+            .await
+            .map_err(|_| AppError::ServicePoolInfrastructureUnavailable)?
+            .map_err(|_| AppError::ServicePoolInfrastructureUnavailable)?
     }
 }
 
-async fn fetch_ornn(
-    state: &AppState,
-    person: &str,
-    path: &str,
-    thread_key: Option<String>,
-    scopes: crate::models::agent_operation_scope::OperationScopes,
-    chat: Option<std::sync::Arc<ChatAuthority>>,
-) -> AppResult<Vec<u8>> {
+async fn fetch_ornn(request: OrnnFetch<'_>) -> AppResult<Vec<u8>> {
+    let OrnnFetch {
+        state,
+        person,
+        path,
+        thread_key,
+        scopes,
+        chat,
+        method,
+        body,
+    } = request;
+    let publication = method != http::Method::GET;
+    if !ornn_operation_allowed(&method, path, publication) {
+        return Err(AppError::Forbidden(
+            "This Ornn operation is not available to agent learning".into(),
+        ));
+    }
     // Fixed catalog selection; no caller-supplied destination, method or headers.
     let service = state
         .db
@@ -86,13 +140,23 @@ async fn fetch_ornn(
     auth.assistant_turn_fence = chat.as_ref().map(|chat| chat.turn_fence());
     auth.assistant_chat = chat;
     let mut request = Request::builder()
+        .method(method)
         .uri(format!("/api/v1/proxy/{}{path}", service.id))
-        .body(Body::empty())
+        .body(body)
         .map_err(|_| AppError::ValidationError("Invalid skill path".into()))?;
+    if publication {
+        request.headers_mut().insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("application/zip"),
+        );
+    }
     request
         .extensions_mut()
         .insert(super::assistant_nyxagent::SERVER_TURN_POLICY);
     request.extensions_mut().insert(OrnnSkillRead);
+    if publication {
+        request.extensions_mut().insert(OrnnSkillPublication);
+    }
     let mut slug = String::new();
     let response = Box::pin(super::proxy::proxy_request_inner(
         state,
@@ -122,6 +186,61 @@ async fn fetch_ornn(
                 "Ornn response exceeded the skill size limit or was interrupted".into(),
             )
         })
+}
+
+/// The learning publisher is deliberately narrower than the general Ornn
+/// catalog adapter.  A proposal can validate/create (or update) a private
+/// package and then read back the exact metadata needed for integrity and
+/// reconciliation; it cannot invoke sharing, permissions, deletion, or an
+/// arbitrary Ornn route.
+pub(crate) fn ornn_operation_allowed(method: &http::Method, path: &str, publication: bool) -> bool {
+    let (route, query) = path.split_once('?').unwrap_or((path, ""));
+    let segments: Vec<_> = route.trim_start_matches('/').split('/').collect();
+    if method == http::Method::GET {
+        let version_query = query.starts_with("version=") && !query.contains('&');
+        let search_query = route == "/api/v1/skill-search"
+            && query
+                .split('&')
+                .filter(|part| !part.is_empty())
+                .all(|part| {
+                    matches!(
+                        part.split_once('=').map(|(key, _)| key).unwrap_or(part),
+                        "scope" | "mode" | "pageSize" | "page" | "q"
+                    )
+                });
+        return search_query
+            || (segments.len() == 4
+                && segments[0] == "api"
+                && segments[1] == "v1"
+                && segments[2] == "skills"
+                && segments[3].parse::<uuid::Uuid>().is_ok()
+                && version_query)
+            || (segments.len() == 5
+                && segments[0] == "api"
+                && segments[1] == "v1"
+                && segments[2] == "skills"
+                && segments[3].parse::<uuid::Uuid>().is_ok()
+                && ((segments[4] == "versions" && query.is_empty())
+                    || (segments[4] == "closure" && version_query)))
+            || (segments.len() == 7
+                && segments[0] == "api"
+                && segments[1] == "v1"
+                && segments[2] == "skills"
+                && segments[3].parse::<uuid::Uuid>().is_ok()
+                && segments[4] == "versions"
+                && !segments[5].is_empty()
+                && segments[6] == "download"
+                && query.is_empty());
+    }
+    publication
+        && ((method == http::Method::POST
+            && matches!(route, "/api/v1/skill-format/validate" | "/api/v1/skills"))
+            || (method == http::Method::PUT
+                && segments.len() == 4
+                && segments[0] == "api"
+                && segments[1] == "v1"
+                && segments[2] == "skills"
+                && segments[3].parse::<uuid::Uuid>().is_ok()))
 }
 
 #[derive(Deserialize)]
@@ -207,6 +326,15 @@ pub(crate) async fn dispatch(
             "Only owner turns may access attached skills".into(),
         ));
     }
+    if matches!(
+        name,
+        "learning_status" | "learning_list_proposals" | "learning_run_now"
+    ) && !chat.is_orchestrator()
+    {
+        return Err(AppError::Forbidden(
+            "Automatic learning is managed from the owner's NyxBot".into(),
+        ));
+    }
     let reader = Reader {
         state,
         person: &chat.user_id,
@@ -216,6 +344,38 @@ pub(crate) async fn dispatch(
     };
     let db = &state.db;
     let value = match name {
+        "learning_status" | "learning_list_proposals" | "learning_run_now" => {
+            let target = args["agent"].as_str().unwrap_or("nyxbot");
+            let agent =
+                super::assistant_team::target_agent(state, &chat.user_id, Some(target)).await?;
+            crate::services::org_agent_service::require_maintain(db, &chat.user_id, &agent).await?;
+            crate::services::feature_flag_service::personal_flag_enabled(
+                db,
+                &chat.user_id,
+                crate::services::assistant_agent_learning::FLAG_KEY,
+            )
+            .await?
+            .then_some(())
+            .ok_or_else(|| {
+                AppError::ValidationError("Automatic agent learning is not enabled yet".into())
+            })?;
+            match name {
+                "learning_status" => json!(
+                    crate::services::assistant_agent_learning_review::status(
+                        db,
+                        &chat.user_id,
+                        &agent.id
+                    )
+                    .await?
+                ),
+                "learning_list_proposals" => {
+                    json!({"proposals": crate::services::assistant_agent_learning_review::list(state, &chat.user_id, &agent.id, false).await?})
+                }
+                _ => {
+                    json!({"run_id": crate::services::assistant_agent_learning::run_now(state, &chat.user_id, &agent.id).await?})
+                }
+            }
+        }
         "search_agent_skills" => {
             skills::search(
                 &reader,

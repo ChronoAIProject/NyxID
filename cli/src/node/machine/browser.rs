@@ -364,6 +364,14 @@ pub enum Failure {
     ExtensionUnavailable,
     #[error("secure_browser_already_running")]
     AlreadyRunning,
+    #[error("secure_browser_transport_write")]
+    TransportWrite,
+    #[error("secure_browser_transport_read")]
+    TransportRead,
+    #[error("secure_browser_transport_timeout")]
+    TransportTimeout,
+    #[error("secure_browser_response_invalid")]
+    ResponseInvalid,
 }
 impl Failure {
     pub fn message(self) -> &'static str {
@@ -374,55 +382,50 @@ impl Failure {
             Self::AlreadyRunning => {
                 "machine_browser_unavailable: another supervisor owns this secure browser; use the running daemon instead of starting a second node"
             }
+            Self::TransportWrite => {
+                "machine_browser_unavailable: secure browser connection closed while sending; observe before retrying"
+            }
+            Self::TransportRead => {
+                "machine_browser_unavailable: secure browser connection closed while receiving; observe before retrying"
+            }
+            Self::TransportTimeout => {
+                "machine_browser_unavailable: secure browser response timed out; observe before retrying"
+            }
+            Self::ResponseInvalid => {
+                "machine_browser_unavailable: secure browser response invalid; retry once, then update the machine"
+            }
         }
+    }
+
+    fn record(self) -> Self {
+        // Fixed classification only: never include native messages or page data.
+        tracing::warn!(reason = %self, "secure browser exchange unavailable");
+        self
     }
 }
 
-pub struct Browser {
-    connection: Arc<Mutex<Option<UnixStream>>>,
-    ready: Arc<Notify>,
-    child: Mutex<Option<tokio::process::Child>>,
-    accept: tokio::task::JoinHandle<()>,
-    updates: tokio::task::JoinHandle<()>,
-    socket: PathBuf,
-    _lock: std::fs::File,
+// Context browsers share the public signed-package endpoint, never profiles or
+// native sockets. Its lifetime must not depend on the legacy browser being alive.
+struct PackageServer(tokio::task::JoinHandle<()>);
+impl Drop for PackageServer {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
+static PACKAGE_SERVERS: std::sync::LazyLock<
+    Mutex<std::collections::HashMap<u16, std::sync::Weak<PackageServer>>>,
+> = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
-impl Browser {
-    pub async fn launch(
-        directory: &Path,
-        identity: &Identity,
-        binary: &Path,
-        port: u16,
-        container: bool,
-        repair: bool,
-    ) -> Result<Self> {
-        protected_runtime_parent(directory)?;
-        let run = directory.join("browser-run");
-        runtime_directory(&run, unsafe { libc::geteuid() }, identity.gid, 0o750)?;
-        use std::os::fd::AsRawFd;
-        let lock = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(run.join("supervisor.lock"))?;
-        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            return Err(Failure::AlreadyRunning.into());
+impl PackageServer {
+    async fn acquire(port: u16) -> Result<Arc<Self>> {
+        let mut servers = PACKAGE_SERVERS.lock().await;
+        servers.retain(|_, server| server.strong_count() > 0);
+        if port != 0
+            && let Some(server) = servers.get(&port).and_then(std::sync::Weak::upgrade)
+        {
+            return Ok(server);
         }
-        let socket = run.join("filler.sock");
-        if socket.exists() {
-            std::fs::remove_file(&socket)?;
-        }
-        let listener = UnixListener::bind(&socket)?;
-        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o660))?;
-        if unsafe { libc::geteuid() } == 0 {
-            chown(&socket, 0, identity.gid)?;
-        }
-        let connection = Arc::new(Mutex::new(None));
-        let ready = Arc::new(Notify::new());
+        anyhow::ensure!(servers.len() < 128, "browser_package_server_capacity");
         let tcp = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await?;
         let actual_port = tcp.local_addr()?.port();
         let id = pin()["extension_id"]
@@ -455,6 +458,66 @@ impl Browser {
                     )
                 }),
             );
+        let server = Arc::new(Self(tokio::spawn(async move {
+            let _ = axum::serve(tcp, router).await;
+        })));
+        servers.insert(actual_port, Arc::downgrade(&server));
+        Ok(server)
+    }
+}
+
+pub struct Browser {
+    connection: Arc<Mutex<Option<UnixStream>>>,
+    ready: Arc<Notify>,
+    child: Mutex<Option<tokio::process::Child>>,
+    accept: tokio::task::JoinHandle<()>,
+    _updates: Arc<PackageServer>,
+    socket: PathBuf,
+    _lock: std::fs::File,
+}
+
+impl Browser {
+    pub async fn launch(
+        directory: &Path,
+        identity: &Identity,
+        binary: &Path,
+        port: u16,
+        container: bool,
+        repair: bool,
+    ) -> Result<Self> {
+        protected_runtime_parent(directory)?;
+        // Keep per-context Unix socket paths below sockaddr_un.sun_path even
+        // for named VM profiles. Legacy paths remain unchanged.
+        let run = directory.join(if identity.desktop.is_some() {
+            "r"
+        } else {
+            "browser-run"
+        });
+        runtime_directory(&run, unsafe { libc::geteuid() }, identity.gid, 0o750)?;
+        use std::os::fd::AsRawFd;
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(run.join("supervisor.lock"))?;
+        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            return Err(Failure::AlreadyRunning.into());
+        }
+        let socket = run.join("filler.sock");
+        if socket.exists() {
+            std::fs::remove_file(&socket)?;
+        }
+        let listener = UnixListener::bind(&socket)?;
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o660))?;
+        if unsafe { libc::geteuid() } == 0 {
+            chown(&socket, 0, identity.gid)?;
+        }
+        let connection = Arc::new(Mutex::new(None));
+        let ready = Arc::new(Notify::new());
+        let updates = PackageServer::acquire(port).await?;
         let profile = directory.join("browser-profile");
         runtime_directory(&profile, identity.uid, identity.gid, 0o700)?;
         let package_hash = hex::encode(Sha256::digest(PACKAGE));
@@ -532,15 +595,12 @@ impl Browser {
                 }
             }
         });
-        let updates = tokio::spawn(async move {
-            let _ = axum::serve(tcp, router).await;
-        });
         Ok(Self {
             connection,
             ready,
             child: Mutex::new(Some(child)),
             accept,
-            updates,
+            _updates: updates,
             socket,
             _lock: lock,
         })
@@ -580,7 +640,7 @@ impl Browser {
 
     pub async fn action(&self, mut parameters: Value) -> Result<Value> {
         if !self.ready().await {
-            bail!("managed browser extension unavailable");
+            return Err(Failure::ExtensionUnavailable.into());
         }
         let nonce = uuid::Uuid::new_v4().to_string();
         parameters["operation"] = json!("browser");
@@ -598,18 +658,21 @@ impl Browser {
         // Take ownership before I/O. Dropping a cancelled exchange closes the
         // stream, forcing a fresh handshake; a late reply cannot poison a turn.
         let mut connection = self.connection.lock().await;
-        let mut stream = connection
-            .take()
-            .context("managed browser extension unavailable")?;
+        let mut stream = connection.take().context(Failure::ExtensionUnavailable)?;
         let raw = tokio::time::timeout(Duration::from_secs(20), async {
-            write_native(&mut stream, bytes).await?;
-            read_native(&mut stream).await
+            write_native(&mut stream, bytes)
+                .await
+                .map_err(|_| Failure::TransportWrite.record())?;
+            read_native(&mut stream)
+                .await
+                .map_err(|_| Failure::TransportRead.record())
         })
         .await
-        .context("managed browser timed out; observe before retrying")??;
-        let response: Value = serde_json::from_slice(&raw).context("invalid browser response")?;
+        .map_err(|_| Failure::TransportTimeout.record())??;
+        let response: Value =
+            serde_json::from_slice(&raw).map_err(|_| Failure::ResponseInvalid.record())?;
         if response["nonce"] != nonce {
-            bail!("managed browser nonce mismatch");
+            return Err(Failure::ResponseInvalid.record().into());
         }
         *connection = Some(stream);
         Ok(response)
@@ -666,7 +729,6 @@ impl Browser {
 impl Drop for Browser {
     fn drop(&mut self) {
         self.accept.abort();
-        self.updates.abort();
         let _ = std::fs::remove_file(&self.socket);
     }
 }
@@ -770,6 +832,78 @@ pub fn create_xauthority(path: &Path, browser: &str, display: u16) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn native_transport_failures_are_typed_and_discard_the_connection() {
+        for case in ["write", "eof", "decode", "nonce"] {
+            let temp = tempfile::tempdir().unwrap();
+            let (stream, mut peer) = UnixStream::pair().unwrap();
+            let task = if case == "write" {
+                drop(peer);
+                tokio::spawn(async {})
+            } else {
+                tokio::spawn(async move {
+                    let _request = read_native(&mut peer).await.unwrap();
+                    match case {
+                        "decode" => write_native(&mut peer, b"invalid-private-content")
+                            .await
+                            .unwrap(),
+                        "nonce" => write_native(&mut peer, br#"{"nonce":"wrong"}"#)
+                            .await
+                            .unwrap(),
+                        _ => {}
+                    }
+                })
+            };
+            let browser = Browser {
+                connection: Arc::new(Mutex::new(Some(stream))),
+                ready: Arc::new(Notify::new()),
+                child: Mutex::new(None),
+                accept: tokio::spawn(std::future::pending()),
+                _updates: PackageServer::acquire(0).await.unwrap(),
+                socket: temp.path().join("unused.sock"),
+                _lock: std::fs::File::create(temp.path().join("lock")).unwrap(),
+            };
+            // Per-run nonce: the "nonce" case replies with a different value.
+            let nonce = uuid::Uuid::new_v4().to_string();
+            let error = browser.exchange(&nonce, b"{}").await.unwrap_err();
+            let failure = error.downcast_ref::<Failure>().unwrap();
+            assert!(match case {
+                "write" => matches!(failure, Failure::TransportWrite),
+                "eof" => matches!(failure, Failure::TransportRead),
+                _ => matches!(failure, Failure::ResponseInvalid),
+            });
+            assert!(!failure.message().contains("private-content"));
+            assert!(browser.connection.lock().await.is_none());
+            task.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn package_server_survives_legacy_browser_release() {
+        let first = PackageServer::acquire(0).await.unwrap();
+        let port = PACKAGE_SERVERS
+            .lock()
+            .await
+            .iter()
+            .find_map(|(port, server)| {
+                server
+                    .upgrade()
+                    .filter(|server| Arc::ptr_eq(server, &first))
+                    .map(|_| *port)
+            })
+            .unwrap();
+        let context = PackageServer::acquire(port).await.unwrap();
+        assert!(Arc::ptr_eq(&first, &context));
+        drop(first);
+        let response = reqwest::get(format!("http://127.0.0.1:{port}/filler.crx"))
+            .await
+            .unwrap();
+        assert_eq!(response.bytes().await.unwrap().as_ref(), PACKAGE);
+        assert!(Arc::ptr_eq(
+            &PackageServer::acquire(port).await.unwrap(),
+            &context
+        ));
+    }
     #[test]
     fn missing_package_and_forced_refresh_clear_only_managed_registration() {
         if unsafe { libc::geteuid() } == 0 {
