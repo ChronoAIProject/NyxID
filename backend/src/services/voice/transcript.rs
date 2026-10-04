@@ -3,13 +3,14 @@ use crate::errors::{AppError, AppResult};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet, VecDeque};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Speaker {
     User,
     Assistant,
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Segment {
     pub id: String,
     pub speaker: Speaker,
@@ -36,6 +37,7 @@ struct Pending {
 }
 #[derive(Default)]
 pub struct Transcripts {
+    normalized_pending: BTreeMap<String, Segment>,
     input: Option<Pending>,
     output: Option<Pending>,
     seen: HashSet<String>,
@@ -46,6 +48,20 @@ pub struct Transcripts {
 
 impl Transcripts {
     pub fn ingest(&mut self, event: &Value, now_ms: i64) -> AppResult<Vec<Segment>> {
+        if event["type"] == "nyx.transcript" {
+            let segment: Segment = serde_json::from_value(event["segment"].clone())
+                .map_err(|_| AppError::VoiceProviderUnavailable)?;
+            if segment.sealed {
+                self.normalized_pending.remove(&segment.id);
+            } else {
+                self.normalized_pending
+                    .insert(segment.id.clone(), segment.clone());
+                if self.normalized_pending.len() > 8 {
+                    return Err(AppError::VoiceProviderUnavailable);
+                }
+            }
+            return Ok(vec![segment]);
+        }
         let speaker = match event["type"].as_str() {
             Some("session.input_transcript.delta") => Speaker::User,
             Some("session.output_transcript.delta") => Speaker::Assistant,
@@ -114,6 +130,17 @@ impl Transcripts {
 
     pub fn seal_ready(&mut self, now_ms: i64, disconnected: bool) -> Vec<Segment> {
         let mut out = Vec::new();
+        if disconnected {
+            out.extend(
+                std::mem::take(&mut self.normalized_pending)
+                    .into_values()
+                    .map(|mut s| {
+                        s.sealed = true;
+                        s.complete = false;
+                        s
+                    }),
+            );
+        }
         for (pending, sealed, speaker) in [
             (&mut self.input, &mut self.sealed_input, Speaker::User),
             (

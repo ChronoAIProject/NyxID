@@ -1,8 +1,8 @@
 # Realtime voice for NyxBot and specialists
 
-Status: **Phase 2 approved; Phase 3 OpenAI private beta in implementation, flags off**. Researched 2026-10-03
-against NyxID `240852b5` (`origin/main`, 0.46.0). No product implementation or
-provider session was run for this design. Latencies below are engineering budgets,
+Status: **Phase 3 merged (PR #1751, v0.54.0); Phase 4 Grok private beta in implementation, flags off**. Initially researched 2026-10-03
+against NyxID `240852b5` (`origin/main`, 0.46.0). Implementation validation uses
+provider fixtures; no paid provider session has been run. Latencies below are engineering budgets,
 not measurements. Provider documentation is evidence of a contract, not proof of
 account entitlement or browser acoustic performance.
 
@@ -219,6 +219,27 @@ provider ID or report startup uncertainty. Never cache SDP in logs or durable
 rows to make this replayable. A replacement connection is a new session/offer.
 
 ### xAI relay and why it is selected
+
+Phase 4 implements a separate default-off `assistant:voice-grok` beta and
+`assistant:voice-grok-platform` paid-platform gate. Only Hold to talk is admitted;
+the UI recommends headphones. Automatic speaker mode is refused server-side
+until manual transcription during output and physical loopback AEC are verified.
+Provider fixtures exercise the wire contract without making paid calls.
+
+The POST admits an unstarted relay and returns an empty SDP answer; it accepts
+no SDP offer. Its human, origin-checked control socket claims the starting session
+on the serving replica before resolving credentials again and opening xAI. The
+browser sends bounded PCM16 frames and explicit PTT controls, never provider JSON.
+The provider actor has bounded channels and processes receipts outside cancellable
+timer futures; a coordinator tick cannot abandon a consumed provider event.
+Dropping its owner or exceeding the bounded shutdown aborts the relay task and
+releases the sole upstream socket. Duration freezes before token settlement I/O.
+Shutdown persists pending completed captions and seals incomplete tails without
+admitting new work or deciding confirmations. Checkpoints survive cancellation
+of the active loop while database or classifier work is in progress.
+A recovered Grok lease never reconnects or replays a response: only persisted
+elapsed checkpoints are collectible, with the existing 24-hour uncertain-usage
+reconciliation deadline. Unknown tail usage remains platform exposure.
 
 The browser connects only to NyxID with first-party human authentication. NyxID
 connects upstream with the resolved Bearer key. After `session.created`, configure
@@ -624,7 +645,7 @@ centrally in `errors/mod.rs` during implementation.
 | --- | --- |
 | `conversation.created`, `session.created`, `session.updated` | Server-only provider identity/config; readiness after validated acknowledgement. |
 | `input_audio_buffer.append` / binary audio | Adapter-generated from bounded authenticated mic input; never raw browser JSON forwarding. |
-| `input_audio_buffer.commit` | Manual endpoint from speech gate/PTT; requires `turn_detection:null`. |
+| `input_audio_buffer.commit` | Manual endpoint from speech gate/PTT; requires `turn_detection: {"type": null}`. |
 | `input_audio_buffer.speech_started/stopped` | VAD hints in supported automatic mode; never task cancellation or confirmation authority. |
 | `conversation.item.input_audio_transcription.updated` | Replace draft text keyed by item ID; requires `grok-transcribe`. |
 | `conversation.item.input_audio_transcription.completed` | Final user text and request boundary; perform echo/intent checks before accepting work. |
@@ -689,7 +710,7 @@ audio transport only if these measurements require it; that is additional scope.
 
 Default `server_vad` can stop generation before NyxID verifies speech. Ducking
 only in the browser cannot undo that. The intended protected path is
-`turn_detection:null` with local VAD/endpointing and NyxID-controlled response
+`turn_detection: {"type": null}` with local VAD/endpointing and NyxID-controlled response
 creation/cancellation:
 
 1. While output plays, a candidate voiced input ducks output by roughly 12 dB
@@ -710,6 +731,20 @@ creation/cancellation:
    dependency. Do not ship `server_vad` as meeting this guarantee. Ship a labelled
    PTT/headphone beta first and gate automatic mode on provider transcription
    and loopback AEC evidence.
+
+The Phase 4 PTT gate measures committed voiced samples, checks a bounded output
+PCM reference and uses the normal billed, tool-less one-shot helper to classify
+meaningful interruption versus backchannel/uncertainty. No lexical allow/deny
+lists are used. Fixtures substitute that advisory classifier. A provider VAD
+event cannot cancel speech or backend work. Truncation retains the provider item
+after `response.done` so buffered playback can still be interrupted; cancelled
+output transcripts cannot arm a spoken confirmation. Browser fixtures verify
+resampling, one receive-track speaker path, bounded buffers and cleanup. Separate
+capture/playback generations reject worklet messages delayed across PTT holds or
+output flushes; stale PCM cannot enter the next utterance and stale playback marks
+cannot advance a later readback. The worklet is a separate same-origin asset.
+These fixtures do
+not establish physical AEC performance or live-provider manual-mode behavior.
 
 GPT-Live handles backchannels and duplex interruptions natively. Do not layer
 a half-duplex output cancellation rule over it. AEC still matters; its full-duplex
@@ -938,6 +973,17 @@ pricing decision. Never advertise an unverified Mini discount.
   estimate. Implement this adapter path in Phase 4. Disable uncovered-byte estimation on
   this voice surface. GPT-Live client delegation has no Responses backend to
   double-charge; NyxAgent work is already metered on its normal path.
+
+Grok reserves tokens through the existing billing service before each response
+or scripted utterance, using a deterministic session/response-sequence identity.
+The actor binds one provider response ID to that reservation and deduplicates
+terminal events before persisting the ordinary settlement intent. Actual token
+settlement uses only provider-reported counts; byte estimates apply only to the
+reservation budget, never the final charge. Token rows carry zero seconds and
+duration rows carry zero tokens. A text-only BYOK lane may therefore meter voice
+seconds freely while still disclosing and charging its configured reported-token
+components. A missing terminal report remains uncertain exposure; no estimated
+tokens are invented on close.
 
 ### Reserve before spending; settle once
 
@@ -1194,7 +1240,8 @@ PTT is a usable fallback and an honestly labelled earlier beta.
 
 ## 17. Shippable implementation phases and rollout
 
-Phase 1 and Phase 2 are approved. Phase 3 is authorized. Each implementation phase is its own
+Phases 1–3 are approved. Phase 4 is authorized on `feat/voice-grok`, stacked on
+Phase 3 with its HMAC credential-fingerprint fix. Each implementation phase is its own
 PR to main; the owner reviews, versions and merges. Do not commit during this
 implementation session. Composer UI is owned by another implementer; Phase 2
 must not edit either composer. U1 (`36e3ef04`, 0.48.0) is now merged into the

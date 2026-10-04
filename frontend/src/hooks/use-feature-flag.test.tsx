@@ -115,6 +115,8 @@ describe("feature flag catalog", () => {
       AI_ASSISTANT: "experimental:ai-assistant",
       ASSISTANT_VOICE: "assistant:voice",
       VOICE_OPENAI_PLATFORM: "assistant:voice-openai-platform",
+      VOICE_GROK: "assistant:voice-grok",
+      VOICE_GROK_PLATFORM: "assistant:voice-grok-platform",
       NYXAGENT_ENGINE: "assistant:nyxagent-engine",
       AGENT_OPERATION_SCOPES: "assistant:operation-scopes",
       ORG_AGENTS: "assistant:org-agents",

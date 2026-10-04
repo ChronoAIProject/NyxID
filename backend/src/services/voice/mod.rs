@@ -4,6 +4,8 @@ pub mod confirmation;
 mod confirmation_tests;
 mod control;
 pub mod credentials;
+pub mod grok;
+pub mod grok_runtime;
 pub mod openai;
 #[cfg(test)]
 mod openai_tests;
@@ -12,7 +14,9 @@ pub mod runtime;
 pub mod session;
 #[cfg(test)]
 mod tests;
+mod tokens;
 pub mod transcript;
+mod transport;
 
 /// Coalesced in-process wake-up; the existing sweep remains the durable backstop.
 static DISPATCH: std::sync::LazyLock<tokio::sync::Notify> =
@@ -26,8 +30,11 @@ pub async fn dispatch_wakeup() {
 
 /// Only compiled, vetted adapters may consume metadata. Models/voices come solely from catalog.
 pub fn supported_metadata(voice: &crate::models::downstream_service::VoiceInference) -> bool {
-    voice.protocol == crate::models::downstream_service::VoiceProtocol::OpenaiLive
-        && super::inference_voice::validate(voice).is_ok()
+    matches!(
+        voice.protocol,
+        crate::models::downstream_service::VoiceProtocol::OpenaiLive
+            | crate::models::downstream_service::VoiceProtocol::XaiRealtime
+    ) && super::inference_voice::validate(voice).is_ok()
 }
 
 /// Recheck catalog choices at admission and on every live credential revalidation.

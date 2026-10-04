@@ -23,7 +23,13 @@ import {
 
 function tariff(option: VoiceOption) {
   if (option.key_source === "own" && !option.pricing) {
-    return "No NyxID voice charge; your provider's charges still apply";
+    const tokens = option.reported_token_pricing;
+    const extras = tokens
+      ? [tokens, ...tokens.components].filter(
+          (p) => p.sync_status === "synced" && p.metric.includes("tokens"),
+        )
+      : [];
+    return `No NyxID ${extras.length ? "duration" : "voice"} charge; your provider's charges still apply${extras.map((p) => `; ${p.credits_per_unit} credits per reported ${metricLabel(p.metric, 1)}`).join("")}`;
   }
   const prices = option.pricing
     ? [option.pricing, ...option.pricing.components]
@@ -36,6 +42,8 @@ function tariff(option: VoiceOption) {
       p.sync_status === "synced" &&
       p.metric !== "voice_seconds" &&
       (p.metric === "requests" ||
+        (option.voice.protocol === "xai_realtime" &&
+          p.metric.includes("tokens")) ||
         option.voice.billing_metrics.includes(
           p.metric as (typeof option.voice.billing_metrics)[number],
         )),
@@ -73,7 +81,7 @@ export function VoicePanel({
       notify_on_completion: savedPreferences?.notify_on_completion ?? false,
     },
   });
-  const inputMode = preferencesForm.watch("input_mode");
+  const configuredInputMode = preferencesForm.watch("input_mode");
   const preferredVoice = preferencesForm.watch("voice");
   const notifyOnCompletion = preferencesForm.watch("notify_on_completion");
   const options = useQuery({
@@ -103,6 +111,8 @@ export function VoicePanel({
       : undefined) ??
     choices.find((o) => o.available && o.default_model) ??
     choices.find((o) => o.available);
+  const isGrok = option?.voice.protocol === "xai_realtime";
+  const inputMode = isGrok ? "push_to_talk" : configuredInputMode;
   const voiceName =
     option?.voice.voices.find((v) => v.id === preferredVoice)?.id ??
     option?.voice.voices[0]?.id ??
@@ -153,7 +163,8 @@ export function VoicePanel({
       );
       return;
     }
-    await voice.start(preferences);
+    if (isGrok) await voice.start(preferences, "xai_realtime");
+    else await voice.start(preferences);
   }
   const micControl = (
     <Button
@@ -198,6 +209,7 @@ export function VoicePanel({
         {inputMode === "push_to_talk" && (
           <Button
             aria-label="Hold to talk"
+            disabled={voice.starting || microphoneMuted}
             aria-pressed={voice.holding}
             onPointerDown={(e) => {
               e.currentTarget.setPointerCapture(e.pointerId);
@@ -273,9 +285,16 @@ export function VoicePanel({
         </Button>
       </div>
       <p className="mt-2 text-muted-foreground">
-        Audio goes to OpenAI. NyxID keeps the transcript, never an audio
-        recording. Muting keeps the call running and billed.
+        Audio goes to {isGrok ? "xAI through NyxID" : "OpenAI"}. NyxID keeps the
+        transcript, never an audio recording. Muting keeps the call running and
+        billed.
       </p>
+      {isGrok && (
+        <p className="mt-2 text-muted-foreground">
+          Grok private beta: Hold to talk, with headphones recommended.
+          Automatic speaker mode is awaiting verification.
+        </p>
+      )}
       {!active && (
         <div className="mt-4 flex flex-wrap gap-3">
           <label>
@@ -330,7 +349,9 @@ export function VoicePanel({
               className="ml-2 h-8 rounded-lg border border-input bg-background px-3"
             >
               <option value="push_to_talk">Hold to talk</option>
-              <option value="automatic">Automatic</option>
+              <option value="automatic" disabled={isGrok}>
+                Automatic{isGrok ? " (not available in Grok beta)" : ""}
+              </option>
             </select>
           </label>
         </div>

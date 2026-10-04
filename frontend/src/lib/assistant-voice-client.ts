@@ -1,3 +1,4 @@
+import { GrokAudio } from "./grok-audio";
 import { api, apiClient, apiUrl, ApiError } from "./api-client";
 import {
   voiceStartedSchema,
@@ -10,6 +11,8 @@ import {
 
 /** Media is ephemeral; only the server's sideband can admit work or usage. */
 export class AssistantVoiceClient {
+  private grok?: GrokAudio;
+  private audioEnd?: number;
   private peer?: RTCPeerConnection;
   private media?: MediaStream;
   private controlSocket?: WebSocket;
@@ -45,7 +48,10 @@ export class AssistantVoiceClient {
   private path() {
     return `/assistant/nyxagent/conversations/${this.thread}/voice-sessions`;
   }
-  async start(preferences: VoicePreferences) {
+  async start(
+    preferences: VoicePreferences,
+    protocol: "openai_live" | "xai_realtime" = "openai_live",
+  ) {
     this.preferences = preferences;
     try {
       this.audio = document.createElement("audio");
@@ -53,6 +59,7 @@ export class AssistantVoiceClient {
       this.audio.setAttribute("playsinline", "");
       const media = await navigator.mediaDevices.getUserMedia({
         audio: {
+          channelCount: 1,
           echoCancellation: true,
           noiseSuppression: true,
           autoGainControl: true,
@@ -67,6 +74,57 @@ export class AssistantVoiceClient {
       media.getAudioTracks().forEach((t) => {
         t.enabled = false;
       });
+      if (protocol === "xai_realtime") {
+        if (preferences.input_mode !== "push_to_talk")
+          throw new Error("Grok requires Hold to talk");
+        this.grok = new GrokAudio(
+          this.audio,
+          (bytes) => {
+            const socket = this.controlSocket;
+            if (
+              !this.closed &&
+              this.held &&
+              socket?.readyState === WebSocket.OPEN
+            ) {
+              if (socket.bufferedAmount > 96000) {
+                this.onError(
+                  "Voice audio connection is too slow. Please reconnect.",
+                );
+                void this.end();
+              } else socket.send(bytes);
+            }
+          },
+          () => {
+            if (!this.closed) {
+              this.onError(
+                "Voice playback could not be verified. Use headphones and restart the call.",
+              );
+              void this.end();
+            }
+          },
+        );
+        await this.grok.start(media);
+        if (this.closed) return;
+        const result = voiceStartedSchema.parse(
+          await apiClient(this.path(), {
+            method: "POST",
+            signal: this.abort.signal,
+            body: {
+              client_request_id: crypto.randomUUID(),
+              preferences,
+              sdp_offer: "",
+            },
+          }),
+        );
+        this.session = result.session;
+        if (this.closed) {
+          await this.end();
+          return;
+        }
+        this.started = true;
+        this.openControls();
+        return;
+      }
       const peer = new RTCPeerConnection();
       this.peer = peer;
       media.getTracks().forEach((t) => peer.addTrack(t, media));
@@ -144,9 +202,48 @@ export class AssistantVoiceClient {
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
     const socket = new WebSocket(url);
     this.controlSocket = socket;
+    socket.binaryType = "arraybuffer";
     socket.onmessage = ({ data }) => {
+      if (this.closed) return;
       try {
-        const snapshot = voiceSnapshotSchema.parse(JSON.parse(String(data)));
+        if (this.grok && data instanceof ArrayBuffer) {
+          if (
+            this.audioEnd === undefined ||
+            data.byteLength > 1920 ||
+            data.byteLength % 2 !== 0
+          )
+            throw new Error("Invalid PCM frame");
+          this.grok.enqueue(data, this.audioEnd);
+          this.audioEnd = undefined;
+          return;
+        }
+        const event = JSON.parse(String(data)) as {
+          type?: string;
+          generation?: number;
+          end_ms?: number;
+        };
+        if (
+          this.grok &&
+          (event.type === "audio" || event.type === "audio_flush")
+        ) {
+          if (event.generation !== this.session?.generation || this.closed)
+            return;
+          if (event.type === "audio_flush") {
+            this.grok.flush();
+            this.audioEnd = undefined;
+            return;
+          }
+          if (
+            this.audioEnd !== undefined ||
+            !Number.isSafeInteger(event.end_ms) ||
+            event.end_ms! < 0 ||
+            event.end_ms! > 1830000
+          )
+            throw new Error("Invalid playback watermark");
+          this.audioEnd = event.end_ms;
+          return;
+        }
+        const snapshot = voiceSnapshotSchema.parse(event);
         if (
           this.closed ||
           snapshot.session.id !== this.session?.id ||
@@ -180,10 +277,9 @@ export class AssistantVoiceClient {
             type: "heartbeat",
             generation: this.session.generation,
             revision: ++this.revision,
-            playback_ms: Math.max(
-              0,
-              Math.floor((this.audio?.currentTime ?? 0) * 1000),
-            ),
+            playback_ms:
+              this.grok?.watermark() ??
+              Math.max(0, Math.floor((this.audio?.currentTime ?? 0) * 1000)),
             playback_audible:
               !!this.audio &&
               !this.audio.paused &&
@@ -205,8 +301,25 @@ export class AssistantVoiceClient {
     this.media?.getAudioTracks().forEach((t) => {
       t.enabled = enabled;
     });
+    this.grok?.capture(!!enabled);
   }
   hold(pressed: boolean) {
+    if (this.closed || this.held === pressed) return;
+    if (this.grok) {
+      if (
+        pressed &&
+        (this.session?.state !== "active" ||
+          this.session.muted ||
+          this.session.input_muted ||
+          !this.controlsReady)
+      )
+        return;
+      if (this.controlSocket?.readyState === WebSocket.OPEN)
+        this.controlSocket.send(
+          JSON.stringify({ type: pressed ? "ptt_begin" : "ptt_commit" }),
+        );
+      if (this.audio) this.audio.volume = pressed ? 0.25 : 1;
+    }
     this.held = pressed;
     this.updateInput();
   }
@@ -217,6 +330,7 @@ export class AssistantVoiceClient {
   async resumeAudio() {
     if (this.audio) this.audio.muted = this.speakerMuted;
     try {
+      await this.grok?.resume();
       await this.audio?.play();
     } catch {
       this.onError("Tap Resume audio to hear the assistant.");
@@ -224,6 +338,7 @@ export class AssistantVoiceClient {
   }
   async mute(muted: boolean) {
     if (!this.session || this.closed) return;
+    if (muted) this.hold(false);
     if (muted)
       this.media?.getAudioTracks().forEach((t) => {
         t.enabled = false;
@@ -260,6 +375,7 @@ export class AssistantVoiceClient {
       t.stop();
     });
     this.audio?.pause();
+    this.grok?.close();
     const session = this.session;
     this.session = undefined;
     if (!session) {
@@ -285,6 +401,7 @@ export class AssistantVoiceClient {
     if (this.heartbeat) clearInterval(this.heartbeat);
     this.media?.getTracks().forEach((t) => t.stop());
     this.peer?.close();
+    this.grok?.close();
     this.controlSocket?.close();
     this.audio?.pause();
     if (this.audio) this.audio.srcObject = null;
