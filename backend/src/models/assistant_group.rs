@@ -53,6 +53,8 @@ pub struct AssistantGroup {
 /// One message in a group transcript.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GroupMessage {
+    #[serde(default)]
+    pub activities: Vec<super::assistant_conversation::TurnActivity>,
     /// Server-only routing marker, including notices with no human author.
     #[serde(default)]
     pub org_group: bool,

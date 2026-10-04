@@ -24,6 +24,48 @@ the desktop through the cua driver, on that machine.
 
 Nothing here may break existing nodes, proxying, SSH, NyxBot or specialists.
 
+## Shared machines, action cards and activity
+
+Existing machines share one workspace and browser session among their granted
+agents. The Machines page, settings and action cards say **Shared workspace and
+browser**. Command/browser credential isolation does not separate specialists'
+files or authenticated tabs. Use separate machine containers for stronger
+separation. See [the phased isolation design](MACHINE_AGENT_ISOLATION.md).
+
+Machine actions in chat have metadata cards: browser action and an existing
+encrypted screenshot thumbnail when one was returned, file read/write byte
+counts when the node reports them, and command/job status and observed exit
+codes. Background admission is shown as running; subsequent history reads use
+the job's current state. Missing historical exit/byte information stays unknown.
+Stop cannot turn a late result into a successful receipt. MCP `isError` results
+are failures for every tool, including tools transported with HTTP 200 or SSE.
+
+Command excerpts are **off by default**. In a private owner thread, expand
+“Command excerpt preference” to opt into future captures. NyxID stores at most
+2 KiB stdout and 1 KiB stderr (40 lines combined), after the node's live secret
+redactor, a second credential-pattern scrub and removal of terminal controls.
+Output may still contain private data. Excerpts are envelope-encrypted attachment
+rows (`origin: machine_preview`), never audit or log content. Disabling stops
+future capture; it does not remove previous excerpts. They expire after the
+shorter of 30 days and the admin's document retention, enforced on reads and by
+the existing fenced sweep. Expired excerpts show a placeholder; deleting the
+conversation or purging its owner removes them. Complete the server replica
+upgrade before enabling captures so all reads enforce this retention contract.
+Guests and agents cannot enable capture. Group cards publish metadata only,
+without private excerpt/screenshot references or consent settings.
+
+**Machines → Activity** shows actions and outcomes, with a picker of visible agents
+by display name or @handle and an “Unknown (older node)” option for unattributed
+rows. Names are batch-loaded under the viewer’s existing ACLs; raw IDs appear
+only in the collapsed correlation disclosure. Cards and activity rows show the
+current machine name, with a short-ID fallback when it is unavailable.
+New `machine_operation` audit rows carry operation, activity, agent and job
+correlation IDs. Older attribution stays unknown. Personal owners and organization
+admins can see this bounded metadata view; it grants no transcript or attachment
+access. It contains no commands, paths, URLs, file contents or output. Pages use
+indexed cursor queries (50 rows by default, 100 maximum, a 3-second query limit)
+and batched job lookups. No additional machine execution authority is introduced.
+
 ## Decisions
 
 ### D1. Capabilities and terms

@@ -485,6 +485,24 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
     )
     .await?;
 
+    // Bounded machine metadata pages, with and without an agent filter.
+    for keys in [
+        doc! {"event_type":1,"event_data.node_id":1,"created_at":-1,"_id":-1},
+        doc! {"event_type":1,"event_data.node_id":1,"event_data.agent_id":1,"created_at":-1,"_id":-1},
+    ] {
+        db.collection::<mongodb::bson::Document>("audit_log")
+            .create_index(
+                IndexModel::builder()
+                    .keys(keys)
+                    .options(
+                        IndexOptions::builder()
+                            .partial_filter_expression(doc! {"event_type":"machine_operation"})
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await?;
+    }
     // ── audit_log ──
     let audit = db.collection::<mongodb::bson::Document>("audit_log");
     audit
