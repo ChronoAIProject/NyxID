@@ -25,6 +25,7 @@ export const FEATURE_FLAG = {
   NYXAGENT_ENGINE: "assistant:nyxagent-engine",
   ORG_AGENTS: "assistant:org-agents",
   AGENT_OPERATION_SCOPES: "assistant:operation-scopes",
+  AGENT_LEARNING: "assistant:agent-learning",
   NYXBOT_THREAD_FOLLOW: "nyxbot:thread-follow",
   NYXBOT_GATEWAY_LARK: "nyxbot:gateway-lark",
   NYXBOT_GATEWAY_FEISHU: "nyxbot:gateway-feishu",

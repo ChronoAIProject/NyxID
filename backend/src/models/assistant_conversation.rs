@@ -223,6 +223,11 @@ pub struct AssistantConversation {
     /// Stable agent owner binding; the conversation itself belongs to the person.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_owner_id: Option<String>,
+    /// L1 enrollment cohort. Missing or zero-valued legacy rows are not
+    /// eligible evidence; new rows set this only when learning is enabled and
+    /// the owner/member has opted in.
+    #[serde(default)]
+    pub learning_epoch: Option<i64>,
     /// Specialist threads only: the NyxBot thread that assigned the current
     /// work, which receives its report and permission requests.
     #[serde(default)]

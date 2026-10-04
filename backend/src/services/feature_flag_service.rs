@@ -150,6 +150,13 @@ const AGENT_OPERATION_SCOPES_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+pub const AGENT_LEARNING_FLAG_KEY: &str = "assistant:agent-learning";
+const AGENT_LEARNING_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: AGENT_LEARNING_FLAG_KEY,
+    description: "Allows opt-in automatic learning proposals for assistant agents.",
+    default_enabled: false,
+};
+
 pub const INVITATION_CODE_FLAG_KEY: &str = "auth:invitation-code";
 const INVITATION_CODE_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: INVITATION_CODE_FLAG_KEY,
@@ -220,6 +227,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     NYXAGENT_ENGINE_FLAG,
     NYXBOT_THREAD_FOLLOW_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
+    AGENT_LEARNING_FLAG,
     ORG_AGENTS_FLAG,
     ASSISTANT_VOICE_FLAG,
     AI_ASSISTANT_FLAG,
@@ -243,6 +251,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     NYXAGENT_ENGINE_FLAG,
     NYXBOT_THREAD_FOLLOW_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
+    AGENT_LEARNING_FLAG,
     ORG_AGENTS_FLAG,
     ASSISTANT_VOICE_FLAG,
     AI_ASSISTANT_FLAG,
@@ -1768,6 +1777,7 @@ mod tests {
                 "assistant:nyxagent-engine",
                 "nyxbot:thread-follow",
                 "assistant:operation-scopes",
+                "assistant:agent-learning",
                 "assistant:org-agents",
                 "assistant:voice",
                 "experimental:ai-assistant",

@@ -524,6 +524,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         updated_at: now,
         role: Default::default(),
         agent_id: None,
+        learning_epoch: None,
         report_to: None,
         pending_events: Vec::new(),
         event_streak: 0,

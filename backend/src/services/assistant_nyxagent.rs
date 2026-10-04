@@ -1115,6 +1115,18 @@ pub async fn begin_turn_with_voice(
         }
         _ => nyxbot.clone(),
     };
+    let learning_epoch = if start.conversation_id.is_none()
+        && !start.guest
+        && start.channel.is_none()
+        && start.origin == TurnOrigin::User
+    {
+        Box::pin(super::assistant_agent_learning::enrollment_epoch(
+            db, user_id, &new_agent,
+        ))
+        .await?
+    } else {
+        None
+    };
     let mut session = db.client().start_session().await?;
     let db = db.clone();
     let user_id = user_id.to_owned();
@@ -1177,6 +1189,7 @@ pub async fn begin_turn_with_voice(
                         },
                         agent_id: Some(new_agent.id.clone()),
                         report_to: None,
+                        learning_epoch,
                         pending_events: Vec::new(),
                         event_streak: 0,
                         channel: start.channel.clone(),

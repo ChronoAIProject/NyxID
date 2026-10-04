@@ -116,6 +116,7 @@ describe("feature flag catalog", () => {
       ASSISTANT_VOICE: "assistant:voice",
       NYXAGENT_ENGINE: "assistant:nyxagent-engine",
       AGENT_OPERATION_SCOPES: "assistant:operation-scopes",
+      AGENT_LEARNING: "assistant:agent-learning",
       ORG_AGENTS: "assistant:org-agents",
       BILLING: "experimental:billing",
       AEVATAR_CHAT_WIRE_LOG: "experimental:aevatar-chat-wire-log",

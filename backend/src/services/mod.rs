@@ -14,6 +14,7 @@ pub mod approval_policy;
 pub mod approval_service;
 pub mod assistant_action_execution_service;
 pub mod assistant_action_receipts;
+pub mod assistant_agent_learning;
 pub mod assistant_direct;
 pub mod assistant_links;
 pub mod assistant_readiness_service;
