@@ -3,6 +3,8 @@ use std::sync::Mutex;
 use std::sync::OnceLock;
 
 use chrono::Utc;
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -41,6 +43,24 @@ pub fn init_audit_chain_hmac_key(key: Zeroizing<[u8; 32]>) {
 
 pub(crate) fn audit_chain_hmac_key() -> Option<&'static [u8]> {
     AUDIT_CHAIN_HMAC_KEY.get().map(|key| key.as_ref())
+}
+
+/// Keyed, domain-separated fingerprint for persisted caller-supplied material.
+///
+/// The audit-chain key stays process-local; callers must never substitute an
+/// unkeyed digest when it has not been initialized.
+pub(crate) fn keyed_fingerprint(
+    key: Option<&[u8]>,
+    domain: &[u8],
+    material: &[u8],
+) -> Option<String> {
+    let key = key?;
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key).expect("HMAC accepts any key length");
+    mac.update(b"nyxid-");
+    mac.update(domain);
+    mac.update(b"\0");
+    mac.update(material);
+    Some(hex::encode(mac.finalize().into_bytes()))
 }
 
 /// Fire-and-forget audit log entry.

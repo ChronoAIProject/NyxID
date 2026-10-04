@@ -4,6 +4,15 @@ use crate::models::channel_thread::ThreadSenderKind;
 use crate::services::channel_platform::BotCredentials;
 use futures::TryStreamExt;
 
+fn email_participant_visible(target: &ThreadReplyTarget, participant_hashes: &[String]) -> bool {
+    target.facts.kind != crate::models::channel_thread::ThreadKind::Email
+        || target
+            .facts
+            .sender_hash
+            .as_ref()
+            .is_some_and(|hash| participant_hashes.iter().any(|candidate| candidate == hash))
+}
+
 /// `eligible_human` is supplied by admitted chat policy; bot replies require
 /// the exact bot identity independently. No fetched content is serializable.
 pub async fn context(
@@ -91,7 +100,9 @@ pub async fn context_until(
                 (id != target.facts.message_id
                     && eligible_human(&sender)
                     && row.thread_context.as_ref().is_some_and(|f| {
-                        f.version == 1 && f.sender_kind == ThreadSenderKind::Human
+                        f.version == 1
+                            && f.sender_kind == ThreadSenderKind::Human
+                            && email_participant_visible(target, &f.participant_hashes)
                     }))
                 .then_some(ThreadHistoryMetadata {
                     message_id: id,
@@ -131,7 +142,9 @@ pub async fn context_until(
                 ThreadSenderKind::Bot => m.sender_id == bot.platform_bot_id,
                 ThreadSenderKind::Unknown => false,
             };
+            let participant_ok = email_participant_visible(target, &m.participant_hashes);
             if !eligible
+                || !participant_ok
                 || !valid_id(&m.message_id)
                 || !valid_id(&m.sender_id)
                 || m.message_id == target.facts.message_id
@@ -191,4 +204,30 @@ pub async fn context_until(
                 metadata: fallback,
             })
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::channel_thread::{ChannelThreadFacts, ThreadKind, ThreadSenderKind};
+
+    #[test]
+    fn email_history_requires_provider_participant_proof() {
+        let mut facts = ChannelThreadFacts {
+            version: 1,
+            kind: ThreadKind::Email,
+            chat_id: "42:thread".into(),
+            message_id: "message".into(),
+            root_id: Some("thread".into()),
+            sender_kind: ThreadSenderKind::Human,
+            sender_hash: Some("a".repeat(64)),
+            ..Default::default()
+        };
+        let target = ThreadReplyTarget::fixture("aurinko", facts.clone());
+        assert!(email_participant_visible(&target, &["a".repeat(64)]));
+        assert!(!email_participant_visible(&target, &["b".repeat(64)]));
+        facts.kind = ThreadKind::Native;
+        let target = ThreadReplyTarget::fixture("slack", facts);
+        assert!(email_participant_visible(&target, &[]));
+    }
 }

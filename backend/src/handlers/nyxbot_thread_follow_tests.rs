@@ -15,6 +15,81 @@ impl Drop for AdapterGuard {
     }
 }
 
+#[tokio::test]
+async fn private_telegram_with_follow_off_is_a_zero_read_legacy_fast_path() {
+    use mongodb::event::{EventHandler, command::CommandEvent};
+    use std::sync::Mutex;
+
+    let commands = Arc::new(Mutex::new(Vec::<String>::new()));
+    let observed = commands.clone();
+    let handler = EventHandler::<CommandEvent>::callback(move |event| {
+        if let CommandEvent::Started(event) = event {
+            observed.lock().unwrap().push(event.command_name.clone());
+        }
+    });
+    let db = crate::test_utils::connect_transaction_test_database_with_command_handler(
+        "nyxbot_thread_follow_private_fast_path",
+        handler,
+    )
+    .await;
+    let state = crate::test_utils::test_app_state(db);
+    let mut row: NyxbotChannel = bson::from_document(doc! {
+        "_id":"private-link", "user_id":OWNER, "channel_bot_id":"private-bot",
+        "platform":"telegram", "bot_label":"Private bot", "transport":"direct",
+        "status":"active", "route_api_key_id":"route", "created_at":bson::DateTime::now(),
+        "updated_at":bson::DateTime::now(),
+    })
+    .unwrap();
+    assert!(!thread_follow::enabled(&state, OWNER).await.unwrap());
+    commands.lock().unwrap().clear();
+
+    for platform in [
+        "telegram",
+        "telegram-new",
+        "slack",
+        "discord",
+        "lark",
+        "feishu",
+        "x",
+        "whatsapp",
+    ] {
+        row.platform = platform.into();
+        assert!(
+            !Box::pin(thread_follow::inbound(
+                &state,
+                &row,
+                &json!({"conversation": {"type": "private"}}),
+                "message-that-does-not-exist",
+                "legacy DM",
+            ))
+            .await
+            .unwrap()
+        );
+    }
+    // The capability gate must honor the bot-specific test override too.
+    row.platform = "aurinko".into();
+    thread_follow::TEST_ADAPTERS.lock().unwrap().insert(
+        row.channel_bot_id.clone(),
+        Arc::new(crate::services::channel_adapters::telegram::TelegramAdapter::default()),
+    );
+    let _adapter = AdapterGuard(row.channel_bot_id.clone());
+    assert!(
+        !Box::pin(thread_follow::inbound(
+            &state,
+            &row,
+            &json!({"conversation": {"type": "private"}}),
+            "message-that-does-not-exist",
+            "legacy DM",
+        ))
+        .await
+        .unwrap()
+    );
+    assert!(
+        commands.lock().unwrap().is_empty(),
+        "private Telegram follow fast path issued MongoDB commands"
+    );
+}
+
 async fn callback(
     state: &AppState,
     row: &NyxbotChannel,

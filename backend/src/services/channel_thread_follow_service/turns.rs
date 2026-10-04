@@ -42,6 +42,34 @@ pub async fn validate_in_session(
     if channel_generation(&channel, &settings) != b.channel_generation {
         return Err(not_found());
     }
+    let bot = db
+        .collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
+        .find_one(doc! {
+            "_id":&channel.channel_bot_id,
+            "user_id":channel.bot_owner_id.as_deref().unwrap_or(owner),
+            "is_active":true,"status":"active"
+        })
+        .session(&mut *session)
+        .await?
+        .ok_or_else(not_found)?;
+    let source = db
+        .collection::<ChannelMessage>(crate::models::channel_message::COLLECTION_NAME)
+        .find_one(doc! {
+            "_id":&b.source_message_id,"direction":"inbound",
+            "channel_bot_id":&bot.id,"user_id":&bot.user_id,
+            "platform":&bot.platform,"sender_platform_id":&b.sender_id,
+            "agent_api_key_id":&channel.route_api_key_id
+        })
+        .session(&mut *session)
+        .await?
+        .ok_or_else(not_found)?;
+    let sender_eligibility = match source.thread_context.as_ref() {
+        Some(facts) => eligible_for_facts(&channel, &settings, facts, &b.sender_id),
+        // Older inbound rows have no facts. Preserve their pre-follow
+        // eligibility semantics instead of making the additive facts field a
+        // prerequisite for an existing binding.
+        None => eligible(&channel, &settings, &b.sender_id),
+    };
     if child.follow.binding_generation != b.generation
         || settings.follow.binding_generation != b.generation
         || child.follow.bound_agent_id.as_deref() != Some(&b.agent_id)
@@ -50,7 +78,7 @@ pub async fn validate_in_session(
             .as_deref()
             .or(channel.agent_id.as_deref())
             .is_some_and(|id| id != b.agent_id)
-        || eligible(&channel, &settings, &b.sender_id) != Some(b.guest)
+        || sender_eligibility != Some(b.guest)
     {
         return Err(not_found());
     }
@@ -83,13 +111,6 @@ pub async fn validate_in_session(
             return Err(not_found());
         }
     }
-    let bot=db.collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME).find_one(
-        doc! {"_id":&channel.channel_bot_id,"user_id":channel.bot_owner_id.as_deref().unwrap_or(owner),
-            "is_active":true,"status":"active"}).session(&mut *session).await?.ok_or_else(not_found)?;
-    let source=db.collection::<ChannelMessage>(crate::models::channel_message::COLLECTION_NAME).find_one(
-        doc! {"_id":&b.source_message_id,"direction":"inbound","channel_bot_id":&bot.id,
-            "user_id":&bot.user_id,"platform":&bot.platform,"sender_platform_id":&b.sender_id,"agent_api_key_id":&channel.route_api_key_id})
-        .session(&mut *session).await?.ok_or_else(not_found)?;
     if !admitted
         && !b.queued
         && !on
@@ -99,6 +120,8 @@ pub async fn validate_in_session(
                 f.address,
                 crate::models::channel_thread::ThreadAddress::Mention
                     | crate::models::channel_thread::ThreadAddress::ReplyToBot
+                    | crate::models::channel_thread::ThreadAddress::MailboxTo
+                    | crate::models::channel_thread::ThreadAddress::VerifiedReply
             )
         })
     {

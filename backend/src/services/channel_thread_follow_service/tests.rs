@@ -485,7 +485,9 @@ async fn unknown_child_contract_never_reactivates_or_delivers() {
     for fields in [
         doc! {"follow_state":"future_state"},
         doc! {"follow_state":"active","thread_identity_version":2},
-        doc! {"thread_identity_version":1,"thread_kind":"email"},
+        // Email is a supported child kind in PR E; use an actually unknown
+        // forward value to exercise the fail-closed contract.
+        doc! {"thread_identity_version":1,"thread_kind":"future_kind"},
     ] {
         db.collection::<NyxbotThread>(THREADS)
             .update_one(doc! {"_id":&c.id}, doc! {"$set":fields})
