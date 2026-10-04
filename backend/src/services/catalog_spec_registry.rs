@@ -24,6 +24,10 @@ const SPEC_PATH_SUFFIX: &str = "/openapi.json";
 /// URL path.
 const HOSTED_SPEC_SOURCES: &[(&str, &str)] = &[
     (
+        "home-automation",
+        include_str!("../../specs/catalog/home-automation.openapi.json"),
+    ),
+    (
         "ifttt-mcp",
         include_str!("../../specs/catalog/ifttt-mcp.openapi.json"),
     ),
@@ -173,6 +177,7 @@ const HOSTED_SPEC_SOURCES: &[(&str, &str)] = &[
 const SLUG_TO_SPEC_KEY: &[(&str, &str)] = &[
     ("api-ifttt", "ifttt"),
     ("api-ifttt-mcp", "ifttt-mcp"),
+    ("api-mqtt", "home-automation"),
     ("api-notion", "notion"),
     ("api-aurinko", "aurinko"),
     ("api-discord", "discord"),
@@ -847,6 +852,27 @@ mod tests {
                 "slug '{slug}' maps to unregistered spec key '{spec_key}'"
             );
         }
+    }
+
+    #[test]
+    fn home_automation_spec_exposes_bounded_device_operations() {
+        let spec = spec_for_key("home-automation").expect("registered home automation spec");
+        let endpoints = crate::services::openapi_parser::parse_openapi_spec_value(&spec)
+            .expect("parse home automation spec");
+        assert_eq!(endpoints.len(), 3);
+        assert!(
+            endpoints
+                .iter()
+                .any(|endpoint| { endpoint.name == "list_devices" && endpoint.method == "GET" })
+        );
+        assert!(
+            endpoints.iter().any(|endpoint| {
+                endpoint.name == "get_device_state" && endpoint.method == "GET"
+            })
+        );
+        assert!(endpoints.iter().any(|endpoint| {
+            endpoint.name == "set_device_state" && endpoint.method == "POST" && endpoint.destructive
+        }));
     }
 
     #[test]

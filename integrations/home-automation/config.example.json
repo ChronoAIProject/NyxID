@@ -1,0 +1,30 @@
+{
+  "homeAssistant": { "url": "http://homeassistant.local:8123/" },
+  "mqtt": { "url": "mqtt://192.168.1.20:1883" },
+  "devices": [
+    {
+      "id": "office_light",
+      "name": "Office light",
+      "source": "home_assistant",
+      "entityId": "light.office",
+      "actions": ["turn_on", "turn_off"]
+    },
+    {
+      "id": "garage_sensor",
+      "name": "Garage door sensor",
+      "source": "mqtt",
+      "stateTopic": "home/garage/door/state",
+      "actions": []
+    },
+    {
+      "id": "desk_lamp",
+      "name": "Desk lamp",
+      "source": "mqtt",
+      "stateTopic": "home/desk/lamp/state",
+      "commandTopic": "home/desk/lamp/set",
+      "onPayload": "ON",
+      "offPayload": "OFF",
+      "actions": ["turn_on", "turn_off"]
+    }
+  ]
+}

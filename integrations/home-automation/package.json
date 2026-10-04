@@ -1,0 +1,13 @@
+{
+  "name": "nyxid-home-automation-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node bridge.mjs",
+    "setup": "node setup.mjs",
+    "test": "node --test bridge.test.mjs setup.test.mjs"
+  },
+  "engines": { "node": ">=20" },
+  "dependencies": { "mqtt": "^5.14.1" }
+}

@@ -1,6 +1,7 @@
 # AI Services Architecture
 
 Admin service creation, provider linking, and legacy vendor retirement are documented in [SERVICE_CONFIGURATION.md](SERVICE_CONFIGURATION.md).
+For user-facing service terms and routing choices, see [Service types and connections](connecting-services/service-types.md).
 
 ## Overview
 

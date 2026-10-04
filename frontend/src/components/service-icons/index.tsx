@@ -65,6 +65,7 @@ import ApiTwilioIcon from "./api-twilio";
 import ApiAurinkoIcon from "./api-aurinko";
 import ApiIftttIcon from "./api-ifttt";
 import ApiIftttMcpIcon from "./api-ifttt-mcp";
+import ApiMqttIcon from "./api-mqtt";
 
 import AwsCostExplorerIcon from "./aws-cost-explorer";
 import AevatarIcon from "./aevatar";
@@ -135,6 +136,7 @@ export const SPEC_CATALOG_SLUGS = [
   "api-aurinko",
   "api-ifttt",
   "api-ifttt-mcp",
+  "api-mqtt",
 
   "aws-cost-explorer",
 ] as const;
@@ -208,6 +210,7 @@ export const SERVICE_ICONS: Readonly<Record<string, IconComponent>> = {
   aurinko: ApiAurinkoIcon,
   "api-ifttt": ApiIftttIcon,
   "api-ifttt-mcp": ApiIftttMcpIcon,
+  "api-mqtt": ApiMqttIcon,
 
   "aws-cost-explorer": AwsCostExplorerIcon,
   aevatar: AevatarIcon,
