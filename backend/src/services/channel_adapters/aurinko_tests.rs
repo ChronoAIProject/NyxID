@@ -324,6 +324,7 @@ impl Fixture {
                     reply_to_platform_message_id: original.platform_message_id.clone(),
                     metadata,
                 },
+                None,
             )
             .await?
             .into_result()
