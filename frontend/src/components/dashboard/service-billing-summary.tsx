@@ -125,11 +125,11 @@ export function ServiceBillingSummary({
                 </div>
               ))}
               <p className="text-muted-foreground">
-                On services with billing configured, NyxID supplies the key or
-                developer app; BYOK uses one supplied by you or your
-                organization. Applicable NyxID charges are listed separately. A
-                dash means not billable by NyxID; the provider may charge
-                separately.
+                NyxID means platform billing is configured. BYOK means the
+                selected key or developer app was supplied by you or your
+                organization. Free credits and grants do not change these
+                labels. A dash means not billable by NyxID; the provider may
+                charge separately.
               </p>
             </>
           )}

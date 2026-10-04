@@ -434,13 +434,13 @@ describe("live grouped services", () => {
     const summary = card.getByRole("button", {
       name: "Show billing for Twitter",
     });
-    expect(summary).toHaveTextContent("1 NyxID · 1 BYOK · 1 — · 1 unverified");
+    expect(summary).toHaveTextContent("2 NyxID · 1 BYOK · 1 unverified");
     await user.hover(summary);
     const tooltip = await screen.findByRole("tooltip");
     for (const text of [
       "ChronoAI Twitter: BYOK",
       "Personal Twitter: NyxID",
-      "Public Twitter: Not billable by NyxID",
+      "Public Twitter: NyxID",
       "Legacy Twitter: Unverified",
       "0.05 credits / request",
     ])

@@ -165,16 +165,37 @@ describe("billing gate before credential supply — reviewed acceptance cases", 
     );
   });
 
-  it("retains the distinction for no-auth legacy charges", () => {
+  it("classifies a configured billable service without a supplied key as platform billing regardless of its price lane", () => {
     const row = { ...connection, auth_method: "none", api_key_id: null };
     expect(
       connectionBillingCategory(row, configuredBilling(row, twitter)),
-    ).toBe("not_billable");
+    ).toBe("platform");
+    expect(connectionBillability(row, configuredBilling(row, twitter))).toBe(
+      false,
+    );
     const legacy = { slug: "legacy", billing: { platform_billable: true } };
     expect(connectionBillingCategory(row, configuredBilling(row, legacy))).toBe(
       "platform",
     );
   });
+
+  it.each(["usage_based", "not_charged"] as const)(
+    "keeps platform and BYOK labels independent of caller charge status %s and free funding",
+    (charge_status) => {
+      for (const credential_binding of ["platform", "user"] as const) {
+        const row = { ...connection, credential_binding };
+        const bill = {
+          ...configuredBilling(row, twitter),
+          charge_status,
+          rates: [],
+          notes: ["Usage covered by a free credit grant; no wallet debit."],
+        };
+        expect(connectionBillingCategory(row, bill)).toBe(
+          credential_binding === "platform" ? "platform" : "byok",
+        );
+      }
+    },
+  );
 
   it("recognizes service-wide charges without requiring this connection's lane", () => {
     expect(serviceBillingConfigured(oauth, twitter)).toBe(true);

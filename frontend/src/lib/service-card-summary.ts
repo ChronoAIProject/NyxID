@@ -41,19 +41,14 @@ export function connectionBillingCategory(
       : undefined);
   if (serviceConfigured === false) return "not_billable";
   if (serviceConfigured !== true) return "unknown";
+  // This label follows configured service billing and selected credential
+  // supply. Per-connection prices, grants and wallet debits do not decide it.
   switch (credentialSupplier(connection, billing)) {
     case "nyxid":
+    case "none":
       return "platform";
     case "own":
       return "byok";
-    case "none": {
-      const charge = connectionBillability(connection, billing, catalog);
-      return charge === false
-        ? "not_billable"
-        : charge === true
-          ? "platform"
-          : "unknown";
-    }
     default:
       return "unknown";
   }

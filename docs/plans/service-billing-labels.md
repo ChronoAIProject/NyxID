@@ -6,18 +6,27 @@ The label answers two questions in order: does this service have NyxID billing
 configured, and who supplied the selected connection credential? Ownership of the
 connection (personal, organization or platform) is a separate fact.
 
+Product clarification: **free credit grants, allowances, promotions and wallet
+funding never decide this label**. A service configured as billable by NyxID uses
+platform billing unless the selected key or developer app is confirmed to be
+supplied by the user or organization. `NyxID` is the compact card label for NyxID
+platform billing. Grant-funded usage remains NyxID; a supplied key remains BYOK
+even when a grant covers an additional NyxID fee. The amount charged, including
+a zero wallet debit, cannot change either classification.
+
 | Service billing | Selected credential supplier | Label |
 | --- | --- | --- |
 | No configured usage charges | Any | — |
 | Configured | NyxID key or NyxID OAuth developer app | NyxID |
+| Configured | No provider credential required | NyxID |
 | Configured | Confirmed person/organization key or developer app | BYOK |
 | Configured | Unknown or unresolved supplier | Unverified |
 | Configuration unavailable/restricted | Any | Unverified |
 
 The dash tooltip is exactly **Not billable by NyxID**. A provider may charge
 separately. All connection categories appear in grouped cards; disabled connections
-retain their configured category. A no-auth connection with no applicable lane is
-unpriced; legacy configuration that charges unauthenticated usage remains NyxID.
+retain their configured category. A no-auth connection on a service with billing
+configured is also NyxID; an absent connection price is separate from the label.
 
 ## Backend evidence
 
@@ -70,6 +79,11 @@ execution deliberately selects the BYOK lane for `NyxidPlatformOauthApp`. A miss
 lane is uncharged. Consequently, the catalog platform-key price must not be shown
 as the charge for an OAuth connection. This is a configuration/runtime discrepancy
 with the intended product behavior, independent of the label correction.
+
+This discrepancy does not make a confirmed NyxID OAuth connection BYOK or
+nonbillable in the card. Its service billing is configured and its selected app
+is NyxID's, so its label remains NyxID. Rates and settlement must be verified
+separately; grants are not part of that classification decision.
 
 This change does not mutate billing configuration or move OAuth into another price
 lane. Charging shared-app OAuth could be addressed through an explicit rate and

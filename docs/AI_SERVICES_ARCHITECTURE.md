@@ -73,8 +73,11 @@ exactly **Not billable by NyxID**. For a service with billing configured, a
 connection shows **NyxID** when NyxID supplies the selected key or
 OAuth developer app, **BYOK** when the person or organization supplies it, and
 **Unverified** when the supplier or service configuration cannot be established.
-A no-auth connection in lane mode remains uncharged; legacy no-auth charges are
-shown as NyxID. Grants and caller rollout do not change this classification.
+A connection requiring no provider credential is also NyxID when service billing
+is configured. Free grants, allowances, promotional credits, caller rollout and
+wallet debits never change this classification. A bill covered entirely by a
+grant remains NyxID; grant coverage of an additional fee on a supplied key does
+not turn BYOK into NyxID. The compact **NyxID** label means platform billing.
 
 The service-wide gate is true if any credential class has a configured charge.
 It is distinct from the selected connection's price lane: a service can have
