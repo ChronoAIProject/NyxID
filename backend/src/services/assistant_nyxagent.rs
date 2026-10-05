@@ -235,6 +235,7 @@ pub struct TurnRequest {
 /// subagent, a batch of NyxID events, or a channel message.
 #[derive(Clone)]
 pub struct TurnStart {
+    pub channel_event_id: Option<String>,
     pub org_access: Option<std::sync::Arc<super::org_agent_service::RequestAccess>>,
     pub attachment_ids: Vec<String>,
     /// Already-bound uploads from the group transcript (server-authored only).
@@ -398,6 +399,7 @@ impl From<&TurnStart> for TurnStart {
 impl From<&TurnRequest> for TurnStart {
     fn from(request: &TurnRequest) -> Self {
         Self {
+            channel_event_id: None,
             org_access: None,
             attachment_ids: request.attachment_ids.clone(),
             group_request_id: None,
@@ -707,6 +709,13 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
             false,
         ),
         (MESSAGES, doc! {"conversation_id": 1, "seq": 1}, true),
+        // Late channel delivery reads one exact settled turn, including in
+        // long-lived home threads; never scan the whole transcript per sweep.
+        (
+            MESSAGES,
+            doc! {"conversation_id": 1, "turn_id": 1, "role": 1},
+            false,
+        ),
         (
             CONVERSATIONS,
             doc! {"user_id": 1, "agent_id": 1, "updated_at": -1},
@@ -822,6 +831,11 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
         (
             crate::models::nyxbot_channel::COLLECTION_NAME,
             doc! {"status": 1, "delivery_checked_at": 1, "created_at": 1},
+            false,
+        ),
+        (
+            crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME,
+            doc! {"delivery.version": 1, "delivery.state": 1, "delivery.checked_at": 1},
             false,
         ),
         // Delivery health: was this relayed message admitted?
@@ -1484,6 +1498,7 @@ pub async fn begin_turn_with_voice(
                     .map(|r| r.message_seq)
                     .unwrap_or(row.message_count + 1);
                 row.active_turn = Some(ActiveTurn {
+                    channel_event_id: start.channel_event_id.clone(),
                     initiating_message_seq: Some(input_seq),
                     voice_request_id: voice_request_id.clone(),
                     machine_node_ids: Vec::new(),
@@ -1519,6 +1534,11 @@ pub async fn begin_turn_with_voice(
                         .flatten(),
                     also_deliver: Vec::new(),
                 });
+                if let Some(event_id) = start.channel_event_id.as_deref() {
+                    super::channel_turn_delivery::bind_in_session(
+                        db, session, event_id, &row.user_id, &row.id, turn_id,
+                    ).await?;
+                }
                 // Chats whose queued messages this turn answers get its reply
                 // too, unless it already goes there.
                 let answered_here = match start.origin {

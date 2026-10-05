@@ -123,6 +123,9 @@ pub struct ToolProgress {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
+    /// Server-only event binding for durable channel answer delivery.
+    #[serde(default)]
+    pub channel_event_id: Option<String>,
     #[serde(default)]
     pub initiating_message_seq: Option<i64>,
     #[serde(default)]

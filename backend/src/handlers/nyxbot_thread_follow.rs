@@ -413,6 +413,10 @@ pub(super) async fn inbound(
             binding.guest,
             addressed,
             Some(binding.clone()),
+            &sha256_hex(format!(
+                "thread-follow:v1\0{}\0{message}",
+                row.channel_bot_id
+            )),
         ))
         .await
     };
@@ -420,10 +424,18 @@ pub(super) async fn inbound(
         Ok(Inbound::Reply(reply)) => Some(reply),
         Ok(Inbound::Silent) => None,
         Ok(Inbound::Busy) => Some("I'm busy right now. Please try again in a moment.".into()),
-        Ok(Inbound::Turn(receiver)) => Some(match final_reply(receiver).await {
-            Ok(reply) => bounded_reply(&reply),
-            Err(_) => "I could not finish that. Please try again.".into(),
-        }),
+        Ok(Inbound::Turn(receiver)) => {
+            let _ = final_reply(receiver).await;
+            late_delivery::process(
+                state,
+                &sha256_hex(format!(
+                    "thread-follow:v1\0{}\0{message}",
+                    row.channel_bot_id
+                )),
+            )
+            .await;
+            None
+        }
         Err(_) => Some("I could not start that. Please try again.".into()),
     };
     if let Some(reply) = reply {

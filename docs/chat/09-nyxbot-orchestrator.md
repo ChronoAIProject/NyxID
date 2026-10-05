@@ -394,6 +394,60 @@ settings, or relinked later); each chat becomes a thread of the linked agent
   event reference is valid, or through the relay reply API; messages that arrive
   while the agent is busy are queued and answered next instead of bounced.
 
+### Channel turn delivery after the provider stream closes
+
+New channel turns bind their `nyxbot_events` delivery record and conversation/turn
+IDs in the same transaction as `begin_turn`. Only records carrying delivery
+version 1 participate; legacy turns retain their original delivery path. Answer
+bodies remain in ordinary `assistant_messages`, never in delivery metadata.
+
+The provider stream owns a `waiting` delivery until it atomically claims
+`streamed` **before** emitting its first committed answer frame. Disconnecting
+(including an unpolled response body) changes only `waiting` to `pending`. A
+separate 15-second, bounded sweep makes the same transition after 570 seconds
+from provider admission; it does not block the live-change or team workers.
+When that deadline expires and the conversation still has this live, unstopped
+turn, NyxID completes the gateway response with “I'm still working on this. I'll
+post the answer here when it is ready.” This is a progress message, not a claim
+on the eventual answer. NyxAgent keeps working. Useful text from a failed turn
+is retained with a bounded **Incomplete** suffix, in both streamed and late
+replies; a failure with no text retains the failure response.
+
+The gateway settlement hook, direct callback and sweep read the exact turn's
+durable assistant message using its conversation/turn index.
+Before any late effect, they revalidate the live channel, bot, route key, agent,
+chat mapping, original sender's owner/guest admission and current reply mode.
+Native followed threads additionally use their existing generation and live
+thread-delivery fences. A guest is never promoted to owner authority. This is a
+reply to the original admitted request: `allow_posts` is not required, and its
+value never enables bypassing a reply refusal. There is **no proactive fallback**
+to a different chat, topic, sender, or newer inbound message.
+
+Gateway replies exchange the original encrypted event reference for CMA's
+24-hour `reply_target_ref` while it remains valid, then call
+`POST /v1/reply-targets/{ref}/messages` with the stable NyxID event ID as
+`Idempotency-Key`. The capability is encrypted at rest and expires no later than
+CMA's expiry. Gateways without that API may use the original `replyToEvent`
+once within its existing 29-minute local safety window. Direct-relay replies
+use the original inbound ID through the normal live route-key reply path;
+followed native threads retain the original source binding and adapter checks.
+Unsupported/expired targets are never redirected to the top-level chat.
+
+Immediately before dispatch a Mongo compare-and-set changes `pending` to
+`sending` with a unique claim ID. Only that claim may record the outcome. No
+replica reclaims `sending`, `unknown` or `streamed`: external delivery may have
+occurred. A confirmed gateway receipt records `sent`; missing/ambiguous receipts
+are `unknown`. These barriers survive crashes and prevent duplicate NyxID
+attempts. They cannot guarantee external delivery after an ambiguous network
+failure (see the CMA contract request in `CHANNEL_EVENT_GATEWAY.md`). Audit and
+warnings contain only event/conversation/turn IDs, transport and fixed outcomes.
+
+Rolling deployment is additive: old callbacks cannot win a new admission already
+claimed by a new replica, and old settlement hooks do not send channel-origin
+answers. New workers never adopt legacy events. Rollback stops the new sweep;
+settled text remains in the web transcript. No new flags or environment variables
+are required.
+
 **Managed Telegram bots.** Bots created inside Telegram through NyxID's manager
 bot are `telegram-new`, and NyxID stamps that platform on every relay artifact,
 including the reply token. The gateway must accept the alias for the reply token
