@@ -26,6 +26,19 @@ const MAX_FILES: usize = 256;
 pub trait OrnnReader: Sync {
     /// Must use the acting person's live identity, never a shared master credential.
     async fn get(&self, path: &str) -> AppResult<Vec<u8>>;
+
+    /// Publication is opt-in for the fixed L1 publisher. Ordinary readers
+    /// remain read-only by default.
+    async fn request(
+        &self,
+        _method: http::Method,
+        _path: &str,
+        _body: Vec<u8>,
+    ) -> AppResult<Vec<u8>> {
+        Err(AppError::Forbidden(
+            "Ornn publication is unavailable".into(),
+        ))
+    }
 }
 
 pub use crate::models::assistant_agent::SkillSelection as Selection;
@@ -446,22 +459,24 @@ pub async fn set(
         .ok_or_else(|| invalid("Skills revision exhausted"))?;
     let revisions = if selection.expected_revision == 0 {
         vec![
-            doc! {"skills_revision":0},
-            doc! {"skills_revision":{"$exists":false}},
+            doc! {"skills_revision": 0},
+            doc! {"skills_revision": {"$exists": false}},
         ]
     } else {
-        vec![doc! {"skills_revision":selection.expected_revision}]
+        vec![doc! {"skills_revision": selection.expected_revision}]
     };
-    let result = db.collection::<AssistantAgent>(COLLECTION_NAME)
+    let result = db
+        .collection::<AssistantAgent>(COLLECTION_NAME)
         .update_one(
-            doc! { "_id": id, "user_id": &agent.user_id, "destroyed_at": bson::Bson::Null, "$or": revisions },
-            doc! { "$set": {
+            doc! {"_id": id, "user_id": &agent.user_id, "destroyed_at": bson::Bson::Null, "$or": revisions},
+            doc! {"$set": {
                 "skills": bson::to_bson(&selection.skills).map_err(|_| invalid("Invalid skills"))?,
                 "skills_revision": revision,
                 "skill_metadata": bson::to_bson(&metadata).map_err(|_| invalid("Invalid metadata"))?,
                 "updated_at": bson::DateTime::now(),
             }},
-        ).await?;
+        )
+        .await?;
     if result.matched_count != 1 {
         return Err(AppError::Conflict(
             "Skills changed; reload the current revision".into(),
@@ -482,6 +497,46 @@ pub async fn set(
         skills: selection.skills.clone(),
         metadata,
     })
+}
+
+/// Persist pins already verified by preview, sharing the B2 revision fence with
+/// the learning saga's proposal/configuration transaction.
+pub(crate) async fn apply_verified_in_session(
+    db: &Database,
+    agent: &AssistantAgent,
+    selection: &Selection,
+    metadata: &BTreeMap<String, AgentSkillMetadata>,
+    session: &mut mongodb::ClientSession,
+) -> AppResult<i64> {
+    validate(selection)?;
+    let revision = selection
+        .expected_revision
+        .checked_add(1)
+        .ok_or_else(|| invalid("Skills revision exhausted"))?;
+    let revisions = if selection.expected_revision == 0 {
+        vec![
+            doc! {"skills_revision":0},
+            doc! {"skills_revision":{"$exists":false}},
+        ]
+    } else {
+        vec![doc! {"skills_revision":selection.expected_revision}]
+    };
+    let result = db.collection::<AssistantAgent>(COLLECTION_NAME)
+        .update_one(
+            doc! { "_id": &agent.id, "user_id": &agent.user_id, "destroyed_at": bson::Bson::Null, "$or": revisions },
+            doc! { "$set": {
+                "skills": bson::to_bson(&selection.skills).map_err(|_| invalid("Invalid skills"))?,
+                "skills_revision": revision,
+                "skill_metadata": bson::to_bson(&metadata).map_err(|_| invalid("Invalid metadata"))?,
+                "updated_at": bson::DateTime::now(),
+            }},
+        ).session(&mut *session).await?;
+    if result.matched_count != 1 {
+        return Err(AppError::Conflict(
+            "Skills changed; reload the current revision".into(),
+        ));
+    }
+    Ok(revision)
 }
 
 pub fn instructions(agent: &AssistantAgent) -> String {
