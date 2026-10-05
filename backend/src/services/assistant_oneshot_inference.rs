@@ -1,8 +1,8 @@
 //! Bounded, tool-less text inference for server-owned assistant metadata tasks.
 //! Never accepts an agent key, session, tool definitions, or arbitrary request JSON.
-//! Service order is platform-available first, then the person's own keys through
-//! the shared resolver. Preferring small advertised models is a heuristic, not
-//! policy. Only the chosen model ID is cached; authority is resolved on every call.
+//! Prefer the configured platform utility route. If absent or unavailable, use
+//! legacy platform-first selection. Preferring small advertised models is a heuristic, not
+//! policy. Only model/capability metadata is cached; authority is resolved on every call.
 use std::{
     collections::HashMap,
     sync::{Arc, LazyLock, Mutex},
@@ -30,10 +30,20 @@ static MODEL_CACHE: LazyLock<Mutex<ModelCache>> = LazyLock::new(Mutex::default);
 struct ModelCache {
     // No credentials, actor identity, ACL results, grants, or provider responses.
     entries: HashMap<(String, CredentialClass), (String, Instant)>,
+    day: Option<chrono::NaiveDate>,
 }
 
 impl ModelCache {
+    fn expire_shutdown_day(&mut self) {
+        let today = chrono::Utc::now().date_naive();
+        if self.day != Some(today) {
+            self.entries.clear();
+            self.day = Some(today);
+        }
+    }
+
     fn get(&mut self, service: &str, class: CredentialClass, now: Instant) -> Option<String> {
+        self.expire_shutdown_day();
         self.entries
             .retain(|_, (_, inserted)| now.duration_since(*inserted) < MODEL_CACHE_TTL);
         self.entries
@@ -42,6 +52,7 @@ impl ModelCache {
     }
 
     fn insert(&mut self, service: &str, class: CredentialClass, model: &str, now: Instant) {
+        self.expire_shutdown_day();
         self.entries
             .retain(|_, (_, inserted)| now.duration_since(*inserted) < MODEL_CACHE_TTL);
         let key = (service.to_owned(), class);
@@ -71,10 +82,90 @@ impl ModelCache {
     }
 }
 
+/// Fixed caller labels, never derived from a prompt or agent-provided input.
+#[derive(Clone, Copy)]
+pub(crate) enum TextCaller {
+    Title,
+    Learning,
+    Voice,
+}
+impl TextCaller {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Title => "title",
+            Self::Learning => "learning",
+            Self::Voice => "voice",
+        }
+    }
+}
+
+const MAX_ATTEMPTS: usize = 3;
+
+// Only provider capability metadata, not authority. A rejection expires so a
+// provider upgrade can regain the parameter. Never cache error bodies.
+type ReasoningCapabilities = HashMap<(String, String), Instant>;
+static REASONING_UNSUPPORTED: LazyLock<Mutex<ReasoningCapabilities>> =
+    LazyLock::new(Mutex::default);
+fn reasoning_disabled(service: &str, model: &str) -> bool {
+    let Ok(mut cache) = REASONING_UNSUPPORTED.lock() else {
+        return false;
+    };
+    cache.retain(|_, inserted| inserted.elapsed() < MODEL_CACHE_TTL);
+    cache.contains_key(&(service.to_owned(), model.to_owned()))
+}
+fn disable_reasoning(service: &str, model: &str) {
+    if let Ok(mut cache) = REASONING_UNSUPPORTED.lock() {
+        cache.retain(|_, inserted| inserted.elapsed() < MODEL_CACHE_TTL);
+        if cache.len() >= MODEL_CACHE_CAPACITY {
+            cache.clear();
+        }
+        cache.insert((service.to_owned(), model.to_owned()), Instant::now());
+    }
+}
+
+// Drop also diagnoses outer-deadline cancellation, exactly once for this attempt.
+// Neither provider errors nor any request/response content enters tracing.
+struct Attempt<'a> {
+    service: &'a str,
+    class: CredentialClass,
+    model: String,
+    caller: TextCaller,
+    finished: bool,
+}
+impl Attempt<'_> {
+    fn refuse(&mut self, stage: &str) {
+        tracing::warn!(service_slug = self.service, credential_class = ?self.class,
+            model = self.model, caller = self.caller.as_str(), stage,
+            "Assistant utility inference attempt failed");
+        self.finished = true;
+    }
+}
+impl Drop for Attempt<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.refuse("timeout");
+        }
+    }
+}
+
+struct RequestFailure {
+    stage: String,
+    retryable: bool,
+}
+impl RequestFailure {
+    fn terminal(stage: &str) -> Self {
+        Self {
+            stage: stage.into(),
+            retryable: false,
+        }
+    }
+}
+
 /// Caller-supplied bounds are additionally capped by this helper. Invalid/oversized
 /// input fails closed instead of silently changing a classifier's input.
 #[derive(Clone, Copy)]
 pub(crate) struct TextLimits {
+    pub caller: TextCaller,
     pub max_input_chars: usize,
     pub max_output_chars: usize,
     pub max_output_tokens: u16,
@@ -96,14 +187,27 @@ pub(crate) async fn one_shot_text(
     {
         return None;
     }
-    tokio::time::timeout(
+    match tokio::time::timeout(
         limits.timeout.min(Duration::from_secs(15)),
         Box::pin(infer(state, actor, prompt, input, limits)),
     )
     .await
-    .ok()?
-    .ok()
-    .flatten()
+    {
+        Ok(Ok(value)) => value,
+        Ok(Err(_)) => {
+            tracing::warn!(
+                service_slug = "",
+                credential_class = "unresolved",
+                model = "",
+                caller = limits.caller.as_str(),
+                stage = "route_unavailable",
+                "Assistant utility inference setup failed"
+            );
+            None
+        }
+        // The active Attempt's Drop diagnoses cancellation; no duplicate warning.
+        Err(_) => None,
+    }
 }
 
 struct Route {
@@ -217,13 +321,67 @@ async fn infer(
     if person.user_type != UserType::Person {
         return Ok(None);
     }
+    let utility = super::utility_inference_service::load(&state.db).await?;
+    if let Some(config) = &utility {
+        let service = state.db.collection::<DownstreamService>(COLLECTION_NAME)
+            .find_one(doc! {"is_active": true, "service_type": "http", "inference.model_list": true, "slug": {"$eq": &config.service_slug, "$ne": "llm-nyx"}}).await?;
+        if let Some(service) = service
+            && platform_key_service::available(&state.db, &service, actor).await?
+        {
+            // Force the catalog platform route: personal connection precedence is
+            // inappropriate for an admin-selected background utility service.
+            let route = Box::pin(proxy_service::resolve_catalog_platform_target(
+                &state.db,
+                &state.encryption_keys,
+                actor,
+                service.clone(),
+                state.platform_user_rate_limit,
+            ))
+            .await;
+            let Ok(target) = route else {
+                let mut attempt = Attempt {
+                    service: &service.slug,
+                    class: CredentialClass::NyxidManagedMaster,
+                    model: String::new(),
+                    caller: limits.caller,
+                    finished: false,
+                };
+                attempt.refuse("route_unavailable");
+                return Ok(None);
+            };
+            let route = Route {
+                target,
+                delegated: vec![],
+                class: CredentialClass::NyxidManagedMaster,
+            };
+            let client = inference_client()?;
+            let mut attempts = 0;
+            // Once available, do not escape to another service after model-list,
+            // provider, billing, or credential-materialization failures.
+            return Ok(infer_route(
+                state,
+                actor,
+                &client,
+                &service,
+                &route,
+                Some(&config.model),
+                prompt,
+                input,
+                limits,
+                &mut attempts,
+            )
+            .await
+            .ok());
+        }
+    }
+    // Absent/cleared config retains the legacy service-selection path. An
+    // unavailable configured platform service is excluded even if personal BYOK exists.
     let mut services: Vec<DownstreamService> = state
         .db
         .collection(COLLECTION_NAME)
         .find(
             doc! {"is_active":true,"service_type":"http","inference.model_list":true,
-            // NyxAgent is an agent runtime, even for store:false. Never call it.
-            "slug":{"$ne":"llm-nyx"}},
+            "slug":{"$nin": ["llm-nyx", utility.as_ref().map_or("", |c| c.service_slug.as_str())]}},
         )
         .sort(doc! {"slug":1})
         .limit(32)
@@ -243,133 +401,321 @@ async fn infer(
             &grants,
         )
     });
-    // No redirected credentialed requests; a model endpoint is not a browser.
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(Duration::from_secs(3))
-        .build()
-        .map_err(|_| crate::errors::AppError::Internal("Inference client unavailable".into()))?;
+    let client = inference_client()?;
+    let mut attempts = 0;
     for service in services {
-        let Some(inference) = service.inference.as_ref() else {
-            continue;
-        };
+        if attempts >= MAX_ATTEMPTS {
+            break;
+        }
         let Ok(route) = Box::pin(resolve(state, actor, &service)).await else {
             continue;
         };
-        // Only conventional provider API authentication. In particular, no
-        // NyxID token injection, body rewriting, or agent/gateway credentials.
-        if !matches!(
-            route.target.auth_method.as_str(),
-            "none" | "bearer" | "header" | "query"
-        ) || route
-            .delegated
-            .iter()
-            .any(|c| !matches!(c.injection_method.as_str(), "bearer" | "header" | "query"))
-        {
-            continue;
-        }
-        // Lookup follows fresh credential resolution and its live ACL checks.
-        // Never hold this short synchronous lock across network/database awaits.
-        let cached_model = MODEL_CACHE
-            .lock()
-            .ok()
-            .and_then(|mut cache| cache.get(&service.id, route.class, Instant::now()));
-        let model = if let Some(model) = cached_model {
-            model
-        } else {
-            let models = Box::pin(request(
-                state, actor, &client, &service, &route, "models", None, None,
-            ));
-            let Ok(Some(models)) = tokio::time::timeout(Duration::from_secs(3), models).await
-            else {
-                continue;
-            };
-            let Some(model) = choose_model(&models) else {
-                continue;
-            };
-            // Do not persist credential reflections even in the model-ID cache.
-            if route.reflects_credential(&model) {
-                continue;
-            }
-            if let Ok(mut cache) = MODEL_CACHE.lock() {
-                cache.insert(&service.id, route.class, &model, Instant::now());
-            }
-            model
-        };
-        if route.reflects_credential(&model) {
-            continue;
-        }
-        let (path, body) = text_request(
-            inference.wire_protocol,
-            &model,
-            prompt,
-            input,
-            limits.max_output_tokens.min(1_024),
-        );
-        let Some(value) = Box::pin(request(
+        match infer_route(
             state,
             actor,
             &client,
             &service,
             &route,
-            path,
-            Some(body),
-            Some(&model),
-        ))
+            None,
+            prompt,
+            input,
+            limits,
+            &mut attempts,
+        )
         .await
-        else {
-            return Ok(None); // No second paid inference or retry after dispatch.
-        };
-        let text = output_text(inference.wire_protocol, &value);
-        if text.is_empty()
-            || text.chars().count() > limits.max_output_chars.min(8_000)
-            || route.reflects_credential(&text)
         {
-            return Ok(None);
+            Ok(text) => return Ok(Some(text)),
+            Err(true) => continue,
+            Err(false) => return Ok(None),
         }
-        return Ok(Some(text));
     }
     Ok(None)
 }
 
-fn choose_model(value: &Value) -> Option<String> {
-    let mut models: Vec<&str> = value["data"]
-        .as_array()?
+fn inference_client() -> AppResult<reqwest::Client> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(3))
+        .build()
+        .map_err(|_| crate::errors::AppError::Internal("Inference client unavailable".into()))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn infer_route(
+    state: &AppState,
+    actor: &str,
+    client: &reqwest::Client,
+    service: &DownstreamService,
+    route: &Route,
+    configured: Option<&str>,
+    prompt: &str,
+    input: &str,
+    limits: TextLimits,
+    attempts: &mut usize,
+) -> Result<String, bool> {
+    let mut attempt = Attempt {
+        service: &service.slug,
+        class: route.class,
+        model: configured
+            .filter(|id| valid_model_id(id) && !route.reflects_credential(id))
+            .unwrap_or_default()
+            .to_owned(),
+        caller: limits.caller,
+        finished: false,
+    };
+    *attempts += 1;
+    if !matches!(
+        route.target.auth_method.as_str(),
+        "none" | "bearer" | "header" | "query"
+    ) || route
+        .delegated
         .iter()
-        .take(1_000)
-        .filter_map(|model| model["id"].as_str())
-        .filter(|id| !id.is_empty() && id.len() <= 256 && !id.chars().any(char::is_control))
-        .filter(|id| {
-            ![
-                "embedding",
-                "embed-",
-                "whisper",
-                "tts",
-                "audio",
-                "realtime",
-                "image",
-                "dall-e",
-                "moderation",
-                "rerank",
-                "transcrib",
-            ]
-            .iter()
-            .any(|kind| id.to_ascii_lowercase().contains(kind))
+        .any(|c| !matches!(c.injection_method.as_str(), "bearer" | "header" | "query"))
+    {
+        attempt.refuse("route_unavailable");
+        return Err(true);
+    }
+    let protocol = service.inference.as_ref().ok_or(false)?.wire_protocol;
+    // Utility selection verifies the live list on every call. Only the legacy
+    // selection uses the short-lived chosen-ID cache; neither caches authority.
+    let cached = if configured.is_none() {
+        MODEL_CACHE
+            .lock()
+            .ok()
+            .and_then(|mut cache| cache.get(&service.id, route.class, Instant::now()))
+    } else {
+        None
+    };
+    let models = if let Some(model) = cached {
+        vec![model]
+    } else {
+        let response = tokio::time::timeout(
+            Duration::from_secs(3),
+            Box::pin(request(
+                state, actor, client, service, route, "models", None, None,
+            )),
+        )
+        .await;
+        let value = match response {
+            Ok(Ok(value)) => value,
+            _ => {
+                attempt.refuse("models_unavailable");
+                return Err(true);
+            }
+        };
+        let mut models = suitable_models(&value, chrono::Utc::now().date_naive());
+        if let Some(model) = configured {
+            if let Some(i) = models.iter().position(|id| id == model) {
+                let preferred = models.remove(i);
+                models.retain(|id| reasoning_effort(id).is_none());
+                models.insert(0, preferred);
+            } else {
+                if valid_model_id(model) && !route.reflects_credential(model) {
+                    attempt.model = model.into();
+                }
+                attempt.refuse("no_model");
+                if *attempts >= MAX_ATTEMPTS {
+                    return Err(true);
+                }
+                *attempts += 1;
+                attempt.finished = false;
+                attempt.model.clear();
+                models.retain(|id| reasoning_effort(id).is_none());
+            }
+        }
+        models
+    };
+    if models.is_empty() {
+        attempt.refuse("no_model");
+        return Err(true);
+    }
+    for (index, model) in models.into_iter().enumerate() {
+        if index > 0 {
+            if configured.is_none() || *attempts >= MAX_ATTEMPTS {
+                return Err(true);
+            }
+            *attempts += 1;
+            attempt.finished = false;
+        }
+        // Never put a reflected secret in diagnostics, cache, or billing metadata.
+        if route.reflects_credential(&model) {
+            attempt.model.clear();
+            attempt.refuse("credential_reflection");
+            return Err(false);
+        }
+        attempt.model = model.clone();
+        if let Ok(mut cache) = MODEL_CACHE.lock() {
+            cache.insert(&service.id, route.class, &model, Instant::now());
+        }
+        let (path, body) = text_request(
+            protocol,
+            &model,
+            prompt,
+            input,
+            limits.max_output_tokens.min(1024),
+            !reasoning_disabled(&service.id, &model),
+        );
+        let result = Box::pin(request(
+            state,
+            actor,
+            client,
+            service,
+            route,
+            path,
+            Some(body),
+            Some(&model),
+        ))
+        .await;
+        let value = match result {
+            Ok(value) => value,
+            Err(failure) => {
+                attempt.refuse(&failure.stage);
+                if failure.retryable {
+                    continue;
+                }
+                return Err(false);
+            }
+        };
+        if let Some(reason) = incomplete_reason(protocol, &value) {
+            attempt.refuse(reason);
+            return Err(false);
+        }
+        let text = output_text(protocol, &value);
+        let failure = if text.trim().is_empty() {
+            Some("empty_output")
+        } else if text.chars().count() > limits.max_output_chars.min(8000) {
+            Some("too_long")
+        } else if route.reflects_credential(&text) {
+            Some("credential_reflection")
+        } else {
+            None
+        };
+        if let Some(stage) = failure {
+            attempt.refuse(stage);
+            return Err(false);
+        }
+        attempt.finished = true;
+        return Ok(text);
+    }
+    Err(true)
+}
+
+pub(crate) fn valid_model_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 256
+        && !id.chars().any(char::is_whitespace)
+        && !id.chars().any(char::is_control)
+}
+
+fn reasoning_effort(model: &str) -> Option<&'static str> {
+    let model = model.rsplit('/').next().unwrap_or(model);
+    if model.starts_with("gpt-6") {
+        Some(if model.contains("luna") {
+            "none"
+        } else {
+            "low"
         })
+    } else if model.starts_with("gpt-5.") {
+        Some("none")
+    } else if model.starts_with("gpt-5") {
+        Some("minimal")
+    } else if model
+        .strip_prefix('o')
+        .is_some_and(|s| s.starts_with(|c: char| c.is_ascii_digit()))
+    {
+        Some("low")
+    } else {
+        None
+    }
+}
+
+fn suitable_models(value: &Value, today: chrono::NaiveDate) -> Vec<String> {
+    let Some(data) = value["data"].as_array() else {
+        return vec![];
+    };
+    let mut models: Vec<String> = data
+        .iter()
+        .take(1000)
+        .filter(|model| {
+            if let Some(date) = model["shutdown_date"].as_str() {
+                let shutdown = chrono::DateTime::parse_from_rfc3339(date)
+                    .map(|d| d.date_naive())
+                    .ok()
+                    .or_else(|| chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok());
+                if shutdown.is_some_and(|date| date <= today) {
+                    return false;
+                }
+            }
+            // Some gateways attach task metadata; never treat non-chat task kinds as text.
+            for field in ["type", "task", "kind"] {
+                if let Some(kind) = model[field].as_str()
+                    && non_chat_kind(kind)
+                {
+                    return false;
+                }
+            }
+            true
+        })
+        .filter_map(|m| m["id"].as_str())
+        .filter(|id| valid_model_id(id) && !non_chat_kind(id))
+        .map(str::to_owned)
         .collect();
-    // Prefer small/fast families advertised by this service, then any advertised
-    // text model. Never guess a vendor model or reuse an agent model alias.
     models.sort_by_key(|id| {
         let lower = id.to_ascii_lowercase();
         (
-            ["nano", "mini", "haiku", "flash", "small", "fast"]
+            reasoning_effort(&lower).is_some(),
+            ["nano", "mini", "haiku", "flash", "small", "fast", "luna"]
                 .iter()
                 .position(|hint| lower.contains(hint))
-                .unwrap_or(6),
-            *id,
+                .unwrap_or(7),
+            id.clone(),
         )
     });
-    models.first().map(|model| (*model).to_owned())
+    models.dedup();
+    models
+}
+
+fn non_chat_kind(id: &str) -> bool {
+    let lower = id.to_ascii_lowercase();
+    if lower == "ada" || lower.starts_with("ada-") || lower.starts_with("text-ada") {
+        return true;
+    }
+    [
+        "embedding",
+        "embed-",
+        "whisper",
+        "tts",
+        "audio",
+        "realtime",
+        "image",
+        "dall-e",
+        "moderation",
+        "rerank",
+        "transcrib",
+        "search",
+        "deep-research",
+        "deep_research",
+        "codex",
+        "computer-use",
+        "computer_use",
+        "instruct",
+        "-pro",
+        "babbage",
+        "davinci",
+        "curie",
+        "safeguard",
+        "sora",
+        "video",
+    ]
+    .iter()
+    .any(|kind| lower.contains(kind))
+}
+
+#[cfg(test)]
+fn choose_model(value: &Value) -> Option<String> {
+    suitable_models(value, chrono::Utc::now().date_naive())
+        .into_iter()
+        .next()
 }
 
 fn text_request(
@@ -378,22 +724,24 @@ fn text_request(
     prompt: &str,
     input: &str,
     tokens: u16,
+    send_reasoning: bool,
 ) -> (&'static str, Value) {
     use InferenceWireProtocol::*;
-    match protocol {
+    let effort = reasoning_effort(model);
+    let tokens = if effort.is_some() {
+        tokens.max(1024)
+    } else {
+        tokens
+    };
+    let (path, mut body) = match protocol {
         OpenaiResponses => (
             "responses",
             json!({"model":model,"instructions":prompt,"input":input,
             "stream":false,"store":false,"max_output_tokens":tokens}),
         ),
         OpenaiCompletions => {
-            let mut body = json!({"model":model,"messages":[{"role":"system","content":prompt},{"role":"user","content":input}],
-                "stream":false});
-            let token_field = if model.starts_with("gpt-")
-                || model.starts_with("o1")
-                || model.starts_with("o3")
-                || model.starts_with("o4")
-            {
+            let mut body = json!({"model":model,"messages":[{"role":"system","content":prompt},{"role":"user","content":input}],"stream":false});
+            let token_field = if model.starts_with("gpt-") || effort.is_some() {
                 "max_completion_tokens"
             } else {
                 "max_tokens"
@@ -406,6 +754,35 @@ fn text_request(
             json!({"model":model,"system":prompt,
             "messages":[{"role":"user","content":input}],"stream":false,"max_tokens":tokens}),
         ),
+    };
+    if send_reasoning && let Some(effort) = effort {
+        match protocol {
+            OpenaiResponses => body["reasoning"] = json!({"effort": effort}),
+            OpenaiCompletions => body["reasoning_effort"] = json!(effort),
+            AnthropicMessages => {}
+        }
+    }
+    (path, body)
+}
+
+fn incomplete_reason(protocol: InferenceWireProtocol, value: &Value) -> Option<&'static str> {
+    use InferenceWireProtocol::*;
+    let reason = match protocol {
+        OpenaiResponses if value["status"] == "incomplete" => value["incomplete_details"]["reason"]
+            .as_str()
+            .unwrap_or("unknown"),
+        OpenaiResponses if value["status"] == "failed" => "unknown",
+        OpenaiCompletions => value["choices"][0]["finish_reason"]
+            .as_str()
+            .unwrap_or("stop"),
+        AnthropicMessages => value["stop_reason"].as_str().unwrap_or("end_turn"),
+        _ => return None,
+    };
+    match reason {
+        "max_output_tokens" | "length" | "max_tokens" => Some("incomplete:max_output_tokens"),
+        "content_filter" | "refusal" => Some("incomplete:content_filter"),
+        "stop" | "end_turn" | "stop_sequence" => None,
+        _ => Some("incomplete:unknown"),
     }
 }
 
@@ -487,7 +864,7 @@ impl MeterGuard {
             .and_then(|spec| {
                 let quantity = match spec.metric {
                     BillingMetric::Tokens => self.usage.tokens,
-                    BillingMetric::Requests => 1,
+                    BillingMetric::Requests => self.usage.requests,
                     BillingMetric::Bytes => self.usage.bytes,
                     _ => return None,
                 };
@@ -535,7 +912,7 @@ async fn request(
     path: &str,
     body: Option<Value>,
     model: Option<&str>,
-) -> Option<Value> {
+) -> Result<Value, RequestFailure> {
     let body = body
         .and_then(|body| serde_json::to_vec(&body).ok())
         .map(bytes::Bytes::from);
@@ -547,7 +924,7 @@ async fn request(
         .owner_resolver()
         .resolve_for_execution(actor, actor, route.class)
         .await
-        .ok()?;
+        .map_err(|_| RequestFailure::terminal("dispatch_unavailable"))?;
     let ctx = billing::BillingRouteContext::new(
         billing::BillingIngress::LlmProvider,
         uuid::Uuid::new_v4().to_string(),
@@ -574,7 +951,9 @@ async fn request(
         state.billing.resale_enabled(),
     )
     .with_request_body(body.as_deref());
-    let metered = Box::pin(state.billing.open(&ctx)).await.ok()?;
+    let metered = Box::pin(state.billing.open(&ctx))
+        .await
+        .map_err(|_| RequestFailure::terminal("dispatch_unavailable"))?;
     let mut guard = MeterGuard {
         billing: state.billing.clone(),
         metered,
@@ -583,7 +962,11 @@ async fn request(
         model: model.map(str::to_owned),
         armed: true,
     };
-    state.billing.mark_forwarded(&guard.metered).await.ok()?;
+    state
+        .billing
+        .mark_forwarded(&guard.metered)
+        .await
+        .map_err(|_| RequestFailure::terminal("dispatch_unavailable"))?;
     guard.forwarded = true;
     let permit = billing::route_inventory::enforce_billing_egress_classification(
         Some(billing::route_inventory::BillingRoutePolicy::Metered(
@@ -591,7 +974,7 @@ async fn request(
         )),
         billing::BillingIngress::LlmProvider,
     )
-    .ok()?;
+    .map_err(|_| RequestFailure::terminal("dispatch_unavailable"))?;
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
         reqwest::header::CONTENT_TYPE,
@@ -624,7 +1007,12 @@ async fn request(
         permit,
     ))
     .await
-    .ok()?;
+    .map_err(|error| {
+        RequestFailure::terminal(match error {
+            proxy_service::ForwardRequestError::Transport(error) if error.is_timeout() => "timeout",
+            _ => "dispatch_unavailable",
+        })
+    })?;
     // Invalidate before reading the body: a 4xx still counts if that body is
     // malformed, oversized, or stalls. The next call rediscovers; never retry a
     // paid inference here, and never invalidate on transient 5xx/transport errors.
@@ -634,15 +1022,55 @@ async fn request(
     {
         cache.invalidate(&service.id, route.class, model);
     }
-    let success = response.status().is_success();
+    let status = response.status();
+    let success = status.is_success();
     let mut stream = response.bytes_stream();
     let mut bytes = Vec::new();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.ok()?;
+        let chunk = chunk.map_err(|error| {
+            RequestFailure::terminal(if error.is_timeout() {
+                "timeout"
+            } else {
+                "dispatch_unavailable"
+            })
+        })?;
         if bytes.len() + chunk.len() > 64 * 1024 {
-            return None;
+            return Err(RequestFailure::terminal("too_long"));
         }
         bytes.extend_from_slice(&chunk);
+    }
+    let value: Option<Value> = serde_json::from_slice(&bytes).ok();
+    // Never repeat generation if a gateway supplied usage or output along with
+    // an error. 408/409 and redirects are ambiguous, just like 5xx/transport errors.
+    let generated = value.as_ref().is_some_and(|v| {
+        v.get("usage").is_some_and(|u| !u.is_null())
+            || v.get("output").is_some()
+            || v.get("choices").is_some()
+            || v.get("content").is_some()
+    });
+    let retryable = matches!(
+        status.as_u16(),
+        400 | 401 | 403 | 404 | 405 | 406 | 415 | 422 | 429
+    ) && !generated;
+    if retryable {
+        if status == reqwest::StatusCode::BAD_REQUEST
+            && let (Some(model), Some(value)) = (model, &value)
+            && unsupported_reasoning(value)
+        {
+            disable_reasoning(&service.id, model);
+        }
+        // A definite pre-generation refusal settles every lane at zero through
+        // the existing durable settlement path, releasing holds. `fail` only
+        // releases unforwarded requests and must not be used after egress.
+        guard.usage = PlatformUsage::default();
+        Box::pin(guard.finish())
+            .await
+            .map_err(|_| RequestFailure::terminal("dispatch_unavailable"))?;
+        guard.armed = false;
+        return Err(RequestFailure {
+            stage: format!("http_status:{}", status.as_u16()),
+            retryable: true,
+        });
     }
     let usage = llm_usage_service::usage_from_body(&bytes, path, success);
     guard.usage = llm_usage_service::platform_usage(
@@ -650,14 +1078,49 @@ async fn request(
         request_len + bytes.len() as i64,
         model.is_some(),
     );
-    Box::pin(guard.finish()).await.ok()?;
+    Box::pin(guard.finish())
+        .await
+        .map_err(|_| RequestFailure::terminal("dispatch_unavailable"))?;
     guard.armed = false;
     if !success {
-        return None;
+        return Err(RequestFailure {
+            stage: format!("http_status:{}", status.as_u16()),
+            retryable: false,
+        });
     }
-    serde_json::from_slice(&bytes).ok()
+    value.ok_or_else(|| RequestFailure::terminal("invalid_response"))
+}
+
+fn unsupported_reasoning(value: &Value) -> bool {
+    let error = &value["error"];
+    let parameter = error["param"].as_str().unwrap_or_default();
+    let code = error["code"].as_str().unwrap_or_default();
+    // Inspect only to classify, never retain or print provider prose. Compatible
+    // gateways sometimes omit `param`; support their conventional error wording.
+    let message = error["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let names_parameter = matches!(
+        parameter,
+        "reasoning" | "reasoning.effort" | "reasoning_effort"
+    ) || [
+        "reasoning_effort",
+        "reasoning.effort",
+        "'reasoning'",
+        "\"reasoning\"",
+    ]
+    .iter()
+    .any(|p| message.contains(p));
+    names_parameter
+        && (matches!(
+            code,
+            "unsupported_parameter" | "unsupported_value" | "unknown_parameter"
+        ) || message.contains("unsupported")
+            || message.contains("not supported")
+            || message.contains("unknown parameter"))
 }
 
 #[cfg(test)]
 #[path = "assistant_oneshot_inference_tests.rs"]
-mod tests;
+pub(crate) mod tests;

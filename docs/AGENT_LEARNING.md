@@ -227,7 +227,11 @@ normal owner-controlled B2 action.
 Analysis calls `services::assistant_oneshot_inference::one_shot_text` with the
 run's acting person, a fixed server prompt and a bounded redacted input. The
 implementation uses `max_input_chars <= 12_000`, `max_output_chars <= 8_000`,
-`max_output_tokens <= 768` and a timeout no longer than 15 seconds. It uses
+`max_output_tokens <= 768` (the shared helper grants reasoning models a bounded
+1,024-token allowance) and a timeout no longer than 15 seconds. Titles and
+learning share the admin-configured utility service/model, live platform ACL,
+metadata-only diagnostics and bounded non-billable fallback contract in
+[Thread titles](chat/08-nyxagent-engine.md#thread-titles). It uses
 no agent key, MCP tools, tool definitions, arbitrary request JSON or
 conversation session. Usage is metered through the existing helper and billed
 to the acting person under the policy below.

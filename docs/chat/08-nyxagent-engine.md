@@ -883,25 +883,76 @@ three catalog `inference.wire_protocol` values are supported: Responses, Chat
 Completions and Anthropic Messages. Redirects are disabled and responses are
 capped at 64 KiB.
 
-Discovery considers at most 32 active inference services with model-list support,
-prioritizing available platform routes. Credential selection uses the same
-`resolve_proxy_target_from_user_service`, legacy resolver/viewer guard and
-provider delegation helpers as the LLM gateway: an explicit personal
-`credential_binding` wins, platform grants are checked before decryption, and
-org BYOK is reachable only through the acting person's live role and service
-scope. No credential is provisioned and `llm-nyx` is excluded. Model discovery
-uses the resolved service's `models` endpoint (3-second bound), prefers advertised
-nano/mini/haiku/flash/small/fast models, excludes non-text families and falls back
-to another advertised text model. This small-model preference is a heuristic,
-not a policy decision. There is no hardcoded vendor model fallback. A bounded
-in-process cache holds only the chosen model ID for each (service ID, credential
-class), for 10 minutes and at most 128 entries, evicting the oldest selection.
-Cache hits skip model discovery and its metering; they still resolve credentials,
-ACLs and grants afresh. No credentials or authority are cached. Inference 4xx
-responses (including 404) invalidate that model choice for the next call; 5xx
-and transport errors leave it until expiry. No available route/models, provider
-refusal or timeout leaves the provisional title. There is no retry of a
-dispatched inference request.
+Utility inference is an admin-controlled pair on the singleton `platform_settings`
+row: optional `utility_inference: {service_slug, model}` and default-false
+`utility_inference_admin_modified`. The pair is atomic, rather than splitting a
+platform choice from per-service model metadata. Startup seeds
+`chrono-llm-public` / `gpt-6-luna` only when the pair is absent/null and the admin
+marker is false; admin overrides and explicit clears are never resurrected.
+This follows `inference_admin_modified` semantics without changing catalog wire
+protocol defaults. Old documents/replicas remain compatible. Absent or explicitly
+cleared configuration retains legacy service selection.
+
+Platform admins can `GET` / `PUT /api/v1/admin/settings/utility-inference`. PUT
+accepts the complete `{"service_slug":"chrono-llm-public","model":"gpt-6-luna"}`
+pair, or JSON `null` to clear. Writes validate an existing active HTTP inference
+catalog service with model-list support and platform credentials (never
+`llm-nyx`), and a nonempty model ID of at most 256 bytes without whitespace or
+control characters. Settings audit contains actor/change metadata only.
+
+Titles and learning use the configured service's catalog platform route, with
+live platform-key grants checked before decryption on every call. A personal
+connection cannot override this route. Its model list is checked live, even
+when model/capability caches are warm. The configured model must be advertised,
+not shut down, and a chat model. If missing or definitely rejected before
+generation, select another live small non-reasoning chat model on that same
+service. Never switch to personal services because an available utility service
+has an empty/broken model list, rejects models, or fails during inference.
+
+Only an inactive/missing utility service or unavailable platform grant permits
+legacy selection across the person's other services, excluding the utility
+service itself. With no configuration, legacy selection also applies: at most
+32 active HTTP inference services with model-list support, platform-available
+first then slug; `llm-nyx` is excluded. These routes retain the normal personal
+binding precedence, live org role/service scope, and provider delegation.
+No credentials are provisioned and no authority is cached.
+
+Model selection excludes expired `shutdown_date` rows and non-chat families,
+including search, deep-research, codex, computer-use, instruct, pro, legacy
+babbage/davinci, audio, images, embeddings and video. Prefer non-reasoning models,
+then nano/mini/haiku/flash/small/fast/luna, then model ID. There is no guessed
+vendor fallback. Legacy routes retain the bounded 128-entry/10-minute selected-ID
+cache, partitioned by service and credential class; utility model lists bypass it.
+
+At most three candidate attempts share the existing overall deadline. A bounded
+model-list failure can move to the next legacy service without generation. Only
+definite pre-generation HTTP 400/401/403/404/405/406/415/422/429 responses without
+usage or generated content permit generation fallback. Each refused request
+settles at zero quantity through the normal durable billing path. HTTP 408/409,
+5xx, redirects, transport failures/timeouts, malformed success, incomplete/empty,
+oversized or credential-reflecting output end the sequence: no second paid or
+ambiguous generation. The successful output is still character-bounded.
+
+OpenAI reasoning models (`gpt-5*`, `gpt-6*`, o-series) get 1,024 output tokens to
+leave space for visible text, and a model-appropriate minimum effort (`none` for
+GPT-6 Luna and GPT-5.x, `minimal` for original GPT-5, `low` for o-series and other
+GPT-6 models). Responses uses `reasoning: {effort}`, Chat Completions uses
+`reasoning_effort` and `max_completion_tokens`. A 400 explicitly identifying an
+unsupported reasoning parameter/value suppresses that parameter on subsequent
+calls for the same service/model, cached for 10 minutes (128 entries). Provider
+error text is inspected only for classification, never stored or logged.
+Official API contracts: [reasoning and output budgets](https://developers.openai.com/api/docs/guides/reasoning),
+[Chat Completions parameters](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create),
+and [GPT-6 Luna effort support](https://developers.openai.com/api/docs/models/gpt-6-luna).
+
+Each failed attempt emits one metadata-only warning: fixed caller (`title`,
+`learning`, or the existing shared helper's `voice` classifiers), service slug,
+credential class, safe chosen model ID (empty before selection), and fixed stage.
+Stages are `models_unavailable`, `no_model`, `http_status:<code>`, `empty_output`,
+`incomplete:max_output_tokens|content_filter|unknown`, `too_long`,
+`credential_reflection`, `timeout`, `route_unavailable`, `dispatch_unavailable`,
+or `invalid_response`. No prompts, input, output, provider error prose or keys
+are logged. Deadline cancellation diagnoses the active attempt once.
 
 Both model discovery and inference use the existing billing admission and
 settlement path and `BillingOwnerResolver::resolve_for_execution`. This metadata
@@ -913,14 +964,15 @@ for bounded text classification; callers must independently authorize the task.
 
 After the first successful owner exchange settles, start title generation in a
 detached task. A replica permits at most four concurrent requests, with no queue
-or retries and a 20-second overall deadline (15 seconds for inference, including
-discovery, and 128 output tokens for titles). This never holds the turn permit or
+or background retries and a 20-second overall deadline (15 seconds for inference, including
+discovery, and 128 output tokens for non-reasoning title models; reasoning
+models receive the bounded 1,024-token allowance above). This never holds the turn permit or
 delays settlement. Supply only bounded text excerpts of the first user/reply
 pair (2,000 characters each), marked as untrusted data, with instructions to
 produce a 3–6 word title in the user's language. Tool isolation comes from the
 provider request contract, not these instructions. Send no images, attachments or session binding.
 Sanitize and bound output to 60 characters and render it as text. Never log
-excerpts or titles; errors are silently best effort and the credential cannot be
+excerpts or titles; errors are best effort with metadata-only diagnostics and the credential cannot be
 reflected into the title; reflected resolved provider credentials are rejected.
 Cancellation retains metering cleanup, including a usage estimate for dispatched
 requests that never yield a response. The existing identifier-only conversation change
