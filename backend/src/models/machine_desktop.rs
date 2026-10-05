@@ -11,6 +11,9 @@ pub struct MachineDesktop {
     pub node_id: String,
     #[serde(default)]
     pub display: nyxid_machine::desktop::Display,
+    /// None preserves the pre-context node/display identity.
+    #[serde(default)]
+    pub context_id: Option<String>,
     pub session_id: String,
     pub user_id: String,
     pub conversation_id: Option<String>,

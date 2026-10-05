@@ -2020,6 +2020,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             "/nyxagent/machines/{node_id}/desktop",
             get(handlers::machine_desktop::upgrade),
         )
+        .route(
+            "/nyxagent/machines/{node_id}/contexts",
+            get(handlers::machine_desktop::contexts),
+        )
         .route("/nyxagent/live", get(handlers::assistant_nyxagent::live))
         .route(
             "/nyxagent/conversations",
@@ -2091,6 +2095,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/nyxagent/agents/{id}/machines/{node_id}",
             axum::routing::put(handlers::machine_access::put),
+        )
+        .route(
+            "/nyxagent/agents/{id}/machines/{node_id}/context-request",
+            post(handlers::machine_access::request_context),
         )
         .route(
             "/nyxagent/agents/{id}/operations",

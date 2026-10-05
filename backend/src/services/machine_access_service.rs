@@ -613,7 +613,10 @@ pub async fn configure(
     node_id: &str,
     selection: Selection,
 ) -> AppResult<Policy> {
-    if !super::feature_flag_service::personal_flag_enabled(db, actor, FLAG).await? {
+    let context_action = selection.mode.as_deref() == Some("separated");
+    if !super::feature_flag_service::personal_flag_enabled(db, actor, FLAG).await?
+        && !context_action
+    {
         return Err(AppError::ValidationError(
             "Machine capability configuration is not enabled. Existing restrictions still apply."
                 .into(),

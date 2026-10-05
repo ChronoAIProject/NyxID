@@ -153,34 +153,6 @@ pub async fn call(
             },
         }));
     }
-    if name != "nyx__machine_request_control" {
-        if matches!(
-            operation,
-            Operation::Browser | Operation::Computer | Operation::FillLogin
-        ) {
-            let display = if operation == Operation::Browser && arguments["browser"] == "dev" {
-                nyxid_machine::desktop::Display::Dev
-            } else {
-                nyxid_machine::desktop::Display::Secure
-            };
-            if node
-                .machine
-                .as_ref()
-                .is_some_and(|profile| profile.os == "linux")
-            {
-                crate::services::machine_desktop_service::agent_display_allowed(
-                    &state.db, &node.id, display,
-                )
-                .await?;
-            } else {
-                // Native macOS browsers share a physical desktop.
-                crate::services::machine_desktop_service::agent_allowed(&state.db, &node.id)
-                    .await?;
-            }
-        } else {
-            crate::services::machine_desktop_service::agent_allowed(&state.db, &node.id).await?;
-        }
-    }
     arguments["machine"] = json!(node.id);
     let mut login = None;
     if operation == Operation::FillLogin {
@@ -332,31 +304,10 @@ pub async fn call(
     }
     arguments["conversation_id"] = json!(chat.conversation_id);
     arguments["turn_id"] = json!(turn_id);
-    if name == "nyx__machine_request_control" {
-        return super::machine_desktop::request_control(
-            state,
-            chat,
-            &node,
-            argument(&arguments, "reason")?,
-            nyxid_machine::desktop::Display::from_parameters(&arguments)
-                .map_err(|message| AppError::ValidationError(message.into()))?,
-        )
-        .await;
-    }
-    if matches!(operation, Operation::Computer | Operation::Browser) {
-        crate::services::machine_desktop_service::open_display(
-            &state.db,
-            &chat.user_id,
-            &node.id,
-            Some(&chat.conversation_id),
-            if operation == Operation::Browser && arguments["browser"] == "dev" {
-                nyxid_machine::desktop::Display::Dev
-            } else {
-                nyxid_machine::desktop::Display::Secure
-            },
-        )
-        .await?;
-    }
+    // Desktop state is opened only after authority admission. A separated
+    // authority carries the signed context id that the node must use; opening
+    // it before admission would create a legacy desktop row and route control
+    // to the wrong browser profile.
     if matches!(operation, Operation::Job | Operation::JobCancel) {
         machines::job(&state.db, chat, &node.id, argument(&arguments, "job_id")?).await?;
     }
@@ -397,6 +348,83 @@ pub async fn call(
             return Err(error);
         }
     };
+    let context_id = authority
+        .as_deref()
+        .filter(|authority| authority.mode == "separated")
+        .map(|authority| authority.context_id.as_str());
+    let display = if name == "nyx__machine_request_control" {
+        nyxid_machine::desktop::Display::from_parameters(&arguments)
+            .map_err(|message| AppError::ValidationError(message.into()))?
+    } else if operation == Operation::Browser && arguments["browser"] == "dev" {
+        nyxid_machine::desktop::Display::Dev
+    } else {
+        nyxid_machine::desktop::Display::Secure
+    };
+    if name != "nyx__machine_request_control" {
+        let allowed = if node
+            .machine
+            .as_ref()
+            .is_some_and(|profile| profile.os == "linux")
+        {
+            if matches!(
+                operation,
+                Operation::Browser | Operation::Computer | Operation::FillLogin
+            ) {
+                crate::services::machine_desktop_service::agent_display_allowed_for_context(
+                    &state.db, &node.id, display, context_id,
+                )
+                .await
+            } else {
+                crate::services::machine_desktop_service::agent_allowed_for_context(
+                    &state.db, &node.id, context_id,
+                )
+                .await
+            }
+        } else {
+            // Native macOS browsers share a physical desktop.
+            crate::services::machine_desktop_service::agent_allowed(&state.db, &node.id).await
+        };
+        if let Err(error) = allowed {
+            if let Some(authority) = &authority {
+                let _ = state
+                    .db
+                    .collection::<mongodb::bson::Document>(crate::models::machine_access::LEASES)
+                    .delete_one(mongodb::bson::doc! {"_id": &authority.lease_id})
+                    .await;
+            }
+            return Err(error);
+        }
+    }
+    if name == "nyx__machine_request_control" {
+        let result = super::machine_desktop::request_control(
+            state,
+            chat,
+            &node,
+            argument(&arguments, "reason")?,
+            display,
+            context_id,
+        )
+        .await;
+        if let Some(authority) = &authority {
+            let _ = state
+                .db
+                .collection::<mongodb::bson::Document>(crate::models::machine_access::LEASES)
+                .delete_one(mongodb::bson::doc! {"_id": &authority.lease_id})
+                .await;
+        }
+        return result;
+    }
+    if matches!(operation, Operation::Computer | Operation::Browser) {
+        crate::services::machine_desktop_service::open_display_for_context(
+            &state.db,
+            &chat.user_id,
+            &node.id,
+            Some(&chat.conversation_id),
+            context_id,
+            display,
+        )
+        .await?;
+    }
     if let (Some(job), Some(authority)) = (&job, &authority) {
         state.db.collection::<mongodb::bson::Document>(crate::models::machine_job::COLLECTION_NAME)
             .update_one(mongodb::bson::doc!{"_id":&job.id},mongodb::bson::doc!{"$set":{"machine_authority":mongodb::bson::to_bson(authority).map_err(|_|AppError::MachineAuthorityStale)?}}).await?;

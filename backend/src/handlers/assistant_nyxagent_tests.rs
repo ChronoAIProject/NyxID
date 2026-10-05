@@ -1097,6 +1097,7 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
         request_excerpt: None,
         decided_by: None,
         reason: None,
+        machine_context: None,
     };
     // Decided before the turn that is about to settle: already reported to it.
     let stale = ack(

@@ -1080,6 +1080,78 @@ async fn machine_watch_settlement_queues_exactly_one_durable_secret_free_event()
 }
 
 #[tokio::test]
+async fn machine_desktop_shared_displays_keep_independent_control_and_dev_requests() {
+    use super::machine_desktop_service as desktop;
+    use nyxid_machine::desktop::Display;
+    let f = orchestrator_fixture("machine_desktop_shared_displays").await;
+    let mut node = node(&f, &f.owner).await;
+    node.machine.as_mut().unwrap().os = "linux".into();
+    save_node(&f, &node).await;
+    let secure = desktop::open(&f.state.db, &f.owner, &node.id, Some(&f.row.id))
+        .await
+        .unwrap();
+    let secure = desktop::take(&f.state.db, &secure, "secure-viewer")
+        .await
+        .unwrap();
+    desktop::controlled(&f.state.db, &secure, "secure-viewer")
+        .await
+        .unwrap();
+    let (task, mut requests) = peer(&f, &node, json!({"ok":true})).await;
+    assert!(matches!(
+        Box::pin(call(
+            &f.state,
+            &f.chat,
+            "nyx__machine_browser",
+            json!({"machine":node.id,"action":"snapshot"})
+        ))
+        .await,
+        Err(AppError::MachineOwnerInControl)
+    ));
+    Box::pin(call(
+        &f.state,
+        &f.chat,
+        "nyx__machine_browser",
+        json!({"machine":node.id,"browser":"dev","action":"snapshot"}),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(requests.recv().await.unwrap().parameters["browser"], "dev");
+    let result = Box::pin(call(
+        &f.state,
+        &f.chat,
+        "nyx__machine_request_control",
+        json!({"machine":node.id,"display":"dev","reason":"Owner signs in"}),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(result["waiting_for_owner"], true);
+    for operation in [Operation::DesktopOpen, Operation::DesktopControl] {
+        let request = requests.recv().await.unwrap();
+        assert_eq!(request.operation, operation);
+        assert_eq!(request.parameters["display"], "dev");
+        assert!(request.parameters["context_id"].is_null());
+    }
+    assert_eq!(
+        desktop::get(&f.state.db, &Display::Dev.key(&node.id))
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "requested"
+    );
+    assert_eq!(
+        desktop::get(&f.state.db, &secure.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "owner"
+    );
+    task.abort();
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn machine_owner_takeover_blocks_tools_and_handback_wakes_with_note() {
     use super::machine_desktop_service as desktop;
     let f = orchestrator_fixture("machine_owner_handback").await;
