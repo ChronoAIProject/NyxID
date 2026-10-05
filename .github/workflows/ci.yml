@@ -330,6 +330,10 @@ jobs:
 
       - name: Run backend tests
         run: python3 .github/scripts/ci_resources.py backend-test cargo nextest run -p nyxid -p nyxid-service-adapters --profile ci
+      - name: Test MongoDB diagnostics
+        if: failure() || cancelled()
+        continue-on-error: true
+        run: bash .github/scripts/dump-test-mongodb.sh
 
       - name: Publish test summary
         if: always()
@@ -382,6 +386,10 @@ jobs:
           key: backend-billing-smoke
       - name: Billing route coverage smoke
         run: python3 .github/scripts/ci_resources.py billing-smoke cargo test -p nyxid billing_route_coverage_smoke -- --nocapture
+      - name: Test MongoDB diagnostics
+        if: failure() || cancelled()
+        continue-on-error: true
+        run: bash .github/scripts/dump-test-mongodb.sh
 
       - name: Upload resource samples
         if: always()
@@ -723,6 +731,10 @@ jobs:
       # workspace (whose tests this job does not run).
       - name: Measure (head)
         run: python3 .github/scripts/ci_resources.py coverage-test cargo llvm-cov --package nyxid --no-report
+      - name: Test MongoDB diagnostics
+        if: failure() || cancelled()
+        continue-on-error: true
+        run: bash .github/scripts/dump-test-mongodb.sh
       - name: Export head coverage
         run: |
           cargo llvm-cov report --package nyxid --lcov --output-path coverage-backend.lcov
@@ -830,6 +842,10 @@ jobs:
         if: steps.base-cache.outputs.cache-hit != 'true'
         working-directory: base-coverage
         run: python3 "$GITHUB_WORKSPACE/.github/scripts/ci_resources.py" coverage-test cargo llvm-cov --package nyxid --no-report
+      - name: Test MongoDB diagnostics
+        if: (failure() || cancelled()) && steps.base-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/dump-test-mongodb.sh"
       - name: Export base coverage
         if: steps.base-cache.outputs.cache-hit != 'true'
         working-directory: base-coverage
