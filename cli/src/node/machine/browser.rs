@@ -470,6 +470,7 @@ impl PackageServer {
 }
 
 const CONTEXT_STARTUP_BUDGET: Duration = Duration::from_secs(45);
+const CONTEXT_STARTUP_PROBE: Duration = Duration::from_millis(1500);
 
 /// Per-process budget: reconnects cannot reset it, but a repair spawn gets a
 /// fresh clock. Nothing here contains page, profile, socket or credential data.
@@ -768,7 +769,11 @@ impl Browser {
             };
             let timeout = deadline
                 .saturating_duration_since(tokio::time::Instant::now())
-                .min(Duration::from_secs(if cold { 20 } else { 4 }));
+                .min(if cold {
+                    CONTEXT_STARTUP_PROBE
+                } else {
+                    Duration::from_secs(4)
+                });
             if timeout.is_zero() {
                 return false;
             }
@@ -786,9 +791,11 @@ impl Browser {
                     return true;
                 }
                 Ok(_) | Err(_) => {
-                    // A failed probe consumes its stream.  The extension will
-                    // reconnect; retry within the startup grace instead of
-                    // handing the first user action a stale pipe.
+                    // A transport failure drops only the attempted stream;
+                    // accept can install a fresh generation even during I/O.
+                    // Retry harmless probes promptly: a lost first exchange
+                    // must not consume the whole cold-start budget. A valid
+                    // not-ready reply can reuse its live connection.
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
             }
@@ -1124,29 +1131,91 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn context_cold_start_allows_a_slow_first_exchange_without_dropping_the_pipe() {
-        let temp = tempfile::tempdir().unwrap();
-        let (stream, mut peer) = UnixStream::pair().unwrap();
-        let browser = context_fixture(temp.path(), Some(stream), Startup::new()).await;
-        let task = tokio::spawn(async move {
-            let request: Value =
+    fn drop_first_startup_probe(
+        browser: &Browser,
+        mut peer: UnixStream,
+        together: Arc<tokio::sync::Barrier>,
+    ) -> tokio::task::JoinHandle<()> {
+        let connection = browser.connection.clone();
+        let generation = browser.connection_generation.clone();
+        let ready = browser.ready.clone();
+        tokio::spawn(async move {
+            let first: Value =
                 serde_json::from_slice(&read_native(&mut peer).await.unwrap()).unwrap();
-            assert_eq!(request["timeout_ms"], 100);
-            // The old 4 s probe deadline was shorter than the extension's
-            // default 5 s observation loop. A slow first reply is still usable.
-            tokio::time::sleep(Duration::from_millis(4200)).await;
+            assert_eq!(first["timeout_ms"], 100);
+            together.wait().await;
+            // Silently lose the first message after hello. The supervisor must
+            // close this pipe, otherwise a native port can stay wedged forever.
+            let mut byte = [0];
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(3), peer.read(&mut byte))
+                    .await
+                    .expect("lost startup probe retained its native pipe")
+                    .unwrap(),
+                0
+            );
+            // Model the extension's initial 500 ms reconnect backoff and hello.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let (stream, mut replacement) = UnixStream::pair().unwrap();
+            generation.fetch_add(1, Ordering::AcqRel);
+            *connection.lock().await = Some(stream);
+            ready.notify_waiters();
+            let second: Value =
+                serde_json::from_slice(&read_native(&mut replacement).await.unwrap()).unwrap();
+            assert_ne!(first["nonce"], second["nonce"]);
             write_native(
-                &mut peer,
-                &serde_json::to_vec(&json!({"nonce": request["nonce"], "status":"ok"})).unwrap(),
+                &mut replacement,
+                &serde_json::to_vec(&json!({"nonce": second["nonce"], "status":"ok"})).unwrap(),
             )
             .await
             .unwrap();
-        });
-        assert!(browser.wait_startup(Duration::from_millis(10)).await);
+        })
+    }
+
+    #[tokio::test]
+    async fn context_cold_start_reconnects_after_a_lost_first_probe() {
+        let temp = tempfile::tempdir().unwrap();
+        let (stream, peer) = UnixStream::pair().unwrap();
+        let browser = context_fixture(temp.path(), Some(stream), Startup::new()).await;
+        let task = drop_first_startup_probe(&browser, peer, Arc::new(tokio::sync::Barrier::new(1)));
+        assert!(
+            tokio::time::timeout(
+                Duration::from_secs(3),
+                browser.wait_startup(Duration::from_millis(10))
+            )
+            .await
+            .expect("lost probe must recover in about two seconds")
+        );
         assert!(browser.connection.lock().await.is_some());
+        assert_eq!(browser.connection_generation.load(Ordering::Acquire), 1);
         assert!(browser.startup.completed.load(Ordering::Acquire));
         task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn two_context_browsers_recover_lost_first_probes_concurrently() {
+        let first_dir = tempfile::tempdir().unwrap();
+        let second_dir = tempfile::tempdir().unwrap();
+        let (first_stream, first_peer) = UnixStream::pair().unwrap();
+        let (second_stream, second_peer) = UnixStream::pair().unwrap();
+        let first = context_fixture(first_dir.path(), Some(first_stream), Startup::new()).await;
+        let second = context_fixture(second_dir.path(), Some(second_stream), Startup::new()).await;
+        let together = Arc::new(tokio::sync::Barrier::new(2));
+        let first_host = drop_first_startup_probe(&first, first_peer, together.clone());
+        let second_host = drop_first_startup_probe(&second, second_peer, together);
+        let (first_ready, second_ready) = tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::join!(
+                first.wait_startup(Duration::from_millis(10)),
+                second.wait_startup(Duration::from_millis(10))
+            )
+        })
+        .await
+        .expect("independent context handshakes must not serialize or wedge");
+        assert!(first_ready && second_ready);
+        assert!(first.connection.lock().await.is_some());
+        assert!(second.connection.lock().await.is_some());
+        first_host.await.unwrap();
+        second_host.await.unwrap();
     }
 
     #[tokio::test]

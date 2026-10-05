@@ -983,20 +983,24 @@ Stop/revocation and authority expiry continue to cancel startup; the server rene
 active v2 authority every 10 seconds.
 
 The startup `tabs` probe explicitly limits its page observation to 100 ms instead
-of the extension's default 5 seconds. Its cold response wait can use up to 20
-seconds within the remaining spawn budget. This avoids dropping a healthy native
-pipe after 4 seconds while the extension is still finishing that initial probe.
+of the extension's default 5 seconds. Cold probe attempts wait at most 1.5 seconds
+and retry within the remaining spawn budget. A lost first probe closes its native
+stream so the extension reconnects; a newer connection generation is preserved.
+The native hello alone does not prove that the worker can answer its first probe.
 
 Metadata-only `secure_browser_startup` events carry a random startup ID, fixed
 phase and milliseconds since spawn: `spawned`, `package_observed`, `native_hello`,
 `probe_sent`, `first_exchange`, or a timeout. Package observation polls bounded
 filesystem metadata every 250 ms until installation is observed; it is not an
 exact Chromium install timestamp. No paths, page data, nonces or credentials are
-logged. The context e2e delays fresh Chromium launches by 18 seconds and verifies
-no repair occurred. `NYXID_TEST_CONTEXT_COLD_REPAIR=1` additionally exhausts the
+logged. The context e2e delays two concurrent fresh Chromium launches by 18 seconds,
+drops each native host's first probe, and verifies recovery without a browser
+relaunch inside the normal 40-second request deadline.
+`NYXID_TEST_CONTEXT_COLD_REPAIR=1` additionally exhausts the
 first process's budget and proves its single repair gets a fresh budget. The
-fixture renews leases and uses the production 135-second request envelope for
-browser operations; shared checks and performance thresholds are unchanged.
+fixture renews leases and uses the production 135-second request envelope only
+for that explicit full-budget repair; other checks retain the 40-second deadline.
+Shared checks and performance thresholds are unchanged.
 
 ## Validation and measurements
 
