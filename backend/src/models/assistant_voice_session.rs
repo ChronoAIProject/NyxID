@@ -34,6 +34,9 @@ pub struct VoiceSession {
     pub live_slot: bool,
     #[serde(default)]
     pub receipt_message_id: Option<String>,
+    /// Atomic write fence for per-call delegation admission.
+    #[serde(default)]
+    pub voice_claim_fence: i64,
     #[serde(default)]
     pub purge_requested: bool,
     pub generation: i64,

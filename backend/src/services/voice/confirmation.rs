@@ -301,7 +301,6 @@ pub async fn fence_decision(
     if chrono::Utc::now().timestamp_millis() >= fence.until_ms
         || card_digest(card) != fence.authority_digest
         || card.user_id != fence.session.user_id
-        || card.conversation_id != fence.session.conversation_id
         || card.decider != "user"
     {
         return Err(AppError::Conflict(
@@ -327,9 +326,23 @@ pub async fn fence_decision(
         .voice_request_id
         .as_deref()
         .ok_or_else(|| AppError::Conflict("Voice confirmation has no request".into()))?;
-    if db.collection::<mongodb::bson::Document>(REQUESTS).find_one(doc!{"_id":request,"session_id":&fence.session.id,
-        "user_id":&card.user_id,"conversation_id":&card.conversation_id,"state":"awaiting_confirmation"}).session(&mut *tx).await?.is_none() {
-        return Err(AppError::Conflict("Voice confirmation task is no longer pending".into()));
+    let row = db
+        .collection::<crate::models::assistant_voice::VoiceRequest>(REQUESTS)
+        .find_one(doc! {"_id":request,"session_id":&fence.session.id,
+        "user_id":&card.user_id,"conversation_id":&fence.session.conversation_id,
+        "state":"awaiting_confirmation"})
+        .session(&mut *tx)
+        .await?;
+    if row.as_ref().is_none_or(|row| {
+        row.task_conversation_id
+            .as_deref()
+            .is_some_and(|id| id != card.conversation_id)
+            || row.task_conversation_id.is_none()
+                && card.conversation_id != fence.session.conversation_id
+    }) {
+        return Err(AppError::Conflict(
+            "Voice confirmation task is no longer pending".into(),
+        ));
     }
     Ok(())
 }

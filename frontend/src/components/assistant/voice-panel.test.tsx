@@ -15,6 +15,7 @@ const mock = vi.hoisted(() => ({
   stop: vi.fn(),
   rejoin: vi.fn(),
   conflictSession: null as null | { id: string; resumable: boolean; control_revision: number },
+  tasks: [] as Array<Record<string, unknown>>,
 }));
 vi.mock("@tanstack/react-query", () => ({
   useQuery: () => ({ isSuccess: true, data: { options: mock.options } }),
@@ -58,7 +59,7 @@ vi.mock("@/hooks/use-assistant-voice", () => ({
           complete: true,
         },
       ],
-      tasks: [],
+      tasks: mock.tasks,
     },
   }),
 }));
@@ -67,6 +68,7 @@ beforeEach(() => {
   mock.connected = true;
   mock.options = [];
   mock.conflictSession = null;
+  mock.tasks = [];
   vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-04T00:00:00Z"));
 });
 afterEach(() => vi.restoreAllMocks());
@@ -110,6 +112,32 @@ it("speaker mute leaves captions and microphone controls available", () => {
   expect(screen.getByLabelText("Assistant captions")).toHaveTextContent(
     "Your tasks are in this thread.",
   );
+});
+
+it("shows human task states and links settled results", () => {
+  mock.tasks = [
+    {
+      id: "task-1",
+      state: "completed",
+      pending_acknowledgement_ids: [],
+      title: "Check my calendar",
+      result_message_id: "result-1",
+    },
+    {
+      id: "task-2",
+      state: "awaiting_confirmation",
+      pending_acknowledgement_ids: ["card-1"],
+      title: "Delete the old event",
+      result_message_id: null,
+    },
+  ];
+  render(<VoicePanel threadId="thread" onClose={vi.fn()} />);
+  expect(screen.getByText(/Check my calendar · Done/)).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "result" })).toHaveAttribute(
+    "href",
+    "#message-result-1",
+  );
+  expect(screen.getByText(/Delete the old event · Needs your OK/)).toBeInTheDocument();
 });
 
 it("starts with a catalog-added model and voice and discloses the payer and tariff", async () => {

@@ -1986,11 +1986,10 @@ impl Runtime {
                 );
             }
             let active = browser.as_ref().expect("launched");
-            // A separated browser is freshly provisioned with a new profile.
-            // Wait for one real extension exchange before allowing the first
-            // navigation; the hello alone only proves the native host socket
-            // was accepted. Shared legacy browsers retain the old readiness
-            // check and timing.
+            // Each separated browser process owns its cold-start deadline
+            // (45 s from spawn), including a repair launch. After its first
+            // exchange, these 12 + 4 s waits apply only to reconnection.
+            // Shared legacy browsers retain their alive-first check and timing.
             let startup_ready = if active.is_context_browser() {
                 active
                     .wait_startup(std::time::Duration::from_secs(12))

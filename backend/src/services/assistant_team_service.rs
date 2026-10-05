@@ -300,11 +300,13 @@ pub async fn agent_for_conversation(
 /// the agent's, and never listed as threads.
 pub fn thread_filter_for(actor: &str, agent: &AssistantAgent) -> bson::Document {
     if agent.is_nyxbot() {
-        doc! {"user_id": actor, "group_id": bson::Bson::Null, "$or": [
+        doc! {"user_id": actor, "group_id": bson::Bson::Null,
+            "voice_parent_conversation_id": bson::Bson::Null, "$or": [
             {"agent_id": &agent.id}, {"agent_id": bson::Bson::Null},
         ]}
     } else {
-        doc! {"user_id": actor, "agent_id": &agent.id, "group_id": bson::Bson::Null}
+        doc! {"user_id": actor, "agent_id": &agent.id, "group_id": bson::Bson::Null,
+        "voice_parent_conversation_id": bson::Bson::Null}
     }
 }
 
@@ -396,6 +398,28 @@ pub(crate) async fn create_automation_thread(
     create_thread_with_kind(db, keys, actor, agent, title, true, session, None, None).await
 }
 
+/// Create a private voice execution context linked to its visible call thread.
+pub(crate) async fn create_voice_task_thread(
+    db: &Database,
+    keys: &EncryptionKeys,
+    actor: &str,
+    agent: &AssistantAgent,
+    title: &str,
+    parent_conversation_id: &str,
+    session: &mut ClientSession,
+) -> AppResult<AssistantConversation> {
+    let mut row = create_automation_thread(db, keys, actor, agent, title, session).await?;
+    db.collection::<AssistantConversation>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &row.id, "user_id": actor},
+            doc! {"$set": {"voice_parent_conversation_id": parent_conversation_id}},
+        )
+        .session(&mut *session)
+        .await?;
+    row.voice_parent_conversation_id = Some(parent_conversation_id.to_owned());
+    Ok(row)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn create_thread_with_kind(
     db: &Database,
@@ -437,6 +461,7 @@ async fn create_thread_with_kind(
         },
         agent_id: Some(agent.id.clone()),
         automation_thread,
+        voice_parent_conversation_id: None,
         agent_owner_id: (actor != agent.user_id).then(|| agent.user_id.clone()),
         learning_epoch,
         report_to: None,

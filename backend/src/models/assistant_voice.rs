@@ -61,6 +61,9 @@ pub struct VoiceRequest {
     pub id: String,
     pub user_id: String,
     pub conversation_id: String,
+    /// Hidden automation thread used for this request's independent turn.
+    #[serde(default)]
+    pub task_conversation_id: Option<String>,
     pub session_id: String,
     /// Provider delegation ID or server acknowledgement ID; never client text.
     pub source_id: String,
@@ -77,6 +80,12 @@ pub struct VoiceRequest {
     /// Continuations retain the original task's cancellation identity.
     #[serde(default)]
     pub root_request_id: Option<String>,
+    /// Visible-thread result summary, populated once the hidden task settles.
+    #[serde(default)]
+    pub result_message_id: Option<String>,
+    /// Number of bounded restart replays already attempted for this request.
+    #[serde(default)]
+    pub recovery_replays: u8,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]

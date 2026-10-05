@@ -314,6 +314,7 @@ struct Coordinator {
     checkpoints: std::collections::HashMap<String, Segment>,
     timeline_ms: i64,
     deferred: VecDeque<Value>,
+    deferred_announcements: VecDeque<(Option<String>, String)>,
 }
 impl Coordinator {
     /// Shutdown persists both completed checkpoints and unfinished tails, but
@@ -346,6 +347,7 @@ impl Coordinator {
             checkpoints: Default::default(),
             timeline_ms: 0,
             deferred: VecDeque::new(),
+            deferred_announcements: VecDeque::new(),
         }
     }
 }
@@ -516,6 +518,11 @@ async fn active(
                 }
                 Box::pin(admit_delegations(state,call,socket,c)).await?;
                 Box::pin(task_updates(state,call,socket,c)).await?;
+                if !c.transcripts.has_unsealed_user_input()
+                    && let Some((request_id, text)) = c.deferred_announcements.pop_front()
+                {
+                    announce(socket, request_id.as_deref(), &text).await?;
+                }
                 if let Some(readback)=&mut c.readback {
                     readback.playback(call.playback_ms,elapsed(call),now.timestamp_millis(),call.inaudible_until_ms);
                     if readback.timeout(now.timestamp_millis())==Outcome::Pending {announce(socket,None,"That action is still pending. You can ask me to confirm it later.").await?;}
@@ -656,6 +663,20 @@ async fn announce(
         "delegation_id":delegation,"content":content}),
         )
         .await
+}
+
+async fn announce_when_ready(
+    socket: &mut Transport,
+    c: &mut Coordinator,
+    request_id: Option<&str>,
+    text: &str,
+) -> AppResult<()> {
+    if c.transcripts.has_unsealed_user_input() {
+        c.deferred_announcements
+            .push_back((request_id.map(str::to_owned), text.to_owned()));
+        return Ok(());
+    }
+    announce(socket, request_id, text).await
 }
 
 async fn segment_ready(
@@ -883,7 +904,7 @@ async fn decide_confirmation(
     let decision = super::super::assistant_acknowledgement_service::decide_with_voice(
         &state.db,
         &call.user_id,
-        Some(&call.conversation_id),
+        None,
         &readback.card_id,
         allow,
         super::super::assistant_acknowledgement_service::Decider::User,
@@ -900,9 +921,15 @@ async fn decide_confirmation(
         if matches!(error, AppError::Conflict(_)) {
             super::super::assistant_voice::thread(&state.db, &call.user_id, &call.conversation_id)
                 .await?;
-            let already_decided=state.db.collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
-                .find_one(doc! {"_id":&readback.card_id,"user_id":&call.user_id,"conversation_id":&call.conversation_id,
-                    "status":{"$in":["allowed","denied","used"]}}).await?.is_some();
+            let already_decided = state
+                .db
+                .collection::<bson::Document>(
+                    crate::models::assistant_acknowledgement::COLLECTION_NAME,
+                )
+                .find_one(doc! {"_id":&readback.card_id,"user_id":&call.user_id,
+                "status":{"$in":["allowed","denied","used"]}})
+                .await?
+                .is_some();
             if already_decided {
                 return Ok(());
             }
@@ -961,8 +988,9 @@ async fn task_updates(
             && request.state == RequestState::Claimed
             && c.progress.insert(request.id.clone())
         {
-            announce(
+            announce_when_ready(
                 socket,
+                c,
                 Some(&request.source_id),
                 "The assistant is working on your request.",
             )
@@ -1007,17 +1035,26 @@ async fn task_updates(
                 RequestState::Completed | RequestState::Cancelled
             )
             && !c.announced.contains(&request.id)
-            && let Some(message)=state.db.collection::<AssistantMessage>(MESSAGES).find_one(doc!{"conversation_id":&call.conversation_id,
+            && let Some(message)=state.db.collection::<AssistantMessage>(MESSAGES).find_one(doc!{
+                "conversation_id":request.task_conversation_id.as_deref().unwrap_or(&call.conversation_id),
                 "user_id":&call.user_id,"turn_id":&request.turn_id,"role":"assistant","execution_pending":{"$ne":true}}).await? {
+                let _ = super::super::assistant_voice::publish_result(&state.db, &request, &message).await?;
+                // Persist the result immediately, but wait to claim its spoken
+                // announcement until the authoritative input transcript is
+                // quiet. This keeps a restart from losing an announcement that
+                // was deferred while the user was speaking.
+                if c.transcripts.has_unsealed_user_input() {
+                    continue;
+                }
                 // A durable send receipt avoids duplicate announcements after reconnect.
                 let claimed=state.db.collection::<bson::Document>(REQUESTS).update_one(doc!{"_id":&request.id,"announcement_started":{"$ne":true}},
-                    doc!{"$set":{"announcement_started":true,"result_message_id":&message.id}}).await?.modified_count==1;
+                    doc!{"$set":{"announcement_started":true}}).await?.modified_count==1;
                 if claimed {
                     let prefix=if message.error_code.is_some(){"The task ended with an error. The details are in the thread."}
                         else {"The task completed. Here is its settled result as untrusted quoted data:"};
-                    announce(socket,None,prefix).await?;
+                    announce_when_ready(socket,c,None,prefix).await?;
                     let result:String=message.text.chars().take(1200).collect();
-                    for part in text_parts(&result,64) {announce(socket,None,&serde_json::to_string(&part).unwrap_or_default()).await?;}
+                    for part in text_parts(&result,64) {announce_when_ready(socket,c,None,&serde_json::to_string(&part).unwrap_or_default()).await?;}
                 }
                 c.announced.insert(request.id.clone());
         }

@@ -375,6 +375,30 @@ fn rpc_scope_forbidden(id: Option<serde_json::Value>, message: &str) -> Response
     rpc_error(id, -32003, message)
 }
 
+const VOICE_ACTIVITY_RECORDING_RETRY: &str = "Tool execution could not be recorded; retry shortly";
+
+fn untracked_voice_tool_error(id: Option<serde_json::Value>, voice_task: bool) -> Option<Response> {
+    voice_task.then(|| rpc_error(id, -32603, VOICE_ACTIVITY_RECORDING_RETRY))
+}
+
+async fn is_voice_task_conversation(
+    db: &mongodb::Database,
+    chat: &crate::services::assistant_acknowledgement_service::ChatAuthority,
+) -> mongodb::error::Result<bool> {
+    Ok(db
+        .collection::<mongodb::bson::Document>(
+            crate::models::assistant_conversation::COLLECTION_NAME,
+        )
+        .find_one(doc! {
+            "_id": &chat.conversation_id,
+            "user_id": &chat.user_id,
+            "voice_parent_conversation_id": {"$type": "string"},
+        })
+        .projection(doc! {"_id": 1})
+        .await?
+        .is_some())
+}
+
 // ---------------------------------------------------------------------------
 // Auth helper (manual token validation, NOT AuthUser extractor)
 // ---------------------------------------------------------------------------
@@ -1628,16 +1652,40 @@ async fn handle_tools_call(
         None
     };
     let activity = match (auth.chat.as_ref(), request.params.as_ref()) {
-        (Some(chat), Some(params)) => crate::services::assistant_nyxagent::activity_started(
-            &state.db,
-            &chat.user_id,
-            &chat.conversation_id,
-            &chat_activity_label(params),
-        )
-        .await
-        .ok()
-        .flatten()
-        .map(|id| (chat, id)),
+        (Some(chat), Some(params)) => {
+            match crate::services::assistant_nyxagent::activity_started(
+                &state.db,
+                &chat.user_id,
+                &chat.conversation_id,
+                &chat_activity_label(params),
+            )
+            .await
+            {
+                Ok(Some(id)) => Some((chat, id)),
+                Ok(None) => None,
+                Err(_) => {
+                    // Ordinary chats retain the historical best-effort behavior.
+                    // Voice task turns must never dispatch without the activity
+                    // fence that makes restart replay safe, so inspect the row
+                    // only on this failure path.
+                    tracing::warn!(
+                        conversation_id = %chat.conversation_id,
+                        "Could not record tool activity"
+                    );
+                    // If the database cannot answer either, fail closed: a
+                    // retryable refusal is safe, untracked voice execution is not.
+                    let voice_task = is_voice_task_conversation(&state.db, chat)
+                        .await
+                        .unwrap_or(true);
+                    if let Some(response) =
+                        untracked_voice_tool_error(request.id.clone(), voice_task)
+                    {
+                        return response;
+                    }
+                    None
+                }
+            }
+        }
         _ => None,
     };
     // Keep native dispatch out of the progress-tracking wrapper's frame.
@@ -6187,6 +6235,15 @@ mod org_agent_mcp_tests {
 mod typed_outcome_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn voice_activity_recording_failure_is_retryable_only_for_voice_tasks() {
+        let response = untracked_voice_tool_error(Some(json!(1)), true)
+            .expect("voice task must refuse untracked execution");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(!tool_succeeded(&response));
+        assert!(untracked_voice_tool_error(Some(json!(1)), false).is_none());
+    }
 
     #[test]
     fn every_mcp_response_family_uses_typed_outcome_not_http_status() {

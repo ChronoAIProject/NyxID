@@ -87,9 +87,9 @@ function request(operation,parameters,authority,requestId){
  }
  r.signature=mac.digest('hex');return r;
 }
-async function call(operation,parameters,authority,requestId){
+async function call(operation,parameters,authority,requestId,responseTimeoutMs=40000){
  const message=request(operation,parameters,authority,requestId);
- const response=new Promise((resolve,reject)=>{const timeout=setTimeout(()=>{responses.delete(message.request_id);reject(new Error(`Timed out: ${operation}`));},40000);responses.set(message.request_id,result=>{clearTimeout(timeout);resolve(result);});});
+ const response=new Promise((resolve,reject)=>{const timeout=setTimeout(()=>{responses.delete(message.request_id);reject(new Error(`Timed out: ${operation}`));},responseTimeoutMs);responses.set(message.request_id,result=>{clearTimeout(timeout);resolve(result);});});
  socket.send(JSON.stringify(message));const result=await response;results.push(result);return result;
 }
 async function callWithReconnect(operation,parameters,authority,requestId){
@@ -782,6 +782,7 @@ assert policy['URLBlocklist']==['file://*'] and 'ExtensionInstallForcelist' not 
  assert.equal((await call('exec',{job_id:randomUUID(),command:'true',services:[]},authority({revision:3}))).exit_code,0,'fresh revision recovers');
  console.log('Authority v2: capability denial, renewal, revocation, late renewal, expiry and v1 downgrade passed');
  await contexts({call,callWithReconnect,frames,profile,conversationId,turnId,origin,browserUrl,certificate:`${testDirectory}/tls.crt`});
+ for(const line of output.join('').split('\n').filter(line=>line.includes('secure_browser_startup')))console.log(line);
  for(const secret of [token,auth,signing.toString('hex')])assert(!output.join('').includes(secret),'node logs must not contain credentials');
  assert(!output.join('').includes('stderr-secret-fixture'),'developer diagnostics must never expose child stderr');
  console.log('| Scenario | Changed frames/s | Frame bytes/s | Actions |\n|---|---:|---:|---:|');
@@ -789,7 +790,7 @@ assert policy['URLBlocklist']==['file://*'] and 'ExtensionInstallForcelist' not 
  console.log(JSON.stringify({passed:true,capabilities:profile,desktop_frames:frames.length,file_round_trip_mib:4,file_round_trip_ms:transferMs,takeover_ms:takeoverMs,renderer_sandbox:true,agent_no_new_privs:true,agent_namespace_filter:true,desktop_performance:performanceSamples,input_to_frame_ms:{p50:latencies[4],p95:latencies[9]}}));
 } catch(error){
  console.error(error.message);
- console.error('Node diagnostics:',output.join('').slice(-5000).replaceAll(token,'[redacted]').replaceAll(auth,'[redacted]').replaceAll(signing.toString('hex'),'[redacted]'));
+ console.error('Node diagnostics:',output.join('').slice(-15000).replaceAll(token,'[redacted]').replaceAll(auth,'[redacted]').replaceAll(signing.toString('hex'),'[redacted]'));
  if(profile)console.error('Capability status:',JSON.stringify(profile));
  process.exitCode=1;
 }finally{
