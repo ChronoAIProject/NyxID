@@ -1,4 +1,4 @@
-// Imported by the real container suite; no alternate launcher or fake authority.
+// Imported by the real container suite; requests use signed production authority.
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import {spawnSync} from 'node:child_process';
@@ -9,7 +9,16 @@ export async function contexts({call,callWithReconnect,profile,conversationId,tu
  const base={require_v2:true,generation:1,mode:'separated',owner_id:randomUUID(),actor_id:randomUUID(),group_id:null,runtime_id:profile.runtime_id,conversation_id:conversationId,turn_id:turnId,revision:1,capabilities:{shell:true,files:true,browser:true,computer:true,developer_browser:true}};
  const a={...base,context_id:randomUUID(),agent_id:randomUUID()},b={...base,context_id:randomUUID(),agent_id:randomUUID()};
  const auth=(context,extra={})=>({...context,lease_id:randomUUID(),expires_at_ms:Date.now()+45000,...extra});
- const invoke=(context,operation,args)=>call(operation,args,auth(context));
+ const invoke=async(context,operation,args)=>{
+  const lease=auth(context);
+  // Production renews active v2 authority every 10 s. A bounded 45 s
+  // cold start plus one repair must not run with the fixture's one-shot lease.
+  if(!['browser','computer','fill_login'].includes(operation))return call(operation,args,lease);
+  let renewal=Promise.resolve();
+  const timer=setInterval(()=>{renewal=renewal.then(()=>call('authority_renew',{}, {...lease,expires_at_ms:Date.now()+45000}));},10000);
+  try{return await call(operation,args,lease,undefined,135000);}
+  finally{clearInterval(timer);await renewal;}
+ };
  const command=(context,command)=>invoke(context,'exec',{job_id:randomUUID(),command,services:[]});
  if(!profile.separated.available) {
   assert.equal(profile.separated.reason,'separated_requires_landlock_abi_6',JSON.stringify(profile.separated));
@@ -65,7 +74,35 @@ export async function contexts({call,callWithReconnect,profile,conversationId,tu
   run('runuser',['-u',name,'--','certutil','-A','-d',`sql:${home}/.pki/nssdb`,'-n','Fixture','-t','C,,','-i',certificate]);
  }
  const navigate=(c,url,browser='secure')=>invoke(c,'browser',{browser,action:'navigate',url});
- const navigated=await Promise.all([navigate(a,origin),navigate(b,browserUrl)]);
+ // Deterministic slow process start, without a production fault-injection
+ // hook or altered signed extension. The wrapper keeps Chromium's PID. Both
+ // first launches exceed the former 12 + 4 s grace. Optionally exercise the
+ // complete 45 s failure and one fresh repair budget as well.
+ const chromium='/usr/bin/chromium', real=chromium+'-cold-test-real';
+ await fs.rename(chromium,real);
+ const repair=process.env.NYXID_TEST_CONTEXT_COLD_REPAIR==='1';
+ await fs.writeFile(chromium,`#!/usr/bin/python3
+import os,sys,time
+profile=next((a.split('=',1)[1] for a in sys.argv[1:] if a.startswith('--user-data-dir=')), '')
+if '/contexts/' in profile:
+ marker=os.path.join(profile,'.cold-start-test')
+ try:
+  with open(marker) as f: attempt=int(f.read())
+ except FileNotFoundError: attempt=0
+ with open(marker,'w') as f: f.write(str(attempt+1))
+ if attempt==0: time.sleep(60 if ${repair?'True':'False'} and os.getuid()==${allocation(a).browsers['1'].secure_uid} else 18)
+ elif attempt==1 and ${repair?'True':'False'} and os.getuid()==${allocation(a).browsers['1'].secure_uid}: time.sleep(18)
+os.execv(${JSON.stringify(real)},[${JSON.stringify(real)}]+sys.argv[1:])
+`,{mode:0o755});
+ let navigated;
+ try {
+  navigated=await Promise.all([navigate(a,origin),navigate(b,browserUrl)]);
+  for(const context of [a,b]) {
+   const attempts=Number(await fs.readFile(`${role(context,'secure')}/browser-profile/.cold-start-test`,'utf8'));
+   assert.equal(attempts,repair&&context===a?2:1,'cold-start budget preserves slow Chromium; repair has a fresh budget');
+  }
+ } finally {await fs.rename(real,chromium);}
+ console.log('Separated cold start: delayed launch'+(repair?' and exhausted-budget repair':' without relaunch')+' passed');
  for(const result of navigated)assert(!result.error,`context secure navigation: ${JSON.stringify(result.error)}`);
  const username=navigated[0].snapshot?.elements?.find(e=>e.kind==='email');
  assert(username,'context A sign-in field is visible');

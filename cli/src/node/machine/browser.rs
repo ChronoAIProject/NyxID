@@ -469,6 +469,54 @@ impl PackageServer {
     }
 }
 
+const CONTEXT_STARTUP_BUDGET: Duration = Duration::from_secs(45);
+
+/// Per-process budget: reconnects cannot reset it, but a repair spawn gets a
+/// fresh clock. Nothing here contains page, profile, socket or credential data.
+struct Startup {
+    spawned: tokio::time::Instant,
+    id: uuid::Uuid,
+    completed: AtomicBool,
+    installed: AtomicBool,
+}
+
+impl Startup {
+    fn new() -> Self {
+        Self {
+            spawned: tokio::time::Instant::now(),
+            id: uuid::Uuid::new_v4(),
+            completed: AtomicBool::new(false),
+            installed: AtomicBool::new(false),
+        }
+    }
+
+    fn phase(&self, phase: &'static str) {
+        tracing::info!(startup_id = %self.id, phase,
+            elapsed_ms = self.spawned.elapsed().as_millis() as u64,
+            "secure_browser_startup");
+    }
+
+    fn observe_package(&self, profile: &Path) {
+        if self.installed.load(Ordering::Acquire) {
+            return;
+        }
+        // This observes installation, not download. Only bounded filesystem
+        // metadata is read, never Chromium preferences or profile contents.
+        let installed = profile
+            .join("Default/Extensions")
+            .join(pin()["extension_id"].as_str().unwrap_or_default());
+        if std::fs::read_dir(installed).is_ok_and(|entries| {
+            entries
+                .take(16)
+                .filter_map(Result::ok)
+                .any(|entry| entry.path().join("manifest.json").is_file())
+        }) && !self.installed.swap(true, Ordering::AcqRel)
+        {
+            self.phase("package_observed");
+        }
+    }
+}
+
 pub struct Browser {
     connection: Arc<Mutex<Option<UnixStream>>>,
     ready: Arc<Notify>,
@@ -477,6 +525,7 @@ pub struct Browser {
     /// native host connected; it does not prove that the MV3 worker can yet
     /// service a request after a fresh profile launch.
     context_browser: bool,
+    startup: Arc<Startup>,
     startup_verified: Arc<AtomicBool>,
     connection_generation: Arc<AtomicU64>,
     child: Mutex<Option<tokio::process::Child>>,
@@ -580,14 +629,30 @@ impl Browser {
             bail!("container browser requires the isolated non-root browser user");
         }
         command.kill_on_drop(true);
+        let startup = Arc::new(Startup::new());
         let child = command.spawn().context("managed browser unavailable")?;
+        let context_browser = identity.desktop.is_some();
+        if context_browser {
+            startup.phase("spawned");
+        }
         let accepted = ready.clone();
         let shared = connection.clone();
         let accepted_startup = startup_verified.clone();
         let accepted_generation = connection_generation.clone();
         let browser_uid = identity.uid;
+        let accepted_clock = startup.clone();
         let accept = tokio::spawn(async move {
-            while let Ok((mut stream, _)) = listener.accept().await {
+            let mut installation = tokio::time::interval(Duration::from_millis(250));
+            installation.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                let incoming = tokio::select! {
+                    incoming = listener.accept() => incoming,
+                    _ = installation.tick(), if context_browser && !accepted_clock.installed.load(Ordering::Acquire) => {
+                        accepted_clock.observe_package(&profile);
+                        continue;
+                    }
+                };
+                let Ok((mut stream, _)) = incoming else { break };
                 if !stream
                     .peer_cred()
                     .is_ok_and(|cred| cred.uid() == browser_uid)
@@ -604,6 +669,10 @@ impl Browser {
                         v["type"] == "hello" && v["extension_id"] == pin()["extension_id"]
                     })
                 {
+                    if context_browser {
+                        accepted_clock.observe_package(&profile);
+                        accepted_clock.phase("native_hello");
+                    }
                     accepted_startup.store(false, Ordering::Release);
                     accepted_generation.fetch_add(1, Ordering::AcqRel);
                     *shared.lock().await = Some(stream);
@@ -614,7 +683,8 @@ impl Browser {
         Ok(Self {
             connection,
             ready,
-            context_browser: identity.desktop.is_some(),
+            context_browser,
+            startup,
             startup_verified,
             connection_generation,
             child: Mutex::new(Some(child)),
@@ -649,7 +719,9 @@ impl Browser {
     /// Wait for a fresh separated-context browser to complete a harmless
     /// native exchange.  This is deliberately separate from the normal
     /// response timeout: Chromium/profile/extension startup gets a bounded
-    /// grace, while each real operation retains its existing 20 s deadline.
+    /// 45 s budget measured from spawn (including a repair spawn). Once that
+    /// succeeds, reconnects use `grace`; each real operation keeps its 20 s
+    /// deadline. A cancelled waiter cannot reset the cold-start clock.
     pub async fn wait_startup(&self, grace: Duration) -> bool {
         if !self.context_browser {
             return self.ready().await;
@@ -660,10 +732,20 @@ impl Browser {
             }
             self.startup_verified.store(false, Ordering::Release);
         }
-        let deadline = tokio::time::Instant::now() + grace;
+        let cold = !self.startup.completed.load(Ordering::Acquire);
+        let deadline = if cold {
+            self.startup.spawned + CONTEXT_STARTUP_BUDGET
+        } else {
+            tokio::time::Instant::now() + grace
+        };
         loop {
             let now = tokio::time::Instant::now();
             if now >= deadline {
+                self.startup.phase(if cold {
+                    "cold_start_timeout"
+                } else {
+                    "reconnect_timeout"
+                });
                 return false;
             }
             let remaining = deadline.saturating_duration_since(now);
@@ -675,7 +757,10 @@ impl Browser {
                 "operation": "browser",
                 "action": "tabs",
                 "nonce": nonce,
-                "expires_at_ms": chrono::Utc::now().timestamp_millis() + 5000,
+                // tabs also collects a page snapshot. Its default 5 s page
+                // wait exceeded the old 4 s probe timeout on a cold profile.
+                "timeout_ms": 100,
+                "expires_at_ms": chrono::Utc::now().timestamp_millis() + 20000,
             });
             let bytes = match serde_json::to_vec(&probe) {
                 Ok(bytes) => Zeroizing::new(bytes),
@@ -683,17 +768,21 @@ impl Browser {
             };
             let timeout = deadline
                 .saturating_duration_since(tokio::time::Instant::now())
-                .min(Duration::from_secs(4));
+                .min(Duration::from_secs(if cold { 20 } else { 4 }));
             if timeout.is_zero() {
                 return false;
             }
             let generation = self.connection_generation.load(Ordering::Acquire);
+            self.startup.phase("probe_sent");
             match self.exchange_with_timeout(&nonce, &bytes, timeout).await {
                 Ok(response)
                     if response["status"] == "ok"
                         && self.connection_generation.load(Ordering::Acquire) == generation =>
                 {
                     self.startup_verified.store(true, Ordering::Release);
+                    if !self.startup.completed.swap(true, Ordering::AcqRel) {
+                        self.startup.phase("first_exchange");
+                    }
                     return true;
                 }
                 Ok(_) | Err(_) => {
@@ -963,6 +1052,7 @@ mod tests {
                 connection: Arc::new(Mutex::new(Some(stream))),
                 ready: Arc::new(Notify::new()),
                 context_browser: false,
+                startup: Arc::new(Startup::new()),
                 startup_verified: Arc::new(AtomicBool::new(false)),
                 connection_generation: Arc::new(AtomicU64::new(0)),
                 child: Mutex::new(None),
@@ -1002,6 +1092,7 @@ mod tests {
             connection: Arc::new(Mutex::new(Some(stream))),
             ready: Arc::new(Notify::new()),
             context_browser: true,
+            startup: Arc::new(Startup::new()),
             startup_verified: Arc::new(AtomicBool::new(false)),
             connection_generation: Arc::new(AtomicU64::new(0)),
             child: Mutex::new(None),
@@ -1017,6 +1108,95 @@ mod tests {
         assert!(browser.wait_startup(Duration::from_millis(1)).await);
     }
 
+    async fn context_fixture(temp: &Path, stream: Option<UnixStream>, startup: Startup) -> Browser {
+        Browser {
+            connection: Arc::new(Mutex::new(stream)),
+            ready: Arc::new(Notify::new()),
+            context_browser: true,
+            startup: Arc::new(startup),
+            startup_verified: Arc::new(AtomicBool::new(false)),
+            connection_generation: Arc::new(AtomicU64::new(0)),
+            child: Mutex::new(None),
+            accept: tokio::spawn(std::future::pending()),
+            _updates: PackageServer::acquire(0).await.unwrap(),
+            socket: temp.join("unused.sock"),
+            _lock: std::fs::File::create(temp.join("lock")).unwrap(),
+        }
+    }
+
+    #[tokio::test]
+    async fn context_cold_start_allows_a_slow_first_exchange_without_dropping_the_pipe() {
+        let temp = tempfile::tempdir().unwrap();
+        let (stream, mut peer) = UnixStream::pair().unwrap();
+        let browser = context_fixture(temp.path(), Some(stream), Startup::new()).await;
+        let task = tokio::spawn(async move {
+            let request: Value =
+                serde_json::from_slice(&read_native(&mut peer).await.unwrap()).unwrap();
+            assert_eq!(request["timeout_ms"], 100);
+            // The old 4 s probe deadline was shorter than the extension's
+            // default 5 s observation loop. A slow first reply is still usable.
+            tokio::time::sleep(Duration::from_millis(4200)).await;
+            write_native(
+                &mut peer,
+                &serde_json::to_vec(&json!({"nonce": request["nonce"], "status":"ok"})).unwrap(),
+            )
+            .await
+            .unwrap();
+        });
+        assert!(browser.wait_startup(Duration::from_millis(10)).await);
+        assert!(browser.connection.lock().await.is_some());
+        assert!(browser.startup.completed.load(Ordering::Acquire));
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn context_cold_budget_is_spawn_based_and_repair_gets_its_own_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut expired = Startup::new();
+        expired.spawned -= CONTEXT_STARTUP_BUDGET;
+        let browser = context_fixture(temp.path(), None, expired).await;
+        // Neither repeated calls nor a longer reconnect grace renew cold time.
+        for _ in 0..2 {
+            assert!(
+                !tokio::time::timeout(
+                    Duration::from_millis(100),
+                    browser.wait_startup(Duration::from_secs(60))
+                )
+                .await
+                .unwrap()
+            );
+        }
+        let repaired = context_fixture(temp.path(), None, Startup::new()).await;
+        let ready = repaired.ready.clone();
+        let connection = repaired.connection.clone();
+        let task = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            let (stream, mut peer) = UnixStream::pair().unwrap();
+            *connection.lock().await = Some(stream);
+            ready.notify_waiters();
+            let request: Value =
+                serde_json::from_slice(&read_native(&mut peer).await.unwrap()).unwrap();
+            write_native(
+                &mut peer,
+                &serde_json::to_vec(&json!({"nonce": request["nonce"], "status":"ok"})).unwrap(),
+            )
+            .await
+            .unwrap();
+        });
+        assert!(repaired.wait_startup(Duration::from_millis(1)).await);
+        task.await.unwrap();
+        // Once proven, a disconnect uses the caller's short reconnect budget.
+        *repaired.connection.lock().await = None;
+        assert!(
+            !tokio::time::timeout(
+                Duration::from_millis(200),
+                repaired.wait_startup(Duration::from_millis(20))
+            )
+            .await
+            .unwrap()
+        );
+    }
+
     #[tokio::test]
     async fn exchange_does_not_block_a_replacement_native_connection() {
         let temp = tempfile::tempdir().unwrap();
@@ -1025,6 +1205,7 @@ mod tests {
             connection: Arc::new(Mutex::new(Some(stream))),
             ready: Arc::new(Notify::new()),
             context_browser: false,
+            startup: Arc::new(Startup::new()),
             startup_verified: Arc::new(AtomicBool::new(false)),
             connection_generation: Arc::new(AtomicU64::new(0)),
             child: Mutex::new(None),
