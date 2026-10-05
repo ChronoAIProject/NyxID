@@ -1,5 +1,8 @@
 //! GPT-Live's own wire protocol, deliberately separate from Realtime.
-use crate::errors::{AppError, AppResult};
+use crate::errors::{
+    AppError, AppResult,
+    voice_start::{Provider, ProviderFailure, Stage},
+};
 use futures::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio_tungstenite::{
@@ -20,12 +23,13 @@ pub struct OpenAi {
 pub struct Created {
     pub provider_id: String,
     pub sdp: String,
-    pub expires_at: i64,
+    pub expires_at: Option<i64>,
 }
 
 pub struct CreateError {
     pub provider_id: Option<String>,
     pub not_created: bool,
+    pub error: AppError,
 }
 impl std::fmt::Debug for CreateError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -33,10 +37,11 @@ impl std::fmt::Debug for CreateError {
     }
 }
 impl From<AppError> for CreateError {
-    fn from(_: AppError) -> Self {
+    fn from(error: AppError) -> Self {
         Self {
             provider_id: None,
             not_created: false,
+            error: Stage::ProviderAnswer.error(error),
         }
     }
 }
@@ -69,27 +74,20 @@ impl OpenAi {
             .json(&start_payload(sdp, instructions, voice, model))
             .send()
             .await
-            .map_err(|_| AppError::VoiceProviderUnavailable)?;
+            .map_err(|_| Stage::Transport.error(AppError::VoiceProviderUnavailable))?;
         if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let body = bounded_body(&mut response, 16 * 1024)
+                .await
+                .unwrap_or_default();
             return Err(CreateError {
                 provider_id: None,
-                not_created: matches!(
-                    response.status().as_u16(),
-                    400 | 401 | 403 | 404 | 422 | 429
-                ),
+                not_created: matches!(status, 400 | 401 | 403 | 404 | 422 | 429),
+                error: ProviderFailure::new(Provider::Openai, Some(status), &body)
+                    .error(Stage::ProviderCreate),
             });
         }
-        let mut bytes = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|_| AppError::VoiceProviderUnavailable)?
-        {
-            if bytes.len().saturating_add(chunk.len()) > MAX_FRAME {
-                return Err(AppError::VoiceProviderUnavailable.into());
-            }
-            bytes.extend_from_slice(&chunk);
-        }
+        let bytes = bounded_body(&mut response, MAX_FRAME).await?;
         let value: Value =
             serde_json::from_slice(&bytes).map_err(|_| AppError::VoiceProviderUnavailable)?;
         let provider_id = value
@@ -105,15 +103,12 @@ impl OpenAi {
             .ok_or_else(|| CreateError {
                 provider_id: Some(provider_id.clone()),
                 not_created: false,
+                error: Stage::ProviderAnswer.error(AppError::VoiceProviderUnavailable),
             })?
             .to_owned();
-        let expires_at = value
-            .pointer("/session/expires_at")
-            .and_then(Value::as_i64)
-            .ok_or_else(|| CreateError {
-                provider_id: Some(provider_id.clone()),
-                not_created: false,
-            })?;
+        // The official create response contains session.id, not an expiry.
+        // Accept legacy expiry metadata when supplied; NyxID always has its own deadline.
+        let expires_at = value.pointer("/session/expires_at").and_then(Value::as_i64);
         Ok(Created {
             provider_id,
             sdp,
@@ -121,11 +116,25 @@ impl OpenAi {
         })
     }
 
+    pub(super) fn attach_url(&self, id: &str) -> AppResult<url::Url> {
+        if !valid_provider_id(id) {
+            return Err(AppError::VoiceProviderUnavailable);
+        }
+        let mut url =
+            url::Url::parse(&self.ws_origin).map_err(|_| AppError::VoiceProviderUnavailable)?;
+        url.path_segments_mut()
+            .map_err(|_| AppError::VoiceProviderUnavailable)?
+            .extend(["v1", "live", "sessions", id, "attach"]);
+        Ok(url)
+    }
+
     pub async fn attach(&self, id: &str) -> AppResult<Socket> {
         if !valid_provider_id(id) {
             return Err(AppError::VoiceProviderUnavailable);
         }
-        let mut request = format!("{}/v1/live/sessions/{id}/attach", self.ws_origin)
+        let mut request = self
+            .attach_url(id)?
+            .as_str()
             .into_client_request()
             .map_err(|_| AppError::VoiceProviderUnavailable)?;
         let mut auth = format!("Bearer {}", self.key.as_str())
@@ -145,16 +154,34 @@ impl OpenAi {
         .await
         .map_err(|_| AppError::VoiceProviderUnavailable)?
         .map(|(socket, _)| socket)
-        .map_err(|_| AppError::VoiceProviderUnavailable)
+        .map_err(|error| {
+            super::diagnostics::socket_error(error, Provider::Openai, Stage::Transport)
+        })
     }
 }
 
+async fn bounded_body(response: &mut reqwest::Response, limit: usize) -> AppResult<Vec<u8>> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| AppError::VoiceProviderUnavailable)?
+    {
+        if bytes.len().saturating_add(chunk.len()) > limit {
+            return Err(AppError::VoiceProviderUnavailable);
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
 pub fn valid_provider_id(id: &str) -> bool {
+    // Opaque provider IDs are encoded as one URL path segment, never interpolated.
+    // Keep a local resource bound and reject URL-normalized dot segments.
     !id.is_empty()
-        && id.len() <= 256
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        && id.len() <= 1024
+        && !matches!(id, "." | "..")
+        && !id.chars().any(char::is_control)
 }
 
 pub fn start_payload(sdp: &str, instructions: &str, voice: &str, model: &str) -> Value {

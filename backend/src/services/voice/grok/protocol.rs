@@ -1,5 +1,8 @@
 use super::super::openai::{self, Socket};
-use crate::errors::{AppError, AppResult};
+use crate::errors::{
+    AppError, AppResult,
+    voice_start::{Provider, ProviderFailure, Stage},
+};
 use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use zeroize::Zeroizing;
@@ -62,13 +65,15 @@ async fn connect_to(
         let (mut socket, _) =
             tokio_tungstenite::connect_async_with_config(request, Some(config), false)
                 .await
-                .map_err(|_| AppError::VoiceProviderUnavailable)?;
+                .map_err(|e| {
+                    super::super::diagnostics::socket_error(e, Provider::Xai, Stage::ProviderCreate)
+                })?;
         let started = tokio::time::Instant::now();
         let created = openai::receive(&mut socket)
             .await?
             .ok_or(AppError::VoiceProviderUnavailable)?;
         if created["type"] != "session.created" {
-            return Err(AppError::VoiceProviderUnavailable);
+            return Err(provider_answer(&created));
         }
         openai::send(&mut socket, configuration(model, voice, instructions)).await?;
         for _ in 0..8 {
@@ -77,18 +82,27 @@ async fn connect_to(
                 .ok_or(AppError::VoiceProviderUnavailable)?;
             if event["type"] == "session.updated" {
                 if !acknowledged(&event["session"], model, voice) {
-                    return Err(AppError::VoiceProviderUnavailable);
+                    return Err(Stage::ProviderAnswer.error(AppError::VoiceProviderUnavailable));
                 }
                 return Ok((socket, started));
             }
             if event["type"] != "conversation.created" {
-                return Err(AppError::VoiceProviderUnavailable);
+                return Err(provider_answer(&event));
             }
         }
-        Err(AppError::VoiceProviderUnavailable)
+        Err(Stage::ProviderAnswer.error(AppError::VoiceProviderUnavailable))
     })
     .await
-    .map_err(|_| AppError::VoiceProviderUnavailable)?
+    .map_err(|_| Stage::Transport.error(AppError::VoiceProviderUnavailable))?
+}
+
+fn provider_answer(event: &Value) -> AppError {
+    if event["type"] == "error" {
+        ProviderFailure::new(Provider::Xai, None, event.to_string().as_bytes())
+            .error(Stage::ProviderCreate)
+    } else {
+        Stage::ProviderAnswer.error(AppError::VoiceProviderUnavailable)
+    }
 }
 
 #[derive(serde::Deserialize)]

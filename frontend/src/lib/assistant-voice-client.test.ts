@@ -59,6 +59,9 @@ const preferences: VoicePreferences = {
 class Peer {
   static current: Peer;
   connectionState = "new";
+  iceGatheringState = "complete";
+  addEventListener = vi.fn();
+  removeEventListener = vi.fn();
   ontrack?: (e: unknown) => void;
   onconnectionstatechange?: () => void;
   localDescription = { sdp: "v=0\r\nm=audio" };
@@ -248,6 +251,139 @@ it("Grok relays only held PCM, pairs bounded output, and commits before mic mute
 it("Grok refuses automatic mode before creating a provider session", async () => {
   const client = new AssistantVoiceClient("thread", vi.fn(), vi.fn());
   await client.start(preferences, "xai_realtime");
+  expect(mocks.create).not.toHaveBeenCalled();
+  expect(track.stop).toHaveBeenCalled();
+});
+
+it.each([
+  ["NotAllowedError", "Microphone permission was denied"],
+  ["NotFoundError", "No microphone found"],
+])("explains %s before contacting the server", async (name, message) => {
+  microphone.mockRejectedValue(
+    new DOMException("private device information", name),
+  );
+  const error = vi.fn();
+  const client = new AssistantVoiceClient("thread", vi.fn(), error);
+  await client.start(preferences);
+  expect(error).toHaveBeenCalledWith(message);
+  expect(mocks.create).not.toHaveBeenCalled();
+});
+it("shows provider diagnostics without collapsing them into microphone advice", async () => {
+  mocks.create.mockRejectedValue(
+    new ApiError(503, {
+      error: "voice_provider_unavailable",
+      error_code: 12501,
+      message: "Voice provider rejected the session",
+      details: {
+        stage: "provider_create",
+        reason: "provider_create:400:invalid_request_error:session.delegation",
+        provider: "openai",
+        provider_status: 400,
+        provider_type: "invalid_request_error",
+        provider_param: "session.delegation",
+      },
+    }),
+  );
+  const error = vi.fn();
+  await new AssistantVoiceClient("thread", vi.fn(), error).start(preferences);
+  expect(error).toHaveBeenCalledWith(
+    "Voice provider rejected the session (OpenAI 400: invalid_request_error · session.delegation · code 12501)",
+  );
+  expect(track.stop).toHaveBeenCalled();
+});
+it("distinguishes an invalid NyxID response from an invalid WebRTC answer", async () => {
+  mocks.create.mockResolvedValueOnce({ session: {}, sdp_answer: "v=0" });
+  const invalid = vi.fn();
+  await new AssistantVoiceClient("thread", vi.fn(), invalid).start(preferences);
+  expect(invalid).toHaveBeenCalledWith(
+    "Voice server returned an invalid session answer",
+  );
+  mocks.create.mockImplementationOnce(async () => {
+    Peer.current.setRemoteDescription.mockRejectedValueOnce(
+      new Error("private SDP"),
+    );
+    return { session, sdp_answer: "v=0" };
+  });
+  const rtc = vi.fn();
+  await new AssistantVoiceClient("thread", vi.fn(), rtc).start(preferences);
+  expect(rtc).toHaveBeenCalledWith("WebRTC negotiation failed");
+  expect(mocks.post).toHaveBeenCalledWith(
+    expect.stringContaining(session.id),
+    expect.objectContaining({ action: "end" }),
+  );
+});
+it("labels RTCPeerConnection construction failures", async () => {
+  vi.stubGlobal(
+    "RTCPeerConnection",
+    class {
+      constructor() {
+        throw new Error("private RTC detail");
+      }
+    },
+  );
+  const error = vi.fn();
+  await new AssistantVoiceClient("thread", vi.fn(), error).start(preferences);
+  expect(error).toHaveBeenCalledWith("WebRTC negotiation failed");
+  expect(mocks.create).not.toHaveBeenCalled();
+});
+it("shows Grok startup errors received over the authenticated relay", async () => {
+  const error = vi.fn();
+  const client = new AssistantVoiceClient("thread", vi.fn(), error);
+  await client.start(
+    { ...preferences, input_mode: "push_to_talk" },
+    "xai_realtime",
+  );
+  Socket.current.onmessage?.({
+    data: JSON.stringify({
+      type: "start_failed",
+      error: {
+        error: "voice_provider_unavailable",
+        error_code: 12501,
+        message: "Voice provider rejected the session",
+        details: {
+          stage: "provider_create",
+          reason: "provider_create:401",
+          provider: "xai",
+          provider_status: 401,
+        },
+      },
+    }),
+  });
+  expect(error).toHaveBeenCalledWith(
+    "Voice provider rejected the session (xAI 401 · code 12501)",
+  );
+  expect(client.isClosed).toBe(true);
+});
+it("waits for ICE gathering before creating a provider session", async () => {
+  vi.stubGlobal(
+    "RTCPeerConnection",
+    class extends Peer {
+      iceGatheringState = "gathering";
+    },
+  );
+  const client = new AssistantVoiceClient("thread", vi.fn(), vi.fn());
+  const starting = client.start(preferences);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(mocks.create).not.toHaveBeenCalled();
+  Peer.current.iceGatheringState = "complete";
+  Peer.current.addEventListener.mock.calls[0]![1]();
+  await starting;
+  expect(mocks.create).toHaveBeenCalledTimes(1);
+  await client.end();
+});
+it("bounds ICE gathering and cancels without creating a session", async () => {
+  vi.stubGlobal(
+    "RTCPeerConnection",
+    class extends Peer {
+      iceGatheringState = "gathering";
+    },
+  );
+  const error = vi.fn();
+  const client = new AssistantVoiceClient("thread", vi.fn(), error);
+  const starting = client.start(preferences);
+  await vi.advanceTimersByTimeAsync(5001);
+  await starting;
+  expect(error).toHaveBeenCalledWith("WebRTC negotiation failed");
   expect(mocks.create).not.toHaveBeenCalled();
   expect(track.stop).toHaveBeenCalled();
 });
