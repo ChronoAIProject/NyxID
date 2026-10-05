@@ -188,6 +188,26 @@ pub async fn get(
         .ok_or_else(|| AppError::NotFound("Voice session not found".into()))
 }
 
+/// Return the caller's live call without requiring the voice feature flag.
+/// This is intentionally metadata-only so a user can recover or end a call
+/// after an operator changes rollout configuration.
+pub async fn active_for_conversation(
+    db: &Database,
+    user: &str,
+    conversation: &str,
+) -> AppResult<Option<VoiceSession>> {
+    super::super::assistant_voice::thread(db, user, conversation).await?;
+    Ok(db
+        .collection::<VoiceSession>(COLLECTION_NAME)
+        .find_one(doc! {
+            "user_id": user,
+            "conversation_id": conversation,
+            "live_slot": true,
+        })
+        .sort(doc! {"created_at": -1})
+        .await?)
+}
+
 pub async fn close(
     db: &Database,
     row: &VoiceSession,
@@ -236,7 +256,8 @@ pub async fn close(
         .map_err(super::super::api_key_mutation_service::map_transaction_error)
 }
 
-/// Recovery acquires a fresh fence solely to close; never resumes audio or repeats POST.
+/// Recovery acquires a fresh fence. OpenAI calls are reattached by the runtime;
+/// calls that were explicitly ended retain that intent and are closed there.
 pub async fn claim_orphans(db: &Database, worker: &str) -> AppResult<Vec<VoiceSession>> {
     let rows = db.collection::<VoiceSession>(COLLECTION_NAME);
     let now = Utc::now();
@@ -246,8 +267,7 @@ pub async fn claim_orphans(db: &Database, worker: &str) -> AppResult<Vec<VoiceSe
     for row in candidates {
         if let Some(row)=rows.find_one_and_update(doc!{"_id":row.id,"generation":row.generation,"live_slot":row.live_slot,
             "lease_until":{"$lte":bson::DateTime::from_chrono(now)}},doc!{"$inc":{"generation":1},"$set":{
-                "lease_owner":worker,"lease_until":bson::DateTime::from_chrono(now+Duration::seconds(LEASE_SECONDS)),
-                "state":"closing","end_requested":true,"end_reason":"worker_lost"}})
+            "lease_owner":worker,"lease_until":bson::DateTime::from_chrono(now+Duration::seconds(LEASE_SECONDS))}})
             .return_document(ReturnDocument::After).await? {claimed.push(row);}
     }
     Ok(claimed)
@@ -341,11 +361,12 @@ pub async fn refresh_stream(db: &Database, row: &VoiceSession, id: &str) -> AppR
     Ok(())
 }
 pub async fn release_stream(db: &Database, row: &VoiceSession, id: &str) -> AppResult<()> {
-    // Cleanup remains permitted after login/org/flag revocation. It grants no work.
+    // A browser transport disconnect is recoverable. Only release the socket
+    // lease; an explicit End command owns end_requested.
     db.collection::<Document>(COLLECTION_NAME)
         .update_one(
             doc! {"_id":&row.id,"user_id":&row.user_id,"control_socket_id":id},
-            doc! {"$set":{"end_requested":true,"control_socket_until":bson::DateTime::now()}},
+            doc! {"$set":{"control_socket_until":bson::DateTime::now()}},
         )
         .await?;
     Ok(())

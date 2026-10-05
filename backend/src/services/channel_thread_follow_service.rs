@@ -245,6 +245,17 @@ pub async fn select(
             }
             if !enabled && child.is_none() { return Ok(Selection::Legacy); }
             let active = enabled && child.as_ref().is_some_and(follows);
+            // A followed thread remains available as context, but a message
+            // addressed only to another user must not trigger a turn. The
+            // inbound row (and its facts) was persisted before selection, so
+            // returning Quiet here still makes it available to later history.
+            if active
+                && target.facts().address
+                    == crate::models::channel_thread::ThreadAddress::NotAddressed
+                && target.facts().mentions_others
+            {
+                return Ok(Selection::Quiet);
+            }
             // Aurinko remains a legacy private chat until an addressed message
             // opens a shared child or an existing child is actively followed.
             if target.facts().kind == ThreadKind::Email && !active && !addressed {

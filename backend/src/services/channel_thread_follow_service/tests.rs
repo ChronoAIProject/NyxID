@@ -138,6 +138,82 @@ async fn unmentioned_follow_checks_sender_each_time_and_guests_cannot_stop() {
 }
 
 #[tokio::test]
+async fn followed_thread_quiets_mentions_for_other_users_but_keeps_bot_requests() {
+    let (db, t, a) = setup().await;
+    let mut broadcast = t.facts().clone();
+    broadcast.address = ThreadAddress::NotAddressed;
+    broadcast.mentions_others = false;
+    assert!(matches!(
+        choose(
+            &db,
+            &ThreadReplyTarget::fixture("telegram", broadcast.clone()),
+            &a,
+            false
+        )
+        .await,
+        Selection::Quiet
+    ));
+    assert_eq!(
+        db.collection::<NyxbotThread>(THREADS)
+            .count_documents(doc! {"record_scope": SCOPE})
+            .await
+            .unwrap(),
+        0
+    );
+    let (c, b) = child(choose(&db, &t, &a, true).await);
+    activate_claim(&db, &c, b).await.unwrap();
+
+    let mut other = t.facts().clone();
+    other.address = ThreadAddress::NotAddressed;
+    other.mentions_others = true;
+    let other = ThreadReplyTarget::fixture("telegram", other);
+    assert!(matches!(
+        choose(&db, &other, &a, false).await,
+        Selection::Quiet
+    ));
+
+    let mut bot_mention = other.facts().clone();
+    bot_mention.address = ThreadAddress::Mention;
+    let bot_mention = ThreadReplyTarget::fixture("telegram", bot_mention);
+    assert!(matches!(
+        choose(&db, &bot_mention, &a, false).await,
+        Selection::Child(..)
+    ));
+
+    broadcast = other.facts().clone();
+    broadcast.address = ThreadAddress::NotAddressed;
+    broadcast.mentions_others = false;
+    assert!(matches!(
+        choose(
+            &db,
+            &ThreadReplyTarget::fixture("telegram", broadcast),
+            &a,
+            false
+        )
+        .await,
+        Selection::Child(..)
+    ));
+    let mut unmentioned = other.facts().clone();
+    unmentioned.mentions_others = false;
+    assert!(matches!(
+        choose(
+            &db,
+            &ThreadReplyTarget::fixture("telegram", unmentioned),
+            &a,
+            false
+        )
+        .await,
+        Selection::Child(..)
+    ));
+
+    let mut legacy = serde_json::to_value(other.facts()).unwrap();
+    legacy.as_object_mut().unwrap().remove("mentions_others");
+    let legacy: ChannelThreadFacts = serde_json::from_value(legacy).unwrap();
+    assert!(!legacy.mentions_others);
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn idle_expiry_reacquires_capacity_and_all_keeps_same_child_stopped() {
     let (db, t, a) = setup().await;
     let (c, b) = child(choose(&db, &t, &a, true).await);

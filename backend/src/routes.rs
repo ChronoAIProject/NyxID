@@ -2243,6 +2243,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 .layer(axum::extract::DefaultBodyLimit::max(128 * 1024)),
         )
         .route(
+            "/assistant/nyxagent/conversations/{id}/voice-sessions/active",
+            get(handlers::assistant_voice::active_session),
+        )
+        .route(
             "/assistant/nyxagent/conversations/{id}/voice-sessions/{sid}",
             get(handlers::assistant_voice::session_status),
         )

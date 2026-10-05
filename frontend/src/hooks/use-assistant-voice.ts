@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AssistantVoiceClient } from "@/lib/assistant-voice-client";
+import { api } from "@/lib/api-client";
 import { useAuthStore } from "@/stores/auth-store";
 import type {
   VoicePreferences,
   VoiceSnapshot,
+  VoiceSession,
 } from "@/schemas/assistant-voice";
 
 export function useAssistantVoice(thread: string) {
@@ -16,6 +18,8 @@ export function useAssistantVoice(thread: string) {
   const [speakerMuted, setSpeakerMuted] = useState(false);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [conflictSession, setConflictSession] =
+    useState<VoiceSession | null>(null);
   useEffect(
     () => () => {
       generation.current++;
@@ -35,6 +39,7 @@ export function useAssistantVoice(thread: string) {
       setStarting(true);
       setError(null);
       setSnapshot(null);
+      setConflictSession(null);
       setSpeakerMuted(false);
       const next = new AssistantVoiceClient(
         thread,
@@ -59,6 +64,9 @@ export function useAssistantVoice(thread: string) {
             setConnected(false);
           }
         },
+        (session) => {
+          if (generation.current === ticket) setConflictSession(session);
+        },
       );
       client.current = next;
       await next.start(preferences, protocol);
@@ -78,13 +86,63 @@ export function useAssistantVoice(thread: string) {
     setConnected(false);
     setSnapshot(null);
     if (previous) await previous.end();
-  }, []);
+    else if (conflictSession) {
+      try {
+        await api.post(
+          `/assistant/nyxagent/conversations/${thread}/voice-sessions/${conflictSession.id}/control`,
+          {
+            command_id: crypto.randomUUID(),
+            expected_revision: conflictSession.control_revision,
+            action: "end",
+          },
+        );
+      } catch {
+        setError("The current call could not be ended. Please try again.");
+      }
+    }
+    setConflictSession(null);
+  }, [conflictSession, thread]);
+  const rejoin = useCallback(() => {
+    if (!conflictSession?.resumable || client.current) return;
+    const ticket = ++generation.current;
+    const next = new AssistantVoiceClient(
+      thread,
+      (value) => {
+        if (generation.current === ticket) {
+          setConflictSession(null);
+          setSnapshot(value);
+          setConnected(
+            value.session.state === "active" ||
+              value.session.state === "closing",
+          );
+        }
+      },
+      (message) => {
+        if (generation.current === ticket) setError(message);
+      },
+      () => {
+        if (generation.current === ticket) {
+          client.current = null;
+          setConnected(false);
+        }
+      },
+      (session) => {
+        if (generation.current === ticket) setConflictSession(session);
+      },
+    );
+    client.current = next;
+    setError(null);
+    setSnapshot(null);
+    next.rejoin(conflictSession);
+  }, [conflictSession, thread]);
   return {
     holding,
     connected,
     snapshot,
     starting,
     error,
+    conflictSession,
+    rejoin,
     start,
     end,
     speakerMuted,

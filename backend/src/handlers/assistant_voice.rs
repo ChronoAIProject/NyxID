@@ -149,6 +149,7 @@ pub struct SessionResponse {
     final_usage_confirmed: bool,
     end_reason: Option<String>,
     idle_warning: bool,
+    resumable: bool,
 }
 impl From<crate::models::assistant_voice_session::VoiceSession> for SessionResponse {
     fn from(row: crate::models::assistant_voice_session::VoiceSession) -> Self {
@@ -167,8 +168,31 @@ impl From<crate::models::assistant_voice_session::VoiceSession> for SessionRespo
             final_usage_confirmed: row.final_usage_confirmed,
             end_reason: row.end_reason,
             idle_warning: (chrono::Utc::now() - row.last_user_at).num_seconds() >= 165,
+            resumable: row.protocol
+                != Some(crate::models::downstream_service::VoiceProtocol::XaiRealtime)
+                && row.provider_session_id.is_some()
+                && row.live_slot,
         }
     }
+}
+
+#[derive(Serialize)]
+pub struct ActiveSessionResponse {
+    session: Option<SessionResponse>,
+}
+
+pub async fn active_session(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+) -> AppResult<Json<ActiveSessionResponse>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    let user = auth.user_id.to_string();
+    let session =
+        crate::services::voice::session::active_for_conversation(&state.db, &user, &id).await?;
+    Ok(Json(ActiveSessionResponse {
+        session: session.map(Into::into),
+    }))
 }
 pub async fn session_status(
     State(state): State<AppState>,
