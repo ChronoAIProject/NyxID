@@ -13,6 +13,8 @@ const mock = vi.hoisted(() => ({
   speaker: vi.fn(),
   hold: vi.fn(),
   stop: vi.fn(),
+  rejoin: vi.fn(),
+  conflictSession: null as null | { id: string; resumable: boolean; control_revision: number },
 }));
 vi.mock("@tanstack/react-query", () => ({
   useQuery: () => ({ isSuccess: true, data: { options: mock.options } }),
@@ -29,6 +31,8 @@ vi.mock("@/hooks/use-assistant-voice", () => ({
     muteSpeaker: mock.speaker,
     hold: mock.hold,
     stopTask: mock.stop,
+    rejoin: mock.rejoin,
+    conflictSession: mock.conflictSession,
     resumeAudio: vi.fn(),
     snapshot: {
       session: {
@@ -62,6 +66,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mock.connected = true;
   mock.options = [];
+  mock.conflictSession = null;
   vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-04T00:00:00Z"));
 });
 afterEach(() => vi.restoreAllMocks());
@@ -82,6 +87,20 @@ it("minimizes and restores without ending the media session", () => {
   fireEvent.click(screen.getByRole("button", { name: "Restore voice panel" }));
   expect(screen.getByLabelText("Your captions")).toBeInTheDocument();
   expect(mock.end).not.toHaveBeenCalled();
+});
+
+it("shows Rejoin and End call for a discovered active session", () => {
+  mock.connected = false;
+  mock.conflictSession = {
+    id: "f985604b-1991-4aa2-969d-2325055ea813",
+    resumable: true,
+    control_revision: 0,
+  };
+  render(<VoicePanel threadId="thread" onClose={vi.fn()} />);
+  fireEvent.click(screen.getByRole("button", { name: "Rejoin" }));
+  expect(mock.rejoin).toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "End call" }));
+  expect(mock.end).toHaveBeenCalled();
 });
 it("speaker mute leaves captions and microphone controls available", () => {
   render(<VoicePanel threadId="thread" onClose={vi.fn()} />);

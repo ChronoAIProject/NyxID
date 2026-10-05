@@ -6,6 +6,7 @@ import {
   voiceStartFailureSchema,
   voiceSessionSchema,
   voiceSnapshotSchema,
+  activeVoiceSessionSchema,
   type VoicePreferences,
   type VoiceSession,
   type VoiceSnapshot,
@@ -22,6 +23,8 @@ export class AssistantVoiceClient {
   private session?: VoiceSession;
   private abort = new AbortController();
   private heartbeat?: ReturnType<typeof setInterval>;
+  private reconnectTimer?: ReturnType<typeof setTimeout>;
+  private reconnectAttempt = 0;
   private started = false;
   private controlsReady = false;
   private closed = false;
@@ -36,16 +39,19 @@ export class AssistantVoiceClient {
   private onSnapshot: (value: VoiceSnapshot) => void;
   private onError: (message: string) => void;
   private onClosed: () => void;
+  private onConflict: (session: VoiceSession | null) => void;
   constructor(
     thread: string,
     onSnapshot: (value: VoiceSnapshot) => void,
     onError: (message: string) => void,
     onClosed: () => void = () => {},
+    onConflict: (session: VoiceSession | null) => void = () => {},
   ) {
     this.thread = thread;
     this.onSnapshot = onSnapshot;
     this.onError = onError;
     this.onClosed = onClosed;
+    this.onConflict = onConflict;
   }
   private path() {
     return `/assistant/nyxagent/conversations/${this.thread}/voice-sessions`;
@@ -196,9 +202,31 @@ export class AssistantVoiceClient {
       step = "transport";
       this.openControls();
     } catch (error) {
-      if (!this.closed) this.onError(voiceStartError(error, step));
+      if (!this.closed) {
+        if (error instanceof ApiError && error.status === 409) {
+          try {
+            const active = activeVoiceSessionSchema.parse(
+              await api.get(`${this.path()}/active`),
+            );
+            this.onConflict(active.session);
+          } catch {
+            this.onConflict(null);
+          }
+        }
+        this.onError(voiceStartError(error, step));
+      }
       await this.end();
     }
+  }
+
+  /** Attach only the browser control stream to a durable server call. */
+  rejoin(session: VoiceSession) {
+    if (this.closed || !session.resumable) return;
+    this.session = session;
+    this.started = true;
+    this.controlsReady = false;
+    this.reconnectAttempt = 0;
+    this.openControls();
   }
   private waitForIce(peer: RTCPeerConnection): Promise<void> {
     if (peer.iceGatheringState === "complete") return Promise.resolve();
@@ -226,6 +254,9 @@ export class AssistantVoiceClient {
   }
   private openControls() {
     if (!this.session || this.closed) return;
+    if (this.heartbeat) clearInterval(this.heartbeat);
+    this.reconnectTimer = undefined;
+    this.controlsReady = false;
     const url = new URL(
       apiUrl(`${this.path()}/${this.session.id}/stream`),
       window.location.href,
@@ -283,34 +314,39 @@ export class AssistantVoiceClient {
           return;
         }
         const snapshot = voiceSnapshotSchema.parse(event);
-        if (
-          this.closed ||
-          snapshot.session.id !== this.session?.id ||
-          snapshot.session.generation !== this.session.generation
-        )
+        if (this.closed || snapshot.session.id !== this.session?.id)
           return;
         this.controlsReady = true;
+        this.reconnectAttempt = 0;
         this.session = snapshot.session;
         this.onSnapshot(snapshot);
         this.updateInput();
-        if (
-          snapshot.session.state === "closed" ||
-          snapshot.session.state === "failed"
-        )
+        if (snapshot.session.state === "closed" || snapshot.session.state === "failed") {
+          if (snapshot.session.end_reason === "server_update")
+            this.onError("The call ended during a server update; start a new call");
           this.dispose();
+        }
       } catch {
         this.onError("Voice state could not be verified.");
         void this.end();
       }
     };
     socket.onclose = () => {
-      if (!this.closed) {
-        this.onError("Voice control connection lost.");
-        void this.end();
+      if (this.closed || socket !== this.controlSocket) return;
+      if (this.heartbeat) clearInterval(this.heartbeat);
+      this.controlsReady = false;
+      if (this.reconnectAttempt >= 6) {
+        this.onError("Voice control connection could not reconnect.");
+        return;
       }
+      const delays = [1000, 2000, 4000, 8000, 15000, 30000];
+      const delay = delays[this.reconnectAttempt++];
+      this.reconnectTimer = setTimeout(() => {
+        if (!this.closed) this.openControls();
+      }, delay);
     };
     this.heartbeat = setInterval(() => {
-      if (socket.readyState === WebSocket.OPEN && this.session)
+      if (socket.readyState === WebSocket.OPEN && this.session && this.controlsReady)
         socket.send(
           JSON.stringify({
             type: "heartbeat",
@@ -437,6 +473,8 @@ export class AssistantVoiceClient {
     this.onClosed();
     this.closed = true;
     this.abort.abort();
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = undefined;
     if (this.heartbeat) clearInterval(this.heartbeat);
     this.media?.getTracks().forEach((t) => t.stop());
     this.peer?.close();

@@ -4,6 +4,7 @@ import { ApiError } from "./api-client";
 import type { VoicePreferences } from "@/schemas/assistant-voice";
 const mocks = vi.hoisted(() => ({
   post: vi.fn(),
+  get: vi.fn(),
   create: vi.fn(),
   capture: vi.fn(),
   enqueue: vi.fn(),
@@ -27,7 +28,7 @@ vi.mock("./grok-audio", () => ({
 }));
 vi.mock("./api-client", async (original) => ({
   ...(await original<typeof import("./api-client")>()),
-  api: { post: mocks.post },
+  api: { post: mocks.post, get: mocks.get },
   apiClient: mocks.create,
 }));
 const session = {
@@ -112,6 +113,7 @@ beforeEach(() => {
   mocks.close.mockReset();
   mocks.create.mockReset();
   mocks.post.mockReset();
+  mocks.get.mockReset();
   track = { enabled: true, stop: vi.fn() };
   microphone = vi.fn().mockResolvedValue({
     getAudioTracks: () => [track],
@@ -135,6 +137,7 @@ beforeEach(() => {
   });
   mocks.create.mockResolvedValue({ session, sdp_answer: "v=0\r\nm=audio" });
   mocks.post.mockResolvedValue({ ...session, muted: true });
+  mocks.get.mockResolvedValue({ session: null });
 });
 afterEach(() => {
   vi.clearAllTimers();
@@ -208,6 +211,31 @@ describe("voice media boundaries", () => {
     expect(error).toHaveBeenCalledWith("End the current call first");
     expect(client.isClosed).toBe(true);
     expect(track.stop).toHaveBeenCalled();
+  });
+  it("reconnects the control stream without ending the call and adopts a new generation", async () => {
+    const snapshots = vi.fn();
+    const client = new AssistantVoiceClient("thread", snapshots, vi.fn());
+    await client.start(preferences);
+    const first = Socket.current;
+    first.snapshot();
+    first.onclose?.();
+    expect(client.isClosed).toBe(false);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(Socket.current).not.toBe(first);
+    const recovered = { ...session, generation: 2 };
+    Socket.current.onmessage?.({
+      data: JSON.stringify({
+        type: "snapshot",
+        session: recovered,
+        captions: [],
+        tasks: [],
+      }),
+    });
+    expect(snapshots).toHaveBeenLastCalledWith(
+      expect.objectContaining({ session: expect.objectContaining({ generation: 2 }) }),
+    );
+    expect(client.isClosed).toBe(false);
+    await client.end();
   });
 });
 
