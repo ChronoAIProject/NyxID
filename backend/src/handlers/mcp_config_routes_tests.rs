@@ -249,7 +249,13 @@ async fn assert_parity(state: &AppState, headers: &HeaderMap, rest: &Value) {
     let expected: Vec<Value> = definitions
         .iter()
         .filter(|t| !(super::is_scoped_api_key(&auth) && super::SSH_META_TOOL_NAMES.contains(&t.name.as_str())))
-        .map(|t| json!({"name": t.name, "description": t.description, "inputSchema": t.input_schema}))
+        .map(|t| {
+            let mut tool = json!({"name": t.name, "description": t.description, "inputSchema": t.input_schema});
+            if let Some(annotations) = mcp_service::tool_annotations(&t.name, &services) {
+                tool["annotations"] = annotations;
+            }
+            tool
+        })
         .collect();
     assert_eq!(listing["result"]["tools"], json!(expected), "{listing}");
 }
