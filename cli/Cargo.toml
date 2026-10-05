@@ -1,6 +1,6 @@
 [package]
 name = "nyxid-cli"
-version = "0.62.3"
+version = "0.63.0"
 edition = "2024"
 rust-version.workspace = true
 license.workspace = true
