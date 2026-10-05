@@ -5,6 +5,7 @@ use super::{
     transcript::{self, Segment, Speaker, Transcripts},
     transport::Transport,
 };
+use crate::errors::voice_start::Stage;
 use crate::{
     AppState,
     errors::{AppError, AppResult},
@@ -33,19 +34,22 @@ pub async fn start(
     mut preferences: VoicePreferences,
     sdp: &str,
 ) -> AppResult<Started> {
-    super::super::assistant_voice::require_enabled(&state.db, user).await?;
+    super::super::assistant_voice::require_enabled(&state.db, user)
+        .await
+        .map_err(|e| Stage::Flag.error(e))?;
     let resolved = Box::pin(super::credentials::resolve(
         state,
         user,
         conversation,
         &preferences,
     ))
-    .await?;
+    .await
+    .map_err(|e| Stage::Credential.error(e))?;
     if resolved.protocol == crate::models::downstream_service::VoiceProtocol::XaiRealtime {
         if !sdp.is_empty() {
-            return Err(AppError::ValidationError(
+            return Err(Stage::Transport.error(AppError::ValidationError(
                 "Grok voice does not accept SDP".into(),
-            ));
+            )));
         }
         return super::grok_runtime::prepare(
             state,
@@ -55,19 +59,20 @@ pub async fn start(
             preferences,
             resolved.identity,
         )
-        .await;
+        .await
+        .map_err(|e| Stage::Thread.error(e));
     }
     if !sdp.starts_with("v=0")
         || !sdp.lines().any(|line| line.starts_with("m=audio "))
         || sdp.lines().any(|line| line.starts_with("m=video "))
         || sdp.len() > 64 * 1024
     {
-        return Err(AppError::ValidationError(
+        return Err(Stage::Transport.error(AppError::ValidationError(
             "Invalid voice offer or voice selection".into(),
-        ));
+        )));
     }
     preferences.voice = Some(resolved.voice);
-    let provider = openai::OpenAi::new(resolved.key)?;
+    let provider = openai::OpenAi::new(resolved.key).map_err(|e| Stage::Transport.error(e))?;
     Box::pin(start_with_provider(
         state,
         StartInput {
@@ -115,12 +120,15 @@ pub(super) async fn start_with_provider(
         identity,
         &state.replica_identity.generation_id,
     )
-    .await?;
+    .await
+    .map_err(|e| Stage::Thread.error(e))?;
     let startup_fence = call.clone();
     let mut created_session_id = None;
     let mut provider_attempted = false;
     let startup = async {
-        let instructions = initial_context(&state.db, &call).await?;
+        let instructions = initial_context(&state.db, &call)
+            .await
+            .map_err(|e| Stage::Thread.error(e))?;
         let meter = super::super::billing::voice::reserve(
             &state.db,
             &state.billing,
@@ -128,10 +136,17 @@ pub(super) async fn start_with_provider(
             &call.id,
             0,
         )
-        .await?;
-        call = session::write(&state.db, &call, doc! {"reserved_until":30}).await?;
+        .await
+        .map_err(|e| Stage::BillingReservation.error(e))?;
+        call = session::write(&state.db, &call, doc! {"reserved_until":30})
+            .await
+            .map_err(|e| Stage::BillingReservation.error(e))?;
         // Persist forwarding before the non-idempotent POST, including unknown outcomes.
-        state.billing.mark_forwarded(&meter).await?;
+        state
+            .billing
+            .mark_forwarded(&meter)
+            .await
+            .map_err(|e| Stage::BillingReservation.error(e))?;
         provider_attempted = true;
         let created = provider
             .create(
@@ -144,11 +159,13 @@ pub(super) async fn start_with_provider(
             .map_err(|failure| {
                 created_session_id = failure.provider_id;
                 provider_attempted = !failure.not_created;
-                AppError::VoiceProviderUnavailable
+                failure.error
             })?;
         created_session_id = Some(created.provider_id.clone());
-        let expires = chrono::DateTime::from_timestamp(created.expires_at, 0)
-            .ok_or(AppError::VoiceProviderUnavailable)?;
+        let expires = created
+            .expires_at
+            .and_then(|v| chrono::DateTime::from_timestamp(v, 0))
+            .unwrap_or(call.deadline);
         call = session::write(
             &state.db,
             &call,
@@ -156,7 +173,10 @@ pub(super) async fn start_with_provider(
             "deadline":bson::DateTime::from_chrono(call.deadline.min(expires))},
         )
         .await?;
-        let socket = provider.attach(&created.provider_id).await?;
+        let socket = provider
+            .attach(&created.provider_id)
+            .await
+            .map_err(|e| Stage::Transport.error(e))?;
         call = session::refresh(&state.db, &call).await?;
         call = session::write(&state.db, &call, doc! {"state":"active"}).await?;
         Ok::<_, AppError>((Transport::Openai(Box::new(socket)), created.sdp))
@@ -195,14 +215,7 @@ pub(super) async fn start_with_provider(
                 {
                     call = updated;
                 }
-                confirmed = tokio::time::timeout(std::time::Duration::from_secs(7), async {
-                    let mut socket = Transport::Openai(Box::new(provider.attach(&id).await?));
-                    drain_close(state, &mut call, &mut socket).await
-                })
-                .await
-                .ok()
-                .and_then(Result::ok)
-                .unwrap_or(false);
+                confirmed = retry_provider_close(state, &mut call, &provider, &id).await;
             }
             if confirmed {
                 if settle_windows(state, &call, false).await.is_ok()
@@ -213,13 +226,14 @@ pub(super) async fn start_with_provider(
                 }
                 let _ = session::close(&state.db, &call, "start_failed", true).await;
             } else {
+                super::diagnostics::close_unconfirmed(&state.db, &call).await;
                 // Unknown initialization cost is platform exposure; no invented debit.
                 let _ = session::write(&state.db,&call,doc! {"state":"closing","end_requested":true,
-                    "end_reason":"start_failed","lease_until":bson::DateTime::from_chrono(Utc::now())}).await;
+                    "end_reason":"close_unconfirmed","lease_until":bson::DateTime::from_chrono(Utc::now())}).await;
             }
             Err(match error {
-                Ok(Err(e)) => e,
-                _ => AppError::VoiceProviderUnavailable,
+                Ok(Err(e)) => Stage::Transport.error(e),
+                _ => Stage::Transport.error(AppError::VoiceProviderUnavailable),
             })
         }
     }
@@ -1018,6 +1032,24 @@ pub fn spawn_recovery(state: AppState) {
     }));
 }
 
+/// WebRTC has no documented REST close endpoint. Retry sideband closure under
+/// the current lease; never replay POST or infer final usage from a closed socket.
+pub(super) async fn retry_provider_close(
+    state: &AppState,
+    call: &mut VoiceSession,
+    provider: &openai::OpenAi,
+    id: &str,
+) -> bool {
+    tokio::time::timeout(std::time::Duration::from_secs(7), async {
+        let mut socket = Transport::Openai(Box::new(provider.attach(id).await?));
+        drain_close(state, call, &mut socket).await
+    })
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .unwrap_or(false)
+}
+
 pub async fn recover(state: &AppState) -> AppResult<()> {
     for mut call in session::claim_orphans(&state.db, &state.replica_identity.generation_id).await?
     {
@@ -1043,19 +1075,35 @@ pub async fn recover(state: &AppState) -> AppResult<()> {
                 if resolved.identity != call.credential_identity {
                     return Ok(false);
                 }
-                let provider = openai::OpenAi::new(resolved.key)?;
-                let mut socket = Transport::Openai(Box::new(provider.attach(id).await?));
-                return drain_close(state, &mut call, &mut socket).await;
+                let provider =
+                    openai::OpenAi::new(resolved.key).map_err(|e| Stage::Transport.error(e))?;
+                let id = id.clone();
+                return Ok(retry_provider_close(state, &mut call, &provider, &id).await);
             }
             Ok::<_, AppError>(false)
         })
         .await;
         let confirmed = result.unwrap_or(false);
+        if !confirmed
+            && call.protocol != Some(crate::models::downstream_service::VoiceProtocol::XaiRealtime)
+        {
+            super::diagnostics::close_unconfirmed(&state.db, &call).await;
+        }
         if confirmed || Utc::now() >= call.reconcile_deadline {
             settle_windows(state, &call, !confirmed).await?;
             call = session::write(&state.db, &call, doc! {"billing_finalized":true}).await?;
         }
-        session::close(&state.db, &call, "recovered", confirmed).await?;
+        session::close(
+            &state.db,
+            &call,
+            if confirmed {
+                "recovered"
+            } else {
+                "close_unconfirmed"
+            },
+            confirmed,
+        )
+        .await?;
     }
     Ok(())
 }

@@ -104,21 +104,33 @@ pub async fn start(
     headers: axum::http::HeaderMap,
     Json(body): Json<StartRequest>,
 ) -> AppResult<Json<StartResponse>> {
-    super::login_client_context::require_first_party_human(&auth)?;
-    require_origin(&state, &headers)?;
-    let started = Box::pin(crate::services::voice::runtime::start(
-        &state,
+    use crate::errors::voice_start::Stage;
+    let result = async {
+        super::login_client_context::require_first_party_human(&auth)
+            .map_err(|e| Stage::Origin.error(e))?;
+        require_origin(&state, &headers).map_err(|e| Stage::Origin.error(e))?;
+        let started = Box::pin(crate::services::voice::runtime::start(
+            &state,
+            &auth.user_id.to_string(),
+            &id,
+            &body.client_request_id,
+            body.preferences.into(),
+            &body.sdp_offer,
+        ))
+        .await?;
+        Ok(Json(StartResponse {
+            session: started.session.into(),
+            sdp_answer: started.sdp,
+        }))
+    }
+    .await;
+    crate::services::voice::diagnostics::finish(
+        &state.db,
         &auth.user_id.to_string(),
-        &id,
-        &body.client_request_id,
-        body.preferences.into(),
-        &body.sdp_offer,
-    ))
-    .await?;
-    Ok(Json(StartResponse {
-        session: started.session.into(),
-        sdp_answer: started.sdp,
-    }))
+        result,
+        Stage::Transport,
+    )
+    .await
 }
 
 #[derive(Serialize)]

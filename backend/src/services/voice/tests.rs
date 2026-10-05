@@ -454,7 +454,7 @@ async fn provider_fixture_reserves_before_create_attaches_before_sdp_and_closes_
     let db=state.db.clone();let attached=Arc::new(AtomicBool::new(false));let observed=attached.clone();
     let app=Router::new().route("/v1/live/sessions",post(move || {let db=db.clone();async move {
         assert_eq!(db.collection::<bson::Document>(crate::models::assistant_voice::WINDOWS).count_documents(doc!{}).await.unwrap(),1,"Reserve precedes provider create");
-        Json(serde_json::json!({"session":{"id":"live_fixture","expires_at":chrono::Utc::now().timestamp()+1800},"transport":{"sdp":"v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"}}))
+        Json(serde_json::json!({"session":{"id":"live_fixture"},"transport":{"sdp":"v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"}}))
     }})).route("/v1/live/sessions/live_fixture/attach",get(move |ws:WebSocketUpgrade| {let observed=observed.clone();async move {
         observed.store(true,Ordering::SeqCst);
         ws.on_upgrade(|mut socket|async move {
@@ -669,4 +669,74 @@ fn duration_billing_requires_synced_authored_prices_and_meters_unpriced_byok() {
             .is_none()
     );
     assert!(duration_billing(&VoiceKeySource::Platform, Some(&billing)).is_ok());
+}
+
+#[tokio::test]
+async fn voice_attach_failure_is_audited_and_recovery_retries_close_without_recreating() {
+    Box::pin(async {
+        use axum::{Json, Router, extract::{WebSocketUpgrade, ws::Message}, response::IntoResponse, routing::{get, post}, http::StatusCode};
+        use crate::services::billing::{BillingRouteContext, BillingIngress, NodeIntent};
+        use crate::models::{service_billing::BillingMetric, usage_meter::CredentialClass};
+        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        let (state, thread, old)=setup("voice_start_attach_failure").await;
+        session::close(&state.db,&old,"fixture_setup",true).await.unwrap();
+        let creates=Arc::new(AtomicUsize::new(0));let posts=creates.clone();
+        let attempts=Arc::new(AtomicUsize::new(0));let connects=attempts.clone();
+        let app=Router::new().route("/v1/live/sessions",post(move || {let posts=posts.clone();async move {
+            posts.fetch_add(1,Ordering::SeqCst);
+            (StatusCode::CREATED,Json(serde_json::json!({"session":{"id":"live_fixture"},"transport":{"type":"webrtc","sdp":"v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"}})))
+        }})).route("/v1/live/sessions/live_fixture/attach",get(move |ws:WebSocketUpgrade|{let connects=connects.clone();async move {
+            if connects.fetch_add(1,Ordering::SeqCst)<2 { return StatusCode::SERVICE_UNAVAILABLE.into_response(); }
+            ws.on_upgrade(|mut socket|async move {
+                let Some(Ok(Message::Text(text)))=socket.recv().await else {panic!("close expected")};
+                assert_eq!(serde_json::from_str::<serde_json::Value>(&text).unwrap()["type"],"session.close");
+                socket.send(Message::Text(serde_json::json!({"type":"session.closed","usage":{"seconds":4.9}}).to_string().into())).await.unwrap();
+            })
+        }}));
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let address=listener.local_addr().unwrap();
+        let server=tokio::spawn(async move{axum::serve(listener,app).await.unwrap()});
+        let billing=BillingRouteContext::new(BillingIngress::LlmProvider,Uuid::new_v4().to_string(),old.user_id.clone(),old.user_id.clone(),None,None,None,None,NodeIntent::Direct,"bearer".into(),CredentialClass::UserOwned,BillingMetric::VoiceSeconds,None,false);
+        let id=Uuid::new_v4().to_string();
+        let result=runtime::start_with_provider(&state,runtime::StartInput{user:&old.user_id,conversation:&thread.id,client_request_id:&id,preferences:preferences(),sdp:"v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"},"identity".into(),billing,openai::OpenAi::fixture(zeroize::Zeroizing::new("fixture-secret".into()),address)).await;
+        let result=diagnostics::finish(&state.db,&old.user_id,result,crate::errors::voice_start::Stage::Transport).await;
+        let error=result.err().unwrap();
+        assert_eq!(error.response_body().details.unwrap()["reason"],"transport:503");
+        let row=state.db.collection::<VoiceSession>(CALLS).find_one(doc!{"client_request_id":&id}).await.unwrap().unwrap();
+        assert_eq!(row.provider_session_id.as_deref(),Some("live_fixture"));
+        assert!(!row.final_usage_confirmed && row.live_slot);
+        assert_eq!(row.observed_seconds,0,"Never invent a billed duration");
+        assert_eq!(row.end_reason.as_deref(),Some("close_unconfirmed"));
+        let audits=state.db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME);
+        assert_eq!(audits.count_documents(doc!{"event_type":"assistant_voice_start_failed"}).await.unwrap(),1);
+        assert_eq!(audits.count_documents(doc!{"event_type":"assistant_voice_close_unconfirmed"}).await.unwrap(),1);
+        state.db.collection::<VoiceSession>(CALLS).update_one(doc!{"_id":&row.id},doc!{"$set":{"lease_until":bson::DateTime::from_chrono(chrono::Utc::now()-chrono::Duration::seconds(1))}}).await.unwrap();
+        let mut recovered=session::claim_orphans(&state.db,&state.replica_identity.generation_id).await.unwrap().into_iter().find(|r|r.id==row.id).unwrap();
+        let provider=openai::OpenAi::fixture(zeroize::Zeroizing::new("fixture-secret".into()),address);
+        assert!(runtime::retry_provider_close(&state,&mut recovered,&provider,"live_fixture").await);
+        assert_eq!(recovered.observed_seconds,4);
+        assert_eq!(creates.load(Ordering::SeqCst),1);
+        assert_eq!(attempts.load(Ordering::SeqCst),3);
+        server.abort();state.db.drop().await.unwrap();
+    }).await;
+}
+
+#[tokio::test]
+async fn voice_start_diagnostics_audit_every_stage_once_with_ids_and_codes_only() {
+    Box::pin(async {
+        use crate::errors::{AppError, voice_start::Stage};
+        let db = connect_transaction_test_database("voice_start_diagnostics").await;
+        let user = Uuid::new_v4().to_string();
+        for stage in [Stage::Flag,Stage::Thread,Stage::Origin,Stage::Credential,Stage::BillingReservation,Stage::ProviderCreate,Stage::ProviderAnswer,Stage::Transport] {
+            let error = stage.error(AppError::Internal("DO-NOT-EXPOSE credential SDP".into()));
+            let failure = diagnostics::finish::<()>(&db,&user,Err(error),Stage::Transport).await.unwrap_err();
+            assert_eq!(failure.response_body().details.unwrap()["stage"],stage.as_str());
+            let rows = db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME);
+            assert_eq!(rows.count_documents(doc!{"event_type":"assistant_voice_start_failed","event_data.stage":stage.as_str()}).await.unwrap(),1);
+            let row=rows.find_one(doc!{"event_data.stage":stage.as_str()}).await.unwrap().unwrap();
+            let text=serde_json::to_string(&row).unwrap();
+            assert!(!text.contains("DO-NOT-EXPOSE") && !text.contains("credential SDP"));
+            assert_eq!(row.get_str("user_id").unwrap(),user);
+        }
+        db.drop().await.unwrap();
+    }).await;
 }

@@ -70,7 +70,10 @@ export const voiceOptionsSchema = z.object({
       available: z.boolean(),
       unavailable_reason: z.string().nullable(),
       billing_owner: z.string(),
-      reported_token_pricing: priceSchema.extend({ components: z.array(priceSchema) }).nullable().optional(),
+      reported_token_pricing: priceSchema
+        .extend({ components: z.array(priceSchema) })
+        .nullable()
+        .optional(),
       pricing: priceSchema
         .extend({ components: z.array(priceSchema) })
         .nullable(),
@@ -78,3 +81,32 @@ export const voiceOptionsSchema = z.object({
   ),
 });
 export type VoiceOption = z.infer<typeof voiceOptionsSchema>["options"][number];
+
+const identifier = z.string().regex(/^[A-Za-z0-9_.[\]]{1,128}$/);
+export const voiceStartDetailsSchema = z.object({
+  stage: z.enum([
+    "flag",
+    "thread",
+    "origin",
+    "credential",
+    "billing_reservation",
+    "provider_create",
+    "provider_answer",
+    "transport",
+  ]),
+  reason: z.string().max(400),
+  provider: z.enum(["openai", "xai"]).optional(),
+  provider_status: z.number().int().min(100).max(599).optional(),
+  provider_type: identifier.optional(),
+  provider_code: identifier.optional(),
+  provider_param: identifier.optional(),
+});
+export const voiceStartFailureSchema = z.object({
+  type: z.literal("start_failed"),
+  error: z.object({
+    error: z.string(),
+    error_code: z.number().int(),
+    message: z.string().max(256),
+    details: voiceStartDetailsSchema,
+  }),
+});

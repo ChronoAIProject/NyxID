@@ -27,6 +27,7 @@ pub enum ClientInput {
     Playback { ms: i64, audible: bool },
 }
 pub enum Output {
+    StartFailed(crate::errors::ErrorResponse),
     Audio { bytes: Vec<u8>, end_ms: i64 },
     Flush,
 }

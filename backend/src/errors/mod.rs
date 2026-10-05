@@ -1,3 +1,4 @@
+pub mod voice_start;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
@@ -114,6 +115,9 @@ pub enum AppError {
     VoiceQueueFull,
     #[error("Voice provider adapters are not enabled")]
     VoiceProviderUnavailable,
+    /// Adds safe startup context while preserving the underlying numeric code/status.
+    #[error("Voice startup failed")]
+    VoiceStartFailed(Box<voice_start::Failure>),
 
     #[error(
         "This assistant key is only valid while its conversation has a live turn; start or resume the conversation"
@@ -740,6 +744,7 @@ pub enum AppError {
 impl AppError {
     fn status_code(&self) -> StatusCode {
         match self {
+            Self::VoiceStartFailed(failure) => failure.source.status_code(),
             Self::BadRequest(_) | Self::CredentialUnavailable(_) | Self::ValidationError(_) => {
                 StatusCode::BAD_REQUEST
             }
@@ -961,6 +966,7 @@ impl AppError {
 
     pub(crate) fn error_code(&self) -> u32 {
         match self {
+            Self::VoiceStartFailed(failure) => failure.source.error_code(),
             Self::BadRequest(_) | Self::CredentialUnavailable(_) => 1000,
             Self::RequestBodyTooLarge { .. } => 11700,
             Self::Unauthorized(_) => 1001,
@@ -1219,6 +1225,7 @@ impl AppError {
 
     pub(crate) fn error_key(&self) -> &str {
         match self {
+            Self::VoiceStartFailed(failure) => failure.source.error_key(),
             Self::BadRequest(_) | Self::CredentialUnavailable(_) => "bad_request",
             Self::RequestBodyTooLarge { .. } => "request_body_too_large",
             Self::Unauthorized(_) => "unauthorized",
@@ -1451,6 +1458,9 @@ impl AppError {
 impl AppError {
     /// The same client-safe payload for JSON responses and streaming errors.
     pub fn response_body(&self) -> ErrorResponse {
+        if let Self::VoiceStartFailed(failure) = self {
+            return failure.response();
+        }
         let mfa_session_token = match &self {
             AppError::MfaRequired { session_token } => Some(session_token.clone()),
             _ => None,
@@ -1519,6 +1529,8 @@ impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         // Log server errors at error level; client errors at warn level.
         match &self {
+            // Already logged once with bounded structured fields by the startup boundary.
+            AppError::VoiceStartFailed(_) => {}
             AppError::Internal(msg) => tracing::error!(error = %msg, "Internal server error"),
             AppError::PoolAttemptTransport(kind) => {
                 tracing::error!(?kind, "Pool attempt transport failure")
