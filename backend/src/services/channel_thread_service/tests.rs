@@ -81,6 +81,196 @@ async fn telegram_topics_chains_human_evidence_and_utf16_mentions() {
 }
 
 #[tokio::test]
+async fn structured_mentions_mark_only_other_users_without_retaining_identities() {
+    let b = bot("telegram");
+    let a = adapter("telegram");
+    let mut telegram = telegram_event();
+    telegram["message"]["text"] = json!("@someone");
+    telegram["message"]["entities"] = json!([{"type":"mention","offset":0,"length":8}]);
+    let facts = a
+        .thread_facts(&parsed("telegram", telegram).await, &b, None)
+        .unwrap();
+    assert!(facts.mentions_others);
+    assert_eq!(facts.address, ThreadAddress::NotAddressed);
+
+    let mut telegram = telegram_event();
+    telegram["message"]["text"] = json!("@helper_bot @someone");
+    telegram["message"]["entities"] = json!([
+        {"type":"mention","offset":0,"length":11},
+        {"type":"mention","offset":12,"length":8}
+    ]);
+    let facts = a
+        .thread_facts(&parsed("telegram", telegram).await, &b, None)
+        .unwrap();
+    assert!(!facts.mentions_others);
+    assert_eq!(facts.address, ThreadAddress::Mention);
+
+    let mut telegram = telegram_event();
+    telegram["message"]["text"] = json!("hello");
+    telegram["message"]["entities"] = json!([]);
+    let facts = a
+        .thread_facts(&parsed("telegram", telegram).await, &b, None)
+        .unwrap();
+    assert!(!facts.mentions_others);
+    assert_eq!(facts.address, ThreadAddress::NotAddressed);
+
+    let slack = adapter("slack");
+    let mut raw = json!({"type":"event_callback", "event": {"type":"message",
+        "channel":"C123", "user":"U456", "ts":"1.000001",
+        "blocks":[{"type":"section","text":{"type":"mrkdwn","text":"<@U789>"}}]}});
+    let mut slack_bot = bot("slack");
+    slack_bot.platform_bot_id = "U123".into();
+    let facts = slack
+        .thread_facts(
+            &parsed("slack", raw.clone()).await,
+            &slack_bot,
+            Some("U123"),
+        )
+        .unwrap();
+    assert!(facts.mentions_others);
+    assert_eq!(facts.address, ThreadAddress::NotAddressed);
+    raw["event"]["blocks"] = json!([{"type":"rich_text","elements":[
+        {"type":"user","user_id":"U123"}, {"type":"user","user_id":"U789"}
+    ]}]);
+    let facts = slack
+        .thread_facts(
+            &parsed("slack", raw.clone()).await,
+            &slack_bot,
+            Some("U123"),
+        )
+        .unwrap();
+    assert!(!facts.mentions_others);
+    assert_eq!(facts.address, ThreadAddress::Mention);
+    raw["event"]["blocks"] = json!([{"type":"section","text":{"type":"mrkdwn","text":"<!here>"}}]);
+    let facts = slack
+        .thread_facts(&parsed("slack", raw).await, &slack_bot, Some("U123"))
+        .unwrap();
+    assert!(!facts.mentions_others);
+    assert_eq!(facts.address, ThreadAddress::NotAddressed);
+
+    let raw = json!({"type":"event_callback", "event": {"type":"message",
+        "channel":"C123", "user":"U456", "ts":"1.000001",
+        "blocks":[{"type":"section","text":{"type":"plain_text","text":"<@U789>"}}]}});
+    let facts = slack
+        .thread_facts(&parsed("slack", raw).await, &slack_bot, Some("U123"))
+        .unwrap();
+    assert!(!facts.mentions_others);
+
+    let mut raw = json!({"type":"event_callback", "event": {"type":"message",
+        "channel":"C123", "user":"U456", "ts":"1.000002", "text":"hello"}});
+    let facts = slack
+        .thread_facts(
+            &parsed("slack", raw.clone()).await,
+            &slack_bot,
+            Some("U123"),
+        )
+        .unwrap();
+    assert!(!facts.mentions_others);
+    assert_eq!(facts.address, ThreadAddress::NotAddressed);
+    raw["event"]["text"] = json!("<@U789>");
+    // Top-level Slack text is deliberately not enough evidence for this
+    // additive field; mention data must come from blocks/elements.
+    let facts = slack
+        .thread_facts(&parsed("slack", raw).await, &slack_bot, Some("U123"))
+        .unwrap();
+    assert!(!facts.mentions_others);
+
+    let discord = adapter("discord");
+    let mut discord_bot = bot("discord");
+    discord_bot.platform_bot_id = "123".into();
+    let mut raw = json!({"d":{"id":"10","channel_id":"20","author":{"id":"456"},
+        "content":"ignored", "mentions":[{"id":"789"}]}});
+    let facts = discord
+        .thread_facts(&parsed("discord", raw.clone()).await, &discord_bot, None)
+        .unwrap();
+    assert!(facts.mentions_others);
+    raw["d"]["mentions"] = json!([{"id":"123"},{"id":"789"}]);
+    let facts = discord
+        .thread_facts(&parsed("discord", raw.clone()).await, &discord_bot, None)
+        .unwrap();
+    assert!(!facts.mentions_others);
+    assert_eq!(facts.address, ThreadAddress::Mention);
+    raw["d"]["mentions"] = json!([]);
+    raw["d"]["mention_everyone"] = json!(true);
+    let facts = discord
+        .thread_facts(&parsed("discord", raw).await, &discord_bot, None)
+        .unwrap();
+    assert!(!facts.mentions_others);
+    assert_eq!(facts.address, ThreadAddress::NotAddressed);
+    let raw = json!({"d":{"id":"11","channel_id":"20","author":{"id":"456"},
+        "content":"hello", "mentions":[]}});
+    let facts = discord
+        .thread_facts(&parsed("discord", raw).await, &discord_bot, None)
+        .unwrap();
+    assert!(!facts.mentions_others);
+    assert_eq!(facts.address, ThreadAddress::NotAddressed);
+
+    for platform in ["lark", "feishu"] {
+        let lark = adapter(platform);
+        let lark_bot = bot(platform);
+        let mut raw = json!({"header":{"event_type":"im.message.receive_v1"},"event":{
+            "sender":{"sender_type":"user","sender_id":{"open_id":"ou_human"}},
+            "message":{"message_id":"om_1","chat_id":"oc_chat","chat_type":"group",
+                "message_type":"text","content":"{}",
+                "mentions":[{"key":"@_user_1","id":{"open_id":"ou_other"}}]}}});
+        let facts = lark
+            .thread_facts(
+                &parsed(platform, raw.clone()).await,
+                &lark_bot,
+                Some("ou_bot"),
+            )
+            .unwrap();
+        assert!(facts.mentions_others);
+        raw["event"]["message"]["mentions"] = json!([{"key":"@_all"}]);
+        let facts = lark
+            .thread_facts(
+                &parsed(platform, raw.clone()).await,
+                &lark_bot,
+                Some("ou_bot"),
+            )
+            .unwrap();
+        assert!(!facts.mentions_others);
+        assert_eq!(facts.address, ThreadAddress::NotAddressed);
+        raw["event"]["message"]["mentions"] = json!([
+            {"key":"@_user_1","id":{"open_id":"ou_other", "user_id":"ou_bot"}},
+            {"key":"@_user_2","id":{"open_id":"ou_other"}}
+        ]);
+        let facts = lark
+            .thread_facts(&parsed(platform, raw).await, &lark_bot, Some("ou_bot"))
+            .unwrap();
+        assert!(!facts.mentions_others);
+        assert_eq!(facts.address, ThreadAddress::Mention);
+
+        let mut raw = json!({"header":{"event_type":"im.message.receive_v1"},"event":{
+            "sender":{"sender_type":"user","sender_id":{"open_id":"ou_human"}},
+            "message":{"message_id":"om_2","chat_id":"oc_chat","chat_type":"group",
+                "message_type":"text","content":"{}","mentions":[]}}});
+        let facts = lark
+            .thread_facts(
+                &parsed(platform, raw.clone()).await,
+                &lark_bot,
+                Some("ou_bot"),
+            )
+            .unwrap();
+        assert!(!facts.mentions_others);
+        assert_eq!(facts.address, ThreadAddress::NotAddressed);
+        raw["event"]["message"]["content"] = json!("@_user_2");
+        // Lark mention keys are read only from the structured `mentions` list.
+        let facts = lark
+            .thread_facts(&parsed(platform, raw).await, &lark_bot, Some("ou_bot"))
+            .unwrap();
+        assert!(!facts.mentions_others);
+    }
+
+    let legacy: ChannelThreadFacts = serde_json::from_value(json!({
+        "version": 1, "kind": "native", "chat_id": "c", "message_id": "m",
+        "sender_kind": "human", "address": "not_addressed"
+    }))
+    .unwrap();
+    assert!(!legacy.mentions_others);
+}
+
+#[tokio::test]
 async fn slack_roots_remain_stable_and_reply_to_root_is_not_a_bot_mention() {
     let a = adapter("slack");
     let mut b = bot("slack");
