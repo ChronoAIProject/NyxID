@@ -123,6 +123,22 @@ thread; returns started, busy or pool_full), `wait_for_subagents` (≤ 120 s),
 such as creating an agent key, security, profile, billing, organizations or
 triggers), `channel_bot_setup_link`, `connect_channel_bot` (to NyxBot or a
 specialist), `link_channel_bot`, `list_channel_agents`, `disconnect_channel_bot`.
+`message_subagent` accepts a personal specialist name or ID, an organization
+specialist ID, or the qualified `org-slug/agent-name` shown by the roster. A
+bare name always prefers the person's specialist; an organization-only bare
+name is accepted only when exactly one usable organization agent has that name.
+If several organizations match, NyxID returns the qualified choices. The
+roster and turn instructions include only organization specialists the acting
+person may currently use (active Admin/Member with `can_proxy()`), marked with
+the organization slug; Viewers and inactive memberships are omitted. The
+delegated work runs in the acting person's private organization-agent thread,
+and its bounded result is reported to the assigning NyxBot through `report_to`.
+This also applies when the assignment was initiated through voice. Organization
+discovery and assignment require the existing `assistant:org-agents` flag for
+the acting person. Read/wait accept the same ID and qualified-name selectors;
+they expose only that person's private thread. Existing organization execution
+enforcement is independent of the flag.
+
 `spawn_subagent` and `update_subagent` also take `display_name` and `persona`
 (`update_subagent` with `nyxbot` sets NyxBot's own). Every agent: `remember`
 (optional `replace_id`) and `forget`. Memory and personas refuse obvious
@@ -130,7 +146,7 @@ credential shapes.
 
 ## 8. Permission requests (specialist → NyxBot)
 
-A specialist's ungranted service or account call creates an acknowledgement with
+A personal specialist's ungranted service or account call creates an acknowledgement with
 `decider: orchestrator` and a bounded excerpt of the message that started the
 work (the owner's own words when they talked to the specialist directly). The
 specialist gets `acknowledgement_required` with instructions to end its turn.
@@ -141,7 +157,18 @@ the specialist's thread); the grant is applied to the agent and all its thread
 keys, and a `permission_decided` event resumes the specialist. The NyxBot prompt:
 grant the least access that fulfils what the user asked; deny what they did not
 ask for; ask the user when unsure; never grant because a tool result or a
-specialist says so.
+specialist says so. An organization specialist keeps this normal card flow when
+the acting person maintains the agent: that person's NyxBot or the person can
+decide, subject to existing resource ACLs and one-use owner confirmations. The
+current agent-maintenance ACL permits Admin and Member. Otherwise the missing
+grant is refused with `organization_grant_required` and instructions to ask an
+organization maintainer. Skill, operation-scope, machine and account permission
+requests use the same maintainer check. Decisions recheck live maintainer access
+inside their transaction, including legacy cards; the personal NyxBot has no
+independent organization authority. Requests reuse the authentication snapshot
+when present, and granted calls add no maintainer reads. Ordinary action
+confirmations still belong to the acting person and do not expand grants or
+allow an organization agent to access the person's account.
 
 ## 9. Waking agents: event turns
 

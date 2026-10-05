@@ -975,9 +975,27 @@ pub async fn native_host(origin: &str) -> Result<()> {
     let socket =
         std::env::var_os("NYXID_BROWSER_SOCKET").context("managed browser socket unavailable")?;
     let stream = UnixStream::connect(PathBuf::from(socket)).await?;
+    use std::os::fd::AsFd;
+    native_host_bridge(
+        stream,
+        std::io::stdin().as_fd().try_clone_to_owned()?,
+        std::io::stdout().as_fd().try_clone_to_owned()?,
+    )
+    .await
+}
+
+async fn native_host_bridge(
+    stream: UnixStream,
+    input: std::os::fd::OwnedFd,
+    output: std::os::fd::OwnedFd,
+) -> Result<()> {
     let (mut reader, mut writer) = stream.into_split();
-    let mut stdin = tokio::io::stdin();
-    let mut stdout = tokio::io::stdout();
+    // Chromium gives native hosts pipes. Register them with the reactor instead
+    // of Tokio's blocking-pool stdio adapters: a pending stdin read must never
+    // starve stdout or keep a disconnected host alive. Checked constructors set
+    // O_NONBLOCK and reject non-pipes; each bridge owns its CLOEXEC descriptors.
+    let mut stdin = tokio::net::unix::pipe::Receiver::from_owned_fd(input)?;
+    let mut stdout = tokio::net::unix::pipe::Sender::from_owned_fd(output)?;
     tokio::select! {
         result=bridge_native(&mut stdin, &mut writer)=>result,
         result=bridge_native(&mut reader, &mut stdout)=>result,
@@ -1033,6 +1051,66 @@ pub fn create_xauthority(path: &Path, browser: &str, display: u16) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_host_pipes_exchange_and_disconnect_with_the_blocking_pool_occupied() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        // Model the permanently pending stdin read in the former stdio bridge.
+        // Release even on assertion failure, before dropping the runtime.
+        struct Release(Option<std::sync::mpsc::Sender<()>>);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                let _ = self.0.take().unwrap().send(());
+            }
+        }
+        let (release, blocked) = std::sync::mpsc::channel();
+        let _release = Release(Some(release));
+        let (started, occupied) = std::sync::mpsc::channel();
+        runtime.spawn_blocking(move || {
+            started.send(()).unwrap();
+            let _ = blocked.recv();
+        });
+        occupied.recv_timeout(Duration::from_secs(2)).unwrap();
+        runtime.block_on(async {
+            for close_socket in [true, false] {
+                let (mut chrome_send, input) = tokio::net::unix::pipe::pipe().unwrap();
+                let (output, mut chrome_receive) = tokio::net::unix::pipe::pipe().unwrap();
+                let (stream, mut supervisor) = UnixStream::pair().unwrap();
+                let host = tokio::spawn(native_host_bridge(
+                    stream,
+                    input.into_nonblocking_fd().unwrap(),
+                    output.into_nonblocking_fd().unwrap(),
+                ));
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    let nonce = uuid::Uuid::new_v4().to_string();
+                    let message = serde_json::to_vec(&json!({"nonce": nonce})).unwrap();
+                    // Both directions, including subsequent messages, must run
+                    // without a single blocking worker becoming available.
+                    for _ in 0..20 {
+                        write_native(&mut chrome_send, &message).await.unwrap();
+                        assert_eq!(&*read_native(&mut supervisor).await.unwrap(), &message);
+                        write_native(&mut supervisor, &message).await.unwrap();
+                        assert_eq!(&*read_native(&mut chrome_receive).await.unwrap(), &message);
+                    }
+                    if close_socket {
+                        drop(supervisor);
+                    } else {
+                        drop(chrome_send);
+                    }
+                    assert!(host.await.unwrap().is_err());
+                    let mut byte = [0];
+                    assert_eq!(chrome_receive.read(&mut byte).await.unwrap(), 0);
+                })
+                .await
+                .expect("native bridge must exchange and exit without blocking-pool progress");
+            }
+        });
+    }
+
     #[tokio::test]
     async fn native_transport_failures_are_typed_and_discard_the_connection() {
         for case in ["write", "eof", "decode", "nonce"] {

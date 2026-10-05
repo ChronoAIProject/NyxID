@@ -190,6 +190,17 @@ pub fn guest_refusal() -> Value {
         ask for that."})
 }
 
+/// An org permission request may use the person's NyxBot only while that
+/// person maintains the agent. Otherwise a maintainer must make the change.
+const ORG_MAINTAINER_REQUIRED: &str = "This organization agent needs a permission or skill change that you cannot maintain. Ask an organization maintainer to update the agent; your personal NyxBot cannot approve it on your behalf.";
+
+pub fn organization_agent_refusal() -> Value {
+    json!({
+        "error": "organization_grant_required",
+        "instructions": ORG_MAINTAINER_REQUIRED
+    })
+}
+
 /// What a guest turn is told when a service call goes beyond what the owner
 /// lets guests do with that service.
 pub fn guest_service_refusal(service: &str, access: GuestAccess) -> Value {
@@ -327,7 +338,11 @@ async fn fence(
     db: &Database,
     chat: &ChatAuthority,
     session: &mut ClientSession,
-) -> AppResult<(AssistantConversation, ApiKey)> {
+) -> AppResult<(
+    AssistantConversation,
+    ApiKey,
+    Option<std::sync::Arc<super::org_agent_service::RequestAccess>>,
+)> {
     let credential = db
         .collection::<bson::Document>(CREDENTIALS)
         .update_one(
@@ -360,26 +375,29 @@ async fn fence(
     }
     // Cards are execution authority. Human decisions and internal NyxBot paths
     // must enforce the same live org/group ACL as a new tool request.
-    if let Some(owner) = row.agent_owner_id.as_deref() {
-        let access = match chat.org_agent_access.as_ref() {
-            Some(access) if access.matches(&row.user_id, owner) => Some(access.clone()),
-            Some(_) => return Err(not_found()),
-            None => {
-                super::org_agent_service::resolve_key_access(db, &row.user_id, Some(owner)).await?
-            }
-        };
-        if let Some(access) = access {
-            super::org_group_service::check_thread_participation(db, &row, &access).await?;
+    let access = if let Some(owner) = row.agent_owner_id.as_deref() {
+        let access = super::org_agent_service::key_access_with_snapshot(
+            db,
+            &row.user_id,
+            Some(owner),
+            chat.org_agent_access.as_ref(),
+        )
+        .await?;
+        if let Some(access) = access.as_ref() {
+            super::org_group_service::check_thread_participation(db, &row, access).await?;
             if row.group_request_id.is_some()
                 && let Some(id) = row.group_id.as_deref()
             {
                 let group =
-                    super::org_group_service::get(db, &row.user_id, id, Some(&access)).await?;
+                    super::org_group_service::get(db, &row.user_id, id, Some(access)).await?;
                 super::org_group_service::fence(db, &group, session).await?;
             }
         }
-    }
-    Ok((row, key))
+        access
+    } else {
+        None
+    };
+    Ok((row, key, access))
 }
 
 pub async fn expire(db: &Database, user: &str, conversation: &str) -> AppResult<()> {
@@ -663,7 +681,13 @@ async fn request_tracked_with_machine_context(
         .and_run2(async move |session| {
             // Do not embed the card transaction in MongoDB's retry frames.
             let operation = Box::pin(async {
-                let (conversation, _) = Box::pin(fence(&db, &chat, session)).await?;
+                let (conversation, _, access) = Box::pin(fence(&db, &chat, session)).await?;
+                // Covers every permission kind, including machine/skill/scope
+                // requests and internal callers without an auth snapshot.
+                // Reuse the access already resolved or reused by the fence.
+                if orchestrated && access.as_ref().is_some_and(|a| !a.can_maintain()) {
+                    return Err(AppError::Forbidden(ORG_MAINTAINER_REQUIRED.into()));
+                }
                 let mut row = candidate.clone();
                 // Ordinary denials stay bound to the initiating user/orchestrator
                 // message across event turns. Only trigger runs use the active turn.
@@ -896,18 +920,25 @@ pub async fn service_gate(
         return Ok(None);
     }
     let key = key_service::get_api_key(db, &chat.user_id, &chat.api_key_id).await?;
+    let mut access = chat.org_agent_access.clone();
     let granted = if platform {
         key.allowed_platform_service_ids
             .iter()
             .any(|allowed| allowed == id)
     } else {
-        (if let Some(access) = chat.org_agent_access.as_deref() {
-            key_service::effective_allowed_service_ids_with_access(db, &key, Some(access)).await?
-        } else {
-            key_service::effective_allowed_service_ids(db, &key).await?
-        })
-        .iter()
-        .any(|allowed| allowed == id)
+        // This authority check already needed live access. Retain a newly
+        // resolved snapshot for the ungranted path and its card transaction.
+        access = super::org_agent_service::key_access_with_snapshot(
+            db,
+            &chat.user_id,
+            key.assistant_agent_owner_id.as_deref(),
+            access.as_ref(),
+        )
+        .await?;
+        key_service::effective_allowed_service_ids_with_access(db, &key, access.as_deref())
+            .await?
+            .iter()
+            .any(|allowed| allowed == id)
     };
     if granted {
         return Ok(None);
@@ -916,6 +947,18 @@ pub async fn service_gate(
     if chat.guest {
         return Ok(Some((guest_refusal(), None)));
     }
+    access = super::org_agent_service::key_access_with_snapshot(
+        db,
+        &chat.user_id,
+        key.assistant_agent_owner_id.as_deref(),
+        access.as_ref(),
+    )
+    .await?;
+    if access.as_ref().is_some_and(|a| !a.can_maintain()) {
+        return Ok(Some((organization_agent_refusal(), None)));
+    }
+    let mut request_chat = chat.clone();
+    request_chat.org_agent_access = access;
     let summary = if platform {
         format!("Use {name} (NyxID platform credential)")
     } else {
@@ -923,7 +966,7 @@ pub async fn service_gate(
     };
     let (row, created) = request_tracked(
         db,
-        chat,
+        &request_chat,
         Request {
             kind: "service",
             service: Some((id, slug, name)),
@@ -955,9 +998,21 @@ pub async fn account_gate(
     {
         return Ok(None);
     }
+    let access = super::org_agent_service::key_access_with_snapshot(
+        db,
+        &chat.user_id,
+        key.assistant_agent_owner_id.as_deref(),
+        chat.org_agent_access.as_ref(),
+    )
+    .await?;
+    if access.as_ref().is_some_and(|a| !a.can_maintain()) {
+        return Ok(Some((organization_agent_refusal(), None)));
+    }
+    let mut request_chat = chat.clone();
+    request_chat.org_agent_access = access;
     let (row, created) = request_tracked(
         db,
-        chat,
+        &request_chat,
         Request {
             kind: "account",
             service: None,
@@ -1092,7 +1147,13 @@ pub(crate) async fn decide_with_voice(
                     agent_name: String::new(),
                     guest: target.guest_turn,
                 };
-                let (_, key) = Box::pin(fence(&db, &chat, session)).await?;
+                // Decision requests have no inherited auth snapshot. The
+                // transaction's fence resolves live membership, including for
+                // cards created before delegation supported org specialists.
+                let (_, key, access) = Box::pin(fence(&db, &chat, session)).await?;
+                if by_nyxbot && access.as_ref().is_some_and(|a| !a.can_maintain()) {
+                    return Err(AppError::Forbidden(ORG_MAINTAINER_REQUIRED.into()));
+                }
                 let subagent = target.role == AgentRole::Subagent;
                 let now = Utc::now();
                 if row.kind == "service" {

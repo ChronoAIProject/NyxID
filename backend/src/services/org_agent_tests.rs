@@ -913,6 +913,656 @@ async fn org_agent_nyxbot_explicit_org_resolution_and_specialist_refusal() {
 }
 
 #[tokio::test]
+async fn nyxbot_delegates_to_usable_org_agents_with_qualified_names() {
+    let f = Fixture::new("org_agent_nyxbot_delegation").await;
+    let (agent, _) = f.create().await;
+
+    // ID, qualified name and the unique bare name all resolve for a Member.
+    assert_eq!(
+        team::delegable_specialist(&f.state.db, &f.member, &agent.id)
+            .await
+            .unwrap()
+            .id,
+        agent.id
+    );
+    assert_eq!(
+        team::delegable_specialist(&f.state.db, &f.member, "org-agent-team/researcher")
+            .await
+            .unwrap()
+            .id,
+        agent.id
+    );
+    assert_eq!(
+        team::delegable_specialist(&f.state.db, &f.member, "researcher")
+            .await
+            .unwrap()
+            .id,
+        agent.id
+    );
+    let member_thread =
+        team::home_thread_for(&f.state.db, &f.state.encryption_keys, &f.member, &agent)
+            .await
+            .unwrap();
+    assert_eq!(member_thread.user_id, f.member);
+    assert_eq!(
+        member_thread.agent_owner_id.as_deref(),
+        Some(f.org.as_str())
+    );
+    assert_eq!(f.key(&member_thread).await.user_id, f.member);
+    let access = org_agents::resolve_key_access(&f.state.db, &f.member, Some(&f.org))
+        .await
+        .unwrap();
+    let chat = acks::for_key_with_access(
+        &f.state.db,
+        &f.member,
+        Some(&member_thread.credential_api_key_id),
+        access.as_ref(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let (value, card) = acks::service_gate(
+        &f.state.db,
+        &chat,
+        "missing-service",
+        "missing-service",
+        "Missing service",
+        false,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(value["error"], "acknowledgement_required");
+    assert_eq!(card.unwrap().decider, "orchestrator");
+    assert!(
+        team::delegable_specialist(&f.state.db, &f.viewer, &agent.id)
+            .await
+            .is_err()
+    );
+
+    // A second usable organization makes a bare name ambiguous, while the
+    // qualified selector remains deterministic.
+    let second_org = Uuid::new_v4().to_string();
+    let mut org = test_user(&second_org, UserType::Org);
+    org.slug = Some("second-agent-team".into());
+    org.display_name = Some("Second Agent Team".into());
+    f.state
+        .db
+        .collection(crate::models::user::COLLECTION_NAME)
+        .insert_one(org)
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection(crate::models::org_membership::COLLECTION_NAME)
+        .insert_one(test_membership(
+            &second_org,
+            &f.member,
+            OrgRole::Member,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (second, _) = team::create_specialist_for(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.member,
+        &second_org,
+        f.request("researcher"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let error = team::delegable_specialist(&f.state.db, &f.member, "researcher")
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("org-agent-team/researcher"));
+    assert!(error.to_string().contains("second-agent-team/researcher"));
+    assert_eq!(
+        team::delegable_specialist(&f.state.db, &f.member, "second-agent-team/researcher")
+            .await
+            .unwrap()
+            .id,
+        second.id
+    );
+
+    // Personal specialists retain precedence over every organization match.
+    let (personal, _) = team::create_specialist(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.member,
+        f.request("researcher"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        team::delegable_specialist(&f.state.db, &f.member, "researcher")
+            .await
+            .unwrap()
+            .id,
+        personal.id
+    );
+
+    let roster = team::roster_note(&f.state.db, &f.member).await.unwrap();
+    assert!(roster.contains("org-agent-team/researcher"));
+    assert!(roster.contains("second-agent-team/researcher"));
+    let viewer_roster = team::roster_note(&f.state.db, &f.viewer).await.unwrap();
+    assert!(!viewer_roster.contains("org-agent-team/researcher"));
+    f.revoke(&f.member).await;
+    assert!(
+        team::home_thread_for(&f.state.db, &f.state.encryption_keys, &f.member, &agent)
+            .await
+            .is_err()
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn org_agent_roster_skips_flag_resolution_without_org_rows() {
+    use std::sync::atomic::Ordering;
+    let (f, memberships, reads) = Fixture::observed("org_agent_personal_roster_reads").await;
+    team::create_specialist(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.member,
+        f.request("personal"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    team::ensure_nyxbot(&f.state.db, &f.member).await.unwrap();
+    memberships.store(0, Ordering::SeqCst);
+    reads.store(0, Ordering::SeqCst);
+    let baseline = team::summaries(&f.state.db, &f.member, false, false, 0)
+        .await
+        .unwrap();
+    assert_eq!(baseline.len(), 1);
+    let baseline_memberships = memberships.load(Ordering::SeqCst);
+    let baseline_reads = reads.load(Ordering::SeqCst);
+    memberships.store(0, Ordering::SeqCst);
+    reads.store(0, Ordering::SeqCst);
+    assert!(
+        team::roster_note(&f.state.db, &f.member)
+            .await
+            .unwrap()
+            .contains("personal")
+    );
+    assert_eq!(memberships.load(Ordering::SeqCst), baseline_memberships);
+    assert_eq!(reads.load(Ordering::SeqCst), baseline_reads);
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn org_agent_delegation_discovery_rechecks_flag_membership_and_owner() {
+    let f = Fixture::new("org_agent_delegation_discovery").await;
+    let (agent, _) = f.create().await;
+    for actor in [&f.admin, &f.member] {
+        let rows = team::delegation_summaries(&f.state.db, actor, false, 0)
+            .await
+            .unwrap();
+        let row = rows.iter().find(|row| row.id == agent.id).unwrap();
+        assert_eq!(row.owner_name.as_deref(), Some("Agent Team"));
+        assert_eq!(row.delegation_name(), "org-agent-team/researcher");
+    }
+    for actor in [&f.viewer, &f.outsider] {
+        assert!(
+            team::delegation_summaries(&f.state.db, actor, false, 0)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+    let (personal, _) = team::create_specialist(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.member,
+        f.request("personal"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    f.flag(false).await;
+    let rows = team::delegation_summaries(&f.state.db, &f.member, false, 0)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, personal.id);
+    for selector in [agent.id.as_str(), "org-agent-team/researcher", "researcher"] {
+        assert!(
+            team::delegable_specialist(&f.state.db, &f.member, selector)
+                .await
+                .is_err()
+        );
+    }
+    assert_eq!(
+        team::delegable_specialist(&f.state.db, &f.member, "personal")
+            .await
+            .unwrap()
+            .id,
+        personal.id
+    );
+    f.flag(true).await;
+    f.revoke(&f.member).await;
+    let rows = team::delegation_summaries(&f.state.db, &f.member, false, 0)
+        .await
+        .unwrap();
+    assert!(rows.iter().all(|row| row.id != agent.id));
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+        .update_one(doc! {"_id": &f.org}, doc! {"$set": {"is_active": false}})
+        .await
+        .unwrap();
+    assert!(
+        team::delegation_summaries(&f.state.db, &f.admin, false, 0)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        team::delegable_specialist(&f.state.db, &f.admin, &agent.id)
+            .await
+            .is_err()
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn org_agent_maintainer_requests_keep_cards_and_sync_every_member_key() {
+    use crate::models::assistant_acknowledgement::{
+        AssistantAcknowledgement, COLLECTION_NAME as ACKS,
+    };
+    use std::sync::atomic::Ordering;
+    let (f, memberships, _) = Fixture::observed("org_agent_maintainer_permission_cards").await;
+    let (agent, admin_thread) = f.create().await;
+    let member_thread =
+        team::home_thread_for(&f.state.db, &f.state.encryption_keys, &f.member, &agent)
+            .await
+            .unwrap();
+    let service = f.service(&f.org, "requested-service").await;
+    let chat = acks::for_key(
+        &f.state.db,
+        &f.admin,
+        Some(&admin_thread.credential_api_key_id),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    memberships.store(0, Ordering::SeqCst);
+    let (value, card) = acks::service_gate(
+        &f.state.db,
+        &chat,
+        &service,
+        "requested-service",
+        "Requested service",
+        false,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(value["error"], "acknowledgement_required");
+    let card = card.expect("maintainers retain their permission cards");
+    assert_eq!(card.decider, "orchestrator");
+    assert_eq!(
+        memberships.load(Ordering::SeqCst),
+        1,
+        "resolve once without a request snapshot"
+    );
+    let decided = Box::pin(acks::decide_as(
+        &f.state.db,
+        &f.admin,
+        None,
+        &card.id,
+        true,
+        acks::Decider::Nyxbot,
+        None,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(decided.status, "allowed");
+    assert!(
+        team::agent(&f.state.db, &f.admin, &agent.id)
+            .await
+            .unwrap()
+            .grants
+            .service_ids
+            .contains(&service)
+    );
+    for thread in [&admin_thread, &member_thread] {
+        assert!(f.key(thread).await.allowed_service_ids.contains(&service));
+    }
+
+    let access = org_agents::resolve_key_access(&f.state.db, &f.admin, Some(&f.org))
+        .await
+        .unwrap();
+    let chat = acks::for_key_with_access(
+        &f.state.db,
+        &f.admin,
+        Some(&admin_thread.credential_api_key_id),
+        access.as_ref(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    memberships.store(0, Ordering::SeqCst);
+    assert!(
+        acks::service_gate(
+            &f.state.db,
+            &chat,
+            &service,
+            "requested-service",
+            "Requested service",
+            false,
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    assert_eq!(
+        memberships.load(Ordering::SeqCst),
+        0,
+        "granted calls reuse auth access"
+    );
+    let (_, account_card) = acks::account_gate(&f.state.db, &chat)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(account_card.unwrap().decider, "orchestrator");
+    assert_eq!(
+        memberships.load(Ordering::SeqCst),
+        0,
+        "ungranted requests reuse auth access"
+    );
+
+    let (value, is_error) = Box::pin(crate::handlers::assistant_team::execute_tool(
+        &f.state,
+        &chat,
+        "nyxid__request_agent_skills",
+        &serde_json::json!({"agent": agent.id, "skill": "org-guidance", "version": "1.0"}),
+    ))
+    .await;
+    assert!(is_error);
+    assert_eq!(value["error"], "acknowledgement_required");
+    let skills = f
+        .state
+        .db
+        .collection::<AssistantAcknowledgement>(ACKS)
+        .find_one(doc! {"conversation_id": &admin_thread.id, "kind": "skills"})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(skills.decider, "orchestrator");
+    assert_eq!(skills.status, "pending");
+
+    // A card created while maintaining the org never preserves that authority
+    // after membership is revoked, even when the caller retained its snapshot.
+    f.revoke(&f.admin).await;
+    assert!(
+        Box::pin(acks::decide_as(
+            &f.state.db,
+            &f.admin,
+            None,
+            &skills.id,
+            true,
+            acks::Decider::Nyxbot,
+            None,
+        ))
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        f.state
+            .db
+            .collection::<AssistantAcknowledgement>(ACKS)
+            .find_one(doc! {"_id": &skills.id})
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "pending"
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn org_agent_member_keeps_maintenance_cards_but_revocation_blocks_new_and_legacy_requests() {
+    use crate::models::assistant_acknowledgement::{
+        AssistantAcknowledgement, COLLECTION_NAME as ACKS,
+    };
+    let f = Fixture::new("org_agent_permission_deciders").await;
+    let (agent, admin_thread) = f.create().await;
+    let thread = team::home_thread_for(&f.state.db, &f.state.encryption_keys, &f.member, &agent)
+        .await
+        .unwrap();
+    // The shipped agent-maintenance ACL includes Members, independently of
+    // write authority on other org resources. Keep that behavior unchanged.
+    // Internal callers without an auth snapshot must resolve live authority.
+    let chat = acks::for_key(&f.state.db, &f.member, Some(&thread.credential_api_key_id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(chat.org_agent_access.is_none());
+    let service = f.service(&f.org, "member-requested").await;
+    let (value, card) = acks::service_gate(
+        &f.state.db,
+        &chat,
+        &service,
+        "member-requested",
+        "Requested service",
+        false,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(value["error"], "acknowledgement_required");
+    let card = card.unwrap();
+    assert_eq!(card.decider, "orchestrator");
+    let decided = Box::pin(acks::decide_as(
+        &f.state.db,
+        &f.member,
+        None,
+        &card.id,
+        true,
+        acks::Decider::Nyxbot,
+        None,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(decided.status, "allowed");
+    for row in [&admin_thread, &thread] {
+        assert!(f.key(row).await.allowed_service_ids.contains(&service));
+    }
+    let (_, account) = acks::account_gate(&f.state.db, &chat)
+        .await
+        .unwrap()
+        .unwrap();
+    let account = account.unwrap();
+    assert_eq!(account.decider, "orchestrator");
+    // A card never overrides the existing ban on personal account grants.
+    assert!(
+        Box::pin(acks::decide_as(
+            &f.state.db,
+            &f.member,
+            None,
+            &account.id,
+            true,
+            acks::Decider::Nyxbot,
+            None,
+        ))
+        .await
+        .is_err()
+    );
+
+    for kind in ["machine", "saved_login", "skills"] {
+        let card = Box::pin(acks::request(
+            &f.state.db,
+            &chat,
+            acks::Request {
+                kind,
+                service: None,
+                tool: None,
+                arguments: None,
+                summary: "Request permission",
+                platform: false,
+            },
+        ))
+        .await
+        .unwrap();
+        assert_eq!(card.decider, "orchestrator");
+    }
+    // Ordinary action confirmations still belong to the acting person.
+    let action = Box::pin(acks::request(
+        &f.state.db,
+        &chat,
+        acks::Request {
+            kind: "action",
+            service: None,
+            tool: Some("test_action"),
+            arguments: Some(&serde_json::json!({"id": "selected"})),
+            summary: "Change the selected object",
+            platform: false,
+        },
+    ))
+    .await
+    .unwrap();
+    assert_eq!(action.decider, "user");
+    assert_eq!(
+        Box::pin(acks::decide_as(
+            &f.state.db,
+            &f.member,
+            Some(&thread.id),
+            &action.id,
+            true,
+            acks::Decider::User,
+            None,
+        ))
+        .await
+        .unwrap()
+        .status,
+        "allowed"
+    );
+    assert_eq!(f.key(&thread).await.scopes, "proxy");
+
+    // A legacy pending card must not preserve maintenance authority following
+    // a demotion. Both NyxBot decision modes check live ACL inside the transaction.
+    let mut legacy = card;
+    legacy.id = Uuid::new_v4().to_string();
+    legacy.status = "pending".into();
+    f.state
+        .db
+        .collection::<AssistantAcknowledgement>(ACKS)
+        .insert_one(&legacy)
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::org_membership::COLLECTION_NAME)
+        .update_one(
+            doc! {"org_user_id": &f.org, "member_user_id": &f.member},
+            doc! {"$set": {"role": "viewer"}},
+        )
+        .await
+        .unwrap();
+    let before = f
+        .state
+        .db
+        .collection::<AssistantAcknowledgement>(ACKS)
+        .count_documents(doc! {"conversation_id": &thread.id})
+        .await
+        .unwrap();
+    assert!(
+        acks::service_gate(
+            &f.state.db,
+            &chat,
+            "missing",
+            "missing",
+            "Missing service",
+            false,
+        )
+        .await
+        .is_err()
+    );
+    assert!(acks::account_gate(&f.state.db, &chat).await.is_err());
+    for kind in ["service", "account", "machine", "saved_login", "skills"] {
+        assert!(
+            Box::pin(acks::request(
+                &f.state.db,
+                &chat,
+                acks::Request {
+                    kind,
+                    service: None,
+                    tool: None,
+                    arguments: None,
+                    summary: "Request permission",
+                    platform: false,
+                },
+            ))
+            .await
+            .is_err()
+        );
+    }
+    for (tool, args) in [
+        (
+            "nyxid__request_agent_skills",
+            serde_json::json!({
+                "agent": agent.id, "skill": "org-guidance", "version": "1.0"
+            }),
+        ),
+        (
+            "nyxid__request_agent_operations",
+            serde_json::json!({
+                "subagent": agent.id, "service_id": service,
+                "selection": {"expected_revision": 0, "all_operations": true}
+            }),
+        ),
+    ] {
+        let (value, is_error) = Box::pin(crate::handlers::assistant_team::execute_tool(
+            &f.state, &chat, tool, &args,
+        ))
+        .await;
+        assert!(is_error);
+        assert_ne!(value["error"], "acknowledgement_required");
+    }
+    for decider in [acks::Decider::Nyxbot, acks::Decider::NyxbotOwnerConfirmed] {
+        assert!(
+            Box::pin(acks::decide_as(
+                &f.state.db,
+                &f.member,
+                None,
+                &legacy.id,
+                true,
+                decider,
+                None,
+            ))
+            .await
+            .is_err()
+        );
+    }
+    assert_eq!(
+        f.state
+            .db
+            .collection::<AssistantAcknowledgement>(ACKS)
+            .find_one(doc! {"_id": &legacy.id})
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "pending"
+    );
+    assert_eq!(
+        f.state
+            .db
+            .collection::<AssistantAcknowledgement>(ACKS)
+            .count_documents(doc! {"conversation_id": &thread.id})
+            .await
+            .unwrap(),
+        before
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn org_agent_member_key_cannot_escape_agent_grants() {
     let f = Fixture::new("org_agent_key_edits").await;
     let (_, row) = f.create().await;

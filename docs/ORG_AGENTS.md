@@ -57,6 +57,31 @@ scopes and adding/re-pinning skills retain one-use cards decided by the requesti
 maintainer, bound to the exact agent and change. Destruction retains confirmation.
 Ornn search, pinning and reads use the managing/acting person's own access.
 
+The acting person's personal NyxBot may discover and delegate to an organization
+specialist that person can use when `assistant:org-agents` is enabled for that
+person. Disabling this discovery/admission gate never disables existing thread
+enforcement. Its roster and turn instructions show only live
+Admin/Member memberships with `can_proxy()`, using `org-slug/agent-name` labels;
+Viewers and inactive memberships are omitted. `nyxid__message_subagent` accepts
+the qualified label or agent ID. Bare names prefer personal specialists and are
+accepted for an organization agent only when the usable match is unambiguous.
+The delegated conversation remains private to the acting person, carries the
+organization owner binding, uses only the organization's grants/skills/memory,
+and reports back to the assigning NyxBot. Membership is checked again at
+admission and on every execution. If an organization agent lacks a grant and the
+acting person maintains it, the existing orchestrator card flow remains available:
+that person's NyxBot or the person may decide the card, subject to the existing
+resource ACLs and one-use owner confirmations. Otherwise refuse with
+`organization_grant_required` and ask an organization maintainer to change the
+agent's grants. The same maintainer check applies to skill, operation-scope,
+machine and account permission requests. Decisions, including legacy cards,
+MUST recheck live maintainer authority inside the decision transaction; a personal
+NyxBot never confers organization authority of its own. Requests reuse the
+authentication snapshot when present, and granted calls add no maintainer reads.
+Admin and Member retain the existing agent-maintenance role semantics. Ordinary
+action confirmations remain decided by the acting person; they do not confer
+new grants or permit personal account access for an organization agent.
+
 Agent memory is shared organization data, visible and editable by maintainers.
 Turn instructions MUST identify this shared memory and prohibit storing a
 member's private content in it. Shared memory is never populated automatically

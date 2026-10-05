@@ -124,6 +124,8 @@ async function measureFrames(label,duration,action){
 }
 
 try{
+ run('python3',['/test/machine_native_host_e2e.py']);
+ console.log('Native host: 200 first exchanges and socket-EOF exits with stdin open passed');
  const testDirectory=await fs.mkdtemp('/tmp/nyxid-browser-test-');await fs.chmod(testDirectory,0o755);
  run('openssl',['req','-x509','-newkey','rsa:2048','-nodes','-days','1','-keyout',`${testDirectory}/tls.key`,'-out',`${testDirectory}/tls.crt`,'-subj','/CN=NyxID local test','-addext','subjectAltName=IP:127.0.0.1','-addext','basicConstraints=critical,CA:TRUE']);
  run('runuser',['-u','browser','--','mkdir','-p','/home/browser/.pki/nssdb']);

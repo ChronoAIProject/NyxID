@@ -374,9 +374,10 @@ pub(crate) async fn after_turn(
             Some(code) => format!("failed ({code})"),
         };
         let note = format!(
-            "Specialist {} {status}. Reply excerpt: \"{}\" Read more with nyxid__read_subagent.",
+            "Specialist {} {status}. Reply excerpt: \"{}\" Read more with nyxid__read_subagent (agent ID {}).",
             identifier(&agent.name),
-            excerpt(text, 1200).replace('"', "'")
+            excerpt(text, 1200).replace('"', "'"),
+            agent.id
         );
         notify(
             state,
@@ -755,6 +756,12 @@ pub(crate) async fn assign(
     text: &str,
     report_to: Option<&str>,
 ) -> AppResult<Started> {
+    if agent.user_id != owner {
+        crate::services::org_agent_service::require_creation_enabled(&state.db, owner).await?;
+    }
+    if agent.destroyed_at.is_some() {
+        return Err(AppError::Conflict("That agent was destroyed".into()));
+    }
     let home = Box::pin(team::home_thread_for(
         &state.db,
         &state.encryption_keys,
@@ -829,10 +836,20 @@ pub(crate) async fn execute_tool(
     }
     let result = async {
         assistant_team_tools::validate(name, args)?;
-        let caller_agent = Box::pin(crate::services::org_agent_service::chat_agent(
-            &state.db, chat,
-        ))
+        let (caller_agent, access) = Box::pin(
+            crate::services::org_agent_service::chat_agent_with_access(&state.db, chat),
+        )
         .await?;
+        let mut permission_chat = std::borrow::Cow::Borrowed(chat);
+        if caller_agent.user_id != chat.user_id
+            && matches!(name, "request_agent_skills" | "request_agent_operations")
+        {
+            if access.as_ref().is_some_and(|a| !a.can_maintain()) {
+                return Ok((acks::organization_agent_refusal(), true));
+            }
+            permission_chat.to_mut().org_agent_access = access;
+        }
+        let chat = permission_chat.as_ref();
         let mut normalized = if matches!(
             name,
             "create_group" | "list_groups" | "update_group" | "delete_group" | "post_to_group"
@@ -1087,7 +1104,7 @@ async fn dispatch_specialists(
             }
         }
         "message_subagent" => {
-            let agent = team::live_specialist(db, owner, text_arg(args, "subagent")).await?;
+            let agent = team::delegable_specialist(db, owner, text_arg(args, "subagent")).await?;
             (
                 started_json(
                     Box::pin(assign(
@@ -1104,24 +1121,38 @@ async fn dispatch_specialists(
         }
         "wait_for_subagents" => (wait_for(state, chat, args).await?, false),
         "list_subagents" => {
-            let rows = team::summaries(
+            let rows = team::delegation_summaries(
                 db,
                 owner,
-                false,
                 args["include_destroyed"].as_bool().unwrap_or(false),
                 300,
             )
             .await?;
             let rows: Vec<_> = rows
                 .into_iter()
-                .filter(|r| {
-                    r.can_maintain && args["org"].as_str().is_none_or(|org| org == r.owner_id)
+                .filter(|r| args["org"].as_str().is_none_or(|org| org == r.owner_id))
+                .map(|r| {
+                    let qualified_name = r.delegation_name();
+                    let mut row = if r.owner_kind == "org" && !r.can_maintain {
+                        // Use-only discovery excludes maintainer data. The
+                        // full existing shape remains available to maintainers.
+                        json!({"id":r.id,"name":r.name,
+                            "owner_id":r.owner_id,"owner_kind":r.owner_kind,
+                            "owner_name":r.owner_name,"owner_slug":r.owner_slug,
+                            "description":r.description,"display_name":r.display_name,
+                            "status":r.status,"can_use":r.can_use,"can_maintain":r.can_maintain,
+                            "services":r.services})
+                    } else {
+                        json!(r)
+                    };
+                    row["qualified_name"] = qualified_name.into();
+                    row
                 })
                 .collect();
             (json!({"subagents": rows}), false)
         }
         "read_subagent" => {
-            let agent = team::specialist(db, owner, text_arg(args, "subagent")).await?;
+            let agent = team::delegable_specialist(db, owner, text_arg(args, "subagent")).await?;
             let rows = team::read(
                 db,
                 owner,
@@ -2046,15 +2077,14 @@ async fn wait_for(state: &AppState, chat: &ChatAuthority, args: &Value) -> AppRe
     let names = string_list(args, "subagents");
     let mut targets = Vec::new();
     if names.is_empty() {
-        targets = team::agents(db, owner, false)
+        targets = team::delegation_summaries(db, owner, false, 0)
             .await?
             .into_iter()
-            .filter(|agent| !agent.is_nyxbot())
-            .map(|agent| agent.id)
+            .map(|summary| summary.id)
             .collect();
     } else {
         for name in &names {
-            targets.push(team::specialist(db, owner, name).await?.id);
+            targets.push(team::delegable_specialist(db, owner, name).await?.id);
         }
     }
     let own_turn = engine::get(db, owner, caller)
@@ -2071,7 +2101,7 @@ async fn wait_for(state: &AppState, chat: &ChatAuthority, args: &Value) -> AppRe
             None => false,
         };
         if !busy || !requests.is_empty() || stopped || tokio::time::Instant::now() >= deadline {
-            let summaries = team::summaries(db, owner, false, true, team::REPLY_EXCERPT_CHARS)
+            let summaries = team::delegation_summaries(db, owner, true, team::REPLY_EXCERPT_CHARS)
                 .await?
                 .into_iter()
                 .filter(|summary| targets.contains(&summary.id))
@@ -2084,10 +2114,10 @@ async fn wait_for(state: &AppState, chat: &ChatAuthority, args: &Value) -> AppRe
             team::consume_settled_events(db, owner, caller, &settled).await?;
             return Ok(json!({
                 "settled": summaries.iter().filter(|s| s.status != "running").map(|s| json!({
-                    "name": s.name, "status": s.status, "reply": s.last_reply,
+                    "id": s.id, "name": s.delegation_name(), "status": s.status, "reply": s.last_reply,
                 })).collect::<Vec<_>>(),
                 "running": summaries.iter().filter(|s| s.status == "running")
-                    .map(|s| s.name.clone()).collect::<Vec<_>>(),
+                    .map(|s| s.delegation_name()).collect::<Vec<_>>(),
                 "pending_requests": team::request_summaries(db, owner, &requests).await?,
             }));
         }
