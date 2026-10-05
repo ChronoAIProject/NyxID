@@ -6,8 +6,8 @@ use uuid::Uuid;
 use crate::errors::{AppError, AppResult};
 use crate::models::group::{COLLECTION_NAME as GROUPS, Group};
 use crate::models::role::{
-    COLLECTION_NAME as ROLES, PLATFORM_ADMIN_ROLE_SLUG, PLATFORM_OPERATOR_ROLE_SLUG,
-    PLATFORM_USER_ROLE_SLUG, Role,
+    COLLECTION_NAME as ROLES, CREDIT_GRANTS_WRITE_PERMISSION, CREDITS_MANAGER_ROLE_SLUG,
+    PLATFORM_ADMIN_ROLE_SLUG, PLATFORM_OPERATOR_ROLE_SLUG, PLATFORM_USER_ROLE_SLUG, Role,
 };
 use crate::models::user::{COLLECTION_NAME as USERS, PlatformRole, User};
 
@@ -20,6 +20,10 @@ const PLATFORM_USER_ROLE_DESCRIPTION: &str = "Default user role";
 const PLATFORM_ADMIN_PERMISSIONS: &[&str] = &["*"];
 const PLATFORM_OPERATOR_PERMISSIONS: &[&str] = &["nyxid:admin:read"];
 const PLATFORM_USER_PERMISSIONS: &[&str] = &[];
+const CREDITS_MANAGER_ROLE_NAME: &str = "Credits Manager";
+const CREDITS_MANAGER_ROLE_DESCRIPTION: &str =
+    "Lets an Operator issue and revoke one-off credit grants";
+const CREDITS_MANAGER_PERMISSIONS: &[&str] = &[CREDIT_GRANTS_WRITE_PERMISSION];
 
 #[derive(Clone, Debug)]
 pub struct PlatformRoleIds {
@@ -138,6 +142,33 @@ pub fn resolve_platform_role_from_ids(user: &User, role_ids: &PlatformRoleIds) -
 pub async fn resolve_platform_role(db: &mongodb::Database, user: &User) -> AppResult<PlatformRole> {
     let role_ids = get_platform_role_ids(db).await?;
     Ok(resolve_platform_role_from_ids(user, &role_ids))
+}
+
+/// Whether the user may issue and revoke one-off credit grants: every Admin,
+/// and an Operator whose direct or group roles carry
+/// [`CREDIT_GRANTS_WRITE_PERMISSION`]. Regular users never qualify, even if
+/// they hold the permission.
+pub async fn can_manage_credit_grants(
+    db: &mongodb::Database,
+    user: &User,
+    platform_role: PlatformRole,
+) -> AppResult<bool> {
+    match platform_role {
+        PlatformRole::Admin => Ok(true),
+        PlatformRole::User => Ok(false),
+        PlatformRole::Operator => {
+            let rbac = crate::services::rbac_helpers::resolve_rbac_from_ids(
+                db,
+                &user.role_ids,
+                &user.group_ids,
+            )
+            .await?;
+            Ok(rbac
+                .permissions
+                .iter()
+                .any(|permission| permission == CREDIT_GRANTS_WRITE_PERMISSION))
+        }
+    }
 }
 
 pub fn add_platform_role_id(
@@ -534,6 +565,15 @@ pub async fn seed_system_roles(db: &mongodb::Database) -> AppResult<()> {
         is_default: true,
     };
     ensure_system_role(db, &user).await?;
+
+    let credits_manager = SystemRoleSpec {
+        name: CREDITS_MANAGER_ROLE_NAME,
+        slug: CREDITS_MANAGER_ROLE_SLUG,
+        description: CREDITS_MANAGER_ROLE_DESCRIPTION,
+        permissions: CREDITS_MANAGER_PERMISSIONS,
+        is_default: false,
+    };
+    ensure_system_role(db, &credits_manager).await?;
 
     Ok(())
 }

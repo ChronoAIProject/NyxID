@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isBillingAvailable } from "./api";
+import { canManageCreditGrants, isBillingAvailable } from "./api";
 
 describe("isBillingAvailable", () => {
   it("fails closed when user capabilities are absent", () => {
@@ -21,5 +21,30 @@ describe("isBillingAvailable", () => {
         capabilities: { billing_available: true },
       }),
     ).toBe(true);
+  });
+});
+
+describe("canManageCreditGrants", () => {
+  it("allows admins and operators the backend marks as credits managers", () => {
+    expect(canManageCreditGrants({ is_admin: true, role: "admin" })).toBe(true);
+    expect(
+      canManageCreditGrants({
+        is_admin: false,
+        role: "operator",
+        capabilities: { manage_credit_grants: true },
+      }),
+    ).toBe(true);
+  });
+
+  it("denies plain operators, users and older backends", () => {
+    expect(canManageCreditGrants({ is_admin: false, role: "operator" })).toBe(false);
+    expect(
+      canManageCreditGrants({
+        is_admin: false,
+        role: "user",
+        capabilities: { manage_credit_grants: false },
+      }),
+    ).toBe(false);
+    expect(canManageCreditGrants(null)).toBe(false);
   });
 });

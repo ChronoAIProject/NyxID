@@ -12,7 +12,9 @@ use utoipa::ToSchema;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
-use crate::handlers::admin_helpers::{require_admin, require_admin_or_operator};
+use crate::handlers::admin_helpers::{
+    require_admin, require_admin_or_operator, require_credit_grant_manager,
+};
 use crate::models::billing_target::{BillingServiceScope, BillingTargetKind};
 use crate::models::credit_grant::{CreditGrant, CreditGrantStatus};
 use crate::models::usage_allowance::{AllowanceRecurrence, UsageAllowance};
@@ -249,7 +251,7 @@ pub async fn issue_grant(
     auth_user: AuthUser,
     Json(body): Json<IssueGrantRequest>,
 ) -> AppResult<Json<IssueGrantResponse>> {
-    require_admin(&state, &auth_user).await?;
+    require_credit_grant_manager(&state, &auth_user).await?;
     let target_org_ids = body.target_org_ids.clone();
     let target_group_ids = body.target_group_ids.clone();
     let grants = billing::grants::issue_grants(
@@ -386,7 +388,7 @@ pub async fn revoke_grant(
     auth_user: AuthUser,
     Path(grant_id): Path<String>,
 ) -> AppResult<Json<CreditGrantResponse>> {
-    require_admin(&state, &auth_user).await?;
+    require_credit_grant_manager(&state, &auth_user).await?;
     let grant = billing::grants::revoke_grant(&state.db, &grant_id).await?;
     audit_service::log_for_user(
         state.db.clone(),
@@ -1000,6 +1002,86 @@ mod tests {
         for error in [issue, revoke, create, update] {
             assert!(matches!(error, AppError::Forbidden(_)));
         }
+    }
+
+    #[tokio::test]
+    async fn credits_manager_operator_issues_and_revokes_grants_only() {
+        let Some((state, _admin_id, operator_id, user_id)) =
+            setup("billing_credits_manager_access").await
+        else {
+            return;
+        };
+        let credits_manager = state
+            .db
+            .collection::<crate::models::role::Role>(crate::models::role::COLLECTION_NAME)
+            .find_one(doc! { "slug": crate::models::role::CREDITS_MANAGER_ROLE_SLUG })
+            .await
+            .unwrap()
+            .expect("credits manager role is seeded");
+        for id in [&operator_id, &user_id] {
+            role_service::assign_role_to_user(&state.db, id, &credits_manager.id)
+                .await
+                .unwrap();
+        }
+        // amount 0 passes authorization and then fails validation.
+        let issue_body = || {
+            Json(IssueGrantRequest {
+                amount_credits: 0,
+                target_kind: BillingTargetKind::AllUsers,
+                target_user_ids: Vec::new(),
+                target_org_ids: Vec::new(),
+                target_group_ids: Vec::new(),
+                all_services: true,
+                service_refs: Vec::new(),
+                expires_at: None,
+                reason: None,
+            })
+        };
+
+        let operator = test_auth_user(&operator_id);
+        let issue = issue_grant(State(state.clone()), operator.clone(), issue_body())
+            .await
+            .expect_err("invalid amount");
+        assert!(matches!(issue, AppError::ValidationError(_)), "{issue:?}");
+        let revoke = revoke_grant(
+            State(state.clone()),
+            operator.clone(),
+            Path("missing-grant".to_string()),
+        )
+        .await
+        .expect_err("grant does not exist");
+        assert!(!matches!(revoke, AppError::Forbidden(_)), "{revoke:?}");
+        let create = create_allowance(
+            State(state.clone()),
+            operator,
+            Json(CreateAllowanceRequest {
+                metric: None,
+                service_ref: "service-1".to_string(),
+                quantity: Some(Some(1)),
+                recurrence: Some(Some(AllowanceRecurrence::Daily)),
+                target_kind: BillingTargetKind::AllUsers,
+                target_user_ids: Vec::new(),
+                target_org_ids: Vec::new(),
+                target_group_ids: Vec::new(),
+                units: None,
+            }),
+        )
+        .await
+        .expect_err("allowances stay admin-only");
+        assert!(matches!(create, AppError::Forbidden(_)));
+
+        // The role alone does nothing for a regular user.
+        let user = test_auth_user(&user_id);
+        let issue = issue_grant(State(state.clone()), user.clone(), issue_body())
+            .await
+            .expect_err("regular user");
+        let revoke = revoke_grant(State(state.clone()), user, Path("missing-grant".into()))
+            .await
+            .expect_err("regular user");
+        for error in [issue, revoke] {
+            assert!(matches!(error, AppError::Forbidden(_)), "{error:?}");
+        }
+        state.db.drop().await.unwrap();
     }
 
     #[tokio::test]
