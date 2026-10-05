@@ -26,6 +26,7 @@ pub mod transfer;
 pub mod update;
 
 use std::{
+    collections::VecDeque,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -37,10 +38,468 @@ use nyxid_machine::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::Mutex,
 };
+
+const OPERATION_RECEIPT_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+const OPERATION_RECEIPT_RUNNING_TTL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+const OPERATION_RECEIPT_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+// A desktop stream can legitimately issue thousands of signed input requests
+// in one turn. Complete receipts are FIFO-evicted; only in-flight operations
+// can refuse admission.
+const OPERATION_RECEIPT_LIMIT: usize = 4096;
+const OPERATION_RECEIPT_RUNNING_LIMIT: usize = 4096;
+const OPERATION_RECEIPT_RESULT_LIMIT: usize = 256 * 1024;
+const OPERATION_RECEIPT_RESULT_BUDGET: usize = 32 * 1024 * 1024;
+
+enum ReceiptState {
+    Running(Arc<tokio::sync::Notify>),
+    Complete { result: Value, bytes: usize },
+}
+
+struct OperationReceipt {
+    fingerprint: [u8; 32],
+    state: ReceiptState,
+    expires_at: std::time::Instant,
+}
+
+#[derive(Default)]
+struct OperationReceipts {
+    entries: Mutex<ReceiptLedger>,
+    replay_deliveries: Mutex<std::collections::HashMap<String, usize>>,
+}
+
+#[derive(Default)]
+struct ReceiptLedger {
+    entries: std::collections::HashMap<String, OperationReceipt>,
+    completed: VecDeque<String>,
+    result_bytes: usize,
+}
+
+enum ReceiptDecision {
+    Execute,
+    Wait(Arc<tokio::sync::Notify>),
+    Complete(Value),
+    Conflict,
+    Capacity,
+}
+
+enum ReceiptWaitOutcome {
+    Complete(Value),
+    Conflict,
+    Pending,
+}
+
+fn unknown_receipt_result() -> Value {
+    json!({"error":{"code":12407,"message":"machine operation outcome unknown; observe before retrying"}})
+}
+
+fn bounded_receipt_result(result: Value) -> (Value, usize) {
+    let bytes = serde_json::to_vec(&result).map_or(usize::MAX, |bytes| bytes.len());
+    if bytes <= OPERATION_RECEIPT_RESULT_LIMIT {
+        return (result, bytes);
+    }
+    let result = json!({"error":{"code":12407,"message":"machine operation completed; response exceeded the replay limit; observe before retrying"}});
+    let bytes = serde_json::to_vec(&result).map_or(usize::MAX, |bytes| bytes.len());
+    (result, bytes)
+}
+
+impl OperationReceipts {
+    async fn begin(&self, request_id: &str, fingerprint: [u8; 32]) -> ReceiptDecision {
+        let mut ledger = self.entries.lock().await;
+        let now = std::time::Instant::now();
+        ledger.sweep(now);
+        match ledger.entries.get(request_id) {
+            Some(receipt) if receipt.fingerprint != fingerprint => ReceiptDecision::Conflict,
+            Some(OperationReceipt {
+                state: ReceiptState::Complete { result, .. },
+                ..
+            }) => ReceiptDecision::Complete(result.clone()),
+            Some(OperationReceipt {
+                state: ReceiptState::Running(notify),
+                ..
+            }) => ReceiptDecision::Wait(notify.clone()),
+            None if ledger.running_count() >= OPERATION_RECEIPT_RUNNING_LIMIT => {
+                ReceiptDecision::Capacity
+            }
+            None => {
+                ledger.evict_completed_until_admitted();
+                if ledger.entries.len() >= OPERATION_RECEIPT_LIMIT {
+                    ReceiptDecision::Capacity
+                } else {
+                    ledger.entries.insert(
+                        request_id.to_owned(),
+                        OperationReceipt {
+                            fingerprint,
+                            state: ReceiptState::Running(Arc::new(tokio::sync::Notify::new())),
+                            expires_at: now + OPERATION_RECEIPT_RUNNING_TTL,
+                        },
+                    );
+                    ReceiptDecision::Execute
+                }
+            }
+        }
+    }
+
+    async fn complete(&self, request_id: &str, result: Value) {
+        let notify = {
+            let mut ledger = self.entries.lock().await;
+            ledger.sweep(std::time::Instant::now());
+            let Some(receipt) = ledger.entries.get_mut(request_id) else {
+                return;
+            };
+            let ReceiptState::Running(notify) = &receipt.state else {
+                return;
+            };
+            let notify = notify.clone();
+            let (result, bytes) = bounded_receipt_result(result);
+            receipt.state = ReceiptState::Complete { result, bytes };
+            receipt.expires_at = std::time::Instant::now() + OPERATION_RECEIPT_TTL;
+            ledger.result_bytes = ledger.result_bytes.saturating_add(bytes);
+            ledger.completed.push_back(request_id.to_owned());
+            ledger.evict_completed_for_budget(Some(request_id));
+            notify
+        };
+        notify.notify_waiters();
+    }
+
+    async fn wait(
+        &self,
+        request_id: &str,
+        fingerprint: [u8; 32],
+        notify: Arc<tokio::sync::Notify>,
+    ) -> ReceiptWaitOutcome {
+        let deadline = tokio::time::Instant::now() + OPERATION_RECEIPT_WAIT_TIMEOUT;
+        loop {
+            // Register before checking state. If completion races the check,
+            // Notify retains a permit and the waiter cannot miss the wakeup.
+            let notified = notify.notified();
+            let state = {
+                let mut ledger = self.entries.lock().await;
+                ledger.sweep(std::time::Instant::now());
+                match ledger.entries.get(request_id) {
+                    Some(receipt) if receipt.fingerprint != fingerprint => {
+                        ReceiptWaitOutcome::Conflict
+                    }
+                    Some(OperationReceipt {
+                        state: ReceiptState::Complete { result, .. },
+                        ..
+                    }) => ReceiptWaitOutcome::Complete(result.clone()),
+                    Some(OperationReceipt {
+                        state: ReceiptState::Running(_),
+                        ..
+                    }) => ReceiptWaitOutcome::Pending,
+                    None => ReceiptWaitOutcome::Complete(unknown_receipt_result()),
+                }
+            };
+            match state {
+                ReceiptWaitOutcome::Pending => {}
+                outcome => return outcome,
+            }
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                return ReceiptWaitOutcome::Complete(unknown_receipt_result());
+            }
+        }
+    }
+
+    #[cfg(test)]
+    async fn result_bytes(&self) -> usize {
+        self.entries.lock().await.result_bytes
+    }
+
+    async fn mark_replay(&self, request_id: &str) {
+        let mut deliveries = self.replay_deliveries.lock().await;
+        let count = deliveries.entry(request_id.to_owned()).or_default();
+        *count = count.saturating_add(1);
+    }
+
+    async fn take_replay(&self, request_id: &str) -> bool {
+        let mut deliveries = self.replay_deliveries.lock().await;
+        let Some(count) = deliveries.get_mut(request_id) else {
+            return false;
+        };
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            deliveries.remove(request_id);
+        }
+        true
+    }
+}
+
+impl ReceiptLedger {
+    fn running_count(&self) -> usize {
+        self.entries
+            .values()
+            .filter(|receipt| matches!(receipt.state, ReceiptState::Running(_)))
+            .count()
+    }
+
+    fn sweep(&mut self, now: std::time::Instant) {
+        let mut expired_running = Vec::new();
+        let mut expired_complete = Vec::new();
+        for (request_id, receipt) in &self.entries {
+            if receipt.expires_at > now {
+                continue;
+            }
+            if matches!(receipt.state, ReceiptState::Running(_)) {
+                expired_running.push(request_id.clone());
+            } else {
+                expired_complete.push(request_id.clone());
+            }
+        }
+        for request_id in expired_running {
+            let notify = match self.entries.get_mut(&request_id) {
+                Some(receipt) => {
+                    let ReceiptState::Running(notify) = &receipt.state else {
+                        continue;
+                    };
+                    let notify = notify.clone();
+                    let (result, bytes) = bounded_receipt_result(unknown_receipt_result());
+                    receipt.state = ReceiptState::Complete { result, bytes };
+                    receipt.expires_at = now + OPERATION_RECEIPT_TTL;
+                    self.result_bytes = self.result_bytes.saturating_add(bytes);
+                    self.completed.push_back(request_id.clone());
+                    Some(notify)
+                }
+                None => None,
+            };
+            if let Some(notify) = notify {
+                notify.notify_waiters();
+            }
+        }
+        for request_id in expired_complete {
+            self.remove_complete(&request_id);
+        }
+        self.evict_completed_for_budget(None);
+    }
+
+    fn evict_completed_until_admitted(&mut self) {
+        while self.entries.len() >= OPERATION_RECEIPT_LIMIT {
+            let Some(request_id) = self.completed.pop_front() else {
+                break;
+            };
+            self.remove_complete(&request_id);
+        }
+    }
+
+    fn evict_completed_for_budget(&mut self, protected: Option<&str>) {
+        let mut inspected = 0;
+        while self.result_bytes > OPERATION_RECEIPT_RESULT_BUDGET {
+            let Some(request_id) = self.completed.pop_front() else {
+                break;
+            };
+            if protected == Some(request_id.as_str()) {
+                self.completed.push_back(request_id);
+                inspected += 1;
+                if inspected >= self.completed.len() {
+                    break;
+                }
+                continue;
+            }
+            inspected = 0;
+            self.remove_complete(&request_id);
+        }
+    }
+
+    fn remove_complete(&mut self, request_id: &str) {
+        let Some(receipt) = self.entries.remove(request_id) else {
+            return;
+        };
+        if let ReceiptState::Complete { bytes, .. } = receipt.state {
+            self.result_bytes = self.result_bytes.saturating_sub(bytes);
+        } else {
+            self.entries.insert(request_id.to_owned(), receipt);
+        }
+    }
+}
+
+struct ReceiptExecutionGuard {
+    receipts: Arc<OperationReceipts>,
+    request_id: String,
+    finished: bool,
+}
+
+impl ReceiptExecutionGuard {
+    fn new(receipts: Arc<OperationReceipts>, request_id: String) -> Self {
+        Self {
+            receipts,
+            request_id,
+            finished: false,
+        }
+    }
+
+    async fn finish(mut self, result: Value) {
+        self.receipts.complete(&self.request_id, result).await;
+        self.finished = true;
+    }
+}
+
+impl Drop for ReceiptExecutionGuard {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        let receipts = self.receipts.clone();
+        let request_id = self.request_id.clone();
+        let result = unknown_receipt_result();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                receipts.complete(&request_id, result).await;
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+mod operation_receipt_tests {
+    use super::*;
+
+    async fn wait_until_complete(receipts: &OperationReceipts, request_id: &str) -> Value {
+        for _ in 0..100 {
+            if let ReceiptDecision::Complete(result) = receipts.begin(request_id, [7; 32]).await {
+                return result;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("receipt did not complete");
+    }
+
+    #[tokio::test]
+    async fn same_request_id_replays_the_completed_result_without_reexecution() {
+        let receipts = OperationReceipts::default();
+        let fingerprint = [7; 32];
+        assert!(matches!(
+            receipts.begin("write-once", fingerprint).await,
+            ReceiptDecision::Execute
+        ));
+
+        let waiter = receipts.begin("write-once", fingerprint).await;
+        let ReceiptDecision::Wait(notify) = waiter else {
+            panic!("duplicate must wait for the original operation");
+        };
+        let notified = tokio::spawn(async move {
+            notify.notified().await;
+        });
+        tokio::task::yield_now().await;
+        receipts
+            .complete("write-once", json!({"sha256":"result","bytes":4}))
+            .await;
+        notified.await.unwrap();
+
+        assert!(matches!(
+            receipts.begin("write-once", fingerprint).await,
+            ReceiptDecision::Complete(result) if result["bytes"] == 4
+        ));
+        assert!(matches!(
+            receipts.begin("write-once", [8; 32]).await,
+            ReceiptDecision::Conflict
+        ));
+        receipts.mark_replay("write-once").await;
+        assert!(receipts.take_replay("write-once").await);
+        assert!(!receipts.take_replay("write-once").await);
+    }
+
+    #[tokio::test]
+    async fn completion_before_wait_registration_is_not_lost() {
+        let receipts = OperationReceipts::default();
+        assert!(matches!(
+            receipts.begin("race", [7; 32]).await,
+            ReceiptDecision::Execute
+        ));
+        let ReceiptDecision::Wait(notify) = receipts.begin("race", [7; 32]).await else {
+            panic!("duplicate must wait");
+        };
+        receipts.complete("race", json!({"ok":true})).await;
+        assert!(matches!(
+            receipts.wait("race", [7; 32], notify).await,
+            ReceiptWaitOutcome::Complete(result) if result["ok"] == true
+        ));
+    }
+
+    #[tokio::test]
+    async fn dropped_execution_records_a_deterministic_outcome() {
+        let receipts = Arc::new(OperationReceipts::default());
+        assert!(matches!(
+            receipts.begin("aborted", [7; 32]).await,
+            ReceiptDecision::Execute
+        ));
+        drop(ReceiptExecutionGuard::new(
+            receipts.clone(),
+            "aborted".into(),
+        ));
+        let result = wait_until_complete(&receipts, "aborted").await;
+        assert_eq!(result["error"]["code"], 12407);
+        assert_eq!(
+            result["error"]["message"],
+            "machine operation outcome unknown; observe before retrying"
+        );
+    }
+
+    #[tokio::test]
+    async fn sequential_desktop_burst_evicts_completed_receipts() {
+        let receipts = OperationReceipts::default();
+        for index in 0..10_000 {
+            let request_id = format!("input-{index}");
+            assert!(matches!(
+                receipts.begin(&request_id, [7; 32]).await,
+                ReceiptDecision::Execute
+            ));
+            receipts
+                .complete(&request_id, json!({"accepted":true}))
+                .await;
+        }
+        assert!(receipts.result_bytes().await <= OPERATION_RECEIPT_RESULT_BUDGET);
+    }
+
+    #[tokio::test]
+    async fn completed_results_are_evicted_at_the_aggregate_byte_budget() {
+        let receipts = OperationReceipts::default();
+        let payload = "x".repeat(OPERATION_RECEIPT_RESULT_LIMIT - 128);
+        for index in 0..200 {
+            let request_id = format!("large-{index}");
+            assert!(matches!(
+                receipts.begin(&request_id, [7; 32]).await,
+                ReceiptDecision::Execute
+            ));
+            receipts
+                .complete(&request_id, json!({"payload":payload.as_str()}))
+                .await;
+        }
+        assert!(receipts.result_bytes().await <= OPERATION_RECEIPT_RESULT_BUDGET);
+    }
+}
+
+fn receipt_fingerprint(request: &Request) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(serde_json::to_vec(&request.operation).unwrap_or_default());
+    digest.update(serde_json::to_vec(&request.authority).unwrap_or_default());
+    digest.update(serde_json::to_vec(&request.parameters).unwrap_or_default());
+    digest.finalize().into()
+}
+
+fn receipt_operation(operation: Operation) -> bool {
+    matches!(
+        operation,
+        Operation::Exec
+            | Operation::JobCancel
+            | Operation::WriteFile
+            | Operation::EditFile
+            | Operation::SaveAttachment
+            | Operation::ServiceCall
+            | Operation::Browser
+            | Operation::FillLogin
+            | Operation::Computer
+            | Operation::DesktopOpen
+            | Operation::DesktopClose
+            | Operation::DesktopControl
+            | Operation::DesktopInput
+            | Operation::Upgrade
+            | Operation::ContainerMigrate
+    )
+}
 
 #[derive(Debug, thiserror::Error)]
 enum MachineError {
@@ -185,6 +644,7 @@ pub struct Runtime {
     browser: Mutex<Option<browser::Browser>>,
     dev_browser: Mutex<Option<dev_browser::DevBrowser>>,
     clipboard_files: Mutex<Vec<tempfile::NamedTempFile>>,
+    operation_receipts: Arc<OperationReceipts>,
     replay: Mutex<ReplayGuard>,
     redactor: Arc<Mutex<Redactor>>,
     owner_control: tokio::sync::watch::Sender<u64>,
@@ -254,6 +714,7 @@ impl Runtime {
             browser: Mutex::new(None),
             dev_browser: Mutex::new(None),
             clipboard_files: Mutex::new(Vec::new()),
+            operation_receipts: Arc::new(OperationReceipts::default()),
             replay: Mutex::new(ReplayGuard::default()),
             redactor,
             owner_control: tokio::sync::watch::channel(0).0,
@@ -531,6 +992,11 @@ impl Runtime {
         parameters: &Value,
         mut result: Value,
     ) {
+        let receipt_replay = if receipt_operation(operation) {
+            self.operation_receipts.take_replay(request_id).await
+        } else {
+            false
+        };
         let Ok(permit) = sender.reserve().await else {
             return;
         };
@@ -581,6 +1047,7 @@ impl Runtime {
         >(parameters["_signed_authority"].clone())
         {
             if result.get("error").is_none()
+                && !receipt_replay
                 && !self.authority.live(&authority.lease_id)
                 && !matches!(
                     operation,
@@ -591,13 +1058,16 @@ impl Runtime {
             }
             // A renewal's acknowledgement is not the operation's completion.
             // Rejected signatures/envelopes may not mutate an existing lease.
-            if !matches!(
-                operation,
-                Operation::AuthorityRenew | Operation::AuthorityRevoke
-            ) && !matches!(
-                result["error"]["code"].as_u64(),
-                Some(12401 | 12420 | 12421)
-            ) {
+            if !receipt_replay
+                && !matches!(
+                    operation,
+                    Operation::AuthorityRenew | Operation::AuthorityRevoke
+                )
+                && !matches!(
+                    result["error"]["code"].as_u64(),
+                    Some(12401 | 12420 | 12421)
+                )
+            {
                 self.authority.finish(&authority.lease_id);
             }
         }
@@ -643,21 +1113,123 @@ impl Runtime {
             });
         }
     }
-    pub async fn handle(self: &Arc<Self>, mut request: Request, signing_secret: &[u8]) -> Value {
-        if request.version == 2 {
-            self.ensure_authority_watch();
-        }
-        if self
-            .replay
-            .lock()
-            .await
-            .verify(
+    pub async fn handle(self: &Arc<Self>, request: Request, signing_secret: &[u8]) -> Value {
+        if receipt_operation(request.operation) {
+            let request_id = request.request_id.clone();
+            let fingerprint = receipt_fingerprint(&request);
+            // Validate the signed identity and timestamp before consulting the
+            // receipt cache. Duplicate nonce consumption is deliberately left
+            // to the full replay check below; a cached result still requires a
+            // valid HMAC and a fresh request.
+            if self
+                .replay
+                .lock()
+                .await
+                .verify_signature_and_freshness(
+                    &request,
+                    &self.node_id,
+                    signing_secret,
+                    chrono::Utc::now().timestamp(),
+                )
+                .is_err()
+            {
+                return json!({"error":{"code":12401,"message":"machine signature or replay check failed"}});
+            }
+            match self
+                .operation_receipts
+                .begin(&request_id, fingerprint)
+                .await
+            {
+                ReceiptDecision::Complete(result) => {
+                    self.operation_receipts.mark_replay(&request_id).await;
+                    tracing::info!(
+                        request_id = %request_id,
+                        operation = ?request.operation,
+                        "machine operation receipt replayed"
+                    );
+                    return result;
+                }
+                ReceiptDecision::Conflict => {
+                    tracing::warn!(
+                        request_id = %request_id,
+                        operation = ?request.operation,
+                        "machine operation request identity conflict"
+                    );
+                    return json!({"error":{"code":12401,"message":"machine request identity conflict; retry with a new request"}});
+                }
+                ReceiptDecision::Capacity => {
+                    self.operation_receipts.mark_replay(&request_id).await;
+                    return json!({"error":{"code":12407,"message":"machine operation receipt capacity reached; retry later"}});
+                }
+                ReceiptDecision::Wait(notify) => {
+                    tracing::info!(
+                        request_id = %request_id,
+                        operation = ?request.operation,
+                        "machine operation receipt awaiting original result"
+                    );
+                    return match self
+                        .operation_receipts
+                        .wait(&request_id, fingerprint, notify)
+                        .await
+                    {
+                        ReceiptWaitOutcome::Complete(result) => {
+                            self.operation_receipts.mark_replay(&request_id).await;
+                            result
+                        }
+                        ReceiptWaitOutcome::Conflict => {
+                            json!({"error":{"code":12401,"message":"machine request identity conflict; retry with a new request"}})
+                        }
+                        ReceiptWaitOutcome::Pending => {
+                            self.operation_receipts.mark_replay(&request_id).await;
+                            unknown_receipt_result()
+                        }
+                    };
+                }
+                ReceiptDecision::Execute => {}
+            }
+            let verification = self.replay.lock().await.verify(
                 &request,
                 &self.node_id,
                 signing_secret,
                 chrono::Utc::now().timestamp(),
-            )
-            .is_err()
+            );
+            if verification.is_err() {
+                let result = json!({"error":{"code":12401,"message":"machine signature or replay check failed"}});
+                self.operation_receipts
+                    .complete(&request_id, result.clone())
+                    .await;
+                return result;
+            }
+            let receipt_guard =
+                ReceiptExecutionGuard::new(self.operation_receipts.clone(), request_id.clone());
+            let result = self.handle_uncached(request, signing_secret, true).await;
+            receipt_guard.finish(result.clone()).await;
+            return result;
+        }
+        self.handle_uncached(request, signing_secret, false).await
+    }
+
+    async fn handle_uncached(
+        self: &Arc<Self>,
+        mut request: Request,
+        signing_secret: &[u8],
+        already_verified: bool,
+    ) -> Value {
+        if request.version == 2 {
+            self.ensure_authority_watch();
+        }
+        if !already_verified
+            && self
+                .replay
+                .lock()
+                .await
+                .verify(
+                    &request,
+                    &self.node_id,
+                    signing_secret,
+                    chrono::Utc::now().timestamp(),
+                )
+                .is_err()
         {
             return json!({"error":{"code":12401,"message":"machine signature or replay check failed"}});
         }

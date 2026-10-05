@@ -308,6 +308,7 @@ impl Runtime {
         target.dev_identity = Some(context.dev);
         target.roots = files::Roots::new(&config.roots, &self.excluded)?;
         target.jobs = self.jobs.clone();
+        target.operation_receipts = self.operation_receipts.clone();
         target.upgrading = self.upgrading.clone();
         target.operation_admission = self.operation_admission.clone();
         target.turns = self.turns.clone();
