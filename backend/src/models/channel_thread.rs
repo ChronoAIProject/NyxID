@@ -52,6 +52,11 @@ pub struct ChannelThreadFacts {
     pub parent_message_id: Option<String>,
     pub sender_kind: ThreadSenderKind,
     pub address: ThreadAddress,
+    /// True when structured provider mention data names another user but does
+    /// not address this bot (or everyone). Older rows omit this field and
+    /// deserialize as false so their routing remains unchanged.
+    #[serde(default)]
+    pub mentions_others: bool,
     /// Keyed HMAC-SHA256 fingerprints of provider participants (email only),
     /// domain-separated as `email-participant`. These prove guest visibility
     /// without retaining recipient addresses or reversible unkeyed digests.
