@@ -252,6 +252,113 @@ pub async fn live_specialist(
     Ok(agent)
 }
 
+/// Resolve a specialist that the acting person may delegate work to.
+///
+/// Personal specialists keep their historical name/ID behaviour and always
+/// win. Organization specialists are considered only when the org-agent flag
+/// is enabled for this person and their live membership grants `can_proxy()`.
+/// A qualified selector is `org-slug/agent-name`; an unqualified org match
+/// must be unique so a name can never silently target the wrong organization.
+pub async fn delegable_specialist(
+    db: &Database,
+    actor: &str,
+    selector: &str,
+) -> AppResult<AssistantAgent> {
+    // Reuse the original lookup (including destroyed personal history and
+    // live-name precedence). ID lookup can return an org profile, so use ACL
+    // and the rollout flag must both be checked before returning it.
+    match specialist(db, actor, selector).await {
+        Ok(agent) => {
+            if agent.user_id != actor {
+                super::org_agent_service::require_creation_enabled(db, actor).await?;
+                super::org_agent_service::require_use(db, actor, &agent).await?;
+            }
+            return Ok(agent);
+        }
+        Err(AppError::NotFound(_)) => {}
+        Err(error) => return Err(error),
+    }
+
+    if let Some((org_selector, agent_selector)) = selector.split_once('/') {
+        if org_selector.is_empty() || agent_selector.is_empty() {
+            return Err(not_found());
+        }
+        super::org_agent_service::require_creation_enabled(db, actor).await?;
+        let owner = super::org_agent_service::resolve_org_selector(db, actor, org_selector).await?;
+        let agent = db
+            .collection::<AssistantAgent>(AGENTS)
+            .find_one(doc! {
+                "user_id": &owner,
+                "kind": "specialist",
+                "destroyed_at": bson::Bson::Null,
+                "$or": [{"_id": agent_selector}, {"name": agent_selector}],
+            })
+            .await?
+            .ok_or_else(not_found)?;
+        super::org_agent_service::require_use(db, actor, &agent).await?;
+        return Ok(agent);
+    }
+
+    if !valid_name(selector) {
+        return Err(not_found());
+    }
+    let owners = super::org_agent_service::visible_owners(db, actor).await?;
+    let org_owners: Vec<_> = owners.into_iter().filter(|owner| owner != actor).collect();
+    if org_owners.is_empty() {
+        return Err(not_found());
+    }
+    let candidates: Vec<AssistantAgent> = db
+        .collection::<AssistantAgent>(AGENTS)
+        .find(doc! {
+            "user_id": {"$in": &org_owners}, "kind": "specialist",
+            "name": selector, "destroyed_at": bson::Bson::Null,
+        })
+        .await?
+        .try_collect()
+        .await?;
+
+    if candidates.is_empty() {
+        return Err(not_found());
+    }
+    super::org_agent_service::require_creation_enabled(db, actor).await?;
+
+    let mut usable = Vec::with_capacity(candidates.len());
+    for agent in candidates {
+        match super::org_agent_service::require_use(db, actor, &agent).await {
+            Ok(()) => usable.push(agent),
+            Err(AppError::Forbidden(_)) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    match usable.len() {
+        0 => Err(not_found()),
+        1 => Ok(usable.pop().expect("one candidate")),
+        _ => {
+            let mut choices = Vec::with_capacity(usable.len());
+            for agent in &usable {
+                choices.push(qualified_name(db, agent).await?);
+            }
+            choices.sort();
+            Err(AppError::ValidationError(format!(
+                "Agent name is ambiguous; use one of: {}",
+                choices.join(", ")
+            )))
+        }
+    }
+}
+
+async fn qualified_name(db: &Database, agent: &AssistantAgent) -> AppResult<String> {
+    let owner = db
+        .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+        .find_one(doc! {"_id": &agent.user_id})
+        .await?;
+    let prefix = owner
+        .as_ref()
+        .and_then(|user| user.slug.as_deref())
+        .unwrap_or(&agent.user_id);
+    Ok(format!("{prefix}/{}", agent.name))
+}
+
 /// The owner's agents: NyxBot first, then specialists oldest first.
 pub async fn agents(
     db: &Database,
@@ -1726,6 +1833,7 @@ pub struct ReplySummary {
 pub struct AgentSummary {
     pub owner_id: String,
     pub owner_name: Option<String>,
+    pub owner_slug: Option<String>,
     pub owner_kind: &'static str,
     pub org_role: Option<crate::models::org_membership::OrgRole>,
     pub can_maintain: bool,
@@ -1754,6 +1862,20 @@ pub struct AgentSummary {
     pub created_at: DateTime<Utc>,
     pub last_active_at: DateTime<Utc>,
     pub destroyed_at: Option<DateTime<Utc>>,
+}
+
+impl AgentSummary {
+    pub fn delegation_name(&self) -> String {
+        if self.owner_kind == "org" {
+            format!(
+                "{}/{}",
+                self.owner_slug.as_deref().unwrap_or(&self.owner_id),
+                self.name
+            )
+        } else {
+            self.name.clone()
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1959,13 +2081,14 @@ pub async fn summaries(
                         .any(|s| &s.id == id && (!s.admin_only || acl.can_write()))
             });
         }
-        let owner_name = if org_owned {
+        let (owner_name, owner_slug) = if org_owned {
             db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
                 .find_one(doc! {"_id": &agent.user_id})
                 .await?
-                .and_then(|u| u.display_name)
+                .map(|u| (u.display_name, u.slug))
+                .unwrap_or((None, None))
         } else {
-            None
+            (None, None)
         };
         let home_id = if !super::org_agent_service::can_use(&acl) {
             None
@@ -1995,6 +2118,7 @@ pub async fn summaries(
         out.push(AgentSummary {
             owner_id: agent.user_id.clone(),
             owner_name,
+            owner_slug,
             owner_kind: if org_owned { "org" } else { "person" },
             org_role: super::org_agent_service::role(&acl),
             can_maintain: super::org_agent_service::can_maintain(&acl),
@@ -2180,15 +2304,24 @@ pub async fn direct_chats_note(
 
 /// A compact roster of the owner's specialists for NyxBot's instructions.
 pub async fn roster_note(db: &Database, owner: &str) -> AppResult<String> {
-    let rows = summaries(db, owner, false, false, 0).await?;
+    let rows = delegation_summaries(db, owner, false, 0).await?;
     if rows.is_empty() {
         return Ok(String::new());
     }
     let mut note = String::from("\n\nYour specialist agents (NyxID facts):");
     for row in rows.iter().take(32) {
+        let name = if row.owner_kind == "org" {
+            format!(
+                "{}/{}",
+                identifier(row.owner_slug.as_deref().unwrap_or(&row.owner_id)),
+                identifier(&row.name)
+            )
+        } else {
+            identifier(&row.name)
+        };
         note.push_str(&format!(
             "\n- {} [{}] services: {}{}{}",
-            identifier(&row.name),
+            name,
             row.status,
             if row.services.is_empty() {
                 "none".to_owned()
@@ -2215,6 +2348,26 @@ pub async fn roster_note(db: &Database, owner: &str) -> AppResult<String> {
         ));
     }
     Ok(note)
+}
+
+/// Use-oriented discovery; UI profile visibility may include Viewers, while
+/// delegation must not. Re-evaluate the flag and live ACL on every request.
+pub async fn delegation_summaries(
+    db: &Database,
+    actor: &str,
+    include_destroyed: bool,
+    reply_chars: usize,
+) -> AppResult<Vec<AgentSummary>> {
+    let rows = summaries(db, actor, false, include_destroyed, reply_chars).await?;
+    // Personal-only rosters keep the original summaries read budget. Resolve
+    // the per-person rollout flag only when there is org data to filter.
+    let org_enabled = rows.iter().any(|row| row.owner_kind == "org")
+        && super::feature_flag_service::personal_flag_enabled(db, actor, "assistant:org-agents")
+            .await?;
+    Ok(rows
+        .into_iter()
+        .filter(|row| row.can_use && (row.owner_kind != "org" || org_enabled))
+        .collect())
 }
 
 /// Remove settled-report events for the given agents from a NyxBot thread's

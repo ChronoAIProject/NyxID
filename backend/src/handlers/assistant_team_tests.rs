@@ -434,6 +434,213 @@ async fn specialist_work_reports_to_the_nyxbot_thread_that_assigned_it() {
 }
 
 #[tokio::test]
+async fn org_agent_delegation_runs_with_org_authority_and_reports_to_assigning_nyxbot() {
+    use crate::models::{assistant_agent::AgentGrants, org_membership::OrgRole};
+    use crate::services::{feature_flag_service as flags, org_agent_service as org_agents};
+    let (state, calls, server) = setup("team_org_delegation_report").await;
+    let db = &state.db;
+    let org = Uuid::new_v4().to_string();
+    let mut org_user = test_user(&org, UserType::Org);
+    org_user.slug = Some("delegation-team".into());
+    org_user.display_name = Some("Delegation Team".into());
+    db.collection(USERS).insert_one(org_user).await.unwrap();
+    db.collection(crate::models::org_membership::COLLECTION_NAME)
+        .insert_one(crate::test_utils::test_membership(
+            &org,
+            OWNER,
+            OrgRole::Member,
+            None,
+        ))
+        .await
+        .unwrap();
+    flags::set_platform_override(
+        db,
+        "assistant:org-agents",
+        &flags::FlagTarget::Global,
+        true,
+        OWNER,
+    )
+    .await
+    .unwrap();
+    let org_service = connected(db, &org, "org-service", "https://example.invalid").await;
+    let personal_service =
+        connected(db, OWNER, "personal-service", "https://example.invalid").await;
+    let (nyxbot, chat) = orchestrator(&state).await;
+    let other = user_turn(&state, None, None, "Unrelated private thread").await;
+    spawn(&state, &chat, json!({"org": "delegation-team", "name": "researcher",
+        "description": "Research the organization", "persona": "Use the organization's terminology"})).await;
+    let agents = team::agents(db, OWNER, false).await.unwrap();
+    let agent = agents.iter().find(|agent| agent.user_id == org).unwrap();
+    let agent = team::set_grants(
+        db,
+        OWNER,
+        &agent.id,
+        team::GrantChange::Add(AgentGrants {
+            service_ids: vec![org_service.clone()],
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+
+    // Both public selectors execute through the real native tool dispatcher.
+    for (index, selector) in [agent.id.as_str(), "delegation-team/researcher"]
+        .into_iter()
+        .enumerate()
+    {
+        let (value, error) = execute_tool(
+            &state,
+            &chat,
+            "nyxid__message_subagent",
+            &json!({"subagent": selector, "text": "Research this topic"}),
+        )
+        .await;
+        assert!(!error, "{value}");
+        assert_eq!(value["status"], "started");
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let events = transcript(&state, &nyxbot.id)
+                    .await
+                    .into_iter()
+                    .filter(|message| message.role == "event")
+                    .count();
+                let row = engine::get(db, OWNER, &nyxbot.id).await.unwrap();
+                if events == index + 1 && row.active_turn.is_none() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("org specialist reports to assigning NyxBot");
+    }
+    let home = team::home_thread_for(db, &state.encryption_keys, OWNER, &agent)
+        .await
+        .unwrap();
+    let home = idle_row(&state, &home.id).await;
+    assert_eq!(home.user_id, OWNER);
+    assert_eq!(home.agent_owner_id.as_deref(), Some(org.as_str()));
+    assert_eq!(home.report_to.as_deref(), Some(nyxbot.id.as_str()));
+    assert!(
+        transcript(&state, &other.id)
+            .await
+            .iter()
+            .all(|row| row.role != "event")
+    );
+    let key = key_service::get_api_key(db, OWNER, &home.credential_api_key_id)
+        .await
+        .unwrap();
+    assert!(!key.allow_all_services && !key.allow_auto_connected_services);
+    assert_eq!(key.allowed_service_ids, vec![org_service.clone()]);
+    assert!(key.allowed_platform_service_ids.is_empty());
+    let auth = crate::mw::auth::api_key_auth_user(db, &key, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(auth.user_id.to_string(), OWNER);
+    assert_eq!(auth.allowed_service_ids, vec![org_service.clone()]);
+    org_agents::authorize_execution(db, &auth, Some(&org_service))
+        .await
+        .unwrap();
+    assert!(
+        org_agents::authorize_execution(db, &auth, Some(&personal_service))
+            .await
+            .is_err()
+    );
+    assert!(
+        org_agents::authorize_execution(db, &auth, None)
+            .await
+            .is_err()
+    );
+    let sub_key = credentials::load_for_conversation(db, &state.encryption_keys, OWNER, &home.id)
+        .await
+        .unwrap()
+        .unwrap();
+    {
+        let calls = calls.lock().await;
+        let sub_call = calls
+            .iter()
+            .find(|call| call.authorization == format!("Bearer {}", sub_key.raw_key.as_str()))
+            .unwrap();
+        let instructions = sub_call.body["instructions"].as_str().unwrap();
+        assert!(instructions.starts_with(engine::SUBAGENT_PROMPT));
+        assert!(instructions.contains("Use the organization's terminology"));
+        assert!(instructions.contains("shared"));
+        assert!(
+            calls.last().unwrap().body["input"]
+                .as_str()
+                .unwrap()
+                .contains("Specialist researcher replied")
+        );
+    }
+    let (listed, error) = execute_tool(&state, &chat, "nyxid__list_subagents", &json!({})).await;
+    assert!(!error, "{listed}");
+    let listed = listed["subagents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == agent.id)
+        .unwrap();
+    assert_eq!(listed["qualified_name"], "delegation-team/researcher");
+    assert_eq!(listed["owner_name"], "Delegation Team");
+    assert_eq!(listed["can_maintain"], true);
+    assert_eq!(listed["persona"], "Use the organization's terminology");
+    assert_eq!(listed["home_conversation_id"], home.id);
+    assert_eq!(listed["memory_count"], 0);
+    assert_eq!(listed["last_reply"]["text"], "Work finished");
+    let (read, error) = execute_tool(
+        &state,
+        &chat,
+        "nyxid__read_subagent",
+        &json!({"subagent": "delegation-team/researcher"}),
+    )
+    .await;
+    assert!(!error, "{read}");
+    assert!(read.to_string().contains("Work finished"));
+    let (waited, error) = execute_tool(
+        &state,
+        &chat,
+        "nyxid__wait_for_subagents",
+        &json!({"subagents": [agent.id], "timeout_secs": 1}),
+    )
+    .await;
+    assert!(!error, "{waited}");
+    assert_eq!(waited["settled"][0]["id"], agent.id);
+    assert_eq!(waited["settled"][0]["name"], "delegation-team/researcher");
+
+    // Even an already resolved agent cannot start more work after revocation.
+    let calls_before = calls.lock().await.len();
+    db.collection::<bson_doc::Document>(crate::models::org_membership::COLLECTION_NAME)
+        .update_one(
+            doc! {"org_user_id": &org, "member_user_id": OWNER},
+            doc! {"$set": {"revoked_at": bson_doc::DateTime::now()}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        Box::pin(assign(
+            &state,
+            OWNER,
+            &agent,
+            "Must not start",
+            Some(&nyxbot.id)
+        ))
+        .await
+        .is_err()
+    );
+    assert!(
+        crate::mw::auth::api_key_auth_user(db, &key, None, None, None)
+            .await
+            .is_err()
+    );
+    assert_eq!(calls.lock().await.len(), calls_before);
+    let (listed, error) = execute_tool(&state, &chat, "nyxid__list_subagents", &json!({})).await;
+    assert!(!error, "{listed}");
+    assert!(listed["subagents"].as_array().unwrap().is_empty());
+    server.abort();
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn specialists_keep_memory_but_not_team_tools_and_destroyed_agents_are_read_only() {
     let (state, _, server) = setup("team_destroy").await;
     let (_, chat) = orchestrator(&state).await;
