@@ -37,6 +37,13 @@ const twitter = {
   },
 };
 const oauth = { ...connection, credential_type: "oauth2" };
+// A healthy modern connection last exchanged or refreshed with its resolved app.
+const healthy = {
+  ...oauth,
+  connection_id: "conn",
+  status: "active",
+  connection_status: "active" as const,
+};
 
 describe("billing gate before credential supply — reviewed acceptance cases", () => {
   it.each([
@@ -66,6 +73,14 @@ describe("billing gate before credential supply — reviewed acceptance cases", 
       row: { ...oauth, connection_id: "conn", oauth_client_id: "org-app" },
       category: "unknown",
     },
+    { row: { ...healthy }, category: "platform" },
+    { row: { ...healthy, oauth_client_id: "org-app" }, category: "byok" },
+    { row: { ...healthy, status: "failed" }, category: "unknown" },
+    {
+      row: { ...healthy, connection_status: "expired" as const },
+      category: "unknown",
+    },
+    { row: { ...healthy, connection_id: null }, category: "unknown" },
     { row: connection, category: "byok" },
     { row: { ...connection, api_key_id: null }, category: "unknown" },
     { row: { ...connection, credential_missing: true }, category: "unknown" },

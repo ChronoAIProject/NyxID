@@ -48,8 +48,15 @@ export function credentialSupplier(
   if (["oauth2", "device_code"].includes(connection.credential_type)) {
     if (connection.oauth_app_source === "platform") return "nyxid";
     if (connection.oauth_app_source === "byo") return "own";
-    // Older records may retain an unrelated app or lack the app originally
-    // used. The backend resolves token provenance; field absence is not proof.
+    // Modern connections exchange and refresh with their embedded app, else the
+    // provider's app, and providers only refresh tokens for the issuing app. A
+    // healthy row therefore proves its app; failed, expired and legacy rows do not.
+    if (
+      connection.connection_id &&
+      connection.status === "active" &&
+      connection.connection_status === "active"
+    )
+      return connection.oauth_client_id?.trim() ? "own" : "nyxid";
     return "unknown";
   }
   if (node && connection.credential_type === "node_managed") return "own";

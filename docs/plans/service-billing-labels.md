@@ -115,3 +115,14 @@ lane. Charging shared-app OAuth could be addressed through an explicit rate and
 NyxID-only restriction using the existing lane, or a separately reviewed change to
 OAuth lane selection. Either affects money, legacy provenance and agent overrides;
 it must not be hidden in a frontend label fix.
+
+### Healthy-connection provenance (owner-approved, 2026-10-05)
+
+Modern OAuth connections exchange and refresh with their embedded app when one is
+stored, otherwise with the provider's app, and providers refresh only tokens issued
+to the same app. A row with a `connection_id`, `status: active` and
+`connection_status: active` therefore proves its app: `oauth_client_id` present means
+BYOK, absent means NyxID. Failed, expired, revoked and legacy rows stay Unverified
+until backend provenance (`oauth_app_source`) resolves them. Do not remove this rule
+without the owner's sign-off; showing every healthy connection as Unverified is not
+an acceptable rollout state.
