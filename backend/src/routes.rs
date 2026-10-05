@@ -1058,6 +1058,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 .delete(handlers::admin_upload_retention::reset),
         )
         .route(
+            "/settings/utility-inference",
+            get(handlers::admin_utility_inference::get).put(handlers::admin_utility_inference::put),
+        )
+        .route(
             "/settings/broker",
             get(handlers::admin::get_broker_settings)
                 .patch(handlers::admin::update_broker_settings),

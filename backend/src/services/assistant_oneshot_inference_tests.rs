@@ -13,11 +13,12 @@ use wiremock::{
     matchers::{method, path},
 };
 
-const ACTOR: &str = "d364bc75-9a92-4f25-8ba5-0db167fe42a2";
+pub(crate) const ACTOR: &str = "d364bc75-9a92-4f25-8ba5-0db167fe42a2";
 const PLATFORM: &str = "platform-inference-secret-do-not-reflect";
 const OWN: &str = "personal-inference-secret-do-not-reflect";
 fn limits() -> TextLimits {
     TextLimits {
+        caller: TextCaller::Title,
         max_input_chars: 8_000,
         max_output_chars: 256,
         max_output_tokens: 128,
@@ -25,7 +26,9 @@ fn limits() -> TextLimits {
     }
 }
 
-async fn fixture(protocol: InferenceWireProtocol) -> (AppState, DownstreamService, MockServer) {
+pub(crate) async fn fixture(
+    protocol: InferenceWireProtocol,
+) -> (AppState, DownstreamService, MockServer) {
     let db = connect_transaction_test_database("assistant_oneshot").await;
     db.collection("users")
         .insert_one(test_user(ACTOR, UserType::Person))
@@ -352,7 +355,11 @@ async fn billed(state: &mut AppState, service: &DownstreamService) {
     crate::services::channel_x_tests::billing::enable_billing_with_entitlement(
         state,
         ACTOR,
-        "title-inference",
+        if service.slug == "chrono-llm-public" {
+            "chrono-llm-public"
+        } else {
+            "title-inference"
+        },
     )
     .await;
     state
@@ -746,4 +753,446 @@ fn assistant_oneshot_rejects_tool_and_non_text_outputs_including_mixed_responses
             assert!(output_text(protocol, &value).is_empty());
         }
     }
+}
+
+pub(crate) async fn utility_fixture() -> (AppState, DownstreamService, MockServer) {
+    let (state, mut service, mock) = fixture(InferenceWireProtocol::OpenaiCompletions).await;
+    service.slug = "chrono-llm-public".into();
+    state
+        .db
+        .collection::<DownstreamService>(COLLECTION_NAME)
+        .replace_one(doc! {"_id": &service.id}, &service)
+        .await
+        .unwrap();
+    super::super::utility_inference_service::seed(&state.db)
+        .await
+        .unwrap();
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":[
+            {"id":"gpt-6-luna"},{"id":"gpt-4.1-mini"},{"id":"gpt-4o-mini"},{"id":"gpt-4.1"}]})))
+        .with_priority(2)
+        .mount(&mock)
+        .await;
+    (state, service, mock)
+}
+
+async fn other_service(state: &AppState, original: &DownstreamService) -> MockServer {
+    let mock = MockServer::start().await;
+    let mut service = original.clone();
+    service.id = uuid::Uuid::new_v4().to_string();
+    service.slug = "zz-personal-fallback".into();
+    service.base_url = mock.uri();
+    state
+        .db
+        .collection::<DownstreamService>(COLLECTION_NAME)
+        .insert_one(&service)
+        .await
+        .unwrap();
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"data":[{"id":"text-mini"}]})),
+        )
+        .mount(&mock)
+        .await;
+    completion(
+        &mock,
+        service.inference.unwrap().wire_protocol,
+        "Fallback title",
+        Duration::ZERO,
+    )
+    .await;
+    mock
+}
+
+pub(crate) async fn utility_completion(mock: &MockServer) {
+    Mock::given(method("POST")).and(path("/chat/completions"))
+        .respond_with(|request: &wiremock::Request| {
+            let body: Value = request.body_json().unwrap();
+            if body["model"] != "gpt-6-luna" || body["reasoning_effort"] != "none" {
+                return ResponseTemplate::new(400);
+            }
+            if body["max_completion_tokens"].as_u64().unwrap_or(0) < 1024 {
+                return ResponseTemplate::new(200).set_body_json(json!({"choices":[{"finish_reason":"length","message":{"content":""}}]}));
+            }
+            ResponseTemplate::new(200).set_body_json(json!({"choices":[{"finish_reason":"stop","message":{"content":"Discover NyxBot capabilities"}}],"usage":{"prompt_tokens":8,"completion_tokens":6,"total_tokens":14}}))
+        }).mount(mock).await;
+}
+
+#[test]
+fn assistant_oneshot_openai_list_selects_live_non_reasoning_chat() {
+    let today = chrono::NaiveDate::from_ymd_opt(2026, 10, 23).unwrap();
+    let ids = [
+        "gpt-4.1-nano",
+        "gpt-4.1-mini",
+        "gpt-4o",
+        "gpt-5-nano",
+        "gpt-5.4-nano",
+        "gpt-6-luna",
+        "o3-mini",
+        "o4-mini",
+        "gpt-4o-mini-search-preview",
+        "o3-deep-research",
+        "gpt-5-codex",
+        "computer-use-preview",
+        "gpt-3.5-turbo-instruct",
+        "gpt-5-pro",
+        "babbage-002",
+        "davinci-002",
+        "gpt-image-1",
+        "text-embedding-3-small",
+        "tts-1",
+        "whisper-1",
+        "sora-2",
+    ];
+    let data: Vec<_> = ids.into_iter().map(|id| json!({"id":id,"object":"model","created":1744000000,
+        "owned_by":"system", "shutdown_date": if id == "gpt-4.1-nano" {Some("2026-10-23")} else {None}})).collect();
+    let models = suitable_models(&json!({"object":"list","data":data}), today);
+    assert_eq!(models[0], "gpt-4.1-mini");
+    assert_eq!(models.len(), 7);
+    assert!(!models.iter().any(|id| id == "gpt-4.1-nano"));
+    assert_eq!(
+        suitable_models(
+            &json!({"data":[{"id":"gpt-4.1-nano","shutdown_date":"2026-10-23"},{"id":"gpt-4.1-mini"}]}),
+            today.pred_opt().unwrap()
+        )[0],
+        "gpt-4.1-nano"
+    );
+}
+
+#[tokio::test]
+async fn assistant_oneshot_utility_and_learning_use_platform_model_and_acting_person_billing() {
+    let (mut state, service, mock) = utility_fixture().await;
+    // A personal connection must not override this server-selected platform route.
+    binding(&state, &service, ACTOR, "user").await;
+    billed(&mut state, &service).await;
+    utility_completion(&mock).await;
+    for caller in [TextCaller::Title, TextCaller::Learning] {
+        let mut bounds = limits();
+        bounds.caller = caller;
+        assert!(
+            one_shot_text(&state, ACTOR, "Summarize", "Data", bounds)
+                .await
+                .is_some()
+        );
+    }
+    let requests = mock.received_requests().await.unwrap();
+    assert_eq!(
+        requests.len(),
+        4,
+        "Utility model availability is live on each call"
+    );
+    assert!(
+        requests
+            .iter()
+            .all(|r| r.headers["authorization"] == format!("Bearer {PLATFORM}"))
+    );
+    let rows = crate::services::channel_x_tests::billing::settled(&state).await;
+    assert_eq!(rows.len(), 4);
+    for row in rows {
+        assert_eq!(row.billing_owner_id, ACTOR);
+        assert_eq!(row.credential_class, CredentialClass::NyxidManagedMaster);
+        assert_eq!(
+            row.quantity,
+            Some(if row.metric == BillingMetric::Tokens {
+                14
+            } else {
+                1
+            })
+        );
+    }
+}
+
+#[tokio::test]
+async fn assistant_oneshot_missing_utility_model_falls_back_only_within_service() {
+    let (state, service, mock) = utility_fixture().await;
+    let other = other_service(&state, &service).await;
+    super::super::utility_inference_service::set(
+        &state.db,
+        Some(crate::models::platform_settings::UtilityInference {
+            service_slug: service.slug.clone(),
+            model: "missing-model".into(),
+        }),
+    )
+    .await
+    .unwrap();
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(wiremock::matchers::body_partial_json(
+            json!({"model":"gpt-4.1-mini"}),
+        ))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"choices":[{"message":{"content":"Live model title"}}]})),
+        )
+        .expect(1)
+        .mount(&mock)
+        .await;
+    assert_eq!(
+        one_shot_text(&state, ACTOR, "Summarize", "Data", limits())
+            .await
+            .as_deref(),
+        Some("Live model title")
+    );
+    assert!(other.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn assistant_oneshot_unavailable_utility_falls_back_with_live_acl() {
+    for unavailable in ["inactive", "not_granted"] {
+        let (state, service, mock) = utility_fixture().await;
+        let other = other_service(&state, &service).await;
+        utility_completion(&mock).await;
+        assert!(
+            one_shot_text(&state, ACTOR, "Summarize", "Data", limits())
+                .await
+                .is_some()
+        );
+        let change = if unavailable == "inactive" {
+            doc! {"is_active": false}
+        } else {
+            doc! {"platform_key.audience":"restricted", "platform_key.allowed_owner_ids": []}
+        };
+        state
+            .db
+            .collection::<Document>(COLLECTION_NAME)
+            .update_one(doc! {"_id": &service.id}, doc! {"$set":change})
+            .await
+            .unwrap();
+        assert_eq!(
+            one_shot_text(&state, ACTOR, "Summarize", "Data", limits())
+                .await
+                .as_deref(),
+            Some("Fallback title")
+        );
+        assert_eq!(
+            mock.received_requests().await.unwrap().len(),
+            2,
+            "Revoked platform access must not use cached authority"
+        );
+        assert_eq!(other.received_requests().await.unwrap().len(), 2);
+    }
+}
+
+#[tokio::test]
+async fn assistant_oneshot_definite_400_falls_through_to_next_service() {
+    let (state, service, mock) = fixture(InferenceWireProtocol::OpenaiCompletions).await;
+    let other = other_service(&state, &service).await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(400))
+        .expect(1)
+        .mount(&mock)
+        .await;
+    assert_eq!(
+        one_shot_text(&state, ACTOR, "Summarize", "Data", limits())
+            .await
+            .as_deref(),
+        Some("Fallback title")
+    );
+    assert_eq!(other.received_requests().await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn assistant_oneshot_utility_400_falls_back_without_charging_refused_generation() {
+    let (mut state, service, mock) = utility_fixture().await;
+    billed(&mut state, &service).await;
+    let other = other_service(&state, &service).await;
+    Mock::given(method("POST"))
+        .and(wiremock::matchers::body_partial_json(
+            json!({"model":"gpt-6-luna"}),
+        ))
+        .respond_with(ResponseTemplate::new(400))
+        .expect(1)
+        .mount(&mock)
+        .await;
+    Mock::given(method("POST")).and(wiremock::matchers::body_partial_json(json!({"model":"gpt-4.1-mini"})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"choices":[{"message":{"content":"Fallback"}}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}})))
+        .expect(1).mount(&mock).await;
+    assert!(
+        one_shot_text(&state, ACTOR, "Summarize", "Data", limits())
+            .await
+            .is_some()
+    );
+    assert!(other.received_requests().await.unwrap().is_empty());
+    let rows = crate::services::channel_x_tests::billing::settled(&state).await;
+    assert_eq!(
+        rows.len(),
+        3,
+        "One discovery, one zero-quantity refusal and one paid generation"
+    );
+    assert_eq!(
+        rows.iter()
+            .filter(|r| r.metric == BillingMetric::Tokens)
+            .map(|r| r.quantity.unwrap())
+            .sum::<i64>(),
+        5
+    );
+}
+
+#[tokio::test]
+async fn assistant_oneshot_never_retries_paid_or_ambiguous_generation() {
+    for response in [
+        ResponseTemplate::new(500),
+        ResponseTemplate::new(408),
+        ResponseTemplate::new(409),
+        ResponseTemplate::new(200).set_body_json(json!({"choices":[{"message":{"content":""}}]})),
+        ResponseTemplate::new(200).set_body_json(
+            json!({"choices":[{"finish_reason":"length","message":{"content":"Partial"}}]}),
+        ),
+        ResponseTemplate::new(400).set_body_json(json!({"usage":{"total_tokens":5}})),
+        ResponseTemplate::new(200).set_body_string("invalid-json"),
+    ] {
+        let (state, service, mock) = utility_fixture().await;
+        let other = other_service(&state, &service).await;
+        Mock::given(method("POST"))
+            .respond_with(response)
+            .expect(1)
+            .mount(&mock)
+            .await;
+        assert!(
+            one_shot_text(&state, ACTOR, "Summarize", "Data", limits())
+                .await
+                .is_none()
+        );
+        assert_eq!(mock.received_requests().await.unwrap().len(), 2);
+        assert!(other.received_requests().await.unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn assistant_oneshot_fallback_is_bounded_to_three_attempts() {
+    let (state, _, mock) = utility_fixture().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(400))
+        .expect(3)
+        .mount(&mock)
+        .await;
+    assert!(
+        one_shot_text(&state, ACTOR, "Summarize", "Data", limits())
+            .await
+            .is_none()
+    );
+    assert_eq!(mock.received_requests().await.unwrap().len(), 4);
+}
+
+#[tokio::test]
+async fn assistant_oneshot_unsupported_reasoning_is_omitted_on_next_call_for_that_model_only() {
+    for protocol in [
+        InferenceWireProtocol::OpenaiResponses,
+        InferenceWireProtocol::OpenaiCompletions,
+    ] {
+        let (state, service, mock) = fixture(protocol).await;
+        Mock::given(method("GET"))
+            .and(path("/models"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"data":[{"id":"gpt-5-nano"}]})),
+            )
+            .with_priority(1)
+            .mount(&mock)
+            .await;
+        let parameter = if protocol == InferenceWireProtocol::OpenaiResponses {
+            "reasoning"
+        } else {
+            "reasoning_effort"
+        };
+        Mock::given(method("POST")).respond_with(move |request: &wiremock::Request| {
+            let body: Value = request.body_json().unwrap();
+            let budget = if protocol == InferenceWireProtocol::OpenaiResponses {"max_output_tokens"} else {"max_completion_tokens"};
+            assert_eq!(body[budget], 1024);
+            if body.get(parameter).is_some() {
+                ResponseTemplate::new(400).set_body_json(json!({"error":{"code":"unsupported_parameter","param":parameter}}))
+            } else if protocol == InferenceWireProtocol::OpenaiResponses {
+                ResponseTemplate::new(200).set_body_json(json!({"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Text fits"}]}]}))
+            } else {
+                ResponseTemplate::new(200).set_body_json(json!({"choices":[{"message":{"content":"Text fits"}}]}))
+            }
+        }).mount(&mock).await;
+        assert!(
+            one_shot_text(&state, ACTOR, "Summarize", "Data", limits())
+                .await
+                .is_none()
+        );
+        assert_eq!(
+            one_shot_text(&state, ACTOR, "Summarize", "Data", limits())
+                .await
+                .as_deref(),
+            Some("Text fits")
+        );
+        assert!(reasoning_disabled(&service.id, "gpt-5-nano"));
+        assert!(!reasoning_disabled(&service.id, "gpt-6-luna"));
+        assert!(!reasoning_disabled("different-service", "gpt-5-nano"));
+    }
+}
+
+#[test]
+fn assistant_oneshot_failure_diagnostics_are_once_bounded_metadata_only() {
+    #[derive(Clone)]
+    struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let capture = Capture(Default::default());
+    let writer = capture.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    {
+        let mut attempt = Attempt {
+            service: "chrono-llm-public",
+            class: CredentialClass::NyxidManagedMaster,
+            model: "gpt-6-luna".into(),
+            caller: TextCaller::Learning,
+            finished: false,
+        };
+        attempt.refuse("incomplete:max_output_tokens");
+    }
+    let log = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+    assert_eq!(log.lines().count(), 1);
+    for metadata in [
+        "chrono-llm-public",
+        "gpt-6-luna",
+        "learning",
+        "incomplete:max_output_tokens",
+        "NyxidManagedMaster",
+    ] {
+        assert!(log.contains(metadata));
+    }
+    // Provider-supplied error reason prose cannot become a stage.
+    assert_eq!(
+        incomplete_reason(
+            InferenceWireProtocol::OpenaiResponses,
+            &json!({"status":"incomplete","incomplete_details":{"reason":"private provider output"}})
+        ),
+        Some("incomplete:unknown")
+    );
+    assert!(!log.contains("private provider output"));
+}
+
+#[tokio::test]
+async fn assistant_oneshot_available_utility_model_list_failure_does_not_escape_to_personal() {
+    let (state, service, mock) = utility_fixture().await;
+    let other = other_service(&state, &service).await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(503))
+        .with_priority(1)
+        .mount(&mock)
+        .await;
+    assert!(
+        one_shot_text(&state, ACTOR, "Summarize", "Data", limits())
+            .await
+            .is_none()
+    );
+    assert_eq!(mock.received_requests().await.unwrap().len(), 1);
+    assert!(other.received_requests().await.unwrap().is_empty());
 }
