@@ -347,6 +347,45 @@ exact user-facing wording need no new environment variable.
 `received -> waiting_for_transcript -> queued -> running -> awaiting_confirmation |
 completed | failed | cancelled | outcome_unknown`.
 
+### Parallel voice work
+
+An admitted voice request runs in its own hidden task conversation so the
+visible conversation keeps its one-active-turn fence. The task thread inherits
+the selected agent, owner authority, grants, billing owner and confirmation
+policy; it stores the immutable source message and a request-bound turn ID.
+The dispatcher claims FIFO requests into separate pool permits, up to
+`min(3, available owner permits)` (the existing owner pool and its settings are
+the real bound). A fourth request remains queued. Each request has its own
+cancel/Stop fence and confirmation/read-back identity; one pending card never
+blocks another task. Durable request state, leases and generation fencing let
+recovery requeue a stale claimed task only after its hidden turn is fenced as
+lost and the hidden turn has zero recorded activities, at most once per request;
+if an activity exists (or the one replay has already been lost), it settles
+with the visible note **Interrupted by a server restart after it started acting
+— check before retrying** rather than replaying potentially destructive work.
+Voice task rows carry a parent-conversation marker and are excluded from thread
+listings while retaining their own key, transcript and acknowledgement records
+for cascade deletion. Result and
+progress announcements enter the call's single output arbiter, which defers
+speech while the user is speaking and still persists the visible-thread result.
+
+Reliability review keeps pool-full work queued for the next bounded sweep and
+wakes the dispatcher after every admission or decision. A result is published
+to the visible thread once, then announced when the authoritative input
+transcript has no open user segment; reconnects cannot replay the publication or
+the task because request state, hidden-thread active-turn fences, and the call
+generation are durable. The existing 30-second heartbeat and three-minute idle
+rules remain independent. Unknown provider events remain ignored and never
+become execution authority; durable request/session state is the recovery
+source of truth. A future change-stream push could replace the control socket's
+one-second refresh tick.
+
+Published voice results are added to the next visible-thread turn as at most
+eight bounded, identifier-labelled notes (up to 1,200 characters each), marked
+as untrusted quoted data. A new voice task receives the visible thread's
+bounded recap on its first turn, so references to earlier chat context remain
+available without merging execution histories.
+
 1. Deduplicate a provider delegation by `(voice_session_id, provider_event_id /
    delegation_id or call_id)`. Correlate OpenAI `offset_ms` with speaker intervals.
    Allow up to 750 ms for late transcript fragments, with a two-second hard
@@ -1098,12 +1137,19 @@ the authority; no browser-only lock or automatic takeover.
 
 On closure, append exactly one compact **Call receipt** through the existing
 thread message/sequence path with `via: "voice"`. Its deterministic server
-snapshot records elapsed duration, requests started/completed/still queued/
-cancelled, confirmations decided, and links to available results. The receipt
-is a call-end snapshot, not an LLM summary or a claim that queued work completed.
-Its durable session-bound identity and transactional marker deduplicate normal
-close, disconnect recovery and reconciliation. Results that settle later remain
-in the thread through the usual result path.
+snapshot shows duration and a cost line only when usage meters exist: a voice-only
+call has one `Cost` value, mixed token/voice usage may show credits plus voice
+cost, and any unsettled meter shows `Cost: pending`; billing-disabled calls omit
+the cost line. It then lists
+each handed-off request using a bounded title from the user's source message,
+its `Done`, `Running`, `Queued`, `Cancelled` or `Needs your OK` state, an
+existing-thread result link when available, and any confirmation inline. Zero
+counters are omitted; a call with no delegated work says **Just a
+conversation, nothing handed off**. The receipt is metadata-only, never an LLM
+summary or a claim that queued work completed. Its durable session-bound
+identity and transactional marker deduplicate normal close, disconnect recovery
+and reconciliation. Results that settle later remain in the thread through the
+usual result path.
 
 
 Follow `DESIGN.md`: Space Grotesk headings, Manrope text, JetBrains Mono timing;

@@ -89,6 +89,7 @@ pub async fn admit(
         notify_on_completion: preferences.notify_on_completion,
         preferences,
         receipt_message_id: None,
+        voice_claim_fence: 0,
         purge_requested: false,
         protocol: None,
         measured_ms: 0,

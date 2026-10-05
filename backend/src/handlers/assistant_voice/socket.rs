@@ -191,11 +191,15 @@ async fn serve(
                     "conversation_id":&call.conversation_id,"voice.session_id":&call.id}).sort(doc!{"seq":-1}).limit(16).await?.try_collect().await?;
                 let tasks:Vec<VoiceRequest>=state.db.collection(REQUESTS).find(doc!{"user_id":&call.user_id,
                     "conversation_id":&call.conversation_id,"session_id":&call.id}).sort(doc!{"message_seq":-1}).limit(64).await?.try_collect().await?;
+                let source_ids:Vec<_>=tasks.iter().map(|r|r.message_id.clone()).collect();
+                let sources:Vec<AssistantMessage>=state.db.collection(MESSAGES).find(doc!{"_id":{"$in":&source_ids},"user_id":&call.user_id}).await?.try_collect().await?;
+                let source_titles:std::collections::HashMap<_,_>=sources.into_iter().map(|m|(m.id,m.text.chars().take(120).collect::<String>())).collect();
                 let value=json!({"type":"snapshot","session":super::SessionResponse::from(call.clone()),
                     "captions":captions.into_iter().rev().map(|m|json!({"id":m.id,"speaker":m.role,"text":m.text,
                         "sealed":m.voice.as_ref().is_some_and(|v|v.sealed),"complete":m.voice.as_ref().is_some_and(|v|v.complete)})).collect::<Vec<_>>(),
                     "tasks":tasks.into_iter().rev().map(|r|json!({"id":r.id,"state":r.state,"turn_id":r.turn_id,
-                        "pending_acknowledgement_ids":r.pending_acknowledgement_ids})).collect::<Vec<_>>()});
+                        "pending_acknowledgement_ids":r.pending_acknowledgement_ids,
+                        "title":source_titles.get(&r.message_id),"result_message_id":r.result_message_id})).collect::<Vec<_>>()});
                 tokio::time::timeout(std::time::Duration::from_secs(2),socket.send(Message::Text(value.to_string().into())))
                     .await.map_err(|_|AppError::ClientDisconnected)?.map_err(|_|AppError::ClientDisconnected)?;
                 startup_reported |= call.state == crate::models::assistant_voice_session::SessionState::Active;

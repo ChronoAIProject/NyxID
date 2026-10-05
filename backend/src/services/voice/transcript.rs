@@ -47,6 +47,10 @@ pub struct Transcripts {
 }
 
 impl Transcripts {
+    pub fn has_unsealed_user_input(&self) -> bool {
+        self.input.is_some()
+    }
+
     pub fn ingest(&mut self, event: &Value, now_ms: i64) -> AppResult<Vec<Segment>> {
         if event["type"] == "nyx.transcript" {
             let segment: Segment = serde_json::from_value(event["segment"].clone())
@@ -246,6 +250,7 @@ pub async fn delegate(
         id: uuid::Uuid::new_v4().to_string(),
         user_id: call.user_id.clone(),
         conversation_id: call.conversation_id.clone(),
+        task_conversation_id: None,
         session_id: call.id.clone(),
         source_id: source_id.into(),
         message_id: segment.id.clone(),
@@ -257,6 +262,8 @@ pub async fn delegate(
         credential_api_key_id: None,
         parent_turn_id: None,
         root_request_id: None,
+        result_message_id: None,
+        recovery_replays: 0,
         created_at: chrono::Utc::now(),
         expires_at: chrono::Utc::now() + chrono::Duration::minutes(30),
     };

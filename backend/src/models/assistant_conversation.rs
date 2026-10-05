@@ -225,6 +225,10 @@ pub struct AssistantConversation {
     /// including when its previous home was deleted. Explicit home runs leave this false.
     #[serde(default)]
     pub automation_thread: bool,
+    /// Voice task threads are private execution contexts for a visible call.
+    /// Trigger automation threads intentionally leave this absent.
+    #[serde(default)]
+    pub voice_parent_conversation_id: Option<String>,
     /// Stable agent owner binding; the conversation itself belongs to the person.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_owner_id: Option<String>,

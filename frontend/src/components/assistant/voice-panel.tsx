@@ -514,8 +514,22 @@ export function VoicePanel({
       <ul className="mt-3 space-y-2" aria-label="Voice tasks">
         {voice.snapshot?.tasks.map((t, i) => (
           <li key={t.id} className="flex items-center justify-between gap-2">
-            <span>
-              Request {i + 1} · {t.state.replaceAll("_", " ")}
+            <span className="min-w-0 truncate">
+              {t.title?.trim() || `Request ${i + 1}`} · {({
+                queued: "Queued",
+                claimed: "Running",
+                awaiting_confirmation: "Needs your OK",
+                completed: "Done",
+                cancelled: "Cancelled",
+              } as Record<string, string>)[t.state] ?? t.state}
+              {t.result_message_id ? (
+                <a
+                  className="ml-1 text-nyx-secondary-400 underline"
+                  href={`#message-${t.result_message_id}`}
+                >
+                  result
+                </a>
+              ) : null}
             </span>
             {!["completed", "cancelled"].includes(t.state) && (
               <Button

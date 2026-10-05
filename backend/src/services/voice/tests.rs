@@ -195,8 +195,426 @@ async fn voice_slot_fences_recovery_controls_and_one_call_receipt() {
             .unwrap()
             .unwrap();
         assert!(receipt.text.starts_with("**Call receipt**"));
-        assert!(receipt.text.contains("0 started"));
+        assert!(
+            receipt
+                .text
+                .contains("Just a conversation, nothing handed off")
+        );
         assert!(receipt.execution_pending, "A receipt is not an instruction");
+        db.drop().await.unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn parallel_voice_tasks_use_hidden_turns_cancel_independently_and_requeue_after_restart() {
+    Box::pin(async {
+        let (state, thread, call) = setup("voice_parallel_tasks").await;
+        let db = &state.db;
+        let mut requests = Vec::new();
+        for index in 0..4 {
+            requests.push(
+                super::super::assistant_voice::enqueue(
+                    db,
+                    &call.user_id,
+                    &thread.id,
+                    &call.id,
+                    &format!("delegation-{index}"),
+                    &format!("Request {index}"),
+                )
+                .await
+                .unwrap(),
+            );
+        }
+        for (index, request) in requests.iter_mut().take(3).enumerate() {
+            *request = super::super::assistant_voice::ensure_task_conversation(
+                db,
+                &state.encryption_keys,
+                request,
+            )
+            .await
+            .unwrap();
+            Box::pin(engine::begin_turn_with_voice(
+                db,
+                &call.user_id,
+                &turn(
+                    request.task_conversation_id.as_deref(),
+                    &format!("Request {index}"),
+                ),
+                &state.encryption_keys,
+                Some(&request.id),
+            ))
+            .await
+            .unwrap();
+        }
+        assert!(matches!(
+            Box::pin(engine::begin_turn_with_voice(
+                db,
+                &call.user_id,
+                &turn(Some(&thread.id), "Request 3"),
+                &state.encryption_keys,
+                Some(&requests[3].id),
+            ))
+            .await,
+            Err(crate::errors::AppError::AssistantTurnActive)
+        ));
+        let hidden: Vec<_> = requests[..3]
+            .iter()
+            .map(|request| request.task_conversation_id.clone().unwrap())
+            .collect();
+        assert_eq!(hidden.iter().collect::<std::collections::HashSet<_>>().len(), 3);
+
+        super::super::assistant_voice::cancel(db, &call.user_id, &thread.id, &requests[0].id)
+            .await
+            .unwrap();
+        let cancelled = db
+            .collection::<bson::Document>(crate::models::assistant_voice::REQUESTS)
+            .find_one(doc! {"_id":&requests[0].id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(cancelled.get_str("state").unwrap(), "cancelled");
+        assert!(
+            db.collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+                .find_one(doc! {"_id":&hidden[0]})
+                .await
+                .unwrap()
+                .unwrap()
+                .get_document("active_turn")
+                .unwrap()
+                .get_bool("stop_requested")
+                .unwrap(),
+        );
+
+        // A confirmation holds no owner-pool permit, so another request can run.
+        db.collection::<bson::Document>(crate::models::assistant_voice::REQUESTS)
+            .update_one(
+                doc! {"_id":&requests[1].id},
+                doc! {"$set":{"state":"awaiting_confirmation"}},
+            )
+            .await
+            .unwrap();
+        let fourth = super::super::assistant_voice::ensure_task_conversation(
+            db,
+            &state.encryption_keys,
+            &requests[3],
+        )
+        .await
+        .unwrap();
+        Box::pin(engine::begin_turn_with_voice(
+            db,
+            &call.user_id,
+            &turn(
+                fourth.task_conversation_id.as_deref(),
+                "Request 3",
+            ),
+            &state.encryption_keys,
+            Some(&fourth.id),
+        ))
+        .await
+        .unwrap();
+
+        // A stale claimed task is requeued after a process restart and can be
+        // claimed again; the stale hidden turn is fenced as turn_lost.
+        let stale = &requests[2];
+        db.collection::<bson::Document>(crate::models::assistant_voice::REQUESTS)
+            .update_one(
+                doc! {"_id":&stale.id},
+                doc! {"$set":{"created_at":bson::DateTime::from_chrono(chrono::Utc::now()-chrono::Duration::seconds(crate::services::assistant_nyxagent::ACTIVE_TURN_TTL_SECS+1))}},
+            )
+            .await
+            .unwrap();
+        db.collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":&hidden[2]},
+                doc! {"$set":{"active_turn.started_at":bson::DateTime::from_chrono(chrono::Utc::now()-chrono::Duration::seconds(crate::services::assistant_nyxagent::ACTIVE_TURN_TTL_SECS+1))}},
+            )
+            .await
+            .unwrap();
+        super::super::assistant_voice::recover(db).await.unwrap();
+        assert_eq!(
+            db.collection::<bson::Document>(crate::models::assistant_voice::REQUESTS)
+                .find_one(doc! {"_id":&stale.id})
+                .await
+                .unwrap()
+                .unwrap()
+                .get_str("state")
+                .unwrap(),
+            "queued"
+        );
+        assert_eq!(
+            db.collection::<bson::Document>(crate::models::assistant_voice::REQUESTS)
+                .find_one(doc! {"_id": &stale.id})
+                .await
+                .unwrap()
+                .unwrap()
+                .get_i32("recovery_replays")
+                .unwrap_or(0),
+            1
+        );
+        Box::pin(engine::begin_turn_with_voice(
+            db,
+            &call.user_id,
+            &turn(Some(&hidden[2]), "Request 2"),
+            &state.encryption_keys,
+            Some(&stale.id),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            db.collection::<bson::Document>(crate::models::assistant_voice::REQUESTS)
+                .find_one(doc! {"_id":&stale.id})
+                .await
+                .unwrap()
+                .unwrap()
+                .get_str("state")
+                .unwrap(),
+            "claimed"
+        );
+        // A second loss is never replayed, even when no activity was recorded.
+        db.collection::<bson::Document>(crate::models::assistant_voice::REQUESTS)
+            .update_one(
+                doc! {"_id": &stale.id},
+                doc! {"$set": {"created_at": bson::DateTime::from_chrono(
+                    chrono::Utc::now() - chrono::Duration::seconds(
+                        crate::services::assistant_nyxagent::ACTIVE_TURN_TTL_SECS + 1,
+                    ),
+                )}},
+            )
+            .await
+            .unwrap();
+        db.collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &hidden[2]},
+                doc! {"$set": {"active_turn.started_at": bson::DateTime::from_chrono(
+                    chrono::Utc::now() - chrono::Duration::seconds(
+                        crate::services::assistant_nyxagent::ACTIVE_TURN_TTL_SECS + 1,
+                    ),
+                )}},
+            )
+            .await
+            .unwrap();
+        super::super::assistant_voice::recover(db).await.unwrap();
+        assert_eq!(
+            db.collection::<bson::Document>(crate::models::assistant_voice::REQUESTS)
+                .find_one(doc! {"_id": &stale.id})
+                .await
+                .unwrap()
+                .unwrap()
+                .get_str("state")
+                .unwrap(),
+            "cancelled"
+        );
+        // An activity proves the turn may have acted and is also never replayed.
+        let activity_request = &requests[1];
+        db.collection::<bson::Document>(crate::models::assistant_voice::REQUESTS)
+            .update_one(
+                doc! {"_id": &activity_request.id},
+                doc! {"$set": {"state": "claimed", "created_at": bson::DateTime::from_chrono(
+                    chrono::Utc::now() - chrono::Duration::seconds(
+                        crate::services::assistant_nyxagent::ACTIVE_TURN_TTL_SECS + 1,
+                    ),
+                )}},
+            )
+            .await
+            .unwrap();
+        db.collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &hidden[1]},
+                doc! {
+                    "$set": {"active_turn.started_at": bson::DateTime::from_chrono(
+                        chrono::Utc::now() - chrono::Duration::seconds(
+                            crate::services::assistant_nyxagent::ACTIVE_TURN_TTL_SECS + 1,
+                        ),
+                    )},
+                    "$push": {"active_turn.activities": {
+                        "id": "activity-1", "label": "calendar", "status": "completed",
+                        "started_at": bson::DateTime::now(), "ended_at": bson::DateTime::now(),
+                    }},
+                },
+            )
+            .await
+            .unwrap();
+        super::super::assistant_voice::recover(db).await.unwrap();
+        let settled = db
+            .collection::<bson::Document>(crate::models::assistant_voice::REQUESTS)
+            .find_one(doc! {"_id": &activity_request.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(settled.get_str("state").unwrap(), "cancelled");
+        assert_eq!(settled.get_i32("recovery_replays").unwrap_or(0), 0);
+        let note = db
+            .collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
+            .find_one(doc! {"conversation_id": &hidden[1], "turn_id": &activity_request.turn_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(note
+            .get_str("text")
+            .unwrap()
+            .contains("Interrupted by a server restart after it started acting"));
+        db.drop().await.unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn completed_hidden_voice_results_publish_after_call_close() {
+    Box::pin(async {
+        let (state, thread, call) = setup("voice_result_after_close").await;
+        let db = &state.db;
+        let request = super::super::assistant_voice::enqueue(
+            db,
+            &call.user_id,
+            &thread.id,
+            &call.id,
+            "delegation-after-close",
+            "Check the calendar",
+        )
+        .await
+        .unwrap();
+        let request = super::super::assistant_voice::ensure_task_conversation(
+            db,
+            &state.encryption_keys,
+            &request,
+        )
+        .await
+        .unwrap();
+        let task_id = request.task_conversation_id.clone().unwrap();
+        db.collection::<crate::models::assistant_message::AssistantMessage>(
+            crate::models::assistant_message::COLLECTION_NAME,
+        )
+        .insert_one(crate::models::assistant_message::AssistantMessage {
+            id: Uuid::new_v4().to_string(),
+            conversation_id: task_id,
+            user_id: call.user_id.clone(),
+            seq: 1,
+            turn_id: request.turn_id.clone(),
+            role: "assistant".into(),
+            text: "Calendar result".into(),
+            status: "completed".into(),
+            error_code: None,
+            created_at: chrono::Utc::now(),
+            activities: Vec::new(),
+            attachments: Vec::new(),
+            origin: None,
+            via: None,
+            voice: None,
+            execution_pending: false,
+        })
+        .await
+        .unwrap();
+        db.collection::<bson::Document>(crate::models::assistant_voice::REQUESTS)
+            .update_one(
+                doc! {"_id": &request.id},
+                doc! {"$set": {"state": "completed"}},
+            )
+            .await
+            .unwrap();
+        super::super::assistant_voice::publish_completed_results(db)
+            .await
+            .unwrap();
+        let visible = db
+            .collection::<crate::models::assistant_message::AssistantMessage>(
+                crate::models::assistant_message::COLLECTION_NAME,
+            )
+            .find_one(doc! {
+                "conversation_id": &thread.id,
+                "via": "voice",
+                "text": "Calendar result",
+            })
+            .await
+            .unwrap();
+        assert!(visible.is_some());
+        let saved = db
+            .collection::<bson::Document>(crate::models::assistant_voice::REQUESTS)
+            .find_one(doc! {"_id": &request.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(saved.get_str("result_message_id").is_ok());
+        db.drop().await.unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn published_result_notes_select_newest_results_after_previous_turn() {
+    Box::pin(async {
+        let (state, thread, call) = setup("voice_result_notes_newest").await;
+        let db = &state.db;
+        let mut requests = Vec::new();
+        for index in 0..10 {
+            requests.push(
+                super::super::assistant_voice::enqueue(
+                    db,
+                    &call.user_id,
+                    &thread.id,
+                    &call.id,
+                    &format!("published-{index}"),
+                    &format!("Request {index}"),
+                )
+                .await
+                .unwrap(),
+            );
+        }
+        let since = chrono::Utc::now();
+        for (index, request) in requests.iter().enumerate() {
+            let result_id = Uuid::new_v4().to_string();
+            let result_created_at = if index < 8 {
+                since - chrono::Duration::seconds(1)
+            } else {
+                since + chrono::Duration::milliseconds(1)
+            };
+            db.collection::<crate::models::assistant_message::AssistantMessage>(
+                crate::models::assistant_message::COLLECTION_NAME,
+            )
+            .insert_one(crate::models::assistant_message::AssistantMessage {
+                id: result_id.clone(),
+                conversation_id: thread.id.clone(),
+                user_id: call.user_id.clone(),
+                seq: request.message_seq + 100,
+                turn_id: request.turn_id.clone(),
+                role: "assistant".into(),
+                text: format!("Voice result {index}"),
+                status: "completed".into(),
+                error_code: None,
+                created_at: result_created_at,
+                activities: Vec::new(),
+                attachments: Vec::new(),
+                origin: None,
+                via: Some("voice".into()),
+                voice: None,
+                execution_pending: false,
+            })
+            .await
+            .unwrap();
+            db.collection::<bson::Document>(crate::models::assistant_voice::REQUESTS)
+                .update_one(
+                    doc! {"_id": &request.id},
+                    doc! {
+                        "$set": {
+                            "state": "completed",
+                            "result_message_id": result_id,
+                        }
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        let notes = super::super::assistant_voice::published_result_notes(
+            db,
+            &call.user_id,
+            &thread.id,
+            since,
+        )
+        .await
+        .unwrap();
+        assert!(notes.contains("Voice result 8"), "{notes}");
+        assert!(notes.contains("Voice result 9"), "{notes}");
+        assert!(!notes.contains("Voice result 0"), "{notes}");
+        assert!(!notes.contains("Voice result 7"), "{notes}");
         db.drop().await.unwrap();
     })
     .await;
@@ -407,8 +825,8 @@ async fn click_vs_voice_commits_exactly_one_continuation_and_audit_is_ids_only()
             .await
             .unwrap()
             .unwrap();
-        assert!(receipt.text.contains("1 started"));
-        assert!(receipt.text.contains("Confirmations decided: 1"));
+        assert!(receipt.text.contains("Handed to NyxBot"));
+        assert!(receipt.text.contains("Confirmation:"));
         db.drop().await.unwrap();
     })
     .await;

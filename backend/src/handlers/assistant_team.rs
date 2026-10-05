@@ -688,6 +688,13 @@ pub(crate) async fn turn_notes(
                 .await
                 .unwrap_or_default(),
         );
+        notes.push_str(
+            &crate::services::assistant_voice::published_result_notes(
+                &state.db, owner, &row.id, since,
+            )
+            .await
+            .unwrap_or_default(),
+        );
     }
     if let Ok(requests) = team::pending_requests(&state.db, owner).await
         && let Ok(summaries) = team::request_summaries(&state.db, owner, &requests).await
