@@ -26,13 +26,13 @@ use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService}
 // `credential_mode: "both"` (platform OAuth app with BYO override, see
 // docs/ONE_CLICK_OAUTH_CONNECTORS_SPEC.md), and this startup migration would
 // otherwise revert an ops-provisioned "both" back to "user" on every restart.
-// `twitter` is also excluded: its seed stays BYO-only, but an ops-provisioned
-// shared app ("both" or "admin") must survive this migration on restart.
+// `twitter` and `linkedin` are also excluded: their seeds stay BYO-only, but an
+// ops-provisioned shared app ("both" or "admin") must survive this migration
+// on restart.
 const SEEDED_USER_CREDENTIAL_OAUTH_PROVIDER_SLUGS: &[&str] = &[
     "facebook",
     "discord",
     "spotify",
-    "linkedin",
     "slack",
     "microsoft",
     "tiktok",
@@ -10028,14 +10028,14 @@ mod tests {
         // "user"; ops then PATCHes them to "both" to enable the platform app.
         collection
             .update_many(
-                doc! { "slug": { "$in": ["google", "github", "twitter"] } },
+                doc! { "slug": { "$in": ["google", "github", "linkedin", "twitter"] } },
                 doc! { "$set": { "credential_mode": "user" } },
             )
             .await
             .unwrap();
         collection
             .update_many(
-                doc! { "slug": { "$in": ["google", "github", "twitter"] } },
+                doc! { "slug": { "$in": ["google", "github", "linkedin", "twitter"] } },
                 doc! { "$set": { "credential_mode": "both" } },
             )
             .await
@@ -10043,7 +10043,7 @@ mod tests {
 
         // Restart: the social_user_mode_migration must leave them alone...
         super::seed_default_providers(&db, &enc).await.unwrap();
-        for slug in ["google", "github", "twitter"] {
+        for slug in ["google", "github", "linkedin", "twitter"] {
             let p = collection
                 .find_one(doc! { "slug": slug })
                 .await
