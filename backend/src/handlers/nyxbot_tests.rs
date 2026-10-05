@@ -1065,6 +1065,7 @@ async fn inbound_of(
 
 fn admission(channel_id: &str, event_id: &str) -> NyxbotEvent {
     NyxbotEvent {
+        delivery: None,
         resolved_thread_id: None,
         resolved_conversation_id: None,
         id: Uuid::new_v4().to_string(),
@@ -1210,6 +1211,7 @@ async fn lost_chat_app_messages_are_reported_to_the_agent_once() {
     // Once a message reaches the agent again, the channel is healthy.
     let arrived = inbound(&state, &route_id, "7", "delivered", None, 0).await;
     let admitted = NyxbotEvent {
+        delivery: None,
         resolved_thread_id: None,
         resolved_conversation_id: None,
         id: Uuid::new_v4().to_string(),
@@ -2235,6 +2237,7 @@ async fn group_chats_share_one_thread_and_members_talk_as_guests() {
         &state,
         OWNER,
         TurnStart {
+            channel_event_id: None,
             org_access: None,
             attachment_ids: Vec::new(),
             group_request_id: None,
@@ -3244,6 +3247,7 @@ async fn the_owners_private_chats_share_the_agents_own_thread() {
         &state,
         OWNER,
         TurnStart {
+            channel_event_id: None,
             org_access: None,
             attachment_ids: Vec::new(),
             group_request_id: None,
@@ -4767,3 +4771,6 @@ async fn lark_groups_count_only_mentions_of_the_bot_itself() {
 
 #[path = "nyxbot_thread_follow_tests.rs"]
 mod thread_follow_tests;
+
+#[path = "nyxbot_late_delivery_tests.rs"]
+mod late_delivery_tests;

@@ -264,6 +264,7 @@ async fn run_member(
         return Ok(());
     }
     let start = TurnStart {
+        channel_event_id: None,
         org_access: None,
         attachment_ids: Vec::new(),
         group_request_id: None,

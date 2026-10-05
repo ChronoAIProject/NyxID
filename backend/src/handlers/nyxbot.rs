@@ -2530,6 +2530,7 @@ const PRIVATE_REFUSAL: &str = "This bot answers only its owner. If this is your 
 /// account, a turn (as the owner or a guest), a short reply, or nothing.
 /// `addressed`: whether the message mentions or replies to the bot, `None`
 /// when the platform cannot tell (then only the owner is answered).
+#[allow(clippy::too_many_arguments)]
 async fn inbound_message(
     state: &AppState,
     row: &NyxbotChannel,
@@ -2537,6 +2538,7 @@ async fn inbound_message(
     sender: &Sender<'_>,
     text: &str,
     addressed: Option<bool>,
+    event_key: &str,
 ) -> AppResult<Inbound> {
     let private = chat.kind.as_deref() == Some("private");
     if let Some(linked) = link_owner(state, row, sender, text, private).await? {
@@ -2556,7 +2558,10 @@ async fn inbound_message(
         }
     };
     let addressed = chat.kind.as_deref() == Some("private") || addressed == Some(true);
-    start_chat_turn(state, row, chat, sender, text, guest, addressed, None).await
+    start_chat_turn(
+        state, row, chat, sender, text, guest, addressed, None, event_key,
+    )
+    .await
 }
 
 /// Link the owner's chat-app account: a sender presenting the owner's
@@ -2830,6 +2835,7 @@ async fn start_chat_turn(
     guest: bool,
     addressed: bool,
     binding: Option<crate::models::channel_thread_follow::ThreadTurnBinding>,
+    event_key: &str,
 ) -> AppResult<Inbound> {
     let private = chat.kind.as_deref() == Some("private");
     // An organization's bot never carries the owner's personal thread.
@@ -2963,7 +2969,9 @@ async fn start_chat_turn(
         };
         Some(looked_up.unwrap_or_else(|| format!("{} group", platform_name(&row.platform))))
     };
+    late_delivery::prepare(state, event_key, row, &origin, sender.id, guest, addressed).await?;
     let start = TurnStart {
+        channel_event_id: Some(event_key.to_owned()),
         org_access: None,
         attachment_ids: Vec::new(),
         group_request_id: None,
@@ -3211,6 +3219,8 @@ async fn final_reply(mut receiver: broadcast::Receiver<Value>) -> Result<String,
                 Some("turn.completed") => {
                     return if event["status"] == "completed" {
                         Ok(text)
+                    } else if !text.trim().is_empty() {
+                        Ok(late_delivery::answer(&text, true))
                     } else {
                         Err(event["error"]["code"]
                             .as_str()
@@ -3577,6 +3587,7 @@ pub async fn responses(State(state): State<AppState>, headers: HeaderMap, body: 
     };
     let now = Utc::now();
     let admitted = NyxbotEvent {
+        delivery: None,
         resolved_thread_id: None,
         resolved_conversation_id: None,
         id: event_key.clone(),
@@ -3619,6 +3630,7 @@ pub async fn responses(State(state): State<AppState>, headers: HeaderMap, body: 
         },
         &text,
         human,
+        &event_key,
     )
     .await;
     let finish = |status: &'static str, conversation: Option<String>| {
@@ -3662,33 +3674,7 @@ pub async fn responses(State(state): State<AppState>, headers: HeaderMap, body: 
             response
         }
         Ok(Inbound::Turn(receiver)) => {
-            let state = state.clone();
-            let stream = async_stream::stream! {
-                yield created;
-                let outcome = final_reply(receiver).await;
-                let (status, conversation) = match &outcome {
-                    Ok(_) => ("completed", None),
-                    Err(_) => ("failed", None::<String>),
-                };
-                let _ = state.db.collection::<NyxbotEvent>(EVENTS).update_one(
-                    doc! {"_id": &event_key},
-                    doc! {"$set": {"status": status, "conversation_id": conversation}},
-                ).await;
-                match outcome {
-                    Ok(text) => {
-                        for frame in message_frames(&response_id, Some(&bounded_reply(&text))) {
-                            yield frame;
-                        }
-                    }
-                    Err(code) => {
-                        yield json!({"type": "response.failed", "response": {
-                            "id": &response_id, "status": "failed",
-                            "error": {"code": identifier(&code), "message": "NyxBot could not finish this turn."},
-                        }});
-                    }
-                }
-            };
-            sse(stream)
+            late_delivery::provider_stream(state, event_key, response_id, created, receiver, now)
         }
         Err(_) => {
             let _ = events.delete_one(doc! {"_id": &event_key}).await;
@@ -3710,6 +3696,7 @@ async fn gateway_inbound(
     sender: &Sender<'_>,
     text: &str,
     human: bool,
+    event_key: &str,
 ) -> AppResult<Inbound> {
     let conversation = &activity["conversation"];
     let kind = chats::chat_kind(conversation["kind"].as_str().unwrap_or("private"));
@@ -3774,7 +3761,7 @@ async fn gateway_inbound(
                 None => false,
             },
     );
-    inbound_message(state, row, &chat, sender, text, addressed).await
+    inbound_message(state, row, &chat, sender, text, addressed, event_key).await
 }
 
 fn is_duplicate(error: &mongodb::error::Error) -> bool {
@@ -4065,6 +4052,7 @@ pub async fn relay_callback(
         chats::group_partition(&chat_id, thread_id.as_deref())
     };
     let admitted = NyxbotEvent {
+        delivery: None,
         resolved_thread_id: None,
         resolved_conversation_id: None,
         id: event_key,
@@ -4178,16 +4166,19 @@ pub async fn relay_callback(
                 display_name: display.as_deref(),
             };
             let reply =
-                match inbound_message(&state, &row, &chat, &sender, &text, addressed).await? {
+                match inbound_message(&state, &row, &chat, &sender, &text, addressed, &admitted.id)
+                    .await?
+                {
                     Inbound::Reply(text) => Some(text),
                     Inbound::Silent => None,
                     Inbound::Busy => Some(
                         "I'm still working on the previous message. I'll pick this up next.".into(),
                     ),
-                    Inbound::Turn(receiver) => match final_reply(receiver).await {
-                        Ok(text) => Some(bounded_reply(&text)),
-                        Err(_) => Some("I could not finish that. Please try again.".into()),
-                    },
+                    Inbound::Turn(receiver) => {
+                        let _ = final_reply(receiver).await;
+                        late_delivery::process(&state, &admitted.id).await;
+                        None
+                    }
                 };
             if let Some(reply) = reply
                 && let Err(error) = direct_reply(
@@ -4524,3 +4515,6 @@ pub(crate) mod thread_follow;
 
 #[path = "nyxbot_thread_controls.rs"]
 pub(crate) mod thread_controls;
+
+#[path = "nyxbot_late_delivery.rs"]
+pub(crate) mod late_delivery;
