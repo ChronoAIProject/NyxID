@@ -52,6 +52,10 @@ export function credentialSupplier(
       connection.oauth_client_id?.trim()
     )
       return "own";
+    // `/keys` decrypts every stored BYO app into `oauth_client_id`, so a modern
+    // connection without one refreshes through the provider's app
+    // (backend `oauth_app_source::from_key`). Legacy rows stay unresolved.
+    if (connection.connection_id) return "nyxid";
     // Legacy execution class UserOwned is a price-lane default, not app provenance.
     return "unknown";
   }

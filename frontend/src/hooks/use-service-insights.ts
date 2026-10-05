@@ -35,6 +35,7 @@ export function useServiceInsights(
       credential_missing: connection.credential_missing,
       oauth_app_source: connection.oauth_app_source,
       has_own_oauth_app: Boolean(connection.oauth_client_id?.trim()),
+      connection_id: connection.connection_id,
       auth_method: connection.auth_method,
       catalog_service_id: connection.catalog_service_id,
       catalog_service_slug: connection.catalog_service_slug,
