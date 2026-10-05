@@ -4,6 +4,7 @@ pub mod confirmation;
 mod confirmation_tests;
 mod control;
 pub mod credentials;
+pub mod diagnostics;
 pub mod grok;
 pub mod grok_runtime;
 pub mod openai;

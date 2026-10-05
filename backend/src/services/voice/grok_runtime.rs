@@ -2,7 +2,7 @@
 use super::{credentials, grok, runtime, session, transport::Transport};
 use crate::{
     AppState,
-    errors::{AppError, AppResult},
+    errors::{AppError, AppResult, voice_start::Stage},
     models::{
         assistant_voice::VoicePreferences,
         assistant_voice_session::{COLLECTION_NAME, VoiceSession},
@@ -44,6 +44,7 @@ pub async fn serve(
     input: mpsc::Receiver<grok::ClientInput>,
     output: mpsc::Sender<grok::Output>,
 ) {
+    let errors = output.clone();
     let setup = async {
         // A control stream can land on another replica. Its single-stream claim
         // transfers only an unstarted relay, never an established provider call.
@@ -59,11 +60,12 @@ pub async fn serve(
             &call.conversation_id,
             &call.preferences,
         ))
-        .await?;
+        .await
+        .map_err(|e| Stage::Credential.error(e))?;
         if resolved.protocol != VoiceProtocol::XaiRealtime
             || resolved.identity != call.credential_identity
         {
-            return Err(AppError::VoiceProviderUnavailable);
+            return Err(Stage::Credential.error(AppError::VoiceProviderUnavailable));
         }
         call = session::refresh(&state.db, &call).await?;
         let meter = super::super::billing::voice::reserve(
@@ -73,10 +75,19 @@ pub async fn serve(
             &call.id,
             0,
         )
-        .await?;
-        call = session::write(&state.db, &call, doc! {"reserved_until":30}).await?;
-        let instructions = runtime::initial_context(&state.db, &call).await?;
-        state.billing.mark_forwarded(&meter).await?;
+        .await
+        .map_err(|e| Stage::BillingReservation.error(e))?;
+        call = session::write(&state.db, &call, doc! {"reserved_until":30})
+            .await
+            .map_err(|e| Stage::BillingReservation.error(e))?;
+        let instructions = runtime::initial_context(&state.db, &call)
+            .await
+            .map_err(|e| Stage::Thread.error(e))?;
+        state
+            .billing
+            .mark_forwarded(&meter)
+            .await
+            .map_err(|e| Stage::BillingReservation.error(e))?;
         let (socket, started) = grok::connect(
             &resolved.key,
             &call.preferences.model,
@@ -100,7 +111,20 @@ pub async fn serve(
     };
     match tokio::time::timeout(std::time::Duration::from_secs(12), Box::pin(setup)).await {
         Ok(Ok((transport, billing))) => runtime::run(state, call, None, transport, billing).await,
-        _ => {
+        failed => {
+            let error = match failed {
+                Ok(Err(e)) => e,
+                _ => AppError::VoiceProviderUnavailable,
+            };
+            let error = super::diagnostics::finish::<()>(
+                &state.db,
+                &call.user_id,
+                Err(error),
+                Stage::Transport,
+            )
+            .await
+            .unwrap_err();
+            let _ = errors.try_send(grok::Output::StartFailed(error.response_body()));
             // Failed setup drops the sole provider socket; no invented duration.
             if runtime::settle_windows(&state, &call, false).await.is_ok()
                 && let Ok(updated) =

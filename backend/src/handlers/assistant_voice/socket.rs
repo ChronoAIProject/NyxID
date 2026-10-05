@@ -42,20 +42,51 @@ pub async fn stream(
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> AppResult<Response> {
-    super::super::login_client_context::require_first_party_human(&auth)?;
-    super::require_origin(&state, &headers)?;
-    let human_session = auth
-        .session_id
-        .ok_or_else(|| AppError::Forbidden("An active browser session is required".into()))?
-        .to_string();
-    let call =
-        crate::services::voice::session::get(&state.db, &auth.user_id.to_string(), &id, &sid)
-            .await?;
-    let socket_id = uuid::Uuid::new_v4().to_string();
-    crate::services::voice::session::claim_stream(&state.db, &call, &socket_id).await?;
+    use crate::errors::voice_start::Stage;
+    let prepared = async {
+        super::super::login_client_context::require_first_party_human(&auth)
+            .map_err(|e| Stage::Origin.error(e))?;
+        super::require_origin(&state, &headers).map_err(|e| Stage::Origin.error(e))?;
+        let human_session = auth
+            .session_id
+            .ok_or_else(|| {
+                Stage::Origin.error(AppError::Forbidden(
+                    "An active browser session is required".into(),
+                ))
+            })?
+            .to_string();
+        let call =
+            crate::services::voice::session::get(&state.db, &auth.user_id.to_string(), &id, &sid)
+                .await
+                .map_err(|e| Stage::Thread.error(e))?;
+        let socket_id = uuid::Uuid::new_v4().to_string();
+        crate::services::voice::session::claim_stream(&state.db, &call, &socket_id).await?;
+        Ok((human_session, call, socket_id))
+    }
+    .await;
+    let (human_session, call, socket_id) = crate::services::voice::diagnostics::finish(
+        &state.db,
+        &auth.user_id.to_string(),
+        prepared,
+        Stage::Transport,
+    )
+    .await?;
+    let failed_state = state.clone();
+    let failed_user = auth.user_id.to_string();
     Ok(upgrade
         .max_message_size(4096)
         .max_frame_size(4096)
+        .on_failed_upgrade(move |_| {
+            tokio::spawn(async move {
+                let _ = crate::services::voice::diagnostics::finish::<()>(
+                    &failed_state.db,
+                    &failed_user,
+                    Err(AppError::VoiceProviderUnavailable),
+                    Stage::Transport,
+                )
+                .await;
+            });
+        })
         .on_upgrade(move |socket| {
             Box::pin(async move {
                 let (input, output) = if call.protocol
@@ -105,7 +136,8 @@ async fn serve(
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut frame_window = tokio::time::Instant::now();
     let mut frames = 0;
-    loop {
+    let mut startup_reported = false;
+    let result = async { loop {
         tokio::select! {
             frame=socket.next()=>{
                 if frame_window.elapsed()>=std::time::Duration::from_secs(1) {frame_window=tokio::time::Instant::now();frames=0;}
@@ -135,6 +167,10 @@ async fn serve(
                 let Some(audio)=audio else {return Ok(());};
                 let result=tokio::time::timeout(std::time::Duration::from_secs(2),async {
                     match audio {
+                        Output::StartFailed(error) => {
+                            startup_reported = true; // Grok startup boundary already audited it.
+                            socket.send(Message::Text(json!({"type":"start_failed","error":error}).to_string().into())).await
+                        },
                         Output::Audio{bytes,end_ms}=>{
                             socket.send(Message::Text(json!({"type":"audio","generation":call.generation,"end_ms":end_ms}).to_string().into())).await?;
                             socket.send(Message::Binary(bytes.into())).await
@@ -149,7 +185,7 @@ async fn serve(
                 if state.db.collection::<mongodb::bson::Document>(crate::models::session::COLLECTION_NAME)
                     .find_one(doc! {"_id":human_session,"user_id":&call.user_id,"revoked":false,"expires_at":{"$gt":mongodb::bson::DateTime::now()}})
                     .await?.is_none() { return Err(AppError::Unauthorized("Voice session expired".into())); }
-                crate::services::assistant_voice::require_enabled(&state.db,&call.user_id).await?;
+                crate::services::assistant_voice::require_enabled(&state.db,&call.user_id).await.map_err(|e|crate::errors::voice_start::Stage::Flag.error(e))?;
                 call=crate::services::voice::session::get(&state.db,&call.user_id,&call.conversation_id,&call.id).await?;
                 let captions:Vec<AssistantMessage>=state.db.collection(MESSAGES).find(doc!{"user_id":&call.user_id,
                     "conversation_id":&call.conversation_id,"voice.session_id":&call.id}).sort(doc!{"seq":-1}).limit(16).await?.try_collect().await?;
@@ -162,8 +198,30 @@ async fn serve(
                         "pending_acknowledgement_ids":r.pending_acknowledgement_ids})).collect::<Vec<_>>()});
                 tokio::time::timeout(std::time::Duration::from_secs(2),socket.send(Message::Text(value.to_string().into())))
                     .await.map_err(|_|AppError::ClientDisconnected)?.map_err(|_|AppError::ClientDisconnected)?;
+                startup_reported |= call.state == crate::models::assistant_voice_session::SessionState::Active;
                 if !call.live_slot {return Ok(());}
             }
         }
+    }}.await;
+    if !startup_reported && let Err(error) = result {
+        let error = crate::services::voice::diagnostics::finish::<()>(
+            &state.db,
+            &call.user_id,
+            Err(error),
+            crate::errors::voice_start::Stage::Transport,
+        )
+        .await
+        .unwrap_err();
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            socket.send(Message::Text(
+                json!({"type":"start_failed", "error":error.response_body()})
+                    .to_string()
+                    .into(),
+            )),
+        )
+        .await;
+        return Err(error);
     }
+    result
 }

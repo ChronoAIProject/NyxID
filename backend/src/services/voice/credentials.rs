@@ -1,7 +1,7 @@
 //! Explicit voice binding; fixed provider origin and live ACL before decryption.
 use crate::{
     AppState,
-    errors::{AppError, AppResult},
+    errors::{AppError, AppResult, voice_start::Stage},
     models::{
         assistant_voice::{VoiceKeySource, VoicePreferences},
         downstream_service::{COLLECTION_NAME as SERVICES, DownstreamService, VoiceProtocol},
@@ -34,7 +34,9 @@ pub async fn resolve(
     p: &VoicePreferences,
 ) -> AppResult<Resolved> {
     super::super::assistant_voice::validate_preferences(p)?;
-    let thread = super::super::assistant_voice::thread(&state.db, user, conversation).await?;
+    let thread = super::super::assistant_voice::thread(&state.db, user, conversation)
+        .await
+        .map_err(|e| Stage::Thread.error(e))?;
     let service = state
         .db
         .collection::<DownstreamService>(SERVICES)
@@ -57,15 +59,17 @@ pub async fn resolve(
             user,
             super::super::feature_flag_service::VOICE_GROK_FLAG_KEY,
         )
-        .await?
+        .await
+        .map_err(|e| Stage::Flag.error(e))?
         {
-            return Err(AppError::VoiceProviderUnavailable);
+            return Err(Stage::Flag.error(AppError::VoiceProviderUnavailable));
         }
     }
     if !official_provider_origin(&service.base_url, &protocol) {
-        return Err(AppError::VoiceProviderUnavailable);
+        return Err(Stage::Origin.error(AppError::VoiceProviderUnavailable));
     }
-    let voice_billing = duration_billing(&p.key_source, service.billing.as_ref())?;
+    let voice_billing = duration_billing(&p.key_source, service.billing.as_ref())
+        .map_err(|e| Stage::BillingReservation.error(e))?;
     authorize_inference(&state.db, &thread, &service).await?;
     let resource_owner = thread.agent_owner_id.as_deref().unwrap_or(user);
     let (mut target, class, owner, key_id, revision) = match p.key_source {
@@ -76,9 +80,10 @@ pub async fn resolve(
                 user,
                 platform_flag(&protocol),
             )
-            .await?
+            .await
+            .map_err(|e| Stage::Flag.error(e))?
             {
-                return Err(AppError::VoiceProviderUnavailable);
+                return Err(Stage::Flag.error(AppError::VoiceProviderUnavailable));
             }
             let revision =
                 keyed_fingerprint(state, b"credential-revision", &service.credential_encrypted);
@@ -173,7 +178,8 @@ pub async fn resolve(
         .billing
         .owner_resolver()
         .resolve_for_execution(user, &owner, class)
-        .await?;
+        .await
+        .map_err(|e| Stage::BillingReservation.error(e))?;
     let billing = BillingRouteContext::new(
         BillingIngress::LlmProvider,
         uuid::Uuid::new_v4().to_string(),

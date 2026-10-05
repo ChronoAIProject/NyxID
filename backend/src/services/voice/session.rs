@@ -56,7 +56,9 @@ pub async fn admit(
     credential_identity: String,
     worker: &str,
 ) -> AppResult<VoiceSession> {
-    super::super::assistant_voice::require_enabled(db, user).await?;
+    super::super::assistant_voice::require_enabled(db, user)
+        .await
+        .map_err(|e| crate::errors::voice_start::Stage::Flag.error(e))?;
     super::super::assistant_voice::thread(db, user, conversation).await?;
     if uuid::Uuid::parse_str(client_request_id).is_err() {
         return Err(AppError::ValidationError(
