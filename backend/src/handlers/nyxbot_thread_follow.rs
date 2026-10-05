@@ -553,7 +553,11 @@ pub(crate) async fn send(
     }
 }
 
-/// Only the first claimed channel turn gets provider history. This string is
+/// Append bounded provider/metadata context to a channel turn. The first
+/// claimed turn receives the complete available history; later turns receive
+/// only messages that arrived since the previous channel turn. This keeps a
+/// silenced followed-thread message available to the next addressed turn
+/// without replaying the whole thread on every request. The string is
 /// appended to the upstream request, never to TurnStart or stored messages.
 pub(crate) async fn prelude(
     state: &AppState,
@@ -566,9 +570,6 @@ pub(crate) async fn prelude(
         .as_ref()
         .or(row.channel.as_ref())?;
     let binding = origin.thread.as_deref()?;
-    if row.message_count > 1 {
-        return None;
-    }
     let deadline = tokio::time::Instant::now() + Duration::from_secs(threads::HISTORY_SECONDS);
     let prepare = async {
         let child = follow::validate_delivery(&state.db, &row.user_id, origin, &row.id).await?;
@@ -632,6 +633,36 @@ pub(crate) async fn prelude(
     )
     .await
     .ok()?;
+    let since_previous_turn = if row.message_count > 1 {
+        state
+            .db
+            .collection::<crate::models::assistant_message::AssistantMessage>(
+                crate::models::assistant_message::COLLECTION_NAME,
+            )
+            .find_one(doc! {
+                "conversation_id": &row.id,
+                "user_id": &row.user_id,
+                "role": "user",
+                "seq": {"$lt": row.message_count},
+            })
+            .sort(doc! {"seq": -1})
+            .await
+            .ok()
+            .flatten()
+            .map(|message| message.created_at)
+    } else {
+        None
+    };
+    let mut context = context;
+    if let Some(since) = since_previous_turn {
+        context
+            .history
+            .messages
+            .retain(|message| message.created_at > since);
+        context
+            .metadata
+            .retain(|message| message.created_at > since);
+    }
     let status = if context.history.messages.is_empty() {
         "metadata_only"
     } else if context.history.partial {
