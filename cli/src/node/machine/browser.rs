@@ -6,7 +6,10 @@ use sha2::{Digest, Sha256};
 use std::{
     os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
     time::Duration,
 };
 use tokio::{
@@ -469,6 +472,13 @@ impl PackageServer {
 pub struct Browser {
     connection: Arc<Mutex<Option<UnixStream>>>,
     ready: Arc<Notify>,
+    /// A separated context must prove one complete extension exchange before
+    /// its first user action.  The extension hello only proves that the
+    /// native host connected; it does not prove that the MV3 worker can yet
+    /// service a request after a fresh profile launch.
+    context_browser: bool,
+    startup_verified: Arc<AtomicBool>,
+    connection_generation: Arc<AtomicU64>,
     child: Mutex<Option<tokio::process::Child>>,
     accept: tokio::task::JoinHandle<()>,
     _updates: Arc<PackageServer>,
@@ -517,6 +527,8 @@ impl Browser {
         }
         let connection = Arc::new(Mutex::new(None));
         let ready = Arc::new(Notify::new());
+        let startup_verified = Arc::new(AtomicBool::new(false));
+        let connection_generation = Arc::new(AtomicU64::new(0));
         let updates = PackageServer::acquire(port).await?;
         let profile = directory.join("browser-profile");
         runtime_directory(&profile, identity.uid, identity.gid, 0o700)?;
@@ -571,6 +583,8 @@ impl Browser {
         let child = command.spawn().context("managed browser unavailable")?;
         let accepted = ready.clone();
         let shared = connection.clone();
+        let accepted_startup = startup_verified.clone();
+        let accepted_generation = connection_generation.clone();
         let browser_uid = identity.uid;
         let accept = tokio::spawn(async move {
             while let Ok((mut stream, _)) = listener.accept().await {
@@ -590,6 +604,8 @@ impl Browser {
                         v["type"] == "hello" && v["extension_id"] == pin()["extension_id"]
                     })
                 {
+                    accepted_startup.store(false, Ordering::Release);
+                    accepted_generation.fetch_add(1, Ordering::AcqRel);
                     *shared.lock().await = Some(stream);
                     accepted.notify_waiters();
                 }
@@ -598,6 +614,9 @@ impl Browser {
         Ok(Self {
             connection,
             ready,
+            context_browser: identity.desktop.is_some(),
+            startup_verified,
+            connection_generation,
             child: Mutex::new(Some(child)),
             accept,
             _updates: updates,
@@ -619,6 +638,70 @@ impl Browser {
             }
             if tokio::time::timeout_at(deadline, ready).await.is_err() {
                 return false;
+            }
+        }
+    }
+
+    pub fn is_context_browser(&self) -> bool {
+        self.context_browser
+    }
+
+    /// Wait for a fresh separated-context browser to complete a harmless
+    /// native exchange.  This is deliberately separate from the normal
+    /// response timeout: Chromium/profile/extension startup gets a bounded
+    /// grace, while each real operation retains its existing 20 s deadline.
+    pub async fn wait_startup(&self, grace: Duration) -> bool {
+        if !self.context_browser {
+            return self.ready().await;
+        }
+        if self.startup_verified.load(Ordering::Acquire) {
+            if self.connection.lock().await.is_some() {
+                return true;
+            }
+            self.startup_verified.store(false, Ordering::Release);
+        }
+        let deadline = tokio::time::Instant::now() + grace;
+        loop {
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            let remaining = deadline.saturating_duration_since(now);
+            if !self.wait_ready(remaining.min(Duration::from_secs(3))).await {
+                continue;
+            }
+            let nonce = uuid::Uuid::new_v4().to_string();
+            let probe = json!({
+                "operation": "browser",
+                "action": "tabs",
+                "nonce": nonce,
+                "expires_at_ms": chrono::Utc::now().timestamp_millis() + 5000,
+            });
+            let bytes = match serde_json::to_vec(&probe) {
+                Ok(bytes) => Zeroizing::new(bytes),
+                Err(_) => return false,
+            };
+            let timeout = deadline
+                .saturating_duration_since(tokio::time::Instant::now())
+                .min(Duration::from_secs(4));
+            if timeout.is_zero() {
+                return false;
+            }
+            let generation = self.connection_generation.load(Ordering::Acquire);
+            match self.exchange_with_timeout(&nonce, &bytes, timeout).await {
+                Ok(response)
+                    if response["status"] == "ok"
+                        && self.connection_generation.load(Ordering::Acquire) == generation =>
+                {
+                    self.startup_verified.store(true, Ordering::Release);
+                    return true;
+                }
+                Ok(_) | Err(_) => {
+                    // A failed probe consumes its stream.  The extension will
+                    // reconnect; retry within the startup grace instead of
+                    // handing the first user action a stale pipe.
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
             }
         }
     }
@@ -655,11 +738,24 @@ impl Browser {
     }
 
     async fn exchange(&self, nonce: &str, bytes: &[u8]) -> Result<Value> {
+        self.exchange_with_timeout(nonce, bytes, Duration::from_secs(20))
+            .await
+    }
+
+    async fn exchange_with_timeout(
+        &self,
+        nonce: &str,
+        bytes: &[u8],
+        timeout: Duration,
+    ) -> Result<Value> {
         // Take ownership before I/O. Dropping a cancelled exchange closes the
         // stream, forcing a fresh handshake; a late reply cannot poison a turn.
-        let mut connection = self.connection.lock().await;
-        let mut stream = connection.take().context(Failure::ExtensionUnavailable)?;
-        let raw = tokio::time::timeout(Duration::from_secs(20), async {
+        let generation = self.connection_generation.load(Ordering::Acquire);
+        let mut stream = {
+            let mut connection = self.connection.lock().await;
+            connection.take().context(Failure::ExtensionUnavailable)?
+        };
+        let raw = tokio::time::timeout(timeout, async {
             write_native(&mut stream, bytes)
                 .await
                 .map_err(|_| Failure::TransportWrite.record())?;
@@ -674,7 +770,16 @@ impl Browser {
         if response["nonce"] != nonce {
             return Err(Failure::ResponseInvalid.record().into());
         }
-        *connection = Some(stream);
+        // Accept can install a replacement while this request is in flight.
+        // Never let the old exchange overwrite the new stream, and never hold
+        // the mutex across I/O (otherwise reconnect handshakes deadlock behind
+        // the response timeout).
+        if self.connection_generation.load(Ordering::Acquire) == generation {
+            let mut connection = self.connection.lock().await;
+            if connection.is_none() {
+                *connection = Some(stream);
+            }
+        }
         Ok(response)
     }
 
@@ -857,6 +962,9 @@ mod tests {
             let browser = Browser {
                 connection: Arc::new(Mutex::new(Some(stream))),
                 ready: Arc::new(Notify::new()),
+                context_browser: false,
+                startup_verified: Arc::new(AtomicBool::new(false)),
+                connection_generation: Arc::new(AtomicU64::new(0)),
                 child: Mutex::new(None),
                 accept: tokio::spawn(std::future::pending()),
                 _updates: PackageServer::acquire(0).await.unwrap(),
@@ -876,6 +984,77 @@ mod tests {
             assert!(browser.connection.lock().await.is_none());
             task.await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn separated_startup_requires_and_caches_a_real_exchange() {
+        let temp = tempfile::tempdir().unwrap();
+        let (stream, mut peer) = UnixStream::pair().unwrap();
+        let task = tokio::spawn(async move {
+            let request = read_native(&mut peer).await.unwrap();
+            let request: Value = serde_json::from_slice(&request).unwrap();
+            let response = json!({"nonce": request["nonce"], "status": "ok"});
+            write_native(&mut peer, &serde_json::to_vec(&response).unwrap())
+                .await
+                .unwrap();
+        });
+        let browser = Browser {
+            connection: Arc::new(Mutex::new(Some(stream))),
+            ready: Arc::new(Notify::new()),
+            context_browser: true,
+            startup_verified: Arc::new(AtomicBool::new(false)),
+            connection_generation: Arc::new(AtomicU64::new(0)),
+            child: Mutex::new(None),
+            accept: tokio::spawn(std::future::pending()),
+            _updates: PackageServer::acquire(0).await.unwrap(),
+            socket: temp.path().join("unused.sock"),
+            _lock: std::fs::File::create(temp.path().join("lock")).unwrap(),
+        };
+        assert!(browser.wait_startup(Duration::from_secs(1)).await);
+        task.await.unwrap();
+        // A successful probe is cached; a later action does not repeat the
+        // startup handshake or require another native peer.
+        assert!(browser.wait_startup(Duration::from_millis(1)).await);
+    }
+
+    #[tokio::test]
+    async fn exchange_does_not_block_a_replacement_native_connection() {
+        let temp = tempfile::tempdir().unwrap();
+        let (stream, mut peer) = UnixStream::pair().unwrap();
+        let browser = Arc::new(Browser {
+            connection: Arc::new(Mutex::new(Some(stream))),
+            ready: Arc::new(Notify::new()),
+            context_browser: false,
+            startup_verified: Arc::new(AtomicBool::new(false)),
+            connection_generation: Arc::new(AtomicU64::new(0)),
+            child: Mutex::new(None),
+            accept: tokio::spawn(std::future::pending()),
+            _updates: PackageServer::acquire(0).await.unwrap(),
+            socket: temp.path().join("unused.sock"),
+            _lock: std::fs::File::create(temp.path().join("lock")).unwrap(),
+        });
+        let nonce = uuid::Uuid::new_v4().to_string();
+        let response_nonce = nonce.clone();
+        let exchange = {
+            let browser = browser.clone();
+            tokio::spawn(async move { browser.exchange(&nonce, b"{}").await })
+        };
+        let _request = read_native(&mut peer).await.unwrap();
+        // A reconnect handler must be able to install a fresh stream while a
+        // stale response is still pending.
+        let replacement =
+            tokio::time::timeout(Duration::from_millis(100), browser.connection.lock())
+                .await
+                .expect("exchange held the connection mutex across I/O");
+        assert!(replacement.is_none());
+        drop(replacement);
+        write_native(
+            &mut peer,
+            &serde_json::to_vec(&json!({"nonce": response_nonce, "status": "ok"})).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert!(exchange.await.unwrap().is_ok());
     }
 
     #[tokio::test]

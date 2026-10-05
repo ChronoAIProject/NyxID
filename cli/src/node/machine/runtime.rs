@@ -1398,12 +1398,31 @@ impl Runtime {
                 );
             }
             let active = browser.as_ref().expect("launched");
-            if active.ready().await {
+            // A separated browser is freshly provisioned with a new profile.
+            // Wait for one real extension exchange before allowing the first
+            // navigation; the hello alone only proves the native host socket
+            // was accepted. Shared legacy browsers retain the old readiness
+            // check and timing.
+            let startup_ready = if active.is_context_browser() {
+                active
+                    .wait_startup(std::time::Duration::from_secs(12))
+                    .await
+            } else {
+                active.ready().await
+            };
+            if startup_ready {
                 return Ok(());
             }
             // A live browser may be reconnecting its native host. Preserve its
             // tabs for another full (at most 4 s) extension retry before repair.
-            if active.alive().await && active.wait_ready(std::time::Duration::from_secs(5)).await {
+            // Check liveness first: a dead browser is repaired immediately.
+            if active.alive().await
+                && if active.is_context_browser() {
+                    active.wait_startup(std::time::Duration::from_secs(4)).await
+                } else {
+                    active.wait_ready(std::time::Duration::from_secs(5)).await
+                }
+            {
                 return Ok(());
             }
             active.stop().await;

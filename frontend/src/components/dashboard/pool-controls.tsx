@@ -62,7 +62,7 @@ export function NumberInput({
         type="number"
         min={min}
         max={max}
-        value={value}
+        value={Number.isFinite(value) ? value : ""}
         onChange={(e) => onChange(e.target.valueAsNumber)}
       />
     </label>

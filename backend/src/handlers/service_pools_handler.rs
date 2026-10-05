@@ -599,6 +599,10 @@ pub struct PoolCandidateResponse {
     pub credential_binding: String,
     pub protocol: Option<crate::models::downstream_service::InferenceWireProtocol>,
     pub catalog_service_id: Option<String>,
+    /// Authoritative original catalog grouping metadata. Custom connections
+    /// use the stable "Custom connections" group and a null catalog ID.
+    pub group_name: String,
+    pub group_slug: Option<String>,
     pub requires_compatibility_declaration: bool,
     pub cooldown_until: Option<String>,
     pub consecutive_failures: i64,
@@ -722,6 +726,8 @@ async fn inspect_pool_candidates(
                 credential_binding: row.credential_binding,
                 protocol: row.protocol,
                 catalog_service_id: row.catalog_service_id,
+                group_name: row.group_name,
+                group_slug: row.group_slug,
                 requires_compatibility_declaration: row.requires_compatibility_declaration,
                 cooldown_until: row.cooldown_until.map(|t| t.to_rfc3339()),
                 consecutive_failures: row.consecutive_failures,
