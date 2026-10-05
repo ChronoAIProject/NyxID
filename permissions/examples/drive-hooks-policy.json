@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "name": "Drive folder with runtime checks",
+  "provider": "google_drive",
+  "resource": {
+    "type": "google_drive_folder",
+    "root_folder_id": "client-a",
+    "include_descendants": true
+  },
+  "allowed_operations": ["drive.files.list", "drive.files.get", "drive.files.download", "drive.files.rename", "drive.folders.create"],
+  "hooks": [
+    {
+      "name": "pause-writes",
+      "handler": "pause_switch",
+      "stage": "before_execute",
+      "operations": ["drive.files.rename", "drive.folders.create"],
+      "timeout_ms": 500,
+      "config": { "path": "/tmp/nyxid-drive-poc.pause" }
+    },
+    {
+      "name": "confidential-output",
+      "handler": "response_markers",
+      "stage": "after_response",
+      "timeout_ms": 500,
+      "config": { "markers": ["CONFIDENTIAL"] }
+    }
+  ]
+}

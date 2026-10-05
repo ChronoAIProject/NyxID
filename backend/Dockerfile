@@ -22,6 +22,7 @@ COPY service-adapters/Cargo.toml service-adapters/Cargo.toml
 COPY mcp-demo/Cargo.toml mcp-demo/Cargo.toml
 COPY nyxid-crypto/Cargo.toml nyxid-crypto/Cargo.toml
 COPY machine/Cargo.toml machine/Cargo.toml
+COPY permissions/Cargo.toml permissions/Cargo.toml
 COPY machine-updater/Cargo.toml machine-updater/Cargo.toml
 
 # Create dummy entry points so cargo can resolve and compile dependencies.
@@ -36,6 +37,8 @@ RUN mkdir -p backend/src && echo "fn main() {}" > backend/src/main.rs \
     && mkdir -p service-adapters/src && echo "pub fn _stub() {}" > service-adapters/src/lib.rs \
     && mkdir -p mcp-demo/src && echo "fn main() {}" > mcp-demo/src/main.rs \
     && mkdir -p nyxid-crypto/src && echo "pub fn _stub() {}" > nyxid-crypto/src/lib.rs \
+    && mkdir -p permissions/src && echo "fn main() {}" > permissions/src/main.rs \
+    && echo "" > permissions/src/lib.rs \
     && mkdir -p machine/src && echo "" > machine/src/lib.rs \
     && mkdir -p machine-updater/src && echo "fn main() {}" > machine-updater/src/main.rs \
     && echo "" > machine-updater/src/lib.rs
@@ -43,9 +46,11 @@ RUN cargo build --release --manifest-path backend/Cargo.toml --features gcp-kms
 
 # Remove the dummy build artifacts (forces recompilation of our code only).
 # Drop the cloud-auth artifacts too so its real source is recompiled.
-RUN rm -rf backend/src cloud-auth/src service-adapters/src machine/src machine-updater/src \
+RUN rm -rf backend/src cloud-auth/src service-adapters/src machine/src machine-updater/src permissions/src \
     target/release/deps/nyxid_machine_updater-* target/release/deps/libnyxid_machine_updater* \
     target/release/libnyxid_machine_updater.* \
+    target/release/deps/nyxid_permissions-* \
+    target/release/libnyxid_permissions.* \
     target/release/deps/nyxid_machine-* \
     target/release/libnyxid_machine.* \
     target/release/deps/nyxid_service_adapters-* \
@@ -64,6 +69,8 @@ COPY backend/specs backend/specs
 COPY cloud-auth/src cloud-auth/src
 COPY service-adapters/src service-adapters/src
 COPY machine/src machine/src
+COPY permissions/src permissions/src
+COPY permissions/examples permissions/examples
 COPY machine/resources machine/resources
 COPY machine-updater/src machine-updater/src
 COPY cli/src/tls.rs cli/src/tls.rs
@@ -77,7 +84,7 @@ COPY docs/AI_AGENT_PLAYBOOK.md docs/AI_AGENT_PLAYBOOK.md
 COPY integrations/oracle/cdp-worker/worker.mjs integrations/oracle/cdp-worker/worker.mjs
 
 # Touch entry points so cargo sees them as newer than the cached dummies.
-RUN touch backend/src/main.rs cloud-auth/src/lib.rs service-adapters/src/lib.rs machine/src/lib.rs machine-updater/src/lib.rs
+RUN touch backend/src/main.rs cloud-auth/src/lib.rs service-adapters/src/lib.rs machine/src/lib.rs machine-updater/src/lib.rs permissions/src/lib.rs
 
 # Build the real binary
 RUN cargo build --release --manifest-path backend/Cargo.toml --features gcp-kms

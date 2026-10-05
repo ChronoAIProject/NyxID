@@ -2,12 +2,12 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { MachineCapabilities, MachineCapabilityForm } from "./machine-capabilities";
 import type { MachineAccess } from "@/schemas/machine-access";
-const { save, feature, query } = vi.hoisted(() => ({ save: vi.fn(), feature: vi.fn(), query: vi.fn() }));
+const { save, contextSave, feature, query } = vi.hoisted(() => ({ save: vi.fn(), contextSave: vi.fn(), feature: vi.fn(), query: vi.fn() }));
 vi.mock("@/hooks/use-feature-flag", () => ({ useFeature: feature }));
-vi.mock("@/hooks/use-machine-access", () => ({ useMachineAccess: query, useSetMachineAccess: () => ({ mutateAsync: save, isPending: false }) }));
+vi.mock("@/hooks/use-machine-access", () => ({ useMachineAccess: query, useSetMachineAccess: () => ({ mutateAsync: save, isPending: false }), useRequestMachineContext: () => ({ mutateAsync: contextSave, isPending: false, isSuccess: false }) }));
 const off = { shell: false, files: false, browser: false, computer: false, developer_browser: false };
-const machine: MachineAccess = { node_id: "node", name: "Work Mac", revision: 3, protocol_v2: true, can_edit: true, capabilities: off, ceiling: { shell: true, files: true, browser: true, computer: true, developer_browser: true }, legacy: false, saved_login_ids: null };
-beforeEach(() => { vi.clearAllMocks(); feature.mockReturnValue(true); query.mockReturnValue({ data: [machine] }); save.mockResolvedValue([]); });
+const machine: MachineAccess = { node_id: "node", name: "Work Mac", revision: 3, protocol_v2: true, can_edit: true, capabilities: off, ceiling: { shell: true, files: true, browser: true, computer: true, developer_browser: true }, legacy: false, saved_login_ids: null, separated: { available: true, landlock_abi: 6, reason: null } };
+beforeEach(() => { vi.clearAllMocks(); feature.mockReturnValue(true); query.mockReturnValue({ data: [machine] }); save.mockResolvedValue([]); contextSave.mockResolvedValue({ status: "pending" }); });
 describe("machine capability editor", () => {
   it("labels separated contexts without promising full isolation", () => {
     render(<MachineCapabilityForm machine={{ ...machine, mode: "separated", saved_login_ids: [] }} agentId="agent" />);
@@ -66,5 +66,14 @@ describe("machine capability editor", () => {
     fireEvent.click(screen.getByRole("checkbox", { name: "File tools" }));
     fireEvent.click(screen.getByRole("button", { name: "Save capabilities" }));
     await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("Reload if access changed"));
+  });
+  it("requests separated mode through the owner card with an explicit login list", async () => {
+    render(<MachineCapabilities agentId="agent" />);
+    fireEvent.click(screen.getByRole("button", { name: "Separate workspace and browser for this agent" }));
+    await waitFor(() => expect(contextSave).toHaveBeenCalledWith({
+      node: "node",
+      selection: { mode: "separated", expected_revision: 3, capabilities: off, saved_login_ids: [] },
+    }));
+    expect(screen.getByText("Owner approval requested in the NyxBot Assistant thread.")).toBeInTheDocument();
   });
 });

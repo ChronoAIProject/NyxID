@@ -1,11 +1,15 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { MachineDesktopPanel } from "./machine-desktop-panel";
+const { contexts } = vi.hoisted(() => ({ contexts: vi.fn() }));
 vi.mock("@/hooks/use-public-config", () => ({
   usePublicConfig: () => ({ data: { node_ws_url: "https://nyxid.example" } }),
 }));
 vi.mock("@/hooks/use-machines", () => ({
   useMachineDesktops: () => ({ data: [] }),
+}));
+vi.mock("@/hooks/use-machine-access", () => ({
+  useMachineContexts: contexts,
 }));
 class Socket {
   static OPEN = 1;
@@ -29,6 +33,7 @@ class Socket {
   }
 }
 beforeEach(() => {
+  contexts.mockReturnValue({ data: [], isError: false });
   Socket.instances = [];
   vi.stubGlobal("WebSocket", Socket);
   vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({
@@ -265,4 +270,39 @@ it("switches capture sockets by display and keeps owner input on its controller"
   expect(dev.send).toHaveBeenCalledOnce();
   expect(secure.send).not.toHaveBeenCalled();
   view.unmount();
+});
+
+it("offers named context choices without exposing context ids in labels", () => {
+  contexts.mockReturnValue({
+    data: [{
+      context_id: "ctx-secret",
+      agent_id: "agent-secret",
+      agent_name: "Luna",
+      actor_label: "Owner session",
+      group_id: null,
+      generation: 2,
+    }],
+    isError: false,
+  });
+  render(<MachineDesktopPanel nodeId="node" />);
+  fireEvent.click(screen.getByRole("combobox", { name: "Desktop context" }));
+  expect(screen.getByRole("option", { name: /Luna · Owner session/ })).toBeInTheDocument();
+  expect(screen.queryByText("ctx-secret")).not.toBeInTheDocument();
+});
+
+it("labels an unattributed persisted context as Unknown agent", () => {
+  contexts.mockReturnValue({
+    data: [{
+      context_id: "legacy-context",
+      agent_id: "old-agent",
+      agent_name: "Unknown agent",
+      actor_label: "Owner session",
+      group_id: null,
+      generation: 1,
+    }],
+    isError: false,
+  });
+  render(<MachineDesktopPanel nodeId="node" />);
+  fireEvent.click(screen.getByRole("combobox", { name: "Desktop context" }));
+  expect(screen.getByRole("option", { name: /Unknown agent · Owner session/ })).toBeInTheDocument();
 });

@@ -218,6 +218,46 @@ outcome is unknown, do not POST again automatically; reconcile/close a known
 provider ID or report startup uncertainty. Never cache SDP in logs or durable
 rows to make this replayable. A replacement connection is a new session/offer.
 
+### Startup contract verification (2026-10-05)
+
+The [official create response](https://developers.openai.com/api/reference/resources/live/methods/create)
+contains `session: {id}` and `transport: {type: "webrtc", sdp}`. It does **not**
+require or document `session.expires_at` there. Requiring that integer rejected a
+valid, already billed session before attach. The regression fixture uses this
+exact documented shape. An optional integer expiry still shortens NyxID's local
+30-minute deadline; absent/string/fractional values do not invalidate creation.
+This identifies a reproducible post-create bug, not a production trace proving
+that every reported failure had the same cause.
+
+The request matches the reference: `session.delegation: {type: "client"}`,
+`session.audio.output.voice`, `store: false`, and `transport: {type: "webrtc", sdp}`.
+`allowed_client_events` is an array of event-name strings (`[]` allows none);
+`allowed_server_events` uses `{type: ...}` selectors, with `response_event` only
+for `response.event`. Provider IDs are opaque: encode one URL path segment rather
+than impose an undocumented alphanumeric-only charset (local 1024-byte bound;
+empty/control/dot-segment IDs refused). SDP remains bounded and must begin `v=0`.
+
+[Sideband attachment](https://developers.openai.com/api/reference/resources/live/sideband-websocket)
+uses `wss://api.openai.com/v1/live/sessions/{session_id}/attach`, Bearer API-key
+authentication, no required subprotocol or initial frame, and no event replay.
+NyxID waits for the handshake, not a replayed `session.started`. The 20-second
+startup budget, 15-second HTTP deadline and 5-second attach deadline are local
+bounds, not provider guarantees; timeout reports `transport`. The
+[WebRTC guide](https://developers.openai.com/api/docs/guides/voice-webrtc?api=live)
+waits for ICE gathering before posting the offer; the client now does so with a
+five-second bound and cancellation. `voiceStartedSchema` validates NyxID's own
+response DTO; schema and `setRemoteDescription` failures have separate messages.
+
+The documented [REST hangup](https://developers.openai.com/api/reference/resources/live/subresources/sessions/methods/hangup)
+is explicitly for SIP. No independent WebRTC close endpoint is documented, so
+NyxID must not assume it closes WebRTC sessions. A failed attach still triggers a
+separate bounded attach/`session.close` attempt. Unconfirmed closure retains the
+provider ID, records `assistant_voice_close_unconfirmed` with local IDs only, and
+retries through the fenced recovery sweep until the existing 24-hour deadline.
+Never replay creation; never infer user charges from elapsed time or failed
+cleanup. Fixtures prove failed initial attach/cleanup followed by recovery close
+with final provider usage. Live paid validation remains an operator rollout gate.
+
 ### xAI relay and why it is selected
 
 Phase 4 implements a separate default-off `assistant:voice-grok` beta and
@@ -1140,6 +1180,18 @@ Backpressure and long result narration must not delay receipt of Stop/mute.
 | Duplicate provider call/result or delayed old event | Deduplicate persistent request/window IDs; ignore old generation/version, no double work, charge, continuation or notification. |
 | False speech / echo | Duck then recover, no backend Stop from VAD; require explicit real input. Offer click/PTT/headphones. |
 | Voice ends with task/card pending | Accepted work and card stay in the thread; normal expiry applies. Result notification uses a deduped receipt and user's preferences. Never auto-confirm or silently re-open mic. |
+
+Each failed startup boundary emits one structured warning and one metadata-only
+`assistant_voice_start_failed` audit. Its fixed `stage` is `flag`, `thread`,
+`origin`, `credential`, `billing_reservation`, `provider_create`, `provider_answer`
+or `transport`. HTTP error codes/statuses are preserved; `details.reason` adds a
+safe stage and, when available, provider status/code/parameter. OpenAI and Grok
+retain only bounded identifier-shaped `error.type`, `error.code`, `error.param`
+and HTTP status; never provider `error.message`. Billing includes its existing
+numeric error code. Grok setup errors use the same safe envelope over the human
+control socket. The browser distinguishes microphone denial/missing device,
+billing/credit/origin refusal, invalid server answers, network/control failures,
+and WebRTC negotiation failure; local exception text is never rendered.
 
 Audits go through the existing append service/hash chain and contain only actor,
 agent/thread/local session/request IDs, provider/model enum, state, counts,

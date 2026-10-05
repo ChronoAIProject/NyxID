@@ -241,3 +241,47 @@ fn grok_unfinished_captions_seal_incomplete_on_disconnect_not_on_silence() {
     assert_eq!(tail[0].id, id);
     assert!(transcripts.seal_ready(5001, true).is_empty());
 }
+
+#[tokio::test]
+async fn grok_start_rejections_preserve_status_or_safe_frame_identifiers() {
+    use axum::{
+        Json, Router,
+        extract::{WebSocketUpgrade, ws::Message},
+        http::StatusCode,
+        response::IntoResponse,
+        routing::get,
+    };
+    for handshake in [true, false] {
+        let app = Router::new().route("/v1/realtime", get(move |ws: WebSocketUpgrade| async move {
+            if handshake {
+                return (StatusCode::UNAUTHORIZED, Json(json!({"error":{"type":"authentication_error","code":"invalid_api_key","message":"DO-NOT-EXPOSE"}}))).into_response();
+            }
+            ws.on_upgrade(|mut socket| async move {
+                socket.send(Message::Text(json!({"type":"session.created"}).to_string().into())).await.unwrap();
+                socket.recv().await.unwrap().unwrap();
+                socket.send(Message::Text(json!({"type":"error","error":{"type":"invalid_request_error","code":"invalid_value","param":"session.voice","message":"DO-NOT-EXPOSE sk-secret instructions SDP"}}).to_string().into())).await.unwrap();
+            })
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let error = protocol::fixture(address).await.err().unwrap();
+        let body = error.response_body();
+        let details = body.details.as_ref().unwrap();
+        assert_eq!(error.error_code(), 12501);
+        assert_eq!(details["stage"], "provider_create");
+        assert_eq!(details["provider"], "xai");
+        if handshake {
+            assert_eq!(details["provider_status"], 401);
+        } else {
+            assert_eq!(details["provider_type"], "invalid_request_error");
+            assert_eq!(
+                details["reason"],
+                "provider_create:invalid_value:session.voice"
+            );
+        }
+        let rendered = serde_json::to_string(&body).unwrap() + &format!("{error:?}");
+        assert!(!rendered.contains("DO-NOT-EXPOSE") && !rendered.contains("sk-secret"));
+        server.abort();
+    }
+}

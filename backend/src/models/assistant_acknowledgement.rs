@@ -56,6 +56,10 @@ pub struct AssistantAcknowledgement {
     /// The orchestrator's bounded reason for its decision.
     #[serde(default)]
     pub reason: Option<String>,
+    /// A graphical machine-context request. The bounded selection is applied
+    /// only after the owner allows this action card.
+    #[serde(default)]
+    pub machine_context: Option<super::machine_access::HumanContextAction>,
 }
 
 fn default_decider() -> String {

@@ -1,4 +1,5 @@
 import { AgentSkills } from "./agent-skills";
+import { AgentLearningReview } from "./agent-learning-review";
 import { MachineCapabilities } from "./machine-capabilities";
 import { AgentOperationScopes } from "./agent-operation-scopes";
 import { MachineGrantPicker } from "./machine-grant-picker";
@@ -191,6 +192,7 @@ export function AgentDetailsSheet({
               )}
               <AgentSkills agentId={agent.id} readOnly={agent.status === "destroyed" || agent.can_maintain === false
                 } />
+              <AgentLearningReview agentId={agent.id} readOnly={agent.status === "destroyed" || agent.can_maintain === false} />
               {agent.can_use !== false ? (
                 <AgentAutomations agentId={agent.id} />
               ) : null}

@@ -41,3 +41,49 @@ export const skillPreviewSchema = z.object({
   description: z.string(),
   size_bytes: z.number(),
 });
+
+export const learningProposalSchema = z.object({
+  id: z.string(),
+  agent_id: z.string(),
+  status: z.string(),
+  revision: z.number().default(0),
+  config_revision: z.number(),
+  agent_skills_revision: z.number(),
+  evidence_count: z.number(),
+  body_bytes: z.number(),
+  created_at: z.string(),
+  updated_at: z.string(),
+  draft: z.object({
+    schema_version: z.number().default(1),
+    kind: z.enum(["new", "improve", "none"]).default("new"),
+    name: z.string(),
+    description: z.string(),
+    skill_md: z.string(),
+    rationale: z.string(),
+    safety_notes: z.string(),
+    files: z.array(z.object({ path: z.string(), content: z.string() })).default([]),
+    base_skill: z.unknown().optional(),
+  }).optional(),
+});
+export const learningProposalsSchema = z.object({ proposals: learningProposalSchema.array() });
+export const learningStatusSchema = z.object({
+  enabled: z.boolean(),
+  config: z
+    .object({
+      threshold: z.number().optional(),
+      learning_epoch: z.number().optional(),
+      config_revision: z.number().optional(),
+      eligible_count: z.number().optional(),
+      last_run_at: z.string().nullable().optional(),
+      last_success_at: z.string().nullable().optional(),
+      last_error_code: z.string().nullable().optional(),
+    })
+    .nullable()
+    .optional(),
+});
+export const learningApprovalSchema = z.object({
+  status: z.string(),
+  acknowledgement: z
+    .object({ acknowledgement_id: z.string() })
+    .optional(),
+});

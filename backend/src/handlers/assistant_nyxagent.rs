@@ -667,7 +667,7 @@ impl From<crate::models::assistant_acknowledgement::AssistantAcknowledgement>
         }
     }
 }
-#[derive(Deserialize)]
+#[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Decision {
     Allow,
@@ -704,6 +704,11 @@ pub async fn decide_acknowledgement(
     // A user decision on a subagent's request resumes the subagent.
     if row.decider == "orchestrator" {
         super::assistant_team::permission_decided(&state, &user, &row).await;
+    }
+    if matches!(body.decision, Decision::Allow)
+        && let Some(action) = row.machine_context.as_ref()
+    {
+        super::machine_access::apply_human_context_action(&state, &user, action).await?;
     }
     Ok(Json(row.into()))
 }

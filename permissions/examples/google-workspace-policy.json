@@ -1,0 +1,180 @@
+{
+  "version": 1,
+  "name": "Project Workspace assistant",
+  "provider": "google",
+  "resource": {
+    "type": "google_api",
+    "operations": [
+      {
+        "id": "drive.files.get",
+        "origin": "https://www.googleapis.com",
+        "method": "GET",
+        "path": "/drive/v3/files/{file_id}",
+        "path_parameters": {
+          "file_id": {
+            "type": "exact",
+            "value": "report-file"
+          }
+        },
+        "query_parameters": {
+          "fields": {
+            "required": true,
+            "rule": {
+              "type": "exact",
+              "value": "id,name,mimeType"
+            }
+          }
+        },
+        "body": null
+      },
+      {
+        "id": "gmail.messages.list",
+        "origin": "https://www.googleapis.com",
+        "method": "GET",
+        "path": "/gmail/v1/users/me/messages",
+        "path_parameters": {},
+        "query_parameters": {
+          "labelIds": {
+            "required": true,
+            "rule": {
+              "type": "exact",
+              "value": "Label_Project"
+            }
+          },
+          "maxResults": {
+            "required": true,
+            "rule": {
+              "type": "max_integer",
+              "value": 20
+            }
+          }
+        },
+        "body": null
+      },
+      {
+        "id": "calendar.events.list",
+        "origin": "https://www.googleapis.com",
+        "method": "GET",
+        "path": "/calendar/v3/calendars/{calendar_id}/events",
+        "path_parameters": {
+          "calendar_id": {
+            "type": "exact",
+            "value": "team@example.com"
+          }
+        },
+        "query_parameters": {
+          "maxResults": {
+            "required": true,
+            "rule": {
+              "type": "max_integer",
+              "value": 50
+            }
+          }
+        },
+        "body": null
+      },
+      {
+        "id": "docs.documents.get",
+        "origin": "https://docs.googleapis.com",
+        "method": "GET",
+        "path": "/v1/documents/{document_id}",
+        "path_parameters": {
+          "document_id": {
+            "type": "exact",
+            "value": "project-document"
+          }
+        },
+        "query_parameters": {},
+        "body": null
+      },
+      {
+        "id": "sheets.values.get",
+        "origin": "https://sheets.googleapis.com",
+        "method": "GET",
+        "path": "/v4/spreadsheets/{spreadsheet_id}/values/{range}",
+        "path_parameters": {
+          "spreadsheet_id": {
+            "type": "exact",
+            "value": "project-sheet"
+          },
+          "range": {
+            "type": "exact",
+            "value": "Sheet1!A1:B10"
+          }
+        },
+        "query_parameters": {},
+        "body": null
+      },
+      {
+        "id": "slides.presentations.get",
+        "origin": "https://slides.googleapis.com",
+        "method": "GET",
+        "path": "/v1/presentations/{presentation_id}",
+        "path_parameters": {
+          "presentation_id": {
+            "type": "exact",
+            "value": "project-slides"
+          }
+        },
+        "query_parameters": {},
+        "body": null
+      },
+      {
+        "id": "sheets.values.update",
+        "origin": "https://sheets.googleapis.com",
+        "method": "PUT",
+        "path": "/v4/spreadsheets/{spreadsheet_id}/values/{range}",
+        "path_parameters": {
+          "spreadsheet_id": {
+            "type": "exact",
+            "value": "project-sheet"
+          },
+          "range": {
+            "type": "exact",
+            "value": "Sheet1!A1:B10"
+          }
+        },
+        "query_parameters": {
+          "valueInputOption": {
+            "required": true,
+            "rule": {
+              "type": "exact",
+              "value": "RAW"
+            }
+          }
+        },
+        "body": {
+          "type": "object",
+          "required": [
+            "values"
+          ],
+          "properties": {
+            "values": {
+              "type": "array",
+              "max_items": 10,
+              "items": {
+                "type": "array",
+                "max_items": 2,
+                "items": {
+                  "type": "string",
+                  "max_length": 1000
+                }
+              }
+            }
+          }
+        }
+      }
+    ]
+  },
+  "allowed_operations": [
+    "drive.files.get",
+    "gmail.messages.list",
+    "calendar.events.list",
+    "docs.documents.get",
+    "sheets.values.get",
+    "slides.presentations.get",
+    "sheets.values.update"
+  ],
+  "constraints": {},
+  "hooks": []
+}

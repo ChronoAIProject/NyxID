@@ -70,14 +70,74 @@ pub struct Lease {
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub expires_at: DateTime<Utc>,
 }
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Selection {
     /// Omitted preserves the assignment mode; old writers cannot widen it.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
     pub expected_revision: i64,
     pub capabilities: Capabilities,
     #[serde(default)]
     pub saved_login_ids: Option<Vec<String>>,
+}
+
+/// Bounded, server-authored payload attached to a human context-change card.
+/// It contains no free-form content or credentials and is applied only after
+/// the existing acknowledgement is allowed.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct HumanContextAction {
+    pub agent_id: String,
+    pub node_id: String,
+    pub selection: Selection,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn context_selection_accepts_mode_without_leaking_it_into_legacy_writers() {
+        let value = json!({
+            "mode": "separated",
+            "expected_revision": 7,
+            "capabilities": {
+                "shell": true,
+                "files": true,
+                "browser": true,
+                "computer": false,
+                "developer_browser": false
+            },
+            "saved_login_ids": []
+        });
+        let selection: Selection = serde_json::from_value(value).unwrap();
+        assert_eq!(selection.mode.as_deref(), Some("separated"));
+        let legacy = serde_json::to_value(&Selection {
+            mode: None,
+            expected_revision: selection.expected_revision,
+            capabilities: selection.capabilities,
+            saved_login_ids: None,
+        })
+        .unwrap();
+        assert!(legacy.get("mode").is_none());
+    }
+
+    #[test]
+    fn context_selection_rejects_unrelated_fields() {
+        let error = serde_json::from_value::<Selection>(json!({
+            "mode": "separated",
+            "expected_revision": 1,
+            "capabilities": {
+                "shell": false,
+                "files": false,
+                "browser": true,
+                "computer": false,
+                "developer_browser": false
+            },
+            "saved_login_ids": [],
+            "skill": "wrong-schema"
+        }));
+        assert!(error.is_err());
+    }
 }

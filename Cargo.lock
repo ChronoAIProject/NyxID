@@ -4276,7 +4276,7 @@ dependencies = [
 
 [[package]]
 name = "nyxid"
-version = "0.60.0"
+version = "0.61.2"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -4322,6 +4322,7 @@ dependencies = [
  "nyxid-cloud-auth",
  "nyxid-machine",
  "nyxid-machine-updater",
+ "nyxid-permissions",
  "nyxid-service-adapters",
  "open",
  "p256",
@@ -4366,7 +4367,7 @@ dependencies = [
 
 [[package]]
 name = "nyxid-cli"
-version = "0.60.0"
+version = "0.61.2"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -4532,6 +4533,31 @@ name = "nyxid-mcp-demo"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+]
+
+[[package]]
+name = "nyxid-permissions"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "bytes",
+ "clap",
+ "futures",
+ "http 1.4.0",
+ "memchr",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "subtle",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower 0.5.3",
+ "url",
+ "urlencoding",
+ "uuid",
+ "zeroize",
 ]
 
 [[package]]

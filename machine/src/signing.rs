@@ -97,6 +97,31 @@ impl ReplayGuard {
         secret: &[u8],
         now: i64,
     ) -> Result<(), Rejection> {
+        self.verify_signature_and_freshness(request, node_id, secret, now)?;
+        self.nonces.retain(|_, expires| *expires >= now);
+        if self.nonces.contains_key(&request.nonce) {
+            return Err(Rejection::Replay);
+        }
+        if self.nonces.len() >= MAX_NONCES {
+            return Err(Rejection::Capacity);
+        }
+        self.nonces.insert(
+            request.nonce.clone(),
+            request.timestamp.saturating_add(WINDOW_SECS),
+        );
+        Ok(())
+    }
+
+    /// Verify the signed request identity without consuming its nonce. This is
+    /// used by the machine receipt ledger before serving a cached or in-flight
+    /// result; replay consumption remains exclusive to first execution.
+    pub fn verify_signature_and_freshness(
+        &self,
+        request: &Request,
+        node_id: &str,
+        secret: &[u8],
+        now: i64,
+    ) -> Result<(), Rejection> {
         if !matches!(request.version, 1 | 2)
             || (request.version == 1 && request.authority.is_some())
             || (request.version == 2 && request.authority.is_none())
@@ -114,17 +139,6 @@ impl ReplayGuard {
         request_mac(request, secret)
             .verify_slice(&provided)
             .map_err(|_| Rejection::Signature)?;
-        self.nonces.retain(|_, expires| *expires >= now);
-        if self.nonces.contains_key(&request.nonce) {
-            return Err(Rejection::Replay);
-        }
-        if self.nonces.len() >= MAX_NONCES {
-            return Err(Rejection::Capacity);
-        }
-        self.nonces.insert(
-            request.nonce.clone(),
-            request.timestamp.saturating_add(WINDOW_SECS),
-        );
         Ok(())
     }
 }
@@ -182,6 +196,34 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[test]
+    fn identity_check_verifies_signature_and_freshness_without_consuming_nonce() {
+        let request = request();
+        let guard = ReplayGuard::default();
+        assert_eq!(
+            guard.verify_signature_and_freshness(&request, "node-a", b"test signing secret", 1000,),
+            Ok(())
+        );
+        assert_eq!(
+            guard.verify_signature_and_freshness(&request, "node-a", b"test signing secret", 1061,),
+            Err(Rejection::Stale)
+        );
+        assert_eq!(
+            guard
+                .verify_signature_and_freshness(&request, "node-a", b"wrong signing secret", 1000,),
+            Err(Rejection::Signature)
+        );
+        let mut consuming = guard;
+        assert_eq!(
+            consuming.verify(&request, "node-a", b"test signing secret", 1000),
+            Ok(())
+        );
+        assert_eq!(
+            consuming.verify(&request, "node-a", b"test signing secret", 1000),
+            Err(Rejection::Replay)
+        );
     }
 }
 

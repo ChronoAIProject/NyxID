@@ -109,6 +109,16 @@ pub struct BillingRouteSpec {
 #[cfg(test)]
 pub const BILLING_ROUTE_INVENTORY: &[BillingRouteSpec] = &[
     BillingRouteSpec {
+        handler: "handlers::permission_keys::rest",
+        route: "/api/v1/permission-execution/rest/{*path}",
+        policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),
+    },
+    BillingRouteSpec {
+        handler: "handlers::permission_keys::mcp",
+        route: "/api/v1/permission-execution/mcp",
+        policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),
+    },
+    BillingRouteSpec {
         handler: "handlers::codex_connection::verify",
         route: "/api/v1/providers/codex-connection/verify",
         policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),

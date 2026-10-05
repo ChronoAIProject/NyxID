@@ -19,5 +19,18 @@ export const machineSelectionSchema = z.object({
 }).refine(v => v.capabilities.browser || (!v.capabilities.computer && !v.capabilities.developer_browser), {
   message: "Browser is required for computer and developer browser access", path: ["capabilities", "browser"],
 });
+export const machineContextSelectionSchema = machineSelectionSchema.extend({
+  mode: z.literal("separated"),
+});
+export const machineContextSchema = z.object({
+  context_id: z.string().min(1),
+  agent_id: z.string().min(1),
+  agent_name: z.string().min(1),
+  actor_label: z.string().min(1),
+  group_id: z.string().nullable(),
+  generation: z.number().int().positive(),
+});
 export type MachineAccess = z.infer<typeof machineAccessSchema>;
 export type MachineSelection = z.infer<typeof machineSelectionSchema>;
+export type MachineContextSelection = z.infer<typeof machineContextSelectionSchema>;
+export type MachineContext = z.infer<typeof machineContextSchema>;

@@ -53,7 +53,13 @@ const defaults = {
   isFetchingNextPage: false,
   onLoadMore: vi.fn(),
 };
-function Harness({ initialIds = [] }: { initialIds?: string[] }) {
+function Harness({
+  initialIds = [],
+  sourceRows = defaults.rows,
+}: {
+  initialIds?: string[];
+  sourceRows?: PoolCandidate[];
+}) {
   const [ids, setIds] = useState(initialIds);
   const [search, setSearch] = useState("");
   return (
@@ -66,8 +72,10 @@ function Harness({ initialIds = [] }: { initialIds?: string[] }) {
           selectedIds={ids}
           search={search}
           onSearch={setSearch}
-          rows={defaults.rows.filter((row) =>
-            (row.name || row.slug).toLowerCase().includes(search.toLowerCase()),
+          rows={sourceRows.filter((row) =>
+            `${row.name || row.slug} ${row.slug} ${row.group_name ?? ""}`
+              .toLowerCase()
+              .includes(search.toLowerCase()),
           )}
           onToggle={(row) =>
             setIds((current) =>
@@ -190,6 +198,74 @@ describe("pool connection picker", () => {
       "true",
     );
   });
+  it("groups interleaved catalog rows, de-duplicates page overlap, and navigates display order", async () => {
+    const user = userEvent.setup();
+    const groupedRows: PoolCandidate[] = [
+      {
+        ...candidate,
+        name: "A account 1",
+        catalog_service_id: "catalog-a",
+        group_name: "Shared service",
+        group_slug: "service-a",
+      },
+      {
+        ...backup,
+        name: "B account 1",
+        catalog_service_id: "catalog-b",
+        group_name: "Shared service",
+        group_slug: "service-b",
+      },
+      {
+        ...candidate,
+        user_service_id: "three",
+        name: "A account 2",
+        catalog_service_id: "catalog-a",
+        group_name: "Shared service",
+        group_slug: "service-a",
+      },
+      {
+        ...candidate,
+        user_service_id: "three",
+        name: "A account 2 duplicate",
+        catalog_service_id: "catalog-a",
+        group_name: "Shared service",
+        group_slug: "service-a",
+      },
+    ];
+    render(<Harness sourceRows={groupedRows} />);
+    const { input } = await openPicker(user);
+    expect(
+      screen.getByRole("group", {
+        name: "Shared service (service-a) (2 loaded)",
+      }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("group", {
+        name: "Shared service (service-b) (1 loaded)",
+      }),
+    ).toBeVisible();
+    expect(screen.getAllByRole("option")).toHaveLength(3);
+    await user.keyboard("{ArrowUp}");
+    expect(input).toHaveAttribute(
+      "aria-activedescendant",
+      screen.getByRole("option", { name: "B account 1" }).id,
+    );
+    await user.keyboard("{Enter}");
+    expect(screen.getByRole("option", { name: "B account 1" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    await user.keyboard("{ArrowDown}{Enter}{ArrowDown}{Enter}");
+    expect(screen.getByRole("option", { name: "A account 1" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.getByRole("option", { name: "A account 2" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(input).toHaveFocus();
+  });
   it("keeps retry and paging inside the dropdown and distinguishes loading, empty search, and empty inventory", async () => {
     const user = userEvent.setup();
     const retry = vi.fn();
@@ -229,4 +305,76 @@ describe("pool connection picker", () => {
     expect(more).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("combobox")).toBeVisible();
   });
+});
+
+it("returns keyboard focus to search after the final page button disappears", async () => {
+  const user = userEvent.setup();
+  const { rerender } = render(
+    <PoolConnectionPicker {...defaults} hasNextPage />,
+  );
+  const { input } = await openPicker(user);
+  await user.tab();
+  const more = screen.getByRole("button", { name: "Load more connections" });
+  expect(more).toHaveFocus();
+  await user.keyboard("{Enter}");
+  rerender(
+    <PoolConnectionPicker {...defaults} hasNextPage isFetchingNextPage />,
+  );
+  expect(more).toBeDisabled();
+  rerender(
+    <PoolConnectionPicker
+      {...defaults}
+      rows={[...defaults.rows, { ...backup, user_service_id: "last" }]}
+      hasNextPage={false}
+    />,
+  );
+  await waitFor(() => expect(input).toHaveFocus());
+});
+
+it("blocks stale additions and pagination during compatibility checks while allowing removal", async () => {
+  const user = userEvent.setup();
+  const onToggle = vi.fn();
+  const onLoadMore = vi.fn();
+  const { rerender } = render(
+    <PoolConnectionPicker
+      {...defaults}
+      selectedIds={[candidate.user_service_id]}
+      onToggle={onToggle}
+      onLoadMore={onLoadMore}
+      hasNextPage
+      isCheckingCompatibility
+      isRefreshing
+    />,
+  );
+  await openPicker(user);
+  expect(screen.getByText("Checking compatibility…")).toBeVisible();
+  const primary = screen.getByRole("option", { name: candidate.name! });
+  const second = screen.getByRole("option", { name: backup.name });
+  expect(primary).toHaveAttribute("aria-disabled", "false");
+  expect(second).toHaveAttribute("aria-disabled", "true");
+  await user.click(second);
+  await user.click(
+    screen.getByRole("button", { name: "Load more connections" }),
+  );
+  expect(onToggle).not.toHaveBeenCalled();
+  expect(onLoadMore).not.toHaveBeenCalled();
+  await user.click(primary);
+  expect(onToggle).toHaveBeenCalledWith(candidate);
+  rerender(
+    <PoolConnectionPicker
+      {...defaults}
+      isCheckingCompatibility
+      isError
+      error={new Error("Temporary failure")}
+    />,
+  );
+  expect(screen.getByText("Compatibility check failed.")).toBeVisible();
+  expect(screen.queryByText("Checking compatibility…")).not.toBeInTheDocument();
+  rerender(
+    <PoolConnectionPicker {...defaults} onLoadMore={onLoadMore} hasNextPage />,
+  );
+  await user.click(
+    screen.getByRole("button", { name: "Load more connections" }),
+  );
+  expect(onLoadMore).toHaveBeenCalledTimes(1);
 });

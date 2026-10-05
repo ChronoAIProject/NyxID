@@ -77,6 +77,24 @@ macro_rules! proxy_billing_routes {
     ($apply:ident, $router:expr) => {
         $apply!($router;
             (
+                "/permission-execution/rest/{*path}",
+                "/api/v1/permission-execution/rest/{*path}",
+                "handlers::permission_keys::rest",
+                axum::routing::any(handlers::permission_keys::rest),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Proxy
+                )
+            ),
+            (
+                "/permission-execution/mcp",
+                "/api/v1/permission-execution/mcp",
+                "handlers::permission_keys::mcp",
+                post(handlers::permission_keys::mcp),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Proxy
+                )
+            ),
+            (
                 "/proxy/s/{slug}/{*path}",
                 "/api/v1/proxy/s/{slug}/{*path}",
                 "handlers::proxy::proxy_request_by_slug",
@@ -1998,6 +2016,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             "/nyxagent/machines/{node_id}/desktop",
             get(handlers::machine_desktop::upgrade),
         )
+        .route(
+            "/nyxagent/machines/{node_id}/contexts",
+            get(handlers::machine_desktop::contexts),
+        )
         .route("/nyxagent/live", get(handlers::assistant_nyxagent::live))
         .route(
             "/nyxagent/conversations",
@@ -2034,12 +2056,45 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::agent_skills::get).put(handlers::agent_skills::set),
         )
         .route(
+            "/nyxagent/agents/{id}/learning",
+            get(handlers::assistant_agent_learning::status)
+                .put(handlers::assistant_agent_learning::configure),
+        )
+        .route(
+            "/nyxagent/agents/{id}/learning/consent",
+            put(handlers::assistant_agent_learning::consent),
+        )
+        .route(
+            "/nyxagent/agents/{id}/learning/proposals",
+            get(handlers::assistant_agent_learning::list),
+        )
+        .route(
+            "/nyxagent/agents/{id}/learning/run",
+            post(handlers::assistant_agent_learning::run_now),
+        )
+        .route(
+            "/nyxagent/agents/{id}/learning/proposals/{proposal_id}/reject",
+            post(handlers::assistant_agent_learning::reject),
+        )
+        .route(
+            "/nyxagent/agents/{id}/learning/proposals/{proposal_id}",
+            axum::routing::put(handlers::assistant_agent_learning::edit),
+        )
+        .route(
+            "/nyxagent/agents/{id}/learning/proposals/{proposal_id}/approve",
+            post(handlers::assistant_agent_learning::approve),
+        )
+        .route(
             "/nyxagent/agents/{id}/machines",
             get(handlers::machine_access::get),
         )
         .route(
             "/nyxagent/agents/{id}/machines/{node_id}",
             axum::routing::put(handlers::machine_access::put),
+        )
+        .route(
+            "/nyxagent/agents/{id}/machines/{node_id}/context-request",
+            post(handlers::machine_access::request_context),
         )
         .route(
             "/nyxagent/agents/{id}/operations",
@@ -2386,6 +2441,17 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::devices::get_onboard_device_authorization),
         )
         .nest("/users", user_routes)
+        .route(
+            "/permission-keys",
+            post(handlers::permission_keys::create)
+                .layer(DefaultBodyLimit::max(nyxid_permissions::MAX_BODY_BYTES)),
+        )
+        .route(
+            "/permission-keys/{id}",
+            get(handlers::permission_keys::get)
+                .patch(handlers::permission_keys::pause)
+                .delete(handlers::permission_keys::revoke),
+        )
         .nest("/api-keys", api_key_routes)
         .nest("/services", service_routes)
         .route("/docs", get(handlers::docs::docs_ui))

@@ -945,7 +945,10 @@ fn dispatch<'a>(
         | "get_agent_skills"
         | "set_agent_skills"
         | "request_agent_skills"
-        | "skill_read" => Box::pin(super::agent_skills::dispatch(state, chat, name, args)),
+        | "skill_read"
+        | "learning_status"
+        | "learning_list_proposals"
+        | "learning_run_now" => Box::pin(super::agent_skills::dispatch(state, chat, name, args)),
         "set_guest_access" | "update_subagent" => {
             Box::pin(dispatch_agent_settings(state, chat, name, args))
         }

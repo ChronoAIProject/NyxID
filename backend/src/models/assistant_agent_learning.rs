@@ -11,6 +11,7 @@ pub const MEMBERS_COLLECTION_NAME: &str = "assistant_agent_learning_members";
 pub const RUNS_COLLECTION_NAME: &str = "assistant_agent_learning_runs";
 pub const PROPOSALS_COLLECTION_NAME: &str = "assistant_agent_learning_proposals";
 pub const REJECTIONS_COLLECTION_NAME: &str = "assistant_agent_learning_rejections";
+pub const ROOTS_COLLECTION_NAME: &str = "assistant_agent_learning_skill_roots";
 
 pub const DEFAULT_THRESHOLD: i64 = 15;
 #[allow(dead_code)]
@@ -151,6 +152,8 @@ pub struct AssistantAgentLearningProposal {
     pub owner_id: String,
     pub run_id: String,
     pub status: String,
+    #[serde(default)]
+    pub revision: i64,
     pub config_revision: i64,
     pub agent_skills_revision: i64,
     pub fingerprint: String,
@@ -158,6 +161,10 @@ pub struct AssistantAgentLearningProposal {
     pub input_digest: String,
     #[serde(default)]
     pub model_contract: String,
+    #[serde(default)]
+    pub publication: Option<LearningPublication>,
+    #[serde(default)]
+    pub failure_code: Option<String>,
     #[serde(default)]
     pub evidence: Vec<LearningEvidence>,
     #[serde(default, with = "crate::models::bson_bytes::required")]
@@ -190,4 +197,42 @@ pub struct AssistantAgentLearningRejection {
     pub expires_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AssistantAgentLearningSkillRoot {
+    #[serde(rename = "_id")]
+    pub id: String,
+    pub agent_id: String,
+    pub owner_id: String,
+    pub skill_id: String,
+    pub version: String,
+    pub sha256: String,
+    pub operation_id: String,
+    #[serde(default)]
+    pub active: bool,
+    pub proposal_id: String,
+    pub config_revision: i64,
+    pub agent_skills_revision: i64,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub created_at: DateTime<Utc>,
+}
+
+/// Metadata only; the reviewed archive is deterministically regenerated from
+/// the encrypted draft. A started write is never issued a second time.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LearningPublication {
+    pub operation_id: String,
+    pub name: String,
+    pub version: String,
+    pub sha256: String,
+    pub skill_id: Option<String>,
+    pub started: bool,
+    pub approved_by: Option<String>,
+    pub approval_digest: Option<String>,
+    pub acknowledgement_id: Option<String>,
+    pub skills_revision: i64,
+    pub lease_id: Option<String>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub lease_expires_at: Option<DateTime<Utc>>,
 }

@@ -1,7 +1,9 @@
+import { voiceStartError, type VoiceStartStep } from "./voice-start-error";
 import { GrokAudio } from "./grok-audio";
 import { api, apiClient, apiUrl, ApiError } from "./api-client";
 import {
   voiceStartedSchema,
+  voiceStartFailureSchema,
   voiceSessionSchema,
   voiceSnapshotSchema,
   type VoicePreferences,
@@ -53,6 +55,7 @@ export class AssistantVoiceClient {
     protocol: "openai_live" | "xai_realtime" = "openai_live",
   ) {
     this.preferences = preferences;
+    let step: VoiceStartStep = "microphone";
     try {
       this.audio = document.createElement("audio");
       this.audio.autoplay = true;
@@ -74,6 +77,7 @@ export class AssistantVoiceClient {
       media.getAudioTracks().forEach((t) => {
         t.enabled = false;
       });
+      step = "webrtc";
       if (protocol === "xai_realtime") {
         if (preferences.input_mode !== "push_to_talk")
           throw new Error("Grok requires Hold to talk");
@@ -105,23 +109,25 @@ export class AssistantVoiceClient {
         );
         await this.grok.start(media);
         if (this.closed) return;
-        const result = voiceStartedSchema.parse(
-          await apiClient(this.path(), {
-            method: "POST",
-            signal: this.abort.signal,
-            body: {
-              client_request_id: crypto.randomUUID(),
-              preferences,
-              sdp_offer: "",
-            },
-          }),
-        );
+        step = "server";
+        const raw = await apiClient(this.path(), {
+          method: "POST",
+          signal: this.abort.signal,
+          body: {
+            client_request_id: crypto.randomUUID(),
+            preferences,
+            sdp_offer: "",
+          },
+        });
+        step = "response";
+        const result = voiceStartedSchema.parse(raw);
         this.session = result.session;
         if (this.closed) {
           await this.end();
           return;
         }
         this.started = true;
+        step = "transport";
         this.openControls();
         return;
       }
@@ -135,7 +141,11 @@ export class AssistantVoiceClient {
       };
       peer.onconnectionstatechange = () => {
         if (peer.connectionState === "failed") {
-          this.onError("Voice connection lost. Start a new call to reconnect.");
+          this.onError(
+            this.started && this.controlsReady
+              ? "Voice connection lost. Start a new call to reconnect."
+              : "WebRTC negotiation failed",
+          );
           void this.end();
         }
       };
@@ -159,39 +169,60 @@ export class AssistantVoiceClient {
         }
       };
       await peer.setLocalDescription(await peer.createOffer());
+      await this.waitForIce(peer);
       if (this.closed) return;
-      const result = voiceStartedSchema.parse(
-        await apiClient(this.path(), {
-          method: "POST",
-          signal: this.abort.signal,
-          body: {
-            client_request_id: crypto.randomUUID(),
-            preferences,
-            sdp_offer: peer.localDescription?.sdp,
-          },
-        }),
-      );
+      step = "server";
+      const raw = await apiClient(this.path(), {
+        method: "POST",
+        signal: this.abort.signal,
+        body: {
+          client_request_id: crypto.randomUUID(),
+          preferences,
+          sdp_offer: peer.localDescription?.sdp,
+        },
+      });
+      step = "response";
+      const result = voiceStartedSchema.parse(raw);
       this.session = result.session;
       if (this.closed) {
         await this.end();
         return;
       }
+      step = "webrtc";
       await peer.setRemoteDescription({
         type: "answer",
         sdp: result.sdp_answer,
       });
+      step = "transport";
       this.openControls();
     } catch (error) {
-      if (!this.closed)
-        this.onError(
-          error instanceof ApiError &&
-            error.status === 409 &&
-            error.message === "End the current call first"
-            ? "End the current call first"
-            : "Voice could not start. Check microphone access, your connection and voice credits.",
-        );
+      if (!this.closed) this.onError(voiceStartError(error, step));
       await this.end();
     }
+  }
+  private waitForIce(peer: RTCPeerConnection): Promise<void> {
+    if (peer.iceGatheringState === "complete") return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const finish = (error?: Error) => {
+        clearTimeout(timer);
+        peer.removeEventListener("icegatheringstatechange", changed);
+        this.abort.signal.removeEventListener("abort", aborted);
+        if (error) reject(error);
+        else resolve();
+      };
+      const changed = () => {
+        if (peer.iceGatheringState === "complete") finish();
+      };
+      const aborted = () => finish(new Error("Voice ended"));
+      const timer = setTimeout(
+        () => finish(new Error("ICE gathering timed out")),
+        5000,
+      );
+      peer.addEventListener("icegatheringstatechange", changed);
+      this.abort.signal.addEventListener("abort", aborted, { once: true });
+      if (this.abort.signal.aborted) aborted();
+      else changed();
+    });
   }
   private openControls() {
     if (!this.session || this.closed) return;
@@ -241,6 +272,14 @@ export class AssistantVoiceClient {
           )
             throw new Error("Invalid playback watermark");
           this.audioEnd = event.end_ms;
+          return;
+        }
+        if (event.type === "start_failed") {
+          const failure = voiceStartFailureSchema.parse(event);
+          this.onError(
+            voiceStartError(new ApiError(503, failure.error), "server"),
+          );
+          void this.end();
           return;
         }
         const snapshot = voiceSnapshotSchema.parse(event);

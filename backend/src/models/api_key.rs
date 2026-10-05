@@ -11,6 +11,7 @@ pub enum ApiKeyPurpose {
     #[default]
     General,
     ScheduledInvocation,
+    PermissionBound,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

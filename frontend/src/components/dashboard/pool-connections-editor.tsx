@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useWatch, type UseFormReturn } from "react-hook-form";
+import { ArrowDown, ArrowUp } from "lucide-react";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -11,7 +12,9 @@ import type {
   ServicePool,
   ServicePoolMember,
 } from "@/schemas/pools";
-import { NumberInput, Toggle } from "./pool-controls";
+import { PoolCycleSummary } from "./pool-cycle-summary";
+import { validPoolWeight } from "./pool-editor-state";
+import { Choice, NumberInput, Toggle } from "./pool-controls";
 import { bindingLabel, reason } from "./pool-labels";
 import { PoolConnectionPicker } from "./pool-connection-picker";
 import { PoolOperationCheck, type PoolOperation } from "./pool-operation-check";
@@ -56,7 +59,7 @@ export function PoolConnectionsEditor({
   const inspection = {
     poolId: pool?.id,
     orgId,
-    contract: values.member_contract,
+    contract: aiChat ? ("ai_chat" as const) : ("same_api" as const),
     strategy: values.strategy,
     checkOperation: !aiChat && operation !== null,
     method: aiChat ? undefined : operation?.method,
@@ -92,6 +95,46 @@ export function PoolConnectionsEditor({
     savedMembers.data?.candidates.map((row) => [row.user_service_id, row]) ??
       [],
   );
+  function memberLabel(id: string, fallbackIndex: number) {
+    const row = selectedRows.get(id) ?? selectedLabels[id] ?? savedRows.get(id);
+    return row?.name || row?.slug || `Connection ${fallbackIndex + 1}`;
+  }
+  function validPriority(value: number | undefined) {
+    return (
+      value === undefined ||
+      (Number.isFinite(value) &&
+        Number.isInteger(value) &&
+        value >= 0 &&
+        value <= 4294967295)
+    );
+  }
+  function configuredShare(member: Partial<ServicePoolMember>): string | null {
+    const memberWeight = member.weight ?? 1;
+    if (member.enabled === false || !validPoolWeight(memberWeight)) return null;
+    const memberPriority = member.priority ?? 0;
+    if (priority && !validPriority(memberPriority)) return null;
+    const shareMembers =
+      priority && values.tier_balance === "weighted"
+        ? members.filter(
+            (candidate) =>
+              candidate.enabled !== false &&
+              (candidate.priority ?? 0) === memberPriority,
+          )
+        : members.filter((candidate) => candidate.enabled !== false);
+    if (
+      shareMembers.some((candidate) => !validPoolWeight(candidate.weight ?? 1))
+    )
+      return null;
+    const total = shareMembers.reduce(
+      (sum, candidate) => sum + (candidate.weight ?? 1),
+      0,
+    );
+    if (!Number.isFinite(total) || total <= 0) return null;
+    const share = (memberWeight / total) * 100;
+    if (!Number.isFinite(share) || share < 0) return null;
+    if (share > 0 && share < 0.1) return "<0.1%";
+    return Number.isInteger(share) ? `${share}%` : `${share.toFixed(1)}%`;
+  }
   function setMember(id: string, patch: Partial<ServicePoolMember>) {
     form.setValue(
       "members",
@@ -131,6 +174,26 @@ export function PoolConnectionsEditor({
       { ...newMember(row.user_service_id), priority: nextPriority },
     ]);
   }
+  function moveMember(id: string, direction: -1 | 1) {
+    const current = form.getValues("members");
+    const index = current.findIndex((member) => member.user_service_id === id);
+    if (index < 0) return;
+    const peers = current
+      .map((member, originalIndex) => ({ member, originalIndex }))
+      .filter(
+        ({ member }) =>
+          !priority ||
+          (member.priority ?? 0) === (current[index]!.priority ?? 0),
+      );
+    const peerPosition = peers.findIndex(
+      ({ originalIndex }) => originalIndex === index,
+    );
+    const target = peers[peerPosition + direction]?.originalIndex;
+    if (target === undefined) return;
+    const next: ServicePoolMember[] = [...current];
+    [next[index], next[target]] = [next[target]!, next[index]!];
+    form.setValue("members", next);
+  }
   const orderedMembers = members
     .map((member, index) => ({ member, index }))
     .sort((a, b) =>
@@ -150,6 +213,29 @@ export function PoolConnectionsEditor({
             : "Add the connections that should share traffic."}
         </p>
       </div>
+      {priority && (
+        <div className="space-y-2 rounded-xl border border-border/50 p-3">
+          <Choice
+            label="Connections with the same priority"
+            value={values.tier_balance ?? "round_robin"}
+            options={[
+              ["round_robin", "Take turns"],
+              ["weighted", "Share by weight"],
+            ]}
+            onChange={(value) => {
+              form.setValue(
+                "tier_balance",
+                value as "round_robin" | "weighted",
+              );
+              void form.trigger();
+            }}
+          />
+          <p className="text-[11px] text-muted-foreground">
+            Lower priority numbers are tried first. Ties use this balancing
+            mode; unavailable members can still be skipped at request time.
+          </p>
+        </div>
+      )}
       <div className="space-y-2 rounded-xl border border-border/50 p-3">
         <h4 className="text-[12px] font-medium">Select connections</h4>
         <PoolConnectionPicker
@@ -159,10 +245,9 @@ export function PoolConnectionsEditor({
           onSearch={setSearch}
           onToggle={toggleMember}
           isLoading={candidates.isLoading}
-          isSearching={
-            search !== settledSearch ||
-            (candidates.isFetching && !candidates.isFetchingNextPage)
-          }
+          isSearching={search !== settledSearch}
+          isCheckingCompatibility={candidates.isCheckingCompatibility}
+          isRefreshing={candidates.isFetching && !candidates.isFetchingNextPage}
           isError={candidates.isError}
           error={candidates.error}
           onRetry={() => {
@@ -170,9 +255,7 @@ export function PoolConnectionsEditor({
           }}
           hasNextPage={candidates.hasNextPage}
           isFetchingNextPage={candidates.isFetchingNextPage}
-          onLoadMore={() => {
-            void candidates.fetchNextPage();
-          }}
+          onLoadMore={() => candidates.fetchNextPage({ cancelRefetch: false })}
         />
       </div>
       {members.length === 0 && (
@@ -184,6 +267,14 @@ export function PoolConnectionsEditor({
           You can mix platform access and your own keys.
         </div>
       )}
+      {members.length > 0 && (
+        <PoolCycleSummary
+          members={members}
+          priority={priority}
+          weighted={weighted}
+          label={memberLabel}
+        />
+      )}
       {selected.isError && (
         <ErrorBanner
           message="Could not refresh selected connections. Retry to check their compatibility."
@@ -192,7 +283,7 @@ export function PoolConnectionsEditor({
           }}
         />
       )}
-      {orderedMembers.map(({ member }, position) => {
+      {orderedMembers.map(({ member, index: originalIndex }, position) => {
         const id = member.user_service_id!;
         const candidate = selectedRows.get(id);
         const labelRow = candidate ?? selectedLabels[id] ?? savedRows.get(id);
@@ -201,6 +292,23 @@ export function PoolConnectionsEditor({
           priority &&
           (labelRow?.requires_compatibility_declaration ||
             member.same_api_compatible);
+        const share = configuredShare(member);
+        const invalidPriority = priority && !validPriority(member.priority);
+        const tierMembers = orderedMembers.filter(
+          ({ member: peer }) =>
+            !priority || (peer.priority ?? 0) === (member.priority ?? 0),
+        );
+        const tierPosition = tierMembers.findIndex(
+          ({ member: peer }) => peer.user_service_id === id,
+        );
+        const enabledTier = tierMembers.filter(
+          ({ member: peer }) => peer.enabled !== false,
+        );
+        const cyclePosition = enabledTier.findIndex(
+          ({ member: peer }) => peer.user_service_id === id,
+        );
+        const weightError =
+          form.formState.errors.members?.[originalIndex]?.weight?.message;
         return (
           <div
             key={id}
@@ -221,6 +329,42 @@ export function PoolConnectionsEditor({
                     ? `${labelRow.slug} · ${bindingLabel(labelRow.credential_binding)}`
                     : "Loading connection details…"}
                 </p>
+                {!invalidPriority && (
+                  <p className="mt-1 text-[11px] text-muted-foreground">
+                    {member.enabled === false ? (
+                      "Disabled · excluded from cycle"
+                    ) : (
+                      <>
+                        {priority ? "Tier cycle position" : "Cycle position"}{" "}
+                        {cyclePosition + 1} of {enabledTier.length}
+                        {cyclePosition === 0 ? " · first in cycle" : ""}
+                        {cyclePosition === enabledTier.length - 1
+                          ? " · last in cycle"
+                          : ""}
+                      </>
+                    )}
+                    {!priority && weighted
+                      ? member.enabled === false
+                        ? " · excluded from configured share"
+                        : share
+                          ? ` · configured share ${share}`
+                          : " · configured share unavailable until enabled weights are valid"
+                      : ""}
+                  </p>
+                )}
+                {priority && values.tier_balance === "weighted" && (
+                  <p className="mt-1 text-[11px] text-muted-foreground">
+                    {invalidPriority
+                      ? "Priority tier needs a valid number · configured share unavailable"
+                      : `Priority tier ${member.priority ?? 0} · ${
+                          share
+                            ? `configured tier share ${share}`
+                            : member.enabled === false
+                              ? "disabled · excluded from tier share"
+                              : "configured share unavailable until enabled weights in this tier are valid"
+                        }`}
+                  </p>
+                )}
                 {candidate?.reason && (
                   <p className="mt-1 text-[11px] text-warning">
                     {reason(candidate)}
@@ -243,6 +387,32 @@ export function PoolConnectionsEditor({
               >
                 Remove
               </Button>
+              {(!priority || !invalidPriority) && (
+                <div className="flex shrink-0 items-center gap-1">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
+                    className="size-7"
+                    aria-label={`Move connection ${position + 1} earlier ${priority ? `within priority ${member.priority ?? 0}` : "in the cycle"}`}
+                    disabled={tierPosition === 0}
+                    onClick={() => moveMember(id, -1)}
+                  >
+                    <ArrowUp className="size-3.5" aria-hidden="true" />
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon"
+                    className="size-7"
+                    aria-label={`Move connection ${position + 1} later ${priority ? `within priority ${member.priority ?? 0}` : "in the cycle"}`}
+                    disabled={tierPosition === tierMembers.length - 1}
+                    onClick={() => moveMember(id, 1)}
+                  >
+                    <ArrowDown className="size-3.5" aria-hidden="true" />
+                  </Button>
+                </div>
+              )}
             </div>
             <div
               className={`grid gap-3 ${aiChat ? "sm:grid-cols-[100px_1fr]" : "sm:grid-cols-2"}`}
@@ -278,6 +448,11 @@ export function PoolConnectionsEditor({
                 />
               )}
             </div>
+            {weighted && weightError && (
+              <p role="alert" className="text-[12px] text-destructive">
+                {memberLabel(id, position)}: {weightError}
+              </p>
+            )}
             <Toggle
               label={`Member ${position + 1} enabled`}
               checked={member.enabled ?? true}

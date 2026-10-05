@@ -17,4 +17,6 @@ it("validates workspace queries without propagating unrelated fields", () => {
     parseMachineDesktopSearch({ conversation_id: "x".repeat(129) })
       .conversation_id,
   ).toBeUndefined();
+  expect(parseMachineDesktopSearch({ context_id: "12345678-1234-4234-8234-123456789abc" }).context_id).toBe("12345678-1234-4234-8234-123456789abc");
+  expect(parseMachineDesktopSearch({ context_id: "ctx_secret!" }).context_id).toBeUndefined();
 });

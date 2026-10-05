@@ -32,6 +32,27 @@ publishes or attaches a skill without an explicit human approval.
 - `learning_epoch` is an additive serde-defaulted field set by
   `create_thread_for`. Legacy and absent values mean the conversation is not
   enrolled.
+- PR-2 verified Ornn OpenAPI 0.18.0 through the catalog service: skills can be
+  created or transferred only to a person (`newOwnerUserId`), not an org. The
+  publisher therefore refuses org-owned proposals with
+  `owner_binding_unavailable` before any Ornn mutation. Personal publication
+  uses the approving person's identity, a fixed operation allowlist and a
+  NyxID-built private ZIP; readback must match its SHA-256 before the existing
+  B2 pin path runs.
+- Publication records a local operation id and package hash. A failed create
+  is reconciled by the approving person's private search and proceeds only
+  after exactly one hash match; it never blindly retries an ambiguous create.
+  One owner card binds the proposal, revisions, fingerprint and operation id
+  for the publish-and-pin saga.
+- Review implementation stores the external operation and lease beside the
+  encrypted proposal. The card is consumed and the lease claimed before Ornn
+  egress; reconciliation verifies the exact private owner, generated operation
+  name and ZIP hash. The B2 pin and terminal proposal state commit together.
+  Personal HTTP review endpoints require a first-party human session, while
+  NyxBot exposes bounded status, run and metadata-only listing.
+- Enrollment first checks pilot override rows. A dormant flag or actor outside
+  a pilot returns without learning-configuration or org-membership reads; once
+  configuration exists, the request access snapshot is reused for org checks.
 
 ## Invariants
 
