@@ -10,7 +10,15 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useAppForm } from "@/components/ui/form";
 import { usePublicConfig } from "@/hooks/use-public-config";
+import { useMachineContexts } from "@/hooks/use-machine-access";
 import { useMachineDesktops } from "@/hooks/use-machines";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   desktopFrame,
   desktopInput,
@@ -28,6 +36,7 @@ export function MachineDesktopPanel({
   name,
   turnActive,
   initialDisplay = "secure",
+  initialContextId,
 }: {
   readonly nodeId: string;
   readonly conversationId?: string;
@@ -35,9 +44,10 @@ export function MachineDesktopPanel({
   readonly name?: string;
   readonly turnActive?: boolean;
   readonly initialDisplay?: "secure" | "dev";
+  readonly initialContextId?: string | null;
 }) {
   const collapseKey = conversationId
-    ? `nyxid:desktop-collapsed:${conversationId}:${nodeId}`
+    ? `nyxid:desktop-collapsed:${conversationId}:${nodeId}:${initialContextId ?? "legacy"}`
     : null;
   const [collapsed, setCollapsed] = useState(() => {
     try {
@@ -75,6 +85,12 @@ export function MachineDesktopPanel({
     button: string;
   } | null>(null);
   const [display, setDisplay] = useState<"secure" | "dev">(initialDisplay);
+  const [contextId, setContextId] = useState<string | undefined>(
+    initialContextId ?? undefined,
+  );
+  useEffect(() => {
+    setContextId(initialContextId ?? undefined);
+  }, [initialContextId]);
   const [attempt, setAttempt] = useState(0);
   const [connected, setConnected] = useState(false);
   const [controls, setControls] = useState(false);
@@ -95,6 +111,7 @@ export function MachineDesktopPanel({
     return () => clearTimeout(timer);
   }, [turnActive, activityAt, controls, controller, collapse]);
   const { data: config } = usePublicConfig();
+  const contexts = useMachineContexts(nodeId);
   const control = useCallback((type: string, note?: string) => {
     if (socket.current?.readyState === WebSocket.OPEN)
       socket.current.send(JSON.stringify({ type, note }));
@@ -102,7 +119,13 @@ export function MachineDesktopPanel({
   useEffect(() => {
     const target = canvas.current;
     const ws = new WebSocket(
-      desktopUrl(nodeId, conversationId, config?.node_ws_url, display),
+      desktopUrl(
+        nodeId,
+        conversationId,
+        config?.node_ws_url,
+        display,
+        contextId,
+      ),
     );
     session.current = "";
     sequence.current = 0n;
@@ -278,7 +301,7 @@ export function MachineDesktopPanel({
       ws.close();
       target?.getContext("2d")?.clearRect(0, 0, target.width, target.height);
     };
-  }, [nodeId, conversationId, config?.node_ws_url, attempt, display]);
+  }, [nodeId, conversationId, config?.node_ws_url, attempt, display, contextId]);
   const input = useCallback(
     (tool: string, args: Record<string, unknown>) => {
       if (
@@ -369,6 +392,35 @@ export function MachineDesktopPanel({
           </span>
         ) : null}
       </div>
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
+        <span className="text-muted-foreground">Workspace and browser</span>
+        <Select
+          value={contextId ?? "legacy"}
+          onValueChange={(value) => {
+            setConnected(false);
+            setContextId(value === "legacy" ? undefined : value);
+          }}
+          disabled={controls}
+        >
+          <SelectTrigger aria-label="Desktop context" className="max-w-full sm:w-80">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="legacy">Shared legacy desktop</SelectItem>
+            {(contexts.data ?? []).map((context) => (
+              <SelectItem key={context.context_id} value={context.context_id}>
+                {context.agent_name} · {context.actor_label}
+                {context.group_id ? " · group task" : ""} · generation {context.generation}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        {contexts.isError ? (
+          <span role="status" className="text-muted-foreground">
+            Separated contexts are unavailable on this machine.
+          </span>
+        ) : null}
+      </div>
       <div className="flex flex-wrap items-center gap-2">
         <Monitor className="size-4" />
         <span className="min-w-0 max-w-48 truncate font-medium">
@@ -415,7 +467,7 @@ export function MachineDesktopPanel({
           aria-label="Pop out desktop"
           onClick={() =>
             window.open(
-              `/assistant/machines/${encodeURIComponent(nodeId)}/desktop?display=${display}${conversationId ? `&conversation_id=${encodeURIComponent(conversationId)}` : ""}`,
+              `/assistant/machines/${encodeURIComponent(nodeId)}/desktop?display=${display}${conversationId ? `&conversation_id=${encodeURIComponent(conversationId)}` : ""}${contextId ? `&context_id=${encodeURIComponent(contextId)}` : ""}`,
               "_blank",
               "noopener,noreferrer",
             )
@@ -638,18 +690,22 @@ export function ConversationMachineDesktops({
   const machines = useMachineDesktops(conversationId);
   const desktops = [
     ...new Map(
-      (machines.data ?? []).map((machine) => [machine.node_id, machine]),
+      (machines.data ?? []).map((machine) => [
+        `${machine.node_id}:${machine.context_id ?? "legacy"}:${machine.display ?? "secure"}`,
+        machine,
+      ]),
     ).values(),
   ];
   return desktops.length ? (
     <div className="mx-auto w-full max-w-[758px] space-y-3 px-4 pb-3">
       {desktops.map((machine) => (
         <MachineDesktopPanel
-          key={machine.node_id}
+          key={`${machine.node_id}:${machine.context_id ?? "legacy"}:${machine.display ?? "secure"}`}
           nodeId={machine.node_id}
           conversationId={conversationId}
           reason={machine.reason}
           initialDisplay={machine.display}
+          initialContextId={machine.context_id}
           turnActive={turnActive}
         />
       ))}

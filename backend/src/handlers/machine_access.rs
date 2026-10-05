@@ -10,6 +10,7 @@ use axum::{
     Json,
     extract::{Path, State},
 };
+use serde::Deserialize;
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -122,6 +123,145 @@ pub async fn put(
         None,
     );
     Ok(Json(Box::pin(options(&state, &actor, &agent)).await?))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextRequestBody {
+    pub selection: Selection,
+}
+
+#[derive(Serialize)]
+pub struct ContextRequestResponse {
+    pub status: &'static str,
+    pub acknowledgement_id: String,
+    pub conversation_id: String,
+    pub message: &'static str,
+}
+
+/// Human Assistant → Machines opt-in. It creates the same owner action card
+/// as the native tool; mode is never changed directly by this route.
+pub async fn request_context(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((agent_id, node_id)): Path<(String, String)>,
+    Json(body): Json<ContextRequestBody>,
+) -> AppResult<Json<ContextRequestResponse>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    let actor = auth.user_id.to_string();
+    if !crate::services::feature_flag_service::personal_flag_enabled(
+        &state.db,
+        &actor,
+        access::CONTEXT_FLAG,
+    )
+    .await?
+    {
+        return Err(AppError::ValidationError(
+            "Machine context setup is not enabled for this account".into(),
+        ));
+    }
+    let agent = team::maintained_agent(&state.db, &actor, &agent_id).await?;
+    let option = Box::pin(options(&state, &actor, &agent.id))
+        .await?
+        .into_iter()
+        .find(|row| row.node_id == node_id)
+        .ok_or(AppError::MachineNotAllowed)?;
+    if !option.can_edit {
+        return Err(AppError::MachineNotAllowed);
+    }
+    if body.selection.mode.as_deref() != Some("separated") {
+        return Err(AppError::ValidationError(
+            "Choose Separate workspace and browser for this agent".into(),
+        ));
+    }
+    if option
+        .separated
+        .as_ref()
+        .is_none_or(|support| !support.available)
+    {
+        return Err(AppError::MachineAuthorityUnsupported);
+    }
+    // The graphical control changes only the mode. Snapshot the assignment
+    // server-side so a forged request cannot widen capabilities or saved-login
+    // access behind a generic owner card; the current revision fences approval.
+    let selection = Selection {
+        mode: Some("separated".into()),
+        expected_revision: option.revision,
+        capabilities: option.capabilities,
+        saved_login_ids: Some(option.saved_login_ids.unwrap_or_default()),
+    };
+    let bot = Box::pin(team::ensure_nyxbot(&state.db, &actor)).await?;
+    let home = Box::pin(team::home_thread(&state.db, &state.encryption_keys, &bot)).await?;
+    let Some(chat) = crate::services::assistant_acknowledgement_service::for_key(
+        &state.db,
+        &actor,
+        Some(&home.credential_api_key_id),
+    )
+    .await?
+    else {
+        return Err(AppError::MachineBrowserUnavailable);
+    };
+    let summary = format!(
+        "Separate workspace and browser for {} on {}",
+        agent.name, option.name
+    );
+    let row = crate::services::assistant_acknowledgement_service::request_machine_context(
+        &state.db,
+        &chat,
+        crate::models::machine_access::HumanContextAction {
+            agent_id: agent.id,
+            node_id,
+            selection,
+        },
+        &summary,
+    )
+    .await?;
+    Ok(Json(ContextRequestResponse {
+        status: "pending",
+        acknowledgement_id: row.id,
+        conversation_id: row.conversation_id,
+        message: "Owner approval requested in the NyxBot Assistant thread.",
+    }))
+}
+
+/// Apply a graphical owner-card decision through the same fenced transaction
+/// as the assistant tool path. The stored typed payload is the authority for
+/// this operation; request data is never re-read from the client.
+pub async fn apply_human_context_action(
+    state: &AppState,
+    actor: &str,
+    action: &crate::models::machine_access::HumanContextAction,
+) -> AppResult<()> {
+    if action.selection.mode.as_deref() != Some("separated") {
+        return Err(AppError::ValidationError(
+            "Only separated mode can be requested here".into(),
+        ));
+    }
+    let policy = Box::pin(access::configure(
+        &state.db,
+        actor,
+        &action.agent_id,
+        &action.node_id,
+        action.selection.clone(),
+    ))
+    .await?;
+    crate::services::audit_service::log_async(
+        state.db.clone(),
+        Some(actor.to_owned()),
+        "machine_context_mode_changed".into(),
+        Some(serde_json::json!({
+            "agent_id": action.agent_id,
+            "node_id": action.node_id,
+            "mode": "separated",
+            "revision": policy.revision,
+            "source": "human_action_card"
+        })),
+        None,
+        None,
+        None,
+        None,
+    );
+    Ok(())
 }
 
 pub async fn native(

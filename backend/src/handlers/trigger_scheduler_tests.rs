@@ -1088,6 +1088,7 @@ async fn schedule_confirmation_waits_and_resumes_without_another_budget() {
             request_excerpt: None,
             decided_by: None,
             reason: None,
+            machine_context: None,
         })
         .await
         .unwrap();

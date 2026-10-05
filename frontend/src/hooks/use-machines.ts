@@ -68,6 +68,7 @@ export interface MachineDesktopMetadata {
   readonly conversation_id: string | null;
   readonly status: string;
   readonly reason: string | null;
+  readonly context_id?: string | null;
 }
 export function useMachineDesktops(conversation: string) {
   return useQuery({

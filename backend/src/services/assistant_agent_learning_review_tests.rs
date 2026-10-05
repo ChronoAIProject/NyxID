@@ -886,6 +886,7 @@ async fn approval_started_failure_uses_durable_boundary_and_expired_lease_resume
             crate::models::assistant_acknowledgement::COLLECTION_NAME,
         )
         .insert_one(AssistantAcknowledgement {
+            machine_context: None,
             id: card.clone(),
             conversation_id: fixture.chat.conversation_id.clone(),
             user_id: fixture.owner.clone(),
@@ -1064,6 +1065,7 @@ async fn approval_card_is_consumed_once_and_replay_cannot_consume_again() {
             crate::models::assistant_acknowledgement::COLLECTION_NAME,
         )
         .insert_one(AssistantAcknowledgement {
+            machine_context: None,
             id: card.clone(),
             conversation_id: fixture.chat.conversation_id.clone(),
             user_id: fixture.owner.clone(),
