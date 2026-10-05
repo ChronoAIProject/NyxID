@@ -1171,7 +1171,7 @@ Backpressure and long result narration must not delay receipt of Stop/mute.
 | OpenAI sideband lost while audio lives | Immediately stop delegation admission and tell UI to pause media; attempt bounded authenticated reattach solely to observe/close. Gap means transcript/usage uncertain. Rebuild a new session with saved text only after safe closure/user action. No client-forwarded events become authority. |
 | Grok upstream/client relay disconnect | Close upstream on client heartbeat expiry, checkpoint duration, discard raw buffers; retain requests. Reconnect never resends buffered old speech/tool calls. |
 | Control WS lag/resync or change-stream outage | Bounded buffers; task snapshot/history refresh and existing poll backstop. Refuse work when authoritative persistence/ACL state cannot be established. |
-| Replica crash/expired lease | Fenced recovery closes orphan session where possible, settles known usage and releases slot only after bounded recovery. Reconcile admitted request against its turn ID; never replay a started/lost/unknown turn. |
+| Replica crash/expired lease | Fenced recovery reclaims the generation. OpenAI sessions with a provider id reattach exactly once and resume the sideband; the browser reconnects its control stream with bounded backoff. Grok relays cannot resume and are closed with final usage/receipt. If the provider is gone or reattach fails, close with the message “The call ended during a server update; start a new call”. |
 | Billing denied before or during call | No start without initial funds; close before next unfunded window. Clear UI message, exact ledger recovery, keep accepted task results. |
 | Backend error or insufficient credits | Persist normal failed reply; announce the safe existing error. No credential replacement/retry for insufficient credits. An uncertain action stays uncertain. |
 | Queue full, rate limit, turn busy | Busy request visibly queues within bounds; full/rate-limited request is refused with retry guidance, not silently dropped or labelled started. |
@@ -1339,6 +1339,32 @@ running while voice rows or `voice_seconds` configuration exist. Do not restart
 pre-metric binaries against those records. A rollback to older binaries requires
 a separately reviewed data/config migration; flag-off alone is not sufficient.
 Existing platform ACL, B1 scopes and B3a enforcement remain active throughout.
+
+### Restart, rejoin and durable End
+
+The recovery worker claims an expired lease by incrementing the session generation
+and fencing on `(session_id, generation, lease_owner)`. For an un-ended OpenAI call it
+resolves the same credential identity, attaches to the persisted `provider_session_id`,
+and only then marks the row active and starts the coordinator. A second worker cannot
+attach because the claim and subsequent writes use the new generation. Pending
+transcripts, delegated requests, result announcements and read-back cards are rebuilt
+from their durable records. xAI's process-local relay is never replayed after restart;
+its measured usage is settled and the call receipt is emitted.
+
+The browser keeps the WebRTC media object alive while its control WebSocket reconnects
+with bounded 1, 2, 4, 8, 15 and 30 second backoff. A recovered snapshot may carry a new
+generation for the same session and is adopted after the session-id check. A closed
+snapshot with `server_update` is shown as “The call ended during a server update; start
+a new call”. `GET .../voice-sessions/active` exposes only the caller's metadata for a
+live call, so a 409 start can offer **Rejoin** when the session is resumable and **End
+call** always. End is a durable control operation even without a worker or provider
+socket; recovery performs best-effort close, uncertain settlement and a
+`close_unconfirmed` audit. An expired lease is recovered or closed before a new start
+can acquire the person's single live slot.
+
+The voice instruction names NyxBot as the owner's chief of staff and includes the
+selected specialist's bounded profile. Small talk may be answered directly; capability
+questions, current facts, owner data and actions are delegated to the NyxID turn bridge.
 
 ## 18. Approved decisions and remaining verification gates
 

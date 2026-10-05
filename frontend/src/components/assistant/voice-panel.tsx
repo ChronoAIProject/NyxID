@@ -289,6 +289,19 @@ export function VoicePanel({
         transcript, never an audio recording. Muting keeps the call running and
         billed.
       </p>
+      {voice.conflictSession && !active && (
+        <div className="mt-4 rounded-lg border border-warning/40 p-3">
+          <p role="status">A voice call is already active in this conversation.</p>
+          <div className="mt-2 flex gap-2">
+            {voice.conflictSession.resumable && (
+              <Button onClick={() => voice.rejoin()}>Rejoin</Button>
+            )}
+            <Button variant="destructive" onClick={() => void voice.end()}>
+              End call
+            </Button>
+          </div>
+        </div>
+      )}
       {isGrok && (
         <p className="mt-2 text-muted-foreground">
           Grok private beta: Hold to talk, with headphones recommended.

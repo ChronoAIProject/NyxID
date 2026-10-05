@@ -203,6 +203,39 @@ async fn voice_slot_fences_recovery_controls_and_one_call_receipt() {
 }
 
 #[tokio::test]
+async fn control_disconnect_releases_only_the_socket_and_active_is_discoverable() {
+    Box::pin(async {
+        let (state, thread, call) = setup("voice_active_discovery").await;
+        session::claim_stream(&state.db, &call, "socket-1")
+            .await
+            .unwrap();
+        session::release_stream(&state.db, &call, "socket-1")
+            .await
+            .unwrap();
+        let current = session::get(&state.db, &call.user_id, &thread.id, &call.id)
+            .await
+            .unwrap();
+        assert!(current.live_slot);
+        assert!(!current.end_requested);
+        assert!(current.control_socket_until.is_some());
+        assert_eq!(
+            session::active_for_conversation(&state.db, &call.user_id, &thread.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            call.id
+        );
+        db_drop(&state).await;
+    })
+    .await;
+}
+
+async fn db_drop(state: &crate::AppState) {
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn unknown_initialization_is_reconciled_after_its_live_slot_expires() {
     Box::pin(async {
         let (state, _, call) = setup("voice_unknown_initialization").await;
