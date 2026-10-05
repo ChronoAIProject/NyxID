@@ -1263,6 +1263,31 @@ pub async fn consume_action(
     }).await.map_err(mutations::map_transaction_error)
 }
 
+/// Consume inside the caller's durable effect transaction. Learning uses this
+/// to bind one human card to exactly one publication operation before egress.
+pub(crate) async fn consume_action_in_session(
+    db: &Database,
+    chat: &ChatAuthority,
+    id: &str,
+    tool: &str,
+    arguments: &Value,
+    session: &mut ClientSession,
+) -> AppResult<bool> {
+    Box::pin(fence(db, chat, session)).await?;
+    let result = db
+        .collection::<AssistantAcknowledgement>(ACKS)
+        .update_one(
+            doc! {"_id": id, "user_id": &chat.user_id, "conversation_id": &chat.conversation_id,
+            "api_key_id": &chat.api_key_id, "kind": "action", "tool_name": tool,
+            "arguments_digest": arguments_digest(arguments), "status": "allowed",
+            "decider": "user", "decided_by": "user", "expires_at": {"$gt": bson::DateTime::now()}},
+            doc! {"$set": {"status": "used"}},
+        )
+        .session(&mut *session)
+        .await?;
+    Ok(result.modified_count == 1)
+}
+
 pub async fn audit_decision(
     db: &Database,
     actor: &audit_service::AuditActor,

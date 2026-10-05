@@ -352,6 +352,29 @@ async fn run_billing_route_coverage_smoke() {
     let (_, private) = crate::routes::build_router();
     let app = private.with_state(state.clone());
 
+    // Permission ingress requires its dedicated key even for a caller with proxy scope.
+    // Accepted effects reuse the Proxy lifecycle exercised below.
+    for (method, path, inventory_path) in [
+        (
+            Method::GET,
+            "/api/v1/permission-execution/rest/drive/v3/files/report",
+            "/api/v1/permission-execution/rest/{*path}",
+        ),
+        (
+            Method::POST,
+            "/api/v1/permission-execution/mcp",
+            "/api/v1/permission-execution/mcp",
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(route_request(method, path, &token, Body::empty()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        exercised_routes.insert(inventory_path);
+    }
+
     let aliases = call_mounted_route(
         &app,
         route_request(Method::GET, "/api/v1/llm/pools", &token, Body::empty()),

@@ -1,6 +1,6 @@
 [package]
 name = "nyxid"
-version = "0.60.1"
+version = "0.61.0"
 edition = "2024"
 rust-version.workspace = true
 license.workspace = true
@@ -88,6 +88,7 @@ deunicode = "1.6"
 nyxid-cloud-auth = { path = "../cloud-auth" }
 nyxid-service-adapters = { path = "../service-adapters" }
 nyxid-machine = { path = "../machine" }
+nyxid-permissions = { path = "../permissions" }
 nyxid-machine-updater = { path = "../machine-updater" }
 http = "1.4"
 http-body-util = "0.1"
