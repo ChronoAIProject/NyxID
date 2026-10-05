@@ -80,6 +80,27 @@ pub async fn require_admin_or_operator(
     Ok(())
 }
 
+/// Check that the caller may issue and revoke one-off credit grants: an
+/// Admin, or an Operator holding the Credits Manager role
+/// (see [`role_service::can_manage_credit_grants`]).
+pub async fn require_credit_grant_manager(state: &AppState, auth_user: &AuthUser) -> AppResult<()> {
+    let user_id = auth_user.user_id.to_string();
+    let user_model = state
+        .db
+        .collection::<User>(USERS)
+        .find_one(doc! { "_id": &user_id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
+
+    let platform_role = role_service::resolve_platform_role(&state.db, &user_model).await?;
+    if !role_service::can_manage_credit_grants(&state.db, &user_model, platform_role).await? {
+        return Err(AppError::Forbidden(
+            "Credit grant management requires Admin or Credits Manager access".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 pub fn extract_ip(headers: &HeaderMap) -> Option<String> {
     headers
         .get("x-forwarded-for")

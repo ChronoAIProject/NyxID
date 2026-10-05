@@ -1074,6 +1074,7 @@ pub async fn process_with_state(state: &AppState, run: AssistantAgentLearningRun
         prompt,
         &input,
         super::assistant_oneshot_inference::TextLimits {
+            caller: super::assistant_oneshot_inference::TextCaller::Learning,
             max_input_chars: MAX_INPUT_CHARS,
             max_output_chars: 8_000,
             max_output_tokens: 768,
@@ -1361,5 +1362,101 @@ mod tests {
             "flag-off enrollment queried a learning collection"
         );
         db.drop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn learning_worker_uses_utility_route_and_flag_off_never_dispatches() {
+        use crate::services::assistant_oneshot_inference::tests::{ACTOR, utility_fixture};
+        use crate::services::{assistant_nyxagent as engine, assistant_team_service as team};
+        use wiremock::{Mock, ResponseTemplate, matchers::method};
+        let (state, _, mock) = utility_fixture().await;
+        let set_flag = async |enabled| {
+            feature_flag_service::set_platform_override(
+                &state.db,
+                FLAG_KEY,
+                &feature_flag_service::FlagTarget::Global,
+                enabled,
+                ACTOR,
+            )
+            .await
+            .unwrap();
+        };
+        set_flag(true).await;
+        ensure_indexes(&state.db).await.unwrap();
+        let agent = Box::pin(team::ensure_nyxbot(&state.db, ACTOR))
+            .await
+            .unwrap();
+        let config = configure(&state.db, ACTOR, &agent.id, true, 15)
+            .await
+            .unwrap();
+        let mut session = state.db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        let row = Box::pin(team::create_thread_for(
+            &state.db,
+            &state.encryption_keys,
+            ACTOR,
+            &agent,
+            "New chat",
+            &mut session,
+        ))
+        .await
+        .unwrap();
+        session.commit_transaction().await.unwrap();
+        let request: engine::TurnRequest = serde_json::from_value(
+            serde_json::json!({"conversation_id":row.id,"text":"Help plan a reusable checklist"}),
+        )
+        .unwrap();
+        let start: engine::TurnStart = (&request).into();
+        let active = Box::pin(engine::begin_turn(
+            &state.db,
+            ACTOR,
+            &start,
+            &state.encryption_keys,
+        ))
+        .await
+        .unwrap();
+        Box::pin(engine::finish_turn(
+            &state.db,
+            &active,
+            &active.credential_api_key_id,
+            &uuid::Uuid::new_v4().to_string(),
+            &engine::TurnResult {
+                text: "Start by identifying the task, then validate the checklist".into(),
+                session_id: None,
+                response_id: None,
+                error: None,
+            },
+        ))
+        .await
+        .unwrap();
+        let run = create_run(&state.db, &agent, &config, ACTOR, "manual")
+            .await
+            .unwrap()
+            .unwrap();
+        set_flag(false).await;
+        assert!(
+            Box::pin(process_with_state(&state, run.clone()))
+                .await
+                .is_err()
+        );
+        assert!(mock.received_requests().await.unwrap().is_empty());
+        set_flag(true).await;
+        Mock::given(method("POST")).respond_with(|request: &wiremock::Request| {
+            let body: serde_json::Value = request.body_json().unwrap();
+            assert_eq!(body["model"], "gpt-6-luna");
+            assert_eq!(body["max_completion_tokens"], 1024);
+            assert_eq!(body["reasoning_effort"], "none");
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"choices":[{"message":{"content":"{\"schema_version\":1,\"kind\":\"none\"}"}}]}))
+        }).expect(1).mount(&mock).await;
+        let run_id = run.id.clone();
+        Box::pin(process_with_state(&state, run)).await.unwrap();
+        let current = state
+            .db
+            .collection::<AssistantAgentLearningRun>(RUNS_COLLECTION_NAME)
+            .find_one(doc! {"_id":run_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.status, "succeeded");
+        assert_eq!(mock.received_requests().await.unwrap().len(), 2);
     }
 }
