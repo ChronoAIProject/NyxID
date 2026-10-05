@@ -21,6 +21,7 @@ const signing=randomBytes(32), nodeId=randomUUID(), auth=`nyx_nauth_${randomByte
 const token=`nyx_nreg_${randomBytes(32).toString('hex')}`;
 const responses=new Map(), transfers=new Map(), output=[], frames=[], screenshotTargets=new Map(), screenshotWrites=[];
 let socket, profile, child, website, browserSite;
+let droppedMachineResultConnection;
 let offlineUntil=0;
 let conversationId=randomUUID(), turnId=randomUUID();
 const values={username:`user-${randomBytes(12).toString('hex')}@example.test`,password:randomBytes(24).toString('base64url'),one_time_code:''};
@@ -60,17 +61,20 @@ wss.on('connection',connection=>connection.on('message',(raw,binary)=>{
     connection.send(JSON.stringify({type:'machine_service_response',request_id:message.request_id,status:200,headers:[['content-type','text/plain']]}));
     const packet=Buffer.alloc(35);packet.write('NYXM');packet[4]=4;Buffer.from(message.request_id.replaceAll('-',''),'hex').copy(packet,6);packet.write('start',30);connection.send(packet);
   }
-  else if(message.type==='machine_result'){responses.get(message.request_id)?.(message.result);responses.delete(message.request_id);}
+  else if(message.type==='machine_result'){
+   if(droppedMachineResultConnection===connection){droppedMachineResultConnection=undefined;return;}
+   responses.get(message.request_id)?.(message.result);responses.delete(message.request_id);
+  }
 }));
 server.listen(0,'127.0.0.1');await once(server,'listening');
 const heartbeat=setInterval(()=>{if(socket?.readyState===1)socket.send(JSON.stringify({type:'heartbeat_ping'}));},3000);
 const delay=ms=>new Promise(r=>setTimeout(r,ms));
 async function waitFor(check,label,ms=45000){const end=Date.now()+ms;while(Date.now()<end){if(check())return;await delay(5);}throw new Error(`Timed out: ${label}`);}
 function canonical(value){if(Array.isArray(value))return `[${value.map(canonical).join(',')}]`;if(value && typeof value==='object')return `{${Object.keys(value).sort().map(k=>JSON.stringify(k)+':'+canonical(value[k])).join(',')}}`;return JSON.stringify(value);}
-function request(operation,parameters,authority){
+function request(operation,parameters,authority,requestId){
  parameters={conversation_id:conversationId,turn_id:turnId,...parameters};
  if(operation==='exec')parameters={...parameters,runtime_id:profile.runtime_id};
- const r={type:'machine_request',request_id:randomUUID(),node_id:nodeId,operation,parameters,timestamp:Math.floor(Date.now()/1000),nonce:randomUUID()};
+ const r={type:'machine_request',request_id:requestId??randomUUID(),node_id:nodeId,operation,parameters,timestamp:Math.floor(Date.now()/1000),nonce:randomUUID()};
  const mac=createHmac('sha256',signing);
  if(authority){
   r.type='machine_request_v2';r.version=2;r.authority=authority;
@@ -83,9 +87,17 @@ function request(operation,parameters,authority){
  }
  r.signature=mac.digest('hex');return r;
 }
-async function call(operation,parameters,authority){
- const message=request(operation,parameters,authority);
+async function call(operation,parameters,authority,requestId){
+ const message=request(operation,parameters,authority,requestId);
  const response=new Promise((resolve,reject)=>{const timeout=setTimeout(()=>{responses.delete(message.request_id);reject(new Error(`Timed out: ${operation}`));},40000);responses.set(message.request_id,result=>{clearTimeout(timeout);resolve(result);});});
+ socket.send(JSON.stringify(message));const result=await response;results.push(result);return result;
+}
+async function callWithReconnect(operation,parameters,authority,requestId){
+ const message=request(operation,parameters,authority,requestId),oldSocket=socket;
+ const response=new Promise((resolve,reject)=>{const timeout=setTimeout(()=>{responses.delete(message.request_id);reject(new Error(`Timed out: ${operation} after reconnect`));},40000);responses.set(message.request_id,result=>{clearTimeout(timeout);resolve(result);});});
+ droppedMachineResultConnection=oldSocket;
+ oldSocket.send(JSON.stringify(message));oldSocket.terminate();
+ await waitFor(()=>socket&&socket!==oldSocket&&socket.readyState===1,'machine operation reconnect',30000);
  socket.send(JSON.stringify(message));const result=await response;results.push(result);return result;
 }
 async function transfer(operation,path,body=Buffer.alloc(0)){
@@ -769,7 +781,7 @@ assert policy['URLBlocklist']==['file://*'] and 'ExtensionInstallForcelist' not 
  assert.equal(expired.status,'finished','lack of renewal stops the background process');
  assert.equal((await call('exec',{job_id:randomUUID(),command:'true',services:[]},authority({revision:3}))).exit_code,0,'fresh revision recovers');
  console.log('Authority v2: capability denial, renewal, revocation, late renewal, expiry and v1 downgrade passed');
- await contexts({call,frames,profile,conversationId,turnId,origin,browserUrl,certificate:`${testDirectory}/tls.crt`});
+ await contexts({call,callWithReconnect,frames,profile,conversationId,turnId,origin,browserUrl,certificate:`${testDirectory}/tls.crt`});
  for(const secret of [token,auth,signing.toString('hex')])assert(!output.join('').includes(secret),'node logs must not contain credentials');
  assert(!output.join('').includes('stderr-secret-fixture'),'developer diagnostics must never expose child stderr');
  console.log('| Scenario | Changed frames/s | Frame bytes/s | Actions |\n|---|---:|---:|---:|');
