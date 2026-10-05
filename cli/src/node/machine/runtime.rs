@@ -526,6 +526,8 @@ enum MachineError {
     #[error("saved logins require the secure browser")]
     SecureBrowserRequired,
     #[error("machine operation refused")]
+    File(FileFailure),
+    #[error("machine operation refused")]
     Operation,
 }
 
@@ -590,6 +592,10 @@ impl MachineError {
             Self::SecureBrowserRequired => (
                 12413,
                 "saved logins require the secure browser; use browser=secure",
+            ),
+            Self::File(_) => (
+                12407,
+                "machine operation refused; check capability, path, input, limits and expected SHA-256",
             ),
             Self::Operation => (
                 12407,
@@ -1342,6 +1348,7 @@ impl Runtime {
         };
         request.parameters["_machine_authority"] =
             serde_json::to_value(&request.authority).unwrap_or(Value::Null);
+        request.parameters["_machine_request_id"] = json!(request.request_id);
         let agent_operation = !matches!(
             request.operation,
             Operation::Cancel
@@ -1385,6 +1392,15 @@ impl Runtime {
             Err(error) => {
                 let (code, message) = error.public();
                 let mut result = json!({"error":{"code":code,"message":message}});
+                if let MachineError::File(failure) = &error {
+                    result["error"]["reason"] = json!(failure.reason);
+                    if let Some(exit_code) = failure.exit_code {
+                        result["error"]["exit_code"] = json!(exit_code);
+                    }
+                    if let Some(signal) = failure.signal {
+                        result["error"]["signal"] = json!(signal);
+                    }
+                }
                 if matches!(
                     error,
                     MachineError::Driver(cua::DriverError::ToolUnsupported)
@@ -2054,53 +2070,109 @@ impl Runtime {
     }
 
     async fn execute_file_worker(&self, request: FileRequest) -> Result<Value> {
+        let request_id = request
+            .parameters
+            .get("_machine_request_id")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_owned();
+        let operation = request.operation;
+        let failure = |failure: FileFailure| {
+            tracing::warn!(
+                request_id,
+                operation = ?operation,
+                reason = failure.reason,
+                exit_code = failure.exit_code,
+                signal = failure.signal,
+                "machine file worker failed"
+            );
+            anyhow::Error::new(MachineError::File(failure))
+        };
         // The backend transport test library runs inside nyxid-server's test
         // harness, not the CLI executable. Production always uses a cancellable
         // child, even when the command user is the supervisor's own user.
         #[cfg(feature = "node-proxy-test")]
         if self.identity.uid == unsafe { libc::geteuid() } {
-            return tokio::task::spawn_blocking(move || execute_file(request)).await?;
+            return tokio::task::spawn_blocking(move || execute_file(request))
+                .await
+                .map_err(|_| failure(FileFailure::new("worker_exit_nonzero")))?
+                .map_err(|error| failure(FileFailure::new(file_error_reason(&error))));
         }
-        {
-            let mut command = tokio::process::Command::new(std::env::current_exe()?);
-            self.identity.prepare_agent(&mut command)?;
-            command
-                .args(["node", "machine-worker"])
-                .kill_on_drop(true)
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::null());
-            let mut child = command.spawn()?;
-            let mut input = child
-                .stdin
-                .take()
-                .context("file worker stdin unavailable")?;
-            let bytes = zeroize::Zeroizing::new(serde_json::to_vec(&request)?);
-            input.write_all(&bytes).await?;
-            input.shutdown().await?;
-            drop(input);
-            let stdout = child
-                .stdout
-                .take()
-                .context("file worker stdout unavailable")?;
-            tokio::time::timeout(std::time::Duration::from_secs(30), async {
-                let mut output = zeroize::Zeroizing::new(Vec::new());
-                stdout.take(256 * 1024 + 1).read_to_end(&mut output).await?;
-                if output.len() > 256 * 1024 || !child.wait().await?.success() {
-                    bail!("file operation refused");
-                }
-                let response: Value =
-                    serde_json::from_slice(&output).context("invalid file worker response")?;
-                if response["error"] == "path_outside_roots" {
-                    return Err(MachineError::PathOutsideRoots.into());
-                }
-                if response.get("error").is_some() {
-                    bail!("file operation refused");
-                }
-                Ok(response["result"].clone())
-            })
-            .await?
+        let mut command = tokio::process::Command::new(
+            std::env::current_exe()
+                .map_err(|_| failure(FileFailure::new("worker_spawn_failed")))?,
+        );
+        self.identity
+            .prepare_agent(&mut command)
+            .map_err(|_| failure(FileFailure::new("worker_spawn_failed")))?;
+        command
+            .args(["node", "machine-worker"])
+            .kill_on_drop(true)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        let mut child = command
+            .spawn()
+            .map_err(|_| failure(FileFailure::new("worker_spawn_failed")))?;
+        let mut input = child
+            .stdin
+            .take()
+            .ok_or_else(|| failure(FileFailure::new("worker_stdin_failed")))?;
+        let bytes = zeroize::Zeroizing::new(
+            serde_json::to_vec(&request)
+                .map_err(|_| failure(FileFailure::new("worker_stdin_failed")))?,
+        );
+        input
+            .write_all(&bytes)
+            .await
+            .map_err(|_| failure(FileFailure::new("worker_stdin_failed")))?;
+        input
+            .shutdown()
+            .await
+            .map_err(|_| failure(FileFailure::new("worker_stdin_failed")))?;
+        drop(input);
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| failure(FileFailure::new("worker_output_invalid")))?;
+        let (output, status) = collect_file_worker(&mut child, stdout)
+            .await
+            .map_err(&failure)?;
+        if let Some(result) = worker_exit_outcome(&output, &status).map_err(&failure)? {
+            // A successful response proves that execute_file reached its
+            // commit and serialized the result. Preserve that result even
+            // if teardown returned a non-zero status (for example, a
+            // post-write stdout/close failure).
+            tracing::warn!(
+                request_id,
+                operation = ?operation,
+                reason = "worker_exit_nonzero_after_result",
+                exit_code = status.code(),
+                signal = worker_status_failure(&status).signal,
+                "machine file worker committed before non-zero exit"
+            );
+            return Ok(result);
         }
+        let response: Value = serde_json::from_slice(&output)
+            .map_err(|_| failure(FileFailure::new("worker_output_invalid")))?;
+        if response["reason"] == "path_outside_roots" {
+            tracing::warn!(
+                request_id,
+                operation = ?operation,
+                reason = "path_outside_roots",
+                "machine file worker refused path"
+            );
+            return Err(MachineError::PathOutsideRoots.into());
+        }
+        if response.get("error").is_some() {
+            let reason =
+                worker_reason(response["reason"].as_str()).unwrap_or("worker_output_invalid");
+            return Err(failure(FileFailure::new(reason)));
+        }
+        response
+            .get("result")
+            .cloned()
+            .ok_or_else(|| failure(FileFailure::new("worker_output_invalid")))
     }
 
     pub async fn shutdown(&self) {
@@ -2175,6 +2247,118 @@ struct FileRequest {
     parameters: Value,
 }
 
+#[derive(Debug, Clone)]
+struct FileFailure {
+    reason: &'static str,
+    exit_code: Option<i32>,
+    signal: Option<i32>,
+}
+
+impl FileFailure {
+    fn new(reason: &'static str) -> Self {
+        Self {
+            reason,
+            exit_code: None,
+            signal: None,
+        }
+    }
+}
+
+fn file_error_reason(error: &anyhow::Error) -> &'static str {
+    if error
+        .downcast_ref::<MachineError>()
+        .is_some_and(|error| matches!(error, MachineError::PathOutsideRoots))
+    {
+        return "path_outside_roots";
+    }
+    if error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::AlreadyExists)
+    }) || error.to_string() == "file already exists"
+    {
+        return "file_exists";
+    }
+    match error.to_string().as_str() {
+        "sha256 mismatch" | "file transfer checksum mismatch" => "sha256_mismatch",
+        "file transfer length mismatch" => "length_mismatch",
+        _ => "operation_refused",
+    }
+}
+
+fn worker_reason(value: Option<&str>) -> Option<&'static str> {
+    match value {
+        Some("path_outside_roots") => Some("path_outside_roots"),
+        Some("file_exists") => Some("file_exists"),
+        Some("sha256_mismatch") => Some("sha256_mismatch"),
+        Some("length_mismatch") => Some("length_mismatch"),
+        Some("operation_refused") => Some("operation_refused"),
+        Some("worker_output_invalid") => Some("worker_output_invalid"),
+        Some("worker_timeout") => Some("worker_timeout"),
+        _ => None,
+    }
+}
+
+/// One deadline for reading and reaping. A broken/partial reply cannot prove
+/// that a changing operation did not commit: callers must observe before retry.
+async fn collect_file_worker(
+    child: &mut tokio::process::Child,
+    stdout: impl tokio::io::AsyncRead + Unpin,
+) -> std::result::Result<(zeroize::Zeroizing<Vec<u8>>, std::process::ExitStatus), FileFailure> {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let mut output = zeroize::Zeroizing::new(Vec::new());
+        stdout
+            .take(256 * 1024 + 1)
+            .read_to_end(&mut output)
+            .await
+            .map_err(|_| FileFailure::new("worker_output_invalid"))?;
+        if output.len() > 256 * 1024 {
+            return Err(FileFailure::new("worker_output_invalid"));
+        }
+        let status = child
+            .wait()
+            .await
+            .map_err(|_| FileFailure::new("worker_wait_failed"))?;
+        Ok((output, status))
+    })
+    .await
+    .map_err(|_| FileFailure::new("worker_timeout"))?
+}
+
+fn worker_status_failure(status: &std::process::ExitStatus) -> FileFailure {
+    #[cfg(unix)]
+    let signal = std::os::unix::process::ExitStatusExt::signal(status);
+    #[cfg(not(unix))]
+    let signal = None;
+    FileFailure {
+        reason: "worker_exit_nonzero",
+        exit_code: status.code(),
+        signal,
+    }
+}
+
+fn committed_worker_result(output: &[u8]) -> Option<Value> {
+    serde_json::from_slice::<Value>(output)
+        .ok()
+        .and_then(|response| {
+            (response.as_object()?.len() == 1)
+                .then(|| response.get("result").cloned())
+                .flatten()
+        })
+}
+
+fn worker_exit_outcome(
+    output: &[u8],
+    status: &std::process::ExitStatus,
+) -> std::result::Result<Option<Value>, FileFailure> {
+    if status.success() {
+        return Ok(None);
+    }
+    committed_worker_result(output)
+        .map(Some)
+        .ok_or_else(|| worker_status_failure(status))
+}
+
 fn execute_file(request: FileRequest) -> Result<Value> {
     let roots = files::Roots::new(&request.roots, &request.excluded)?;
     let p = &request.parameters;
@@ -2229,14 +2413,54 @@ pub async fn worker() -> Result<()> {
     let result = match execute_file(serde_json::from_slice(&bytes)?) {
         Ok(value) => json!({"result":value}),
         Err(error) => {
-            let kind = MachineError::from(error);
-            json!({"error": if matches!(kind, MachineError::PathOutsideRoots) {"path_outside_roots"} else {"operation_refused"}})
+            let reason = file_error_reason(&error);
+            json!({"error":"operation_refused","reason":reason})
         }
     };
-    tokio::io::stdout()
-        .write_all(result.to_string().as_bytes())
-        .await?;
+    // This dedicated child already performs synchronous file operations. Finish
+    // its bounded reply with an explicit write and flush so an EPIPE or other
+    // output failure reaches the supervisor as a non-zero worker exit.
+    use std::io::Write;
+    let output = zeroize::Zeroizing::new(serde_json::to_vec(&result)?);
+    let mut stdout = std::io::stdout().lock();
+    stdout.write_all(&output)?;
+    stdout.flush()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod file_worker_tests {
+    use super::*;
+    use std::os::unix::process::ExitStatusExt;
+
+    #[test]
+    fn committed_write_survives_nonzero_worker_teardown() {
+        let root = tempfile::tempdir().unwrap();
+        let roots = files::Roots::new(&[root.path().to_owned()], &[]).unwrap();
+        let hash = roots
+            .write("private.txt", b"committed", "create", None)
+            .unwrap();
+        let output = serde_json::to_vec(&json!({
+            "result": {"sha256": hash, "bytes": 9}
+        }))
+        .unwrap();
+        let status = std::process::ExitStatus::from_raw(17 << 8);
+        let result = worker_exit_outcome(&output, &status).unwrap().unwrap();
+        assert_eq!(result["bytes"], 9);
+        assert_eq!(
+            std::fs::read(root.path().join("private.txt")).unwrap(),
+            b"committed"
+        );
+    }
+
+    #[test]
+    fn nonzero_worker_without_result_has_fixed_status_reason() {
+        let status = std::process::ExitStatus::from_raw(23 << 8);
+        let failure = worker_exit_outcome(b"", &status).unwrap_err();
+        assert_eq!(failure.reason, "worker_exit_nonzero");
+        assert_eq!(failure.exit_code, Some(23));
+        assert_eq!(failure.signal, None);
+    }
 }
 
 #[cfg(test)]
