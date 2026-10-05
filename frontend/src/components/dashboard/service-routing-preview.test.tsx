@@ -367,6 +367,7 @@ describe("live grouped services", () => {
         credential_binding: "user",
         credential_type: type,
         oauth_client_id: app,
+        oauth_app_source: app ? "byo" : null,
         platform_key_pricing: {
           metric: "requests",
           credits_per_unit: "0.05",
@@ -438,6 +439,7 @@ describe("live grouped services", () => {
       credential_binding: "user",
       credential_type: "oauth2",
       oauth_client_id: "chrono-app",
+      oauth_app_source: "byo",
       platform_key_pricing: catalog.billing.platform_key_pricing,
       byok_pricing: catalog.billing.byok_pricing,
     };
@@ -460,6 +462,7 @@ describe("live grouped services", () => {
       id: "twitter-unknown",
       label: "Legacy Twitter",
       oauth_client_id: null,
+      oauth_app_source: null,
     };
     for (const connection of [byo, platform, noCharge, unknown]) {
       records.push(connection);

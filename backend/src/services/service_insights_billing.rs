@@ -1130,12 +1130,25 @@ mod tests {
         key.credential_source = None;
         key.connection_id = Some("connection".into());
         key.provider_config_id = Some("provider".into());
+        key.access_token_encrypted = Some(vec![1]);
+        assert_eq!(
+            stored_credential_supplier(&key),
+            CredentialSupplier::Unknown
+        );
+        key.oauth_app_observation = Some(
+            super::super::oauth_app_source::OAuthAppSource::Byo.observation(key.credential_epoch),
+        );
         assert_eq!(stored_credential_supplier(&key), CredentialSupplier::Own);
         key.user_oauth_client_id_encrypted = None;
+        key.oauth_app_observation = Some(
+            super::super::oauth_app_source::OAuthAppSource::Platform
+                .observation(key.credential_epoch),
+        );
         assert_eq!(stored_credential_supplier(&key), CredentialSupplier::Nyxid);
         // Legacy selection must use the provider token, including for disabled
         // connections and selected agent overrides, not a retained client hint.
         key.connection_id = None;
+        key.oauth_app_observation = None;
         assert_eq!(
             stored_credential_supplier(&key),
             CredentialSupplier::Unknown

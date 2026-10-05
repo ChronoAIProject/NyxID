@@ -5688,6 +5688,7 @@ mod tests {
         let encrypted = keys.encrypt(override_secret.as_bytes()).await.unwrap();
         db.collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(UserApiKey {
+                oauth_app_observation: None,
                 credential_source: None,
                 id: override_credential_id.clone(),
                 user_id: user_id.clone(),
@@ -8375,6 +8376,7 @@ mod tests {
 
     fn authority_test_key(credential_type: &str) -> UserApiKey {
         UserApiKey {
+            oauth_app_observation: None,
             credential_source: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
@@ -8453,6 +8455,7 @@ mod tests {
     #[test]
     fn missing_credential_error_oauth2_with_provider() {
         let key = UserApiKey {
+            oauth_app_observation: None,
             credential_source: None,
             id: "k".into(),
             user_id: "u".into(),
@@ -8485,6 +8488,7 @@ mod tests {
     #[test]
     fn missing_credential_error_api_key() {
         let key = UserApiKey {
+            oauth_app_observation: None,
             credential_source: None,
             id: "k".into(),
             user_id: "u".into(),

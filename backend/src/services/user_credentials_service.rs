@@ -220,10 +220,11 @@ pub async fn delete_user_credentials(
 /// Resolved OAuth client credentials (decrypted).
 #[derive(Debug)]
 pub struct ResolvedOAuthCredentials {
+    pub app_source: super::oauth_app_source::OAuthAppSource,
     pub client_id: String,
     pub client_secret: Option<String>,
-    /// `Some(user_id)` when user-provided OAuth app credentials were used.
-    /// `None` means provider-level credentials were used.
+    /// Legacy user-provider credential lookup. Embedded connection apps also
+    /// leave this empty; use `app_source` to identify the selected app source.
     pub credential_user_id: Option<String>,
 }
 
@@ -366,6 +367,7 @@ pub(crate) async fn decrypt_provider_credentials(
     };
 
     Ok(ResolvedOAuthCredentials {
+        app_source: super::oauth_app_source::OAuthAppSource::Platform,
         client_id,
         client_secret,
         credential_user_id: None,
@@ -400,6 +402,7 @@ pub async fn decrypt_claimed_key_oauth_credentials(
         };
 
     Ok(ResolvedOAuthCredentials {
+        app_source: super::oauth_app_source::OAuthAppSource::Byo,
         client_id,
         client_secret,
         credential_user_id: Some(key.user_id.clone()),
@@ -434,6 +437,7 @@ async fn decrypt_user_credentials(
         };
 
     Ok(ResolvedOAuthCredentials {
+        app_source: super::oauth_app_source::OAuthAppSource::Byo,
         client_id,
         client_secret,
         credential_user_id: Some(credential_user_id.to_string()),
@@ -525,6 +529,7 @@ pub async fn resolve_connection_oauth_credentials(
     };
 
     Ok(Some(ResolvedOAuthCredentials {
+        app_source: super::oauth_app_source::OAuthAppSource::Byo,
         client_id,
         client_secret,
         // The `credential_user_id` field on `ResolvedOAuthCredentials`
@@ -551,6 +556,7 @@ mod tests {
 
     fn placeholder_key(connection_id: &str) -> UserApiKey {
         UserApiKey {
+            oauth_app_observation: None,
             credential_source: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
@@ -1376,5 +1382,9 @@ mod tests {
         assert_eq!(resolved.client_secret.as_deref(), Some("super-secret"));
         // Per §12: the multi-connection branch leaves credential_user_id None.
         assert!(resolved.credential_user_id.is_none());
+        assert_eq!(
+            resolved.app_source,
+            crate::services::oauth_app_source::OAuthAppSource::Byo
+        );
     }
 }

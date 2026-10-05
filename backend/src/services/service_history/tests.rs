@@ -189,6 +189,46 @@ async fn shared_endpoint_fanout_and_concurrent_before_after() {
     assert_eq!(transitions, (0..6).map(|v| (v, v + 1)).collect::<Vec<_>>());
 }
 
+#[test]
+fn oauth_app_metadata_refresh_does_not_count_as_a_service_edit() {
+    let now = bson::DateTime::now();
+    let before = doc! {
+        "_id": "key", "user_id": "owner", "label": "X", "credential_type": "oauth2",
+        "status": "active", "credential_epoch": 1_i64, "created_at": now, "updated_at": now,
+        "access_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![1] },
+    };
+    let mut after = before.clone();
+    after.insert(
+        "access_token_encrypted",
+        bson::Binary {
+            subtype: bson::spec::BinarySubtype::Generic,
+            bytes: vec![2],
+        },
+    );
+    after.insert(
+        "oauth_app_observation",
+        doc! { "source": "platform", "credential_epoch": 1_i64, "observed_at": now },
+    );
+    let (changes, additional, changed) = projection::diff("user_api_keys", &before, &after, true);
+    assert!(changes.is_empty());
+    assert!(!additional);
+    assert!(!changed);
+    // Later observation timestamps are operational too.
+    let mut refreshed = after.clone();
+    refreshed
+        .get_document_mut("oauth_app_observation")
+        .unwrap()
+        .insert(
+            "observed_at",
+            bson::DateTime::from_millis(now.timestamp_millis() + 1000),
+        );
+    let (changes, additional, changed) =
+        projection::diff("user_api_keys", &after, &refreshed, true);
+    assert!(changes.is_empty());
+    assert!(!additional);
+    assert!(!changed);
+}
+
 #[tokio::test]
 async fn credential_replacement_refresh_removal_and_disabled_delete() {
     let (db, mut s) = fixture().await;

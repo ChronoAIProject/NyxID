@@ -5,6 +5,16 @@ use super::bson_datetime;
 
 pub const COLLECTION_NAME: &str = "user_api_keys";
 
+/// App actually used by a successful OAuth exchange or refresh. This is
+/// descriptive metadata; `credential_source` remains the routing choice.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OAuthAppObservation {
+    pub source: String,
+    pub credential_epoch: i64,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub observed_at: DateTime<Utc>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UserApiKey {
     #[serde(rename = "_id")]
@@ -65,6 +75,9 @@ pub struct UserApiKey {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_source: Option<String>,
 
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_app_observation: Option<OAuthAppObservation>,
+
     /// "active" | "expired" | "revoked" | "failed" | "refresh_failed" | "pending_auth"
     pub status: String,
     #[serde(default, with = "bson_datetime::optional")]
@@ -116,6 +129,7 @@ mod tests {
     #[test]
     fn bson_roundtrip_api_key() {
         let key = UserApiKey {
+            oauth_app_observation: None,
             credential_source: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
@@ -153,6 +167,7 @@ mod tests {
     #[test]
     fn missing_credential_epoch_defaults_to_one() {
         let key = UserApiKey {
+            oauth_app_observation: None,
             credential_source: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
@@ -188,6 +203,7 @@ mod tests {
     fn bson_roundtrip_oauth2() {
         let conn_id = uuid::Uuid::new_v4().to_string();
         let key = UserApiKey {
+            oauth_app_observation: None,
             credential_source: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),

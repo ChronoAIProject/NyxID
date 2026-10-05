@@ -1128,6 +1128,7 @@ mod tests {
 
     fn fixture_api_key(id: &str, user_id: &str) -> UserApiKey {
         UserApiKey {
+            oauth_app_observation: None,
             credential_epoch: 1,
             credential_source: None,
             id: id.to_string(),

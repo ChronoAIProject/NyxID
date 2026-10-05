@@ -4235,6 +4235,12 @@ async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error
 
         // Create UserApiKey -- clean up endpoint on failure
         let api_key = UserApiKey {
+            oauth_app_observation: (token.token_type == "oauth2").then(|| {
+                crate::services::oauth_app_source::OAuthAppSource::from_credential_owner(
+                    token.credential_user_id.as_deref(),
+                )
+                .observation(1)
+            }),
             credential_source: None,
             id: api_key_id.clone(),
             user_id: token.user_id.clone(),
@@ -4485,6 +4491,7 @@ async fn migrate_service_connections(db: &Database) -> Result<(), Box<dyn std::e
             .or_else(|| service.auth_type.clone())
             .unwrap_or_else(|| "api_key".to_string());
         let api_key = UserApiKey {
+            oauth_app_observation: None,
             credential_source: None,
             id: api_key_id.clone(),
             user_id: conn.user_id.clone(),
@@ -4752,6 +4759,7 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
 
         // Create UserApiKey (placeholder -- node-managed or SSH certificate)
         let api_key = UserApiKey {
+            oauth_app_observation: None,
             credential_source: None,
             id: api_key_id.clone(),
             user_id: binding.user_id.clone(),

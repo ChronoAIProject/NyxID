@@ -1755,6 +1755,7 @@ mod tests {
     fn test_pending_oauth_api_key(key_id: &str, user_id: &str, provider_id: &str) -> UserApiKey {
         let now = Utc::now();
         UserApiKey {
+            oauth_app_observation: None,
             credential_source: None,
             id: key_id.to_string(),
             user_id: user_id.to_string(),

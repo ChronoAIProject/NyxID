@@ -1567,6 +1567,7 @@ pub async fn poll_device_code(
             oauth_state.connection_id.as_deref(),
             &token_data,
             now,
+            resolved.app_source,
         )
         .await;
     }
@@ -1582,6 +1583,7 @@ pub async fn poll_device_code(
         oauth_state.connection_id.as_deref(),
         &resp_data,
         now,
+        resolved.app_source,
     )
     .await
 }
@@ -1604,6 +1606,7 @@ async fn store_device_code_tokens(
     connection_id: Option<&str>,
     token_data: &serde_json::Value,
     now: chrono::DateTime<Utc>,
+    app_source: super::oauth_app_source::OAuthAppSource,
 ) -> AppResult<DeviceCodePollResult> {
     let access_token = token_data["access_token"]
         .as_str()
@@ -1630,6 +1633,7 @@ async fn store_device_code_tokens(
             refresh_token,
             scope,
             token_expires_at,
+            Some(app_source),
         )
         .await
         .inspect_err(|e| {
@@ -2003,6 +2007,7 @@ pub async fn handle_oauth_callback(
                 refresh_token,
                 scope,
                 token_expires_at,
+                Some(resolved.app_source),
             )
             .await?;
             if !wrote {
@@ -2019,6 +2024,7 @@ pub async fn handle_oauth_callback(
                 refresh_token,
                 scope,
                 token_expires_at,
+                Some(resolved.app_source),
             )
             .await
             .inspect_err(|e| {
@@ -2699,6 +2705,11 @@ async fn refresh_user_api_key_under_lease(
     let now = Utc::now();
 
     let access_enc = encryption_keys.encrypt(new_access_token.as_bytes()).await?;
+    let observed_source = if api_key.user_oauth_client_id_encrypted.is_some() {
+        super::oauth_app_source::OAuthAppSource::Byo
+    } else {
+        super::oauth_app_source::OAuthAppSource::Platform
+    };
     let mut set_doc = doc! {
         "access_token_encrypted": bson::Binary {
             subtype: bson::spec::BinarySubtype::Generic,
@@ -2708,6 +2719,11 @@ async fn refresh_user_api_key_under_lease(
         "error_message": bson::Bson::Null,
         "last_used_at": bson::DateTime::from_chrono(now),
         "updated_at": bson::DateTime::from_chrono(now),
+        "oauth_app_observation": {
+            "source": observed_source.as_str(),
+            "credential_epoch": api_key.credential_epoch,
+            "observed_at": bson::DateTime::from_chrono(now),
+        },
     };
     if let Some(exp) = expires_in {
         let new_expires = now + Duration::seconds(exp);
@@ -4039,6 +4055,10 @@ mod tests {
                         .unwrap()
                         .unwrap();
                     assert_eq!(saved.status, "active");
+                    let observation = saved.oauth_app_observation.as_ref().unwrap();
+                    assert_eq!(observation.source, "platform");
+                    assert_eq!(observation.credential_epoch, saved.credential_epoch);
+                    assert_eq!(Some(observation.observed_at), saved.last_authorized_at);
                     (
                         saved.access_token_encrypted,
                         saved.refresh_token_encrypted,
@@ -4656,6 +4676,7 @@ mod tests {
         };
         let now = Utc::now();
         let key = UserApiKey {
+            oauth_app_observation: None,
             credential_source: None,
             id: key_id,
             user_id: Uuid::new_v4().to_string(),
@@ -5698,6 +5719,19 @@ mod tests {
             .unwrap();
         assert_eq!(String::from_utf8(bytes).unwrap(), "fresh-access-token");
         assert_eq!(refreshed.token_scopes.as_deref(), Some("openid profile"));
+        assert_eq!(
+            refreshed.oauth_app_observation.as_ref().unwrap().source,
+            "platform"
+        );
+        assert_eq!(
+            refreshed
+                .oauth_app_observation
+                .as_ref()
+                .unwrap()
+                .credential_epoch,
+            key.credential_epoch
+        );
+        assert_eq!(refreshed.credential_source, key.credential_source);
         // expires_at advanced past now.
         assert!(refreshed.expires_at.unwrap() > Utc::now());
     }
@@ -5747,6 +5781,19 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(String::from_utf8(bytes).unwrap(), "byo-access-token");
+        assert_eq!(
+            refreshed.oauth_app_observation.as_ref().unwrap().source,
+            "byo"
+        );
+        assert_eq!(
+            refreshed
+                .oauth_app_observation
+                .as_ref()
+                .unwrap()
+                .credential_epoch,
+            key.credential_epoch
+        );
+        assert_eq!(refreshed.credential_source, key.credential_source);
     }
 
     #[tokio::test]
@@ -5991,6 +6038,7 @@ mod tests {
 
         let now = Utc::now();
         let key = UserApiKey {
+            oauth_app_observation: None,
             credential_source: None,
             id: Uuid::new_v4().to_string(),
             user_id: Uuid::new_v4().to_string(),
@@ -7023,6 +7071,7 @@ mod tests {
             None
         };
         let key = UserApiKey {
+            oauth_app_observation: None,
             credential_source: None,
             id: Uuid::new_v4().to_string(),
             user_id: Uuid::new_v4().to_string(),

@@ -95,11 +95,17 @@ configuration/provenance; unavailable agent overrides never borrow the default
 connection's supplier. None of these reads decrypts a credential or changes billing.
 
 `/keys` also exposes `oauth_app_source` (`platform` or `byo`), separately from
-personal/organization ownership. The shared read-only resolver honors explicit
-app selection, resolves unmarked modern keys from their embedded/provider app
-layout, and batch-loads legacy provider-token app-source metadata. Legacy matches
-must agree on owner, provider and any original migration source ID; missing or
-ambiguous matches remain unknown. The resolver loads no encrypted token material.
+personal/organization ownership. Successful OAuth authorization and refresh
+atomically record `oauth_app_observation` with the app source, credential epoch
+and timestamp. Source comes from the actual credential-resolution branch,
+including embedded BYO apps whose legacy owner-reference field is empty.
+The shared read-only resolver honors explicit selection and current observations;
+disagreement stays unknown. An epoch change or newer authorization invalidates
+an old observation. It batch-loads legacy provider-token records to match owner,
+provider, token association and identical copied ciphertext. Ciphertext is never
+decrypted or exposed. Missing or ambiguous evidence remains unknown; connection
+IDs, retained developer apps and token expiry are not provenance evidence.
+Observation writes never alter execution's credential source or pricing lane.
 Explicit platform binding wins over a retained user key. A legacy OAuth execution
 class of `user_owned` does not prove BYOK.
 Non-OAuth stored key records identify the supplied-key path; a user binding alone

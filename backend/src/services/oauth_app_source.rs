@@ -5,7 +5,7 @@ use mongodb::{Database, bson::doc};
 use serde::Deserialize;
 
 use crate::errors::AppResult;
-use crate::models::user_api_key::UserApiKey;
+use crate::models::user_api_key::{OAuthAppObservation, UserApiKey};
 use crate::models::user_provider_token::COLLECTION_NAME;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -15,6 +15,22 @@ pub enum OAuthAppSource {
 }
 
 impl OAuthAppSource {
+    pub fn from_credential_owner(owner: Option<&str>) -> Self {
+        if owner.is_some() {
+            Self::Byo
+        } else {
+            Self::Platform
+        }
+    }
+
+    pub fn observation(self, credential_epoch: i64) -> OAuthAppObservation {
+        OAuthAppObservation {
+            source: self.as_str().into(),
+            credential_epoch,
+            observed_at: chrono::Utc::now(),
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Platform => "platform",
@@ -23,26 +39,48 @@ impl OAuthAppSource {
     }
 }
 
-/// No credential decryption or provider call is needed to identify the app.
-/// Modern connection refresh uses embedded BYO credentials, otherwise the
-/// provider's app. Legacy keys refresh through their provider-token record.
+/// App selection or a successful exchange is evidence; a connection ID,
+/// retained developer app, or unexpired token alone is not.
 pub fn from_key(key: &UserApiKey) -> Option<OAuthAppSource> {
     if !matches!(key.credential_type.as_str(), "oauth2" | "device_code") {
         return None;
     }
+    let observed = key
+        .oauth_app_observation
+        .as_ref()
+        .filter(|observation| {
+            has_token_material(key)
+                && observation.credential_epoch == key.credential_epoch
+                && key
+                    .last_authorized_at
+                    .is_none_or(|authorized| observation.observed_at >= authorized)
+        })
+        .and_then(|observation| parse_source(&observation.source));
     match key.credential_source.as_deref() {
+        Some(source) if observed.is_some() && parse_source(source) != observed => None,
         Some("platform") => Some(OAuthAppSource::Platform),
         Some("byo") => Some(OAuthAppSource::Byo),
         Some(_) => None,
-        None if key.connection_id.is_some() && key.provider_config_id.is_some() => {
-            Some(if key.user_oauth_client_id_encrypted.is_some() {
-                OAuthAppSource::Byo
-            } else {
-                OAuthAppSource::Platform
-            })
-        }
-        None => None,
+        None => observed,
     }
+}
+
+fn parse_source(source: &str) -> Option<OAuthAppSource> {
+    match source {
+        "platform" => Some(OAuthAppSource::Platform),
+        "byo" => Some(OAuthAppSource::Byo),
+        _ => None,
+    }
+}
+
+fn has_token_material(key: &UserApiKey) -> bool {
+    key.access_token_encrypted
+        .as_ref()
+        .is_some_and(|token| !token.is_empty())
+        || key
+            .refresh_token_encrypted
+            .as_ref()
+            .is_some_and(|token| !token.is_empty())
 }
 
 #[derive(Deserialize)]
@@ -53,38 +91,55 @@ struct LegacyAppMetadata {
     provider_config_id: String,
     #[serde(default)]
     credential_user_id: Option<String>,
+    #[serde(default)]
+    connection_id: Option<String>,
+    #[serde(default, with = "crate::models::bson_bytes::optional")]
+    access_token_encrypted: Option<Vec<u8>>,
+    #[serde(default, with = "crate::models::bson_bytes::optional")]
+    refresh_token_encrypted: Option<Vec<u8>>,
 }
 
 fn needs_legacy_lookup(key: &UserApiKey) -> bool {
     matches!(key.credential_type.as_str(), "oauth2" | "device_code")
         && key.credential_source.is_none()
-        && key.connection_id.is_none()
         && key.provider_config_id.is_some()
+        && from_key(key).is_none()
+        && has_token_material(key)
 }
 
 fn from_legacy(key: &UserApiKey, tokens: &[LegacyAppMetadata]) -> Option<OAuthAppSource> {
     let provider_id = key.provider_config_id.as_deref()?;
-    let source_id = (key.source.as_deref() == Some("migration_provider_token"))
-        .then_some(key.source_id.as_deref())
-        .flatten();
+    let source_id = matches!(
+        key.source.as_deref(),
+        Some("migration_provider_token" | "user_created")
+    )
+    .then_some(key.source_id.as_deref())
+    .flatten();
     let mut matches = tokens.iter().filter(|token| {
         token.user_id == key.user_id
             && token.provider_config_id == provider_id
             && source_id.is_none_or(|id| token.id == id)
+            && (key.connection_id.is_none()
+                || source_id.is_some()
+                || key.connection_id == token.connection_id)
+            // Migration and legacy sync copy ciphertext unchanged. Matching
+            // both token fields ties the source to this credential revision.
+            && key.access_token_encrypted == token.access_token_encrypted
+            && key.refresh_token_encrypted == token.refresh_token_encrypted
+            && has_token_material(key)
     });
     let token = matches.next()?;
     if matches.next().is_some() {
         return None;
     }
-    Some(if token.credential_user_id.is_some() {
-        OAuthAppSource::Byo
-    } else {
-        OAuthAppSource::Platform
-    })
+    Some(OAuthAppSource::from_credential_owner(
+        token.credential_user_id.as_deref(),
+    ))
 }
 
 /// Request-scoped projection for already-authorized credential records. Only
-/// safe owner/provider/app-source metadata is loaded for unresolved legacy keys.
+/// legacy token copies are matched without decrypting them. Ciphertext is kept
+/// inside this resolver; only the source enum is returned.
 pub async fn load(
     db: &Database,
     keys: &[&UserApiKey],
@@ -97,10 +152,14 @@ pub async fn load(
                 "user_id": &key.user_id,
                 "provider_config_id": key.provider_config_id.as_deref().unwrap(),
             };
-            if key.source.as_deref() == Some("migration_provider_token")
-                && let Some(id) = &key.source_id
+            if matches!(
+                key.source.as_deref(),
+                Some("migration_provider_token" | "user_created")
+            ) && let Some(id) = &key.source_id
             {
                 filter.insert("_id", id);
+            } else if let Some(connection_id) = &key.connection_id {
+                filter.insert("connection_id", connection_id);
             }
             filter
         })
@@ -112,7 +171,8 @@ pub async fn load(
             .find(doc! { "$or": filters })
             .projection(doc! {
                 "_id": 1, "user_id": 1, "provider_config_id": 1,
-                "credential_user_id": 1,
+                "credential_user_id": 1, "connection_id": 1,
+                "access_token_encrypted": 1, "refresh_token_encrypted": 1,
             })
             .await?
             .try_collect()
@@ -141,6 +201,9 @@ mod tests {
             "_id": "key", "user_id": "person", "label": "X",
             "credential_type": "oauth2", "status": "active",
             "provider_config_id": "x", "connection_id": "connection",
+            "access_token_encrypted": mongodb::bson::Binary {
+                subtype: mongodb::bson::spec::BinarySubtype::Generic, bytes: vec![1, 2, 3],
+            },
             "created_at": mongodb::bson::DateTime::now(),
             "updated_at": mongodb::bson::DateTime::now(),
         })
@@ -153,19 +216,101 @@ mod tests {
             user_id: owner.into(),
             provider_config_id: provider.into(),
             credential_user_id: supplied.then(|| owner.into()),
+            connection_id: None,
+            access_token_encrypted: Some(vec![1, 2, 3]),
+            refresh_token_encrypted: None,
         }
     }
 
     #[test]
-    fn oauth_app_metadata_resolves_modern_keys_without_new_marker() {
+    fn oauth_app_metadata_requires_evidence_for_modern_keys() {
         let mut key = key();
-        assert_eq!(from_key(&key), Some(OAuthAppSource::Platform));
+        key.expires_at = Some(chrono::Utc::now() + chrono::Duration::days(365));
+        assert_eq!(from_key(&key), None);
         key.user_oauth_client_id_encrypted = Some(vec![1]);
+        assert_eq!(from_key(&key), None);
+        key.oauth_app_observation = Some(OAuthAppSource::Byo.observation(key.credential_epoch));
         assert_eq!(from_key(&key), Some(OAuthAppSource::Byo));
+        key.credential_epoch += 1;
+        assert_eq!(from_key(&key), None);
         key.credential_source = Some("platform".into());
         assert_eq!(from_key(&key), Some(OAuthAppSource::Platform));
         key.credential_source = Some("unsupported".into());
         assert_eq!(from_key(&key), None);
+    }
+
+    #[test]
+    fn oauth_app_metadata_observation_survives_expiry_but_not_reauthorization_or_conflict() {
+        let mut key = key();
+        let observation = OAuthAppSource::Platform.observation(key.credential_epoch);
+        key.last_authorized_at = Some(observation.observed_at);
+        key.oauth_app_observation = Some(observation.clone());
+        key.status = "revoked".into();
+        key.expires_at = Some(chrono::Utc::now() - chrono::Duration::days(1));
+        assert_eq!(from_key(&key), Some(OAuthAppSource::Platform));
+        key.credential_source = Some("byo".into());
+        assert_eq!(from_key(&key), None);
+        key.credential_source = None;
+        key.access_token_encrypted = None;
+        assert_eq!(from_key(&key), None);
+        key.access_token_encrypted = Some(vec![1, 2, 3]);
+        key.last_authorized_at = Some(observation.observed_at + chrono::Duration::seconds(1));
+        assert_eq!(from_key(&key), None);
+    }
+
+    #[tokio::test]
+    async fn oauth_app_metadata_batch_matches_actual_migrated_tokens() {
+        let db = crate::test_utils::connect_test_database("oauth_app_metadata")
+            .await
+            .unwrap();
+        let mut migrated = key();
+        migrated.source = Some("migration_provider_token".into());
+        migrated.source_id = Some("original".into());
+        // A migrated modern key may carry an unrelated retained app.
+        migrated.user_oauth_client_id_encrypted = Some(vec![99]);
+        let mut changed = migrated.clone();
+        changed.id = "reauthorized".into();
+        changed.access_token_encrypted = Some(vec![8, 9]);
+        let mut wrong_owner = migrated.clone();
+        wrong_owner.id = "wrong-owner".into();
+        wrong_owner.user_id = "different-owner".into();
+        let mut legacy = key();
+        legacy.id = "legacy-byo".into();
+        legacy.connection_id = None;
+        legacy.user_id = "org".into();
+        let mut explicit = migrated.clone();
+        explicit.id = "explicit".into();
+        explicit.credential_source = Some("byo".into());
+        db.collection::<mongodb::bson::Document>(COLLECTION_NAME)
+            .insert_many([
+                doc! {
+                    "_id": "original", "user_id": "person", "provider_config_id": "x",
+                    "access_token_encrypted": mongodb::bson::Binary {
+                        subtype: mongodb::bson::spec::BinarySubtype::Generic, bytes: vec![1, 2, 3],
+                    },
+                },
+                doc! {
+                    "_id": "org-token", "user_id": "org", "provider_config_id": "x",
+                    "credential_user_id": "org",
+                    "access_token_encrypted": mongodb::bson::Binary {
+                        subtype: mongodb::bson::spec::BinarySubtype::Generic, bytes: vec![1, 2, 3],
+                    },
+                },
+            ])
+            .await
+            .unwrap();
+        let sources = load(
+            &db,
+            &[&migrated, &changed, &wrong_owner, &legacy, &explicit],
+        )
+        .await
+        .unwrap();
+        assert_eq!(sources.len(), 3);
+        assert_eq!(sources[&migrated.id], OAuthAppSource::Platform);
+        assert_eq!(sources[&legacy.id], OAuthAppSource::Byo);
+        assert_eq!(sources[&explicit.id], OAuthAppSource::Byo);
+        assert!(!sources.contains_key(&changed.id));
+        assert!(!sources.contains_key(&wrong_owner.id));
     }
 
     #[test]

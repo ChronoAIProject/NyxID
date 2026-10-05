@@ -4741,6 +4741,7 @@ mod tests {
 
     fn sample_api_key(credential_type: &str) -> UserApiKey {
         UserApiKey {
+            oauth_app_observation: None,
             credential_source: None,
             id: "key-1".to_string(),
             user_id: "user-1".to_string(),
@@ -6249,11 +6250,16 @@ mod tests {
     }
 
     #[test]
-    fn oauth_app_metadata_key_view_resolves_unmarked_modern_oauth() {
+    fn oauth_app_metadata_key_view_exposes_observed_modern_oauth() {
         let service = sample_service("oauth2");
         let mut key = sample_api_key("oauth2");
         key.connection_id = Some("connection".into());
         key.provider_config_id = Some("provider".into());
+        key.access_token_encrypted = Some(vec![1]);
+        key.oauth_app_observation = Some(
+            super::super::oauth_app_source::OAuthAppSource::Platform
+                .observation(key.credential_epoch),
+        );
         let view = build_key_view(
             &service,
             &sample_endpoint(),
@@ -8147,6 +8153,7 @@ mod tests {
         let now = Utc::now();
         db.collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(UserApiKey {
+                oauth_app_observation: None,
                 credential_source: None,
                 id: stripped_key_id.clone(),
                 user_id: user_id.clone(),

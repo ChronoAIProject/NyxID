@@ -387,3 +387,18 @@ An incomplete inventory is labelled as incomplete rather than showing zero keys.
 Validation: 131 frontend tests, TypeScript, production build and changed-file
 ESLint passed. The running preview serves the updated summary and schema modules.
 Signed-in visual verification remains outstanding because no browser is connected.
+
+## OAuth billing provenance — 5 October 2026
+
+The preview at `http://127.0.0.1:4317/keys?view=routing` still targets production.
+The draft backend now records the app source at successful authorization/refresh
+and exposes verified `oauth_app_source` through `/keys` and service insights.
+Older copied tokens are matched against their original token data without
+decryption. Neither a connection ID nor the presence/absence of a retained OAuth
+client ID establishes billing source.
+
+Production has not received these changes. Its missing source fields can leave
+all four X OAuth rows Unverified after the frontend guesses are removed. The
+expected `3 NyxID · 1 BYOK` requires backend evidence; local tests proving that
+rendering are not production verification. Rates, charge lanes and free-credit
+funding are unaffected by the provenance metadata change.

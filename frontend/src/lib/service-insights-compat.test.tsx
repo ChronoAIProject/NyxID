@@ -113,6 +113,7 @@ describe("deployed service insight compatibility", () => {
         ...org,
         credential_type: "oauth2",
         oauth_client_id: "organization-app",
+        oauth_app_source: "byo",
       },
       {
         slug: "twitter",

@@ -2571,6 +2571,7 @@ mod tests {
             .unwrap();
         db.collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(UserApiKey {
+                oauth_app_observation: None,
                 id: actor_external_key_id.clone(),
                 user_id: actor_id.to_string(),
                 label: "Secret-bearing fixture".to_string(),

@@ -35,19 +35,26 @@ configured is also NyxID; an absent connection price is separate from the label.
 - `billing.credential_supplier`: `nyxid`, `own`, `none` or `unknown` for the selected
   context. Restricted results omit it. Agent overrides use the override's metadata.
 - `KeyResponse.oauth_app_source`: resolved `platform` or `byo` OAuth app source.
-  Both `/keys` and insights use `oauth_app_source::load`: explicit selection first;
-  unmarked modern connections use their embedded app or provider app, matching
-  the refresh path; legacy connections use the matching provider token's
-  `credential_user_id`. No credentials are decrypted or returned by this lookup.
+  Both `/keys` and insights use `oauth_app_source::load`: explicit selection,
+  an observation from a successful OAuth exchange/refresh, or an exactly matched
+  legacy token copy. The lookup never decrypts or returns credentials.
+- `UserApiKey.oauth_app_observation` records the actual resolved app source,
+  credential epoch and observation time alongside the successful token write.
+  A replacement epoch or newer authorization invalidates an old observation.
+  A disagreement with explicit selection remains unknown. The observation is
+  descriptive metadata and never changes execution's `credential_source`.
 - Existing `credit_billing_configured`, `rates` and `charge_status` keep their
   connection-specific meaning and never decide the service-wide label gate.
 
 Explicit platform binding selects NyxID even when an old personal key is retained.
-Durable OAuth source wins over retained app hints. Missing the newer marker alone
-does not mean unverified. Legacy token matching checks owner and provider and
-honors the original migration source ID; missing or ambiguous token evidence
-remains unknown. Legacy embedded app hints alone cannot override that token's
-source. The execution class `UserOwned` is also the legacy fallback, so it is not
+Durable OAuth source wins over retained app hints. A connection ID, stored client
+ID or unexpired token alone does not prove which app issued the grant. Older BYO
+connections can lack embedded app credentials, and migration could copy an
+unrelated app onto a key. Legacy token matching checks owner, provider, token
+association and identical copied access/refresh ciphertext; it also handles
+migrated rows carrying a connection ID. Missing, changed or ambiguous token
+evidence remains unknown. Ciphertext stays inside the resolver. The execution
+class `UserOwned` is also the legacy fallback, so it is not
 proof of app ownership. For non-OAuth connections, a stored
 API-key record follows the supplied-key path; NyxID master credentials are kept
 in the catalog and selected by platform binding. A user binding without a stored
@@ -57,8 +64,10 @@ key is insufficient. Node routing alone does not establish credential provenance
 
 The current preview can classify unpriced services and supplied keys from existing
 APIs. It cannot prove NyxID OAuth app selection until `oauth_app_source` or the
-insight supplier field is deployed. Legacy OAuth rows can be resolved from their
-provider-token records; missing or ambiguous records still need reconciliation. Missing
+insight supplier field is deployed. Legacy OAuth rows can be resolved from an
+exact provider-token copy. Unmarked modern rows acquire verified provenance on
+their next successful authorization or refresh; reads do not trigger a refresh.
+Missing or ambiguous records still need reconciliation. Missing
 private catalog entries cannot be interpreted as absent billing.
 
 Connected-service cards and overview pages request the full accessible catalog,
@@ -74,9 +83,13 @@ establish which case produced the previously reported browser label.
 Live checks found Twitter with one supplied organization app and three personal
 OAuth rows without published app provenance. Two carry a connection ID; the
 disabled third uses legacy storage. The owner confirms all three used NyxID's app,
-so the expected card is **3 NyxID · 1 BYOK**. Production omits the source field
-and returns HTTP 404 for `/service-insights`; the compatibility path consequently
-reports three Unverified until the backend resolver is deployed.
+so the expected card, once supported by backend evidence, is **3 NyxID · 1 BYOK**.
+Production omits the source field and returns HTTP 404 for `/service-insights`.
+Removing client-ID and connection-ID guesses means all four OAuth connections
+can show Unverified on that older backend. This is an explicit rollout limit,
+not a claim that the user connected them incorrectly. Deployment supplies source
+metadata for selected, observed or exactly matched connections; historical rows
+without that evidence need a successful refresh or reauthorization.
 Available history does not supply that missing source. The legacy token's exact
 contents could not be inspected through existing public metadata APIs.
 Anthropic, Chrono LLM and Spotify have no billing configuration and show

@@ -87,7 +87,11 @@ fn operational(entity: &str, key: &str) -> bool {
     ) || (entity == "user_api_keys"
         && matches!(
             key,
-            "expires_at" | "error_message" | "status" | "oauth_attempt_nonce"
+            "expires_at"
+                | "error_message"
+                | "status"
+                | "oauth_attempt_nonce"
+                | "oauth_app_observation"
         ))
 }
 

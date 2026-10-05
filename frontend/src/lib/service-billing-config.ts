@@ -47,16 +47,9 @@ export function credentialSupplier(
   if (connection.credential_missing) return "unknown";
   if (["oauth2", "device_code"].includes(connection.credential_type)) {
     if (connection.oauth_app_source === "platform") return "nyxid";
-    if (
-      connection.oauth_app_source === "byo" ||
-      connection.oauth_client_id?.trim()
-    )
-      return "own";
-    // `/keys` decrypts every stored BYO app into `oauth_client_id`, so a modern
-    // connection without one refreshes through the provider's app
-    // (backend `oauth_app_source::from_key`). Legacy rows stay unresolved.
-    if (connection.connection_id) return "nyxid";
-    // Legacy execution class UserOwned is a price-lane default, not app provenance.
+    if (connection.oauth_app_source === "byo") return "own";
+    // Older records may retain an unrelated app or lack the app originally
+    // used. The backend resolves token provenance; field absence is not proof.
     return "unknown";
   }
   if (node && connection.credential_type === "node_managed") return "own";
