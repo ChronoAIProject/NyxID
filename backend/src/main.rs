@@ -567,6 +567,9 @@ async fn server_main() {
     services::inference_service::backfill(&db)
         .await
         .expect("Failed to backfill inference metadata");
+    services::utility_inference_service::seed(&db)
+        .await
+        .expect("Failed to seed utility inference defaults");
 
     services::retired_service_service::retire_legacy_vendors(&db)
         .await

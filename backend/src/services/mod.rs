@@ -278,3 +278,5 @@ pub mod voice;
 
 #[cfg(test)]
 mod machine_access_tests;
+
+pub mod utility_inference_service;
