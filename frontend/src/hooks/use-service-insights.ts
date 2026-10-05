@@ -36,6 +36,9 @@ export function useServiceInsights(
       oauth_app_source: connection.oauth_app_source,
       has_own_oauth_app: Boolean(connection.oauth_client_id?.trim()),
       connection_id: connection.connection_id,
+      // Healthy OAuth rows prove their app, so reconnecting changes the label.
+      status: connection.status,
+      connection_status: connection.connection_status,
       auth_method: connection.auth_method,
       catalog_service_id: connection.catalog_service_id,
       catalog_service_slug: connection.catalog_service_slug,

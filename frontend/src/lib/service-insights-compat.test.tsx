@@ -362,6 +362,31 @@ describe("deployed service insight compatibility", () => {
       ).toBe("nyxid"),
     );
   });
+  it("reclassifies a reconnected OAuth row whose failed refresh recovers", async () => {
+    const failed: KeyInfo = {
+      ...personal,
+      credential_type: "oauth2",
+      connection_id: "conn",
+      status: "failed",
+      connection_status: "expired",
+    };
+    const { result, rerender } = mount([failed]);
+    await waitFor(() =>
+      expect(
+        result.current.connections.get(failed.id)?.billing?.credential_supplier,
+      ).toBe("unknown"),
+    );
+    rerender({
+      connections: [
+        { ...failed, status: "active", connection_status: "active" },
+      ],
+    });
+    await waitFor(() =>
+      expect(
+        result.current.connections.get(failed.id)?.billing?.credential_supplier,
+      ).toBe("nyxid"),
+    );
+  });
   it.each([403, 500])(
     "does not fall back on an insights %s failure",
     async (status) => {
