@@ -17,6 +17,10 @@ export const voiceSessionSchema = z.object({
   final_usage_confirmed: z.boolean(),
   end_reason: z.string().nullable(),
   idle_warning: z.boolean(),
+  resumable: z.boolean().default(true),
+});
+export const activeVoiceSessionSchema = z.object({
+  session: voiceSessionSchema.nullable(),
 });
 export const voiceSnapshotSchema = z.object({
   type: z.literal("snapshot"),
