@@ -185,6 +185,10 @@ pub struct RequestAccess {
 }
 
 impl RequestAccess {
+    pub(crate) fn can_maintain(&self) -> bool {
+        can_maintain(&self.acl)
+    }
+
     pub(crate) fn approval_admin_permits(&self, ids: &[String]) -> bool {
         self.acl.can_write() && self.acl.allows_any_resource(ids)
     }
@@ -272,6 +276,21 @@ pub async fn resolve_key_access(
     })))
 }
 
+/// Reuse only an actor/owner-bound request snapshot. Internal callers without
+/// authentication resolve once and can pass the result through their helpers.
+pub(crate) async fn key_access_with_snapshot(
+    db: &Database,
+    actor: &str,
+    owner: Option<&str>,
+    snapshot: Option<&std::sync::Arc<RequestAccess>>,
+) -> AppResult<Option<std::sync::Arc<RequestAccess>>> {
+    if let Some(snapshot) = snapshot {
+        bound_access(actor, owner, Some(snapshot.as_ref()))?;
+        return Ok(Some(snapshot.clone()));
+    }
+    resolve_key_access(db, actor, owner).await
+}
+
 /// Callers without an authentication context resolve fresh authority. Ordinary
 /// keys take the no-read path in resolve_key_access.
 pub async fn validate_key(db: &Database, actor: &str, owner: Option<&str>) -> AppResult<()> {
@@ -282,12 +301,33 @@ pub async fn chat_agent(
     db: &Database,
     chat: &super::assistant_acknowledgement_service::ChatAuthority,
 ) -> AppResult<AssistantAgent> {
+    chat_agent_with_access(db, chat)
+        .await
+        .map(|(agent, _)| agent)
+}
+
+/// Return the access resolved for the agent so permission requests can reuse it
+/// in the acknowledgement transaction instead of resolving membership again.
+pub(crate) async fn chat_agent_with_access(
+    db: &Database,
+    chat: &super::assistant_acknowledgement_service::ChatAuthority,
+) -> AppResult<(AssistantAgent, Option<std::sync::Arc<RequestAccess>>)> {
     if let Some(access) = chat.org_agent_access.as_deref() {
-        return access.agent(db, &chat.user_id, &chat.agent_id).await;
+        return Ok((
+            access.agent(db, &chat.user_id, &chat.agent_id).await?,
+            chat.org_agent_access.clone(),
+        ));
     }
-    let agent = super::assistant_team_service::agent(db, &chat.user_id, &chat.agent_id).await?;
-    require_use(db, &chat.user_id, &agent).await?;
-    Ok(agent)
+    let agent = db
+        .collection::<AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
+        .find_one(doc! {"_id": &chat.agent_id})
+        .await?
+        .ok_or_else(|| AppError::NotFound("Agent not found".into()))?;
+    if agent.user_id != chat.user_id && agent.is_nyxbot() {
+        return Err(AppError::NotFound("Agent not found".into()));
+    }
+    let access = resolve_key_access(db, &chat.user_id, Some(&agent.user_id)).await?;
+    Ok((agent, access))
 }
 
 fn bound_access<'a>(

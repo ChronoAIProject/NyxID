@@ -196,8 +196,16 @@ fn services() -> Value {
 }
 
 pub fn schema(name: &str) -> Value {
-    let subagent = json!({"type": "string", "minLength": 1, "maxLength": 64,
-        "description": "Specialist agent name or id"});
+    let subagent = if matches!(
+        name,
+        "message_subagent" | "wait_for_subagents" | "read_subagent"
+    ) {
+        json!({"type": "string", "minLength": 1, "maxLength": 128,
+            "description": "Specialist agent name or ID; organization agents may use org-slug/agent-name"})
+    } else {
+        json!({"type": "string", "minLength": 1, "maxLength": 64,
+            "description": "Specialist agent name or id"})
+    };
     let (mut properties, required): (Value, Vec<&str>) = match name {
         "create_schedule" | "update_schedule" => {
             let mut props = json!({
