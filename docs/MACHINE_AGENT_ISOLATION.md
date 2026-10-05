@@ -589,3 +589,60 @@ also passed. The private MongoDB container and dedicated Linux builder/cache
 were removed. `target/` stayed below 10 GiB and free disk stayed above the
 15 GiB cutoff. No commit or additional version bump was made; main's v0.58.0
 version files remain unchanged and the merge is uncommitted.
+
+### 8.11 M1.3b graphical and human desktop follow-up (2026-10-05)
+
+The graphical opt-in is deliberately an owner action, not a settings-side mode
+mutation. When `assistant:machine-contexts` is enabled and a supported v2
+machine advertises separated support, Assistant → Machines shows **Separate
+workspace and browser for this agent**. The request is posted to the owner's
+NyxBot home thread as the same `nyxid__machine_capabilities` action card used by
+the assistant. Only an allowed card applies the fenced selection; a denied or
+expired card leaves the legacy assignment unchanged. The flag is default-off and
+existing machines remain `shared_legacy`.
+
+The human desktop API accepts an opaque `context_id` and validates it against the
+durable context row. On an organization machine, only that context's acting
+person may list, open, control or send input to it; organization writers and
+admins cannot inspect another person's browser. On a personal machine, the
+machine owner retains the existing physical authority over every context on
+their hardware. The context list is filtered by these rules and is
+metadata-only. Control and input recheck the stored context and live machine
+access; an existing WebSocket grants no continuing authority. Closing a viewer
+only closes its own stream. Stop uses the linked conversation; an unbound context
+viewer is directed to Take control to pause that context, and cannot stop all
+work on the machine. A persisted context on a downgraded node is refused
+unless the current profile advertises v2 authority and separated support.
+The live desktop selector offers **Shared legacy desktop** plus
+batched context labels (agent, actor kind, group task and generation); raw IDs
+are carried only in the URL and protocol metadata. Desktop rows and all signed
+open/control/input messages retain the context ID, so takeover and saved-login
+browser access stay within that context. A context that is not running is
+refused with the node's separated-context-unavailable result; the UI never
+falls back to the shared desktop.
+
+Agent labels are batch-resolved from the listed contexts' agent IDs, including
+organization agents. Shared Linux secure/dev display control remains independent;
+a developer-display takeover does not select the secure browser.
+
+Native validation remains a release gate. Run the existing machine context
+harness on a Linux VM provisioned with `--separate-users` (for example, the
+`cli/tests/machine_context_spike` fixture plus `cli/tests/machine_context_e2e.mjs`)
+and repeat the two-context browser/profile/display/D-Bus/native-host denial,
+restart, saved-login binding and generation-quarantine cases. This worktree has
+no Linux VM provider available (`limactl`, `multipass`, QEMU and Tart are absent),
+so no native VM result is claimed here. Unsupported hosts return an explicit
+separated-unavailable reason; they never silently become `shared_legacy`.
+
+A feasible next validation environment is a disposable arm64 Lima VM using
+Apple's Virtualization.framework (or a Colima-managed VM accessed through SSH),
+with host-directory sharing disabled. Run the daemon natively inside the guest
+with `--separate-users`, not inside Docker. Ubuntu 24.04 needs an HWE kernel
+providing Landlock ABI 6 or newer: its original 6.8 kernel is insufficient.
+Debian 13 with kernel 6.12 is another candidate. Live-probe Landlock and retain
+the guest's AppArmor policy. Adapt the container harness's fixed paths and
+entrypoint checks to the native setup, then exercise two concurrent contexts,
+browser relaunch/restart, cross-context denials, fill binding and quarantine.
+The earlier QEMU/TCG spike proved an independent Linux kernel can run locally,
+but did not validate native browser lifecycle. No VM tooling was installed for
+this follow-up; the flag remains off pending that release gate.

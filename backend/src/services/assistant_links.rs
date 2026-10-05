@@ -18,6 +18,7 @@ pub enum AssistantPage<'a> {
     MachineDesktop {
         node: &'a str,
         conversation: Option<&'a str>,
+        context_id: Option<&'a str>,
         display: nyxid_machine::desktop::Display,
     },
 }
@@ -40,6 +41,7 @@ impl AssistantPage<'_> {
             Self::MachineDesktop {
                 node,
                 conversation,
+                context_id,
                 display,
             } => {
                 let path = format!(
@@ -49,6 +51,9 @@ impl AssistantPage<'_> {
                 let mut query = url::form_urlencoded::Serializer::new(String::new());
                 if let Some(conversation) = conversation {
                     query.append_pair("conversation_id", conversation);
+                }
+                if let Some(context_id) = context_id {
+                    query.append_pair("context_id", context_id);
                 }
                 if display == nyxid_machine::desktop::Display::Dev {
                     query.append_pair("display", "dev");
@@ -103,6 +108,7 @@ mod tests {
                 MachineDesktop {
                     node: "n",
                     conversation: None,
+                    context_id: None,
                     display: nyxid_machine::desktop::Display::Dev,
                 },
                 "/assistant/machines/n/desktop?display=dev",
@@ -112,6 +118,7 @@ mod tests {
                     node: "n",
                     display: nyxid_machine::desktop::Display::Secure,
                     conversation: Some("nyxagent:c"),
+                    context_id: None,
                 },
                 "/assistant/machines/n/desktop?conversation_id=nyxagent%3Ac",
             ),
@@ -120,6 +127,7 @@ mod tests {
                     node: "n",
                     display: nyxid_machine::desktop::Display::Secure,
                     conversation: None,
+                    context_id: None,
                 },
                 "/assistant/machines/n/desktop",
             ),

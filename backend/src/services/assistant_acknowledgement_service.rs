@@ -540,6 +540,46 @@ pub async fn request(
     Ok(request_tracked(db, chat, request).await?.0)
 }
 
+/// Create the same owner action card used by native machine tools, while
+/// retaining a bounded typed payload for the graphical context editor.
+pub async fn request_machine_context(
+    db: &Database,
+    chat: &ChatAuthority,
+    action: crate::models::machine_access::HumanContextAction,
+    summary: &str,
+) -> AppResult<AssistantAcknowledgement> {
+    let args = serde_json::json!({
+        "agent": action.agent_id,
+        "machine": action.node_id,
+        "selection": action.selection,
+        "source": "human_machine_settings"
+    });
+    let encoded = bson::to_bson(&action).map_err(|_| not_found())?;
+    let (row, _) = request_tracked_with_machine_context(
+        db,
+        chat,
+        Request {
+            kind: "action",
+            service: None,
+            tool: Some("nyxid__machine_capabilities"),
+            arguments: Some(&args),
+            summary,
+            platform: false,
+        },
+        Some(action),
+    )
+    .await?;
+    Ok(db
+        .collection::<AssistantAcknowledgement>(ACKS)
+        .find_one_and_update(
+            doc! {"_id": &row.id, "status": "pending", "machine_context": {"$exists": false}},
+            doc! {"$set": {"machine_context": encoded}},
+        )
+        .return_document(mongodb::options::ReturnDocument::After)
+        .await?
+        .unwrap_or(row))
+}
+
 /// Like [`request`], also reporting whether a new row was created (a pending
 /// duplicate is returned as-is). Subagent requests are decided by the team's
 /// orchestrator; action confirmations always belong to the user.
@@ -547,6 +587,15 @@ pub async fn request_tracked(
     db: &Database,
     chat: &ChatAuthority,
     request: Request<'_>,
+) -> AppResult<(AssistantAcknowledgement, bool)> {
+    request_tracked_with_machine_context(db, chat, request, None).await
+}
+
+async fn request_tracked_with_machine_context(
+    db: &Database,
+    chat: &ChatAuthority,
+    request: Request<'_>,
+    machine_context: Option<crate::models::machine_access::HumanContextAction>,
 ) -> AppResult<(AssistantAcknowledgement, bool)> {
     if request.kind == "operations" {
         Box::pin(
@@ -604,6 +653,7 @@ pub async fn request_tracked(
         request_excerpt: None,
         decided_by: None,
         reason: None,
+        machine_context,
     };
     let db = db.clone();
     let chat = chat.clone();

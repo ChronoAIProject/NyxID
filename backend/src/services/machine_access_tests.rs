@@ -1672,6 +1672,56 @@ async fn machine_access_separated_requires_support_flag_card_and_keeps_mode_with
 }
 
 #[tokio::test]
+async fn machine_access_graphical_separated_action_does_not_require_capability_editor() {
+    let f = orchestrator_fixture("machine_access_graphical_context").await;
+    let mut n = v2(&f).await;
+    n.machine.as_mut().unwrap().separated = Some(nyxid_machine::context::Support {
+        available: true,
+        landlock_abi: Some(6),
+        reason: None,
+    });
+    f.state
+        .db
+        .collection::<Document>(crate::models::node::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &n.id},
+            doc! {"$set": {"machine": bson::to_bson(&n.machine).unwrap()}},
+        )
+        .await
+        .unwrap();
+    super::feature_flag_service::set_platform_override(
+        &f.state.db,
+        access::CONTEXT_FLAG,
+        &super::feature_flag_service::FlagTarget::Global,
+        true,
+        &f.owner,
+    )
+    .await
+    .unwrap();
+    let mut selected = selection(
+        1,
+        Capabilities {
+            browser: true,
+            files: true,
+            ..Default::default()
+        },
+    );
+    selected.mode = Some("separated".into());
+    selected.saved_login_ids = Some(Vec::new());
+    let policy = Box::pin(access::configure(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        &n.id,
+        selected,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(policy.assignments[&n.id].mode, "separated");
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn machine_access_separated_login_binding_and_delete_quarantine_are_atomic() {
     let f = orchestrator_fixture("machine_access_context_login").await;
     enable(&f).await;
