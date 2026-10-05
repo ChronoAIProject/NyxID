@@ -810,6 +810,25 @@ const MOCK_PUSH_DEVICES = {
 // ── Catalog ──
 const MOCK_CATALOG = [
   {
+    slug: "api-mqtt", name: "MQTT", description: "Read mapped MQTT device states and send explicitly allowed on/off commands through a local HTTP bridge. Configure exact topics and payloads in the bridge; devices are read-only until you enable actions.",
+    base_url: "http://127.0.0.1:8787", auth_method: "bearer", auth_key_name: "Authorization",
+    provider_config_id: "provider-mqtt", provider_type: "api_key", requires_gateway_url: true,
+    credential_mode: "admin",
+    api_key_instructions: "Run the home automation bridge beside a credential node. Enter its local HTTP URL and the bearer key from bridge.key on the node; MQTT broker credentials stay local to the bridge.",
+    api_key_url: null, icon_url: null, documentation_url: "https://mqtt.org/",
+    service_type: "http",
+    ssh_host: null, ssh_port: null, ssh_ca_public_key: null, ssh_allowed_principals: null, ssh_certificate_ttl_minutes: null,
+    authorization_url: null, token_url: null, device_code_url: null,
+    default_scopes: null, supports_pkce: null, device_code_format: null,
+    oauth_client_id: null, client_id_param_name: null,
+    requires_credential: true, token_exchange_credential_fields: null, default_request_headers: null,
+    homepage_url: "https://mqtt.org/", repository_url: null, issues_url: null,
+    capabilities: { supports_proxy_read: true, supports_proxy_write: true, supports_proxy_binary_upload: false, supports_direct_downstream_auth: false, supports_authoring_via_nyx: false, supports_websocket: false, supports_streaming: false },
+    auth_notes: "Route through a credential node running beside the local bridge. Store the bridge key on that node under the connection slug.",
+    known_limitations: "The HTTP bridge exposes mapped devices, including Home Assistant devices if configured. MQTT state is unknown until a matching message arrives. Broker receipt does not confirm physical completion.",
+    required_permissions: [],
+  },
+  {
     slug: "api-supabase", name: "Supabase Data API", description: "Read and write a Supabase project's tables through its Data API.",
     base_url: "https://project-ref.supabase.co/rest/v1", auth_method: "header", auth_key_name: "apikey",
     provider_config_id: "provider-supabase", provider_type: "api_key", requires_gateway_url: true,

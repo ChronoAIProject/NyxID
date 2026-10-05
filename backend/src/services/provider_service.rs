@@ -118,6 +118,54 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
+    // MQTT through the user-hosted home automation bridge.
+    if !slug_exists!("mqtt") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "mqtt".to_string(),
+            name: "MQTT".to_string(),
+            description: Some("Access mapped MQTT devices through a local HTTP bridge".to_string()),
+            provider_type: "api_key".to_string(),
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            revocation: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: Some(
+                "Run the NyxID home automation bridge beside a credential node. Enter its HTTP URL (normally http://127.0.0.1:8787) and the bearer key generated in bridge.key. Store the key on the node; MQTT broker credentials stay in the bridge environment."
+                    .to_string(),
+            ),
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: Some("https://mqtt.org/".to_string()),
+            is_active: true,
+            credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            requires_gateway_url: true,
+            created_by: "system".to_string(),
+            revocation_seed_version: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        validate_seeded_provider_options(&provider)?;
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "mqtt", "Seeded default provider: MQTT");
+        seeded_count += 1;
+    }
+
     if !slug_exists!("ifttt-mcp") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -3077,6 +3125,18 @@ fn seed_capability_override(slug: &str) -> Option<(ServiceCapabilities, bool)> {
             },
             false,
         )),
+        "api-mqtt" => Some((
+            ServiceCapabilities {
+                supports_proxy_read: true,
+                supports_proxy_write: true,
+                supports_proxy_binary_upload: false,
+                supports_direct_downstream_auth: false,
+                supports_authoring_via_nyx: false,
+                supports_websocket: false,
+                supports_streaming: false,
+            },
+            false,
+        )),
         "api-google-workspace"
         | "api-google-calendar"
         | "api-google-drive"
@@ -3290,6 +3350,29 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         ),
         known_limitations: Some(
             "Only preconfigured Webhooks Applets; no Applet creation, listing, history, or completion polling. POST only; JSON bodies only, no query parameters or WebSocket. Fixed maker.ifttt.com destination. No identity/access-token/delegation forwarding. No automatic verification, retry, redirect following, or idempotency guarantee. Check IFTTT Activity after an uncertain result. Node routing requires a node version supporting ifttt_webhook.",
+        ),
+    },
+    DefaultServiceSeed {
+        provider_slug: "mqtt",
+        service_slug: "api-mqtt",
+        service_name: "MQTT",
+        base_url: "http://127.0.0.1:8787",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: Some("bearer"),
+        service_auth_key_name: Some("Authorization"),
+        description: Some(
+            "Read mapped MQTT device states and send explicitly allowed on/off commands through a local HTTP bridge. Configure exact topics and payloads in the bridge; devices are read-only until you enable actions.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://mqtt.org/"),
+        auth_notes: Some(
+            "Run the home automation bridge beside a NyxID credential node and route this service through that node. Use the bridge URL (normally http://127.0.0.1:8787) and its generated bearer key; store the key on the node under the new connection slug. MQTT broker credentials remain local to the bridge.",
+        ),
+        known_limitations: Some(
+            "This is an HTTP bridge for configured topics, not a native MQTT broker connection or arbitrary topic browser. The bridge exposes every mapped device, including Home Assistant devices if configured. MQTT state is unknown until a matching message arrives; retained messages can provide initial state. A successful publish confirms broker receipt, not physical device completion. No subscriptions or WebSocket streaming through NyxID.",
         ),
     },
     DefaultServiceSeed {
@@ -6772,6 +6855,28 @@ mod tests {
 
         assert_eq!(seed.service_auth_method, Some("path"));
         assert_eq!(seed.service_auth_key_name, Some("bot"));
+    }
+
+    #[test]
+    fn mqtt_seed_uses_local_bridge_and_hosted_operations() {
+        let seed = DEFAULT_SERVICE_SEEDS
+            .iter()
+            .find(|seed| seed.service_slug == "api-mqtt")
+            .expect("MQTT catalog seed should exist");
+
+        assert_eq!(seed.provider_slug, "mqtt");
+        assert_eq!(seed.base_url, "http://127.0.0.1:8787");
+        assert_eq!(seed.service_auth_method, Some("bearer"));
+        assert_eq!(seed.service_auth_key_name, Some("Authorization"));
+        assert_eq!(
+            crate::services::catalog_spec_registry::spec_path_for_slug(seed.service_slug)
+                .as_deref(),
+            Some("/api/v1/catalog-specs/home-automation/openapi.json")
+        );
+        let (caps, streaming) = seed_capability_override(seed.service_slug).unwrap();
+        assert!(caps.supports_proxy_read && caps.supports_proxy_write);
+        assert!(!caps.supports_websocket);
+        assert!(!streaming);
     }
 
     #[test]

@@ -1,0 +1,50 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Home automation bridge",
+    "version": "v1-nyxid-overlay",
+    "description": "Operations on devices explicitly mapped by the user's local Home Assistant or MQTT bridge. The bridge runs beside a NyxID credential node; only mapped devices and allowed actions are available. MQTT state is null until a matching message arrives."
+  },
+  "paths": {
+    "/devices": {
+      "get": {
+        "operationId": "list_devices",
+        "summary": "List configured devices and current states",
+        "x-aevatar-tool": { "name": "list_devices", "readOnly": true, "destructive": false, "requiresApproval": false },
+        "responses": { "200": { "description": "Mapped devices and states" } }
+      }
+    },
+    "/devices/{id}": {
+      "get": {
+        "operationId": "get_device_state",
+        "summary": "Read one configured device state",
+        "x-aevatar-tool": { "name": "get_device_state", "readOnly": true, "destructive": false, "requiresApproval": false },
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "Device state" } }
+      }
+    },
+    "/devices/{id}/actions": {
+      "post": {
+        "operationId": "set_device_state",
+        "summary": "Turn a configured device on or off",
+        "description": "Only actions explicitly allowed for this device in the local bridge configuration are accepted. Confirm the target device with the user before calling. MQTT publish acknowledgement does not prove physical completion.",
+        "x-aevatar-tool": { "name": "set_device_state", "readOnly": false, "destructive": true, "requiresApproval": true },
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["action"],
+                "properties": { "action": { "type": "string", "enum": ["turn_on", "turn_off"] } }
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "Command accepted, not necessarily completed" } }
+      }
+    }
+  }
+}

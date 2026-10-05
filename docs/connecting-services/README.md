@@ -24,13 +24,17 @@ This guide works for **hosted** (`https://nyx.chrono-ai.fun`) and **self-host** 
 
 If you're unsure, **[start with Web UI](web-ui.md)**. The other paths are equivalent under the hood.
 
+To choose between a catalog entry, a custom service, and node routing, read [Service types and connections](service-types.md). For a broker on your home or private network, follow [Connect MQTT devices](mqtt.md).
+
 ## Did it work?
 
 For **IFTTT**, follow the [IFTTT setup guide](ifttt.md) to connect with browser OAuth and discover its AI tools, including Applet creation. **IFTTT Webhooks** remains a separate connection for triggering configured events. Neither connection runs an automatic credential probe; a Webhooks test can run real Applet actions, and event acceptance does not confirm completion.
 
+For **MQTT**, follow the [MQTT setup guide](mqtt.md). The local bridge runs beside a credential node and exposes only mapped devices.
+
 After any path completes, you should be able to make a real downstream call through NyxID's proxy and get a real response back, not an auth error.
 
-For the Web UI and CLI paths, the path itself runs the verification call. If you're using AI-driven or Direct API, the verification is the explicit final step in those guides.
+Verification depends on the service. The [MQTT guide](mqtt.md#check-the-connection) uses an explicit read request; IFTTT has no harmless automatic credential probe. Follow the service guide when one exists, or make a read request through NyxID after connecting.
 
 If you got a 401, 403, or 5xx from the proxy:
 
