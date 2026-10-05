@@ -536,6 +536,7 @@ async fn delete_user_cascade_internal(
         SESSIONS,
         REFRESH_TOKENS,
         API_KEYS,
+        crate::models::permission_policy::COLLECTION_NAME,
         crate::models::assistant_acknowledgement::COLLECTION_NAME,
         crate::models::assistant_agent::COLLECTION_NAME,
         crate::models::assistant_group::COLLECTION_NAME,
