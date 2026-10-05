@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "name": "One YouTube video",
+  "provider": "google",
+  "resource": {
+    "type": "google_api",
+    "operations": [
+      {
+        "id": "youtube.videos.list",
+        "origin": "https://www.googleapis.com",
+        "method": "GET",
+        "path": "/youtube/v3/videos",
+        "path_parameters": {},
+        "query_parameters": {
+          "id": {
+            "required": true,
+            "rule": {
+              "type": "exact",
+              "value": "VIDEO_ID"
+            }
+          },
+          "part": {
+            "required": true,
+            "rule": {
+              "type": "exact",
+              "value": "snippet,statistics"
+            }
+          }
+        },
+        "body": null
+      }
+    ]
+  },
+  "allowed_operations": [
+    "youtube.videos.list"
+  ],
+  "constraints": {},
+  "hooks": []
+}

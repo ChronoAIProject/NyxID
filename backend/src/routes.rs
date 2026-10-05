@@ -77,6 +77,24 @@ macro_rules! proxy_billing_routes {
     ($apply:ident, $router:expr) => {
         $apply!($router;
             (
+                "/permission-execution/rest/{*path}",
+                "/api/v1/permission-execution/rest/{*path}",
+                "handlers::permission_keys::rest",
+                axum::routing::any(handlers::permission_keys::rest),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Proxy
+                )
+            ),
+            (
+                "/permission-execution/mcp",
+                "/api/v1/permission-execution/mcp",
+                "handlers::permission_keys::mcp",
+                post(handlers::permission_keys::mcp),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Proxy
+                )
+            ),
+            (
                 "/proxy/s/{slug}/{*path}",
                 "/api/v1/proxy/s/{slug}/{*path}",
                 "handlers::proxy::proxy_request_by_slug",
@@ -2415,6 +2433,17 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::devices::get_onboard_device_authorization),
         )
         .nest("/users", user_routes)
+        .route(
+            "/permission-keys",
+            post(handlers::permission_keys::create)
+                .layer(DefaultBodyLimit::max(nyxid_permissions::MAX_BODY_BYTES)),
+        )
+        .route(
+            "/permission-keys/{id}",
+            get(handlers::permission_keys::get)
+                .patch(handlers::permission_keys::pause)
+                .delete(handlers::permission_keys::revoke),
+        )
         .nest("/api-keys", api_key_routes)
         .nest("/services", service_routes)
         .route("/docs", get(handlers::docs::docs_ui))

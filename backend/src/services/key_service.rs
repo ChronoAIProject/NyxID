@@ -547,6 +547,19 @@ pub(crate) async fn create_api_key_with_security_class_and_id(
     let all_svcs = allow_all_services.unwrap_or(true);
     let all_nodes = allow_all_nodes.unwrap_or(true);
 
+    if purpose == ApiKeyPurpose::PermissionBound
+        && (all_svcs
+            || all_nodes
+            || allow_auto_connected_services.unwrap_or(false)
+            || scopes != "proxy"
+            || svc_ids.len() != 1
+            || !node_ids.is_empty()
+            || callback_url.is_some()
+            || scheduled_write_enabled)
+    {
+        return Err(AppError::ValidationError("Permission-bound keys require one connection, proxy scope, and no node or callback authority".into()));
+    }
+
     if purpose == ApiKeyPurpose::ScheduledInvocation
         && (all_svcs
             || all_nodes
@@ -1046,6 +1059,9 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                     .session(&mut *session)
                     .await?
                     .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
+                if old_key.purpose == ApiKeyPurpose::PermissionBound {
+                    return Err(AppError::Forbidden("Reissue permission-bound keys through /permission-keys, then revoke the predecessor".into()));
+                }
                 if old_key.purpose == ApiKeyPurpose::ScheduledInvocation {
                     return Err(AppError::DurableGrantMismatch(
                         "scheduled_invocation keys must be reprovisioned from a fresh scope plan"
@@ -1460,6 +1476,9 @@ pub async fn update_api_key_scope_with_expected_state_version(
         return Err(stale_api_key_conflict());
     }
 
+    if existing.purpose == ApiKeyPurpose::PermissionBound {
+        return Err(AppError::Forbidden("Permission-bound key authority is immutable; use /permission-keys to pause or reissue it".into()));
+    }
     if existing
         .assistant_agent_owner_id
         .as_deref()

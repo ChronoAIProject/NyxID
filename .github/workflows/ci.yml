@@ -65,6 +65,7 @@ jobs:
       backend: ${{ steps.filter.outputs.backend }}
       cli: ${{ steps.filter.outputs.cli }}
       machine: ${{ steps.filter.outputs.machine }}
+      permissions: ${{ steps.filter.outputs.permissions }}
       rust: ${{ steps.filter.outputs.rust }}
       frontend: ${{ steps.filter.outputs.frontend }}
       mobile: ${{ steps.filter.outputs.mobile }}
@@ -87,6 +88,11 @@ jobs:
           # YAML anchors aren't used here -- aliased sequences expand to
           # nested lists in js-yaml, which paths-filter does not flatten.
           filters: |
+            permissions:
+              - 'permissions/**'
+              - 'scripts/test-drive-permissions-poc.py'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
             machine:
               - 'frontend/scripts/machine-seccomp.ts'
               - 'frontend/src/schemas/machines.ts'
@@ -110,6 +116,7 @@ jobs:
               - 'Cargo.lock'
             backend:
               - 'backend/**'
+              - 'permissions/**'
               - 'machine/**'
               - 'machine-updater/**'
               - 'integrations/oracle/cdp-worker/worker.mjs'
@@ -153,6 +160,7 @@ jobs:
               - 'service-adapters/**'
               - 'nyxid-crypto/**'
               - 'mcp-demo/**'
+              - 'permissions/**'
               - 'docs/AI_AGENT_PLAYBOOK.md'
               - '.dockerignore'
               - 'scripts/check-backend-docker-embeds.py'
@@ -222,8 +230,25 @@ jobs:
         run: python3 scripts/check-reusable-workflow-permissions.py
 
   # ---------------------------------------------------------------------------
-  # Cursor plugin: manifest, component, MCP variable, and marketplace checks.
+  # Permission engine: no database or Google credentials required.
   # ---------------------------------------------------------------------------
+  permissions-test:
+    name: Google Permissions
+    needs: changes
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.permissions == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt -p nyxid-permissions --check
+      - run: cargo clippy -p nyxid-permissions --all-targets --locked -- -D warnings
+      - run: cargo test -p nyxid-permissions --locked
+      - run: python3 scripts/test-drive-permissions-poc.py
+
+  # Cursor plugin: manifest, component, MCP variable, and marketplace checks.
   cursor-plugin-validate:
     name: Cursor Plugin Validate
     needs: changes
@@ -330,6 +355,10 @@ jobs:
 
       - name: Run backend tests
         run: python3 .github/scripts/ci_resources.py backend-test cargo nextest run -p nyxid -p nyxid-service-adapters --profile ci
+      - name: Test MongoDB diagnostics
+        if: failure() || cancelled()
+        continue-on-error: true
+        run: bash .github/scripts/dump-test-mongodb.sh
 
       - name: Publish test summary
         if: always()
@@ -382,6 +411,10 @@ jobs:
           key: backend-billing-smoke
       - name: Billing route coverage smoke
         run: python3 .github/scripts/ci_resources.py billing-smoke cargo test -p nyxid billing_route_coverage_smoke -- --nocapture
+      - name: Test MongoDB diagnostics
+        if: failure() || cancelled()
+        continue-on-error: true
+        run: bash .github/scripts/dump-test-mongodb.sh
 
       - name: Upload resource samples
         if: always()
@@ -723,6 +756,10 @@ jobs:
       # workspace (whose tests this job does not run).
       - name: Measure (head)
         run: python3 .github/scripts/ci_resources.py coverage-test cargo llvm-cov --package nyxid --no-report
+      - name: Test MongoDB diagnostics
+        if: failure() || cancelled()
+        continue-on-error: true
+        run: bash .github/scripts/dump-test-mongodb.sh
       - name: Export head coverage
         run: |
           cargo llvm-cov report --package nyxid --lcov --output-path coverage-backend.lcov
@@ -830,6 +867,10 @@ jobs:
         if: steps.base-cache.outputs.cache-hit != 'true'
         working-directory: base-coverage
         run: python3 "$GITHUB_WORKSPACE/.github/scripts/ci_resources.py" coverage-test cargo llvm-cov --package nyxid --no-report
+      - name: Test MongoDB diagnostics
+        if: (failure() || cancelled()) && steps.base-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/dump-test-mongodb.sh"
       - name: Export base coverage
         if: steps.base-cache.outputs.cache-hit != 'true'
         working-directory: base-coverage
@@ -1137,6 +1178,7 @@ jobs:
       - rust-fmt
       - rust-clippy
       - backend-test
+      - permissions-test
       - backend-billing-smoke
       - backend-image-inputs
       - cli-test
@@ -1165,6 +1207,7 @@ jobs:
             rust-fmt=${{ needs.rust-fmt.result }}
             rust-clippy=${{ needs.rust-clippy.result }}
             backend-test=${{ needs.backend-test.result }}
+            permissions-test=${{ needs.permissions-test.result }}
             backend-billing-smoke=${{ needs.backend-billing-smoke.result }}
             backend-image-inputs=${{ needs.backend-image-inputs.result }}
             cli-test=${{ needs.cli-test.result }}

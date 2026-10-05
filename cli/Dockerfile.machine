@@ -17,6 +17,7 @@ COPY backend/ backend/
 COPY cli/ cli/
 COPY cloud-auth/ cloud-auth/
 COPY service-adapters/ service-adapters/
+COPY permissions/ permissions/
 COPY mcp-demo/ mcp-demo/
 COPY nyxid-crypto/ nyxid-crypto/
 COPY machine/ machine/

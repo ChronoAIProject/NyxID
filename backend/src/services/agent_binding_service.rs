@@ -145,6 +145,12 @@ async fn create_binding_with_scope_authorization_inner(
                     .await?
                     .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
 
+                if api_key.purpose == crate::models::api_key::ApiKeyPurpose::PermissionBound {
+                    return Err(AppError::Forbidden(
+                        "Permission-bound credentials cannot be overridden".into(),
+                    ));
+                }
+
                 if api_key
                     .assistant_agent_owner_id
                     .as_deref()

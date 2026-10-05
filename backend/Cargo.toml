@@ -88,6 +88,7 @@ deunicode = "1.6"
 nyxid-cloud-auth = { path = "../cloud-auth" }
 nyxid-service-adapters = { path = "../service-adapters" }
 nyxid-machine = { path = "../machine" }
+nyxid-permissions = { path = "../permissions" }
 nyxid-machine-updater = { path = "../machine-updater" }
 http = "1.4"
 http-body-util = "0.1"

@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "name": "Client A reporting assistant",
+  "provider": "google_drive",
+  "resource": {
+    "type": "google_drive_folder",
+    "root_folder_id": "client-a",
+    "include_descendants": true
+  },
+  "allowed_operations": [
+    "drive.files.list",
+    "drive.files.get",
+    "drive.files.download",
+    "drive.files.export",
+    "drive.folders.create",
+    "drive.files.rename"
+  ],
+  "constraints": {
+    "drive.files.list": [
+      { "location": "query", "name": "pageSize", "required": true, "rule": { "type": "max_integer", "value": 100 } }
+    ],
+    "drive.files.rename": [
+      { "location": "body", "name": "/name", "required": true, "rule": { "type": "max_length", "value": 80 } }
+    ],
+    "drive.files.export": [
+      { "location": "query", "name": "mimeType", "required": true, "rule": { "type": "one_of", "values": ["application/pdf", "text/plain"] } }
+    ]
+  }
+}

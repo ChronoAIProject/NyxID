@@ -559,6 +559,9 @@ async fn authenticate_mcp(
 
         match crate::services::key_service::validate_api_key(&state.db, raw_key).await {
             Ok((user_id, api_key, _credential_id)) => {
+                if api_key.purpose == crate::models::api_key::ApiKeyPurpose::PermissionBound {
+                    return Err(mcp_403_api_key_insufficient_scope());
+                }
                 if !auth::scope_allows_rest_proxy(&api_key.scopes) {
                     return Err(mcp_403_api_key_insufficient_scope());
                 }
