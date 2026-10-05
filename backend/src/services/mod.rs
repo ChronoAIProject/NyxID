@@ -209,6 +209,7 @@ pub mod assistant_settings_service;
 pub mod assistant_team_service;
 pub mod assistant_team_tools;
 pub mod channel_retry_ingress;
+pub mod channel_turn_delivery;
 pub mod provider_link_service;
 pub mod retired_service_service;
 pub mod service_history;

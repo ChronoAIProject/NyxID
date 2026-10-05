@@ -164,6 +164,7 @@ pub(crate) async fn team_pool_limit(state: &AppState, owner: &str) -> u32 {
 
 fn event_turn(conversation_id: &str) -> TurnStart {
     TurnStart {
+        channel_event_id: None,
         org_access: None,
         attachment_ids: Vec::new(),
         group_request_id: None,
@@ -347,6 +348,9 @@ pub(crate) async fn after_turn(
     let Some(turn) = row.active_turn.as_ref() else {
         return;
     };
+    if let Some(event_id) = turn.channel_event_id.as_deref() {
+        super::nyxbot::late_delivery::settled(state, event_id).await;
+    }
     let owner = row.user_id.as_str();
     if let Some(run_id) = turn.trigger_run_id.as_deref() {
         super::trigger_scheduler::settled(state, row, run_id, text, error.map(|e| e.code)).await;
@@ -756,6 +760,7 @@ pub(crate) async fn assign(
         state,
         owner,
         TurnStart {
+            channel_event_id: None,
             org_access: None,
             attachment_ids: Vec::new(),
             group_request_id: None,
@@ -2664,6 +2669,7 @@ const SWEEP_SECS: u64 = 15;
 /// restarted) when their events arrived. Agents are persistent, so nothing
 /// is destroyed automatically.
 pub fn spawn_sweeps(state: AppState) {
+    super::nyxbot::late_delivery::spawn_sweep(state.clone());
     super::assistant_voice::spawn_dispatch(state.clone());
     crate::services::voice::runtime::spawn_recovery(state.clone());
     tokio::spawn(async move {

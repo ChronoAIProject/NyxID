@@ -159,6 +159,7 @@ async fn run_member(
         .find_one(doc! {"group_id":&access.group.id,"request_id":&request.id,"seq":request.message_seq,"role":"user","author_user_id":&access.actor})
         .await?.ok_or_else(groups::missing)?;
     let start = engine::TurnStart {
+        channel_event_id: None,
         org_access: access.org.clone(),
         group_request_id: Some(request.id.clone()),
         attachment_ids: Vec::new(),
