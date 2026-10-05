@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import {spawnSync} from 'node:child_process';
 import {randomUUID} from 'node:crypto';
 
-export async function contexts({call,profile,conversationId,turnId,origin,browserUrl,certificate,frames}) {
+export async function contexts({call,callWithReconnect,profile,conversationId,turnId,origin,browserUrl,certificate,frames}) {
  assert(profile.separated,'node must explicitly report separated support');
  const base={require_v2:true,generation:1,mode:'separated',owner_id:randomUUID(),actor_id:randomUUID(),group_id:null,runtime_id:profile.runtime_id,conversation_id:conversationId,turn_id:turnId,revision:1,capabilities:{shell:true,files:true,browser:true,computer:true,developer_browser:true}};
  const a={...base,context_id:randomUUID(),agent_id:randomUUID()},b={...base,context_id:randomUUID(),agent_id:randomUUID()};
@@ -22,13 +22,19 @@ export async function contexts({call,profile,conversationId,turnId,origin,browse
  for(const context of [a,b]) {
   const result=await command(context,'printf context-ok; pwd; id -u');
   assert.equal(result.exit_code,0,JSON.stringify(result));assert.match(result.stdout,/context-ok/);
-  const written=await invoke(context,'write_file',{path:'private.txt',content:context.context_id});
+  const writeAuthority=auth(context),writeRequestId=randomUUID(),writeParameters={path:'private.txt',content:context.context_id};
+  const written=await (context===a?callWithReconnect:call)('write_file',writeParameters,writeAuthority,writeRequestId);
   if(written.error) {
    const diagnostic=await command(context,'pwd; id -u; ls -la .');
    console.error('Context workspace metadata on failure:',JSON.stringify(diagnostic));
   }
   assert(!written.error,`context workspace write: ${JSON.stringify(written)}`);
- }
+  // A reconnect can lose the response after the node has committed the
+  // create-only write. Re-delivery keeps the original request id and must
+  // return its receipt instead of executing the write a second time.
+  const replay=await call('write_file',writeParameters,writeAuthority,writeRequestId);
+  assert.deepEqual(replay,written,'replayed context write returns the original receipt');
+}
  for(const context of [a,b]) {
   const read=await invoke(context,'read_file',{path:'private.txt'});
   assert.equal(read.content,context.context_id,'file worker reads its own workspace bytes');
