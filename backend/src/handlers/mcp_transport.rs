@@ -1535,11 +1535,15 @@ async fn handle_tools_list(
     let tools_json: Vec<serde_json::Value> = tool_defs
         .iter()
         .map(|t| {
-            serde_json::json!({
+            let mut tool = serde_json::json!({
                 "name": t.name,
                 "description": t.description,
                 "inputSchema": webhook_tool_schema(auth, &t.input_schema),
-            })
+            });
+            if let Some(annotations) = mcp_service::tool_annotations(&t.name, &services) {
+                tool["annotations"] = annotations;
+            }
+            tool
         })
         .collect();
 
