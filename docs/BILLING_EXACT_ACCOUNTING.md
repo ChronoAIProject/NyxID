@@ -264,8 +264,11 @@ values are Decimal128 credits. A missing mirror falls back to the root without
 rescaling an exact root. New folds mirror all five money measures, including
 legacy grant cost. Normalization and every fold also write flat
 `query_{money_field}` Decimal128 aliases from those mirrors in the same atomic
-update. Once every exact key exists, scalar v4 covering definitions need no
-presence inspection or nested traversal. Before completion, document reads
+update. Once every exact key exists, scalar v5 covering definitions need no
+presence inspection or nested traversal. v5 adds the metering-only
+`audio_input_tokens` / `audio_output_tokens` measures (provider-reported voice
+subsets of prompt/completion, never priced) and retires v4; summaries folded
+before audio metering read those measures as zero. Before completion, document reads
 preserve the missing-versus-null distinction. Startup creates replacement indexes
 before retiring their known obsolete definitions; unrelated indexes remain
 unchanged.

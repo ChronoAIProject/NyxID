@@ -60,8 +60,12 @@ pub const MEASURES: &[&str] = &[
     "completion_tokens",
     "cached_tokens",
     "cache_creation_tokens",
+    "audio_input_tokens",
+    "audio_output_tokens",
     "rows_folded",
 ];
+/// Metered-only measures added after the v4 covering indexes.
+const AUDIO_MEASURES: &[&str] = &["audio_input_tokens", "audio_output_tokens"];
 pub const DIMENSIONS: &[&str] = &[
     "actor",
     "owner",
@@ -160,13 +164,22 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
             keys.insert("single_display_key", 1);
             let mut legacy_keys = keys.clone();
             let mut nested_keys = keys.clone();
+            let mut v4_keys = keys.clone();
             for field in MEASURES.iter().filter(|field| **field != "rows_folded") {
-                legacy_keys.insert(legacy_measure(field), 1);
+                // Retired definitions predate the audio measures.
+                let historical = !AUDIO_MEASURES.contains(field);
+                if historical {
+                    legacy_keys.insert(legacy_measure(field), 1);
+                }
                 if money_measure(field) {
                     nested_keys.insert(format!("query_costs.{field}"), 1);
+                    v4_keys.insert(format!("query_{field}"), 1);
                     keys.insert(format!("query_{field}"), 1);
                 } else {
-                    nested_keys.insert(*field, 1);
+                    if historical {
+                        nested_keys.insert(*field, 1);
+                        v4_keys.insert(*field, 1);
+                    }
                     keys.insert(*field, 1);
                 }
             }
@@ -180,7 +193,7 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
                         .keys(keys)
                         .options(
                             IndexOptions::builder()
-                                .name(format!("{name}_exact_v4"))
+                                .name(format!("{name}_exact_v5"))
                                 .build(),
                         )
                         .build(),
@@ -190,6 +203,7 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
             for (old_name, old_keys) in [
                 (name.to_owned(), legacy_keys),
                 (format!("{name}_exact_v3"), nested_keys),
+                (format!("{name}_exact_v4"), v4_keys),
             ] {
                 let obsolete = indexes.iter().any(|index| {
                     index.options.as_ref().and_then(|o| o.name.as_deref()) == Some(&old_name)
