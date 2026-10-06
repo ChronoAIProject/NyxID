@@ -938,6 +938,26 @@ fn mcp_service_scope(auth: &McpAuthContext) -> mcp_service::ServiceScope<'_> {
     }
 }
 
+#[cfg(test)]
+pub(super) async fn assert_oauth_service_scope(
+    state: &AppState,
+    access_token: &str,
+    expected_ids: &[String],
+) {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "authorization",
+        format!("Bearer {access_token}").parse().unwrap(),
+    );
+    let auth = authenticate_mcp(state, &headers, false).await.unwrap();
+    assert!(!auth.allow_all_services);
+    assert_eq!(auth.allowed_service_ids, expected_ids);
+    assert!(matches!(
+        mcp_service_scope(&auth),
+        mcp_service::ServiceScope::Allowed(ids) if ids == expected_ids
+    ));
+}
+
 /// Names of tools that SSH-gate on agent scope.
 const SSH_META_TOOL_NAMES: &[&str] = &["nyx__ssh_exec", "nyx__ssh_list_services"];
 
