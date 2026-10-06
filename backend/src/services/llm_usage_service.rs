@@ -20,6 +20,9 @@ pub struct ReportedLlmUsage {
     pub cached_tokens: u64,
     /// Cache-write tokens (Anthropic `cache_creation_input_tokens`).
     pub cache_creation_tokens: u64,
+    /// Audio subsets of prompt/completion (OpenAI/xAI realtime and audio chat).
+    pub audio_input_tokens: u64,
+    pub audio_output_tokens: u64,
     pub reported_cost: Option<f64>,
     pub cached_tokens_included_in_prompt: bool,
     pub images: u64,
@@ -33,6 +36,8 @@ impl ReportedLlmUsage {
             && self.total_tokens == 0
             && self.cached_tokens == 0
             && self.cache_creation_tokens == 0
+            && self.audio_input_tokens == 0
+            && self.audio_output_tokens == 0
             && self.reported_cost.is_none()
             && self.images == 0
     }
@@ -53,7 +58,12 @@ impl ReportedLlmUsage {
         usage.cache_read_tokens = clamp(self.cached_tokens);
         usage.cache_write_tokens = clamp(self.cache_creation_tokens);
         usage.images = clamp(self.images);
-        usage.with_token_breakdown(Some(self.token_breakdown()))
+        usage
+            .with_token_breakdown(Some(self.token_breakdown()))
+            .with_audio_tokens(Some(crate::models::service_billing::AudioTokens {
+                input_tokens: clamp(self.audio_input_tokens),
+                output_tokens: clamp(self.audio_output_tokens),
+            }))
     }
 
     /// Per-class breakdown for the usage meter row, following each
@@ -78,6 +88,8 @@ pub struct ReportedLlmUsageAccumulator {
     total_tokens: u64,
     cached_tokens: u64,
     cache_creation_tokens: u64,
+    audio_input_tokens: u64,
+    audio_output_tokens: u64,
     reported_cost: Option<f64>,
     cached_tokens_included_in_prompt: bool,
     images: u64,
@@ -260,6 +272,8 @@ impl ReportedLlmUsageAccumulator {
         self.total_tokens = self.total_tokens.max(usage.total_tokens);
         self.cached_tokens = self.cached_tokens.max(usage.cached_tokens);
         self.cache_creation_tokens = self.cache_creation_tokens.max(usage.cache_creation_tokens);
+        self.audio_input_tokens = self.audio_input_tokens.max(usage.audio_input_tokens);
+        self.audio_output_tokens = self.audio_output_tokens.max(usage.audio_output_tokens);
 
         if let Some(cost) = usage.reported_cost {
             self.reported_cost = Some(
@@ -289,6 +303,12 @@ impl ReportedLlmUsageAccumulator {
         self.cache_creation_tokens = self
             .cache_creation_tokens
             .saturating_add(usage.cache_creation_tokens);
+        self.audio_input_tokens = self
+            .audio_input_tokens
+            .saturating_add(usage.audio_input_tokens);
+        self.audio_output_tokens = self
+            .audio_output_tokens
+            .saturating_add(usage.audio_output_tokens);
 
         if let Some(cost) = usage.reported_cost {
             self.reported_cost = Some(self.reported_cost.unwrap_or(0.0) + cost);
@@ -316,6 +336,8 @@ impl ReportedLlmUsageAccumulator {
             total_tokens,
             cached_tokens: self.cached_tokens,
             cache_creation_tokens: self.cache_creation_tokens,
+            audio_input_tokens: self.audio_input_tokens,
+            audio_output_tokens: self.audio_output_tokens,
             reported_cost: self.reported_cost,
             cached_tokens_included_in_prompt: self.cached_tokens_included_in_prompt,
             images: self.images,
@@ -492,6 +514,32 @@ pub fn extract_reported_usage(value: &serde_json::Value) -> Option<ReportedLlmUs
     )
     .unwrap_or(0);
 
+    let audio_input_tokens = token_at(
+        value,
+        &[
+            "/input_token_details/audio_tokens",
+            "/usage/input_token_details/audio_tokens",
+            "/response/usage/input_token_details/audio_tokens",
+            "/prompt_tokens_details/audio_tokens",
+            "/usage/prompt_tokens_details/audio_tokens",
+            "/response/usage/prompt_tokens_details/audio_tokens",
+        ],
+    )
+    .unwrap_or(0);
+
+    let audio_output_tokens = token_at(
+        value,
+        &[
+            "/output_token_details/audio_tokens",
+            "/usage/output_token_details/audio_tokens",
+            "/response/usage/output_token_details/audio_tokens",
+            "/completion_tokens_details/audio_tokens",
+            "/usage/completion_tokens_details/audio_tokens",
+            "/response/usage/completion_tokens_details/audio_tokens",
+        ],
+    )
+    .unwrap_or(0);
+
     let reported_cost = [
         "/usage/reported_cost",
         "/usage/cost_usd",
@@ -518,6 +566,8 @@ pub fn extract_reported_usage(value: &serde_json::Value) -> Option<ReportedLlmUs
         total_tokens,
         cached_tokens,
         cache_creation_tokens,
+        audio_input_tokens,
+        audio_output_tokens,
         reported_cost,
         cached_tokens_included_in_prompt: [
             "/prompt_tokens_details/cached_tokens",
@@ -929,6 +979,69 @@ mod tests {
         assert_eq!(summary.estimated_response_count, 0);
         assert_eq!(summary.uncovered_bytes, 0);
         assert_eq!(summary.token_quantity(), 42);
+    }
+
+    #[test]
+    fn realtime_collector_sums_audio_token_details_without_changing_prices() {
+        let mut collector = RealtimeLlmUsageCollector::new(true);
+        collector.observe_client_text(r#"{"type":"response.create"}"#);
+        collector.observe_downstream_text(
+            r#"{"type":"response.done","response":{"id":"resp_1","usage":{"input_tokens":120,"output_tokens":80,"total_tokens":200,"input_token_details":{"text_tokens":20,"audio_tokens":100,"cached_tokens":0},"output_token_details":{"text_tokens":15,"audio_tokens":65}}}}"#,
+        );
+        collector.observe_client_text(r#"{"type":"response.create"}"#);
+        collector.observe_downstream_text(
+            r#"{"type":"response.done","response":{"id":"resp_2","usage":{"input_tokens":40,"output_tokens":30,"total_tokens":70,"input_token_details":{"audio_tokens":25},"output_token_details":{"audio_tokens":20}}}}"#,
+        );
+
+        let summary = collector.finalize();
+        let usage = summary.reported_usage.as_ref().expect("reported usage");
+        assert_eq!(
+            (usage.audio_input_tokens, usage.audio_output_tokens),
+            (125, 85)
+        );
+        let platform = super::platform_usage(Some(usage), 0, false);
+        assert_eq!(
+            platform.audio_tokens,
+            Some(crate::models::service_billing::AudioTokens {
+                input_tokens: 125,
+                output_tokens: 85,
+            })
+        );
+        // Audio is a subset of the priced classes, never added to them.
+        assert_eq!(
+            (
+                platform.input_tokens,
+                platform.output_tokens,
+                platform.tokens
+            ),
+            (160, 110, 270)
+        );
+    }
+
+    #[test]
+    fn chat_audio_token_details_are_captured_and_text_only_usage_has_none() {
+        let audio = extract_reported_usage(&serde_json::json!({
+            "usage": {
+                "prompt_tokens": 50, "completion_tokens": 40, "total_tokens": 90,
+                "prompt_tokens_details": { "audio_tokens": 30, "cached_tokens": 0 },
+                "completion_tokens_details": { "audio_tokens": 35 },
+            }
+        }))
+        .expect("usage");
+        assert_eq!(
+            (audio.audio_input_tokens, audio.audio_output_tokens),
+            (30, 35)
+        );
+
+        let text = extract_reported_usage(&serde_json::json!({
+            "usage": { "prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8 }
+        }))
+        .expect("usage");
+        assert!(
+            super::platform_usage(Some(&text), 0, false)
+                .audio_tokens
+                .is_none()
+        );
     }
 
     #[test]

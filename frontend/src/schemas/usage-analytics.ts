@@ -15,6 +15,8 @@ export const ANALYTICS_MEASURES = [
   "completion_tokens",
   "cached_tokens",
   "cache_creation_tokens",
+  "audio_input_tokens",
+  "audio_output_tokens",
   "quantity",
   "wallet_cost",
   "grant_cost",

@@ -96,7 +96,10 @@ it("starts with Operations and persists large boards without a panel count limit
   expect(TEMPLATE_COPY.operations.recommended).toBe(true);
   expect(TEMPLATE_COPY.overview.recommended).toBe(false);
   expect(TEMPLATE_COPY.explorer.recommended).toBe(false);
-  expect(view.panels).toHaveLength(6);
+  expect(view.panels).toHaveLength(8);
+  expect(view.panels.map((panel) => panel.measure)).toContain(
+    "audio_output_tokens",
+  );
   view.panels = Array.from({ length: 1000 }, () => newPanel());
   const config = { version: 1, draft: view, saved_views: [] };
   expect(workspaceConfigSchema.safeParse(config).success).toBe(true);

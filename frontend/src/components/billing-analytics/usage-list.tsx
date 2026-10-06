@@ -72,6 +72,8 @@ const SORT_LABELS: Record<AdminUsageSearch["sort"], string> = {
   completion_tokens: "Output tokens",
   cached_tokens: "Cache-read tokens",
   cache_creation_tokens: "Cache-write tokens",
+  audio_input_tokens: "Voice input tokens",
+  audio_output_tokens: "Voice output tokens",
 };
 function listUsageParams(
   search: AdminUsageSearch,
@@ -204,6 +206,13 @@ function Quantities({
               <br />
               cache read {formatNumber(usage.cached_tokens)} · cache write{" "}
               {formatNumber(usage.cache_creation_tokens)}
+              {usage.audio_input_tokens + usage.audio_output_tokens > 0 && (
+                <>
+                  <br />
+                  voice in {formatNumber(usage.audio_input_tokens)} · voice out{" "}
+                  {formatNumber(usage.audio_output_tokens)}
+                </>
+              )}
             </>
           ) : tokenView.length === 1 ? (
             <>

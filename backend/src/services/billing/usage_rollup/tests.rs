@@ -935,6 +935,30 @@ async fn covering_index_upgrade_retires_only_superseded_definitions() {
                 (name, value.clone())
             })
             .collect();
+        // The v4 flat-mirror definition predates the audio measures.
+        let v4_keys: Document = keys
+            .iter()
+            .map(|(field, value)| {
+                let name = MEASURES
+                    .iter()
+                    .find(|measure| money_measure(measure) && legacy_measure(measure) == *field)
+                    .map_or_else(|| field.clone(), |measure| format!("query_{measure}"));
+                (name, value.clone())
+            })
+            .collect();
+        summaries
+            .create_index(
+                IndexModel::builder()
+                    .keys(v4_keys)
+                    .options(
+                        IndexOptions::builder()
+                            .name("usage_rollup_reduce_window_exact_v4".to_string())
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await
+            .unwrap();
         summaries
             .create_index(
                 IndexModel::builder()
@@ -992,7 +1016,8 @@ async fn covering_index_upgrade_retires_only_superseded_definitions() {
             .collect();
         assert!(!names.contains(&"usage_rollup_reduce_window"));
         assert!(!names.contains(&"usage_rollup_reduce_window_exact_v3"));
-        assert!(names.contains(&"usage_rollup_reduce_window_exact_v4"));
+        assert!(!names.contains(&"usage_rollup_reduce_window_exact_v4"));
+        assert!(names.contains(&"usage_rollup_reduce_window_exact_v5"));
         assert!(names.contains(&"custom_service_lookup"));
     }
     db.drop().await.unwrap();

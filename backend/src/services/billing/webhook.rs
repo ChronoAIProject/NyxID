@@ -767,6 +767,7 @@ mod tests {
             credential_class: CredentialClass::UserOwned,
             model: None,
             token_breakdown: None,
+            audio_tokens: None,
             reserved_credits: crate::models::credits::Credits::from_whole(1),
             funding: None,
             quantity: Some(1),

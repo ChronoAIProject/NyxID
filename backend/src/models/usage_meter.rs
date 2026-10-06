@@ -250,6 +250,10 @@ pub struct UsageMeterRow {
     /// not priced separately). Follows each provider's own accounting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_breakdown: Option<crate::models::service_billing::TokenBreakdown>,
+    /// Provider-reported audio subsets of the token breakdown (observability
+    /// only, never priced).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_tokens: Option<crate::models::service_billing::AudioTokens>,
     #[serde(default)]
     #[serde(with = "crate::models::credits::whole")]
     pub reserved_credits: Credits,
