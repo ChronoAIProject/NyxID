@@ -36,51 +36,53 @@ This record tracks the delivery and review of user-controlled AI service prefere
 Fable 5.1 delivered 14 implementation tasks and 24 acceptance criteria. PM review
 added four criteria and required corrections to routing, auth, privacy, model
 defaults, concurrency, error recovery, accessibility, and validation commands.
-The final plan incorporates AC-01 through AC-28. The integrated frontend and
-seven pure/database-backed feature tests have passed; the corrected MCP fixture,
-CLI checks, Rust static checks and final Opus review are the remaining gates.
+The final plan incorporates AC-01 through AC-28. All local acceptance checks
+have passed, and the PM has closed every substantiated finding in the tables
+below. Required CI on the corrected revision and final Opus review remain.
 
 ## Plan review findings
 
 | Finding | Required correction | Status |
 |---|---|---|
-| A static key route would take over an existing valid service slug. | Use a dedicated `/service-preferences` route. | In implementation |
-| Adding rejection middleware to the existing key-update group could affect catalog-curation callers. | Restrict the new PUT route and verify first-party auth in its handler. | In implementation |
-| Raw rank gaps disclose positions of inaccessible entries. | Expose dense ranks from the caller's authorized inventory. | In implementation |
-| The minimal model fixture omits required dates, and the absent response timestamp is unspecified. | Require model BSON dates; return a nullable timestamp for no saved order. | In implementation |
-| Version and UUID validation need canonicalization, bounds, and overflow rules. | Validate canonical UUID v4 IDs, bounded body/list, safe versions, and unknown fields. | In implementation |
-| Loading an empty order after a read failure enables an accidental overwrite. | Block editing until a successful read, with explicit Retry. | In implementation |
-| Conflict and stale-ID recovery assume server data the generic error does not contain. | Refetch version/inventory before recovery, preserving local edits. | In implementation |
-| Mocked drag callbacks do not prove browser gestures or focus behavior. | Test actual mouse, touch, and keyboard gestures on `/keys`. | In implementation |
-| A one-service inventory still needs rank/unrank controls. | Enable single-service editing and enforce the selection limit. | In implementation |
-| Unsupported binary-crate test commands and silent database skips weaken validation. | Use valid commands and an explicit isolated database URI. | In implementation |
+| A static key route would take over an existing valid service slug. | Use a dedicated `/service-preferences` route. | Closed: existing slug and dedicated-route HTTP regressions passed |
+| Adding rejection middleware to the existing key-update group could affect catalog-curation callers. | Restrict the new PUT route and verify first-party auth in its handler. | Closed: caller-matrix and neighboring curation regressions passed |
+| Raw rank gaps disclose positions of inaccessible entries. | Expose dense ranks from the caller's authorized inventory. | Closed: scoped HTTP, relay/guest MCP and live-org regressions passed |
+| The minimal model fixture omits required dates, and the absent response timestamp is unspecified. | Require model BSON dates; return a nullable timestamp for no saved order. | Closed: BSON and missing-document HTTP regressions passed |
+| Version and UUID validation need canonicalization, bounds, and overflow rules. | Validate canonical UUID v4 IDs, bounded body/list, safe versions, and unknown fields. | Closed: pure/schema and mounted HTTP regressions passed |
+| Loading an empty order after a read failure enables an accidental overwrite. | Block editing until a successful read, with explicit Retry. | Closed: failed-read and cached-read browser/unit regressions passed |
+| Conflict and stale-ID recovery assume server data the generic error does not contain. | Refetch version/inventory before recovery, preserving local edits. | Closed: actual409 Overwrite and actual400 inventory-first browser regressions passed |
+| Mocked drag callbacks do not prove browser gestures or focus behavior. | Test actual mouse, touch, and keyboard gestures on `/keys`. | Closed: independent fourteen-scenario browser suite passed |
+| A one-service inventory still needs rank/unrank controls. | Enable single-service editing and enforce the selection limit. | Closed: one-service browser and 201-row limit regressions passed |
+| Unsupported binary-crate test commands and silent database skips weaken validation. | Use valid commands and an explicit isolated database URI. | Closed: eight backend tests executed with explicit replica-set URI |
 
 ## Implementation review findings
 
-The PM reviews the implementation directly while it is being completed. These
-findings are based on inspected source; correction and execution evidence are
-required before closing them. No implementation sign-off is claimed.
+The PM reviewed the implementation directly and required source correction and
+execution evidence for each substantiated finding. The table records all returned
+findings and their closure; external Opus sign-off and final CI are separate gates.
 
 | Finding | Required correction | Status |
 |---|---|---|
 | Conflict recovery calls a submit closure that still sees `recovering = true`, so Overwrite exits without saving. | Separate recovery and mutation guards; prove a 409 followed by Overwrite persists local edits using the latest version. | Closed: browser Overwrite/persistence test passed |
-| The initial MCP patch adds rank metadata to `tools/list` and omits it from search results. | Preserve the agreed `tools/list` boundary; add metadata to search matches and verify config/list remain unchanged. | Returned to Sol |
+| The initial MCP patch adds rank metadata to `tools/list` and omits it from search results. | Preserve the agreed `tools/list` boundary; add metadata to search matches and verify config/list remain unchanged. | Closed: mounted HTTP config and MCP discovery/execution invariance tests passed |
 | A legacy preference document defaults to version zero when read, but its missing BSON version cannot match the update CAS filter. | Support missing-version rows in the version-zero CAS and prove the upgrade with a database test. | Closed: mounted HTTP/database legacy CAS regression passed |
 | Inventory refresh failures during editing can hide the existing inventory error banner; preference-read failure can disable its own conflict recovery. | Keep edits, expose Retry, and let validated recovery repair failed reads. | Closed: independent 14-scenario browser run |
 | Backend UUID validation does not verify the RFC 4122 variant, unlike the frontend UUID v4 schema. | Align validation and cover non-RFC variants. | Closed: pure validation and mounted HTTP regressions passed |
 | The draft omits planned toolbar affordances and provenance badges, and uses oversized body typography. | Add the reorder icon, disabled explanation, owner badges, compact design tokens, and loading feedback. | Closed: refreshed source and desktop/mobile visual review |
 | Every key-detail poll loads the entire inventory and repeats provider/grant work, including for users with no preference. | Skip unnecessary inventory work, bound dense-rank visibility to saved entries, reuse the live snapshot, and document/measure actual reads. | Closed: database command-monitoring regression passed |
-| Search's appended native tool rows lack the advertised rank field, and an older discovery paragraph contradicts the new ordering. | Emit null rank for unrankable native rows and reconcile the existing description. | Returned to Sol |
+| Search's appended native tool rows lack the advertised rank field, and an older discovery paragraph contradicts the new ordering. | Emit null rank for unrankable native rows and reconcile the existing description. | Closed: native-row MCP assertion passed and docs inspected |
 | Asynchronous conflict recovery can continue after account switching and issue PUT under the new session. | Fence saves/recovery by live identity, reset abandoned editor state, and prove the race with a deferred read. | Closed: deferred account-switch browser test passed |
 | The new grid/table test leaves a persisted table preference for following tests. | Reset view storage in setup and assert rendered ordering in both views. | Closed: isolated 31-test regression run passed |
 | First-create responses expose nanosecond timestamps that BSON stores at millisecond precision. | Normalize write timestamps to BSON precision and compare first PUT with GET/no-op. | Closed: mounted HTTP/database timestamp equality regression passed |
 | Reorder can capture cached inventory/order while a newer read is still in progress. | Wait for current reads before entry and test the disabled loading state. | Closed: loading/refetch unit regressions passed |
 | Restoring focus in one animation frame can target a button still disabled by the inventory refetch on editor close. | Restore focus once the intended target is available, cancel stale focus requests, and verify with a delayed inventory response. | Closed: independent delayed Save/Cancel browser regressions |
-| The new CLI command enum derives `Debug` for authentication arguments that intentionally do not implement it. | Remove the command enum's unnecessary derive; preserve authentication redaction and prove CLI compilation and command execution. | Returned to Sol |
-| The plan's caller table conflates REST preference-route rejection with MCP discovery and incorrectly claims relay callers receive no preference. | Separate REST auth from MCP identity semantics; document scoped relay owner preference, service-account subject defaults, and authorized delegated/OAuth discovery without changing existing authorization. | Returned to Sol |
+| The new CLI command enum derives `Debug` for authentication arguments that intentionally do not implement it. | Remove the command enum's unnecessary derive; preserve authentication redaction and prove CLI compilation and command execution. | Closed: CLI compilation, unit and actual subprocess integration tests passed |
+| The plan's caller table conflates REST preference-route rejection with MCP discovery and incorrectly claims relay callers receive no preference. | Separate REST auth from MCP identity semantics; document scoped relay owner preference, service-account subject defaults, and authorized delegated/OAuth discovery without changing existing authorization. | Closed: corrected docs inspected; real relay-auth MCP ranking parity passed |
 | Editor entry joins legacy organization provenance, but recovery replaces it with raw `/keys` rows and late provenance never reaches the editor's state snapshot. | Reuse the source join for every inventory recovery and enrich late metadata without resetting ordered IDs, version or draft; verify organization labels survive refresh. | Closed: independent legacy-provenance browser regression |
 | The 201-row boundary regression exceeds the default five-second timeout under the full suite and parallel build load. | Scope queries to the relevant rows and verify stable full-suite execution; retain the limit and saved-payload assertions. | Closed: focused and complete frontend reruns passed with the original timeout |
 | Inserting the preference sorter leaves the old search documentation attached to the wrong function. | Attach the search contract to the production ranked-search function. | Closed: corrected source inspected by PM |
+| The CLI output regression parses only the outer table border, while the existing condensed style uses a different internal separator. | Parse the actual column separators and retain exact ranked/unranked last-column assertions, with useful failure output. | Closed: PM inspected diagnostic output/fix; both CLI integration tests passed |
+| Rust 1.98 CI Clippy rejects a cloned single-item slice in the MCP fixture. | Use `std::slice::from_ref` without suppressing the lint and pass Clippy. | Closed: PM inspected fixture change; final local Clippy passed |
 
 ## Integration review
 
@@ -210,3 +212,62 @@ routing and authorization contract. Log:
 The PM completed the integrated production-source review and is publishing a
 draft PR to start the repository CI while final local Rust checks continue.
 Draft publication does not close the remaining checks or Opus sign-off.
+
+
+The corrected feature rerun passed all eight tests (zero failures or ignored
+checks, 3.15 seconds after 12m34 compilation). The PM inspected the corrected
+fixture and the execution log. It proves preferred search/connected ordering,
+null native ranks, owner/scoped/relay/guest visibility, byte-identical
+`tools/list`, unchanged explicit tool result/target and exactly two effects for
+two named calls with identical execution-audit data. The earlier HTTP test
+proves full `/mcp/config` equality. Log:
+`/tmp/service-preference-integrated-backend-recheck.log`.
+
+Draft PR: https://github.com/ChronoAIProject/NyxID/pull/1796. Source revision:
+`caed88dfa5e449af062b77d2fd264b3c05e4d1b1`. Required remote CI is running.
+
+
+The PM's final production-source inspection covers persistence/CAS and validation,
+route/auth layering, inventory and dense-rank visibility, MCP relevance and scope
+application, explicit execution boundaries, CLI identity/slug resolution,
+account-bound UI recovery, drag controls, shared group/table pills and view-state
+preservation. No additional substantiated production finding remained after the
+search-comment correction. `cargo fmt --all -- --check` independently passed.
+Final CLI/static-check execution, required CI and Opus sign-off remain open.
+
+
+The first remote CLI test/coverage runs and the local CLI integration run exposed
+the same new-test defect: parsing only `│` does not split the condensed table's
+internal `┆` columns. CLI unit tests passed (two tests); the Set/conflict integration
+case passed, while the table/JSON case requires the corrected parser and a rerun.
+The PM confirmed both separators in the installed table-style source and returned
+the correction to Sol. This failed run is not final acceptance evidence.
+
+
+### Final CLI execution evidence
+
+- CLI unit feature checks: two passed, zero failures/ignored, 0.01 seconds.
+- Actual CLI subprocess integration: two passed, zero failures/ignored, 1.99
+  seconds after the separator correction. The PM inspected the diagnostic table
+  and corrected parser. Assertions retain the exact final-column `1`/`-` values,
+  saved table ranks, JSON equality, active-slug selection, versioned PUT and
+  nonzero conflict exit with actionable text.
+- CLI wizard freshness: one passed, 0.06 seconds.
+
+Logs: `/tmp/service-preference-final-cli-unit.log`,
+`/tmp/service-preference-final-cli-integration.log`,
+`/tmp/service-preference-final-wizard-freshness.log`.
+
+
+### Final local review gate
+
+`cargo clippy -p nyxid -p nyxid-cli --all-targets -j 1 -- -D warnings` passed on
+the corrected source (5m38s, no warnings or errors), log
+`/tmp/service-preference-final-clippy.log`. This closes the last local gate.
+The PM inspected both final fixture diffs and all successful execution logs.
+Every substantiated plan and implementation finding above is closed.
+
+The first remote CI run identified the CLI parser and cloned-slice fixture
+findings; those failures are superseded only after CI passes on the corrected
+revision. Final Opus review will cover the complete plan and PR diff, followed
+by confirmation on the final revision after required CI succeeds.

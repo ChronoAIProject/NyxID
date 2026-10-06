@@ -3279,7 +3279,7 @@ async fn service_preference_discovery_guest_dense_and_explicit_target_unchanged(
     preferences::replace(
         &f.state.db,
         &f.owner,
-        &[b.clone()],
+        std::slice::from_ref(&b),
         0,
         &[a.clone(), b.clone(), hidden.clone()].into_iter().collect(),
     )

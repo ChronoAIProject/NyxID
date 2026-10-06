@@ -53,9 +53,9 @@ async fn service_preference_cli_table_and_json_show_saved_ranks() {
     for (slug, rank) in [("ranked", "1"), ("unranked", "-")] {
         let cells: Vec<_> = table
             .lines()
-            .find(|line| line.split('│').any(|cell| cell.trim() == slug))
-            .unwrap()
-            .split('│')
+            .find(|line| line.split(['│', '┆']).any(|cell| cell.trim() == slug))
+            .unwrap_or_else(|| panic!("Missing {slug} row: {table}"))
+            .split(['│', '┆'])
             .map(str::trim)
             .filter(|cell| !cell.is_empty())
             .collect();
