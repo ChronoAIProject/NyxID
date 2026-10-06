@@ -206,7 +206,7 @@ describe("service card billing and caller details", () => {
     });
     expect(screen.getByTitle(/^Organization · ChronoAI · /)).toBeVisible();
     expect(screen.getByText(/Codex CI · Release app/)).toBeVisible();
-    expect(screen.getByText("Personal account")).toBeVisible();
+    expect(screen.getByText("You pay · 0.25 credits/request")).toBeVisible();
   });
   it("does not present incomplete key inventory as zero keys", () => {
     mount({
@@ -307,7 +307,9 @@ describe("service card billing and caller details", () => {
       },
     });
     expect(screen.getByTitle(/Configured scope[\s\S]*Codex CI/)).toBeVisible();
-    expect(screen.getByText("Acting user's personal account")).toBeVisible();
+    expect(
+      screen.getByText("Caller pays · 0.05 credits/request"),
+    ).toBeVisible();
     expect(screen.queryByText(/No recorded requests/)).not.toBeInTheDocument();
     await user.click(
       screen.getByRole("button", { name: "Billing for Team OpenAI" }),
@@ -315,15 +317,15 @@ describe("service card billing and caller details", () => {
     const panel = screen.getByRole("region", {
       name: "Billing for Team OpenAI",
     });
-    expect(within(panel).getByText("Billing flow")).toBeVisible();
-    expect(within(panel).getByText("Expected payer")).toBeVisible();
-    expect(within(panel).getByText("Pending")).toBeVisible();
+    expect(within(panel).getByText("Uses NyxID credits")).toBeVisible();
+    expect(within(panel).getByText("Who pays NyxID")).toBeVisible();
+    expect(
+      within(panel).getByText(/A new price is waiting to be activated/),
+    ).toBeVisible();
     expect(
       within(panel).queryByRole("combobox", { name: "Preview billing for" }),
     ).not.toBeInTheDocument();
-    expect(
-      within(panel).getByRole("table", { name: "Configured NyxID rates" }),
-    ).toBeVisible();
+    expect(within(panel).getByText("0.05 credits per request")).toBeVisible();
     await user.click(
       screen.getByRole("button", { name: "Recent requests for Team OpenAI" }),
     );
@@ -337,7 +339,7 @@ describe("service card billing and caller details", () => {
   it("exposes payer, credential and actual last caller directly in the expanded table", () => {
     mount();
     expect(screen.getByRole("columnheader", { name: "Billing" })).toBeVisible();
-    expect(screen.getByText("Personal account")).toBeVisible();
+    expect(screen.getByText("You pay · 0.25 credits/request")).toBeVisible();
     expect(screen.getByText(/NyxID key/)).toBeVisible();
     expect(
       within(
@@ -345,7 +347,6 @@ describe("service card billing and caller details", () => {
       ).getByText(/Codex CI/),
     ).toBeVisible();
     expect(screen.getByText("NyxID")).toBeVisible();
-    expect(screen.getByText("Rate: 0.25 credits / request")).toBeVisible();
     expect(screen.getByText(/· 1 override$/)).toBeVisible();
     expect(screen.getByTitle(/^Your keys with access/)).toBeVisible();
     expect(screen.queryByText("Provisioning app")).not.toBeInTheDocument();
@@ -359,15 +360,17 @@ describe("service card billing and caller details", () => {
     await user.click(
       screen.getByRole("button", { name: "Billing for Team OpenAI" }),
     );
+    expect(screen.getByText("0.25 credits per request")).toBeVisible();
     expect(
-      screen.getByRole("table", { name: "Applicable NyxID rates" }),
+      screen.getByText(
+        "Each request costs 0.25 NyxID credits, paid by you, from your personal credits.",
+      ),
     ).toBeVisible();
-    expect(screen.getByText(/NyxID supplies the provider key/)).toBeVisible();
     await user.click(
       screen.getByRole("button", { name: "Agent key access for Team OpenAI" }),
     );
     expect(
-      screen.queryByRole("table", { name: "Applicable NyxID rates" }),
+      screen.queryByText("0.25 credits per request"),
     ).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Codex CI" })).toHaveAttribute(
       "href",
@@ -418,7 +421,7 @@ describe("service card billing and caller details", () => {
       within(panel).getByRole("combobox", { name: "Preview billing for" }),
     );
     await user.click(
-      screen.getByRole("option", { name: "Codex CI · agent key" }),
+      screen.getByRole("option", { name: "Agent key: Codex CI" }),
     );
     await waitFor(() =>
       expect(request).toHaveBeenCalledWith(
@@ -426,7 +429,7 @@ describe("service card billing and caller details", () => {
       ),
     );
     expect(
-      within(panel).queryByText("Personal account"),
+      within(panel).queryByText("You, from your personal credits"),
     ).not.toBeInTheDocument();
     expect(within(panel).getByText(/Loading billing/)).toBeVisible();
     resolvePreview({
@@ -442,17 +445,17 @@ describe("service card billing and caller details", () => {
       ],
     });
     expect(
-      await within(panel).findByText("ChronoAI · organization"),
+      await within(panel).findByText("ChronoAI, from its organization credits"),
     ).toBeVisible();
     await user.click(
       within(panel).getByRole("combobox", { name: "Preview billing for" }),
     );
-    await user.click(
-      screen.getByRole("option", { name: "You · connection default" }),
-    );
-    expect(within(panel).getByText("Personal account")).toBeVisible();
+    await user.click(screen.getByRole("option", { name: "You" }));
     expect(
-      within(panel).queryByText("ChronoAI · organization"),
+      within(panel).getByText("You, from your personal credits"),
+    ).toBeVisible();
+    expect(
+      within(panel).queryByText("ChronoAI, from its organization credits"),
     ).not.toBeInTheDocument();
   });
   it("shows server compatibility failures instead of claiming free service or no usage", async () => {
@@ -540,15 +543,14 @@ describe("service card billing and caller details", () => {
       screen.getByRole("button", { name: "Billing for Team OpenAI" }),
     );
     expect(cell.getByText("BYOK")).toBeVisible();
-    expect(cell.getByText("Personal account")).toBeVisible();
-    expect(cell.getByText("Rate: 0.25 credits / request")).toBeVisible();
+    expect(cell.getByText("You pay · 0.25 credits/request")).toBeVisible();
     await user.click(
       screen.getByRole("button", { name: "Billing for Team OpenAI" }),
     );
     expect(
       within(
         screen.getByRole("region", { name: "Billing for Team OpenAI" }),
-      ).getByText(/Any NyxID fees are additional/),
+      ).getByText(/This is a NyxID fee on top of anything/),
     ).toBeVisible();
   });
 
@@ -560,7 +562,7 @@ describe("service card billing and caller details", () => {
     const cell = within(
       screen.getByRole("button", { name: "Billing for Team OpenAI" }),
     );
-    expect(cell.getAllByText("No NyxID charge")[0]).toBeVisible();
+    expect(cell.getByText("Free on NyxID")).toBeVisible();
     expect(screen.getByText(/NyxID key/)).toBeVisible();
     expect(cell.queryByText("BYOK")).not.toBeInTheDocument();
   });

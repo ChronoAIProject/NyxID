@@ -1,7 +1,6 @@
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
 import {
-  ArrowRight,
   ArrowUpRight,
   Bot,
   CreditCard,
@@ -31,6 +30,7 @@ import {
   type ServiceUsageDay,
 } from "@/lib/service-usage";
 import { formatExactCredits, hasCredits } from "@/lib/credits";
+import { plainBilling } from "@/lib/billing-plain";
 import type { ServiceInsight } from "@/schemas/service-insights";
 import {
   useServiceInsights,
@@ -38,12 +38,8 @@ import {
 } from "@/hooks/use-service-insights";
 import {
   accessReasonLabel,
-  billingAccountLabel,
-  billingModelLabel,
-  billingExplanation,
   callerKindLabel,
   callerLabel,
-  credentialLabel,
   outcomeLabel,
   recordedSourceLabel,
 } from "@/lib/service-insights";
@@ -177,7 +173,14 @@ function UsageDailyChart({ series }: { readonly series: ServiceUsageDay[] }) {
   );
 }
 
-function ConnectionUsage({ connection }: { readonly connection: KeyInfo }) {
+function ConnectionUsage({
+  connection,
+  freeNow,
+}: {
+  readonly connection: KeyInfo;
+  /** The connection is free on NyxID today, so charged usage needs a reason. */
+  readonly freeNow: boolean;
+}) {
   const [period, setPeriod] = useState<BillingUsagePeriod>("30d");
   // One daily request feeds both the totals and the chart.
   const usage = useBillingUsage(period, period === "24h" ? undefined : "day");
@@ -234,7 +237,7 @@ function ConnectionUsage({ connection }: { readonly connection: KeyInfo }) {
               </dd>
             </div>
             <div>
-              <dt className="text-muted-foreground">Metered</dt>
+              <dt className="text-muted-foreground">Usage</dt>
               <dd className="mt-1 text-sm font-medium tabular-nums">
                 {summary.quantities
                   .map(
@@ -245,25 +248,25 @@ function ConnectionUsage({ connection }: { readonly connection: KeyInfo }) {
               </dd>
             </div>
             <div>
-              <dt className="text-muted-foreground">NyxID credits charged</dt>
+              <dt className="text-muted-foreground">NyxID credits used</dt>
               <dd className="mt-1 text-sm font-medium tabular-nums">
                 {!summary.billable
-                  ? "None · metered only"
+                  ? "None"
                   : summary.charged == null
-                    ? "Not settled yet"
+                    ? "Still being calculated"
                     : formatExactCredits(summary.charged)}
               </dd>
               {summary.billable &&
                 [
-                  ["Wallet", summary.wallet],
-                  ["Grants", summary.grant],
-                  ["Allowances", summary.allowance],
+                  ["From wallet", summary.wallet],
+                  ["From grants", summary.grant],
+                  ["From allowances", summary.allowance],
                 ].some(([, value]) => hasCredits(value)) && (
                   <dd className="mt-0.5 text-[11px] text-muted-foreground">
                     {[
-                      ["Wallet", summary.wallet],
-                      ["Grants", summary.grant],
-                      ["Allowances", summary.allowance],
+                      ["From wallet", summary.wallet],
+                      ["From grants", summary.grant],
+                      ["From allowances", summary.allowance],
                     ]
                       .filter(([, value]) => hasCredits(value))
                       .map(
@@ -280,18 +283,28 @@ function ConnectionUsage({ connection }: { readonly connection: KeyInfo }) {
           ) : (
             period !== "24h" && (
               <p className="text-muted-foreground">
-                The daily chart needs the updated NyxID backend.
+                A day-by-day chart will appear here after the next NyxID update.
               </p>
             )
           )}
+          {freeNow &&
+            summary.charged != null &&
+            hasCredits(summary.charged) && (
+              <p className="text-amber-600 dark:text-amber-400">
+                Credits were charged in this period even though this connection
+                is free on NyxID now. They may come from an earlier price, or
+                from another connection that shares{" "}
+                <code>{connection.slug}</code>.
+              </p>
+            )}
           {summary.agents.length > 1 || summary.agents[0]?.name ? (
             <p className="text-muted-foreground">
-              By caller:{" "}
+              Made by:{" "}
               {summary.agents
                 .slice(0, 5)
                 .map(
                   ({ name, calls }) =>
-                    `${name ?? "You (signed in)"} ${calls.toLocaleString()}`,
+                    `${name ?? "you, signed in"} (${calls.toLocaleString()})`,
                 )
                 .join(" · ")}
               {summary.agents.length > 5 &&
@@ -301,8 +314,9 @@ function ConnectionUsage({ connection }: { readonly connection: KeyInfo }) {
         </>
       )}
       <p className="text-[11px] text-muted-foreground">
-        Recorded by slug <code>{connection.slug}</code> for your personal
-        billing account, so connections sharing this slug are combined.
+        Counts calls made through <code>{connection.slug}</code> that were
+        billed to your personal account. Other connections using the same
+        address are counted together.
         {org && ` Usage billed to ${org} isn’t included.`}
       </p>
     </div>
@@ -328,6 +342,7 @@ function ConnectionBillingPanel({
     caller === "you"
       ? insight.billing
       : selectedState.connections.get(connection.id)?.billing;
+  const plain = bill ? plainBilling(connection, bill) : null;
   return (
     <section
       className="space-y-4 p-3"
@@ -335,14 +350,12 @@ function ConnectionBillingPanel({
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h4 className="inline-flex items-center gap-2 text-sm font-medium">
-          <CreditCard className="size-4 text-primary" /> Billing flow
+          <CreditCard className="size-4 text-primary" /> Billing
         </h4>
-        <div className="flex items-center gap-2 text-xs">
-          {insight.billing?.context === "configuration" ? (
-            <Badge variant="secondary">Connection default · configured</Badge>
-          ) : (
-            <>
-              <span className="text-muted-foreground">For</span>
+        {insight.billing?.context !== "configuration" &&
+          !!insight.usage?.access.keys.length && (
+            <div className="flex items-center gap-2 text-xs">
+              <span className="text-muted-foreground">Show for</span>
               <Select value={caller} onValueChange={setCaller}>
                 <SelectTrigger
                   aria-label="Preview billing for"
@@ -351,159 +364,57 @@ function ConnectionBillingPanel({
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="you">You · connection default</SelectItem>
+                  <SelectItem value="you">You</SelectItem>
                   {insight.usage?.access.keys.map((key) => (
                     <SelectItem key={key.id} value={key.id}>
-                      {key.name} · agent key
+                      Agent key: {key.name}
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
-            </>
+            </div>
           )}
-        </div>
       </div>
-      {bill ? (
+      {plain ? (
         <>
-          <div className="flex flex-wrap items-center gap-2 text-xs">
-            {bill.credit_billing_configured != null &&
-              bill.status !== "restricted" && (
-                <Badge variant="secondary">
-                  {bill.credit_billing_configured
-                    ? "NyxID usage charges configured"
-                    : "No NyxID usage charges configured"}
-                </Badge>
-              )}
-            <Badge variant="secondary">{billingModelLabel(bill)}</Badge>
-            {bill.status !== "restricted" && bill.status !== "unavailable" && (
-              <span className="text-muted-foreground">
-                {billingExplanation(bill)}
-              </span>
-            )}
+          <div className="rounded-lg border border-border/60 bg-muted/20 p-3">
+            <p className="text-sm font-medium">{plain.headline}</p>
+            <p className="mt-1 text-xs text-muted-foreground">{plain.detail}</p>
           </div>
-          <dl className="grid items-center gap-3 text-xs sm:grid-cols-[1fr_auto_1fr_auto_1fr]">
-            <div className="self-stretch rounded-lg border border-border/60 bg-muted/20 p-3">
-              <dt className="text-muted-foreground">Credential</dt>
-              <dd className="mt-1 font-medium">
-                {credentialLabel(connection, bill)}
-              </dd>
+          <dl className="grid gap-3 text-xs sm:grid-cols-3">
+            <div>
+              <dt className="text-muted-foreground">Whose key or app</dt>
+              <dd className="mt-1 font-medium">{plain.key.title}</dd>
+              {plain.key.note && (
+                <dd className="mt-0.5 text-[11px] text-muted-foreground">
+                  {plain.key.note}
+                </dd>
+              )}
             </div>
-            <ArrowRight
-              className="hidden size-4 text-muted-foreground sm:block"
-              aria-hidden="true"
-            />
-            <div className="self-stretch rounded-lg border border-border/60 bg-muted/20 p-3">
-              <dt className="text-muted-foreground">
-                {bill.context === "configuration"
-                  ? "Expected payer"
-                  : "Billing account"}
-              </dt>
-              <dd className="mt-1 font-medium">{billingAccountLabel(bill)}</dd>
+            <div>
+              <dt className="text-muted-foreground">Who pays NyxID</dt>
+              <dd className="mt-1 font-medium">{plain.payer}</dd>
             </div>
-            <ArrowRight
-              className="hidden size-4 text-muted-foreground sm:block"
-              aria-hidden="true"
-            />
-            <div className="self-stretch rounded-lg border border-border/60 bg-muted/20 p-3">
-              <dt className="text-muted-foreground">NyxID charges</dt>
-              <dd className="mt-1 font-medium">
-                {bill.charge_status === "not_charged"
-                  ? "Not charged by NyxID"
-                  : bill.charge_status === "usage_based"
-                    ? "Based on metered usage"
-                    : bill.charge_status === "restricted"
-                      ? "Restricted"
-                      : "Determined at execution"}
-              </dd>
+            <div>
+              <dt className="text-muted-foreground">NyxID price</dt>
+              <dd className="mt-1 font-medium">{plain.price}</dd>
             </div>
           </dl>
-          {bill.status !== "restricted" &&
-            bill.status !== "unavailable" &&
-            (bill.charge_status === "usage_based" ||
-              bill.charge_status === "conditional") && (
-              <div className="text-xs">
-                <p>
-                  <span className="text-muted-foreground">Funding order: </span>
-                  Eligible allowances → Credit grants → Wallet credits
-                </p>
-                <p className="mt-1 text-[11px] text-muted-foreground">
-                  Applied within the selected billing account, including
-                  eligible platform-issued grants. Actual funding is determined
-                  per request; the grant used is not reported in this preview.
-                </p>
-                <p className="mt-1 text-[11px] text-muted-foreground">
-                  A direct connection slug targets this connection. A priority
-                  pool slug can fail over according to its saved policy, with
-                  each attempted connection using its own billing rules.
-                </p>
-              </div>
-            )}
-          {!!bill.rates.length && (
-            <div className="overflow-x-auto rounded-lg border border-border/60">
-              <table
-                className="w-full text-left text-xs"
-                aria-label={
-                  bill.context === "configuration"
-                    ? "Configured NyxID rates"
-                    : "Applicable NyxID rates"
-                }
-              >
-                <thead className="bg-muted/30 text-muted-foreground">
-                  <tr>
-                    <th className="px-3 py-2 font-medium">Charge</th>
-                    <th className="px-3 py-2 font-medium">Unit</th>
-                    <th className="px-3 py-2 text-right font-medium">
-                      Credits per unit
-                    </th>
-                    {bill.context === "configuration" && (
-                      <th className="px-3 py-2 font-medium">Price sync</th>
-                    )}
-                  </tr>
-                </thead>
-                <tbody>
-                  {bill.rates.map((rate, i) => (
-                    <tr
-                      key={`${rate.layer}-${rate.metric}-${i}`}
-                      className="border-t border-border/40"
-                    >
-                      <td className="px-3 py-2">
-                        {rate.layer === "resale"
-                          ? "Provider usage through NyxID"
-                          : "NyxID usage"}
-                      </td>
-                      <td className="px-3 py-2">
-                        {metricLabel(rate.metric, 1)}
-                      </td>
-                      <td className="px-3 py-2 text-right font-mono">
-                        {rate.credits_per_unit ?? "Plan rate not reported"}
-                      </td>
-                      {bill.context === "configuration" && (
-                        <td className="px-3 py-2">
-                          {rate.sync_status === "synced"
-                            ? "Synced"
-                            : rate.sync_status === "pending"
-                              ? "Pending"
-                              : rate.sync_status === "failed"
-                                ? "Failed"
-                                : "Not reported"}
-                        </td>
-                      )}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+          {!!plain.tips.length && (
+            <ul className="list-disc space-y-1 pl-4 text-[11px] text-muted-foreground">
+              {plain.tips.map((tip) => (
+                <li key={tip}>{tip}</li>
+              ))}
+            </ul>
           )}
-          {bill.notes.map((note) => (
-            <p key={note} className="text-xs text-muted-foreground">
-              {note}
-            </p>
-          ))}
         </>
       ) : (
         <InsightsUnavailable state={selectedState} />
       )}
-      <ConnectionUsage connection={connection} />
+      <ConnectionUsage
+        connection={connection}
+        freeNow={plain?.verdict === "free"}
+      />
     </section>
   );
 }

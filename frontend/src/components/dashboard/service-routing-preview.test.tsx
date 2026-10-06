@@ -296,7 +296,7 @@ describe("live grouped services", () => {
       name: "Billing for Unpriced account 0",
     });
     expect(
-      within(billing).getByText("No NyxID usage charges configured"),
+      within(billing).getByText("Free on NyxID", { selector: "p" }),
     ).toBeVisible();
     expect(
       within(billing).queryByText("Credit billing unverified"),
@@ -399,11 +399,11 @@ describe("live grouped services", () => {
       const panel = card.getByRole("region", { name: `Billing for ${name}` });
       expect(
         within(panel).getByText(
-          type === "oauth2" ? "Your OAuth app (BYOK)" : "Your API key (BYOK)",
+          type === "oauth2" ? /^Your own .+ app$/ : "Your own API key",
         ),
       ).toBeVisible();
       expect(
-        within(panel).getByText("No NyxID usage charges configured"),
+        within(panel).getByText("Free on NyxID", { selector: "p" }),
       ).toBeVisible();
       expect(panel).not.toHaveTextContent("0.05");
       expect(
@@ -493,14 +493,8 @@ describe("live grouped services", () => {
     const platformPanel = card.getByRole("region", {
       name: "Billing for Personal Twitter",
     });
-    const platformRates = within(platformPanel).getByRole("table", {
-      name: "Configured NyxID rates",
-    });
     expect(
-      within(platformRates).getByRole("cell", { name: "0.05" }),
-    ).toBeVisible();
-    expect(
-      within(platformRates).getByRole("cell", { name: "request" }),
+      within(platformPanel).getByText("0.05 credits per request"),
     ).toBeVisible();
     await user.click(
       card.getByRole("button", { name: "Billing for ChronoAI Twitter" }),
@@ -508,8 +502,10 @@ describe("live grouped services", () => {
     const byoPanel = card.getByRole("region", {
       name: "Billing for ChronoAI Twitter",
     });
-    expect(byoPanel).toHaveTextContent("Organization OAuth app (BYOK)");
-    expect(byoPanel).toHaveTextContent("No NyxID usage charges configured");
+    expect(byoPanel).toHaveTextContent("Chrono's own Twitter app");
+    expect(byoPanel).toHaveTextContent(
+      "so NyxID doesn't charge for it. Twitter may bill Chrono directly.",
+    );
     expect(byoPanel).not.toHaveTextContent("0.05");
     expect(byoPanel).not.toHaveTextContent("0.01");
   });
@@ -543,7 +539,7 @@ describe("live grouped services", () => {
     expect(
       screen.getByRole("region", { name: "Billing for App 3" }),
     ).toBeVisible();
-    expect(screen.getByText("NyxID usage charges configured")).toBeVisible();
+    expect(screen.getByText("Uses NyxID credits")).toBeVisible();
     expect(screen.getByText("NyxID")).toBeVisible();
   });
   it("identifies supplied API keys without requiring published prices", () => {
@@ -675,11 +671,8 @@ describe("live grouped services", () => {
       }),
     ).toBeVisible();
     expect(
-      within(card).getByText(/A priority pool slug can fail over/),
-    ).toBeVisible();
-    expect(
       within(card).getByText(
-        /Eligible allowances → Credit grants → Wallet credits/,
+        /free allowances first, then credit grants, then your wallet balance/,
       ),
     ).toBeVisible();
     expect(
@@ -1731,7 +1724,7 @@ describe("saved routing in service cards", () => {
     await userEvent.click(
       screen.getByRole("button", { name: "Show billing for OpenAI" }),
     );
-    expect(screen.getByText("Billing flow")).toBeVisible();
+    expect(screen.getByText("Billing", { selector: "h4" })).toBeVisible();
     expect(
       screen.queryByRole("table", { name: "Reliable route members" }),
     ).not.toBeInTheDocument();

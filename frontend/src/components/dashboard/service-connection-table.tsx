@@ -54,12 +54,10 @@ import {
   ConnectionInsightPanel,
   type InsightPanel,
 } from "./service-insight-panels";
+import { plainBilling } from "@/lib/billing-plain";
 import {
-  billingAccountLabel,
-  billingExplanation,
   callerLabel,
   credentialLabel,
-  nyxidChargeLabel,
   accessCountLabel,
   latestRecordedUse,
   outcomeLabel,
@@ -498,31 +496,19 @@ export function ServiceConnectionTable({
                             <span className="truncate">
                               {insights.status === "ready"
                                 ? connectionBillingLabels[billingCategory]
-                                : insightStatusLabel(insights.status, "Billing")}
+                                : insightStatusLabel(
+                                    insights.status,
+                                    "Billing",
+                                  )}
                             </span>
                           </span>
                           {billing &&
-                            (billingCategory === "platform" || billingCategory === "byok") && (
-                            <>
-                              <span
-                                className="mt-1 block truncate text-[11px] text-muted-foreground"
-                                title={`NyxID payer: ${billingAccountLabel(billing)}`}
-                              >
-                                <span>
-                                  {billing.context === "configuration"
-                                    ? "Expected payer: "
-                                    : "Payer: "}
-                                </span>
-                                {billingAccountLabel(billing)}
+                            (billingCategory === "platform" ||
+                              billingCategory === "byok") && (
+                              <span className="mt-1 block truncate text-[11px] text-muted-foreground">
+                                {plainBilling(key, billing).short}
                               </span>
-                              <span
-                                className="mt-1 block truncate text-[11px] text-muted-foreground"
-                                title={nyxidChargeLabel(billing)}
-                              >
-                                {nyxidChargeLabel(billing)}
-                              </span>
-                            </>
-                          )}
+                            )}
                         </button>
                       </TooltipTrigger>
                       <TooltipContent
@@ -545,15 +531,20 @@ export function ServiceConnectionTable({
                         ) : (
                           <>
                             <p className="font-medium">
-                              {credentialLabel(key, billing)}
-                            </p>
-                            <p className="mt-1">
                               {billing
-                                ? billingExplanation(billing)
-                                : insightStatusLabel(insights.status, "Billing")}
+                                ? plainBilling(key, billing).headline
+                                : insightStatusLabel(
+                                    insights.status,
+                                    "Billing",
+                                  )}
                             </p>
+                            {billing && (
+                              <p className="mt-1">
+                                {plainBilling(key, billing).detail}
+                              </p>
+                            )}
                             <p className="mt-1 text-muted-foreground">
-                              Click to see rates and the funding order.
+                              Click for details and your usage.
                             </p>
                           </>
                         )}
