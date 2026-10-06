@@ -246,7 +246,7 @@ export function DeviceCodeDialog({ provider, onClose }: DeviceCodeDialogProps) {
                 Your code
               </p>
               <div className="flex items-center gap-3">
-                <code className="text-3xl font-bold tracking-[0.3em] font-mono text-primary">
+                <code className="text-3xl font-bold tracking-[0.3em] font-mono text-primary-text">
                   {userCode}
                 </code>
                 <Button

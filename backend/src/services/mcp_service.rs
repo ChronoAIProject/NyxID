@@ -165,6 +165,12 @@ impl McpBillingRouteContextBuilder {
 /// node allow-list enforcement. OAuth and session callers pass `api_key_id:
 /// None` and `allow_all_nodes: true`, preserving their existing behavior.
 pub struct McpExecContext<'a> {
+    /// Acting person/SA when credential resolution runs as another owner.
+    pub actor_user_id: Option<&'a str>,
+    /// Supplied caller bearer; absent for API-key-only or session-fallback calls.
+    pub caller_token: Option<&'a str>,
+    /// Authenticated caller restrictions, including resources and catalog limits.
+    pub delegation_restrictions: Box<crate::crypto::jwt::TokenRestrictionClaims>,
     pub attribution: Option<super::service_insights_activity::RequestAttribution>,
     pub org_agent_access: Option<&'a super::org_agent_service::RequestAccess>,
     pub agent_owner: Option<&'a str>,
@@ -3862,17 +3868,6 @@ pub fn prepare_exact_proxy_tool_call(
     Ok(prepared)
 }
 
-fn apply_server_owned_headers(
-    mut headers: Vec<(String, String)>,
-    server_owned_headers: &[(String, String)],
-) -> Vec<(String, String)> {
-    for (name, value) in server_owned_headers {
-        headers.retain(|(existing, _)| !existing.eq_ignore_ascii_case(name));
-        headers.push((name.clone(), value.clone()));
-    }
-    headers
-}
-
 pub fn build_mcp_operation_descriptor(
     service: &McpToolService,
     endpoint: &McpToolEndpoint,
@@ -4258,8 +4253,7 @@ pub async fn execute_tool_response(
     }
     // Resolve the proxy target and node routing from the fresh resolver result
     // (not cached loader flags -- credential state may have changed).
-    let (target, node_route, has_server_credential, billing_context_builder) = match &service.source
-    {
+    let resolved = match &service.source {
         McpToolSource::Internal => {
             return Err(AppError::Forbidden(
                 "Native tools require chat acknowledgement dispatch".into(),
@@ -4412,6 +4406,7 @@ pub async fn execute_tool_response(
                 nr,
                 has_cred_for_fallback,
                 billing_context_builder,
+                resolution.catalog_service_slug,
             )
         }
         McpToolSource::Platform {
@@ -4489,9 +4484,13 @@ pub async fn execute_tool_response(
                 nr,
                 has_cred,
                 McpBillingRouteContextBuilder::for_platform_service(billing_principal_user_id),
+                None,
             )
         }
     };
+
+    let (target, node_route, has_server_credential, billing_context_builder, catalog_service_slug) =
+        resolved;
 
     let mut target = target;
     prepared.resolve_destination(&mut target)?;
@@ -4518,6 +4517,7 @@ pub async fn execute_tool_response(
         node_route,
         has_server_credential,
         billing_context_builder,
+        catalog_service_slug.as_deref(),
     ))
     .await?
     {
@@ -4553,6 +4553,7 @@ impl std::fmt::Debug for ToolMedia {
 /// are unchanged; `media` is set only for verified images.
 #[derive(Debug)]
 pub struct ToolResponse {
+    pub concurrency: Option<super::service_concurrency_service::Lease>,
     pub status: u16,
     pub text: String,
     pub media: Option<ToolMedia>,
@@ -4601,6 +4602,7 @@ fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a s
 
 fn tool_response(status: u16, content_type: Option<&str>, body: &[u8]) -> ToolResponse {
     ToolResponse {
+        concurrency: None,
         status,
         text: String::from_utf8_lossy(body).to_string(),
         media: tool_media(status, content_type, body),
@@ -4686,6 +4688,125 @@ pub async fn execute_tool_resolved(
     node_route: Option<node_routing_service::NodeRoute>,
     has_server_credential: bool,
     billing_context_builder: McpBillingRouteContextBuilder,
+    catalog_service_slug: Option<&str>,
+) -> AppResult<McpToolExecutionOutcome> {
+    let lease = super::service_concurrency_service::acquire(
+        db,
+        &target.service,
+        exec_ctx.actor_user_id.unwrap_or(user_id),
+    )
+    .await?;
+    let execution = execute_tool_resolved_boxed(
+        http_client,
+        db,
+        encryption_keys,
+        node_ws_manager,
+        billing,
+        user_id,
+        billing_principal_user_id,
+        service,
+        endpoint,
+        prepared,
+        jwt_keys,
+        config,
+        connection_expiry_notifier,
+        token_exchange_cache,
+        cloud_response_cache,
+        exec_ctx,
+        billing_egress_permit,
+        target,
+        node_route,
+        has_server_credential,
+        billing_context_builder,
+        catalog_service_slug,
+    );
+    match lease {
+        Some(lease) => {
+            let mut outcome = lease.run(execution).await?;
+            if let McpToolExecutionOutcome::Response(response) = &mut outcome {
+                response.concurrency = Some(lease);
+            }
+            Ok(outcome)
+        }
+        None => execution.await,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_tool_resolved_boxed<'a>(
+    http_client: &'a reqwest::Client,
+    db: &'a mongodb::Database,
+    encryption_keys: &'a EncryptionKeys,
+    node_ws_manager: &'a std::sync::Arc<NodeWsManager>,
+    billing: &'a std::sync::Arc<crate::services::billing::BillingService>,
+    user_id: &'a str,
+    billing_principal_user_id: &'a str,
+    service: &'a McpToolService,
+    endpoint: &'a McpToolEndpoint,
+    prepared: PreparedProxyCall,
+    jwt_keys: &'a crate::crypto::jwt::JwtKeys,
+    config: &'a crate::config::AppConfig,
+    connection_expiry_notifier: &'a crate::services::connection_expiry_service::ConnectionExpiryNotifier,
+    token_exchange_cache: &'a crate::services::provider_token_exchange_service::TokenExchangeCache,
+    cloud_response_cache: &'a crate::services::cloud_response_cache::CloudResponseCache,
+    exec_ctx: &'a McpExecContext<'a>,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+    target: proxy_service::ProxyTarget,
+    node_route: Option<node_routing_service::NodeRoute>,
+    has_server_credential: bool,
+    billing_context_builder: McpBillingRouteContextBuilder,
+    catalog_service_slug: Option<&'a str>,
+) -> futures::future::BoxFuture<'a, AppResult<McpToolExecutionOutcome>> {
+    Box::pin(execute_tool_resolved_inner(
+        http_client,
+        db,
+        encryption_keys,
+        node_ws_manager,
+        billing,
+        user_id,
+        billing_principal_user_id,
+        service,
+        endpoint,
+        prepared,
+        jwt_keys,
+        config,
+        connection_expiry_notifier,
+        token_exchange_cache,
+        cloud_response_cache,
+        exec_ctx,
+        billing_egress_permit,
+        target,
+        node_route,
+        has_server_credential,
+        billing_context_builder,
+        catalog_service_slug,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_tool_resolved_inner(
+    http_client: &reqwest::Client,
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    node_ws_manager: &std::sync::Arc<NodeWsManager>,
+    billing: &std::sync::Arc<crate::services::billing::BillingService>,
+    user_id: &str,
+    billing_principal_user_id: &str,
+    service: &McpToolService,
+    endpoint: &McpToolEndpoint,
+    prepared: PreparedProxyCall,
+    jwt_keys: &crate::crypto::jwt::JwtKeys,
+    config: &crate::config::AppConfig,
+    connection_expiry_notifier: &crate::services::connection_expiry_service::ConnectionExpiryNotifier,
+    token_exchange_cache: &crate::services::provider_token_exchange_service::TokenExchangeCache,
+    cloud_response_cache: &crate::services::cloud_response_cache::CloudResponseCache,
+    exec_ctx: &McpExecContext<'_>,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+    target: proxy_service::ProxyTarget,
+    node_route: Option<node_routing_service::NodeRoute>,
+    has_server_credential: bool,
+    billing_context_builder: McpBillingRouteContextBuilder,
+    catalog_service_slug: Option<&str>,
 ) -> AppResult<McpToolExecutionOutcome> {
     super::org_agent_service::authorize_service_with_access(
         db,
@@ -4836,6 +4957,25 @@ pub async fn execute_tool_resolved(
         }
     }
 
+    // Build before the direct/node split, exactly as the REST proxy does.
+    if target.service.inject_delegation_token {
+        let subject = uuid::Uuid::parse_str(user_id)
+            .map_err(|_| AppError::Internal("Invalid authenticated MCP subject".into()))?;
+        match identity_service::generate_proxy_delegation_token(
+            jwt_keys,
+            config,
+            &subject,
+            &target.service.delegation_token_scope,
+            &target.service.slug,
+            catalog_service_slug,
+            Some(&exec_ctx.delegation_restrictions),
+        ) {
+            Ok(token) => identity_headers.push(("X-NyxID-Delegation-Token".into(), token)),
+            Err(_) => tracing::warn!(service_id = %service.service_id,
+                "Failed to generate delegation token for MCP tool"),
+        }
+    }
+
     identity_headers.extend(parameter_headers);
 
     // Resolve delegated credentials (only for platform services).
@@ -4846,10 +4986,15 @@ pub async fn execute_tool_resolved(
         McpToolSource::Platform {
             downstream_service_id,
         } => {
+            // This principal is resolved from authentication, just like REST's
+            // AuthUser::proxy_resolution_user_id: a service account uses its
+            // verified effective owner. It is not the later billing payer.
+            let delegated_owner =
+                proxy_service::delegated_credential_owner(billing_principal_user_id, None);
             match delegation_service::resolve_delegated_credentials(
                 db,
                 encryption_keys,
-                user_id,
+                delegated_owner,
                 downstream_service_id,
                 Some(connection_expiry_notifier),
             )
@@ -4947,43 +5092,30 @@ pub async fn execute_tool_resolved(
     if let Some(ref nr) = node_route {
         let method_str = method.to_string();
 
-        let mut all_headers: Vec<(String, String)> = identity_headers.clone();
-        for (name, value) in &req_headers {
-            if let Ok(v) = value.to_str() {
-                all_headers.push((name.to_string(), v.to_string()));
-            }
-        }
-
-        // NyxID#356: service-level default headers must be injected on
-        // node-routed MCP calls too, not just on the direct HTTP proxy
-        // path. Without this, required defaults (e.g. `x-openclaw-scopes`)
-        // would reach the downstream for regular proxy requests but go
-        // missing for MCP tool invocations of the same service.
-        all_headers = crate::models::default_request_header::merge_into_header_list(
-            all_headers,
-            &[
-                target.catalog_default_headers.as_slice(),
-                target.user_service_default_headers.as_slice(),
-            ],
-        );
-        all_headers = apply_server_owned_headers(all_headers, &server_owned_headers);
-
-        // Strip any default whose name collides with what the node
-        // agent will append locally as the service credential. Matches
-        // the trim on the node-routed HTTP / WS paths in
-        // `handlers/proxy.rs`; without it, a default `x-api-key` (or
-        // equivalent) would ride along in the frame and the node would
-        // put the real credential on top of it, leaving two values on
-        // the wire.
-        if let Some(cred_name) = crate::services::proxy_service::credential_header_name(&target) {
-            all_headers.retain(|(n, _)| !n.eq_ignore_ascii_case(&cred_name));
-        }
-
+        let base_headers = req_headers
+            .iter()
+            .filter_map(|(name, value)| {
+                value
+                    .to_str()
+                    .ok()
+                    .map(|value| (name.to_string(), value.to_string()))
+            })
+            .collect();
         super::destination_routing::validate_node_outbound_destination(
             &target,
             method.as_str(),
             &path,
             &delegated,
+        )?;
+        let prepared = proxy_service::prepare_node_request(
+            &target,
+            &path,
+            query.as_deref(),
+            base_headers,
+            &identity_headers,
+            &delegated,
+            exec_ctx.caller_token,
+            &server_owned_headers,
         )?;
         let node_request = NodeProxyRequest {
             target_id: target.target_id.clone(),
@@ -4992,9 +5124,9 @@ pub async fn execute_tool_resolved(
             service_slug: target.service.slug.clone(),
             base_url: target.base_url.clone(),
             method: method_str,
-            path: path.clone(),
-            query: query.clone(),
-            headers: all_headers,
+            path: prepared.path,
+            query: prepared.query,
+            headers: prepared.headers,
             body: body.as_ref().map(|b| b.to_vec()),
         };
 
@@ -5134,7 +5266,7 @@ pub async fn execute_tool_resolved(
         proxy_service::ProxyBody::Buffered(body),
         identity_headers,
         delegated,
-        None,
+        exec_ctx.caller_token,
         token_exchange_cache,
         cloud_response_cache,
         server_owned_headers,
@@ -5222,6 +5354,7 @@ pub async fn execute_tool_resolved(
     destination_audit.complete(status);
     request_audit.response(status);
     Ok(McpToolExecutionOutcome::Response(ToolResponse {
+        concurrency: None,
         status,
         text: body_text,
         media,
@@ -6102,6 +6235,9 @@ mod tests {
                     &state.token_exchange_cache,
                     &state.cloud_response_cache,
                     &McpExecContext {
+                        actor_user_id: None,
+                        caller_token: None,
+                        delegation_restrictions: Default::default(),
                         attribution: None,
                         org_agent_access: None,
                         agent_owner: None,
@@ -12062,7 +12198,7 @@ mod tests {
         assert!(prepared.server_owned_headers.is_empty());
 
         assert_eq!(
-            apply_server_owned_headers(
+            proxy_service::apply_server_owned_headers(
                 vec![("idempotency-key".to_string(), "default".to_string())],
                 &[("Idempotency-Key".to_string(), "effect-key".to_string())],
             ),
@@ -12182,6 +12318,7 @@ mod tests {
                 capabilities: None,
                 inference: None,
                 git_http: None,
+                concurrency_policy: None,
                 inference_admin_modified: false,
                 billing: None,
                 auth_notes: None,

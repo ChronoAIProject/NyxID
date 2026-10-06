@@ -257,6 +257,7 @@ async fn clear_key_bindings(
         doc! {"user_id": user_id, "credential_api_key_id": key_id},
         doc! {"$set": {
             "nyxagent_session_id": bson::Bson::Null,
+            "nyxagent_instruction_binding": bson::Bson::Null,
             "nyxagent_last_response_id": bson::Bson::Null,
             "context_reset_at": bson::DateTime::from_chrono(Utc::now()),
             "context_reset_reason": "credential_replaced",

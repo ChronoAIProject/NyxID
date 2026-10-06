@@ -82,7 +82,7 @@ export function OAuthCallbackGuidance({
           href="https://developer.x.com/en/portal/dashboard"
           target="_blank"
           rel="noopener noreferrer"
-          className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+          className="inline-flex items-center gap-1 text-xs text-primary-text hover:underline"
         >
           Where do I get Client ID and Client Secret? Open Keys &amp; Tokens in
           X Developer Console

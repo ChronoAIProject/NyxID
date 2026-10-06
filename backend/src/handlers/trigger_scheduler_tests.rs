@@ -230,7 +230,7 @@ async fn schedule_fake_agent_latency_authority_and_event_streak() {
     assert_eq!(calls.len(), 1);
     assert!(calls[0].authorization.contains("nyxid_"));
     assert!(
-        calls[0].body["instructions"]
+        calls[0].body["input"]
             .as_str()
             .unwrap()
             .contains("Started by trigger")
@@ -1062,6 +1062,7 @@ async fn schedule_confirmation_waits_and_resumes_without_another_budget() {
         .db
         .collection::<AssistantAcknowledgement>(ACKS)
         .insert_one(AssistantAcknowledgement {
+            authored_skill: None,
             voice_request_id: None,
             continuation_receipt_id: None,
             skill_selection: None,

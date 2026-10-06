@@ -9,7 +9,6 @@ import {
   Settings2,
   UsersRound,
   CreditCard,
-  GitBranch,
   Info,
   type LucideIcon,
 } from "lucide-react";
@@ -43,6 +42,7 @@ import {
 import type { CatalogEntry, KeyInfo } from "@/types/keys";
 import type { ServicePool } from "@/schemas/pools";
 import { poolStrategyLabel } from "@/lib/service-pool-display";
+import { PoolStrategyIcon } from "./service-pool-icons";
 import {
   connectionBillingCategory,
   connectionBillingLabels,
@@ -154,7 +154,7 @@ function PanelSection({
   return (
     <section className="space-y-3 p-3" aria-label={title}>
       <h4 className="inline-flex items-center gap-2 text-sm font-medium">
-        <Icon className="size-4 text-primary" aria-hidden="true" /> {title}
+        <Icon className="size-4 text-primary-text" aria-hidden="true" /> {title}
       </h4>
       {children}
     </section>
@@ -212,7 +212,7 @@ export function ServiceConnectionTable({
               Access &amp; requests
             </TableHead>
             <TableHead scope="col" className="w-[19%]">
-              Billing
+              Billing &amp; usage
             </TableHead>
             <TableHead scope="col" className="w-[20%]">
               Configuration
@@ -288,7 +288,7 @@ export function ServiceConnectionTable({
                     <div className="flex items-center gap-1.5">
                       <button
                         type="button"
-                        className="flex size-5 shrink-0 items-center justify-center rounded-sm hover:bg-accent hover:text-primary focus-visible:outline-2 focus-visible:outline-ring"
+                        className="flex size-5 shrink-0 items-center justify-center rounded-sm hover:bg-accent hover:text-primary-text focus-visible:outline-2 focus-visible:outline-ring"
                         onClick={() => toggle(key.id, "details")}
                         aria-expanded={expanded && open.view === "details"}
                         aria-controls={panelId}
@@ -307,7 +307,7 @@ export function ServiceConnectionTable({
                         to="/keys/$keyId"
                         params={{ keyId: key.id }}
                         aria-label={`View ${key.label} connection details (${owner})`}
-                        className="inline-flex min-w-0 items-center gap-1 rounded-sm font-medium hover:text-primary hover:underline focus-visible:outline-2 focus-visible:outline-ring"
+                        className="inline-flex min-w-0 items-center gap-1 rounded-sm font-medium hover:text-primary-text hover:underline focus-visible:outline-2 focus-visible:outline-ring"
                       >
                         <ServiceIcon
                           slug={key.catalog_service_slug ?? key.slug}
@@ -368,14 +368,14 @@ export function ServiceConnectionTable({
                           key={pool.id}
                           type="button"
                           onClick={() => onViewPool?.(pool.id)}
-                          className="mt-1 flex max-w-full items-center gap-1.5 text-left text-11 text-primary hover:underline"
+                          className="mt-1 flex w-full min-w-0 items-start gap-1.5 text-left text-11 text-primary-text hover:underline"
                           title={`${poolStrategyLabel(pool)} · ${pool.members.length} connections${!pool.is_active ? " · pool disabled" : ""}${!member.enabled ? " · member disabled" : ""}`}
                         >
-                          <GitBranch
-                            className="size-3 shrink-0"
-                            aria-hidden="true"
+                          <PoolStrategyIcon
+                            strategy={pool.strategy}
+                            className="mt-0.5 size-3 shrink-0"
                           />
-                          <span className="truncate">
+                          <span className="min-w-0 whitespace-normal break-words [overflow-wrap:anywhere]">
                             {pool.name} ·{" "}
                             {pool.strategy === "priority"
                               ? `Priority ${member.priority ?? 0}`
@@ -417,7 +417,7 @@ export function ServiceConnectionTable({
                       aria-label={`Agent key access for ${key.label}`}
                       data-insight-view="access"
                       data-connection-id={key.id}
-                      className="inline-flex items-center gap-1.5 rounded-sm text-xs font-medium text-primary hover:underline focus-visible:outline-2 focus-visible:outline-ring"
+                      className="inline-flex items-center gap-1.5 rounded-sm text-xs font-medium text-primary-text hover:underline focus-visible:outline-2 focus-visible:outline-ring"
                     >
                       <UsersRound className="size-3.5 shrink-0" />
                       <span
@@ -457,20 +457,20 @@ export function ServiceConnectionTable({
                             ? "No recorded use with exact connection attribution in the last 30 days"
                             : "Use is not reported by this server"
                       }
-                      className="mt-1 flex max-w-full items-center gap-1.5 rounded-sm text-left text-11 hover:text-primary focus-visible:outline-2 focus-visible:outline-ring"
+                      className="mt-1 flex w-full min-w-0 items-center gap-1.5 rounded-sm text-left text-11 hover:text-primary-text focus-visible:outline-2 focus-visible:outline-ring"
                     >
                       <Clock3
                         className="size-3.5 shrink-0 text-muted-foreground"
                         aria-hidden="true"
                       />
-                      <span className="text-muted-foreground">
+                      <span className="shrink-0 whitespace-nowrap text-muted-foreground">
                         {usage?.activity.visibility === "own_requests"
                           ? "Your last use"
                           : "Last used"}{" "}
                         ·
                       </span>
                       {latest ? (
-                        <span className="truncate">
+                        <span className="min-w-0 truncate">
                           {callerLabel(latest.caller)}
                           {latest.caller.app_name
                             ? ` · ${latest.caller.app_name}`
@@ -479,7 +479,7 @@ export function ServiceConnectionTable({
                           {outcomeLabel(latest.outcome)}
                         </span>
                       ) : (
-                        <span>
+                        <span className="min-w-0 truncate">
                           {insights.status === "loading"
                             ? "Loading…"
                             : insights.status === "restricted"
@@ -508,7 +508,7 @@ export function ServiceConnectionTable({
                           data-insight-view="billing"
                           data-connection-id={key.id}
                           className={cn(
-                            "block max-w-full rounded-sm text-left text-xs hover:text-primary focus-visible:outline-2 focus-visible:outline-ring",
+                            "block max-w-full rounded-sm text-left text-xs hover:text-primary-text focus-visible:outline-2 focus-visible:outline-ring",
                             billingCategory === "not_billable"
                               ? "w-fit"
                               : "w-full",
@@ -516,7 +516,7 @@ export function ServiceConnectionTable({
                         >
                           <span className="flex items-start gap-1.5 font-medium">
                             <CreditCard className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
-                            <span className="truncate">
+                            <span className="min-w-0 whitespace-normal break-words">
                               {insights.status === "ready"
                                 ? connectionBillingLabels[billingCategory]
                                 : insightStatusLabel(
@@ -593,7 +593,7 @@ export function ServiceConnectionTable({
                             to="/keys/$keyId"
                             params={{ keyId: key.id }}
                             aria-label={`Configure ${key.label} (${owner})`}
-                            className="inline-flex shrink-0 items-center gap-1 text-primary hover:underline"
+                            className="inline-flex shrink-0 items-center gap-1 text-primary-text hover:underline"
                           >
                             <Settings2 className="size-3" aria-hidden="true" />{" "}
                             Configure
@@ -634,7 +634,7 @@ export function ServiceConnectionTable({
                         aria-label={`History for ${key.label} (${owner})`}
                         aria-expanded={expanded && open.view === "history"}
                         aria-controls={panelId}
-                        className="inline-flex shrink-0 items-center gap-1 rounded-sm text-primary hover:underline focus-visible:outline-2 focus-visible:outline-ring"
+                        className="inline-flex shrink-0 items-center gap-1 rounded-sm text-primary-text hover:underline focus-visible:outline-2 focus-visible:outline-ring"
                       >
                         <History className="size-3" aria-hidden="true" />{" "}
                         History

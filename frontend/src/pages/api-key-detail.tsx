@@ -99,7 +99,7 @@ export function ApiKeyDetailPage() {
           <Link
             to="/assistant"
             search={{ c: apiKey.assistant_conversation_id }}
-            className="text-primary hover:underline"
+            className="text-primary-text hover:underline"
           >
             Open chat
           </Link>

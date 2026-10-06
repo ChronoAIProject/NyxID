@@ -4,7 +4,6 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { Button } from "@/components/ui/button";
 import { ChatComposer } from "@/components/assistant/chat-composer";
 import {
-  UPLOAD_ACCEPT,
   createUploadDraft,
   removeUpload,
   uploadFile,
@@ -205,11 +204,12 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
       }
       attachmentButton={
         <>
+          {/* No picker MIME filter: extensionless text and browser MIME guesses
+              must reach the same server sniffing/validation as paste and drop. */}
           <input
             ref={input}
             type="file"
             multiple
-            accept={UPLOAD_ACCEPT}
             className="sr-only"
             tabIndex={-1}
             aria-label="Choose attachments"

@@ -20,7 +20,7 @@ export const connectionBillingLabels: Record<
   ConnectionBillingCategory,
   string
 > = {
-  platform: "NyxID",
+  platform: "NyxID managed",
   byok: "BYOK",
   not_billable: "—",
   unknown: "Unverified",

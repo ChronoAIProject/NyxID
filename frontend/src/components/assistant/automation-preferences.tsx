@@ -44,7 +44,7 @@ export function AgentAutomations({ agentId }: { readonly agentId: string }) {
         </p>
       ))}
       <Link
-        className="text-12 text-primary underline"
+        className="text-12 text-primary-text underline"
         to="/assistant/automations"
         search={{ agent: agentId }}
       >
@@ -60,7 +60,7 @@ export function AutomationPreferences() {
   const [open, setOpen] = useState(false);
   return (
     <div className="text-12">
-      <button className="text-primary underline" onClick={() => setOpen(!open)}>
+      <button className="text-primary-text underline" onClick={() => setOpen(!open)}>
         Timezone and automation budgets
       </button>
       {open && settings.data && (

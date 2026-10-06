@@ -131,26 +131,41 @@ pub async fn ssh_web_terminal(
             .and_then(|v| v.to_str().ok()),
     );
 
+    let concurrency = crate::services::service_concurrency_service::acquire_policy(
+        &state.db,
+        auth_context.concurrency_policy.as_ref(),
+        &auth_user.user_id.to_string(),
+    )
+    .await?;
+
     Ok(ws
         .on_upgrade(move |socket| async move {
-            handle_web_terminal(
-                state,
-                auth_user,
-                service_id,
-                auth_context.service_slug,
-                ssh_svc,
-                principal,
-                auth_context.mode,
-                cols,
-                rows,
-                socket,
-                session_guard,
-                client_meta,
-                tele,
-                auth_context.owner_user_id,
-                billing_egress_permit,
-            )
-            .await;
+            let work = async {
+                handle_web_terminal(
+                    state,
+                    auth_user,
+                    service_id,
+                    auth_context.service_slug,
+                    ssh_svc,
+                    principal,
+                    auth_context.mode,
+                    cols,
+                    rows,
+                    socket,
+                    session_guard,
+                    client_meta,
+                    tele,
+                    auth_context.owner_user_id,
+                    billing_egress_permit,
+                )
+                .await;
+                Ok(())
+            };
+            if let Some(lease) = concurrency {
+                let _ = lease.run(work).await;
+            } else {
+                let _ = work.await;
+            }
         })
         .into_response())
 }

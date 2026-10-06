@@ -11,9 +11,9 @@ async fn inspect(fixture: &Fixture, query: Value, health: bool) -> handler::Pool
         Query(serde_json::from_value(query).unwrap()),
     );
     let Json(result) = if health {
-        handler::health(args.0, args.1, args.2, args.3).await
+        Box::pin(handler::health(args.0, args.1, args.2, args.3)).await
     } else {
-        handler::pool_candidates(args.0, args.1, args.2, args.3).await
+        Box::pin(handler::pool_candidates(args.0, args.1, args.2, args.3)).await
     }
     .unwrap();
     result

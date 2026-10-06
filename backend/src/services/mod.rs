@@ -21,6 +21,7 @@ mod assistant_learning_publication;
 pub mod assistant_links;
 pub mod assistant_readiness_service;
 pub mod assistant_service;
+pub mod assistant_skill_authoring;
 pub mod assistant_wire_log_service;
 pub mod audit_chain_service;
 pub mod audit_service;
@@ -204,6 +205,7 @@ pub mod assistant_acknowledgement_service;
 pub mod assistant_agent_credential_service;
 pub mod assistant_continuation;
 pub mod assistant_group_service;
+pub mod assistant_instruction_context;
 pub mod assistant_live;
 pub mod assistant_nyxagent;
 pub mod assistant_profile_routing;
@@ -284,4 +286,5 @@ pub mod voice;
 #[cfg(test)]
 mod machine_access_tests;
 
+pub mod service_concurrency_service;
 pub mod utility_inference_service;

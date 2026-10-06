@@ -217,7 +217,6 @@ function ConversationRow({
             </DropdownMenuItem>
           ) : null}
           <DropdownMenuItem
-            disabled={Boolean(conversation.active_turn)}
             onSelect={onRequestDelete}
             className="text-destructive focus:text-destructive"
           >
@@ -883,8 +882,9 @@ export function AssistantSidebar({
           <DialogHeader>
             <DialogTitle>Delete chat?</DialogTitle>
             <DialogDescription>
-              &ldquo;{deleteTarget?.title}&rdquo; and its history are removed
-              permanently.
+              {deleteTarget?.active_turn
+                ? `The running reply will stop. “${deleteTarget.title}” and its history are removed permanently.`
+                : `“${deleteTarget?.title}” and its history are removed permanently.`}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

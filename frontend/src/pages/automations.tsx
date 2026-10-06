@@ -857,7 +857,7 @@ function AutomationHistory({
                 )}
                 {run.thread_id && (
                   <Link
-                    className="text-primary underline"
+                    className="text-primary-text underline"
                     to="/assistant"
                     search={{ c: run.thread_id }}
                   >

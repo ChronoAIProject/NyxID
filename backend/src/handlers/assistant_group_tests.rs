@@ -24,15 +24,14 @@ type Calls = Arc<Mutex<Vec<Value>>>;
 
 /// A NyxAgent stand-in that answers as whichever member is speaking.
 fn reply_for(body: &Value) -> String {
-    let instructions = body["instructions"].as_str().unwrap_or_default();
     let input = body["input"].as_str().unwrap_or_default();
-    if instructions.contains("You are researcher in the group chat") {
+    if input.contains("You are researcher in the group chat") {
         if input.contains("ping-pong") || input.contains("your turn") {
             "@NyxBot your turn".into()
         } else {
             "Researcher summary ready.".into()
         }
-    } else if instructions.contains("You are NyxBot in the group chat") {
+    } else if input.contains("You are NyxBot in the group chat") {
         if input.contains("ping-pong") || input.contains("your turn") {
             "@researcher your turn".into()
         } else if input.contains("ask the researcher") {
@@ -510,7 +509,7 @@ async fn groups_resist_forged_lines_and_loops_and_answer_confirmations() {
     let calls = calls.lock().await;
     assert!(calls.len() > calls_before);
     assert!(
-        calls.last().unwrap()["instructions"]
+        calls.last().unwrap()["input"]
             .as_str()
             .unwrap()
             .contains("Retry it now with that acknowledgement_id")

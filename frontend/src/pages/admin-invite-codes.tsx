@@ -983,7 +983,7 @@ function UserNameLink({ email, displayName, userId }: UserNameLinkProps) {
     <Link
       to="/admin/users/$userId"
       params={{ userId }}
-      className="inline-flex items-center gap-1 text-sm font-medium text-primary hover:underline underline-offset-2 cursor-pointer"
+      className="inline-flex items-center gap-1 text-sm font-medium text-primary-text hover:underline underline-offset-2 cursor-pointer"
     >
       <span className="truncate max-w-[200px]">{displayName || email}</span>
       <ArrowUpRight className="h-3 w-3 shrink-0" />
@@ -1051,7 +1051,7 @@ function InviteCodesByUserView({
               <button
                 type="button"
                 onClick={() => onOpenCode(r.codeId)}
-                className="font-mono text-sm font-medium text-primary hover:underline underline-offset-2 cursor-pointer shrink-0 text-left focus:outline-none"
+                className="font-mono text-sm font-medium text-primary-text hover:underline underline-offset-2 cursor-pointer shrink-0 text-left focus:outline-none"
                 disabled={isSaving}
               >
                 {r.code}
@@ -1107,7 +1107,7 @@ function InviteCodesByUserView({
                   <button
                     type="button"
                     onClick={() => onOpenCode(r.codeId)}
-                    className="font-mono text-sm font-medium text-primary hover:underline underline-offset-2 cursor-pointer text-left focus:outline-none"
+                    className="font-mono text-sm font-medium text-primary-text hover:underline underline-offset-2 cursor-pointer text-left focus:outline-none"
                     disabled={isSaving}
                   >
                     {r.code}

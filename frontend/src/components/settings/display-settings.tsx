@@ -64,7 +64,7 @@ function SegmentedChoice<T extends string | number>({
           aria-checked={value === option.value}
           onClick={() => onChange(option.value)}
           className={cn(
-            "text-control h-7 rounded-md px-3 text-12 transition-colors",
+            "min-h-control h-7 rounded-md px-3 text-12 transition-colors",
             value === option.value
               ? "bg-overlay-strong font-medium text-foreground"
               : "text-muted-foreground hover:text-foreground",

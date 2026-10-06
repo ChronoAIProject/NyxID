@@ -36,6 +36,7 @@ import {
   defaultFailoverPolicy,
   type CreateServicePoolInput,
   type FailoverPolicy,
+  type PoolStrategy,
   type ServicePool,
 } from "@/schemas/pools";
 import { poolEditorDefaults, poolEditorPayload } from "./pool-editor-state";
@@ -43,6 +44,7 @@ import { PoolConnectionsEditor } from "./pool-connections-editor";
 import { Choice, PolicyEditor, Toggle } from "./pool-controls";
 import { message, readOnlyPreview, strategyLabels } from "./pool-labels";
 import type { PoolOperation } from "./pool-operation-check";
+import { PoolStrategyIcon, ServicePoolIcon } from "./service-pool-icons";
 
 export function PoolEditor({
   pool,
@@ -153,7 +155,8 @@ export function PoolEditor({
         className="data-[state=open]:!animate-none md:data-[state=open]:!animate-none md:max-w-2xl [&_input:focus-visible]:border-primary [&_input:focus-visible]:ring-1 [&_input:focus-visible]:ring-primary/40"
       >
         <DialogHeader>
-          <DialogTitle>
+          <DialogTitle className="flex items-center gap-2">
+            <ServicePoolIcon className="size-4 shrink-0" />
             {pool ? "Edit service pool" : "Create service pool"}
           </DialogTitle>
           <DialogDescription className="text-12">
@@ -222,7 +225,18 @@ export function PoolEditor({
                 <Choice
                   label="Routing"
                   value={values.strategy ?? "priority"}
-                  options={Object.entries(strategyLabels)}
+                  options={Object.entries(strategyLabels).map(
+                    ([strategy, label]) => [
+                      strategy,
+                      <span className="flex items-center gap-2" key={strategy}>
+                        <PoolStrategyIcon
+                          strategy={strategy as PoolStrategy}
+                          className="size-3.5 shrink-0"
+                        />
+                        {label}
+                      </span>,
+                    ],
+                  )}
                   onChange={setStrategy}
                 />
                 <p className="text-12 text-muted-foreground">
