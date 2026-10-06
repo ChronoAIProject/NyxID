@@ -492,6 +492,10 @@ const ALLOWED_FORWARD_HEADERS: &[&str] = &[
     // when they are absent.
     "http-referer",
     "x-title",
+    // LinkedIn API version selection; its `/rest/*` endpoints reject
+    // requests without `LinkedIn-Version`.
+    "linkedin-version",
+    "x-restli-protocol-version",
 ];
 
 /// Namespaced header prefixes that should be forwarded transparently.
@@ -4993,6 +4997,23 @@ mod tests {
         assert!(is_allowed_forward_header("tracestate"));
         assert!(is_allowed_forward_header("last-event-id"));
         assert!(is_allowed_forward_header("prefer"));
+    }
+
+    #[test]
+    fn linkedin_version_headers_are_forwarded() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert("LinkedIn-Version", "202609".parse().unwrap());
+        headers.insert("X-Restli-Protocol-Version", "2.0.0".parse().unwrap());
+
+        let forwarded = collect_forward_headers(&headers);
+        for (name, value) in [
+            ("linkedin-version", "202609"),
+            ("x-restli-protocol-version", "2.0.0"),
+        ] {
+            assert!(forwarded.iter().any(|(actual_name, actual_value)| {
+                actual_name.eq_ignore_ascii_case(name) && actual_value == value
+            }));
+        }
     }
 
     #[test]
