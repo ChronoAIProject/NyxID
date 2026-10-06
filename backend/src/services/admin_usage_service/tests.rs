@@ -1696,9 +1696,9 @@ async fn hourly_and_daily_reductions_have_covering_indexes() {
     ] {
         // Flat Decimal128 mirrors use covered index slots after normalization.
         for index in [
-            "usage_rollup_reduce_window_exact_v4",
-            "usage_rollup_reduce_actor_exact_v4",
-            "usage_rollup_reduce_owner_exact_v4",
+            "usage_rollup_reduce_window_exact_v5",
+            "usage_rollup_reduce_actor_exact_v5",
+            "usage_rollup_reduce_owner_exact_v5",
         ] {
             let mut group = doc! { "_id": "$single_display_key" };
             for field in usage_rollup::MEASURES
@@ -1714,10 +1714,10 @@ async fn hourly_and_daily_reductions_have_covering_indexes() {
             }
             let mut filter = doc! { bucket: { "$gte": bson::DateTime::from_chrono(end - chrono::Duration::days(1)), "$lt": bson::DateTime::from_chrono(end) }, "single_display_key": { "$ne": null } };
             match index {
-                "usage_rollup_reduce_actor_exact_v4" => {
+                "usage_rollup_reduce_actor_exact_v5" => {
                     filter.insert("actor", "actor");
                 }
-                "usage_rollup_reduce_owner_exact_v4" => {
+                "usage_rollup_reduce_owner_exact_v5" => {
                     filter.insert("owner", "owner");
                 }
                 _ => (),
@@ -2457,7 +2457,7 @@ async fn covered_credit_mirrors_preserve_legacy_scale_and_explicit_null() {
     let explain = db
         .run_command(doc! {
             "explain": { "aggregate": collection.name(), "pipeline": pipeline, "cursor": {},
-                "hint": "usage_rollup_reduce_window_exact_v4" },
+                "hint": "usage_rollup_reduce_window_exact_v5" },
             "verbosity": "executionStats",
         })
         .await

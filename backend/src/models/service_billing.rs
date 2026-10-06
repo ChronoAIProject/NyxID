@@ -226,6 +226,23 @@ impl TokenBreakdown {
     }
 }
 
+/// Provider-reported audio token classes (OpenAI/xAI realtime
+/// `input_token_details.audio_tokens` / `output_token_details.audio_tokens`,
+/// chat `prompt_tokens_details` / `completion_tokens_details`). Subsets of
+/// the prompt/completion counts, metered for observability only and never
+/// priced.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct AudioTokens {
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+}
+
+impl AudioTokens {
+    pub fn is_empty(&self) -> bool {
+        self.input_tokens == 0 && self.output_tokens == 0
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct PlatformUsage {
     pub requests: i64,
@@ -244,6 +261,8 @@ pub struct PlatformUsage {
     pub images: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_breakdown: Option<TokenBreakdown>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_tokens: Option<AudioTokens>,
 }
 
 impl PlatformUsage {
@@ -269,6 +288,11 @@ impl PlatformUsage {
 
     pub fn with_token_breakdown(mut self, breakdown: Option<TokenBreakdown>) -> Self {
         self.token_breakdown = breakdown.filter(|breakdown| !breakdown.is_empty());
+        self
+    }
+
+    pub fn with_audio_tokens(mut self, audio: Option<AudioTokens>) -> Self {
+        self.audio_tokens = audio.filter(|audio| !audio.is_empty());
         self
     }
 }

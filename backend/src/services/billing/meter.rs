@@ -250,7 +250,7 @@ pub(super) async fn persist_settlement_intent(
             BillingLayer::Platform,
             platform_quantity,
             model.clone(),
-            platform.token_breakdown.as_ref(),
+            Some(&platform),
             Some(resale_quantity),
             finalized_at,
         )
@@ -285,7 +285,7 @@ pub(super) async fn persist_settlement_intent(
             BillingLayer::Platform,
             platform_quantity,
             model.clone(),
-            platform.token_breakdown.as_ref(),
+            Some(&platform),
             None,
             finalized_at,
         )
@@ -350,8 +350,7 @@ async fn materialize_component_rows(
                     BillingLayer::Platform,
                     row.flush_seq,
                 ))
-            .then_some(usage.token_breakdown.as_ref())
-            .flatten(),
+            .then_some(usage),
             None,
             coordinator.finalized_at.unwrap_or(coordinator.updated_at),
         )
@@ -524,6 +523,7 @@ pub(super) fn reserved_row(
         credential_class: ctx.credential_class,
         model: None,
         token_breakdown: None,
+        audio_tokens: None,
         reserved_credits,
         funding,
         quantity: None,
@@ -578,11 +578,11 @@ async fn finalize_layer(
     layer: BillingLayer,
     quantity: i64,
     model: Option<String>,
-    token_breakdown: Option<&crate::models::service_billing::TokenBreakdown>,
+    request_usage: Option<&PlatformUsage>,
     pending_resale_quantity: Option<i64>,
     finalized_at: chrono::DateTime<Utc>,
 ) -> AppResult<Option<UsageMeterRow>> {
-    finalize_matching(db, doc! { "transaction_id": transaction_id(billing_request_id, layer, None), "status": "forwarded" }, quantity, model, token_breakdown, pending_resale_quantity, finalized_at).await
+    finalize_matching(db, doc! { "transaction_id": transaction_id(billing_request_id, layer, None), "status": "forwarded" }, quantity, model, request_usage, pending_resale_quantity, finalized_at).await
 }
 
 async fn finalize_matching(
@@ -590,7 +590,8 @@ async fn finalize_matching(
     filter: bson::Document,
     quantity: i64,
     model: Option<String>,
-    token_breakdown: Option<&crate::models::service_billing::TokenBreakdown>,
+    // Request-level observability classes, recorded on the primary row only.
+    request_usage: Option<&PlatformUsage>,
     pending_resale_quantity: Option<i64>,
     finalized_at: chrono::DateTime<Utc>,
 ) -> AppResult<Option<UsageMeterRow>> {
@@ -603,10 +604,15 @@ async fn finalize_matching(
         "updated_at": bson::DateTime::from_chrono(finalized_at),
         "finalized_at": bson::DateTime::from_chrono(finalized_at),
     };
-    if let Some(breakdown) = token_breakdown
+    if let Some(breakdown) = request_usage.and_then(|usage| usage.token_breakdown.as_ref())
         && let Ok(breakdown) = bson::to_bson(breakdown)
     {
         set.insert("token_breakdown", breakdown);
+    }
+    if let Some(audio) = request_usage.and_then(|usage| usage.audio_tokens.as_ref())
+        && let Ok(audio) = bson::to_bson(audio)
+    {
+        set.insert("audio_tokens", audio);
     }
     if let Some(resale_quantity) = pending_resale_quantity {
         set.insert("pending_resale_quantity", resale_quantity);
@@ -2144,10 +2150,16 @@ mod tests {
             cached_tokens: 100,
             cache_creation_tokens: 30,
         };
+        let audio = crate::models::service_billing::AudioTokens {
+            input_tokens: 90,
+            output_tokens: 25,
+        };
         settle(
             &db,
             &metered,
-            PlatformUsage::llm_completion(640, 160).with_token_breakdown(Some(breakdown)),
+            PlatformUsage::llm_completion(640, 160)
+                .with_token_breakdown(Some(breakdown))
+                .with_audio_tokens(Some(audio)),
             None,
             Some("test-model".to_string()),
         )
@@ -2161,6 +2173,7 @@ mod tests {
             .expect("find row")
             .expect("row exists");
         assert_eq!(row.token_breakdown, Some(breakdown));
+        assert_eq!(row.audio_tokens, Some(audio));
 
         // An empty breakdown is dropped instead of stored as zeros.
         let empty = PlatformUsage::llm_completion(64, 1).with_token_breakdown(Some(

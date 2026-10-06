@@ -12,6 +12,9 @@ export const usageStatsSchema = z.object({
   completion_tokens: count,
   cached_tokens: count,
   cache_creation_tokens: count,
+  // Audio subsets of input/output; absent from older servers.
+  audio_input_tokens: count.default(0),
+  audio_output_tokens: count.default(0),
   total_tokens: count,
   gross_cost: creditsSchema.nullable().optional(),
   gross_cost_micros: count.nullable(),
@@ -83,6 +86,8 @@ export const USAGE_SORTS = [
   "completion_tokens",
   "cached_tokens",
   "cache_creation_tokens",
+  "audio_input_tokens",
+  "audio_output_tokens",
 ] as const;
 export const adminUsageSearchSchema = z.object({
   period: z.enum(["24h", "7d", "30d", "custom"]).catch("24h"),

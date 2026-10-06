@@ -1452,6 +1452,7 @@ mod tests {
                         bytes: 100,
                         tokens: 7,
                         token_breakdown: None,
+                        audio_tokens: None,
                     },
                     None,
                     None,
