@@ -17,6 +17,10 @@ import {
   SelectItem,
 } from "@/components/ui/select";
 import { metricLabel } from "@/schemas/billing-metrics";
+import type { BillingUsagePeriod } from "@/schemas/billing";
+import { useBillingUsage } from "@/hooks/use-billing";
+import { serviceUsageSummary } from "@/lib/service-usage";
+import { formatExactCredits, hasCredits } from "@/lib/credits";
 import type { ServiceInsight } from "@/schemas/service-insights";
 import {
   useServiceInsights,
@@ -62,6 +66,132 @@ export function InsightsUnavailable({
           Retry
         </Button>
       )}
+    </div>
+  );
+}
+
+const USAGE_PERIODS: readonly [BillingUsagePeriod, string][] = [
+  ["24h", "Last 24 hours"],
+  ["7d", "Last 7 days"],
+  ["30d", "Last 30 days"],
+  ["90d", "Last 90 days"],
+];
+
+function ConnectionUsage({ connection }: { readonly connection: KeyInfo }) {
+  const [period, setPeriod] = useState<BillingUsagePeriod>("30d");
+  const usage = useBillingUsage(period);
+  const summary = usage.data
+    ? serviceUsageSummary(usage.data.rows, connection.slug)
+    : null;
+  const org =
+    connection.credential_source?.type === "org"
+      ? connection.credential_source.org_name
+      : null;
+  return (
+    <div
+      className="space-y-3 rounded-lg border border-border/60 p-3 text-xs"
+      aria-label={`Your usage of ${connection.label}`}
+      role="group"
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="font-medium">Your usage</p>
+        <Select
+          value={period}
+          onValueChange={(value) => setPeriod(value as BillingUsagePeriod)}
+        >
+          <SelectTrigger aria-label="Usage period" className="h-8 w-40">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {USAGE_PERIODS.map(([value, label]) => (
+              <SelectItem key={value} value={value}>
+                {label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+      {usage.isPending ? (
+        <p className="text-muted-foreground">Loading usage…</p>
+      ) : usage.isError ? (
+        <p className="text-muted-foreground">Usage couldn’t load.</p>
+      ) : !summary ? (
+        <p className="text-muted-foreground">
+          No usage recorded through <code>{connection.slug}</code> in this
+          period.
+        </p>
+      ) : (
+        <>
+          <dl className="grid gap-3 sm:grid-cols-3">
+            <div>
+              <dt className="text-muted-foreground">Calls</dt>
+              <dd className="mt-1 text-sm font-medium tabular-nums">
+                {summary.calls.toLocaleString()}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-muted-foreground">Metered</dt>
+              <dd className="mt-1 text-sm font-medium tabular-nums">
+                {summary.quantities
+                  .map(
+                    ({ metric, quantity }) =>
+                      `${quantity.toLocaleString()} ${metricLabel(metric, quantity)}`,
+                  )
+                  .join(" · ")}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-muted-foreground">NyxID credits charged</dt>
+              <dd className="mt-1 text-sm font-medium tabular-nums">
+                {!summary.billable
+                  ? "None · metered only"
+                  : summary.charged == null
+                    ? "Not settled yet"
+                    : formatExactCredits(summary.charged)}
+              </dd>
+              {summary.billable &&
+                [
+                  ["Wallet", summary.wallet],
+                  ["Grants", summary.grant],
+                  ["Allowances", summary.allowance],
+                ].some(([, value]) => hasCredits(value)) && (
+                  <dd className="mt-0.5 text-[11px] text-muted-foreground">
+                    {[
+                      ["Wallet", summary.wallet],
+                      ["Grants", summary.grant],
+                      ["Allowances", summary.allowance],
+                    ]
+                      .filter(([, value]) => hasCredits(value))
+                      .map(
+                        ([label, value]) =>
+                          `${label} ${formatExactCredits(value!)}`,
+                      )
+                      .join(" · ")}
+                  </dd>
+                )}
+            </div>
+          </dl>
+          {summary.agents.length > 1 || summary.agents[0]?.name ? (
+            <p className="text-muted-foreground">
+              By caller:{" "}
+              {summary.agents
+                .slice(0, 5)
+                .map(
+                  ({ name, calls }) =>
+                    `${name ?? "You (signed in)"} ${calls.toLocaleString()}`,
+                )
+                .join(" · ")}
+              {summary.agents.length > 5 &&
+                ` · +${summary.agents.length - 5} more`}
+            </p>
+          ) : null}
+        </>
+      )}
+      <p className="text-[11px] text-muted-foreground">
+        Recorded by slug <code>{connection.slug}</code> for your personal
+        billing account, so connections sharing this slug are combined.
+        {org && ` Usage billed to ${org} isn’t included.`}
+      </p>
     </div>
   );
 }
@@ -260,6 +390,7 @@ function ConnectionBillingPanel({
       ) : (
         <InsightsUnavailable state={selectedState} />
       )}
+      <ConnectionUsage connection={connection} />
     </section>
   );
 }

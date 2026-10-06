@@ -318,7 +318,9 @@ describe("service card billing and caller details", () => {
     expect(within(panel).getByText("Billing flow")).toBeVisible();
     expect(within(panel).getByText("Expected payer")).toBeVisible();
     expect(within(panel).getByText("Pending")).toBeVisible();
-    expect(within(panel).queryByRole("combobox")).not.toBeInTheDocument();
+    expect(
+      within(panel).queryByRole("combobox", { name: "Preview billing for" }),
+    ).not.toBeInTheDocument();
     expect(
       within(panel).getByRole("table", { name: "Configured NyxID rates" }),
     ).toBeVisible();

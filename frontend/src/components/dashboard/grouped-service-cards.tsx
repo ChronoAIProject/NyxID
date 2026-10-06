@@ -286,7 +286,7 @@ function GroupCard({
         viewTransitionName: `service-card-${headingId.replace(/[^a-zA-Z0-9-]/g, "")}`,
       }}
       className={cn(
-        "min-w-0 scroll-mt-[calc(var(--service-filters-height,0px)+32px)] rounded-xl border border-border bg-card shadow-sm",
+        "min-w-0 scroll-mt-[calc(var(--service-filters-height,0px)+24px)] sm:scroll-mt-[calc(var(--service-filters-height,0px)+20px)] rounded-xl border border-border bg-card shadow-sm",
         expanded
           ? "sm:col-span-2 xl:col-span-3"
           : "relative focus-within:z-10 hover:z-10",
@@ -298,7 +298,7 @@ function GroupCard({
         className={cn(
           "service-card-header",
           expanded
-            ? "sticky top-[calc(var(--service-filters-height,0px)+32px)] z-10"
+            ? "sticky top-[calc(var(--service-filters-height,0px)+24px)] z-10 sm:top-[calc(var(--service-filters-height,0px)+20px)]"
             : undefined,
         )}
       >

@@ -266,7 +266,7 @@ export function ServiceViewToolbar({
       role="region"
       aria-label="Service filters"
       data-stuck={stuck}
-      className="service-filter-toolbar pointer-events-none sticky top-0 z-20"
+      className="service-filter-toolbar pointer-events-none sticky -top-2 z-20 sm:-top-3"
     >
       <div
         className={cn(
