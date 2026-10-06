@@ -1,6 +1,6 @@
 # Service preference order for agent discovery
 
-Branch: `service-tool-preference-order`. Planner: Fable 5.1. Status: implemented and locally verified against `868ce0b7`, including release 0.66.0 and the latest frontend readability changes. All 28 acceptance criteria and every substantiated review finding are closed. §17 records the acceptance matrix; §19 records backend/CLI/Clippy validation; §20 records final frontend/wizard validation. Final remote CI and Opus 5.5's verdict are recorded on [PR #1796](https://github.com/ChronoAIProject/NyxID/pull/1796), bound to its published head. Earlier integration and validation history is retained below.
+Branch: `service-tool-preference-order`. Planner: Fable 5.1. Status: implemented and locally verified against `868ce0b7`, including release 0.66.0 and the latest frontend readability changes. All 28 acceptance criteria and every substantiated review finding are closed. §17 records the acceptance matrix; §19 records backend/CLI/Clippy validation; §20 records frontend/wizard validation; §21 records the final label-layout correction and its validation. Final remote CI and Opus 5.5's verdict are recorded on [PR #1796](https://github.com/ChronoAIProject/NyxID/pull/1796), bound to its published head. Earlier integration and validation history is retained below.
 
 ## 1. Problem and scope
 
