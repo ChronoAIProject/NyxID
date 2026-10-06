@@ -1533,11 +1533,24 @@ async fn execute_turn(
         };
     decisions
         .push_str(&super::assistant_team::turn_notes(state, row, agent.as_ref(), previous).await);
-    let prepared = crate::services::assistant_instruction_context::Prepared::new(
+    // Rollout-gated authoring rules are instructions, so they belong in the
+    // stable (fingerprinted) part rather than the per-turn quoted context.
+    let guidance = if !row.is_subagent()
+        && !row.guest_turn
+        && crate::services::assistant_skill_authoring::enabled(&state.db, &row.user_id)
+            .await
+            .unwrap_or(false)
+    {
+        crate::services::assistant_skill_authoring::GUIDANCE
+    } else {
+        ""
+    };
+    let prepared = crate::services::assistant_instruction_context::Prepared::with_guidance(
         state.audit_chain_hmac_key.as_ref().as_ref(),
         row,
         agent.as_ref(),
         &history,
+        guidance,
     )
     .map_err(|_| TurnError::new("assistant_unavailable"))?;
     *instruction_context = Some(prepared);

@@ -41,7 +41,20 @@ impl Prepared {
         agent: Option<&AssistantAgent>,
         history: &[AssistantMessage],
     ) -> AppResult<Self> {
-        let stable = engine::base_prompt(row, agent) + PROTOCOL;
+        Self::with_guidance(key, row, agent, history, "")
+    }
+
+    /// `guidance` is configuration-dependent instruction text (for example a
+    /// rollout-gated tool's usage rules). It is part of the stable fingerprint,
+    /// so enabling or disabling it resets the session once.
+    pub fn with_guidance(
+        key: &[u8],
+        row: &AssistantConversation,
+        agent: Option<&AssistantAgent>,
+        history: &[AssistantMessage],
+        guidance: &str,
+    ) -> AppResult<Self> {
+        let stable = engine::base_prompt(row, agent) + guidance + PROTOCOL;
         let fingerprint = audit_service::keyed_fingerprint(Some(key), DOMAIN, stable.as_bytes())
             .ok_or_else(|| AppError::Internal("Instruction fingerprint unavailable".into()))?;
         let previous = row.nyxagent_instruction_binding.as_ref().filter(|binding| {

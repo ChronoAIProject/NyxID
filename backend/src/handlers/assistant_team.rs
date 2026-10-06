@@ -625,13 +625,6 @@ pub(crate) async fn turn_notes(
     if row.guest_turn {
         return notes;
     }
-    if !row.is_subagent()
-        && crate::services::assistant_skill_authoring::enabled(&state.db, &row.user_id)
-            .await
-            .unwrap_or(false)
-    {
-        notes.push_str(crate::services::assistant_skill_authoring::GUIDANCE);
-    }
     if let Some(agent) = agent {
         // Only the agent's own threads hear about its other chats.
         if row.channel.is_none() && row.group_request_id.is_none() {
