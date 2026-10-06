@@ -239,3 +239,105 @@ pub async fn run_now(
         json!({"run_id": learning::run_now(&state, &owner, &agent_id).await?}),
     ))
 }
+
+/// Content never enters acknowledgement rows, audit or model-visible output.
+pub async fn authored_preview(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((agent, id)): Path<(String, String)>,
+) -> AppResult<Json<Value>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    let actor = auth.user_id.to_string();
+    engine::require_enabled(&state.db, &actor).await?;
+    Ok(Json(
+        review::authored_preview(&state, &actor, &agent, &id).await?,
+    ))
+}
+
+pub(crate) async fn decide_authored(
+    state: &AppState,
+    auth: &AuthUser,
+    mut card: crate::models::assistant_acknowledgement::AssistantAcknowledgement,
+    allow: bool,
+) -> AppResult<crate::models::assistant_acknowledgement::AssistantAcknowledgement> {
+    super::login_client_context::require_first_party_human(auth)?;
+    let actor = auth.user_id.to_string();
+    if state.db.collection::<mongodb::bson::Document>(crate::models::api_key::COLLECTION_NAME)
+        .find_one(mongodb::bson::doc! {"_id":&card.api_key_id,"user_id":&actor,"is_active":true,
+            "$or":[{"expires_at":mongodb::bson::Bson::Null},{"expires_at":{"$gt":mongodb::bson::DateTime::now()}}]})
+        .await?.is_none() {
+        return Err(AppError::Forbidden("Skill review key is no longer current".into()));
+    }
+    let reference = card
+        .authored_skill
+        .clone()
+        .ok_or_else(|| AppError::NotFound("Skill review not found".into()))?;
+    let chat = acks::for_key(&state.db, &actor, Some(&card.api_key_id))
+        .await?
+        .filter(|chat| chat.conversation_id == card.conversation_id)
+        .ok_or_else(|| AppError::Forbidden("Skill review key is no longer current".into()))?;
+    crate::services::assistant_skill_authoring::require_author(&state.db, &chat).await?;
+    if card.status == "pending" {
+        card = acks::decide(&state.db, &actor, &card.conversation_id, &card.id, allow).await?;
+        acks::audit_decision(
+            &state.db,
+            &crate::services::audit_service::AuditActor::from_auth_user(auth),
+            &card,
+        )
+        .await;
+    }
+    if !allow && card.status == "denied" {
+        review::reject(
+            state,
+            &actor,
+            &reference.agent_id,
+            &reference.proposal_id,
+            reference.revision,
+            "rejected",
+        )
+        .await?;
+        return Ok(card);
+    }
+    if !allow || !matches!(card.status.as_str(), "allowed" | "used") {
+        return Err(AppError::Conflict(
+            "Skill approval is no longer pending".into(),
+        ));
+    }
+    let preview =
+        review::authored_preview(state, &actor, &reference.agent_id, &reference.proposal_id)
+            .await?;
+    if preview["status"] == "pinned" {
+        return Ok(card);
+    }
+    let binding = review::approval_binding(
+        state,
+        &actor,
+        &reference.agent_id,
+        &reference.proposal_id,
+        reference.revision,
+        reference.skills_revision,
+    )
+    .await?;
+    let reader = super::agent_skills::Reader {
+        state,
+        person: &actor,
+        // This is the reviewed human publication, not a new agent tool effect.
+        // Its consumed card and live chat key fence authority; Ornn uses the
+        // approving person's normal signed identity without a second card.
+        thread_key: None,
+        scopes: None,
+        chat: None,
+    };
+    Box::pin(review::approve(
+        state,
+        &chat,
+        &reference.agent_id,
+        &reference.proposal_id,
+        &card.id,
+        &binding,
+        &reader,
+    ))
+    .await?;
+    card.status = "used".into();
+    Ok(card)
+}

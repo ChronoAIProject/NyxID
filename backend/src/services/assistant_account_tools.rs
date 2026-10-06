@@ -265,6 +265,32 @@ pub fn virtual_service(chat: &acks::ChatAuthority) -> McpToolService {
     service
         .endpoints
         .extend(super::assistant_team_tools::agent_endpoints());
+    // Gated authoring is appended only by the actor-aware discovery helper.
+    service
+        .endpoints
+        .retain(|e| e.name != super::assistant_skill_authoring::TOOL_NAME);
+    service
+}
+
+pub async fn virtual_service_for(
+    db: &mongodb::Database,
+    chat: &acks::ChatAuthority,
+) -> McpToolService {
+    let mut service = virtual_service(chat);
+    // Only owner NyxBot chats need this rollout lookup. A flag-store failure
+    // hides authoring alone, preserving the existing tools for every caller.
+    if !chat.guest
+        && chat.is_orchestrator()
+        && super::assistant_skill_authoring::enabled(db, &chat.user_id)
+            .await
+            .unwrap_or(false)
+    {
+        service.endpoints.extend(
+            super::assistant_team_tools::endpoints()
+                .into_iter()
+                .filter(|e| e.name == super::assistant_skill_authoring::TOOL_NAME),
+        );
+    }
     service
 }
 

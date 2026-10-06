@@ -21,6 +21,7 @@ mod assistant_learning_publication;
 pub mod assistant_links;
 pub mod assistant_readiness_service;
 pub mod assistant_service;
+pub mod assistant_skill_authoring;
 pub mod assistant_wire_log_service;
 pub mod audit_chain_service;
 pub mod audit_service;

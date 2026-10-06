@@ -625,6 +625,15 @@ async fn request_tracked_with_machine_context(
     let now = Utc::now();
     let orchestrated = !chat.is_orchestrator() && request.kind != "action";
     let candidate = AssistantAcknowledgement {
+        authored_skill: if request.tool == Some(super::assistant_agent_learning_review::TOOL) {
+            request
+                .arguments
+                .and_then(|a| a.get("authored_skill"))
+                .map(|value| serde_json::from_value(value.clone()).map_err(|_| not_found()))
+                .transpose()?
+        } else {
+            None
+        },
         skill_selection: if request.kind == "skills"
             && request
                 .arguments
@@ -778,6 +787,8 @@ pub fn refusal(row: &AssistantAcknowledgement) -> Value {
         "The user denied this request. Do not retry or request another \
                 card unless the user explicitly asks again in a later message."
             .into()
+    } else if row.authored_skill.is_some() {
+        "End your turn. The owner must review the complete draft on its NyxID card. NyxID publishes and pins after approval; do not retry or accept a chat reply as publication approval.".into()
     } else if row.voice_request_id.is_some() {
         "NyxID is awaiting the owner's confirmation of this exact action. End this turn; \
         the voice coordinator reads the server summary and handles the owner's decision. \
@@ -806,7 +817,11 @@ pub fn refusal(row: &AssistantAcknowledgement) -> Value {
         "kind": row.kind, "acknowledgement_id": row.id, "service_slug": row.service_slug,
         "service_name": row.service_name, "summary": row.summary, "decider": row.decider,
         "instructions": instructions});
-    if row.kind == "action" && !denied && row.voice_request_id.is_none() {
+    if row.kind == "action"
+        && !denied
+        && row.voice_request_id.is_none()
+        && row.authored_skill.is_none()
+    {
         value["confirm_phrase"] = json!(format!("yes {}", confirm_code(&row.id)));
     }
     value
@@ -870,6 +885,7 @@ pub async fn decide_reply(
         .find(
             doc! {"user_id": owner, "conversation_id": {"$in": conversation_ids},
             "kind": "action", "status": "pending", "decider": "user",
+            "authored_skill": bson::Bson::Null,
             "expires_at": {"$gt": bson::DateTime::from_chrono(now)}},
         )
         .await?
@@ -1109,6 +1125,9 @@ pub(crate) async fn decide_with_voice(
                     .session(&mut *session)
                     .await?
                     .ok_or_else(not_found)?;
+                if row.authored_skill.is_some() && (voice.is_some() || by_nyxbot) {
+                    return Err(AppError::Forbidden("Review the complete skill draft on its owner card".into()));
+                }
                 if let Some(voice)=&voice {
                     super::voice::confirmation::fence_decision(&db,session,&row,voice).await?;
                 }

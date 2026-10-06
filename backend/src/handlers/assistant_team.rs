@@ -625,6 +625,13 @@ pub(crate) async fn turn_notes(
     if row.guest_turn {
         return notes;
     }
+    if !row.is_subagent()
+        && crate::services::assistant_skill_authoring::enabled(&state.db, &row.user_id)
+            .await
+            .unwrap_or(false)
+    {
+        notes.push_str(crate::services::assistant_skill_authoring::GUIDANCE);
+    }
     if let Some(agent) = agent {
         // Only the agent's own threads hear about its other chats.
         if row.channel.is_none() && row.group_request_id.is_none() {
@@ -853,6 +860,7 @@ pub(crate) async fn execute_tool(
         if !matches!(
             name,
             "set_agent_operations"
+                | "draft_agent_skill"
                 | "set_agent_skills"
                 | "decide_permission"
                 | "machine_update"
@@ -941,6 +949,7 @@ fn dispatch<'a>(
         | "skill_read"
         | "learning_status"
         | "learning_list_proposals"
+        | "draft_agent_skill"
         | "learning_run_now" => Box::pin(super::agent_skills::dispatch(state, chat, name, args)),
         "set_guest_access" | "update_subagent" => {
             Box::pin(dispatch_agent_settings(state, chat, name, args))
