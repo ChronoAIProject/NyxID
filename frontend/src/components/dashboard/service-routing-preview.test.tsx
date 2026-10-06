@@ -239,6 +239,8 @@ describe("live grouped services", () => {
       catalog_service_id: "chrono-llm",
       catalog_service_slug: "chrono-llm",
       catalog_service_name: "Chrono LLM",
+      api_key_id: null,
+      auth_method: "none",
     };
     records.push(connection);
     internalCatalog.push({
@@ -312,7 +314,7 @@ describe("live grouped services", () => {
   });
 
   it.each([
-    { type: "api_key", auth: "bearer", label: "—" },
+    { type: "api_key", auth: "bearer", label: "BYOK" },
     { type: "api_key", auth: "none", label: "—" },
     { type: "oauth2", auth: "bearer", label: "—" },
   ])(

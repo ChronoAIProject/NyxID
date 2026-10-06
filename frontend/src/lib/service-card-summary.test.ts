@@ -48,12 +48,20 @@ const healthy = {
 describe("billing gate before credential supply — reviewed acceptance cases", () => {
   it.each([
     connection,
+    { ...connection, node_id: "node", credential_type: "node_managed" },
+    { ...connection, is_active: false },
+  ])("shows BYOK for your own key even on an unpriced service: %j", (row) => {
+    const catalog = { slug: "llm-anthropic", billing: null };
+    expect(
+      connectionBillingCategory(row, configuredBilling(row, catalog), catalog),
+    ).toBe("byok");
+  });
+
+  it.each([
     { ...connection, credential_binding: "platform" as const },
     oauth,
     { ...oauth, oauth_app_source: "platform" as const },
-    { ...connection, node_id: "node", credential_type: "node_managed" },
-    { ...connection, is_active: false },
-  ])("shows a dash for every credential on an unpriced service: %j", (row) => {
+  ])("shows a dash for other credentials on an unpriced service: %j", (row) => {
     const catalog = { slug: "llm-anthropic", billing: null };
     expect(
       connectionBillingCategory(row, configuredBilling(row, catalog), catalog),
@@ -161,12 +169,15 @@ describe("billing gate before credential supply — reviewed acceptance cases", 
         ...bill,
         service_billing_configured: false,
       }),
-    ).toBe("not_billable");
+    ).toBe("byok");
   });
 
   it("does not label missing catalog data or restricted rows as free", () => {
     expect(
-      connectionBillingCategory(connection, configuredBilling(connection)),
+      connectionBillingCategory(
+        { ...connection, api_key_id: null },
+        configuredBilling({ ...connection, api_key_id: null }),
+      ),
     ).toBe("unknown");
     expect(
       connectionBillingCategory(connection, {
@@ -181,7 +192,7 @@ describe("billing gate before credential supply — reviewed acceptance cases", 
       node_id: "node",
     };
     expect(connectionBillingCategory(custom, configuredBilling(custom))).toBe(
-      "not_billable",
+      "byok",
     );
   });
 

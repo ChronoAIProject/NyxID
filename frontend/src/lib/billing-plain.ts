@@ -126,6 +126,22 @@ export function plainBilling(
       ? `${rates[0]!.credits_per_unit} credits/${unit(rates[0]!.metric)}`
       : "NyxID credits";
 
+  // The service has a NyxID price, but none applies to this credential. That
+  // is a pricing gap, not a free service, so say exactly that.
+  const otherPrice = connection.platform_key_pricing;
+  if (free && supplier === "nyxid" && !master && otherPrice) {
+    return {
+      verdict: "free",
+      headline: "No NyxID price set for this connection",
+      detail: `${provider} has a NyxID price of ${otherPrice.credits_per_unit} credits per ${unit(otherPrice.metric)}, but it only applies to calls made with NyxID's ${provider} key. No price is set for sign-ins through NyxID's ${provider} app, so these calls aren't charged under the current settings.`,
+      key,
+      payer: "No one under the current settings",
+      price: "No price set for this connection",
+      short: "No price set",
+      tips: [],
+    };
+  }
+
   if (free) {
     const detail =
       supplier === "nyxid"

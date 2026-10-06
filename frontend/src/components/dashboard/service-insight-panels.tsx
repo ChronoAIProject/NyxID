@@ -1,11 +1,6 @@
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
-import {
-  ArrowUpRight,
-  Bot,
-  CreditCard,
-  UsersRound,
-} from "lucide-react";
+import { ArrowUpRight, Bot, CreditCard, UsersRound } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -343,6 +338,15 @@ function ConnectionBillingPanel({
       ? insight.billing
       : selectedState.connections.get(connection.id)?.billing;
   const plain = bill ? plainBilling(connection, bill) : null;
+  // Settings say what should be charged; recorded usage says what was.
+  const recent = useBillingUsage("7d");
+  const recentCharged = recent.data
+    ? serviceUsageSummary(recent.data.rows, connection.slug)?.charged
+    : null;
+  const chargedAnyway =
+    plain?.verdict === "free" &&
+    recentCharged != null &&
+    hasCredits(recentCharged);
   return (
     <section
       className="space-y-4 p-3"
@@ -378,8 +382,14 @@ function ConnectionBillingPanel({
       {plain ? (
         <>
           <div className="rounded-lg border border-border/60 bg-muted/20 p-3">
-            <p className="text-sm font-medium">{plain.headline}</p>
-            <p className="mt-1 text-xs text-muted-foreground">{plain.detail}</p>
+            <p className="text-sm font-medium">
+              {chargedAnyway ? "Credits were charged recently" : plain.headline}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {chargedAnyway
+                ? `${formatExactCredits(recentCharged!)} NyxID credits were charged in the last 7 days for calls through ${connection.slug}, so don't treat this connection as free. ${plain.detail}`
+                : plain.detail}
+            </p>
           </div>
           <dl className="grid gap-3 text-xs sm:grid-cols-3">
             <div>

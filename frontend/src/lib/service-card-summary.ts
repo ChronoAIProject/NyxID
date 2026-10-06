@@ -32,6 +32,8 @@ export function connectionBillingCategory(
   catalog?: ConfiguredCatalogEntry,
 ): ConnectionBillingCategory {
   if (billing?.status === "restricted") return "unknown";
+  // A confirmed own key or app is BYOK whether or not NyxID prices the service.
+  if (credentialSupplier(connection, billing) === "own") return "byok";
   const serviceConfigured =
     billing?.service_billing_configured ??
     serviceBillingConfigured(connection, catalog) ??
