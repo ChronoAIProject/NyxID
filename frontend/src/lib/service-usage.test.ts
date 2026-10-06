@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { BillingUsageRow } from "@/schemas/billing";
-import { serviceUsageDaily, serviceUsageSummary } from "./service-usage";
+import {
+  serviceUsageDaily,
+  serviceUsageSummary,
+  serviceUsageTrend,
+} from "./service-usage";
 
 const row = (overrides: Partial<BillingUsageRow>): BillingUsageRow => ({
   service_slug: "llm-deepseek",
@@ -114,5 +118,54 @@ describe("serviceUsageDaily", () => {
       ),
     ).toBeNull();
     expect(serviceUsageDaily([], "llm-deepseek", "30d", now)).toHaveLength(30);
+  });
+});
+
+describe("serviceUsageSummary models", () => {
+  it("ranks named models by calls and skips unnamed rows", () => {
+    const summary = serviceUsageSummary(
+      [
+        row({ model: "deepseek-chat", events: 2 }),
+        row({ model: "deepseek-reasoner", events: 5 }),
+        row({ model: "deepseek-chat", events: 1 }),
+        row({ events: 4 }),
+      ],
+      "llm-deepseek",
+    );
+    expect(summary?.models).toEqual([
+      { name: "deepseek-reasoner", calls: 5 },
+      { name: "deepseek-chat", calls: 3 },
+    ]);
+  });
+});
+
+describe("serviceUsageTrend", () => {
+  it("differences nested period totals into per-day windows", () => {
+    const calls = (events: number) => [row({ events })];
+    const trend = serviceUsageTrend(
+      { "24h": calls(2), "7d": calls(8), "30d": calls(31), "90d": calls(151) },
+      "llm-deepseek",
+    );
+    expect(
+      trend.map(({ label, calls, perDay }) => [label, calls, perDay]),
+    ).toEqual([
+      ["30–90 days ago", 120, 2],
+      ["7–30 days ago", 23, 1],
+      ["1–7 days ago", 6, 1],
+      ["Last 24 hours", 2, 2],
+    ]);
+  });
+
+  it("never reports a negative window when periods race", () => {
+    const trend = serviceUsageTrend(
+      {
+        "24h": [row({ events: 3 })],
+        "7d": [row({ events: 2 })],
+        "30d": [],
+        "90d": [],
+      },
+      "llm-deepseek",
+    );
+    expect(trend.every((slot) => slot.calls >= 0)).toBe(true);
   });
 });

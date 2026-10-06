@@ -1,6 +1,12 @@
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
-import { ArrowUpRight, Bot, CreditCard, UsersRound } from "lucide-react";
+import {
+  Activity,
+  ArrowUpRight,
+  Bot,
+  CreditCard,
+  UsersRound,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -13,7 +19,15 @@ import {
 import { metricLabel } from "@/schemas/billing-metrics";
 import type { BillingUsagePeriod } from "@/schemas/billing";
 import { useBillingUsage } from "@/hooks/use-billing";
-import { Bar, BarChart, XAxis, YAxis } from "recharts";
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Line,
+  LineChart,
+  XAxis,
+  YAxis,
+} from "recharts";
 import {
   ChartContainer,
   ChartTooltip,
@@ -22,9 +36,12 @@ import {
 import {
   serviceUsageDaily,
   serviceUsageSummary,
+  serviceUsageTrend,
   type ServiceUsageDay,
+  type ServiceUsageSummary,
+  type ServiceUsageWindow,
 } from "@/lib/service-usage";
-import { formatExactCredits, hasCredits } from "@/lib/credits";
+import { formatExactCredits, hasCredits, parseCredits } from "@/lib/credits";
 import { plainBilling } from "@/lib/billing-plain";
 import type {
   ConfiguredCatalogEntry,
@@ -41,7 +58,7 @@ import {
   outcomeLabel,
   recordedSourceLabel,
 } from "@/lib/service-insights";
-import { formatDateTime } from "@/lib/utils";
+import { cn, formatDateTime } from "@/lib/utils";
 import type { KeyInfo } from "@/types/keys";
 
 export type InsightPanel = "access" | "requests" | "billing";
@@ -82,8 +99,27 @@ const USAGE_PERIODS: readonly [BillingUsagePeriod, string][] = [
 ];
 
 const usageChartConfig = {
-  calls: { label: "Calls", color: "var(--color-primary)" },
+  value: { label: "Usage", color: "var(--color-primary)" },
 } satisfies ChartConfig;
+
+/** What the trend line plots: calls, one recorded metric, or credits. */
+type TrendMeasure = "calls" | "credits" | `metric:${string}`;
+
+function trendValue(day: ServiceUsageDay, measure: TrendMeasure) {
+  if (measure === "calls") return day.calls;
+  // Unsettled days have no exact charge yet; leave a gap, not a fake zero.
+  if (measure === "credits")
+    return day.charged == null ? null : Number(day.charged);
+  const metric = measure.slice("metric:".length);
+  return day.quantities.find((q) => q.metric === metric)?.quantity ?? 0;
+}
+
+function trendLabel(measure: TrendMeasure) {
+  if (measure === "calls") return "Calls";
+  if (measure === "credits") return "Credits";
+  const label = metricLabel(measure.slice("metric:".length));
+  return label.charAt(0).toUpperCase() + label.slice(1);
+}
 
 const shortDay = (day: string) =>
   new Date(`${day}T00:00:00Z`).toLocaleDateString(undefined, {
@@ -92,14 +128,29 @@ const shortDay = (day: string) =>
     timeZone: "UTC",
   });
 
+/** Where charged credits came from, in the order NyxID spends them. */
+function fundingParts(source: {
+  readonly allowance: string;
+  readonly grant: string;
+  readonly wallet: string;
+}) {
+  return (
+    [
+      ["Free allowance", source.allowance],
+      ["Free credit grants", source.grant],
+      ["Wallet", source.wallet],
+    ] as const
+  ).filter(([, value]) => hasCredits(value));
+}
+
 function UsageDayTooltip({
   active,
   payload,
 }: {
   readonly active?: boolean;
-  readonly payload?: readonly { payload: ServiceUsageDay }[];
+  readonly payload?: readonly { payload: { source: ServiceUsageDay } }[];
 }) {
-  const day = active ? payload?.[0]?.payload : undefined;
+  const day = active ? payload?.[0]?.payload.source : undefined;
   if (!day) return null;
   return (
     <div className="rounded-lg border border-border/60 bg-popover px-2.5 py-1.5 text-xs shadow-md">
@@ -112,27 +163,79 @@ function UsageDayTooltip({
           {quantity.toLocaleString()} {metricLabel(metric, quantity)}
         </p>
       ))}
-      {hasCredits(day.charged) && (
+      {day.charged == null ? (
+        <p className="text-muted-foreground">Credits still being calculated</p>
+      ) : (
+        hasCredits(day.charged) && (
+          <p className="text-muted-foreground tabular-nums">
+            {formatExactCredits(day.charged)} credits
+          </p>
+        )
+      )}
+      {fundingParts(day).length > 0 && (
         <p className="text-muted-foreground tabular-nums">
-          {formatExactCredits(day.charged!)} credits
+          Paid from{" "}
+          {fundingParts(day)
+            .map(
+              ([label, value]) =>
+                `${label.toLowerCase()} ${formatExactCredits(value)}`,
+            )
+            .join(" · ")}
         </p>
       )}
     </div>
   );
 }
 
-function UsageDailyChart({ series }: { readonly series: ServiceUsageDay[] }) {
+function UsageTrendChart({
+  series,
+  measures,
+}: {
+  readonly series: ServiceUsageDay[];
+  readonly measures: readonly TrendMeasure[];
+}) {
+  const [picked, setPicked] = useState<TrendMeasure>("calls");
+  const measure = measures.includes(picked) ? picked : "calls";
+  const data = series.map((day) => ({
+    day: day.day,
+    value: trendValue(day, measure),
+    source: day,
+  }));
+  const label = trendLabel(measure);
   return (
-    <figure aria-label="Calls per day">
+    <figure aria-label={`${label} per day`} className="space-y-2">
+      {measures.length > 1 && (
+        <div
+          role="group"
+          aria-label="Chart shows"
+          className="inline-flex rounded-md border border-border/60 p-0.5"
+        >
+          {measures.map((option) => (
+            <button
+              key={option}
+              type="button"
+              aria-pressed={option === measure}
+              onClick={() => setPicked(option)}
+              className={cn(
+                "rounded px-2 py-0.5 text-[11px] text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring",
+                option === measure && "bg-muted font-medium text-foreground",
+              )}
+            >
+              {trendLabel(option)}
+            </button>
+          ))}
+        </div>
+      )}
       <ChartContainer
         config={usageChartConfig}
-        className="aspect-auto h-28 w-full"
+        className="aspect-auto h-32 w-full"
       >
-        <BarChart
+        <LineChart
           accessibilityLayer
-          data={series}
-          margin={{ top: 4, right: 0, bottom: 0, left: 0 }}
+          data={data}
+          margin={{ top: 6, right: 6, bottom: 0, left: 0 }}
         >
+          <CartesianGrid vertical={false} strokeOpacity={0.4} />
           <XAxis
             dataKey="day"
             tickLine={false}
@@ -142,32 +245,244 @@ function UsageDailyChart({ series }: { readonly series: ServiceUsageDay[] }) {
             tickFormatter={shortDay}
           />
           <YAxis
-            width={28}
+            width={44}
             tickLine={false}
             axisLine={false}
-            allowDecimals={false}
+            allowDecimals={measure === "credits"}
             tickCount={3}
+            tickFormatter={(value: number) =>
+              value.toLocaleString(undefined, {
+                notation: "compact",
+                maximumSignificantDigits: 3,
+              })
+            }
+          />
+          <ChartTooltip
+            cursor={{ stroke: "var(--color-border)" }}
+            content={<UsageDayTooltip />}
+          />
+          <Line
+            type="monotone"
+            dataKey="value"
+            name={label}
+            stroke="var(--color-value)"
+            strokeWidth={2}
+            dot={series.length <= 7}
+            activeDot={{ r: 4 }}
+            isAnimationActive={false}
+          />
+        </LineChart>
+      </ChartContainer>
+      <figcaption className="sr-only">
+        {data
+          .filter((point) => point.value)
+          .map((point) => `${shortDay(point.day)}: ${point.value} ${label}`)
+          .join(", ") || `No ${label.toLowerCase()} in this period`}
+      </figcaption>
+    </figure>
+  );
+}
+
+const FUNDING_COLORS: Record<string, string> = {
+  "Free allowance": "var(--color-success)",
+  "Free credit grants": "var(--chart-1)",
+  Wallet: "var(--color-primary)",
+};
+
+/** One bar split by where the period's credits came from. */
+function FundingBar({ summary }: { readonly summary: ServiceUsageSummary }) {
+  const parts = fundingParts(summary).map(([label, value]) => ({
+    label,
+    value,
+    pico: parseCredits(value),
+  }));
+  const total = parts.reduce((sum, part) => sum + part.pico, 0n);
+  if (total === 0n) return null;
+  return (
+    <div className="space-y-1.5">
+      <p className="text-muted-foreground">Where the credits came from</p>
+      <div
+        className="flex h-2 overflow-hidden rounded-full bg-muted"
+        aria-hidden="true"
+      >
+        {parts.map((part) => (
+          <div
+            key={part.label}
+            style={{
+              width: `${Number((part.pico * 10_000n) / total) / 100}%`,
+              background: FUNDING_COLORS[part.label],
+            }}
+          />
+        ))}
+      </div>
+      <ul className="flex flex-wrap gap-x-4 gap-y-1 text-[11px]">
+        {parts.map((part) => (
+          <li key={part.label} className="inline-flex items-center gap-1.5">
+            <span
+              className="size-2 rounded-full"
+              style={{ background: FUNDING_COLORS[part.label] }}
+              aria-hidden="true"
+            />
+            {part.label}{" "}
+            <span className="tabular-nums text-muted-foreground">
+              {formatExactCredits(part.value)} (
+              {Math.round(Number((part.pico * 1000n) / total) / 10)}%)
+            </span>
+          </li>
+        ))}
+        {!hasCredits(summary.wallet) && (
+          <li className="text-muted-foreground">Nothing from your wallet</li>
+        )}
+      </ul>
+    </div>
+  );
+}
+
+/** Ranked horizontal bars, capped at five rows. */
+function BreakdownBars({
+  title,
+  items,
+}: {
+  readonly title: string;
+  readonly items: readonly { label: string; value: number }[];
+}) {
+  const max = Math.max(1, ...items.map((item) => item.value));
+  const shown = items.slice(0, 5);
+  return (
+    <div className="space-y-1.5">
+      <p className="text-muted-foreground">{title}</p>
+      <ul className="space-y-1">
+        {shown.map((item) => (
+          <li
+            key={item.label}
+            className="grid grid-cols-[minmax(0,12rem)_1fr_3rem] items-center gap-2"
+          >
+            <span className="truncate" title={item.label}>
+              {item.label}
+            </span>
+            <span className="h-2 rounded-full bg-muted" aria-hidden="true">
+              <span
+                className="block h-full rounded-full bg-primary"
+                style={{ width: `${(item.value / max) * 100}%` }}
+              />
+            </span>
+            <span className="text-right tabular-nums">
+              {item.value.toLocaleString()}
+            </span>
+          </li>
+        ))}
+      </ul>
+      {items.length > shown.length && (
+        <p className="text-[11px] text-muted-foreground">
+          +{items.length - shown.length} more
+        </p>
+      )}
+    </div>
+  );
+}
+
+const windowChartConfig = {
+  perDay: { label: "Calls per day", color: "var(--color-primary)" },
+} satisfies ChartConfig;
+
+/**
+ * Average calls per day over recent windows, built from period totals so it
+ * works before the server reports usage by day.
+ */
+function UsageWindows({ slug }: { readonly slug: string }) {
+  const day = useBillingUsage("24h");
+  const week = useBillingUsage("7d");
+  const month = useBillingUsage("30d");
+  const quarter = useBillingUsage("90d");
+  const queries = [day, week, month, quarter];
+  if (queries.some((query) => query.isPending))
+    return <p className="text-muted-foreground">Loading recent trend…</p>;
+  if (!day.data || !week.data || !month.data || !quarter.data) return null;
+  const windows = serviceUsageTrend(
+    {
+      "24h": day.data.rows,
+      "7d": week.data.rows,
+      "30d": month.data.rows,
+      "90d": quarter.data.rows,
+    },
+    slug,
+  );
+  return (
+    <figure aria-label="Average calls per day" className="space-y-1.5">
+      <p className="text-muted-foreground">
+        Recent trend · average calls per day
+      </p>
+      <ChartContainer
+        config={windowChartConfig}
+        className="aspect-auto h-28 w-full"
+      >
+        <BarChart
+          accessibilityLayer
+          data={windows}
+          margin={{ top: 4, right: 0, bottom: 0, left: 0 }}
+        >
+          <CartesianGrid vertical={false} strokeOpacity={0.4} />
+          <XAxis
+            dataKey="label"
+            tickLine={false}
+            axisLine={false}
+            tickMargin={6}
+          />
+          <YAxis
+            width={36}
+            tickLine={false}
+            axisLine={false}
+            tickCount={3}
+            tickFormatter={(value: number) =>
+              value.toLocaleString(undefined, { maximumFractionDigits: 1 })
+            }
           />
           <ChartTooltip
             cursor={{ fill: "var(--color-muted)", opacity: 0.4 }}
-            content={<UsageDayTooltip />}
+            content={<WindowTooltip />}
           />
           <Bar
-            dataKey="calls"
-            fill="var(--color-calls)"
+            dataKey="perDay"
+            fill="var(--color-perDay)"
             radius={[4, 4, 0, 0]}
-            maxBarSize={18}
+            maxBarSize={48}
             isAnimationActive={false}
           />
         </BarChart>
       </ChartContainer>
-      <figcaption className="sr-only">
-        {series
-          .filter((day) => day.calls > 0)
-          .map((day) => `${shortDay(day.day)}: ${day.calls} calls`)
-          .join(", ") || "No calls in this period"}
+      <figcaption className="text-[11px] text-muted-foreground">
+        {windows
+          .map(
+            (slot) =>
+              `${slot.label}: ${slot.calls.toLocaleString()} ${slot.calls === 1 ? "call" : "calls"}`,
+          )
+          .join(" · ")}
+        . A day-by-day graph replaces this once NyxID reports usage by day.
       </figcaption>
     </figure>
+  );
+}
+
+function WindowTooltip({
+  active,
+  payload,
+}: {
+  readonly active?: boolean;
+  readonly payload?: readonly { payload: ServiceUsageWindow }[];
+}) {
+  const slot = active ? payload?.[0]?.payload : undefined;
+  if (!slot) return null;
+  return (
+    <div className="rounded-lg border border-border/60 bg-popover px-2.5 py-1.5 text-xs shadow-md">
+      <p className="font-medium">{slot.label}</p>
+      <p className="tabular-nums">
+        {slot.calls.toLocaleString()} {slot.calls === 1 ? "call" : "calls"}
+      </p>
+      <p className="text-muted-foreground tabular-nums">
+        {slot.perDay.toLocaleString(undefined, { maximumFractionDigits: 1 })}{" "}
+        per day on average
+      </p>
+    </div>
   );
 }
 
@@ -193,13 +508,17 @@ function ConnectionUsage({
       ? connection.credential_source.org_name
       : null;
   return (
-    <div
-      className="space-y-3 rounded-lg border border-border/60 p-3 text-xs"
-      aria-label={`Your usage of ${connection.label}`}
-      role="group"
+    <section
+      className="space-y-3 border-t border-border/60 pt-4 text-xs"
+      aria-labelledby={`usage-history-${connection.id}`}
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="font-medium">Your usage</p>
+        <h5
+          id={`usage-history-${connection.id}`}
+          className="text-[10px] font-semibold uppercase tracking-[1.5px] text-text-tertiary"
+        >
+          Usage history
+        </h5>
         <Select
           value={period}
           onValueChange={(value) => setPeriod(value as BillingUsagePeriod)}
@@ -254,36 +573,25 @@ function ConnectionUsage({
                     ? "Still being calculated"
                     : formatExactCredits(summary.charged)}
               </dd>
-              {summary.billable &&
-                [
-                  ["From wallet", summary.wallet],
-                  ["From grants", summary.grant],
-                  ["From allowances", summary.allowance],
-                ].some(([, value]) => hasCredits(value)) && (
-                  <dd className="mt-0.5 text-[11px] text-muted-foreground">
-                    {[
-                      ["From wallet", summary.wallet],
-                      ["From grants", summary.grant],
-                      ["From allowances", summary.allowance],
-                    ]
-                      .filter(([, value]) => hasCredits(value))
-                      .map(
-                        ([label, value]) =>
-                          `${label} ${formatExactCredits(value!)}`,
-                      )
-                      .join(" · ")}
-                  </dd>
-                )}
             </div>
           </dl>
+          {summary.billable && fundingParts(summary).length > 0 && (
+            <FundingBar summary={summary} />
+          )}
           {daily ? (
-            <UsageDailyChart series={daily} />
+            <UsageTrendChart
+              series={daily}
+              measures={[
+                "calls",
+                // Requests repeat the call count, so they get no line of their own.
+                ...summary.quantities
+                  .filter(({ metric }) => metric !== "requests")
+                  .map(({ metric }) => `metric:${metric}` as const),
+                ...(summary.billable ? (["credits"] as const) : []),
+              ]}
+            />
           ) : (
-            period !== "24h" && (
-              <p className="text-muted-foreground">
-                A day-by-day chart will appear here after the next NyxID update.
-              </p>
-            )
+            <UsageWindows slug={connection.slug} />
           )}
           {freeNow &&
             summary.charged != null &&
@@ -295,20 +603,33 @@ function ConnectionUsage({
                 <code>{connection.slug}</code>.
               </p>
             )}
-          {summary.agents.length > 1 || summary.agents[0]?.name ? (
-            <p className="text-muted-foreground">
-              Made by:{" "}
-              {summary.agents
-                .slice(0, 5)
-                .map(
-                  ({ name, calls }) =>
-                    `${name ?? "you, signed in"} (${calls.toLocaleString()})`,
-                )
-                .join(" · ")}
-              {summary.agents.length > 5 &&
-                ` · +${summary.agents.length - 5} more`}
-            </p>
-          ) : null}
+          {(summary.agents.length > 1 || !!summary.agents[0]?.name) && (
+            <BreakdownBars
+              title="Who made the calls"
+              items={summary.agents.map(({ name, calls }) => ({
+                label: name ?? "You, signed in",
+                value: calls,
+              }))}
+            />
+          )}
+          {summary.models.length > 1 ? (
+            <BreakdownBars
+              title="Calls by model"
+              items={summary.models.map(({ name, calls }) => ({
+                label: name,
+                value: calls,
+              }))}
+            />
+          ) : (
+            summary.models[0] && (
+              <p className="text-muted-foreground">
+                Model:{" "}
+                <span className="text-foreground">
+                  {summary.models[0].name}
+                </span>
+              </p>
+            )
+          )}
         </>
       )}
       <p className="text-[11px] text-muted-foreground">
@@ -317,7 +638,7 @@ function ConnectionUsage({
         address are counted together.
         {org && ` Usage billed to ${org} isn’t included.`}
       </p>
-    </div>
+    </section>
   );
 }
 
@@ -396,32 +717,43 @@ function ConnectionBillingPanel({
                 : plain.detail}
             </p>
           </div>
-          <dl className="grid gap-3 text-xs sm:grid-cols-3">
-            <div>
-              <dt className="text-muted-foreground">Whose key or app</dt>
-              <dd className="mt-1 font-medium">{plain.key.title}</dd>
-              {plain.key.note && (
-                <dd className="mt-0.5 text-[11px] text-muted-foreground">
-                  {plain.key.note}
-                </dd>
-              )}
-            </div>
-            <div>
-              <dt className="text-muted-foreground">Who pays NyxID</dt>
-              <dd className="mt-1 font-medium">{plain.payer}</dd>
-            </div>
-            <div>
-              <dt className="text-muted-foreground">NyxID price</dt>
-              <dd className="mt-1 font-medium">{plain.price}</dd>
-            </div>
-          </dl>
-          {!!plain.tips.length && (
-            <ul className="list-disc space-y-1 pl-4 text-[11px] text-muted-foreground">
-              {plain.tips.map((tip) => (
-                <li key={tip}>{tip}</li>
-              ))}
-            </ul>
-          )}
+          <section
+            className="space-y-3 border-t border-border/60 pt-4"
+            aria-labelledby={`billing-details-${connection.id}`}
+          >
+            <h5
+              id={`billing-details-${connection.id}`}
+              className="text-[10px] font-semibold uppercase tracking-[1.5px] text-text-tertiary"
+            >
+              Details
+            </h5>
+            <dl className="grid gap-3 text-xs sm:grid-cols-3">
+              <div>
+                <dt className="text-muted-foreground">Whose key or app</dt>
+                <dd className="mt-1 font-medium">{plain.key.title}</dd>
+                {plain.key.note && (
+                  <dd className="mt-0.5 text-[11px] text-muted-foreground">
+                    {plain.key.note}
+                  </dd>
+                )}
+              </div>
+              <div>
+                <dt className="text-muted-foreground">Who pays NyxID</dt>
+                <dd className="mt-1 font-medium">{plain.payer}</dd>
+              </div>
+              <div>
+                <dt className="text-muted-foreground">NyxID price</dt>
+                <dd className="mt-1 font-medium">{plain.price}</dd>
+              </div>
+            </dl>
+            {!!plain.tips.length && (
+              <ul className="list-disc space-y-1 pl-4 text-[11px] text-muted-foreground">
+                {plain.tips.map((tip) => (
+                  <li key={tip}>{tip}</li>
+                ))}
+              </ul>
+            )}
+          </section>
         </>
       ) : (
         <InsightsUnavailable state={selectedState} />
@@ -591,7 +923,9 @@ export function ConnectionInsightPanel({
       aria-label={`Recent requests for ${connection.label}`}
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h4 className="text-sm font-medium">Recent requests</h4>
+        <h4 className="inline-flex items-center gap-2 text-sm font-medium">
+          <Activity className="size-4 text-primary" /> Recent requests
+        </h4>
         <span className="text-[11px] text-muted-foreground">
           {usage.activity.visibility === "own_requests"
             ? "Your requests"

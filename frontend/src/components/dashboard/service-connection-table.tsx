@@ -10,6 +10,8 @@ import {
   UsersRound,
   CreditCard,
   GitBranch,
+  Info,
+  type LucideIcon,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -139,6 +141,26 @@ function ConnectionMetadata({
   );
 }
 
+/** A titled panel inside an opened connection, matching Billing and Agent keys. */
+function PanelSection({
+  icon: Icon,
+  title,
+  children,
+}: {
+  readonly icon: LucideIcon;
+  readonly title: string;
+  readonly children: ReactNode;
+}) {
+  return (
+    <section className="space-y-3 p-3" aria-label={title}>
+      <h4 className="inline-flex items-center gap-2 text-sm font-medium">
+        <Icon className="size-4 text-primary" aria-hidden="true" /> {title}
+      </h4>
+      {children}
+    </section>
+  );
+}
+
 export function ServiceConnectionTable({
   connections,
   serviceName,
@@ -258,7 +280,8 @@ export function ServiceConnectionTable({
                   data-service-connection-row={key.id}
                   className={cn(
                     "[&>td]:align-top [&>td]:py-3",
-                    expanded && "bg-muted/20",
+                    // The opened panel continues this entry, so no rule between them.
+                    expanded && "border-b-0 bg-muted/20 hover:bg-muted/20",
                   )}
                 >
                   <TableCell>
@@ -622,26 +645,35 @@ export function ServiceConnectionTable({
                 {expanded && (
                   <TableRow
                     id={panelId}
-                    className="bg-muted/10 hover:bg-muted/10"
+                    className="bg-muted/20 hover:bg-muted/20"
                   >
-                    <TableCell colSpan={5} className="whitespace-normal">
-                      {open.view === "history" ? (
-                        <ServiceHistory serviceId={key.id} />
-                      ) : open.view === "details" ? (
-                        <ConnectionMetadata
-                          connection={key}
-                          insight={insight}
-                        />
-                      ) : (
-                        <ConnectionInsightPanel
-                          key={`${key.id}:${open.view}`}
-                          connection={key}
-                          insight={insight}
-                          view={open.view}
-                          state={insights}
-                          catalog={catalog}
-                        />
-                      )}
+                    <TableCell
+                      colSpan={5}
+                      className="whitespace-normal px-3 pb-3 pt-0"
+                    >
+                      <div className="rounded-xl border border-border/60 bg-card">
+                        {open.view === "history" ? (
+                          <PanelSection icon={History} title="History">
+                            <ServiceHistory serviceId={key.id} />
+                          </PanelSection>
+                        ) : open.view === "details" ? (
+                          <PanelSection icon={Info} title="Connection details">
+                            <ConnectionMetadata
+                              connection={key}
+                              insight={insight}
+                            />
+                          </PanelSection>
+                        ) : (
+                          <ConnectionInsightPanel
+                            key={`${key.id}:${open.view}`}
+                            connection={key}
+                            insight={insight}
+                            view={open.view}
+                            state={insights}
+                            catalog={catalog}
+                          />
+                        )}
+                      </div>
                     </TableCell>
                   </TableRow>
                 )}
