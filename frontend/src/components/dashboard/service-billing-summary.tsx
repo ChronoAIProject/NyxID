@@ -7,6 +7,7 @@ import {
 } from "@/lib/service-card-summary";
 import { insightStatusLabel } from "@/lib/service-insights";
 import { plainBilling } from "@/lib/billing-plain";
+import { credentialSupplier } from "@/lib/service-billing-config";
 import type { CatalogEntry, KeyInfo } from "@/types/keys";
 import {
   Tooltip,
@@ -61,12 +62,24 @@ export function ServiceBillingSummary({
     "unknown",
   ];
   const countLabels = {
-    platform: "NyxID",
-    byok: "BYOK",
-    not_billable: "—",
+    ...connectionBillingLabels,
     unknown: "unverified",
   };
   const notBillable = rows.every((row) => row.category === "not_billable");
+  const managedCount =
+    insights.status === "ready"
+      ? rows.filter(
+          ({ connection, billing }) =>
+            billing?.status !== "restricted" &&
+            (connection.auto_connected ||
+              credentialSupplier(connection, billing) === "nyxid"),
+        ).length
+      : 0;
+  const managementLabel = managedCount
+    ? managedCount === rows.length
+      ? "Platform managed"
+      : `${managedCount} platform managed ${managedCount === 1 ? "connection" : "connections"}`
+    : undefined;
   // Identical entries collapse into one line; a list of 30 equal rows says
   // nothing more than "30 connections".
   const groups = [
@@ -121,18 +134,27 @@ export function ServiceBillingSummary({
             type="button"
             aria-label={`Show billing for ${serviceName}`}
             aria-description={notBillable ? "Not billable by NyxID" : undefined}
-            className="flex min-h-6 w-fit min-w-0 max-w-full items-center gap-2 rounded-sm text-left text-xs focus-visible:outline-2 focus-visible:outline-ring"
+            className="flex min-h-6 w-fit min-w-0 max-w-full flex-col justify-center rounded-sm text-left text-xs leading-snug focus-visible:outline-2 focus-visible:outline-ring"
             onClick={() => {
               const first =
                 rows.find((row) => row.category === "platform") ?? rows[0];
               if (first) onOpen(first.connection.id);
             }}
           >
-            <CreditCard
-              className="size-3.5 shrink-0 text-muted-foreground"
-              aria-hidden="true"
-            />
-            <span className="line-clamp-2 font-medium leading-4">{label}</span>
+            <span className="flex min-w-0 max-w-full items-center gap-2">
+              <CreditCard
+                className="size-3.5 shrink-0 text-muted-foreground"
+                aria-hidden="true"
+              />
+              <span className="line-clamp-2 font-medium">
+                {label}
+              </span>
+            </span>
+            {managementLabel && (
+              <span className="max-w-full pl-[22px] text-muted-foreground">
+                {managementLabel}
+              </span>
+            )}
           </button>
         </TooltipTrigger>
         <TooltipContent
@@ -161,7 +183,8 @@ export function ServiceBillingSummary({
                 </div>
               ))}
               <p className="border-t border-border/60 pt-1.5 text-muted-foreground">
-                NyxID: uses NyxID&apos;s key or app and costs NyxID credits.
+                NyxID managed: uses NyxID&apos;s key or app, or a service that
+                needs no credential. Usage charges are shown for each connection.
                 BYOK: uses your or your organization&apos;s own key or app. —:
                 NyxID doesn&apos;t charge for it.
               </p>

@@ -29,7 +29,7 @@ export function BlogIndexPage() {
     <BlogShell>
       <section className="px-6 pt-20 pb-12">
         <div className="mx-auto max-w-6xl">
-          <p className="font-mono text-xs tracking-widest text-primary uppercase">
+          <p className="font-mono text-xs tracking-widest text-primary-text uppercase">
             The NyxID Journal
           </p>
           <h1 className="mt-4 max-w-3xl font-serif text-4xl leading-tight text-white md:text-6xl">

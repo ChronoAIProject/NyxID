@@ -385,7 +385,8 @@ export function AuthFlow({
 
                 <Button
                   type="submit"
-                  className="mt-1 h-[44px] w-full nyx-gradient-vivid text-13 font-medium shadow-[0_2px_12px_rgba(90,42,241,0.25)] hover:opacity-90 hover:shadow-[0_4px_20px_rgba(90,42,241,0.35)]"
+                  variant="primary"
+                  className="mt-1 h-[44px] w-full text-13 shadow-[0_2px_12px_rgba(90,42,241,0.25)] hover:opacity-90 hover:shadow-[0_4px_20px_rgba(90,42,241,0.35)]"
                   isLoading={loginMutation.isPending}
                 >
                   Sign in
@@ -747,7 +748,8 @@ export function AuthFlow({
 
               <Button
                 type="submit"
-                className="mt-1 h-[44px] w-full nyx-gradient-vivid text-13 font-medium shadow-[0_2px_12px_rgba(90,42,241,0.25)] hover:opacity-90 hover:shadow-[0_4px_20px_rgba(90,42,241,0.35)]"
+                variant="primary"
+                className="mt-1 h-[44px] w-full text-13 shadow-[0_2px_12px_rgba(90,42,241,0.25)] hover:opacity-90 hover:shadow-[0_4px_20px_rgba(90,42,241,0.35)]"
                 isLoading={registerMutation.isPending}
               >
                 Create Account

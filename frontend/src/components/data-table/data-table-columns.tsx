@@ -668,7 +668,7 @@ export function DataTableColumnHeader<
             className={cn(
               "h-3.5 w-3.5 shrink-0",
               direction
-                ? "text-primary"
+                ? "text-primary-text"
                 : "text-muted-foreground/55 group-hover/sort:text-muted-foreground",
             )}
             aria-hidden="true"
@@ -687,7 +687,7 @@ export function DataTableColumnHeader<
           className={cn(
             "flex h-full w-7 shrink-0 items-center justify-center outline-none transition-opacity hover:text-foreground focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring group-hover/header:opacity-100 group-focus-within/header:opacity-100",
             lastFrozen
-              ? "text-primary opacity-100"
+              ? "text-primary-text opacity-100"
               : "text-muted-foreground opacity-0",
           )}
         >

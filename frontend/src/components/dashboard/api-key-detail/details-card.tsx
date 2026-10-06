@@ -100,7 +100,7 @@ export function DetailsCard({
     <Card>
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
-          <KeyRound className="h-4 w-4 text-primary" />
+          <KeyRound className="h-4 w-4 text-primary-text" />
           <CardTitle className="text-15">Key Details</CardTitle>
         </div>
       </CardHeader>

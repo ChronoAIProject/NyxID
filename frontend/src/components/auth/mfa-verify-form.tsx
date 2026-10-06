@@ -73,7 +73,7 @@ export function MfaVerifyForm({ returnTo }: MfaVerifyFormProps) {
     <div className="space-y-6">
       <div className="flex flex-col items-center space-y-2 text-center">
         <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-primary/10">
-          <ShieldCheck className="h-6 w-6 text-primary" aria-hidden="true" />
+          <ShieldCheck className="h-6 w-6 text-primary-text" aria-hidden="true" />
         </div>
         <h1 className="text-28 font-normal tracking-tight">
           MFA verification

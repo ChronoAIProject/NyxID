@@ -70,14 +70,15 @@ Billing checks the service configuration before credential supply. A service wit
 no configured NyxID usage charge shows **—** for every connection, including
 supplied API keys, OAuth apps, disabled connections and nodes. Its tooltip is
 exactly **Not billable by NyxID**. For a service with billing configured, a
-connection shows **NyxID** when NyxID supplies the selected key or
+connection shows **NyxID managed** when NyxID supplies the selected key or
 OAuth developer app, **BYOK** when the person or organization supplies it, and
 **Unverified** when the supplier or service configuration cannot be established.
-A connection requiring no provider credential is also NyxID when service billing
+A connection requiring no provider credential is also **NyxID managed** when service billing
 is configured. Free grants, allowances, promotional credits, caller rollout and
 wallet debits never change this classification. A bill covered entirely by a
-grant remains NyxID; grant coverage of an additional fee on a supplied key does
-not turn BYOK into NyxID. The compact **NyxID** label means platform billing.
+grant remains **NyxID managed**; grant coverage of an additional fee on a supplied key does
+not turn BYOK into **NyxID managed**. The label identifies the connection's
+relationship to the platform; the payer and usage charges remain separate.
 
 The service-wide gate is true if any credential class has a configured charge.
 It is distinct from the selected connection's price lane: a service can have
@@ -86,6 +87,12 @@ represented categories, including disabled connections; all-unpriced groups show
 one dash. Hover lists each connection and its actual/configured charge separately.
 Clicking opens the first NyxID connection's billing panel, or the first connection
 when none uses NyxID credentials. Expanded rows use the same classifier.
+
+Card billing summaries show **Platform managed** beneath the billing count when
+every displayed connection uses a confirmed NyxID key/app or is auto-connected.
+Mixed groups show the number of managed connections. This indication also appears
+for free managed connections; payment, grants and connection ownership do not
+establish management. Restricted or unavailable insights do not infer it.
 
 The additive insight fields `service_billing_configured` and `credential_supplier`
 carry the service-wide gate and selected credential provenance. Existing
@@ -154,6 +161,12 @@ The pool summary shows the number of member connections and selection strategy;
 the next line shows the pool name and configured failover. Multiple pools show
 their count and how many have failover enabled. Hover/focus lists each pool's
 members, strategy, policy and slug. Expanded connection rows link to their pools.
+These membership links wrap the full pool name and selection strategy within
+the connection column. Pools use a network icon; selection strategies use
+branching arrows for priority/fallback, a scale for weighted balancing, and a
+circular arrow for round robin. Direct connections use a cable icon. The same
+strategy icons appear on cards, membership links, routing details, and in the
+pool editor. The failover label remains authoritative about enabled retries.
 Grouping by catalog does not create a pool or change an individual connection slug.
 Click the pool summary to inspect the pool slug, strategy, priority/weight, credential supplier,
 billing account/rates, and operation-scoped eligibility/cooldown in a table inside
@@ -844,7 +857,7 @@ execution.
 
 Collapsed cards show credential sources, the latest recorded request, and a billing
 summary for their active connections. The expanded comparison table exposes
-**Owner / credential**, **Access & requests**, and **Billing** alongside identity,
+**Owner / credential**, **Access & requests**, and **Billing & usage** alongside identity,
 state, and configuration. Each connection can open one inline panel: permitted
 agent keys and credential overrides, its latest three recorded requests, or payer
 and rates. Users do not need to open an individual connection page to inspect

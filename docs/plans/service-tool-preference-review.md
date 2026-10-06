@@ -39,11 +39,11 @@ defaults, concurrency, error recovery, accessibility, and validation commands.
 The final plan incorporates AC-01 through AC-28. All local acceptance checks
 passed on the prior integration base, and the PM closed the original findings.
 Opus preliminary review returned the additional findings recorded below.
-Release 0.66.0 is now integrated in the working tree. The PM has reviewed the
-merged source and corrections; fresh frontend/browser/build/lint checks pass.
-All requested local gates pass on the 0.66.0 integration. The subsequent
-frontend-only readability commit `868ce0b7` requires integration and affected
-checks before publication. Final CI and Opus sign-off remain open.
+Release 0.66.0 and the subsequent frontend readability revision `868ce0b7`
+are integrated and locally verified. The PM personally reviewed the final source
+and every substantiated finding is closed. Required remote CI and Opus 5.5's
+final verdict are recorded on PR #1796 against its published head; the PR is the
+authoritative delivery status for those external gates.
 
 ## Plan review findings
 
@@ -172,7 +172,7 @@ instructions, handles, owner badges, connection identifiers and Discovery pills
 are visible and fit the tested viewport. The late-provenance correction and final
 Rust checks were still pending at this stage; later evidence supersedes this status.
 
-### Final integrated frontend validation by the PM
+### Prior integrated frontend validation by the PM
 
 - Full isolated suite: all 458 files and 4,694 tests passed in 183.97 seconds.
 - Browser suite: all 14 scenarios passed in 39.8 seconds, including late legacy
@@ -264,7 +264,7 @@ Logs: `/tmp/service-preference-final-cli-unit.log`,
 `/tmp/service-preference-final-wizard-freshness.log`.
 
 
-### Final local review gate
+### Prior local review gate
 
 `cargo clippy -p nyxid -p nyxid-cli --all-targets -j 1 -- -D warnings` passed on
 the corrected source (5m38s, no warnings or errors), log
@@ -343,8 +343,31 @@ denied passed in 4m15s. The log prefix for these checks is
 An independent PM scan of 45 execution/approval/billing/insight files found no
 `service_preferences` or `preference_rank` reference.
 
-All substantiated preliminary Opus findings are now closed. Before publication,
-the frontend-only readability commit `868ce0b7` will be integrated, preserving
-its service-table and pool presentation changes and regenerating the wizard.
-The backend Rust source is unchanged by that commit; affected frontend and
-wizard checks will provide the additional integration evidence.
+All substantiated preliminary Opus findings are closed. PM committed the 0.66.0
+integration as `0390ad00`, then reviewed the frontend-only readability merge
+with `868ce0b7`. Its service-table and pool presentation changes are preserved
+alongside Discovery pills and the editor; the information icon follows upstream's
+readability token. No backend/CLI Rust source or manifest changed. The completed
+backend/CLI/Clippy results therefore remain applicable; wizard generation and
+freshness were verified again against the final merged embedding.
+
+### Final local validation on `868ce0b7`
+
+- Full isolated frontend suite: all 463 files and 4,741 tests passed in 168.33s.
+- Real-route browser suite: all 14 scenarios passed in 36.1s.
+- Production build and lint passed; zero lint errors or feature warnings and
+  the same 29 unrelated baseline warnings.
+- Wizard build passed with its regenerated 168-file closure; freshness passed
+  one test, with zero failures/ignored checks, in 0.04s after a focused CLI rebuild.
+- PM inspected the final desktop and 390-pixel mobile screenshots. Controls,
+  instructions, provenance and numbered pills are visible; long labels wrap and
+  the browser overflow assertions pass.
+- PM inspected the final diff against `868ce0b7` and verified no Rust-source
+  changes from `0390ad00`, no unmerged paths and clean staged/working whitespace.
+
+Final UI logs: `/tmp/nyxid-service-preference-868-{full-frontend,browser,build,lint}.log`.
+Wizard logs: `/tmp/service-preference-merge-868ce0b7-{wizard-build,wizard-freshness}.log`.
+Screenshots: `/tmp/nyxid-service-preference-review/868-*.png`.
+Plan §20 records exact checks. CI and Opus's final plan/PR sign-off are recorded
+in the PR body against the published head, avoiding an evidence-only commit
+after the final review.

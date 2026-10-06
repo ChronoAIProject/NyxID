@@ -1,6 +1,6 @@
 # Service preference order for agent discovery
 
-Branch: `service-tool-preference-order`. Planner: Fable 5.1. Status: feature implemented; all requested local gates passed for the uncommitted merge of `566ca5f9` (release 0.66.0, #1795) into published head `35af1701`. Source conflicts are resolved and the wizard is regenerated. PM owns the merge commit, renewed CI and final sign-off. §17 records the current acceptance matrix and historical baseline logs; §19 records fresh merged-source checks and the separately deferred `868ce0b7` frontend-only integration. §18 records the earlier #1685 UI integration.
+Branch: `service-tool-preference-order`. Planner: Fable 5.1. Status: implemented and locally verified against `868ce0b7`, including release 0.66.0 and the latest frontend readability changes. All 28 acceptance criteria and every substantiated review finding are closed. §17 records the acceptance matrix; §19 records backend/CLI/Clippy validation; §20 records final frontend/wizard validation. Final remote CI and Opus 5.5's verdict are recorded on [PR #1796](https://github.com/ChronoAIProject/NyxID/pull/1796), bound to its published head. Earlier integration and validation history is retained below.
 
 ## 1. Problem and scope
 
@@ -703,7 +703,7 @@ no database; the combined `service_preference` filter also selects DB tests.
   `service_preferences`.
 - **AC-12** (DB, MCP transport via `assistant_authority_tests::fixture`): with
   two connected services and a saved order placing the second first,
-  `nyx__search_tools` with an nonempty relevance-tie query (transport requires a query) lists the preferred service's
+  `nyx__search_tools` with a nonempty relevance-tie query (transport requires a query) lists the preferred service's
   tools first and each match carries `preference_rank`;
   `nyx__list_connected_services` returns them in preference order; a guest-turn
   chat key sees the same order restricted to its allowed services.
@@ -891,11 +891,12 @@ exact check commands and outcomes, and every resolved review finding.
 
 ## 17. AC implementation and check evidence
 
-The matrix now records fresh evidence on the uncommitted `566ca5f9` merge
-from published head `35af1701`. §19 lists exact commands, logs and integration
-results. All feature, neighboring/upstream backend, CLI/wizard/Clippy and PM frontend
-gates have passed. PM sign-off and remote CI
-remain separate gates; no remote pass is inferred from local checks. Prior-base
+The matrix records successful implementation and local validation. §19 lists
+backend/CLI/Clippy commands and results on the `566ca5f9` integration committed
+as `0390ad00`; §20 supersedes frontend/wizard evidence with final `868ce0b7`
+integration results. Backend/CLI Rust source is unchanged between these bases.
+All local gates passed. Remote CI and Opus's final verdict are separate gates,
+recorded on the PR; no remote pass is inferred from local checks. Earlier-base
 results are retained below as historical evidence.
 
 - [x] AC-01: `models/service_preference.rs::service_preference_bson_dates_and_legacy_defaults`: BSON dates and dated legacy defaults passed in the merged 8-test backend feature run.
@@ -914,17 +915,17 @@ results are retained below as historical evidence.
 - [x] AC-14: Fresh `rg` returned no preference/rank references in proxy, execution authority, approvals, billing, `handlers/service_insights.rs` or `services/service_insights_activity.rs`. Source review confirms only search/connected metadata calls use the preferred loader; execution keeps the operation catalog.
 - [x] AC-15: HTTP CAS test checks exactly two changed-write audits across both races/no-op, count/version-only event data and successful chain verification; passed in the merged 8-test backend feature run.
 - [x] AC-16: CLI unit checks passed 2/2 (0.01s): active slug/display and prior GET-version→PUT/typed409. Fresh merged process integration passed 2/2 (1.52s): precise table `1`/`-` rank cells, show/table/JSON equality, active slug and actual nonzero409 exit. Parser splits outer `│` and internal `┆`; a missing row prints the rendered table. No timeout increase or weakened assertion.
-- [x] AC-17: Merged full suite passed (4,723 tests): shared table/overview pills follow links and precede readiness; Gamma→Alpha API order is unchanged. Real grouped browser scenario passed: chip derives hidden Beta from complete group, names it, lists all ranks in title and expands; org/service/search/Personal filters retain dense pill text, pool row shows independent Priority 7, overview and DEV use the shared renderer.
+- [x] AC-17: Merged full suite passed (4,741 tests): shared table/overview pills follow links and precede readiness; Gamma→Alpha API order is unchanged. Real grouped browser scenario passed: chip derives hidden Beta from complete group, names it, lists all ranks in title and expands; org/service/search/Personal filters retain dense pill text, pool row shows independent Priority 7, overview and DEV use the shared renderer.
 - [x] AC-18: Fresh merged grouped browser scenario passed: full three-item inventory under Personal/service/search/auto-hidden filters, toolbar unmounted, no form links, saved filter text and expanded card restored after both Save and Cancel, no service-view PUT. Page tests cover loading/refetch entry gates; browser covers empty/404 and hidden DEV entry.
 - [x] AC-19: PM's merged 14-scenario real-route browser run passed, including mouse/touch dragging, keyboard movement/Escape, the divider, Rank/Unrank and live rank updates. The keyboard test waits for actual Escape layout animation and the sensor render frame before the next lift; all movement/announcement assertions remain.
 - [x] AC-20: Fresh merged browser tests pass dirty-gated Save, Cancel, exact ordered IDs/version payload, grid/table transitions and Save/Cancel focus after a delayed closing inventory GET.
 - [x] AC-21: Fresh merged real-route browser tests pass network retry with edits retained, actual 409→Overwrite→successful persistence, Reload resets dirty, recovery after ordinary preference refetch failure, and initial-404 compatibility.
 - [x] AC-22: Request/response schema checks passed in the merged full frontend suite; canonical RFC4122 UUID-v4, duplicate/201 bound, safe version, unknown-field and missing-document/null timestamp cases.
-- [x] AC-23: Fresh merged frontend passed 461 files/4,723 tests (168.67s), production build and lint passed (0 errors/29 unchanged unrelated warnings, no feature warnings), browser 14/14 passed (37.3s), and regenerated wizard freshness passed 1/1 (0.06s). The 201-row regression retains its default 5-second timeout. Fresh local all-target Clippy with `-D warnings` passed on Rust 1.94.1 (4m15s), log `/tmp/service-preference-merge-566ca5f9-clippy.log`; remote Rust 1.98.1 CI awaits PM's merge commit/push.
+- [x] AC-23: Fresh merged frontend passed 463 files/4,741 tests (168.33s), production build and lint passed (0 errors/29 unchanged unrelated warnings, no feature warnings), browser 14/14 passed (36.1s), and regenerated wizard freshness passed 1/1 (0.04s). The 201-row regression retains its default 5-second timeout. Fresh local all-target Clippy with `-D warnings` passed on Rust 1.94.1 (4m15s), log `/tmp/service-preference-merge-566ca5f9-clippy.log`; remote Rust 1.98.1 CI is recorded on the PR at its published head.
 - [x] AC-24: API/OpenAPI, discovery, service-card architecture, NyxAgent and CLAUDE reviewed against revised UI. Docs distinguish Discovery from pool Priority/cascade, preserve normal order, state independent-client limits and one relevance/name/preference/stable contract. REST auth and MCP identity application are separate (including scoped relay order). Upstream release 0.66.0 is retained with no feature-specific bump. Guest Internal exclusion and active-MCP versus full-UI rank examples are documented.
 - [x] AC-25: Mounted HTTP test passed the original `preference-order` slug read and OAuth preference-write rejection. Existing `curation_router_scoped_discovery_history_and_route_confinement` passed against the dedicated replica set (1.45s), preserving curation auth/routing.
 - [x] AC-26: Fresh merged backend feature run passed scoped/guest/relay HTTP/MCP privacy and live org revocation: no hidden IDs or rank gaps, unchanged stale storage, canonical IDs/version/body/unknown-field/no-op checks.
-- [x] AC-27: PM's fresh merged browser run passed 14/14 in 37.3s on merged 0.66 source: mouse/touch/keyboard/Escape, grouped/table/overview/DEV pills, complete-group chip, preserved filters/expanded card/no saved-view write, stale400, late legacy-org provenance enrichment and refreshed provenance, identity switch, delayed exit focus and desktop/mobile screenshots. Log: `/tmp/nyxid-service-preference-066-browser.log`.
+- [x] AC-27: PM's fresh merged browser run passed 14/14 in 36.1s on merged 0.66 source: mouse/touch/keyboard/Escape, grouped/table/overview/DEV pills, complete-group chip, preserved filters/expanded card/no saved-view write, stale400, late legacy-org provenance enrichment and refreshed provenance, identity switch, delayed exit focus and desktop/mobile screenshots. Log: `/tmp/nyxid-service-preference-066-browser.log`.
 - [x] AC-28: Merged full frontend suite and fresh browser cases prove 200 bound, fail-closed cached reads, 404, one-service rank/unrank, separate identity caches/late mutation rejection, deferred recovery identity switch, inventory-failure retry and actual400 inventory-first recovery. New metadata-only enrichment regression preserves draft IDs/version when source arrives late and when a legacy inventory is refreshed.
 
 
@@ -1030,14 +1031,16 @@ placement (toolbar when keys exist, header otherwise).
 Root-owned review document `docs/plans/service-tool-preference-review.md` is
 not modified by this revision.
 
-## 19. Latest upstream integration (`origin/main` `566ca5f9`, #1795)
+## 19. Release 0.66 integration (`566ca5f9`, #1795; committed as `0390ad00`)
 
 PM requested `git merge --no-commit origin/main` on the already published branch
 at `35af1701`, preserving its plan-only working diff and the PM-owned review
-record. The merge is uncommitted; PM owns the merge commit, push, renewed CI and
-final review of draft PR [#1796](https://github.com/ChronoAIProject/NyxID/pull/1796).
-The existing §17 evidence remains a historical baseline until the fresh results
-below are recorded.
+record. After all local gates passed, PM committed the merge and corrections as
+`0390ad001d23c1b18fcfe7de997f84382de58d6c`; it was not pushed at the start of §20.
+PM owns publication, renewed CI and final review of draft PR
+[#1796](https://github.com/ChronoAIProject/NyxID/pull/1796).
+The results below establish the backend/CLI/Clippy evidence used in §17. The
+later frontend-only integration supersedes UI evidence in §20.
 
 Actual conflicts were limited to `handlers/mod.rs`, `models/mod.rs`, the generated
 wizard `assets/index.html`, and `bundle-meta/index.hash`. Both preference and
@@ -1135,7 +1138,7 @@ Opus preliminary findings on `35af1701` are incorporated before Rust compilation
   3 files/33 tests (4.62s), log
   `/tmp/service-preference-merge-566ca5f9-frontend-targeted.log`.
 
-Source and wizard are ready for PM's merge commit. PM inspected the merged MCP,
+PM committed the validated source and wizard as `0390ad00`. PM inspected the merged MCP,
 shared GET visibility helper, docs and UI cleanup. The eight-test feature run,
 all neighboring/upstream backend filters, CLI/wizard/Clippy and all fresh frontend
 gates have passed. All AC-01..AC-28 now have current local evidence. There are no
@@ -1143,12 +1146,10 @@ known unresolved implementation findings; PM's final sign-off and renewed remote
 CI remain separate gates.
 
 After these checks, PM fetched frontend-only `868ce0b7d01a6193ad7a6cff77147bd5163bac9a`
-(76-file readability change, no Rust source). It is deliberately not merged into
-the current uncommitted merge: HEAD remains `35af1701`, MERGE_HEAD remains
-`566ca5f9`. PM will first commit this integration, then authorize the separate
-frontend/wizard integration and fresh frontend validation. Completed backend
-evidence above remains applicable while Rust source is unchanged; no check of the
-unmerged `868ce0b7` frontend is claimed.
+(76-file readability change, no Rust source). It was held until PM committed the
+0.66 integration. Its separately authorized merge and fresh UI evidence are now
+tracked in §20; completed backend evidence remains applicable while Rust source
+is unchanged.
 
 The first Cargo invocation built the merged test binary successfully. A later
 cached Cargo invocation retriggered the build scripts because their relative
@@ -1173,3 +1174,71 @@ zero-test result is counted.
 | `handlers::mcp_transport::tests::service_concurrency_` | 2 | 0.35s | `mcp-concurrency.log` |
 | `handlers::proxy::proxy_resolution_integration_tests::service_concurrency_` | 2 | 1.16s | `proxy-concurrency.log` |
 | `org_agent_mcp_tests` | 1 | 1.34s | `org-agent-mcp.log` |
+
+## 20. Frontend readability integration (`868ce0b7`)
+
+PM authorized `git merge --no-commit origin/main` from committed integration head
+`0390ad001d23c1b18fcfe7de997f84382de58d6c` onto fetched
+`868ce0b7d01a6193ad7a6cff77147bd5163bac9a`. PM inspected the merged source and
+completed fresh full frontend/browser/build/lint checks before committing and
+publishing the integration. The PM review record is preserved and is not edited
+by the implementer.
+
+The only conflicts were generated `cli/src/wizard/assets/index.html` and
+`cli/src/wizard/bundle-meta/index.hash`; both are resolved by regeneration from merged source.
+Grouped cards, the shared connection table, keys page and architecture docs
+merged automatically and were inspected against upstream. Preserve upstream
+`text-primary-text`/control-height readability tokens, pool strategy icons,
+wrapping and billing/usage changes. Discovery pills remain beside the connection
+link, the collapsed chip still derives from complete `group.connections`, and
+the editor retains its inventory/filter/identity/recovery/focus behavior.
+
+The editor's information icon explicitly adopts `text-primary-text` to follow
+the upstream readability contract. AC-12's text now says "a nonempty" query.
+No backend/CLI Rust source, execution semantics or preference visibility logic
+changed. The completed §19 backend/CLI/Clippy evidence is retained without a
+repeat backend build. Only wizard freshness is affected by the rebuilt embedding.
+
+Fresh evidence on this frontend merge:
+
+- [x] `npm --prefix frontend run build:wizard`: exit0; TypeScript and wizard
+  production build passed, merged embedded assets and 168-file source closure
+  regenerated. Closure hash prefix `c960ab3c6057`; log
+  `/tmp/service-preference-merge-868ce0b7-wizard-build.log`.
+- [x] No unmerged paths or conflict markers. Staged/working `git diff --check`
+  passed. `git diff 0390ad00 --name-only -- backend cli ':!cli/src/wizard'`
+  has no output: backend/CLI Rust source and manifests are unchanged. PM review
+  record was byte-identical to its pre-merge backup at this verification boundary;
+  subsequent PM-owned updates remain preserved.
+- [x] `cargo test -p nyxid-cli --test wizard_bundle_freshness -j 1`: 1 passed,
+  0 failed/ignored (0.04s; focused CLI rebuild 26.71s), log
+  `/tmp/service-preference-merge-868ce0b7-wizard-freshness.log`. Uses the §11
+  explicit DB URI/task target/debug=0/incremental=0 environment and checks the
+  rebuilt merged 168-file source closure.
+- [x] PM-owned full isolated frontend suite: 463 files / 4,741 tests passed in
+  168.33s. Log `/tmp/nyxid-service-preference-868-full-frontend.log`; the same
+  origin-only temporary config described in §17 preserves the repository setup.
+- [x] Real-route browser suite: all 14 scenarios passed in 36.1s, including
+  actual mouse/touch/keyboard input, persistence, complete-group/table/overview
+  pills, preserved views, delayed focus, conflict/stale recovery and account
+  switching. Log `/tmp/nyxid-service-preference-868-browser.log`. PM inspected
+  fresh desktop and 390-pixel mobile screenshots under
+  `/tmp/nyxid-service-preference-review/868-*.png`; labels wrap without overflow.
+- [x] Production build and lint passed, with zero lint errors/feature warnings
+  and the same 29 unrelated baseline warnings. Logs
+  `/tmp/nyxid-service-preference-868-{build,lint}.log`.
+- [x] PM personally inspected the final source diff and all validation logs;
+  every substantiated plan, implementation and preliminary Opus finding is closed.
+
+PM publishes this integration on PR #1796. Required remote CI and Opus's final
+review are recorded there against the published head, so their final verdict does
+not require another source or evidence-only commit.
+
+Source/wizard are complete and ready for PM's review. PM inspected the merged UI
+and accepted preservation of upstream readability/service-table/pool behavior,
+preference pills/editor and the information-icon token correction. All fresh
+frontend/browser/build/lint checks passed. No frontend source edits remain. The focused CLI wizard
+freshness check passed; backend regressions, CLI preference tests and Clippy are
+not repeated because Rust source is unchanged and the only CLI delta is the
+regenerated embedding. No known unresolved source findings remain. The fresh
+§20 UI results supersede §19's UI baseline; backend evidence remains applicable.

@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { Layers, MoreVertical } from "lucide-react";
+import { MoreVertical } from "lucide-react";
 import { toast } from "sonner";
 import { CopyableField } from "@/components/shared/copyable-field";
 import { ErrorBanner } from "@/components/shared/error-banner";
@@ -40,6 +40,7 @@ import { PoolEditor } from "./pool-editor";
 import { PoolHealthDialog } from "./pool-health-dialog";
 import { message, readOnlyPreview, strategyLabels } from "./pool-labels";
 import { ServicePoolCards } from "./service-pool-cards";
+import { PoolStrategyIcon, ServicePoolIcon } from "./service-pool-icons";
 
 export { PoolEditor } from "./pool-editor";
 export { PoolHealthDialog } from "./pool-health-dialog";
@@ -187,7 +188,7 @@ export function ServicePoolsTab({
       {pools.data?.length === 0 && (
         <div className="rounded-xl border border-border/50 bg-card px-6 py-12 text-center">
           <div className="mx-auto mb-4 flex size-10 items-center justify-center rounded-xl border border-border/50 bg-overlay">
-            <Layers className="size-5 text-muted-foreground" />
+            <ServicePoolIcon className="size-5 text-muted-foreground" />
           </div>
           <h3 className="text-15 font-semibold">
             Your connections, one reliable route
@@ -244,13 +245,14 @@ export function ServicePoolsTab({
                     <TableCell>
                       <button
                         type="button"
-                        className="max-w-full break-words text-left font-medium hover:underline"
+                        className="flex max-w-full items-start gap-2 break-words text-left font-medium hover:underline"
                         onClick={(event) => {
                           dialogTrigger.current = event.currentTarget;
                           setEditing(pool);
                         }}
                       >
-                        {pool.name}
+                        <ServicePoolIcon className="mt-0.5 size-4 shrink-0" />
+                        <span>{pool.name}</span>
                       </button>
                       {pool.description && (
                         <p className="mt-1 max-w-64 truncate text-11 text-muted-foreground">
@@ -262,9 +264,14 @@ export function ServicePoolsTab({
                       {pool.slug}
                     </TableCell>
                     <TableCell>
-                      {strategyLabels[pool.strategy]}
-                      <br />
-                      <span className="text-11 text-muted-foreground">
+                      <span className="flex items-center gap-1.5">
+                        <PoolStrategyIcon
+                          strategy={pool.strategy}
+                          className="size-3.5 shrink-0"
+                        />
+                        {strategyLabels[pool.strategy]}
+                      </span>
+                      <span className="block pl-5 text-11 text-muted-foreground">
                         {pool.member_contract === "ai_chat"
                           ? "AI chat"
                           : "Same API"}
@@ -292,9 +299,19 @@ export function ServicePoolsTab({
                 className="flex items-center justify-between gap-3 rounded-xl border border-border/50 bg-card p-4"
               >
                 <div className="min-w-0 flex-1">
-                  <p className="break-words text-13 font-medium">{pool.name}</p>
+                  <p className="flex items-start gap-2 break-words text-13 font-medium">
+                    <ServicePoolIcon className="mt-0.5 size-4 shrink-0" />
+                    <span>{pool.name}</span>
+                  </p>
                   <p className="break-words text-12 text-muted-foreground">
-                    {pool.slug} · {strategyLabels[pool.strategy]} ·{" "}
+                    {pool.slug}
+                  </p>
+                  <p className="flex items-center gap-1.5 text-12 text-muted-foreground">
+                    <PoolStrategyIcon
+                      strategy={pool.strategy}
+                      className="size-3.5 shrink-0"
+                    />
+                    {strategyLabels[pool.strategy]} ·{" "}
                     {pool.is_active ? "Enabled" : "Disabled"}
                   </p>
                 </div>

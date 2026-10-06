@@ -363,7 +363,7 @@ export function ServicePreferenceEditor({
         and saved views are not applied here and are not changed.
       </p>
       <div className="flex items-start gap-3 rounded-xl border border-primary/15 bg-primary/[0.04] px-4 py-3">
-        <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+        <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary-text">
           <Info className="size-4" aria-hidden="true" />
         </span>
         <p className="text-12 text-muted-foreground">

@@ -128,7 +128,7 @@ export function UsageStatsCard({
       <CardHeader className="pb-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <Activity className="h-4 w-4 text-primary" />
+            <Activity className="h-4 w-4 text-primary-text" />
             <CardTitle className="text-15">Usage</CardTitle>
           </div>
           <Select value={String(days)} onValueChange={(v) => setDays(Number(v))}>
