@@ -2558,9 +2558,11 @@ async fn inbound_message(
         }
     };
     let addressed = chat.kind.as_deref() == Some("private") || addressed == Some(true);
-    start_chat_turn(
+    // Channel admission nests several large futures before claiming the turn.
+    // Keep them off the polling stack for both gateway and direct-relay calls.
+    Box::pin(start_chat_turn(
         state, row, chat, sender, text, guest, addressed, None, event_key,
-    )
+    ))
     .await
 }
 
@@ -3002,14 +3004,14 @@ async fn start_chat_turn(
         question: Some(excerpt(text, engine::QUESTION_EXCERPT_CHARS)),
         reply_channel: shared.then(|| origin.clone()),
     };
-    match start_server_turn(
+    match Box::pin(start_server_turn(
         state,
         &row.user_id,
         start,
         Pool::Channel {
             owner: &row.user_id,
         },
-    )
+    ))
     .await
     {
         Ok(Started::Turn { receiver, .. }) => Ok(Inbound::Turn(receiver)),
@@ -3618,7 +3620,7 @@ pub async fn responses(State(state): State<AppState>, headers: HeaderMap, body: 
         .as_str()
         .map(str::to_owned);
     let human = activity["actor"]["kind"] == "human";
-    let inbound = gateway_inbound(
+    let inbound = Box::pin(gateway_inbound(
         &state,
         &row,
         &partition,
@@ -3631,7 +3633,7 @@ pub async fn responses(State(state): State<AppState>, headers: HeaderMap, body: 
         &text,
         human,
         &event_key,
-    )
+    ))
     .await;
     let finish = |status: &'static str, conversation: Option<String>| {
         let state = state.clone();
@@ -3761,7 +3763,10 @@ async fn gateway_inbound(
                 None => false,
             },
     );
-    inbound_message(state, row, &chat, sender, text, addressed, event_key).await
+    Box::pin(inbound_message(
+        state, row, &chat, sender, text, addressed, event_key,
+    ))
+    .await
 }
 
 fn is_duplicate(error: &mongodb::error::Error) -> bool {
@@ -4165,21 +4170,28 @@ pub async fn relay_callback(
                 id: &sender_id,
                 display_name: display.as_deref(),
             };
-            let reply =
-                match inbound_message(&state, &row, &chat, &sender, &text, addressed, &admitted.id)
-                    .await?
-                {
-                    Inbound::Reply(text) => Some(text),
-                    Inbound::Silent => None,
-                    Inbound::Busy => Some(
-                        "I'm still working on the previous message. I'll pick this up next.".into(),
-                    ),
-                    Inbound::Turn(receiver) => {
-                        let _ = final_reply(receiver).await;
-                        late_delivery::process(&state, &admitted.id).await;
-                        None
-                    }
-                };
+            let reply = match Box::pin(inbound_message(
+                &state,
+                &row,
+                &chat,
+                &sender,
+                &text,
+                addressed,
+                &admitted.id,
+            ))
+            .await?
+            {
+                Inbound::Reply(text) => Some(text),
+                Inbound::Silent => None,
+                Inbound::Busy => Some(
+                    "I'm still working on the previous message. I'll pick this up next.".into(),
+                ),
+                Inbound::Turn(receiver) => {
+                    let _ = final_reply(receiver).await;
+                    late_delivery::process(&state, &admitted.id).await;
+                    None
+                }
+            };
             if let Some(reply) = reply
                 && let Err(error) = direct_reply(
                     &state,

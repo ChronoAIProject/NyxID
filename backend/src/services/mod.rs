@@ -202,6 +202,7 @@ pub mod assistant_acknowledgement_service;
 pub mod assistant_agent_credential_service;
 pub mod assistant_continuation;
 pub mod assistant_group_service;
+pub mod assistant_instruction_context;
 pub mod assistant_live;
 pub mod assistant_nyxagent;
 pub mod assistant_profile_routing;

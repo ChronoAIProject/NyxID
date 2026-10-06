@@ -14,8 +14,6 @@ export interface UploadedMessage {
   readonly attachmentIds: string[];
   readonly conversationId?: string;
 }
-export const UPLOAD_ACCEPT =
-  ".png,.jpg,.jpeg,.gif,.webp,.pdf,.docx,.txt,.md,.markdown,.csv,.json";
 
 export async function createUploadDraft(agentId?: string): Promise<string> {
   const draft = await assistantJson<{ id: string }>(
