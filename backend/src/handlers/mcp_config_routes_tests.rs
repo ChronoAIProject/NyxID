@@ -236,13 +236,26 @@ async fn assert_parity(state: &AppState, headers: &HeaderMap, rest: &Value) {
         ));
     }
     let mut definitions = mcp_service::generate_tool_definitions(&services, None);
-    if auth.chat.as_ref().is_some_and(|chat| !chat.guest) {
-        definitions.extend(crate::services::machine_tools::definitions());
+    if let Some(chat) = auth.chat.as_ref().filter(|chat| !chat.guest) {
+        definitions.extend(
+            Box::pin(crate::services::machine_access_service::definitions(
+                &state.db, chat,
+            ))
+            .await
+            .unwrap(),
+        );
+        definitions.push(crate::services::assistant_upload_service::definition());
     }
     let expected: Vec<Value> = definitions
         .iter()
         .filter(|t| !(super::is_scoped_api_key(&auth) && super::SSH_META_TOOL_NAMES.contains(&t.name.as_str())))
-        .map(|t| json!({"name": t.name, "description": t.description, "inputSchema": t.input_schema}))
+        .map(|t| {
+            let mut tool = json!({"name": t.name, "description": t.description, "inputSchema": t.input_schema});
+            if let Some(annotations) = mcp_service::tool_annotations(&t.name, &services) {
+                tool["annotations"] = annotations;
+            }
+            tool
+        })
         .collect();
     assert_eq!(listing["result"]["tools"], json!(expected), "{listing}");
 }

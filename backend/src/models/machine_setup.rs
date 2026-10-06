@@ -7,6 +7,8 @@ pub const COLLECTION_NAME: &str = "machine_setups";
 #[serde(deny_unknown_fields)]
 pub struct Choices {
     #[serde(default)]
+    pub automatic_updates: Option<bool>,
+    #[serde(default)]
     pub owner_id: Option<String>,
     pub name: String,
     #[serde(rename = "where")]

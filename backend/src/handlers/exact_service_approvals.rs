@@ -48,6 +48,9 @@ pub async fn redeem_request(
     Json(fence): Json<ExactServiceApprovalFence>,
 ) -> AppResult<Json<ExactServiceApprovalResult>> {
     auth_user.ensure_rest_proxy_access()?;
+    auth_user
+        .ensure_live_assistant_turn(&state.db, "exact-approval.redeem")
+        .await?;
     enforce_rate_limit(&state, &auth_user).await?;
     let caller = caller(&auth_user)?;
     let permit =
@@ -91,6 +94,10 @@ fn caller(auth_user: &AuthUser) -> AppResult<ExactServiceApprovalCaller> {
             AuthMethod::Session => ("session", actor_user_id.clone()),
         };
     Ok(ExactServiceApprovalCaller {
+        org_agent_access: auth_user.org_agent_access.clone(),
+        assistant_group_id: auth_user.assistant_group_id.clone(),
+        agent_owner: auth_user.assistant_agent_owner_id.clone(),
+        operation_scopes: auth_user.assistant_operation_scopes.clone(),
         actor_user_id,
         proxy_resolution_user_id: auth_user.proxy_resolution_user_id(),
         approval_owner_user_id: auth_user.effective_approval_owner_user_id(),
@@ -125,6 +132,12 @@ mod tests {
 
     fn auth(method: AuthMethod) -> AuthUser {
         AuthUser {
+            org_agent_access: None,
+            assistant_group_id: None,
+            assistant_agent_owner_id: None,
+            assistant_operation_scopes: Default::default(),
+            assistant_turn_fence: None,
+            assistant_chat: None,
             user_id: uuid::Uuid::new_v4(),
             session_id: None,
             scope: "proxy".to_string(),

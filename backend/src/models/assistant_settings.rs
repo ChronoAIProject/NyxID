@@ -33,6 +33,8 @@ pub struct AssistantSettings {
     pub skip_destructive_confirmation: bool,
     #[serde(default = "default_live")]
     pub max_live_subagents: i32,
+    #[serde(default = "default_auto_continuations")]
+    pub max_auto_continuations: i32,
     #[serde(default = "default_concurrent")]
     pub max_concurrent_subagent_turns: i32,
     /// 0 turns agent hand-offs in groups off.
@@ -44,6 +46,8 @@ pub struct AssistantSettings {
     pub updated_at: DateTime<Utc>,
     #[serde(default)]
     pub timezone: Option<String>,
+    #[serde(default)]
+    pub voice: Option<super::assistant_voice::VoicePreferences>,
     #[serde(default = "default_schedule_minimum")]
     pub schedule_minimum_minutes: i32,
     #[serde(default = "default_trigger_hourly")]
@@ -60,6 +64,10 @@ fn default_trigger_hourly() -> i32 {
 }
 fn default_trigger_daily() -> i32 {
     DEFAULT_TRIGGER_RUNS_PER_DAY
+}
+
+fn default_auto_continuations() -> i32 {
+    8
 }
 
 fn default_live() -> i32 {
@@ -81,11 +89,13 @@ impl AssistantSettings {
             user_id: user_id.into(),
             skip_destructive_confirmation: false,
             max_live_subagents: DEFAULT_MAX_LIVE_SUBAGENTS,
+            max_auto_continuations: default_auto_continuations(),
             max_concurrent_subagent_turns: DEFAULT_MAX_CONCURRENT_SUBAGENT_TURNS,
             max_group_handoffs: DEFAULT_MAX_GROUP_HANDOFFS,
             max_group_handoffs_per_hour: DEFAULT_MAX_GROUP_HANDOFFS_PER_HOUR,
             updated_at: Utc::now(),
             timezone: None,
+            voice: None,
             schedule_minimum_minutes: DEFAULT_SCHEDULE_MINIMUM_MINUTES,
             trigger_runs_per_hour: DEFAULT_TRIGGER_RUNS_PER_HOUR,
             trigger_runs_per_day: DEFAULT_TRIGGER_RUNS_PER_DAY,

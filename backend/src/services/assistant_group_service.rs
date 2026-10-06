@@ -64,6 +64,7 @@ async fn resolve_members(
         let agent = team::agent(db, owner, id)
             .await
             .map_err(|_| AppError::ValidationError("Unknown agent in member_agent_ids".into()))?;
+        super::org_agent_service::require_use(db, owner, &agent).await?;
         if agent.destroyed_at.is_some() {
             return Err(AppError::Conflict(format!(
                 "Agent {} was destroyed",
@@ -120,6 +121,8 @@ pub async fn create(
     let group = AssistantGroup {
         id: format!("nyxg-{}", Uuid::new_v4().simple()),
         user_id: owner.into(),
+        participant_user_ids: Vec::new(),
+        created_by_user_id: None,
         name,
         member_agent_ids: members.iter().map(|member| member.id.clone()).collect(),
         lead_agent_id: lead_of(&members),
@@ -262,12 +265,27 @@ pub async fn delete(db: &Database, owner: &str, id: &str) -> AppResult<()> {
             Err(error) => return Err(error),
         }
     }
-    db.collection::<GroupMessage>(MESSAGES)
-        .delete_many(doc! {"group_id": id, "user_id": owner})
-        .await?;
+    // Commit the parent deletion and upload cleanup together. Upload admission
+    // writes the same parent, so an in-flight parser cannot leave orphan files.
+    let mut session = db.client().start_session().await?;
+    session.start_transaction().await?;
     db.collection::<AssistantGroup>(GROUPS)
         .delete_one(owner_filter(owner, id)?)
+        .session(&mut session)
         .await?;
+    db.collection::<bson::Document>(crate::models::assistant_attachment::COLLECTION_NAME)
+        .delete_many(doc! {"group_id": id, "user_id": owner})
+        .session(&mut session)
+        .await?;
+    db.collection::<bson::Document>(crate::models::assistant_upload_retention::TOMBSTONES)
+        .delete_many(doc! {"group_id": id, "user_id": owner})
+        .session(&mut session)
+        .await?;
+    db.collection::<GroupMessage>(MESSAGES)
+        .delete_many(doc! {"group_id": id, "user_id": owner})
+        .session(&mut session)
+        .await?;
+    session.commit_transaction().await?;
     Ok(())
 }
 
@@ -293,6 +311,12 @@ pub async fn append(
         .await?
         .ok_or_else(not_found)?;
     let message = GroupMessage {
+        activities: Vec::new(),
+        org_group: false,
+        author_user_id: None,
+        author_display_name: None,
+        request_id: None,
+        attachments: Vec::new(),
         id: Uuid::new_v4().to_string(),
         group_id: group_id.into(),
         user_id: owner.into(),
@@ -306,6 +330,72 @@ pub async fn append(
     db.collection::<GroupMessage>(MESSAGES)
         .insert_one(&message)
         .await?;
+    Ok(message)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn append_with_uploads(
+    db: &Database,
+    owner: &str,
+    group_id: &str,
+    role: &str,
+    agent: Option<&AssistantAgent>,
+    text: &str,
+    ids: &[String],
+) -> AppResult<GroupMessage> {
+    if ids.is_empty() {
+        return append(db, owner, group_id, role, agent, text).await;
+    }
+    if role != "user" {
+        return Err(AppError::Forbidden("Only the owner uploads files".into()));
+    }
+    let mut session = db.client().start_session().await?;
+    session.start_transaction().await?;
+    let now = Utc::now();
+    let group = db
+        .collection::<AssistantGroup>(GROUPS)
+        .find_one_and_update(
+            owner_filter(owner, group_id)?,
+            doc! {"$inc": {"message_count": 1},
+            "$set": {"last_message_at": bson::DateTime::from_chrono(now),
+            "updated_at": bson::DateTime::from_chrono(now)}},
+        )
+        .return_document(ReturnDocument::After)
+        .session(&mut session)
+        .await?
+        .ok_or_else(not_found)?;
+    let message_id = Uuid::new_v4().to_string();
+    let attachments = Box::pin(super::assistant_upload_service::bind(
+        db,
+        owner,
+        group_id,
+        &message_id,
+        ids,
+        &mut session,
+    ))
+    .await?;
+    let message = GroupMessage {
+        activities: Vec::new(),
+        org_group: false,
+        author_user_id: None,
+        author_display_name: None,
+        request_id: None,
+        attachments,
+        id: message_id,
+        group_id: group_id.into(),
+        user_id: owner.into(),
+        seq: group.message_count,
+        role: role.into(),
+        agent_id: agent.map(|agent| agent.id.clone()),
+        agent_name: agent.map(|agent| agent.name.clone()),
+        text: text.into(),
+        created_at: now,
+    };
+    db.collection::<GroupMessage>(MESSAGES)
+        .insert_one(&message)
+        .session(&mut session)
+        .await?;
+    session.commit_transaction().await?;
     Ok(message)
 }
 
@@ -423,7 +513,8 @@ pub async fn follow(
     conversation_id: &str,
     since_seq: i64,
 ) -> AppResult<()> {
-    let filter = owner_filter(owner, group_id)?;
+    let mut filter = owner_filter(owner, group_id)?;
+    filter.insert("created_by_user_id", bson::Bson::Null);
     let groups = db.collection::<AssistantGroup>(GROUPS);
     groups
         .update_one(
@@ -617,7 +708,7 @@ pub async fn set_seen(db: &Database, owner: &str, thread_id: &str, seq: i64) -> 
 pub async fn with_pending(db: &Database) -> AppResult<Vec<AssistantGroup>> {
     let rows: Vec<AssistantGroup> = db
         .collection::<AssistantGroup>(GROUPS)
-        .find(doc! {"pending_agent_ids.0": {"$exists": true}})
+        .find(doc! {"$or": [{"pending_agent_ids.0": {"$exists": true}}, {"created_by_user_id": {"$type": "string"}}]})
         .sort(doc! {"pending_checked_at": 1})
         .limit(50)
         .await?
@@ -654,7 +745,11 @@ pub async fn remove_agent(db: &Database, owner: &str, agent_id: &str) -> AppResu
             .filter_map(|id| agents.iter().find(|agent| &agent.id == id).cloned())
             .collect();
         if members.is_empty() {
-            delete(db, owner, &group.id).await?;
+            if super::org_group_service::is_org(&group) {
+                super::org_group_service::delete_contents(db, &group, None).await?;
+            } else {
+                delete(db, owner, &group.id).await?;
+            }
             continue;
         }
         db.collection::<AssistantGroup>(GROUPS)

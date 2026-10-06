@@ -17,7 +17,7 @@ use tokio::{
 
 use super::process::Identity;
 
-pub const VERSION: &str = "0.30.4";
+pub const VERSION: &str = "0.31.0";
 const MAX_MCP_LINE: usize = 12 * 1024 * 1024;
 static TOOLS: std::sync::LazyLock<Vec<Value>> = std::sync::LazyLock::new(|| {
     serde_json::from_str(nyxid_machine::CUA_TOOLS).expect("embedded contract")
@@ -115,6 +115,7 @@ pub async fn verify_version(path: &Path) -> Result<String> {
     command
         .arg("--version")
         .env("CUA_DRIVER_RS_TELEMETRY_ENABLED", "false")
+        .env("CUA_DRIVER_RS_UPDATE_CHECK", "false")
         .stderr(std::process::Stdio::null());
     let output = tokio::time::timeout(Duration::from_secs(10), command.output()).await??;
     let version = String::from_utf8_lossy(&output.stdout);
@@ -128,6 +129,69 @@ pub async fn verify_version(path: &Path) -> Result<String> {
     Ok(VERSION.into())
 }
 
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum DriverError {
+    #[error(
+        "driver restarting; retry after {retry_after_ms} ms and observe before repeating an action"
+    )]
+    Restarting { retry_after_ms: u64 },
+    #[error("computer permission missing; enable Accessibility and Screen Recording for the node")]
+    PermissionMissing,
+    #[error("computer tool is not supported on this platform")]
+    ToolUnsupported,
+    #[error("display unavailable; start the desktop session")]
+    DisplayUnavailable,
+    #[error("computer request refused by cua; check its permission mode and request arguments")]
+    Refused,
+}
+
+// A broken session must never escape as an unclassified machine-operation error.
+// Keep transport/process failures separate from a well-formed MCP refusal.
+#[derive(Debug, Clone, Copy)]
+enum TransportFailure {
+    Spawn,
+    Write,
+    Read,
+    Eof,
+    Decode,
+    Protocol,
+    Exited,
+    Timeout,
+    Cancelled,
+}
+
+#[derive(Debug)]
+enum SessionError {
+    Transport(TransportFailure),
+    Refused(DriverError),
+}
+
+type SessionResult<T> = std::result::Result<T, SessionError>;
+type DriverResult<T> = std::result::Result<T, DriverError>;
+
+fn tool_refusal(value: &Value) -> Option<DriverError> {
+    match value["code"].as_str() {
+        Some(
+            "permission_denied"
+            | "accessibility_permission_denied"
+            | "screen_recording_permission_denied",
+        ) => Some(DriverError::PermissionMissing),
+        Some("display_unavailable" | "display_not_found") => Some(DriverError::DisplayUnavailable),
+        Some("unsupported_tool" | "tool_not_supported") => Some(DriverError::ToolUnsupported),
+        _ => None,
+    }
+}
+
+fn refusal(value: &Value) -> DriverError {
+    tool_refusal(value).unwrap_or_else(|| {
+        if value["code"] == -32601 {
+            DriverError::ToolUnsupported
+        } else {
+            DriverError::Refused
+        }
+    })
+}
+
 pub struct Driver {
     human_input: bool,
     #[cfg(target_os = "macos")]
@@ -137,7 +201,11 @@ pub struct Driver {
     mode: ComputerMode,
     session: Mutex<Option<Session>>,
     cancelled: tokio::sync::watch::Sender<u64>,
-    attempts: Mutex<Vec<Instant>>,
+    failures: std::sync::atomic::AtomicU32,
+    next_start: std::sync::Mutex<Option<Instant>>,
+    known_tools: std::sync::RwLock<Vec<String>>,
+    #[cfg(target_os = "macos")]
+    known_permissions: std::sync::RwLock<Option<nyxid_machine::ComputerPermissions>>,
 }
 
 struct Session {
@@ -161,7 +229,11 @@ impl Driver {
             mode,
             session: Mutex::new(None),
             cancelled: tokio::sync::watch::channel(0).0,
-            attempts: Mutex::new(Vec::new()),
+            failures: std::sync::atomic::AtomicU32::new(0),
+            next_start: std::sync::Mutex::new(None),
+            known_tools: std::sync::RwLock::new(Vec::new()),
+            #[cfg(target_os = "macos")]
+            known_permissions: std::sync::RwLock::new(None),
         }
     }
 
@@ -179,30 +251,20 @@ impl Driver {
         self
     }
 
-    async fn start(&self) -> Result<Session> {
-        let mut attempts = self.attempts.lock().await;
-        attempts.retain(|at| at.elapsed() < Duration::from_secs(60));
-        if attempts.len() >= 3 {
-            bail!("cua driver restart limit reached; retry after one minute");
+    async fn start(&self) -> SessionResult<Session> {
+        let next = *self.next_start.lock().expect("driver backoff lock");
+        if let Some(at) = next {
+            tokio::time::sleep(at.saturating_duration_since(Instant::now())).await;
         }
-        attempts.push(Instant::now());
-        drop(attempts);
         let mut command = Command::new(&self.path);
-        self.identity.prepare(&mut command)?;
-        for key in [
-            "DISPLAY",
-            "XAUTHORITY",
-            "WAYLAND_DISPLAY",
-            "XDG_RUNTIME_DIR",
-            "DBUS_SESSION_BUS_ADDRESS",
-        ] {
-            if let Some(value) = std::env::var_os(key) {
-                command.env(key, value);
-            }
-        }
+        self.identity
+            .prepare(&mut command)
+            .map_err(|_| SessionError::Transport(TransportFailure::Spawn))?;
+        self.identity.desktop_env(&mut command);
         command
             .args(["mcp", "--direct"])
             .env("CUA_DRIVER_RS_TELEMETRY_ENABLED", "false")
+            .env("CUA_DRIVER_RS_UPDATE_CHECK", "false")
             .env(
                 "CUA_DRIVER_PERMISSION_MODE",
                 if self.mode == ComputerMode::Unrestricted {
@@ -219,7 +281,11 @@ impl Driver {
         }
         #[cfg(target_os = "macos")]
         let capture = if self.memory_capture {
-            Some(super::memory_capture::MemoryCapture::create().await?)
+            Some(
+                super::memory_capture::MemoryCapture::create()
+                    .await
+                    .map_err(|_| SessionError::Transport(TransportFailure::Spawn))?,
+            )
         } else {
             None
         };
@@ -227,9 +293,19 @@ impl Driver {
         if let Some(capture) = &capture {
             command.env("TMPDIR", capture.path());
         }
-        let mut child = command.spawn().context("cua driver unavailable")?;
-        let input = child.stdin.take().context("cua stdin unavailable")?;
-        let output = BufReader::new(child.stdout.take().context("cua stdout unavailable")?);
+        let mut child = command
+            .spawn()
+            .map_err(|_| SessionError::Transport(TransportFailure::Spawn))?;
+        let input = child
+            .stdin
+            .take()
+            .ok_or(SessionError::Transport(TransportFailure::Spawn))?;
+        let output = BufReader::new(
+            child
+                .stdout
+                .take()
+                .ok_or(SessionError::Transport(TransportFailure::Spawn))?,
+        );
         let mut session = Session {
             #[cfg(target_os = "macos")]
             _capture: capture,
@@ -243,11 +319,12 @@ impl Driver {
         session
             .input
             .write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n")
-            .await?;
+            .await
+            .map_err(|_| SessionError::Transport(TransportFailure::Write))?;
         let tools = session.rpc("tools/list", json!({})).await?;
         session.tools = tools["tools"]
             .as_array()
-            .context("invalid cua tool list")?
+            .ok_or(SessionError::Transport(TransportFailure::Protocol))?
             .iter()
             .filter_map(|tool| tool["name"].as_str())
             .filter(|name| public_tool(name))
@@ -264,81 +341,153 @@ impl Driver {
                 "arguments":{"session":"nyxid-owner","glide_duration_ms":50,"dwell_after_click_ms":0,"spring":1,"arc_size":0}
             })).await?;
             if result["isError"] == true {
-                bail!("cua human cursor configuration unavailable");
+                return Err(SessionError::Refused(refusal(&result["structuredContent"])));
             }
         }
+        *self.known_tools.write().expect("driver tools lock") = session.tools.clone();
+        *self.next_start.lock().expect("driver backoff lock") = None;
         Ok(session)
     }
 
-    pub async fn tools(&self) -> Result<Vec<String>> {
-        let mut cancelled = self.cancelled.subscribe();
-        tokio::select! {
-            biased;
-            _ = cancelled.changed() => bail!("cua initialization cancelled"),
-            result = async {
-                let mut session = self.session.lock().await;
-                let mut active = session.take();
-                if active.is_none() {
-                    active = Some(tokio::time::timeout(Duration::from_secs(20), self.start()).await??);
-                }
-                let tools = active.as_ref().context("cua session unavailable")?.tools.clone();
-                *session = active;
-                Ok(tools)
-            } => result,
+    /// A transport restart does not withdraw installed capability support.
+    pub fn advertised_tools(&self) -> Vec<String> {
+        let cached = self.known_tools.read().expect("driver tools lock");
+        if cached.is_empty() {
+            TOOLS
+                .iter()
+                .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
+                .collect()
+        } else {
+            cached.clone()
         }
+    }
+
+    fn restarting(&self, failure: TransportFailure) -> DriverError {
+        // Metadata only: never log driver response text or request arguments.
+        tracing::debug!(?failure, "cua session restarting");
+        let failures = self
+            .failures
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .min(5);
+        let delay = Duration::from_millis((100u64 << failures).min(2000));
+        *self.next_start.lock().expect("driver backoff lock") = Some(Instant::now() + delay);
+        DriverError::Restarting {
+            retry_after_ms: delay.as_millis() as u64,
+        }
+    }
+
+    async fn start_bounded(&self) -> SessionResult<Session> {
+        tokio::time::timeout(Duration::from_secs(20), self.start())
+            .await
+            .map_err(|_| SessionError::Transport(TransportFailure::Timeout))?
+    }
+
+    // Retain a healthy session after a genuine MCP refusal. Every transport error
+    // instead drops/kills the child and leaves the next call to restart with backoff.
+    fn finish<T>(
+        &self,
+        slot: &mut Option<Session>,
+        active: Option<Session>,
+        result: SessionResult<T>,
+    ) -> DriverResult<T> {
+        match result {
+            Ok(value) => {
+                self.failures.store(0, std::sync::atomic::Ordering::Relaxed);
+                *slot = active;
+                Ok(value)
+            }
+            Err(SessionError::Refused(error)) => {
+                *slot = active;
+                Err(error)
+            }
+            Err(SessionError::Transport(failure)) => Err(self.restarting(failure)),
+        }
+    }
+
+    pub async fn tools(&self) -> DriverResult<Vec<String>> {
+        self.with_session(None, None).await.map(|value| {
+            value
+                .as_array()
+                .expect("tools result")
+                .iter()
+                .map(|name| name.as_str().expect("tool name").to_owned())
+                .collect()
+        })
     }
 
     /// Local readiness probe only; never expose this diagnostic tool to an
     /// agent. In direct MCP mode it reports this process's real TCC attribution.
     #[cfg(target_os = "macos")]
-    pub async fn permissions(&self) -> Result<nyxid_machine::ComputerPermissions> {
-        let mut session = self.session.lock().await;
-        let active = session.as_mut().context("cua session unavailable")?;
-        let result = tokio::time::timeout(
-            Duration::from_secs(5),
-            active.rpc(
-                "tools/call",
-                json!({"name":"check_permissions","arguments":{"prompt":false}}),
-            ),
-        )
-        .await??;
-        Ok(nyxid_machine::ComputerPermissions {
+    pub async fn permissions(&self) -> DriverResult<nyxid_machine::ComputerPermissions> {
+        let result = self
+            .with_session(
+                Some(("check_permissions", json!({"prompt":false}))),
+                Some(Duration::from_secs(5)),
+            )
+            .await?;
+        let permissions = nyxid_machine::ComputerPermissions {
             screen_recording: result["structuredContent"]["screen_recording"].as_bool(),
             accessibility: result["structuredContent"]["accessibility"].as_bool(),
-        })
+        };
+        *self.known_permissions.write().expect("permissions lock") = Some(permissions.clone());
+        Ok(permissions)
     }
 
-    pub async fn call(&self, name: &str, arguments: Value) -> Result<Value> {
+    #[cfg(target_os = "macos")]
+    pub fn last_permissions(&self) -> Option<nyxid_machine::ComputerPermissions> {
+        self.known_permissions
+            .read()
+            .expect("permissions lock")
+            .clone()
+    }
+
+    pub async fn call(&self, name: &str, arguments: Value) -> DriverResult<Value> {
         if !public_tool(name) {
-            bail!("cua tool is outside the supported public contract");
+            return Err(DriverError::ToolUnsupported);
         }
+        self.with_session(Some((name, arguments)), None).await
+    }
+
+    async fn with_session(
+        &self,
+        call: Option<(&str, Value)>,
+        timeout: Option<Duration>,
+    ) -> DriverResult<Value> {
         let mut cancelled = self.cancelled.subscribe();
         let mut session = tokio::select! {
             biased;
-            _ = cancelled.changed() => bail!("cua action cancelled"),
+            _ = cancelled.changed() => return Err(self.restarting(TransportFailure::Cancelled)),
             session = self.session.lock() => session,
         };
         let mut active = session.take();
         let result = tokio::select! {
             biased;
-            _ = cancelled.changed() => Err(anyhow::anyhow!("cua action cancelled")),
+            _ = cancelled.changed() => Err(SessionError::Transport(TransportFailure::Cancelled)),
             result = async {
                 if active.is_none() {
-                    active = Some(tokio::time::timeout(Duration::from_secs(20), self.start()).await??);
+                    active = Some(self.start_bounded().await?);
                 }
-                let active = active.as_mut().context("cua session unavailable")?;
-                if !active.tools.iter().any(|tool| tool == name) {
-                    bail!("cua tool is not advertised on this platform");
+                let active = active.as_mut().expect("started session");
+                active.check_running()?;
+                let Some((name, arguments)) = call else {
+                    return Ok(json!(active.tools));
+                };
+                if name != "check_permissions" && !active.tools.iter().any(|tool| tool == name) {
+                    return Err(SessionError::Refused(DriverError::ToolUnsupported));
                 }
-                tokio::time::timeout(Duration::from_secs(30), active.rpc("tools/call", json!({"name":name,"arguments":arguments}))).await?
+                let value = tokio::time::timeout(
+                    timeout.unwrap_or(Duration::from_secs(30)),
+                    active.rpc("tools/call", json!({"name":name,"arguments":arguments})),
+                ).await.map_err(|_| SessionError::Transport(TransportFailure::Timeout))??;
+                if let Some(error) = tool_refusal(&value["structuredContent"]) {
+                    return Err(SessionError::Refused(error));
+                }
+                // Ordinary tool mistakes retain cua's explanation so callers can
+                // scrub it and the agent can correct its arguments or observation.
+                Ok(value)
             } => result,
         };
-        if result.is_ok() {
-            *session = active;
-        }
-        // The local session owns a kill_on_drop child. Dropping a cancelled
-        // call kills it even when the outer operation future was dropped.
-        result
+        self.finish(&mut session, active, result)
     }
 
     pub async fn stop(&self) {
@@ -362,26 +511,47 @@ impl Drop for Session {
 }
 
 impl Session {
-    async fn rpc(&mut self, method: &str, parameters: Value) -> Result<Value> {
+    fn check_running(&mut self) -> SessionResult<()> {
+        match self._child.try_wait() {
+            Ok(None) => Ok(()),
+            Ok(Some(_)) | Err(_) => Err(SessionError::Transport(TransportFailure::Exited)),
+        }
+    }
+
+    async fn rpc(&mut self, method: &str, parameters: Value) -> SessionResult<Value> {
+        self.check_running()?;
         let id = self.next_id;
         self.next_id += 1;
         let request = json!({"jsonrpc":"2.0","id":id,"method":method,"params":parameters});
-        self.input.write_all(request.to_string().as_bytes()).await?;
-        self.input.write_all(b"\n").await?;
-        self.input.flush().await?;
+        self.input
+            .write_all(request.to_string().as_bytes())
+            .await
+            .map_err(|_| SessionError::Transport(TransportFailure::Write))?;
+        self.input
+            .write_all(b"\n")
+            .await
+            .map_err(|_| SessionError::Transport(TransportFailure::Write))?;
+        self.input
+            .flush()
+            .await
+            .map_err(|_| SessionError::Transport(TransportFailure::Write))?;
         for _ in 0..64 {
             let mut bytes = Vec::new();
             loop {
-                let buffer = self.output.fill_buf().await?;
+                let buffer = self
+                    .output
+                    .fill_buf()
+                    .await
+                    .map_err(|_| SessionError::Transport(TransportFailure::Read))?;
                 if buffer.is_empty() {
-                    bail!("cua driver closed its output");
+                    return Err(SessionError::Transport(TransportFailure::Eof));
                 }
                 let length = buffer
                     .iter()
                     .position(|byte| *byte == b'\n')
                     .map_or(buffer.len(), |index| index + 1);
                 if bytes.len() + length > MAX_MCP_LINE {
-                    bail!("cua result size limit exceeded");
+                    return Err(SessionError::Transport(TransportFailure::Protocol));
                 }
                 bytes.extend_from_slice(&buffer[..length]);
                 self.output.consume(length);
@@ -389,25 +559,286 @@ impl Session {
                     break;
                 }
             }
-            let response: Value = serde_json::from_slice(&bytes).context("invalid cua response")?;
+            let response: Value = serde_json::from_slice(&bytes)
+                .map_err(|_| SessionError::Transport(TransportFailure::Decode))?;
             if response["id"] != id {
                 continue;
             }
-            if response.get("error").is_some() {
-                bail!("cua refused the request; check its permission mode and OS permissions");
+            if let Some(error) = response.get("error").filter(|e| !e.is_null()) {
+                let error = if error["data"].is_object() {
+                    &error["data"]
+                } else {
+                    error
+                };
+                return Err(SessionError::Refused(refusal(error)));
             }
             return response
                 .get("result")
                 .cloned()
-                .context("missing cua result");
+                .ok_or(SessionError::Transport(TransportFailure::Protocol));
         }
-        bail!("too many cua notifications")
+        Err(SessionError::Transport(TransportFailure::Protocol))
     }
 }
 
+#[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
     use super::*;
+    struct Fixture {
+        root: tempfile::TempDir,
+        driver: Driver,
+    }
+
+    impl Fixture {
+        fn new(fault: &str) -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("driver");
+            let script = r#"#!/usr/bin/env python3
+import sys,json,os,time
+from pathlib import Path
+fault=FAULT
+marker=Path(__file__+'.failed')
+ready=Path(__file__+'.ready')
+first=not marker.exists()
+for line in sys.stdin:
+ r=json.loads(line)
+ if 'id' not in r:continue
+ method=r['method']
+ result={'tools':[{'name':'list_windows'}]} if method=='tools/list' else {}
+ if method=='tools/call':
+  if fault in ('refusal','rpc_refusal'):
+   code=-32601 if fault=='refusal' else -32099
+   print(json.dumps({'jsonrpc':'2.0','id':r['id'],'error':{'code':code,'message':'refused'}}),flush=True)
+   continue
+  if fault.startswith('tool:'):result={'isError':True,'structuredContent':{'code':fault[5:]},'content':[{'type':'text','text':'Element index is stale; get_window_state again'}]}
+  elif fault=='permission_without_is_error':result={'structuredContent':{'code':'permission_denied'}}
+  elif fault in ('generic_refusal','numeric_tool_code'):
+   result={'isError':True,'content':[{'type':'text','text':'Element index is stale; get_window_state again'}]}
+   if fault=='numeric_tool_code':result['structuredContent']={'code':-32601}
+  elif first:
+   marker.touch()
+   if fault=='truncated_json':os.write(1,b'{"jsonrpc":\n')
+   if fault=='partial_eof':os.write(1,b'{"jsonrpc":')
+   if fault in ('eof','partial_eof'):os.close(1)
+   time.sleep(30)
+ print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':result}),flush=True)
+ if method=='tools/list' and first and fault=='broken_pipe':
+  marker.touch()
+  os.close(0)
+  ready.touch()
+  time.sleep(30)
+"#.replace("FAULT", &serde_json::to_string(fault).unwrap());
+            std::fs::write(&path, script).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let mut driver = Driver::new(
+                path,
+                Identity::resolve(None).unwrap(),
+                ComputerMode::Standard,
+            );
+            driver.without_capture_for_test();
+            Self { root, driver }
+        }
+
+        async fn ready(&self) {
+            self.driver.tools().await.unwrap();
+        }
+
+        async fn assert_restart(&self, error: DriverError) {
+            assert_eq!(
+                super::super::MachineError::Driver(error.clone()).public().0,
+                12414
+            );
+            assert!(
+                matches!(error, DriverError::Restarting { retry_after_ms } if retry_after_ms > 0)
+            );
+            assert!(self.driver.session.lock().await.is_none());
+            assert!(self.driver.next_start.lock().unwrap().is_some());
+            assert_eq!(self.driver.advertised_tools(), vec!["list_windows"]);
+            assert!(self.driver.call("list_windows", json!({})).await.is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn broken_pipe_on_write_restarts_with_12414() {
+        let fixture = Fixture::new("broken_pipe");
+        fixture.ready().await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !fixture.root.path().join("driver.ready").exists() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let error = fixture
+            .driver
+            .call("list_windows", json!({}))
+            .await
+            .unwrap_err();
+        fixture.assert_restart(error).await;
+    }
+
+    #[tokio::test]
+    async fn eof_before_response_restarts_with_12414() {
+        let fixture = Fixture::new("eof");
+        fixture.ready().await;
+        let error = fixture
+            .driver
+            .call("list_windows", json!({}))
+            .await
+            .unwrap_err();
+        fixture.assert_restart(error).await;
+    }
+
+    #[tokio::test]
+    async fn truncated_json_line_restarts_with_12414() {
+        let fixture = Fixture::new("truncated_json");
+        fixture.ready().await;
+        let error = fixture
+            .driver
+            .call("list_windows", json!({}))
+            .await
+            .unwrap_err();
+        fixture.assert_restart(error).await;
+    }
+
+    #[tokio::test]
+    async fn partial_line_before_eof_restarts_with_12414() {
+        let fixture = Fixture::new("partial_eof");
+        fixture.ready().await;
+        let error = fixture
+            .driver
+            .call("list_windows", json!({}))
+            .await
+            .unwrap_err();
+        fixture.assert_restart(error).await;
+    }
+
+    #[tokio::test]
+    async fn already_exited_child_restarts_with_12414() {
+        let fixture = Fixture::new("exited");
+        fixture.ready().await;
+        std::fs::write(fixture.root.path().join("driver.failed"), []).unwrap();
+        fixture
+            .driver
+            .session
+            .lock()
+            .await
+            .as_mut()
+            .unwrap()
+            ._child
+            .kill()
+            .await
+            .unwrap();
+        let error = fixture
+            .driver
+            .call("list_windows", json!({}))
+            .await
+            .unwrap_err();
+        fixture.assert_restart(error).await;
+    }
+
+    #[tokio::test]
+    async fn timeout_restarts_with_12414() {
+        let fixture = Fixture::new("timeout");
+        fixture.ready().await;
+        let error = fixture
+            .driver
+            .with_session(
+                Some(("list_windows", json!({}))),
+                Some(Duration::from_millis(100)),
+            )
+            .await
+            .unwrap_err();
+        fixture.assert_restart(error).await;
+    }
+
+    #[tokio::test]
+    async fn spawn_failure_restarts_with_12414() {
+        let fixture = Fixture::new("normal");
+        std::fs::remove_file(&fixture.driver.path).unwrap();
+        let error = fixture
+            .driver
+            .call("list_windows", json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            super::super::MachineError::Driver(error.clone()).public().0,
+            12414
+        );
+        assert!(matches!(error, DriverError::Restarting { retry_after_ms } if retry_after_ms > 0));
+        assert!(fixture.driver.next_start.lock().unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn mcp_refusals_keep_the_session_and_specific_code() {
+        for (fault, code) in [
+            ("refusal", Some(12416)),
+            ("rpc_refusal", Some(12406)),
+            ("tool:permission_denied", Some(12415)),
+            ("tool:accessibility_permission_denied", Some(12415)),
+            ("tool:screen_recording_permission_denied", Some(12415)),
+            ("permission_without_is_error", Some(12415)),
+            ("tool:display_unavailable", Some(12417)),
+            ("tool:display_not_found", Some(12417)),
+            ("tool:unsupported_tool", Some(12416)),
+            ("tool:tool_not_supported", Some(12416)),
+            ("generic_refusal", None),
+            ("tool:stale_element_index", None),
+            ("numeric_tool_code", None),
+        ] {
+            let fixture = Fixture::new(fault);
+            fixture.ready().await;
+            let before = fixture
+                .driver
+                .session
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                ._child
+                .id();
+            let result = fixture.driver.call("list_windows", json!({})).await;
+            if let Some(code) = code {
+                assert_eq!(
+                    super::super::MachineError::Driver(result.unwrap_err())
+                        .public()
+                        .0,
+                    code,
+                    "{fault}"
+                );
+            } else {
+                let mut expected = json!({
+                    "isError": true,
+                    "content": [{
+                        "type": "text",
+                        "text": "Element index is stale; get_window_state again"
+                    }]
+                });
+                if let Some(code) = fault.strip_prefix("tool:") {
+                    expected["structuredContent"] = json!({"code": code});
+                } else if fault == "numeric_tool_code" {
+                    expected["structuredContent"] = json!({"code": -32601});
+                }
+                assert_eq!(result.unwrap(), expected, "{fault}");
+            }
+            assert_eq!(
+                fixture
+                    .driver
+                    .session
+                    .lock()
+                    .await
+                    .as_ref()
+                    .unwrap()
+                    ._child
+                    .id(),
+                before
+            );
+            assert!(fixture.driver.next_start.lock().unwrap().is_none());
+        }
+    }
+
     #[test]
     fn release_pins_cover_supported_platforms_and_exclude_perception() {
         for (os, arch) in [
@@ -417,7 +848,7 @@ mod tests {
             ("macos", "x86_64"),
         ] {
             let (url, hash) = platform_asset(os, arch).unwrap();
-            assert!(url.contains("cua-driver-rs-v0.30.4"));
+            assert!(url.contains("cua-driver-rs-v0.31.0"));
             assert_eq!(hex::decode(hash).unwrap().len(), 32);
         }
         assert!(!public_tool("parse_visual_regions"));
@@ -434,6 +865,7 @@ mod tests {
         std::fs::write(&path, r#"#!/usr/bin/env python3
 import sys,json,os
 assert os.environ['CUA_DRIVER_RS_TELEMETRY_ENABLED']=='false'
+assert os.environ['CUA_DRIVER_RS_UPDATE_CHECK']=='false'
 assert os.environ['CUA_DRIVER_PERMISSION_MODE']=='standard'
 configured=False
 for line in sys.stdin:
@@ -489,4 +921,96 @@ for line in sys.stdin:
             true
         );
     }
+}
+
+/// Keep actionable refs and visible labels before structural AX nodes. Never
+/// duplicate the tree as markdown, and never expose an input's current value.
+pub fn compact_window_state(mut result: Value) -> Value {
+    if result["isError"] == true {
+        return result;
+    }
+    let Some(state) = result.get_mut("structuredContent") else {
+        return result;
+    };
+    let Some(rows) = state.get_mut("elements").and_then(Value::as_array_mut) else {
+        return result;
+    };
+    let total = rows.len();
+    rows.sort_by_key(|row| {
+        let role = row["role"].as_str().unwrap_or_default().to_lowercase();
+        if row["actions"].as_array().is_some_and(|a| !a.is_empty())
+            || [
+                "button",
+                "link",
+                "entry",
+                "text field",
+                "checkbox",
+                "combo",
+                "radio",
+                "slider",
+                "menu item",
+            ]
+            .iter()
+            .any(|name| role.contains(name))
+        {
+            0
+        } else if row["label"]
+            .as_str()
+            .is_some_and(|label| !label.trim().is_empty())
+        {
+            1
+        } else {
+            2
+        }
+    });
+    let mut kept = Vec::new();
+    let mut bytes = 0;
+    for row in rows.iter() {
+        let mut compact = json!({});
+        for name in [
+            "element_index",
+            "element_token",
+            "role",
+            "label",
+            "frame",
+            "enabled",
+            "selected",
+            "actions",
+        ] {
+            if let Some(value) = row.get(name) {
+                let value = match value {
+                    Value::String(text) if name != "element_token" => {
+                        json!(text.chars().take(200).collect::<String>())
+                    }
+                    _ => value.clone(),
+                };
+                compact[name] = value;
+            }
+        }
+        let size = compact.to_string().len();
+        if bytes + size > 6800 {
+            continue;
+        }
+        bytes += size;
+        kept.push(compact);
+        if kept.len() >= 60 {
+            break;
+        }
+    }
+    let retained = kept.len();
+    state["elements"] = json!(kept);
+    state["returned_element_count"] = json!(retained);
+    if total > retained {
+        state["truncated"] = json!(true);
+        state["hint"] = json!(
+            "Narrow get_window_state with query for omitted elements; refs keep their original indices."
+        );
+    }
+    if let Some(object) = state.as_object_mut() {
+        object.remove("tree_markdown");
+    }
+    if let Some(content) = result.get_mut("content").and_then(Value::as_array_mut) {
+        content.retain(|item| item["type"] != "text");
+    }
+    result
 }

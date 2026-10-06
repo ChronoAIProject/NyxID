@@ -1,5 +1,11 @@
 # Agent Isolation
 
+Per-thread `nyxid-assistant` credentials carry an `AssistantTurnFence`. With
+the default-off `assistant:live-turn-gate` rollout flag enabled, execution
+requires a live, non-stopped turn; dedicated channel-agent credentials remain
+separate and idle-capable. Deploy all replicas before enabling the flag, and
+disable it before rollback.
+
 ## Login Credentials Bound to a Key
 
 `nyxid login --agent-key` enrolls a CLI profile through explicit human approval in the web console or the mobile app's QR flow. The operator chooses an existing eligible personal/org key or creates a limited key. Each login receives its own `api_key_credentials` child secret; the parent key's primary secret is never recovered, displayed, or silently rotated. New keys also use child credentials, with their undisclosed primary secret discarded.

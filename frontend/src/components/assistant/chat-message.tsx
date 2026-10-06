@@ -1,5 +1,4 @@
 import {
-  Fragment,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -28,6 +27,7 @@ import type {
   ChatSessionState,
 } from "@/lib/assistant/chat-types";
 import { cn } from "@/lib/utils";
+import { MachineToolCard } from "./machine-tool-card";
 
 const EMPTY_MESSAGES: readonly ChatMessage[] = [];
 
@@ -78,7 +78,7 @@ function ThinkingBlock({
 
 function ActivityBlock({ message }: { readonly message: ChatMessage }) {
   const steps = message.steps ?? [];
-  const tools = message.toolCalls ?? [];
+  const tools = (message.toolCalls ?? []).filter((tool) => !tool.machine);
   const count = steps.length + tools.length;
   const [open, setOpen] = useState(false);
   if (!count) return null;
@@ -96,7 +96,7 @@ function ActivityBlock({ message }: { readonly message: ChatMessage }) {
         <ChevronRight
           className={cn("h-3 w-3 transition-transform", open && "rotate-90")}
         />
-        {running ? <PulseDot /> : <Check className="h-3 w-3 text-success" />}
+        {running ? <PulseDot /> : tools.some((tool) => tool.status === "error") || steps.some((step) => step.status === "error") ? <X className="h-3 w-3 text-destructive" /> : <Check className="h-3 w-3 text-success" />}
         <span>{count} {count === 1 ? "action" : "actions"}</span>
       </button>
       {open ? (
@@ -159,6 +159,11 @@ export function ChatMessageBubble({
     return (
       <div className="ml-auto max-w-[78%] rounded-lg bg-overlay-strong px-3 py-2 text-[12px] leading-relaxed text-foreground whitespace-pre-wrap">
         {content}
+        {message.images?.length ? (
+          <div className="mt-2 flex flex-wrap gap-2">
+            {message.images.map((image) => <ToolImage key={image.id} image={image} />)}
+          </div>
+        ) : null}
       </div>
     );
   }
@@ -190,10 +195,13 @@ export function ChatMessageBubble({
       <div className="min-w-0 max-w-[min(84%,758px)] flex-1 pt-0.5">
         <ThinkingBlock text={message.thinking ?? ""} streaming={streaming} />
         <ActivityBlock message={message} />
+        {message.toolCalls?.filter((tool) => tool.machine).map((tool) => (
+          <MachineToolCard key={tool.id} receipt={tool.machine!} conversationId={tool.conversationId} images={message.images} />
+        ))}
         {content ? <TextBlock text={content} streaming={streaming} /> : null}
         {message.images?.length ? (
           <div className="mt-2 flex flex-wrap gap-2">
-            {message.images.map((image) => (
+            {message.images.filter((image) => !message.toolCalls?.some((tool) => tool.machine?.screenshot_id === image.id)).map((image) => (
               <ToolImage key={image.id} image={image} />
             ))}
           </div>
@@ -412,9 +420,9 @@ export function ChatMessageList({
         ) : null}
         {!messages.length ? <EmptyState>{emptyDescription}</EmptyState> : null}
         {messages.map((message) => (
-          <Fragment key={message.id}>
+          <div id={`message-${message.id}`} key={message.id}>
             {renderMessage?.(message) ?? <ChatMessageEntry message={message} />}
-          </Fragment>
+          </div>
         ))}
         {footer}
         {emptyTurnDetected ? (

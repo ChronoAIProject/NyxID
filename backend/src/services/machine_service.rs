@@ -93,7 +93,17 @@ pub fn caller(chat: &ChatAuthority) -> AppResult<()> {
 /// One membership snapshot and one node query; never a lookup per node.
 pub async fn visible_nodes(db: &Database, chat: &ChatAuthority) -> AppResult<Vec<Node>> {
     caller(chat)?;
-    let owners = usable_owners(db, &chat.user_id).await?;
+    let owners = if chat.is_orchestrator() {
+        // NyxBot is always personal; retain its existing batched read budget.
+        usable_owners(db, &chat.user_id).await?
+    } else {
+        let agent = super::org_agent_service::chat_agent(db, chat).await?;
+        if agent.user_id != chat.user_id {
+            vec![agent.user_id]
+        } else {
+            usable_owners(db, &chat.user_id).await?
+        }
+    };
     Ok(db
         .collection::<Node>(NODES)
         .find(doc! {
@@ -108,7 +118,7 @@ pub async fn visible_nodes(db: &Database, chat: &ChatAuthority) -> AppResult<Vec
                 "machine.files":true
             },{
                 "machine.computer":true
-            }]
+            },{"machine.browser":true}]
         })
         .sort(doc! {"name":1,"_id":1})
         .limit(500)
@@ -140,6 +150,10 @@ pub fn capable(node: &Node, operation: Operation) -> AppResult<()> {
 pub fn changing(operation: Operation, parameters: &Value) -> bool {
     match operation {
         Operation::ListFiles | Operation::ReadFile | Operation::ShareFile | Operation::Job => false,
+        Operation::Browser => !matches!(
+            parameters["action"].as_str(),
+            Some("snapshot" | "tabs" | "wait" | "console" | "network" | "screenshot")
+        ),
         Operation::Computer => {
             static TOOLS: std::sync::LazyLock<Vec<Value>> = std::sync::LazyLock::new(|| {
                 serde_json::from_str(nyxid_machine::CUA_TOOLS).expect("embedded cua contract")
@@ -165,6 +179,10 @@ pub fn metadata(node: &Node) -> Value {
         "status":node.status,
         "machine":node.machine,
         "machine_confirm":node.machine_confirm,
+        "agent_version":super::machine_update_service::current(node),
+        "supported_version":super::machine_update_service::TARGET,
+        "update_available":super::machine_update_service::update_available(node),
+        "updater":super::machine_update_service::companion_status(node),
         "allow_single_user_saved_logins":node.allow_single_user_saved_logins
     })
 }

@@ -1226,9 +1226,13 @@
       "names": [
         "clone",
         "unshare",
-        "setns"
+        "setns",
+        "mount",
+        "umount2",
+        "pivot_root"
       ],
-      "action": "SCMP_ACT_ALLOW"
+      "action": "SCMP_ACT_ALLOW",
+      "comment": "Browser namespace sandbox and supervisor-launched developer browser policy mount. Agent children additionally deny namespaces and mounts with their inherited seccomp filter."
     }
   ]
 }

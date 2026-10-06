@@ -26,5 +26,5 @@ const signature=sign('sha256',Buffer.concat([Buffer.from('CRX3 SignedData\0'),in
 const header=Buffer.concat([field(2,Buffer.concat([field(1,der),field(2,signature)])),field(10000,signedHeader)]);
 const packageBytes=Buffer.concat([Buffer.from('Cr24'),integer(3),integer(header.length),header,zip]);
 fs.writeFileSync(path.join(root,'filler.crx'),packageBytes);
-fs.writeFileSync(path.join(root,'package.json'),JSON.stringify({extension_id:id,version:'1.0.0',sha256:createHash('sha256').update(packageBytes).digest('hex')},null,2)+'\n');
+fs.writeFileSync(path.join(root,'package.json'),JSON.stringify({extension_id:id,version:JSON.parse(fs.readFileSync(path.join(root,'manifest.json'),'utf8')).version,sha256:createHash('sha256').update(packageBytes).digest('hex')},null,2)+'\n');
 console.info(`Packaged extension ${id}`);

@@ -1,3 +1,4 @@
+import { VoiceInferenceFields } from "./voice-inference-fields";
 import { BILLING_METRICS, metricLabel } from "@/schemas/billing-metrics";
 import { Badge } from "@/components/ui/badge";
 import { serviceCredentialStatus } from "@/lib/service-credential-status";
@@ -43,6 +44,11 @@ export function PlatformServiceFields({
   });
   const policy = policyField.value;
   const inference = form.watch("inference");
+  const suggestedMetrics = BILLING_METRICS.filter(
+    (metric) =>
+      metric !== "voice_seconds" ||
+      inference?.voice?.billing_metrics.includes(metric),
+  );
   const platform = form.watch("platform_key") ?? {
     enabled: service?.legacy_public_master ?? false,
     audience: service?.legacy_public_master ? "public" : "restricted",
@@ -70,7 +76,9 @@ export function PlatformServiceFields({
                 : {
                     wire_protocol: value as InferenceMetadata["wire_protocol"],
                     model_list: inference?.model_list ?? false,
-                    realtime: inference?.realtime ?? false,
+                    realtime:
+                      !!inference?.voice || (inference?.realtime ?? false),
+                    voice: inference?.voice,
                   },
               { shouldDirty: true, shouldValidate: true },
             )
@@ -105,7 +113,12 @@ export function PlatformServiceFields({
               </Label>
               <Switch
                 id={`inference-${field}`}
-                checked={inference[field] ?? false}
+                checked={
+                  field === "realtime" && inference.voice
+                    ? true
+                    : (inference[field] ?? false)
+                }
+                disabled={field === "realtime" && !!inference.voice}
                 onCheckedChange={(value) =>
                   form.setValue(
                     "inference",
@@ -116,6 +129,22 @@ export function PlatformServiceFields({
               />
             </div>
           ))}
+        {inference && (
+          <VoiceInferenceFields
+            value={inference.voice}
+            onChange={(voice) =>
+              form.setValue(
+                "inference",
+                {
+                  ...inference,
+                  voice,
+                  realtime: !!voice || inference.realtime,
+                },
+                { shouldDirty: true, shouldTouch: true, shouldValidate: true },
+              )
+            }
+          />
+        )}
       </section>
       {credentialSupported && (
         <section className="space-y-3">
@@ -366,7 +395,11 @@ export function PlatformServiceFields({
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        {BILLING_METRICS.map((metric) => (
+                        {BILLING_METRICS.filter(
+                          (metric) =>
+                            suggestedMetrics.includes(metric) ||
+                            metric === lane.metric,
+                        ).map((metric) => (
                           <SelectItem key={metric} value={metric}>
                             {metricLabel(metric)}
                           </SelectItem>
@@ -424,7 +457,11 @@ export function PlatformServiceFields({
                                     </SelectTrigger>
                                   </FormControl>
                                   <SelectContent>
-                                    {BILLING_METRICS.map((metric) => (
+                                    {BILLING_METRICS.filter(
+                                      (metric) =>
+                                        suggestedMetrics.includes(metric) ||
+                                        metric === input.value,
+                                    ).map((metric) => (
                                       <SelectItem key={metric} value={metric}>
                                         {metricLabel(metric)}
                                       </SelectItem>
@@ -491,10 +528,10 @@ export function PlatformServiceFields({
                       variant="outline"
                       disabled={
                         (lane.components?.length ?? 0) >=
-                        BILLING_METRICS.length - 1
+                        suggestedMetrics.length - 1
                       }
                       onClick={() => {
-                        const metric = BILLING_METRICS.find(
+                        const metric = suggestedMetrics.find(
                           (metric) =>
                             metric !== lane.metric &&
                             !lane.components?.some(

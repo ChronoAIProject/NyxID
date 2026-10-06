@@ -3,6 +3,8 @@ use std::sync::Mutex;
 use std::sync::OnceLock;
 
 use chrono::Utc;
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -41,6 +43,24 @@ pub fn init_audit_chain_hmac_key(key: Zeroizing<[u8; 32]>) {
 
 pub(crate) fn audit_chain_hmac_key() -> Option<&'static [u8]> {
     AUDIT_CHAIN_HMAC_KEY.get().map(|key| key.as_ref())
+}
+
+/// Keyed, domain-separated fingerprint for persisted caller-supplied material.
+///
+/// The audit-chain key stays process-local; callers must never substitute an
+/// unkeyed digest when it has not been initialized.
+pub(crate) fn keyed_fingerprint(
+    key: Option<&[u8]>,
+    domain: &[u8],
+    material: &[u8],
+) -> Option<String> {
+    let key = key?;
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key).expect("HMAC accepts any key length");
+    mac.update(b"nyxid-");
+    mac.update(domain);
+    mac.update(b"\0");
+    mac.update(material);
+    Some(hex::encode(mac.finalize().into_bytes()))
 }
 
 /// Fire-and-forget audit log entry.
@@ -128,6 +148,27 @@ pub async fn log_actor_event(
         actor.api_key_name.clone(),
     );
     write_audit_entry(db, entry, event_type).await
+}
+
+/// An admin policy change and its metadata audit commit atomically.
+pub async fn log_actor_event_in_session(
+    db: &mongodb::Database,
+    session: &mut mongodb::ClientSession,
+    key: &[u8],
+    actor: &AuditActor,
+    event_type: &str,
+    event_data: serde_json::Value,
+) -> crate::errors::AppResult<()> {
+    let entry = build_audit_entry(
+        Some(actor.user_id.clone()),
+        event_type.into(),
+        Some(event_data),
+        actor.ip_address.clone(),
+        actor.user_agent.clone(),
+        actor.api_key_id.clone(),
+        actor.api_key_name.clone(),
+    );
+    audit_chain_service::append_chained_entry_in_session(db, session, entry, key).await
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -1117,10 +1117,17 @@ pub(crate) async fn authorize_ssh_access_for_operation(
     let timeout_secs = channel.approval_timeout_secs;
     let approval_service_slug =
         resolve_ssh_approval_service_slug(&state.db, owner_for_resolution, &service).await?;
-    let request_operation = approval_service::ApprovalRequestOperation::from_descriptor(
+    let mut request_operation = approval_service::ApprovalRequestOperation::from_descriptor(
         operation,
         pending.resolution.grant_scope.clone(),
     );
+    request_operation.assistant_group = crate::services::org_group_service::approval_binding(
+        &state.db,
+        auth_user.assistant_group_id.as_deref(),
+        &auth_user.user_id.to_string(),
+        auth_user.api_key_id.as_deref(),
+    )
+    .await?;
     let approval_request = approval_service::create_approval_request(
         &state.db,
         &state.config,

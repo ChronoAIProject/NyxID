@@ -85,6 +85,13 @@ jobs:
           echo "dist ran successfully"
           cat plan-dist-manifest.json
           echo "manifest=$(jq -c "." plan-dist-manifest.json)" >> "$GITHUB_OUTPUT"
+      # Hand-added; reapply if dist init regenerates. Release Build Cache runs
+      # `dist build` on main without a tag, which needs every dist-able package
+      # at one version. `dist plan` does not check that; `dist manifest` matches
+      # `dist build` without building, so pull requests catch it here.
+      - name: Verify the untagged dist build announces one version
+        if: ${{ github.event.pull_request }}
+        run: dist manifest --output-format=json --artifacts=local --target=x86_64-unknown-linux-gnu > /dev/null
       - name: "Upload dist-manifest.json"
         uses: actions/upload-artifact@v4
         with:

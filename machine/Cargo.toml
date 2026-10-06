@@ -16,4 +16,4 @@ base64 = "0.22"
 zeroize = "1"
 urlencoding = "2.1"
 uuid = { workspace = true }
-
+semver = "1"

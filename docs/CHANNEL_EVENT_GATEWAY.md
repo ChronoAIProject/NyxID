@@ -456,3 +456,41 @@ The initial broken deploy of this feature created a `unique` variant of the `(co
 ## Aurinko notification retries
 
 The [Aurinko email adapter](./AURINKO_INTEGRATION.md) uses the channel callback and reply protocol while owning its bounded inline ingress. Aurinko supplies redelivery; NyxID persists only subscription bindings, batch digest/cursor, stable message receipts, and irreversible send barriers. No message bodies, queue, or periodic worker are added. Active claims produce retryable failures, completed items stay deduplicated across partial batches and log expiration, and callback retries retain their UUID-v4 so runtimes can suppress duplicate work after a lost acknowledgement. Device and legacy chat adapters keep their existing protocols.
+
+
+## NyxBot provider late replies and CMA contract boundary
+
+This section concerns NyxID acting as CMAEG's `nyxbot` provider, not the generic
+`/channel-events` ingress. Generic ingress remains ADR-013 passthrough. NyxBot's
+existing assistant history owns answer content; additive `nyxbot_events.delivery`
+metadata arbitrates streamed versus delayed answers. The implementation contract
+is in [NyxBot channel delivery](chat/09-nyxbot-orchestrator.md#channel-turn-delivery-after-the-provider-stream-closes).
+
+Verified against CMA `develop`, `docs/CMAEG_Protocol.md` §§8–10 and
+`api/crates/cmaeg/src/{turns,tools/reply_targets}`:
+
+- Committed `response.output_item.done` messages and a terminal
+  `response.completed` can express both a continuing-work notice and an
+  incomplete answer as text. No CMA change is necessary for those messages.
+- `createReplyTarget` and `replyToTarget` already support the original relay
+  destination, current channel/binding/key checks, a 24-hour sealed target, and
+  durable payload-bound idempotency. They deliberately return `unknown` for an
+  uncertain external send rather than retrying it.
+- Stream output has no delivery acknowledgement. CMA's ordinary automatic
+  delivery state is replica-local; writing SSE bytes does not prove platform
+  delivery. NyxID therefore irrevocably marks a streamed answer before emission
+  and never guesses that a disconnect means those bytes were not delivered.
+
+**Precise CMA follow-up request (no CMA code changed here):** pass the remaining
+absolute ingress turn deadline in the provider request, and expose a durable,
+provider-authenticated delivery receipt keyed by the provider response/turn ID
+and committed item ID. Stream delivery and `replyToTarget` must share one
+payload-bound dispatch identity/barrier, with `confirmed`, `not_started`, and
+`unknown` outcomes and current route/binding checks. A lost receipt must be
+reconcilable without a second send. This would close the crash/timeout window
+between claiming the stream and the platform delivering it. Without it, NyxID
+can guarantee one chosen delivery attempt across replicas, **not exactly-once
+external delivery**. Platform sends with ambiguous outcomes may still be lost.
+The earlier 570-second notice is best effort: CMA starts its 600-second clock at
+ingress, so a long admission delay or a shorter operator timeout can close the
+stream first; the durable late-answer path still runs.

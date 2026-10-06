@@ -154,6 +154,22 @@ pub(crate) async fn process_inbound_messages(
             &uuid::Uuid::new_v4().to_string(),
         );
         metadata.activity = activity.clone();
+        // Additive facts are dormant by default and limited to direct NyxBot
+        // routes. Metadata failure must not change legacy message delivery.
+        if !notification {
+            match super::channel_thread_service::inbound_facts(
+                state.db,
+                bot,
+                &route.api_key_id,
+                adapter,
+                inbound,
+            )
+            .await
+            {
+                Ok(facts) => metadata.thread_context = facts,
+                Err(_) => tracing::debug!(bot_id = %bot.id, "Channel thread facts unavailable"),
+            }
+        }
         if notification {
             metadata.attachments.clear();
             metadata.thread_id = None;

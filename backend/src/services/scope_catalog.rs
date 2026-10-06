@@ -145,6 +145,9 @@ pub fn platform_scope_allowlist(slug: &str) -> Option<&'static [&'static str]> {
             "bookmark.read",
             "list.read",
         ]),
+        // The shared LinkedIn app currently has OIDC and Share on LinkedIn.
+        // Page, advertising, and hiring scopes require separate product access.
+        "linkedin" => Some(&["openid", "profile", "email", "w_member_social"]),
         _ => None,
     }
 }
@@ -1179,6 +1182,17 @@ mod tests {
             "future.scope",
         ] {
             assert!(!allowed.contains(&scope), "{scope} must use BYO");
+        }
+    }
+
+    #[test]
+    fn linkedin_platform_allowlist_matches_approved_products() {
+        let allowed = platform_scope_allowlist("linkedin").unwrap();
+        for scope in ["openid", "profile", "email", "w_member_social"] {
+            assert!(allowed.contains(&scope));
+        }
+        for scope in ["w_organization_social", "rw_organization_admin", "rw_ads"] {
+            assert!(!allowed.contains(&scope));
         }
     }
 

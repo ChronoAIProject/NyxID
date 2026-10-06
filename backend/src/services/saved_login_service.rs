@@ -195,22 +195,44 @@ pub async fn put(
 
 pub async fn delete(db: &Database, actor: &str, id: &str) -> AppResult<()> {
     let login = get(db, actor, id).await?;
-    db.collection::<SavedLogin>(COLLECTION_NAME)
-        .delete_one(doc! {"_id":id,"user_id":&login.user_id})
-        .await?;
-    db.collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
-        .update_many(
-            doc! {"saved_login_ids":id},
-            doc! {"$pull":{"saved_login_ids":id}},
-        )
-        .await?;
-    db.collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
-        .update_many(
-            doc! {"kind":"saved_login","service_id":id,"status":"pending"},
-            doc! {"$set":{"status":"expired"}},
-        )
-        .await?;
-    Ok(())
+    let db = db.clone();
+    let id = id.to_owned();
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let result = Box::pin(async {
+                db.collection::<SavedLogin>(COLLECTION_NAME)
+                    .delete_one(doc! {"_id":&id,"user_id":&login.user_id})
+                    .session(&mut *session)
+                    .await?;
+                Box::pin(super::machine_access_service::quarantine_login_in_session(
+                    &db, &id, session,
+                ))
+                .await?;
+                db.collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+                    .update_many(
+                        doc! {"saved_login_ids":&id},
+                        doc! {"$pull":{"saved_login_ids":&id}},
+                    )
+                    .session(&mut *session)
+                    .await?;
+                db.collection::<bson::Document>(
+                    crate::models::assistant_acknowledgement::COLLECTION_NAME,
+                )
+                .update_many(
+                    doc! {"kind":"saved_login","service_id":&id,"status":"pending"},
+                    doc! {"$set":{"status":"expired"}},
+                )
+                .session(&mut *session)
+                .await?;
+                Ok(())
+            })
+            .await;
+            super::api_key_mutation_service::transaction_result(result)
+        })
+        .await
+        .map_err(super::api_key_mutation_service::map_transaction_error)
 }
 
 pub async fn materialize(

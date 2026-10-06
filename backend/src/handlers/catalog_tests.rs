@@ -531,15 +531,20 @@ fn catalog_entry_response_maps_rich_metadata() {
     entry.required_permissions = Some(vec!["models:read".to_string()]);
     entry.examples_url = Some("https://docs.openai.com/examples".to_string());
     entry.recommended_skills = Some(vec!["chat".to_string()]);
-    entry.capabilities = Some(ServiceCapabilities {
-        supports_proxy_read: true,
-        supports_proxy_write: true,
-        supports_proxy_binary_upload: false,
-        supports_direct_downstream_auth: false,
-        supports_authoring_via_nyx: false,
-        supports_websocket: false,
-        supports_streaming: true,
-    });
+    entry.capabilities = Some(
+        crate::services::inference_service::ServiceCapabilitiesView {
+            supports_realtime_voice: false,
+            transport: ServiceCapabilities {
+                supports_proxy_read: true,
+                supports_proxy_write: true,
+                supports_proxy_binary_upload: false,
+                supports_direct_downstream_auth: false,
+                supports_authoring_via_nyx: false,
+                supports_websocket: false,
+                supports_streaming: true,
+            },
+        },
+    );
 
     let resp = super::catalog_entry_response(&crate::test_utils::test_app_config(), entry);
     assert_eq!(resp.homepage_url.as_deref(), Some("https://openai.com"));
@@ -560,9 +565,9 @@ fn catalog_entry_response_maps_rich_metadata() {
         Some(vec!["models:read".to_string()])
     );
     let caps = resp.capabilities.expect("capabilities present");
-    assert!(caps.supports_proxy_read);
-    assert!(caps.supports_streaming);
-    assert!(!caps.supports_websocket);
+    assert!(caps.transport.supports_proxy_read);
+    assert!(caps.transport.supports_streaming);
+    assert!(!caps.transport.supports_websocket);
 }
 
 #[test]

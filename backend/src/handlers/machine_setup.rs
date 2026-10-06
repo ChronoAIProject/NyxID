@@ -233,6 +233,8 @@ pub async fn preview(
 }
 #[derive(Deserialize)]
 pub struct Decision {
+    #[serde(default)]
+    automatic_updates: Option<bool>,
     code: String,
     approve: bool,
 }
@@ -245,7 +247,15 @@ pub async fn decide(
     let owner = auth.user_id.to_string();
     rate_owner(&state, &owner).await?;
     let row = setup::by_code(&state.db, state.auth_device_hmac_key.as_slice(), &body.code).await?;
-    let row = setup::decide(&state.db, &owner, &row.id, body.approve, None).await?;
+    let row = setup::decide_with_updates(
+        &state.db,
+        &owner,
+        &row.id,
+        body.approve,
+        None,
+        body.automatic_updates,
+    )
+    .await?;
     crate::services::audit_service::log_for_user(
         state.db.clone(),
         &auth,
@@ -274,6 +284,7 @@ pub async fn link_tool(
     crate::services::machine_service::caller(chat)?;
     rate_owner(state, &chat.user_id).await?;
     let choices = Choices {
+        automatic_updates: None,
         owner_id: None,
         name: args["name"].as_str().unwrap_or("my-machine").into(),
         location: args["where"].as_str().unwrap_or("vm").into(),
@@ -317,15 +328,17 @@ pub async fn pair_tool(
     let mut canonical = args.clone();
     canonical["code"] = json!(setup::normalize_code(code)?);
     canonical["pairing_id"] = json!(row.id);
+    canonical["automatic_updates"] = json!(true);
     if let Some(id) = args["acknowledgement_id"].as_str()
         && acks::consume_action(&state.db, chat, id, "nyxid__machine_pair", &canonical).await?
     {
-        setup::decide(
+        setup::decide_with_updates(
             &state.db,
             &chat.user_id,
             &row.id,
             true,
             Some(&chat.conversation_id),
+            Some(true),
         )
         .await?;
         return Ok((
@@ -334,7 +347,7 @@ pub async fn pair_tool(
         ));
     }
     let details = format!(
-        "Pair machine {} ({}, IP {}) with capabilities {}. Confirm only if you started this setup. Commands have the machine user's full access; prefer a VM or container.",
+        "Pair machine {} ({}, IP {}) with capabilities {}. Confirm only if you started this setup. Commands have the machine user's full access; prefer a VM or container. Enable automatic updates when idle (recommended); they wait for work and desktop sessions to end and notify you. Change this in Machines settings.",
         row.hostname.as_deref().unwrap_or_default(),
         row.os.as_deref().unwrap_or_default(),
         row.ip.as_deref().unwrap_or_default(),

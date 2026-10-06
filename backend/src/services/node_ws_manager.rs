@@ -1181,6 +1181,9 @@ pub struct CredentialUpdateParams {
 pub(crate) fn map_retryable_node_failure(message: String, reason: Option<&str>) -> AppError {
     match reason {
         Some("credential_missing") => AppError::NodeCredentialMissing(message),
+        Some("machine_authority_stale") => AppError::MachineAuthorityStale,
+        Some("machine_turn_stopped") => AppError::MachineTurnStopped,
+        Some("owner_in_control") => AppError::MachineOwnerInControl,
         _ => AppError::NodeOffline(message),
     }
 }
@@ -2146,11 +2149,11 @@ impl NodeWsManager {
         if matches!(
             request.operation,
             nyxid_machine::Operation::SaveAttachment | nyxid_machine::Operation::ShareFile
-        ) && !conn
-            .machine_profile
-            .lock()
-            .is_ok_and(|p| p.as_ref().is_some_and(|p| request.operation.allowed(p)))
-        {
+        ) && !conn.machine_profile.lock().is_ok_and(|p| {
+            p.as_ref().is_some_and(|p| {
+                request.operation.allowed(p) && (request.version == 1 || p.authority_v2())
+            })
+        }) {
             return Err(NodeProxyFailure::before_dispatch(
                 AppError::MachineCapabilityDisabled,
             ));
@@ -2160,7 +2163,11 @@ impl NodeWsManager {
                 "Upload metadata encoding failed".into(),
             ))
         })?;
-        value["type"] = serde_json::json!("proxy_upload");
+        value["type"] = serde_json::json!(if value["version"] == 2 {
+            "proxy_upload_v2"
+        } else {
+            "proxy_upload"
+        });
         let (response_tx, response_rx) = oneshot::channel();
         conn.pending
             .insert(request_id.clone(), PendingRequest::Awaiting(response_tx));
@@ -3682,7 +3689,9 @@ impl NodeWsManager {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
-            .is_some_and(|p| request.operation.allowed(p))
+            .is_some_and(|p| {
+                request.operation.allowed(p) && (request.version == 1 || p.authority_v2())
+            })
         {
             return Err(AppError::Forbidden(
                 "Machine capability not advertised".into(),
@@ -3697,7 +3706,11 @@ impl NodeWsManager {
             + 15;
         let mut message = serde_json::to_value(&request)
             .map_err(|_| AppError::Internal("Machine request encoding failed".into()))?;
-        message["type"] = serde_json::json!("machine_request");
+        message["type"] = serde_json::json!(if request.version == 2 {
+            "machine_request_v2"
+        } else {
+            "machine_request"
+        });
         let pending = conn.machine_requests.clone();
         pending.insert(id.clone(), tx);
         struct Guard {

@@ -40,9 +40,14 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { AdminUsageList } from "@/components/billing-analytics/usage-list";
+import {
+  AdminUsageList,
+  AdminUsagePreload,
+} from "@/components/billing-analytics/usage-list";
 import { PageHeader } from "@/components/shared/page-header";
 import { cn } from "@/lib/utils";
+import { normalizeAdminUsageSearch } from "@/schemas/admin-usage";
+import type { AdminUsageSearch } from "@/types/admin";
 
 const SamplePage =
   import.meta.env.DEV && import.meta.env.MODE === "test"
@@ -65,6 +70,7 @@ export function AdminUsagePage() {
   return (
     <LiveAnalytics
       tab={tab}
+      preloadSearch={normalizeAdminUsageSearch(search)}
       onTabChange={(next) =>
         void navigate({ to: "/admin/usage", search: { ...search, tab: next } })
       }
@@ -74,9 +80,11 @@ export function AdminUsagePage() {
 function LiveAnalytics({
   tab,
   onTabChange,
+  preloadSearch,
 }: {
   tab: "dashboard" | "list";
   onTabChange: (tab: "dashboard" | "list") => void;
+  preloadSearch: AdminUsageSearch;
 }) {
   const user = useAuthStore((state) => state.user);
   const query = useUsageWorkspace(user?.id ?? "");
@@ -102,6 +110,7 @@ function LiveAnalytics({
       editable={user?.role === "admin" || user?.is_admin === true}
       tab={tab}
       onTabChange={onTabChange}
+      preloadSearch={preloadSearch}
     />
   );
 }
@@ -114,6 +123,7 @@ export function AnalyticsWorkspace({
   initialLayout,
   tab,
   onTabChange,
+  preloadSearch,
 }: {
   initial: WorkspaceResponse;
   userId: string;
@@ -123,6 +133,7 @@ export function AnalyticsWorkspace({
   initialLayout?: AnalyticsLayout;
   tab?: "dashboard" | "list";
   onTabChange?: (tab: "dashboard" | "list") => void;
+  preloadSearch?: AdminUsageSearch;
 }) {
   const [starting] = useState<WorkspaceResponse>(() =>
     initialLayout && !initial.config
@@ -515,6 +526,9 @@ export function AnalyticsWorkspace({
             <AdminUsageList filters={view.filters} />
           </TabsContent>
         </fieldset>
+        {preloadSearch && !workspace.pendingRecovery && (
+          <AdminUsagePreload filters={view.filters} search={preloadSearch} />
+        )}
       </Tabs>
       <p className="text-[10px] leading-relaxed text-muted-foreground">
         Usage windows are UTC and end-exclusive. Gross cost includes wallet,

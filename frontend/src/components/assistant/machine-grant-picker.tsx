@@ -7,7 +7,9 @@ export function MachineGrantPicker({
   value,
   onChange,
   disabled,
+  org,
 }: {
+  readonly org?: string;
   readonly kind: "machines" | "logins";
   readonly value: readonly string[];
   readonly onChange: (ids: string[]) => void;
@@ -20,10 +22,11 @@ export function MachineGrantPicker({
       ? (nodes.data ?? [])
           .filter(
             (node) =>
+              (!org || node.owner?.id === org) &&
               node.machine &&
               (node.machine.shell ||
                 node.machine.files ||
-                node.machine.computer),
+                node.machine.computer || node.machine.browser),
           )
           .map((node) => ({ id: node.id, label: node.name }))
       : (logins.data ?? []).map((login) => ({

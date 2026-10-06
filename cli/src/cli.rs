@@ -1576,8 +1576,9 @@ pub enum PoolCommands {
         contract: Option<String>,
         #[arg(long, value_enum)]
         strategy: Option<PoolStrategyArg>,
-        #[arg(long, default_value = "POST")]
-        method: String,
+        /// Optional operation method. Omit method/path to browse inventory.
+        #[arg(long)]
+        method: Option<String>,
         #[arg(long)]
         path: Option<String>,
         #[arg(long)]
@@ -2290,6 +2291,17 @@ pub enum NodeCommands {
     },
     #[command(hide = true)]
     MachineWorker,
+    #[command(hide = true)]
+    MachineBrowserRefresh {
+        profile: std::path::PathBuf,
+        #[arg(long)]
+        force: bool,
+    },
+    /// Install or run the independent verified machine updater.
+    MachineUpdater {
+        #[command(subcommand)]
+        command: crate::commands::machine_native_update::Command,
+    },
     #[command(hide = true)]
     MachineTransferWorker,
     #[command(hide = true)]

@@ -5,6 +5,9 @@ pub enum AssistantPage<'a> {
         setup: Option<&'a str>,
     },
     Machines,
+    MachineSettings {
+        node: &'a str,
+    },
     SavedLogins,
     MachineSetup {
         setup: &'a str,
@@ -15,6 +18,8 @@ pub enum AssistantPage<'a> {
     MachineDesktop {
         node: &'a str,
         conversation: Option<&'a str>,
+        context_id: Option<&'a str>,
+        display: nyxid_machine::desktop::Display,
     },
 }
 
@@ -25,18 +30,41 @@ impl AssistantPage<'_> {
                 ("/assistant/automations".into(), setup.map(|v| ("setup", v)))
             }
             Self::Machines => ("/assistant/machines".into(), None),
+            Self::MachineSettings { node } => {
+                ("/assistant/machines".into(), Some(("machine", node)))
+            }
             Self::SavedLogins => ("/assistant/machines".into(), Some(("tab", "logins"))),
             Self::MachineSetup { setup } => {
                 ("/assistant/machines/new".into(), Some(("setup", setup)))
             }
             Self::MachinePair { code } => ("/assistant/machines/pair".into(), Some(("code", code))),
-            Self::MachineDesktop { node, conversation } => (
-                format!(
+            Self::MachineDesktop {
+                node,
+                conversation,
+                context_id,
+                display,
+            } => {
+                let path = format!(
                     "/assistant/machines/{}/desktop",
                     url::form_urlencoded::byte_serialize(node.as_bytes()).collect::<String>()
-                ),
-                conversation.map(|v| ("conversation_id", v)),
-            ),
+                );
+                let mut query = url::form_urlencoded::Serializer::new(String::new());
+                if let Some(conversation) = conversation {
+                    query.append_pair("conversation_id", conversation);
+                }
+                if let Some(context_id) = context_id {
+                    query.append_pair("context_id", context_id);
+                }
+                if display == nyxid_machine::desktop::Display::Dev {
+                    query.append_pair("display", "dev");
+                }
+                let query = query.finish();
+                return if query.is_empty() {
+                    path
+                } else {
+                    format!("{path}?{query}")
+                };
+            }
         };
         match query {
             Some((key, value)) => format!(
@@ -79,14 +107,27 @@ mod tests {
             (
                 MachineDesktop {
                     node: "n",
+                    conversation: None,
+                    context_id: None,
+                    display: nyxid_machine::desktop::Display::Dev,
+                },
+                "/assistant/machines/n/desktop?display=dev",
+            ),
+            (
+                MachineDesktop {
+                    node: "n",
+                    display: nyxid_machine::desktop::Display::Secure,
                     conversation: Some("nyxagent:c"),
+                    context_id: None,
                 },
                 "/assistant/machines/n/desktop?conversation_id=nyxagent%3Ac",
             ),
             (
                 MachineDesktop {
                     node: "n",
+                    display: nyxid_machine::desktop::Display::Secure,
                     conversation: None,
+                    context_id: None,
                 },
                 "/assistant/machines/n/desktop",
             ),

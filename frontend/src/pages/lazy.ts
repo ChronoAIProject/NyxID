@@ -341,3 +341,7 @@ export const MachinePairPage = lazy(() => import("./machine-setup").then((m) => 
 export const SavedLoginsPage = lazy(() => import("./saved-logins").then((m) => ({ default: m.SavedLoginsPage })));
 
 export const MachineDesktopPage = lazy(() => import("./machine-desktop").then((m) => ({ default: m.MachineDesktopPage })));
+
+export const AdminUploadRetentionPage = lazy(() =>
+  import("./admin-upload-retention").then((m) => ({ default: m.AdminUploadRetentionPage })),
+);

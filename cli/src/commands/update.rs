@@ -223,6 +223,30 @@ async fn update_cli(args: &UpdateArgs) -> Result<Option<PathBuf>> {
     Ok(Some(installed_path))
 }
 
+/// Unattended machine updates never fall back to source or skip verification.
+pub(super) async fn download_machine_release(version: &str, root: &Path) -> Result<PathBuf> {
+    nyxid_machine::update::version(version).map_err(anyhow::Error::msg)?;
+    let client = github_client()?;
+    let release = resolve_release(&client, Some(version))
+        .await?
+        .context("Release unavailable")?;
+    anyhow::ensure!(
+        release.tag_name == format!("v{version}"),
+        "Unexpected release tag"
+    );
+    let name = asset_name_for_target(current_target())?;
+    let asset = release_asset(&release, &name).context("No supported prebuilt release")?;
+    let tmp = tempfile::tempdir()?;
+    let archive = tmp.path().join(&name);
+    download_asset(&client, asset, &archive).await?;
+    verify_release_attestation(&client, &archive, &release.tag_name).await?;
+    extract_binary_to_version_root(&archive, &release.tag_name, root)
+}
+
+pub(super) fn activate_machine_binary(active: &Path, binary: &Path) -> Result<()> {
+    retarget_active_symlink(active, binary)
+}
+
 async fn update_cli_from_source() -> Result<()> {
     eprintln!("Updating NyxID CLI from source...");
 

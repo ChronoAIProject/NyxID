@@ -1,9 +1,11 @@
-importScripts("policy.js");
+importScripts("policy.js", "browser-background.js");
 
 (() => {
   let port;
   let active = false;
   let retryMs = 500;
+  let connecting = false;
+  let retryTimer;
   const seen = new Map();
 
   async function fill(request) {
@@ -49,33 +51,61 @@ importScripts("policy.js");
     return { status: "refused", reason: "input_rejected" };
   }
 
+  function reconnect() {
+    if (retryTimer) return;
+    retryTimer = setTimeout(() => { retryTimer = undefined; void connect(); }, retryMs);
+    // Stay below the supervisor's readiness window and MV3 idle timeout.
+    retryMs = Math.min(retryMs * 2, 4000);
+  }
   async function connect() {
+    if (port || connecting) return;
+    connecting = true;
+    try {
     const self = await chrome.management.getSelf();
     if (self.installType !== "admin" || self.mayDisable) return;
     port = chrome.runtime.connectNative("dev.nyxid.machine_filler");
     port.onDisconnect.addListener(() => {
       void chrome.runtime.lastError;
       port = undefined;
-      setTimeout(connect, retryMs);
-      retryMs = Math.min(retryMs * 2, 30000);
+      reconnect();
     });
     port.onMessage.addListener(async request => {
       const currentPort = port;
+      // connectNative/postMessage can succeed before an asynchronous host
+      // failure. Only an inbound message proves the connection is usable.
+      retryMs = 500;
       const nonce = typeof request?.nonce === "string" ? request.nonce : "";
       if (active) {
         currentPort.postMessage({ nonce, status: "refused", reason: "busy" });
         return;
       }
       active = true;
-      retryMs = 500;
       let result;
-      try { result = await fill(request); }
+      try {
+        if (request?.operation === "browser") {
+          if (!/^[0-9a-f-]{36}$/.test(nonce) || request.expires_at_ms < Date.now() || request.expires_at_ms > Date.now() + 30000 || seen.has(nonce)) {
+            result = {status: "refused", reason: "expired_or_replayed"};
+          } else {
+            for (const [id, expiry] of seen) if (expiry <= Date.now()) seen.delete(id);
+            if (seen.size >= 512) throw new Error("busy");
+            seen.set(nonce, request.expires_at_ms);
+            result = await NyxIdBrowserBackground.perform(request);
+          }
+        } else result = await fill(request);
+      }
       catch { result = { status: "refused", reason: "browser_unavailable" }; }
       finally { if (request) request.value = ""; active = false; }
       try { currentPort.postMessage({ nonce, ...result }); }
       catch { /* A disconnected request is never replayed automatically. */ }
     });
     port.postMessage({ type: "hello", version: 1, extension_id: chrome.runtime.id });
+    } catch { port = undefined; reconnect(); }
+    finally { connecting = false; }
   }
+  // MV3 only starts a dormant worker for events registered synchronously.
+  // A native messaging port keeps it alive once connected, and disconnects
+  // reconnect without replaying the request that lost its connection.
+  chrome.runtime.onStartup.addListener(() => { void connect(); });
+  chrome.runtime.onInstalled.addListener(() => { void connect(); });
   void connect();
 })();

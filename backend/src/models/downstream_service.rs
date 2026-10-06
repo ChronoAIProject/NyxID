@@ -46,6 +46,49 @@ pub struct ServiceInference {
     pub model_list: bool,
     #[serde(default)]
     pub realtime: bool,
+    #[serde(default)]
+    pub voice: Option<VoiceInference>,
+}
+
+/// Catalog metadata only; adapter endpoints and credentials are never catalog input.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VoiceProtocol {
+    OpenaiLive,
+    XaiRealtime,
+    /// Future protocols remain readable during rolling upgrades, but cannot execute.
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VoiceUsageSource {
+    ProviderReported,
+    ServerMeasured,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct VoiceModel {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub default: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct VoiceChoice {
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct VoiceInference {
+    pub protocol: VoiceProtocol,
+    pub models: Vec<VoiceModel>,
+    pub voices: Vec<VoiceChoice>,
+    pub usage_source: VoiceUsageSource,
+    pub billing_metrics: Vec<crate::models::service_billing::BillingMetric>,
 }
 
 /// Catalog-controlled smart-HTTP destination. Never authored by a machine.

@@ -1,5 +1,7 @@
 import * as React from "react";
 import * as DropdownMenuPrimitive from "@radix-ui/react-dropdown-menu";
+import { OverlayLayer } from "@/components/ui/overlay-layer";
+import { useOverlayLayer } from "@/lib/overlay-layer";
 import { cn } from "@/lib/utils";
 
 const DropdownMenu = DropdownMenuPrimitive.Root;
@@ -33,7 +35,10 @@ DropdownMenuSubTrigger.displayName =
 const DropdownMenuSubContent = React.forwardRef<
   React.ComponentRef<typeof DropdownMenuPrimitive.SubContent>,
   React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.SubContent>
->(({ className, ...props }, ref) => (
+>(({ className, style, ...props }, ref) => {
+  const layer = useOverlayLayer();
+  return (
+  <OverlayLayer layer={layer}>
   <DropdownMenuPrimitive.SubContent
     ref={ref}
     className={cn(
@@ -41,15 +46,21 @@ const DropdownMenuSubContent = React.forwardRef<
       className,
     )}
     {...props}
+      style={{ ...style, zIndex: layer }}
   />
-));
+  </OverlayLayer>
+  );
+});
 DropdownMenuSubContent.displayName =
   DropdownMenuPrimitive.SubContent.displayName;
 
 const DropdownMenuContent = React.forwardRef<
   React.ComponentRef<typeof DropdownMenuPrimitive.Content>,
   React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Content>
->(({ className, sideOffset = 4, ...props }, ref) => (
+>(({ className, sideOffset = 4, style, ...props }, ref) => {
+  const layer = useOverlayLayer();
+  return (
+  <OverlayLayer layer={layer}>
   <DropdownMenuPrimitive.Portal>
     <DropdownMenuPrimitive.Content
       ref={ref}
@@ -59,9 +70,12 @@ const DropdownMenuContent = React.forwardRef<
         className,
       )}
       {...props}
+      style={{ ...style, zIndex: layer }}
     />
   </DropdownMenuPrimitive.Portal>
-));
+  </OverlayLayer>
+  );
+});
 DropdownMenuContent.displayName = DropdownMenuPrimitive.Content.displayName;
 
 const DropdownMenuItem = React.forwardRef<

@@ -3,7 +3,9 @@ ARG MACHINE_IMAGE=nyxid-node-machine:local
 FROM ${MACHINE_IMAGE}
 RUN apt-get update && apt-get install -y --no-install-recommends libnss3-tools node-ws \
     && rm -rf /var/lib/apt/lists/*
-COPY cli/tests/machine_container_e2e.mjs /test/machine_container_e2e.mjs
+COPY cli/tests/machine_container_e2e.mjs cli/tests/machine_context_e2e.mjs /test/
+COPY cli/tests/machine_native_probe_drop.py /test/
+COPY cli/tests/machine_native_host_e2e.py /test/
 COPY cli/tests/machine_filler.test.mjs /test/machine_filler.test.mjs
 COPY cli/resources/machine-browser/ /resources/machine-browser/
 RUN node --test /test/machine_filler.test.mjs

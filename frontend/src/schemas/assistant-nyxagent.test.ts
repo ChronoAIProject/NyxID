@@ -8,6 +8,7 @@ import {
   assistantGroupMessagesSchema,
   assistantGroupPostedSchema,
   nyxAgentAcknowledgementSchema,
+  nyxAgentChannelAgentSchema,
   nyxAgentChannelConnectSchema,
   nyxAgentChannelListSchema,
   nyxAgentConversationSchema,
@@ -275,8 +276,12 @@ describe("NyxBot team, settings and channel schemas", () => {
       max_concurrent_subagent_turns: 1,
       max_group_handoffs: 0,
       max_group_handoffs_per_hour: 0,
+      max_auto_continuations: 8,
     };
     expect(schema.safeParse(valid).success).toBe(true);
+    expect(schema.safeParse({ ...valid, max_auto_continuations: 0 }).success).toBe(true);
+    expect(schema.safeParse({ ...valid, max_auto_continuations: 32 }).success).toBe(true);
+    expect(schema.safeParse({ ...valid, max_auto_continuations: 33 }).success).toBe(false);
     expect(schema.safeParse({ ...valid, max_group_handoffs: 24 }).success).toBe(true);
     expect(schema.safeParse({ ...valid, max_group_handoffs: 25 }).success).toBe(false);
     expect(schema.safeParse({ ...valid, max_group_handoffs_per_hour: 601 }).success).toBe(false);
@@ -285,6 +290,21 @@ describe("NyxBot team, settings and channel schemas", () => {
     expect(schema.safeParse({ ...valid, max_concurrent_subagent_turns: 9 }).success).toBe(false);
     expect(schema.safeParse({ ...valid, max_live_subagents: 2.5 }).success).toBe(false);
     expect(schema.safeParse({ ...valid, max_live_subagents: Number.NaN }).success).toBe(false);
+  });
+
+  it("treats missing and future channel follow readiness as unavailable", () => {
+    const channel = {
+      id: "c", channel_bot_id: "bot", platform: "slack", bot_label: "Bot",
+      transport: "direct", status: "active", owner_linked: true, created_at: at,
+    };
+    // Older responses remain accepted; readiness always requires an explicit ready.
+    expect(nyxAgentChannelAgentSchema.parse(channel).follow_readiness).not.toBe("ready");
+    expect(nyxAgentChannelAgentSchema.parse({ ...channel, follow_readiness: "future" })
+      .follow_readiness).toBe("unavailable");
+    expect(nyxAgentChannelAgentSchema.parse({ ...channel, follow_readiness: "unavailable" })
+      .follow_readiness).toBe("unavailable");
+    expect(nyxAgentChannelAgentSchema.parse({ ...channel, follow_readiness: "ready" })
+      .follow_readiness).toBe("ready");
   });
 
   it("keeps only https owner links", () => {

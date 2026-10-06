@@ -35,6 +35,9 @@ impl std::fmt::Debug for StoredAttachment {
 /// grain state, or wherever the agent persists its conversation history).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChannelMessage {
+    /// Optional normalized thread facts, never an interaction credential.
+    #[serde(default)]
+    pub thread_context: Option<super::channel_thread::ChannelThreadFacts>,
     #[serde(default)]
     pub activity: Option<super::channel_activity::ActivityMetadata>,
     #[serde(default)]
@@ -124,6 +127,7 @@ mod tests {
 
     fn make_message() -> ChannelMessage {
         ChannelMessage {
+            thread_context: None,
             activity: None,
             platform_send: None,
             attachments: vec![],

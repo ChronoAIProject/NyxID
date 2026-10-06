@@ -284,8 +284,31 @@ pub async fn available(
     service: &DownstreamService,
     owner_id: &str,
 ) -> AppResult<bool> {
+    if !has_platform_key(service) {
+        return Ok(false);
+    }
+    let provider = if let Some(id) = &service.provider_config_id {
+        db.collection::<ProviderConfig>(PROVIDERS)
+            .find_one(doc! {"_id": id})
+            .await?
+    } else {
+        None
+    };
+    available_with_provider(db, service, provider.as_ref(), owner_id).await
+}
+
+/// Single-entry callers can reuse a provider already loaded for inference discovery.
+pub async fn available_with_provider(
+    db: &mongodb::Database,
+    service: &DownstreamService,
+    provider: Option<&ProviderConfig>,
+    owner_id: &str,
+) -> AppResult<bool> {
     if !has_platform_key(service)
-        || !provider_supports_platform_key(db, service.provider_config_id.as_deref()).await?
+        || service
+            .provider_config_id
+            .as_deref()
+            .is_some_and(|id| !provider.is_some_and(|p| p.id == id && !p.requires_gateway_url))
     {
         return Ok(false);
     }

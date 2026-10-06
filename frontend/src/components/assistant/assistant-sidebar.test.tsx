@@ -395,19 +395,17 @@ describe("NyxAgent row controls", () => {
     await user.click(screen.getByRole("button", { name: `Options for ${row.title}` }));
     await user.click(screen.getByRole("menuitem", { name: "Rename" }));
     expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
-    const input = within(screen.getByRole("dialog")).getByRole("textbox");
+    const input = within(screen.getByRole("form", { name: "Rename chat" })).getByRole("textbox");
     await user.clear(input);
     await user.type(input, "New title");
     await user.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(rename).toHaveBeenCalledExactlyOnceWith(row.id, "New title"));
   });
-  it("disables both mutations while a turn is active", async () => {
+  it("allows rename but disables delete while a turn is active", async () => {
     const user = userEvent.setup();
     nyxSidebar({ ...row, active_turn: { turn_id: "running", started_at: row.created_at } });
     await user.click(screen.getByRole("button", { name: `Options for ${row.title}` }));
-    expect(screen.getByRole("menuitem", { name: "Rename" })).toHaveAttribute(
-      "aria-disabled", "true",
-    );
+    expect(screen.getByRole("menuitem", { name: "Rename" })).not.toHaveAttribute("aria-disabled", "true");
     expect(screen.getByRole("menuitem", { name: "Delete" })).toHaveAttribute(
       "aria-disabled", "true",
     );

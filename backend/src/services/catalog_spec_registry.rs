@@ -116,6 +116,10 @@ const HOSTED_SPEC_SOURCES: &[(&str, &str)] = &[
         include_str!("../../specs/catalog/lark-bot.openapi.json"),
     ),
     (
+        "linkedin",
+        include_str!("../../specs/catalog/linkedin.openapi.json"),
+    ),
+    (
         "microsoft-graph",
         include_str!("../../specs/catalog/microsoft-graph.openapi.json"),
     ),
@@ -190,6 +194,7 @@ const SLUG_TO_SPEC_KEY: &[(&str, &str)] = &[
     ("api-google-slides", "google-slides"),
     ("api-lark", "lark"),
     ("api-lark-bot", "lark-bot"),
+    ("api-linkedin", "linkedin"),
     ("api-microsoft", "microsoft-graph"),
     ("api-reddit", "reddit"),
     ("api-slack", "slack"),

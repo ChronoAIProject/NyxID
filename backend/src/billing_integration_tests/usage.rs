@@ -26,6 +26,7 @@ fn meter(owner: &str, quantity: i64) -> UsageMeterRow {
         credential_class: CredentialClass::NyxidManagedMaster,
         model: Some("test-model".into()),
         token_breakdown: None,
+        audio_tokens: None,
         reserved_credits: crate::models::credits::Credits::from_whole(0),
         funding: None,
         quantity: Some(quantity),

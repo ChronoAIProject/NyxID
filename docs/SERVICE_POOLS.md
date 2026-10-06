@@ -17,7 +17,18 @@ billing classification. Pools belong to a person or organization.
 Priority pools have a separate `tier_balance` of `round_robin` or `weighted`.
 Backup tiers advance only when visited, so intermittent primary failures still
 distribute work across backups. Members have weight 1–1000 and may be disabled
-without deleting their connection.
+without deleting their connection. The dashboard can reorder connections within
+each priority tier without changing their priorities or weights. Each tier uses
+a separate counter, and saving configuration restarts these tier cycles.
+
+Round-robin and weighted routing use the saved member order for a repeating
+cycle. Round-robin gives each eligible member one turn. Weighted routing gives
+each member as many consecutive turns as its weight: A with weight 2 followed
+by B with weight 1 produces A → A → B, then repeats. Reordering those members
+produces B → A → A while preserving their 1/3 and 2/3 shares. The next request
+continues from the pool's current counter; saving does not restart the cycle.
+Disabled or unavailable members are omitted at execution time. Ordered retry
+after a failed attempt requires the `priority` strategy.
 
 A priority pool uses one of two request contracts:
 
@@ -81,7 +92,13 @@ nyxid pool show reliable-chat --method POST --path /chat/completions
 Member inputs accept an owned connection slug or UUID; responses contain canonical
 UUIDs. Use `--org <UUID|slug|name>` consistently for organization management. The
 CLI resolves the pool within that owner, so a same-slug personal pool is distinct.
-Foreign connection UUIDs cannot be inserted.
+Foreign connection UUIDs cannot be inserted. Accepted pool slugs such as
+`candidates` and UUID-shaped names remain addressable: the CLI resolves ambiguous
+names to owner-scoped IDs. A genuine authorized pool UUID takes precedence and
+works for an organization pool without `--org`; an authorization failure is never
+reinterpreted as a slug. Mutation output reports health as “Not checked” until a
+health snapshot has been read, and `show` uses the connection slug from that
+snapshot.
 
 ## AI chat aliases
 
@@ -230,14 +247,54 @@ nyxid pool set-strategy reliable-chat priority --tier-balance weighted
 nyxid pool remove-member reliable-chat --service another-chat
 ```
 
-Candidates include availability, effective credential class, protocol, compatibility
-requirements and node upgrade reasons. Follow `has_more`/`next_cursor`; a page is
-not the complete inventory. Existing-pool inspection includes peer compatibility.
-The REST candidate API additionally accepts `peer_ids` and `declared_peer_ids`
-(comma-separated UUIDs, at most 50) to inspect an unsaved selection. The dashboard
-sends the draft strategy/contract and confirmations. Same API inspection needs the
-actual method/path; AI defaults to `POST chat/completions`. Health always uses the
-saved configuration and directly fetches its members, including unavailable rows.
+`nyxid pool candidates` browses connection inventory by default, without requiring
+an API path. Add `--method` and/or `--path` to inspect a concrete operation.
+Candidates include connection names, availability, effective credential class,
+protocol, compatibility requirements and node upgrade reasons. Follow
+`has_more`/`next_cursor`; a page is not the complete inventory. Existing-pool inspection includes peer compatibility.
+The REST candidate API accepts `check_operation=false` for inventory browsing.
+This explicit mode returns `operation_checked: false`, with `method` and `path`
+set to null, and does not read operation cooldown. Omitting the flag preserves
+existing operation checks (`POST /` for Same API, `POST chat/completions` for AI
+chat); checked responses retain method/path strings and set `operation_checked:
+true`. Supplying a method or path to the CLI enables these checks. Explicit paths
+use the same security validation as execution: no trailing slash except `/`, dot
+segments, repeated slashes, query/fragment, or encoded characters.
+
+The API additionally accepts `peer_ids` and `declared_peer_ids` (comma-separated
+UUIDs, at most 50) to inspect an unsaved selection. `selected_only=true` returns
+all those selected IDs, independent of `search`, `after` and `limit`, so editors
+can keep peer compatibility controls visible when browsing other pages. The
+dashboard sends the draft strategy/contract and confirmations. An operation check
+needs the actual Same API method/path; AI defaults to `POST chat/completions`. Draft candidate checks do not inherit saved member
+Disable or cooldown state. Saved operation checks still report both. Legacy
+round-robin/weighted pools never use priority cooldown health. Health always uses
+the saved configuration and directly fetches its members, including unavailable rows.
+
+If a connection's credential is failed, inactive, or missing, inspection marks
+that connection `credential_unavailable` while keeping healthy connections
+available. Reconnect or update the affected connection in Services. Priority
+pools skip known unavailable credentials before sending a request, so a broken
+primary credential does not block a healthy backup. Inspection checks stored
+state; it does not test credentials against the provider.
+
+Use the dashboard's searchable multi-select dropdown to choose connections.
+Connections are grouped under their original catalog service, with individual
+accounts and keys visible beneath each heading. Custom connections have their
+own group. Search matches connection and original service names and slugs
+across the inventory. Connection names match the Services page, including renamed
+keys. Platform connections use their endpoint label rather than a retained
+personal key's label.
+It stays open while selecting and retains loaded pages and scroll position;
+select a checked connection again to remove it.
+While compatibility is being checked, new selections and pagination wait for the
+result. You can still remove selected connections. An in-flight next page finishes
+before the loaded pages refresh against the latest selection.
+The selected connections appear in the form with priority and model settings.
+Unavailable connections show a repair reason and cannot be added.
+The dashboard requires at least one selected connection when creating a pool.
+The CLI and API still support creating an empty draft and adding members later;
+existing empty drafts remain editable in the dashboard.
 
 Save settings and members together with `nyxid pool update <pool> --file update.json`:
 
@@ -262,6 +319,18 @@ instead of silently overwriting concurrent changes. Omitted fields preserve the
 current value. Null clears description/model/failover; a members array replaces
 membership while preserving omitted fields for retained IDs. The dashboard sends
 one PUT, including `expected_revision`, for all edited settings and members.
+After a conflict, **Reload latest** replaces the draft with the current saved
+configuration and revision. The pool list also refreshes, so closing and reopening
+the editor loads the latest settings.
+
+Switching routing modes keeps the draft's priorities, models, balancing and retry
+settings. Saving sends only the fields used by the selected mode. Invalid hidden
+weights are replaced with 1 for an unweighted mode; visible weights must be whole
+numbers from 1 to 1000. Cycle previews show enabled connections and the consecutive
+turns assigned by each weight.
+
+Name, description and model limits are 128, 1024 and 256 Unicode characters,
+respectively, using the same Unicode scalar count in the form and API.
 `set-strategy` can also change tier balancing and uses a revision-checked PUT.
 `add-member` updates existing members while preserving omitted fields; its flags
 cover priority, weight, enabled state, model, `--clear-model` and
@@ -283,7 +352,23 @@ error; durable settlement intent and reconciliation retain known usage.
 
 `pool show`, `pool candidates` and `pool health` display the selected operation.
 Same API health for `POST /` describes only that operation, not all API paths.
-The dashboard method/path controls select the same operation-scoped view.
+The dashboard initially shows connection inventory. Its optional “Check operation”
+controls validate the complete input and apply it only when requested, including
+in the health dialog. They never query a partial path while typing. AI health uses
+the chat operation automatically. Health can also use `check_operation=false` to
+list saved members without claiming that cooldown has been checked.
+
+The dashboard provides one Create Pool action. New connections get increasing
+priorities so the common primary/backup setup works without editing priority
+numbers. Same API and AI chat choices explain request behavior; switching back to
+Same API clears hidden model mappings. Same-priority balancing appears beside
+the connection controls. Weighted and round-robin connections have explicit cycle
+positions and move controls; weighted connections also show their configured
+share among enabled connections (within the same priority tier for fallback).
+Retry limits, description and pool enabled state live under Advanced settings.
+Search and pagination never discard draft members or their compatibility
+confirmations. Editing saves
+one revision-checked update; stale revisions remain visible as conflicts.
 
 Responses include `x-nyxid-pool-member` and `x-nyxid-pool-attempts`. Exhaustion
 preserves the final upstream response when possible. Transport-only exhaustion

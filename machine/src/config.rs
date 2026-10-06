@@ -10,6 +10,8 @@ pub struct Config {
     pub shell: bool,
     pub files: bool,
     pub computer: bool,
+    /// Absent preserves the pre-v2 computer ceiling. Explicit false always wins.
+    pub browser: Option<bool>,
     pub roots: Vec<PathBuf>,
     pub computer_mode: ComputerMode,
     pub max_jobs: usize,
@@ -19,6 +21,7 @@ pub struct Config {
     pub cua_driver: Option<PathBuf>,
     pub agent_user: Option<String>,
     pub browser_user: Option<String>,
+    pub dev_browser_user: Option<String>,
     pub managed_browser: Option<ManagedBrowserConfig>,
 }
 
@@ -28,6 +31,7 @@ impl Default for Config {
             shell: false,
             files: false,
             computer: false,
+            browser: None,
             roots: Vec::new(),
             computer_mode: ComputerMode::Standard,
             max_jobs: 4,
@@ -37,12 +41,27 @@ impl Default for Config {
             cua_driver: None,
             agent_user: None,
             browser_user: None,
+            dev_browser_user: None,
             managed_browser: None,
         }
     }
 }
 
 impl Config {
+    pub fn browser_enabled(&self) -> bool {
+        self.browser.unwrap_or(self.computer)
+    }
+    /// Existing container volumes predate the developer-browser setting. The
+    /// official image always provisions this separate identity on upgrade.
+    pub fn effective_dev_browser_user(&self) -> Option<&str> {
+        self.dev_browser_user.as_deref().or_else(|| {
+            self.managed_browser
+                .as_ref()
+                .filter(|browser| browser.container)
+                .map(|_| "devbrowser")
+        })
+    }
+
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.max_jobs == 0 || self.max_jobs > 64 {
             return Err("max_jobs must be between 1 and 64");
@@ -67,6 +86,12 @@ impl Config {
         }
         if self.agent_user.is_some() && self.agent_user == self.browser_user {
             return Err("the browser and agent OS users must differ");
+        }
+        if let Some(dev) = self.effective_dev_browser_user()
+            && (self.agent_user.as_deref() == Some(dev)
+                || self.browser_user.as_deref() == Some(dev))
+        {
+            return Err("the developer browser needs its own OS user on separated installs");
         }
         Ok(())
     }
@@ -98,6 +123,23 @@ mod tests {
         config.max_jobs = usize::MAX;
         assert!(config.validate().is_err());
     }
+
+    #[test]
+    fn existing_container_volumes_get_the_separate_developer_identity() {
+        let mut config: Config = serde_json::from_value(serde_json::json!({
+            "agent_user":"agent", "browser_user":"browser",
+            "managed_browser":{
+                "binary":"/usr/bin/chromium", "data_dir":"/desktop",
+                "update_port":32248, "container":true
+            }
+        }))
+        .unwrap();
+        assert_eq!(config.effective_dev_browser_user(), Some("devbrowser"));
+        assert!(config.validate().is_ok());
+        config.dev_browser_user = Some("browser".into());
+        assert!(config.validate().is_err());
+        assert_eq!(Config::default().effective_dev_browser_user(), None);
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -105,8 +147,8 @@ pub struct ManagedBrowserConfig {
     pub binary: PathBuf,
     pub data_dir: PathBuf,
     pub update_port: u16,
-    /// Docker's default seccomp policy prevents Chromium's namespace sandbox.
-    /// The machine image uses separate users and the container boundary.
+    /// The official image provisions separate browser/agent/developer users and
+    /// uses the published seccomp profile for Chromium's namespace sandbox.
     #[serde(default)]
     pub container: bool,
 }

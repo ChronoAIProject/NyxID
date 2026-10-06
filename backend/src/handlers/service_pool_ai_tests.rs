@@ -19,6 +19,9 @@ use crate::test_utils::{
 };
 use crate::{AppState, mw::auth::AuthUser};
 
+#[path = "service_pool_ai_operation_scope_tests.rs"]
+mod operation_scopes;
+
 struct Fixture {
     state: AppState,
     auth: AuthUser,
@@ -86,6 +89,7 @@ async fn fixture(label: &str, backup: ResponseTemplate) -> Fixture {
             wire_protocol: protocol,
             model_list: false,
             realtime: false,
+            voice: None,
         });
         db.collection::<crate::models::downstream_service::DownstreamService>(
             "downstream_services",

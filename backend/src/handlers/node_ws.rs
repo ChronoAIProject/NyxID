@@ -86,7 +86,7 @@ enum NodeMessage {
         /// (twenty-seventh-round Codex P2: capability negotiation so
         /// backend + node don't need a lockstep upgrade).
         #[serde(default)]
-        capabilities: Option<NodeCapabilitiesMsg>,
+        capabilities: Option<Box<NodeCapabilitiesMsg>>,
     },
     #[serde(rename = "ssh_tunnel_opened")]
     SshTunnelOpened(WsSshTunnelOpenedMsg),
@@ -1401,7 +1401,7 @@ async fn handle_node_connection(
                     &state,
                     &node_id_reader,
                     agent_version,
-                    capabilities,
+                    capabilities.map(|caps| *caps),
                     Some(&owner_fence),
                 )
                 .await;

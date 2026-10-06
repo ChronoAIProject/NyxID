@@ -15,7 +15,7 @@ use axum::{
     body::{Body, Bytes},
     http::{Request, Response},
 };
-use futures::{SinkExt, StreamExt};
+use futures::{SinkExt, StreamExt, TryStreamExt};
 use mongodb::bson::doc;
 use nyxid_node_proxy_test::machine::Runtime;
 use serde_json::{Value, json};
@@ -40,6 +40,9 @@ impl Drop for Peer {
 }
 impl Peer {
     async fn start(f: &Fixture) -> (Self, crate::models::node::Node) {
+        super::machine_access_service::ensure_indexes(&f.state.db)
+            .await
+            .unwrap();
         let root = tempfile::tempdir().unwrap();
         let mut node = node(f, &f.owner).await;
         let config = nyxid_machine::config::Config {
@@ -49,7 +52,9 @@ impl Peer {
             allow_root: true,
             ..Default::default()
         };
-        let runtime = Runtime::new(&config, &node.id, &root.path().join("private-node")).unwrap();
+        let private = root.path().join("private-node");
+        std::fs::create_dir(&private).unwrap();
+        let runtime = Runtime::new(&config, &node.id, &private).unwrap();
         let profile = runtime.profile().await;
         node.machine = Some(profile.clone());
         f.state
@@ -170,7 +175,7 @@ impl Peer {
                     tokio_tungstenite::tungstenite::Message::Text(text) => {
                         let value: Value = serde_json::from_str(&text).unwrap();
                         match value["type"].as_str() {
-                            Some("machine_request") => {
+                            Some("machine_request" | "machine_request_v2") => {
                                 let request: nyxid_machine::Request =
                                     serde_json::from_value(value).unwrap();
                                 let active = active.clone();
@@ -178,10 +183,24 @@ impl Peer {
                                 let secret = secret.clone();
                                 requests.spawn(async move {
                                     let request_id = request.request_id.clone();
+                                    let operation = request.operation;
+                                    let revision = active
+                                        .control_revision(operation, &request.parameters)
+                                        .await;
+                                    let mut parameters = request.parameters.clone();
+                                    parameters["_signed_authority"] =
+                                        serde_json::to_value(&request.authority).unwrap();
                                     let result = active.handle(request, &secret).await;
-                                    node_tx.send(nyxid_node_proxy_test::ws_client::NodeWsMessage::Text(
-                                        json!({"type":"machine_result","request_id":request_id,"result":result}).to_string(),
-                                    )).await.unwrap();
+                                    active
+                                        .send_result(
+                                            &node_tx,
+                                            &request_id,
+                                            operation,
+                                            revision,
+                                            &parameters,
+                                            result,
+                                        )
+                                        .await;
                                 });
                             }
                             Some("machine_service_response") => {
@@ -202,6 +221,29 @@ impl Peer {
                     _ => {}
                 }
                 while requests.try_join_next().is_some() {}
+            }
+        }));
+        // The real server renews leases independently of the HTTP call. This
+        // loopback adapter uses that same live resolver while its peer exists.
+        let state = f.state.clone();
+        let id = node.id.clone();
+        tasks.push(tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+            loop {
+                interval.tick().await;
+                let leases: Vec<crate::models::machine_access::Lease> = state
+                    .db
+                    .collection(crate::models::machine_access::LEASES)
+                    .find(doc! {"node_id": &id})
+                    .limit(500)
+                    .await
+                    .unwrap()
+                    .try_collect()
+                    .await
+                    .unwrap();
+                for lease in leases {
+                    let _ = Box::pin(super::machine_access_service::renew_one(&state, lease)).await;
+                }
             }
         }));
         (
@@ -347,7 +389,7 @@ async fn machine_gateway_uses_live_specialist_scope_and_server_credentials() {
         &f.owner,
         &f.chat.agent_id,
         GrantChange::Add(crate::models::assistant_agent::AgentGrants {
-            service_ids: vec![service],
+            service_ids: vec![service.clone()],
             ..Default::default()
         }),
     )
@@ -380,6 +422,46 @@ async fn machine_gateway_uses_live_specialist_scope_and_server_credentials() {
     assert_eq!(
         allowed["stdout"], "upstream accepted server credential",
         "declared service call should reach the upstream"
+    );
+    crate::test_utils::set_agent_operation_scopes_enabled(&f.state.db, &f.owner, true).await;
+    super::agent_operation_scope_service::set(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        &service,
+        &crate::models::agent_operation_scope::OperationSelection {
+            expected_revision: 0,
+            all_operations: false,
+            endpoint_ids: vec![],
+            rules: vec![crate::models::downstream_service::ProxyOperationRule {
+                method: "GET".into(),
+                path_template: "/allowed".into(),
+                ..Default::default()
+            }],
+        },
+        true,
+    )
+    .await
+    .unwrap();
+    let narrowed = call(
+        &f.state,
+        &chat,
+        "nyx__machine_exec",
+        json!({"machine":node.id,"command":command,"services":["test-machine-api"]}),
+    )
+    .await
+    .unwrap();
+    assert!(
+        narrowed["stdout"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Allowed operations")
+    );
+    assert!(
+        !narrowed["stdout"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("upstream accepted")
     );
     let env = call(
         &f.state,

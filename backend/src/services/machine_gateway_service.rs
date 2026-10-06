@@ -6,7 +6,7 @@ use crate::{
         downstream_service::{GitHttp, InferenceWireProtocol, ServiceInference},
         machine_job::DeclaredService,
     },
-    services::{catalog_discovery_service, key_service, platform_key_service},
+    services::{catalog_discovery_service, key_service, node_service, platform_key_service},
 };
 use futures::TryStreamExt;
 use mongodb::{Database, bson::doc};
@@ -217,6 +217,7 @@ pub async fn services(
                     wire_protocol: InferenceWireProtocol::OpenaiCompletions,
                     model_list: false,
                     realtime: false,
+                    voice: None,
                 })
             } else {
                 members.first().and_then(|row| row.inference.clone())
@@ -476,6 +477,92 @@ pub fn stream_upload(
     Ok((axum::body::Body::from_stream(stream), meter))
 }
 
+/// Rebuild a job's live authority for both gateway calls and lease renewal.
+pub async fn job_auth(
+    db: &Database,
+    job: &crate::models::machine_job::MachineJob,
+) -> AppResult<crate::mw::auth::AuthUser> {
+    let key = key_service::get_api_key(db, &job.user_id, &job.api_key_id).await?;
+    if key.expires_at.is_some_and(|at| at <= chrono::Utc::now()) {
+        return Err(AppError::Forbidden("The job's chat key expired".into()));
+    }
+    let bound = db
+        .collection::<mongodb::bson::Document>(
+            crate::models::assistant_agent_credential::COLLECTION_NAME,
+        )
+        .find_one(doc! {
+            "user_id":&job.user_id,
+            "conversation_id":&job.conversation_id,
+            "api_key_id":&job.api_key_id
+        })
+        .await?;
+    if bound.is_none() {
+        return Err(AppError::Forbidden(
+            "The job's chat key is no longer bound to its conversation".into(),
+        ));
+    }
+    let node = node_service::get_node_by_id(db, &job.node_id)
+        .await?
+        .ok_or_else(|| AppError::NodeNotFound("Machine unavailable".into()))?;
+    if !node.is_active {
+        return Err(AppError::MachineNotAllowed);
+    }
+    crate::services::machine_service::capable(&node, nyxid_machine::Operation::ServiceCall)?;
+    if job.runtime_id.is_empty()
+        || node
+            .machine
+            .as_ref()
+            .is_none_or(|profile| profile.runtime_id != job.runtime_id)
+    {
+        return Err(AppError::Forbidden(
+            "The machine restarted; start a new job".into(),
+        ));
+    }
+    let auth = crate::mw::auth::api_key_auth_user(db, &key, None, None, None).await?;
+    let agent = if let Some(access) = auth.org_agent_access.as_deref() {
+        access.agent(db, &job.user_id, &job.agent_id).await?
+    } else {
+        crate::services::assistant_team_service::agent(db, &job.user_id, &job.agent_id).await?
+    };
+    if agent.user_id != job.user_id {
+        if auth.org_agent_access.is_none() || node.user_id != agent.user_id {
+            return Err(AppError::MachineNotAllowed);
+        }
+    } else if !crate::services::org_service::resolve_owner_access(db, &job.user_id, &node.user_id)
+        .await?
+        .can_write()
+    {
+        return Err(AppError::Forbidden("Machine ownership changed".into()));
+    }
+    if agent.destroyed_at.is_some()
+        || (!agent.is_nyxbot() && !agent.machine_node_ids.contains(&job.node_id))
+    {
+        return Err(AppError::Forbidden("Machine grant was removed".into()));
+    }
+    let policy = Box::pin(crate::services::machine_access_service::policy(
+        db, &agent.id,
+    ))
+    .await?;
+    let assignment = policy
+        .assignments
+        .get(&node.id)
+        .filter(|a| a.capabilities.shell)
+        .ok_or(AppError::MachinePermissionRevoked)?;
+    let row = db
+        .collection::<mongodb::bson::Document>(crate::models::machine_job::COLLECTION_NAME)
+        .find_one(doc! {"_id":&job.id})
+        .await?
+        .ok_or(AppError::MachinePermissionRevoked)?;
+    if let Ok(authority) = row.get_document("machine_authority") {
+        if authority.get_i64("revision").ok() != Some(assignment.revision) {
+            return Err(AppError::MachineAuthorityStale);
+        }
+    } else if !assignment.legacy {
+        return Err(AppError::MachineAuthorityStale);
+    }
+    Ok(auth)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -529,6 +616,7 @@ mod tests {
                 wire_protocol: InferenceWireProtocol::AnthropicMessages,
                 model_list: false,
                 realtime: false,
+                voice: None,
             }),
             git: Some(GitHttp {
                 origin: "https://git.example.test:8443".into(),

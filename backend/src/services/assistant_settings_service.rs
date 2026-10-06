@@ -1,6 +1,10 @@
 //! Per-person NyxBot preferences: destructive-action confirmation and team limits.
 use chrono::Utc;
-use mongodb::{Database, bson::doc, options::ReturnDocument};
+use mongodb::{
+    Database,
+    bson::{self, doc},
+    options::ReturnDocument,
+};
 
 use crate::{
     errors::{AppError, AppResult},
@@ -23,6 +27,8 @@ pub async fn get(db: &Database, user_id: &str) -> AppResult<AssistantSettings> {
 
 #[derive(Clone, Debug, Default)]
 pub struct Update {
+    pub voice: Option<Option<crate::models::assistant_voice::VoicePreferences>>,
+    pub max_auto_continuations: Option<i32>,
     pub timezone: Option<String>,
     pub schedule_minimum_minutes: Option<i32>,
     pub trigger_runs_per_hour: Option<i32>,
@@ -74,6 +80,12 @@ pub async fn update(db: &Database, user_id: &str, update: Update) -> AppResult<A
     }
     for (name, value, low, high) in [
         (
+            "max_auto_continuations",
+            update.max_auto_continuations,
+            0,
+            super::assistant_continuation::HARD_MAX,
+        ),
+        (
             "schedule_minimum_minutes",
             update.schedule_minimum_minutes,
             DEFAULT_SCHEDULE_MINIMUM_MINUTES,
@@ -98,11 +110,26 @@ pub async fn update(db: &Database, user_id: &str, update: Update) -> AppResult<A
             )));
         }
     }
+    if let Some(Some(voice)) = &update.voice {
+        super::assistant_voice::validate_preferences(voice)?;
+    }
     let mut set = doc! {"updated_at":mongodb::bson::DateTime::from_chrono(Utc::now())};
     let mut defaults = mongodb::bson::to_document(&AssistantSettings::defaults(user_id))
         .map_err(|_| AppError::Internal("Settings serialization failed".into()))?;
     defaults.remove("_id");
     defaults.remove("updated_at");
+    if let Some(voice) = update.voice {
+        set.insert(
+            "voice",
+            bson::to_bson(&voice)
+                .map_err(|_| AppError::Internal("Voice preferences serialization failed".into()))?,
+        );
+        defaults.remove("voice");
+    }
+    if let Some(value) = update.max_auto_continuations {
+        set.insert("max_auto_continuations", value);
+        defaults.remove("max_auto_continuations");
+    }
     if let Some(value) = update.timezone {
         set.insert("timezone", value);
         defaults.remove("timezone");
@@ -169,6 +196,7 @@ pub async fn audit(
         "assistant_settings_updated",
         Some(serde_json::json!({
             "timezone_changed":before.timezone!=after.timezone,
+            "max_auto_continuations":after.max_auto_continuations,
             "schedule_minimum_minutes":after.schedule_minimum_minutes,
             "trigger_runs_per_hour":after.trigger_runs_per_hour,
             "trigger_runs_per_day":after.trigger_runs_per_day,

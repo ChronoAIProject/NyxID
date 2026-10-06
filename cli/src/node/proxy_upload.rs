@@ -69,6 +69,8 @@ impl Uploads {
             .map_err(|_| anyhow::anyhow!("upload signature refused"))?;
         let id = Uuid::parse_str(&request.request_id)?;
         let mut metadata = request.parameters;
+        metadata["_authority"] = serde_json::to_value(&request.authority)?;
+        metadata["_authority_version"] = request.version.into();
         let git = metadata["git"].as_bool().unwrap_or(false);
         let limit = metadata["max_bytes"]
             .as_u64()
@@ -186,6 +188,8 @@ mod tests {
     use serde_json::json;
     fn opening() -> Request {
         let mut request = Request {
+            version: 1,
+            authority: None,
             request_id: Uuid::new_v4().to_string(),
             node_id: "credential-node".into(),
             operation: Operation::ProxyUpload,

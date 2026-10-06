@@ -70,6 +70,76 @@ async fn call(f: &Fixture, auth: &McpAuthContext, name: &str, args: Value) -> Re
     .await
 }
 
+async fn assert_scoped_thread_attachment_access(f: &Fixture, auth: &McpAuthContext) {
+    use crate::services::assistant_upload_service as uploads;
+
+    assert!(!auth.assistant_operation_scopes.is_empty());
+    let item = uploads::upload(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.owner,
+        &f.row.id,
+        "notes.txt",
+        b"Owner-provided thread notes".to_vec(),
+    )
+    .await
+    .unwrap();
+    let message = f
+        .state
+        .db
+        .collection::<crate::models::assistant_message::AssistantMessage>(
+            crate::models::assistant_message::COLLECTION_NAME,
+        )
+        .find_one(doc! {"conversation_id": &f.row.id, "role": "user"})
+        .await
+        .unwrap()
+        .unwrap();
+    let mut session = f.state.db.client().start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    uploads::bind(
+        &f.state.db,
+        &f.owner,
+        &f.row.id,
+        &message.id,
+        std::slice::from_ref(&item.id),
+        &mut session,
+    )
+    .await
+    .unwrap();
+    session.commit_transaction().await.unwrap();
+
+    let search = result(
+        direct_call(
+            f,
+            auth,
+            "nyx__search_tools",
+            json!({"query": "attachment read"}),
+        )
+        .await,
+        false,
+    )
+    .await;
+    assert!(
+        search["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == "nyx__attachment_read")
+    );
+    for generic in [false, true] {
+        let args = json!({"attachment_id": item.id});
+        let response = if generic {
+            call(f, auth, "nyx__attachment_read", args).await
+        } else {
+            direct_call(f, auth, "nyx__attachment_read", args).await
+        };
+        assert_eq!(
+            result(response, false).await["text"],
+            "Owner-provided thread notes"
+        );
+    }
+}
+
 #[tokio::test]
 async fn mounted_chat_service_edits_record_verified_actor_and_separate_request_groups() {
     use crate::models::service_change_event::{HistoryActorKind, ServiceChangeEvent};
@@ -872,6 +942,11 @@ async fn chat_tool_calls_are_recorded_as_metadata_only_turn_activity() {
     let row = crate::services::assistant_nyxagent::get(&f.state.db, &f.owner, &f.row.id)
         .await
         .unwrap();
+    let progress = &row.active_turn.as_ref().unwrap().tool_progress;
+    assert_eq!(progress.calls, 3);
+    assert_eq!(progress.digest.len(), 64);
+    let encoded_progress = serde_json::to_string(progress).unwrap();
+    assert!(!encoded_progress.contains("do_not_record") && !encoded_progress.contains("issues"));
     let activities = row.active_turn.as_ref().unwrap().activities.clone();
     let labels: Vec<_> = activities.iter().map(|a| a.label.as_str()).collect();
     assert_eq!(
@@ -895,6 +970,7 @@ async fn chat_tool_calls_are_recorded_as_metadata_only_turn_activity() {
     let row = crate::services::assistant_nyxagent::get(&f.state.db, &f.owner, &f.row.id)
         .await
         .unwrap();
+    assert_eq!(row.active_turn.as_ref().unwrap().tool_progress.calls, 3);
     assert_eq!(row.active_turn.unwrap().activities.len(), 3);
 }
 
@@ -1914,4 +1990,1217 @@ async fn webhook_native_changes_require_owner_cards_even_with_skip_destructive()
     )
     .await;
     assert!(!refused, "{result}");
+}
+
+#[tokio::test]
+async fn assistant_operation_scopes_block_direct_universal_raw_and_guest_bypasses() {
+    use crate::models::{
+        agent_operation_scope::OperationSelection, assistant_agent::AgentGrants,
+        downstream_service::ProxyOperationRule,
+    };
+    use crate::services::{
+        agent_operation_scope_service as scopes, assistant_team_service as team,
+    };
+    use tower::ServiceExt;
+    let f = fixture("operation_scope_paths").await;
+    crate::test_utils::set_agent_operation_scopes_enabled(&f.state.db, &f.owner, true).await;
+    let hits = Arc::new(AtomicUsize::new(0));
+    let count = hits.clone();
+    let upstream = Router::new().route(
+        "/{*path}",
+        any(move || {
+            count.fetch_add(1, Ordering::SeqCst);
+            async { Json(json!({"ok":true})) }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+    let id = connected(&f.state.db, &f.owner, "scoped-http", &address).await;
+    team::set_grants(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        team::GrantChange::Add(AgentGrants {
+            service_ids: vec![id.clone()],
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    scopes::set(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        &id,
+        &OperationSelection {
+            expected_revision: 0,
+            all_operations: false,
+            endpoint_ids: vec![],
+            rules: vec![
+                ProxyOperationRule {
+                    method: "GET".into(),
+                    path_template: "/items/{id}".into(),
+                    ..Default::default()
+                },
+                ProxyOperationRule {
+                    method: "DELETE".into(),
+                    path_template: "/items/{id}".into(),
+                    ..Default::default()
+                },
+            ],
+        },
+        true,
+    )
+    .await
+    .unwrap();
+    // Disabling configuration during rollout/rollback never disables enforcement.
+    crate::test_utils::set_agent_operation_scopes_enabled(&f.state.db, &f.owner, false).await;
+    crate::services::service_pool_service::create_pool(
+        &f.state.db,
+        &f.owner,
+        crate::services::service_pool_service::CreatePoolInput {
+            slug: "scoped-pool".into(),
+            name: "Scoped pool".into(),
+            description: None,
+            strategy: Default::default(),
+            tier_balance: Default::default(),
+            member_contract: Default::default(),
+            failover: None,
+            is_active: None,
+            members: vec![crate::models::service_pool::ServicePoolMember {
+                user_service_id: id.clone(),
+                weight: 1,
+                enabled: true,
+                priority: 0,
+                model: None,
+                same_api_compatible: true,
+                health_reset_generation: 0,
+            }],
+        },
+    )
+    .await
+    .unwrap();
+    let auth = authenticate(&f).await;
+    let services = load_all_services_for_meta_tools(&f.state, &auth)
+        .await
+        .unwrap();
+    let service = services.iter().find(|s| s.service_id == id).unwrap();
+    let tool = format!("{}__{}", service.service_slug, service.endpoints[0].name);
+    for universal in [false, true] {
+        let args = json!({"method":"POST","path":"/items/1"});
+        let response = if universal {
+            call(&f, &auth, &tool, args).await
+        } else {
+            direct_call(&f, &auth, &tool, args).await
+        };
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["result"]["isError"], true);
+        assert!(
+            value["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Allowed operations")
+        );
+    }
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        result(
+            call(&f, &auth, &tool, json!({"method":"GET","path":"/items/1"})).await,
+            false
+        )
+        .await["ok"],
+        true
+    );
+    let mut webhook = auth.clone();
+    webhook.chat.as_mut().unwrap().confirmation_policy =
+        Some(crate::models::trigger_schedule::ConfirmationPolicy::Changes);
+    let card = result(
+        call(
+            &f,
+            &webhook,
+            &tool,
+            json!({"method":"DELETE","path":"/items/1"}),
+        )
+        .await,
+        true,
+    )
+    .await;
+    assert_eq!(card["kind"], "action");
+    assert_eq!(card["decider"], "user");
+    let before = hits.load(Ordering::SeqCst);
+    mark_guest(&f, true).await;
+    let guest = authenticate(&f).await;
+    let refused = result(
+        call(
+            &f,
+            &guest,
+            &tool,
+            json!({"method":"DELETE","path":"/items/1"}),
+        )
+        .await,
+        true,
+    )
+    .await;
+    assert_eq!(refused["error"], "owner_only");
+    mark_guest(&f, false).await;
+    let credential = credentials::load_for_conversation(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.owner,
+        &f.row.id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let (_, router) = crate::routes::build_router_with_state(f.state.clone());
+    let router = router.with_state(f.state.clone());
+    for route in [
+        format!("/api/v1/proxy/{id}"),
+        "/api/v1/proxy/s/scoped-http".into(),
+        "/api/v1/proxy/s/scoped-pool".into(),
+    ] {
+        for (method, path, override_header) in [
+            ("POST", "/items/1", false),
+            ("HEAD", "/items/1", false),
+            ("GET", "/Items/1", false),
+            ("GET", "/items/1/", false),
+            ("GET", "/items//1", false),
+            ("GET", "/items/%2e%2e/secret", false),
+            ("GET", "/items/a%2fb", false),
+            ("GET", "/items/%252e%252e", false),
+            ("GET", "/items/1?_method=DELETE", false),
+            ("GET", "/items/1", true),
+        ] {
+            let mut request = axum::http::Request::builder()
+                .method(method)
+                .uri(format!("{route}{path}"))
+                .header(
+                    "authorization",
+                    format!("Bearer {}", credential.raw_key.as_str()),
+                );
+            if override_header {
+                request = request.header("x-http-method-override", "DELETE");
+            }
+            let response = router
+                .clone()
+                .oneshot(request.body(axum::body::Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert!(
+                response.status().is_client_error(),
+                "{method} {path}: {}",
+                response.status()
+            );
+        }
+    }
+    let ws = router
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/api/v1/proxy/s/scoped-http/items/1")
+                .header(
+                    "authorization",
+                    format!("Bearer {}", credential.raw_key.as_str()),
+                )
+                .header("connection", "upgrade")
+                .header("upgrade", "websocket")
+                .header("sec-websocket-version", "13")
+                .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ws.status(), axum::http::StatusCode::FORBIDDEN);
+    let relay = crate::crypto::jwt::generate_relay_access_token(
+        &f.state.jwt_keys,
+        &f.state.config,
+        &uuid::Uuid::parse_str(&f.owner).unwrap(),
+        "proxy llm:proxy",
+        None,
+        &crate::crypto::jwt::RelayAgentScope {
+            api_key_id: f.chat.api_key_id.clone(),
+            api_key_name: "test".into(),
+            allowed_service_ids: vec![id.clone()],
+            allowed_node_ids: vec![],
+            allow_all_services: false,
+            allow_all_nodes: false,
+        },
+    )
+    .unwrap();
+    let response = router
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/v1/proxy/s/scoped-http/items/1")
+                .header("authorization", format!("Bearer {relay}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+    let mut relay_headers = HeaderMap::new();
+    relay_headers.insert("authorization", format!("Bearer {relay}").parse().unwrap());
+    let relay_auth = authenticate_mcp(&f.state, &relay_headers, false)
+        .await
+        .unwrap();
+    assert_eq!(
+        relay_auth.assistant_operation_scopes,
+        auth.assistant_operation_scopes
+    );
+    // Node routing cannot outrank the policy, even before a node is online.
+    f.state
+        .db
+        .collection::<mongodb::bson::Document>(crate::models::user_service::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&id},
+            doc! {"$set":{"node_id":uuid::Uuid::new_v4().to_string()}},
+        )
+        .await
+        .unwrap();
+    let response = router
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/v1/proxy/s/scoped-http/items/1")
+                .header(
+                    "authorization",
+                    format!("Bearer {}", credential.raw_key.as_str()),
+                )
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+    assert_eq!(hits.load(Ordering::SeqCst), before);
+    server.abort();
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn assistant_operation_scopes_require_owner_card_even_when_skip_destructive_is_enabled() {
+    use crate::models::{agent_operation_scope::OperationSelection, assistant_agent::AgentGrants};
+    use crate::services::{
+        agent_operation_scope_service as scopes, assistant_team_service as team,
+    };
+    let f = fixture("operation_scope_card").await;
+    crate::test_utils::set_agent_operation_scopes_enabled(&f.state.db, &f.owner, true).await;
+    let id = connected(&f.state.db, &f.owner, "scoped-card", "http://127.0.0.1:9").await;
+    team::set_grants(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        team::GrantChange::Add(AgentGrants {
+            service_ids: vec![id.clone()],
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    scopes::set(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        &id,
+        &OperationSelection {
+            expected_revision: 0,
+            all_operations: false,
+            endpoint_ids: vec![],
+            rules: vec![],
+        },
+        true,
+    )
+    .await
+    .unwrap();
+    crate::services::assistant_settings_service::update(
+        &f.state.db,
+        &f.owner,
+        crate::services::assistant_settings_service::Update {
+            skip_destructive_confirmation: Some(true),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let auth = authenticate_id(&f, &f.nyxbot_thread).await;
+    let args = json!({"subagent":"worker","service_id":id,"selection":{"expected_revision":1,"all_operations":true}});
+    let card = result(
+        call(&f, &auth, "nyxid__set_agent_operations", args.clone()).await,
+        true,
+    )
+    .await;
+    assert_eq!(card["kind"], "action");
+    assert_eq!(card["decider"], "user");
+    let key = f
+        .state
+        .db
+        .collection::<crate::models::api_key::ApiKey>(crate::models::api_key::COLLECTION_NAME)
+        .find_one(doc! {"_id":&f.row.credential_api_key_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(key.assistant_operation_scopes.contains_key(&id));
+    let ack = card["acknowledgement_id"].as_str().unwrap();
+    acks::decide(&f.state.db, &f.owner, &f.nyxbot_thread, ack, true)
+        .await
+        .unwrap();
+    let mut confirmed = args;
+    confirmed["acknowledgement_id"] = json!(ack);
+    let _ = result(
+        call(&f, &auth, "nyxid__set_agent_operations", confirmed.clone()).await,
+        false,
+    )
+    .await;
+    let replay = result(
+        call(&f, &auth, "nyxid__set_agent_operations", confirmed).await,
+        true,
+    )
+    .await;
+    assert_eq!(replay["error"], "acknowledgement_invalid");
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn assistant_operation_scopes_hide_typed_tools_and_preserve_guest_and_webhook_fences() {
+    use crate::models::{
+        agent_operation_scope::OperationSelection, assistant_agent::AgentGrants,
+        service_endpoint::ServiceEndpoint,
+    };
+    use crate::services::{
+        agent_operation_scope_service as scopes, assistant_team_service as team,
+    };
+    let f = fixture("operation_catalog").await;
+    crate::test_utils::set_agent_operation_scopes_enabled(&f.state.db, &f.owner, true).await;
+    let mut catalog = crate::test_utils::test_auto_connected_catalog_service();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    catalog.base_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new().route("/items", any(|| async { Json(json!({"ok":true})) })),
+        )
+        .await
+        .unwrap()
+    });
+    catalog.slug = "scoped-catalog".into();
+    f.state
+        .db
+        .collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .insert_one(&catalog)
+        .await
+        .unwrap();
+    let mut ids = Vec::new();
+    for (name, method) in [("read", "GET"), ("write", "DELETE")] {
+        let id = uuid::Uuid::new_v4().to_string();
+        let endpoint: ServiceEndpoint = mongodb::bson::from_document(doc! {
+            "_id":&id,"service_id":&catalog.id,"name":name,"method":method,"path":"/items",
+            "is_active":true,"created_at":mongodb::bson::DateTime::now(),"updated_at":mongodb::bson::DateTime::now()
+        }).unwrap();
+        f.state
+            .db
+            .collection(crate::models::service_endpoint::COLLECTION_NAME)
+            .insert_one(endpoint)
+            .await
+            .unwrap();
+        ids.push(id);
+    }
+    team::set_grants(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        team::GrantChange::Add(AgentGrants {
+            platform_service_ids: vec![catalog.id.clone()],
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    let selection = OperationSelection {
+        expected_revision: 0,
+        all_operations: false,
+        endpoint_ids: vec![ids[0].clone()],
+        rules: vec![],
+    };
+    scopes::set(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        &catalog.id,
+        &selection,
+        true,
+    )
+    .await
+    .unwrap();
+    let auth = authenticate(&f).await;
+    let services = load_all_services_for_meta_tools(&f.state, &auth)
+        .await
+        .unwrap();
+    let visible = services
+        .iter()
+        .find(|row| row.service_id == catalog.id)
+        .unwrap();
+    assert_eq!(visible.endpoints.len(), 1);
+    assert_eq!(visible.endpoints[0].endpoint_id, ids[0]);
+    let listed = handle_tools_list(
+        &f.state,
+        &auth,
+        None,
+        &JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(json!(1)),
+            method: "tools/list".into(),
+            params: None,
+        },
+    )
+    .await;
+    let bytes = axum::body::to_bytes(listed.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let listed: Value = serde_json::from_slice(&bytes).unwrap();
+    let tools = listed["result"]["tools"].as_array().unwrap();
+    assert!(
+        tools
+            .iter()
+            .any(|tool| tool["name"] == "scoped-catalog__read")
+    );
+    assert!(
+        !tools
+            .iter()
+            .any(|tool| tool["name"] == "scoped-catalog__write")
+    );
+    assert!(
+        tools
+            .iter()
+            .any(|tool| tool["name"] == "nyx__attachment_read")
+    );
+    // Operation scopes restrict service operations, never a thread's native
+    // attachment tools. Exercise discovery plus both typed and generic calls.
+    Box::pin(assert_scoped_thread_attachment_access(&f, &auth)).await;
+    for query in ["scoped catalog", "write", "DELETE items"] {
+        let searched = result(
+            direct_call(&f, &auth, "nyx__search_tools", json!({"query":query})).await,
+            false,
+        )
+        .await;
+        assert!(
+            searched["matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|tool| tool["name"] != "scoped-catalog__write")
+        );
+    }
+    for universal in [true, false] {
+        let denied = if universal {
+            call(&f, &auth, "scoped-catalog__write", json!({})).await
+        } else {
+            direct_call(&f, &auth, "scoped-catalog__write", json!({})).await
+        };
+        let bytes = axum::body::to_bytes(denied.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["result"]["isError"], true);
+        assert!(
+            value["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Allowed operations")
+        );
+    }
+    assert_eq!(
+        result(
+            direct_call(&f, &auth, "scoped-catalog__read", json!({})).await,
+            false
+        )
+        .await["ok"],
+        true
+    );
+    let credential = credentials::load_for_conversation(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.owner,
+        &f.row.id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let (_, router) = crate::routes::build_router_with_state(f.state.clone());
+    let router = router.with_state(f.state.clone());
+    use tower::ServiceExt;
+    for (method, status) in [("GET", 200), ("DELETE", 403), ("HEAD", 403)] {
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(method)
+                    .uri(format!("/api/v1/proxy/{}/items", catalog.id))
+                    .header(
+                        "authorization",
+                        format!("Bearer {}", credential.raw_key.as_str()),
+                    )
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), status);
+    }
+    // Raw calls obey the same guest approval fence as MCP: neither create an
+    // approval card nor spend a grant previously given to the owner.
+    let now = chrono::Utc::now();
+    f.state
+        .db
+        .collection::<crate::models::service_approval_config::ServiceApprovalConfig>(
+            crate::models::service_approval_config::COLLECTION_NAME,
+        )
+        .insert_one(
+            crate::models::service_approval_config::ServiceApprovalConfig {
+                id: uuid::Uuid::new_v4().to_string(),
+                user_id: f.owner.clone(),
+                service_id: catalog.id.clone(),
+                service_name: catalog.name.clone(),
+                approval_required: true,
+                approval_mode: crate::models::service_approval_config::ApprovalMode::Grant,
+                rules: vec![],
+                default_effect: None,
+                created_at: now,
+                updated_at: now,
+            },
+        )
+        .await
+        .unwrap();
+    set_guest_access(&f, &catalog.id, GuestAccess::All).await;
+    mark_guest(&f, true).await;
+    for with_owner_grant in [false, true] {
+        if with_owner_grant {
+            f.state
+                .db
+                .collection::<crate::models::approval_grant::ApprovalGrant>(
+                    crate::models::approval_grant::COLLECTION_NAME,
+                )
+                .insert_one(crate::models::approval_grant::ApprovalGrant {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    user_id: f.owner.clone(),
+                    service_id: catalog.id.clone(),
+                    service_name: catalog.name.clone(),
+                    requester_type: auth.approval_requester_type().unwrap().to_string(),
+                    requester_id: auth.approval_requester_id(),
+                    requester_label: None,
+                    approval_request_id: uuid::Uuid::new_v4().to_string(),
+                    scope: None,
+                    granted_at: now,
+                    expires_at: now + chrono::Duration::days(1),
+                    revoked: false,
+                    org_scoped: false,
+                })
+                .await
+                .unwrap();
+        }
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            router.clone().oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/v1/proxy/{}/items", catalog.id))
+                    .header(
+                        "authorization",
+                        format!("Bearer {}", credential.raw_key.as_str()),
+                    )
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("guest must not wait for an owner approval")
+        .unwrap();
+        assert_eq!(response.status().as_u16(), 403);
+    }
+    assert_eq!(f.state.db.collection::<mongodb::bson::Document>(
+        crate::models::approval_request::COLLECTION_NAME,
+    ).count_documents(doc! {"service_id": &catalog.id}).await.unwrap(), 0);
+    mark_guest(&f, false).await;
+    // A stored endpoint edit cannot widen its pinned method/path contract.
+    f.state
+        .db
+        .collection::<mongodb::bson::Document>(crate::models::service_endpoint::COLLECTION_NAME)
+        .update_one(doc! {"_id":&ids[0]}, doc! {"$set":{"path":"/admin"}})
+        .await
+        .unwrap();
+    assert!(
+        !load_all_services_for_meta_tools(&f.state, &auth)
+            .await
+            .unwrap()
+            .iter()
+            .any(|row| row.service_id == catalog.id)
+    );
+    let bad = OperationSelection {
+        expected_revision: 1,
+        endpoint_ids: vec![],
+        rules: vec![crate::models::downstream_service::ProxyOperationRule {
+            method: "GET".into(),
+            path_template: "/admin".into(),
+            ..Default::default()
+        }],
+        ..selection
+    };
+    assert!(
+        scopes::set(
+            &f.state.db,
+            &f.owner,
+            &f.chat.agent_id,
+            &catalog.id,
+            &bad,
+            true
+        )
+        .await
+        .is_err()
+    );
+    server.abort();
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn assistant_operation_scopes_specialist_request_cannot_silently_widen() {
+    use crate::models::{agent_operation_scope::OperationSelection, assistant_agent::AgentGrants};
+    use crate::services::{
+        agent_operation_scope_service as scopes, assistant_team_service as team,
+    };
+    let f = fixture("operation_permission").await;
+    crate::test_utils::set_agent_operation_scopes_enabled(&f.state.db, &f.owner, true).await;
+    let id = connected(
+        &f.state.db,
+        &f.owner,
+        "requested-operations",
+        "http://127.0.0.1:9",
+    )
+    .await;
+    team::set_grants(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        team::GrantChange::Add(AgentGrants {
+            service_ids: vec![id.clone()],
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    scopes::set(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        &id,
+        &OperationSelection {
+            expected_revision: 0,
+            all_operations: false,
+            endpoint_ids: vec![],
+            rules: vec![],
+        },
+        true,
+    )
+    .await
+    .unwrap();
+    let auth = authenticate(&f).await;
+    let args = json!({"subagent":"worker","service_id":id,"selection":{"expected_revision":1,"all_operations":true}});
+    let request = result(
+        call(&f, &auth, "nyxid__request_agent_operations", args.clone()).await,
+        true,
+    )
+    .await;
+    assert_eq!(request["decider"], "orchestrator");
+    let ack = request["acknowledgement_id"].as_str().unwrap();
+    assert!(
+        acks::decide_as(
+            &f.state.db,
+            &f.owner,
+            None,
+            ack,
+            true,
+            acks::Decider::Nyxbot,
+            None
+        )
+        .await
+        .is_err()
+    );
+    let agent = team::live_specialist(&f.state.db, &f.owner, &f.chat.agent_id)
+        .await
+        .unwrap();
+    assert!(agent.operation_scopes[&id].operations.is_empty());
+    let own = result(
+        call(&f, &auth, "nyxid__set_agent_operations", args).await,
+        true,
+    )
+    .await;
+    assert!(own.get("error").is_some());
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn assistant_operation_scopes_rollout_gate_blocks_configuration_and_pending_requests() {
+    use crate::errors::AppError;
+    use crate::models::{agent_operation_scope::OperationSelection, assistant_agent::AgentGrants};
+    use crate::services::assistant_team_service as team;
+    use crate::test_utils::set_agent_operation_scopes_enabled as rollout;
+    use axum::extract::Path;
+    let f = fixture("operation_scope_rollout").await;
+    let id = connected(&f.state.db, &f.owner, "rollout-scope", "http://127.0.0.1:9").await;
+    team::set_grants(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        team::GrantChange::Add(AgentGrants {
+            service_ids: vec![id.clone()],
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    let owner_auth = crate::test_utils::test_auth_user(&f.owner);
+    let selection: OperationSelection = serde_json::from_value(json!({
+        "expected_revision":0,"all_operations":false,
+        "rules":[{"method":"GET","path_template":"/items/{id}"}]
+    }))
+    .unwrap();
+    let denied = crate::handlers::assistant_team::set_agent_operations(
+        State(f.state.clone()),
+        owner_auth.clone(),
+        Path((f.chat.agent_id.clone(), id.clone())),
+        Json(selection.clone()),
+    )
+    .await;
+    assert!(
+        matches!(denied, Err(AppError::ValidationError(message)) if message.contains("not enabled yet"))
+    );
+    let nyxbot = authenticate_id(&f, &f.nyxbot_thread).await;
+    let specialist = authenticate(&f).await;
+    let args = json!({"subagent":"worker","service_id":id,"selection":selection});
+    for (auth, tool) in [
+        (&nyxbot, "nyxid__set_agent_operations"),
+        (&specialist, "nyxid__request_agent_operations"),
+    ] {
+        let refusal = result(call(&f, auth, tool, args.clone()).await, true).await;
+        assert!(refusal.to_string().contains("not enabled yet"));
+        assert!(refusal.get("acknowledgement_id").is_none());
+    }
+    assert_eq!(
+        f.state
+            .db
+            .collection::<mongodb::bson::Document>(
+                crate::models::assistant_acknowledgement::COLLECTION_NAME
+            )
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    let agent = team::live_specialist(&f.state.db, &f.owner, &f.chat.agent_id)
+        .await
+        .unwrap();
+    assert!(agent.operation_scopes.is_empty());
+    assert!(agent.operation_scope_revisions.is_empty());
+
+    rollout(&f.state.db, &f.owner, true).await;
+    let saved = crate::handlers::assistant_team::set_agent_operations(
+        State(f.state.clone()),
+        owner_auth,
+        Path((f.chat.agent_id.clone(), id.clone())),
+        Json(selection),
+    )
+    .await
+    .unwrap();
+    assert_eq!(saved.0["revision"], 1);
+    let narrow = json!({"subagent":"worker","service_id":id,
+        "selection":{"expected_revision":1,"all_operations":false}});
+    result(
+        call(&f, &nyxbot, "nyxid__set_agent_operations", narrow).await,
+        false,
+    )
+    .await;
+    let pending = result(call(&f, &specialist, "nyxid__request_agent_operations", json!({
+        "subagent":"worker","service_id":id,"selection":{"expected_revision":2,"all_operations":false}
+    })).await, true).await;
+    let ack = pending["acknowledgement_id"].as_str().unwrap();
+    rollout(&f.state.db, &f.owner, false).await;
+    let refused = result(
+        call(
+            &f,
+            &nyxbot,
+            "nyxid__decide_permission",
+            json!({
+                "request_id":ack,"decision":"allow","reason":"Allow the requested narrowing"
+            }),
+        )
+        .await,
+        true,
+    )
+    .await;
+    assert!(refused.to_string().contains("not enabled yet"));
+    assert!(refused.get("acknowledgement_id").is_none());
+    let pending = f
+        .state
+        .db
+        .collection::<crate::models::assistant_acknowledgement::AssistantAcknowledgement>(
+            crate::models::assistant_acknowledgement::COLLECTION_NAME,
+        )
+        .find_one(doc! {"_id":ack})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending.status, "pending");
+    let agent = team::live_specialist(&f.state.db, &f.owner, &f.chat.agent_id)
+        .await
+        .unwrap();
+    assert_eq!(agent.operation_scope_revisions[&id], 2);
+    assert!(agent.operation_scopes[&id].operations.is_empty());
+    let key = f
+        .state
+        .db
+        .collection::<crate::models::api_key::ApiKey>(crate::models::api_key::COLLECTION_NAME)
+        .find_one(doc! {"_id":&f.row.credential_api_key_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(key.assistant_operation_scopes, agent.operation_scopes);
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn specialist_machine_update_dispatch_preserves_one_owner_card() {
+    use crate::services::assistant_team_service as team;
+    for universal in [false, true] {
+        let f = fixture("mcp_specialist_update_card").await;
+        let node = crate::services::machine_integration_tests::node(&f, &f.owner).await;
+        team::set_grants(
+            &f.state.db,
+            &f.owner,
+            &f.chat.agent_id,
+            team::GrantChange::Machine {
+                base: Box::new(team::GrantChange::Add(Default::default())),
+                machines: Some(vec![node.id.clone()]),
+                logins: None,
+                mode: team::MachineGrantMode::Add,
+            },
+        )
+        .await
+        .unwrap();
+        crate::services::assistant_settings_service::update(
+            &f.state.db,
+            &f.owner,
+            crate::services::assistant_settings_service::Update {
+                skip_destructive_confirmation: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let mut auth = authenticate(&f).await;
+        auth.chat.as_mut().unwrap().confirmation_policy =
+            Some(crate::models::trigger_schedule::ConfirmationPolicy::Changes);
+        let invoke = |args| async {
+            if universal {
+                call(&f, &auth, "nyxid__machine_update", args).await
+            } else {
+                direct_call(&f, &auth, "nyxid__machine_update", args).await
+            }
+        };
+        let card = result(invoke(json!({"machine":node.id})).await, true).await;
+        assert_eq!(card["kind"], "action");
+        assert_eq!(card["decider"], "user");
+        let id = card["acknowledgement_id"].as_str().unwrap();
+        assert_eq!(
+            acks::history(&f.state.db, &f.owner, &f.row.id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        acks::decide(&f.state.db, &f.owner, &f.row.id, id, true)
+            .await
+            .unwrap();
+        let finished = result(
+            invoke(json!({"machine":node.id,"acknowledgement_id":id})).await,
+            false,
+        )
+        .await;
+        assert_eq!(finished["status"], "manual_step");
+        // The tool's exact card satisfies the webhook gate as well; dispatch
+        // must not add a second generic confirmation before or after it.
+        assert_eq!(
+            acks::history(&f.state.db, &f.owner, &f.row.id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        f.state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn assistant_skills_card_is_one_use_and_cannot_be_bypassed() {
+    use crate::models::catalog_skill_revision::SkillReference;
+    use sha2::{Digest, Sha256};
+    use std::io::{Cursor, Write};
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path, query_param},
+    };
+    let f = fixture("assistant_skills_cards").await;
+    let upstream = MockServer::start().await;
+    let mut catalog = crate::test_utils::test_auto_connected_catalog_service();
+    catalog.slug = "ornn-api".into();
+    catalog.base_url = upstream.uri();
+    catalog.identity_propagation_mode = "jwt".into();
+    f.state
+        .db
+        .collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .insert_one(&catalog)
+        .await
+        .unwrap();
+    let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    zip.start_file("SKILL.md", zip::write::SimpleFileOptions::default())
+        .unwrap();
+    zip.write_all(b"Pinned guidance only").unwrap();
+    let bytes = zip.finish().unwrap().into_inner();
+    let id = uuid::Uuid::new_v4().to_string();
+    let pin = SkillReference {
+        source: "ornn".into(),
+        skill_id: id.clone(),
+        name: "card-skill".into(),
+        version: "1.0".into(),
+        sha256: hex::encode(Sha256::digest(&bytes)),
+        dependencies: vec![],
+    };
+    Mock::given(method("GET")).and(path(format!("/api/v1/skills/{id}"))).and(query_param("version","1.0"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":{"guid":id,"name":pin.name,"version":"1.0","description":"Bounded guidance","skillHash":pin.sha256}}))).mount(&upstream).await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/v1/skills/{id}/closure")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":{"items":[]}})))
+        .mount(&upstream)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/v1/skills/{id}/versions/1.0/download")))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes))
+        .mount(&upstream)
+        .await;
+    crate::services::assistant_settings_service::update(
+        &f.state.db,
+        &f.owner,
+        crate::services::assistant_settings_service::Update {
+            skip_destructive_confirmation: Some(true),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let auth = authenticate_id(&f, &f.nyxbot_thread).await;
+    let args = json!({"agent":f.chat.agent_id,"selection":{"expected_revision":0,"skills":[pin]}});
+    let card = result(
+        call(&f, &auth, "nyxid__set_agent_skills", args.clone()).await,
+        true,
+    )
+    .await;
+    assert_eq!(card["kind"], "action");
+    assert_eq!(card["decider"], "user");
+    let ack = card["acknowledgement_id"].as_str().unwrap();
+    acks::decide(&f.state.db, &f.owner, &f.nyxbot_thread, ack, true)
+        .await
+        .unwrap();
+    let mut confirmed = args.clone();
+    confirmed["acknowledgement_id"] = json!(ack);
+    let mut tampered = confirmed.clone();
+    tampered["selection"]["skills"][0]["version"] = json!("2.0");
+    let invalid = result(
+        direct_call(&f, &auth, "nyxid__set_agent_skills", tampered).await,
+        true,
+    )
+    .await;
+    assert_eq!(invalid["error"], "acknowledgement_invalid");
+    let applied = result(
+        call(&f, &auth, "nyxid__set_agent_skills", confirmed.clone()).await,
+        false,
+    )
+    .await;
+    assert_eq!(applied["revision"], 1);
+    let replay = result(
+        call(&f, &auth, "nyxid__set_agent_skills", confirmed).await,
+        true,
+    )
+    .await;
+    assert!(replay.get("error").is_some());
+    let specialist = authenticate(&f).await;
+    let read = result(
+        call(&f, &specialist, "nyxid__skill_read", json!({"skill":id})).await,
+        false,
+    )
+    .await;
+    assert_eq!(read["content"], "Pinned guidance only");
+    let other = result(
+        direct_call(&f, &auth, "nyxid__skill_read", json!({"skill":id})).await,
+        true,
+    )
+    .await;
+    assert!(other.get("error").is_some());
+    let own = result(
+        call(
+            &f,
+            &specialist,
+            "nyxid__set_agent_skills",
+            json!({"agent":f.chat.agent_id,"selection":{"expected_revision":1,"skills":[]}}),
+        )
+        .await,
+        true,
+    )
+    .await;
+    assert!(own.get("error").is_some());
+    let mut guest = authenticate(&f).await;
+    guest.chat.as_mut().unwrap().guest = true;
+    let refusal = result(
+        direct_call(&f, &guest, "nyxid__skill_read", json!({"skill":id})).await,
+        true,
+    )
+    .await;
+    assert!(refusal.get("error").is_some());
+    let mut scopes = std::collections::BTreeMap::from([(
+        catalog.id.clone(),
+        crate::models::agent_operation_scope::AgentOperationScope {
+            revision: 1,
+            catalog_service_id: Some(catalog.id.clone()),
+            operations: vec![crate::models::agent_operation_scope::ScopedOperation {
+                rule: crate::models::downstream_service::ProxyOperationRule {
+                    method: "GET".into(),
+                    path_template: format!("/api/v1/skills/{id}/versions/1.0/download"),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+        },
+    )]);
+    f.state
+        .db
+        .collection::<mongodb::bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &f.chat.agent_id},
+            doc! {"$set": {"operation_scopes": mongodb::bson::to_bson(&scopes).unwrap()}},
+        )
+        .await
+        .unwrap();
+    let allowed = result(
+        call(&f, &specialist, "nyxid__skill_read", json!({"skill": id})).await,
+        false,
+    )
+    .await;
+    assert_eq!(allowed["content"], "Pinned guidance only");
+    let before_scope = upstream.received_requests().await.unwrap().len();
+    scopes.get_mut(&catalog.id).unwrap().operations.clear();
+    f.state
+        .db
+        .collection::<mongodb::bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &f.chat.agent_id},
+            doc! {"$set": {"operation_scopes": mongodb::bson::to_bson(&scopes).unwrap()}},
+        )
+        .await
+        .unwrap();
+    let scoped = result(
+        call(&f, &specialist, "nyxid__skill_read", json!({"skill": id})).await,
+        true,
+    )
+    .await;
+    assert!(scoped.get("error").is_some());
+    assert_eq!(
+        upstream.received_requests().await.unwrap().len(),
+        before_scope
+    );
+    // Removing needs neither an owner card nor an available Ornn.
+    upstream.reset().await;
+    let removed = result(
+        call(
+            &f,
+            &auth,
+            "nyxid__set_agent_skills",
+            json!({"agent":f.chat.agent_id,"selection":{"expected_revision":1,"skills":[]}}),
+        )
+        .await,
+        false,
+    )
+    .await;
+    assert_eq!(removed["revision"], 2);
+    assert_eq!(removed["skills"], json!([]));
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn assistant_skills_specialist_permission_is_advisory_and_agent_scoped() {
+    let f = fixture("assistant_skill_request").await;
+    let specialist = authenticate(&f).await;
+    let args = json!({"agent":f.chat.agent_id,"selection":{"expected_revision":0,"skills":[]}});
+    let request = result(
+        call(&f, &specialist, "nyxid__request_agent_skills", args).await,
+        true,
+    )
+    .await;
+    assert_eq!(request["decider"], "orchestrator");
+    let ack = request["acknowledgement_id"].as_str().unwrap();
+    acks::decide_as(
+        &f.state.db,
+        &f.owner,
+        None,
+        ack,
+        true,
+        acks::Decider::Nyxbot,
+        None,
+    )
+    .await
+    .unwrap();
+    let agent =
+        crate::services::assistant_team_service::agent(&f.state.db, &f.owner, &f.chat.agent_id)
+            .await
+            .unwrap();
+    assert!(agent.skills.is_empty());
+    assert_eq!(agent.skills_revision, 0);
+    let by_name = result(
+        call(
+            &f,
+            &specialist,
+            "nyxid__request_agent_skills",
+            json!({"agent": f.chat.agent_id, "skill": "research-guide", "version": "1.0"}),
+        )
+        .await,
+        true,
+    )
+    .await;
+    assert_eq!(by_name["decider"], "orchestrator");
+    assert!(
+        by_name["summary"]
+            .as_str()
+            .unwrap()
+            .contains("research-guide")
+    );
+    let denied = result(
+        call(
+            &f,
+            &specialist,
+            "nyxid__get_agent_skills",
+            json!({"agent":"nyxbot"}),
+        )
+        .await,
+        true,
+    )
+    .await;
+    assert!(denied.get("error").is_some());
+    f.state.db.drop().await.unwrap();
 }

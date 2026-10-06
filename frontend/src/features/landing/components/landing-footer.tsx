@@ -1,4 +1,3 @@
-import { Link } from "@tanstack/react-router";
 import { GitHubButton } from "@/components/shared/github-button";
 
 export function LandingFooter() {
@@ -21,18 +20,18 @@ export function LandingFooter() {
           >
             CLI
           </a>
-          <Link
-            to="/terms"
+          <a
+            href="/terms"
             className="text-xs text-text-tertiary transition-colors hover:text-foreground"
           >
             Terms of Use
-          </Link>
-          <Link
-            to="/privacy"
+          </a>
+          <a
+            href="/privacy"
             className="text-xs text-text-tertiary transition-colors hover:text-foreground"
           >
             Privacy
-          </Link>
+          </a>
           <a
             href="https://discord.gg/QMvcs8UQBW"
             target="_blank"

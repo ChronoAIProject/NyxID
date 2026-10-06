@@ -20,11 +20,20 @@ pub struct AssistantAcknowledgement {
     pub platform: bool,
     pub tool_name: Option<String>,
     pub arguments_digest: Option<String>,
+    /// Operation permission proposal; IDs and templates only, never call arguments.
+    #[serde(default)]
+    pub operation_selection: Option<super::agent_operation_scope::OperationSelection>,
+    #[serde(default)]
+    pub skill_selection: Option<super::assistant_agent::SkillSelection>,
     pub summary: String,
     pub status: String,
     /// Denial is sticky for the user turn that requested it. A new user turn
     /// may ask again; the model is explicitly instructed not to retry otherwise.
     pub requested_turn_id: Option<String>,
+    #[serde(default)]
+    pub voice_request_id: Option<String>,
+    #[serde(default)]
+    pub continuation_receipt_id: Option<String>,
     #[serde(default)]
     pub trigger_run_id: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
@@ -47,6 +56,10 @@ pub struct AssistantAcknowledgement {
     /// The orchestrator's bounded reason for its decision.
     #[serde(default)]
     pub reason: Option<String>,
+    /// A graphical machine-context request. The bounded selection is applied
+    /// only after the owner allows this action card.
+    #[serde(default)]
+    pub machine_context: Option<super::machine_access::HumanContextAction>,
 }
 
 fn default_decider() -> String {

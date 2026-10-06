@@ -278,6 +278,9 @@ pub async fn record_capabilities(
             },
         )
         .await?;
+    if result.matched_count == 1 && machine.is_some_and(|m| m.enabled()) {
+        super::machine_update_service::seed_policy(db, &fence.node_id).await?;
+    }
     Ok(result.matched_count == 1)
 }
 

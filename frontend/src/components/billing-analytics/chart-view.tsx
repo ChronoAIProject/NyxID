@@ -31,6 +31,7 @@ import type {
 } from "@/schemas/usage-analytics";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { ChevronDown } from "lucide-react";
 import "./visualization.css";
 
 const COLORS = [
@@ -628,81 +629,108 @@ export function ChartView({
         </div>
       )}
       <div className={cn("pt-4", compact && "mt-auto")}>
-        <details className="border-t border-border/50 pt-3">
-          <summary className="cursor-pointer text-[11px] text-muted-foreground hover:text-foreground">
-            View data table
-          </summary>
-          <div className="mt-3 max-h-72 overflow-auto rounded-lg border border-border/50">
-            <table className="w-full text-left text-[11px]">
-              <caption className="sr-only">{panel.title} data</caption>
-              <thead className="bg-muted/40">
-                <tr>
-                  <th className="px-3 py-2 font-medium">
-                    {temporal ? "Time (UTC)" : "Group"}
-                  </th>
-                  <th className="px-3 py-2 text-right font-medium">{unit}</th>
-                  {temporal &&
-                    panel.top !== 0 &&
-                    data.series.map((series, index) => (
-                      <th
-                        key={index}
-                        className="whitespace-nowrap px-3 py-2 text-right font-medium"
-                      >
-                        {series.label}
-                      </th>
-                    ))}
-                  {panel.chart === "combo" && (
-                    <th className="px-3 py-2 text-right font-medium">
-                      Requests
+        <section
+          className="border-t border-border/50 pt-3"
+          aria-label={`${panel.title} data table`}
+        >
+          <details
+            key={panel.table_display ?? "always"}
+            open={panel.table_display === "accordion" ? undefined : true}
+            className="group"
+          >
+            <summary
+              className={cn(
+                "flex cursor-pointer list-none items-center justify-between text-[11px] font-medium text-muted-foreground [&::-webkit-details-marker]:hidden",
+                panel.table_display !== "accordion" && "hidden",
+              )}
+            >
+              Data table
+              <ChevronDown className="size-3.5 transition-transform group-open:rotate-180" />
+            </summary>
+            {panel.table_display !== "accordion" && (
+              <h4 className="text-[11px] font-medium text-muted-foreground">
+                Data table
+              </h4>
+            )}
+            <div
+              className={cn(
+                "mt-2 overflow-auto rounded-lg border border-border/50",
+                compact ? "max-h-44" : "max-h-72",
+              )}
+            >
+              <table className="w-full text-left text-[11px]">
+                <caption className="sr-only">{panel.title} data</caption>
+                <thead className="sticky top-0 bg-muted/90">
+                  <tr>
+                    <th className="px-3 py-2 font-medium">
+                      {temporal ? "Time (UTC)" : "Group"}
                     </th>
-                  )}
-                </tr>
-              </thead>
-              <tbody>
-                {temporal
-                  ? data.points.map((point, pointIndex) => (
-                      <tr
-                        key={point.bucket}
-                        className="border-t border-border/40"
-                      >
-                        <td className="whitespace-nowrap px-3 py-2">
-                          {timeLabel(point.bucket)}
-                        </td>
-                        <td className="px-3 py-2 text-right font-mono">
-                          {format(analyticsAmount(point))}
-                        </td>
-                        {panel.top !== 0 &&
-                          data.series.map((series, index) => (
-                            <td
-                              key={index}
-                              className="px-3 py-2 text-right font-mono"
-                            >
-                              {format(
-                                analyticsAmount(
-                                  series.points[pointIndex] ?? { value: null },
-                                ),
-                              )}
-                            </td>
-                          ))}
-                        {panel.chart === "combo" && (
-                          <td className="px-3 py-2 text-right font-mono">
-                            {point.requests.toLocaleString()}
+                    <th className="px-3 py-2 text-right font-medium">{unit}</th>
+                    {temporal &&
+                      panel.top !== 0 &&
+                      data.series.map((series, index) => (
+                        <th
+                          key={index}
+                          className="whitespace-nowrap px-3 py-2 text-right font-medium"
+                        >
+                          {series.label}
+                        </th>
+                      ))}
+                    {panel.chart === "combo" && (
+                      <th className="px-3 py-2 text-right font-medium">
+                        Requests
+                      </th>
+                    )}
+                  </tr>
+                </thead>
+                <tbody>
+                  {temporal
+                    ? data.points.map((point, pointIndex) => (
+                        <tr
+                          key={point.bucket}
+                          className="border-t border-border/40"
+                        >
+                          <td className="whitespace-nowrap px-3 py-2">
+                            {timeLabel(point.bucket)}
                           </td>
-                        )}
-                      </tr>
-                    ))
-                  : data.slices.map((slice, index) => (
-                      <tr key={index} className="border-t border-border/40">
-                        <td className="px-3 py-2">{slice.label}</td>
-                        <td className="px-3 py-2 text-right font-mono">
-                          {format(analyticsAmount(slice))}
-                        </td>
-                      </tr>
-                    ))}
-              </tbody>
-            </table>
-          </div>
-        </details>
+                          <td className="px-3 py-2 text-right font-mono">
+                            {format(analyticsAmount(point))}
+                          </td>
+                          {panel.top !== 0 &&
+                            data.series.map((series, index) => (
+                              <td
+                                key={index}
+                                className="px-3 py-2 text-right font-mono"
+                              >
+                                {format(
+                                  analyticsAmount(
+                                    series.points[pointIndex] ?? {
+                                      value: null,
+                                    },
+                                  ),
+                                )}
+                              </td>
+                            ))}
+                          {panel.chart === "combo" && (
+                            <td className="px-3 py-2 text-right font-mono">
+                              {point.requests.toLocaleString()}
+                            </td>
+                          )}
+                        </tr>
+                      ))
+                    : data.slices.map((slice, index) => (
+                        <tr key={index} className="border-t border-border/40">
+                          <td className="px-3 py-2">{slice.label}</td>
+                          <td className="px-3 py-2 text-right font-mono">
+                            {format(analyticsAmount(slice))}
+                          </td>
+                        </tr>
+                      ))}
+                </tbody>
+              </table>
+            </div>
+          </details>
+        </section>
       </div>
     </div>
   );

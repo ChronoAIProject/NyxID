@@ -89,7 +89,7 @@ pub(super) fn scrub_claim_codes(text: &str) -> Option<String> {
         }
     });
     let query_changed = query_redacted != text;
-    let text = query_redacted.as_ref();
+    let text: &str = query_redacted.as_ref();
     let mut cores = Vec::new();
     let mut start = None;
     for (index, ch) in text.char_indices() {

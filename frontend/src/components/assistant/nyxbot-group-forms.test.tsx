@@ -6,6 +6,17 @@ import { useAuthStore } from "@/stores/auth-store";
 import type { AssistantAgent, AssistantGroup } from "@/schemas/assistant-nyxagent";
 import { GroupSettingsDialog, NewGroupDialog } from "./nyxbot-group-forms";
 
+let orgs: { id: string; your_role: string; display_name: string }[] = [];
+let orgEnabled = false;
+vi.mock("@/hooks/use-orgs", () => ({ useOrgs: () => ({ data: orgs }) }));
+vi.mock("@/hooks/use-feature-flag", () => ({ useFeature: () => orgEnabled }));
+vi.mock("@/hooks/use-org-members", () => ({ useOrgMembers: () => ({ data: [
+  { user_id: "owner", display_name: "Owner", role: "admin", revoked_at: null },
+  { user_id: "blair", display_name: "Blair", role: "member", revoked_at: null },
+  { user_id: "viewer", display_name: "Viewer", role: "viewer", revoked_at: null },
+  { user_id: "revoked", display_name: "Revoked", role: "member", revoked_at: "2026-01-01" },
+] }) }));
+
 const at = "2026-09-29T00:00:00Z";
 
 function agent(fields: Partial<AssistantAgent>): AssistantAgent {
@@ -60,6 +71,8 @@ let respond: (method: string) => Response;
 let client: QueryClient;
 
 beforeEach(() => {
+  orgs = [];
+  orgEnabled = false;
   useAuthStore.getState().setUser({
     id: "owner",
     email: "owner@example.com",
@@ -212,4 +225,58 @@ it("deletes only after confirmation", async () => {
     endpoint: "/assistant/nyxagent/groups/nyxg-1",
     body: undefined,
   });
+});
+
+
+it("creates an organization group with only its agents and eligible participants", async () => {
+  orgs = [{ id: "org-a", display_name: "Research Org", your_role: "member" }];
+  orgEnabled = true;
+  const orgAgent = agent({ id: "org-agent", name: "Org specialist", kind: "specialist", owner_id: "org-a", owner_kind: "org" });
+  const otherAgent = agent({ id: "other-agent", name: "Other org specialist", kind: "specialist", owner_id: "org-b", owner_kind: "org" });
+  const onCreated = vi.fn();
+  const user = userEvent.setup();
+  render(<QueryClientProvider client={client}><NewGroupDialog agents={[...AGENTS, orgAgent, otherAgent]} onClose={vi.fn()} onCreated={onCreated} /></QueryClientProvider>);
+  await user.click(screen.getByRole("combobox", { name: "Ownership" }));
+  await user.click(screen.getByRole("option", { name: "Research Org" }));
+  const agents = screen.getByRole("list", { name: "Agents" });
+  expect(within(agents).queryByText("NyxBot")).not.toBeInTheDocument();
+  expect(within(agents).queryByText("Other org specialist")).not.toBeInTheDocument();
+  await user.click(within(agents).getByRole("checkbox"));
+  const participants = screen.getByRole("list", { name: "Participants" });
+  expect(within(participants).queryByText("Viewer")).not.toBeInTheDocument();
+  expect(within(participants).queryByText("Revoked")).not.toBeInTheDocument();
+  await user.click(within(participants).getByRole("checkbox", { name: "Blair" }));
+  await user.type(screen.getByLabelText("Name"), "Org group");
+  await user.click(screen.getByRole("button", { name: "Create group" }));
+  await waitFor(() => expect(onCreated).toHaveBeenCalled());
+  expect(requests.find((r) => r.method === "POST")?.body).toEqual({ name: "Org group", org: "org-a", member_agent_ids: ["org-agent"], participant_user_ids: ["owner", "blair"] });
+});
+
+it("lets a participant leave but never edit or delete the organization group", async () => {
+  const onDeleted = vi.fn();
+  const group = { ...GROUP, owner: { type: "org" as const, id: "org-a", name: "Research Org" }, participants: [{ id: "owner", display_name: "Owner" }], your_role: "participant" as const };
+  render(<QueryClientProvider client={client}><GroupSettingsDialog group={group} agents={AGENTS} open onOpenChange={vi.fn()} onDeleted={onDeleted} /></QueryClientProvider>);
+  expect(screen.getByLabelText("Name")).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+  expect(screen.queryByRole("button", { name: "Delete group" })).not.toBeInTheDocument();
+  expect(screen.getByText(/The creator or a participating Admin must remain/)).toHaveTextContent("Leaving as the last participant deletes the group.");
+  expect(screen.getByText(/Wait for your running turns/)).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Leave group" }));
+  await waitFor(() => expect(onDeleted).toHaveBeenCalled());
+  expect(requests.find((r) => r.method === "PATCH")?.body).toEqual({ leave: true });
+});
+
+it("keeps org creation disabled until the rollout flag is enabled", async () => {
+  orgs = [{ id: "org-a", display_name: "Research Org", your_role: "member" }];
+  render(<QueryClientProvider client={client}><NewGroupDialog agents={AGENTS} onClose={vi.fn()} onCreated={vi.fn()} /></QueryClientProvider>);
+  expect(screen.getByText("Organization groups are not enabled yet.")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("combobox", { name: "Ownership" }));
+  expect(screen.getByRole("option", { name: "Research Org" })).toHaveAttribute("aria-disabled", "true");
+});
+
+
+it("preserves organization agents as choices in personal groups", () => {
+  const orgAgent = agent({ id: "org-agent", name: "Org specialist", kind: "specialist", owner_id: "org-a", owner_kind: "org" });
+  render(<QueryClientProvider client={client}><NewGroupDialog agents={[...AGENTS, orgAgent]} onClose={vi.fn()} onCreated={vi.fn()} /></QueryClientProvider>);
+  expect(within(screen.getByRole("list", { name: "Agents" })).getByText("Org specialist")).toBeInTheDocument();
 });

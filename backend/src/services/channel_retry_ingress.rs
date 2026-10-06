@@ -76,6 +76,7 @@ async fn with_claim<T>(
 pub async fn deliver(
     context: &IngressContext<'_>,
     bot: &ChannelBot,
+    adapter: &dyn super::channel_platform::PlatformAdapter,
     inbound: &InboundMessage,
     message_id: &str,
 ) -> AppResult<()> {
@@ -145,6 +146,19 @@ pub async fn deliver(
             .await?
         }
     };
+    if stored.thread_context.is_none()
+        && let Ok(Some(facts)) =
+            super::channel_thread_service::inbound_facts(db, bot, &api_key.id, adapter, inbound)
+                .await
+    {
+        db.collection::<ChannelMessage>(MESSAGES)
+            .update_one(
+                doc! {"_id": &stored.id, "thread_context": bson::Bson::Null},
+                doc! {"$set": {"thread_context": bson::to_bson(&facts).map_err(|e| AppError::Internal(e.to_string()))?}},
+            )
+            .await?;
+        stored.thread_context = Some(facts);
+    }
     if stored.user_id != bot.user_id
         || stored.platform_conversation_id.as_deref() != Some(&inbound.conversation_id)
         || stored.thread_id != inbound.thread_id

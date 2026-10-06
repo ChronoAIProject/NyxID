@@ -292,6 +292,9 @@ pub async fn submit_task(
     Path(pool_id_or_slug): Path<String>,
     Json(body): Json<SubmitOracleTaskRequest>,
 ) -> AppResult<impl IntoResponse> {
+    auth_user
+        .ensure_live_assistant_turn(&state.db, "oracle.submit")
+        .await?;
     let actor = auth_user.user_id.to_string();
     let pool = oracle_pool_service::get_pool(&state.db, &pool_id_or_slug).await?;
     oracle_pool_service::ensure_can_submit(&state.db, &actor, &pool).await?;
@@ -355,6 +358,9 @@ pub async fn attach_conversation(
     Path(pool_id_or_slug): Path<String>,
     Json(body): Json<AttachConversationRequest>,
 ) -> AppResult<impl IntoResponse> {
+    auth_user
+        .ensure_live_assistant_turn(&state.db, "oracle.attach")
+        .await?;
     let actor = auth_user.user_id.to_string();
     let pool = oracle_pool_service::get_pool(&state.db, &pool_id_or_slug).await?;
     oracle_pool_service::ensure_can_submit(&state.db, &actor, &pool).await?;
@@ -396,6 +402,9 @@ pub async fn extract_url(
     Path(pool_id_or_slug): Path<String>,
     Json(body): Json<ExtractRequest>,
 ) -> AppResult<impl IntoResponse> {
+    auth_user
+        .ensure_live_assistant_turn(&state.db, "oracle.extract")
+        .await?;
     let actor = auth_user.user_id.to_string();
     let pool = oracle_pool_service::get_pool(&state.db, &pool_id_or_slug).await?;
     oracle_pool_service::ensure_can_submit(&state.db, &actor, &pool).await?;

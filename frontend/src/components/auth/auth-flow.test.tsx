@@ -318,7 +318,10 @@ describe("AuthFlow — register", () => {
     ).not.toBeInTheDocument();
 
     registerFn.mockResolvedValue({ message: "Check your email." });
-    await user.type(screen.getByPlaceholderText("John Doe"), "Ada Lovelace");
+    const nameInput = screen.getByPlaceholderText("John Doe");
+    // Wait for the panel transition's delayed autofocus before typing fields.
+    await waitFor(() => expect(nameInput).toHaveFocus());
+    await user.type(nameInput, "Ada Lovelace");
     await user.type(
       screen.getByPlaceholderText("you@example.com"),
       "ada@example.com",

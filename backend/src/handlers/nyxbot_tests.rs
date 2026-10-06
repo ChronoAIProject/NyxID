@@ -139,6 +139,8 @@ async fn channel(state: &AppState, transport: &str) -> (NyxbotChannel, String) {
     let agent = key(state, "agent").await;
     let now = Utc::now();
     let row = NyxbotChannel {
+        follow_capacity_revision: 0,
+        follow_binding_generation: 0,
         id: Uuid::new_v4().to_string(),
         user_id: OWNER.into(),
         channel_bot_id: Uuid::new_v4().to_string(),
@@ -1063,6 +1065,9 @@ async fn inbound_of(
 
 fn admission(channel_id: &str, event_id: &str) -> NyxbotEvent {
     NyxbotEvent {
+        delivery: None,
+        resolved_thread_id: None,
+        resolved_conversation_id: None,
         id: Uuid::new_v4().to_string(),
         channel_id: channel_id.into(),
         user_id: OWNER.into(),
@@ -1206,6 +1211,9 @@ async fn lost_chat_app_messages_are_reported_to_the_agent_once() {
     // Once a message reaches the agent again, the channel is healthy.
     let arrived = inbound(&state, &route_id, "7", "delivered", None, 0).await;
     let admitted = NyxbotEvent {
+        delivery: None,
+        resolved_thread_id: None,
+        resolved_conversation_id: None,
         id: Uuid::new_v4().to_string(),
         channel_id: row.id.clone(),
         user_id: OWNER.into(),
@@ -1452,6 +1460,7 @@ async fn the_live_stream_pushes_only_the_owners_changes() {
     let mut body = response.into_body().into_data_stream();
     assert!(frame(&mut body).await.contains("event: ready"));
     state.assistant_live.publish(LiveEvent::Conversation {
+        title_changed: false,
         id: "nyxa-other".into(),
         user_id: "someone-else".into(),
         group_id: None,
@@ -1459,6 +1468,7 @@ async fn the_live_stream_pushes_only_the_owners_changes() {
         messages: 1,
     });
     state.assistant_live.publish(LiveEvent::Conversation {
+        title_changed: false,
         id: "nyxa-mine".into(),
         user_id: OWNER.into(),
         group_id: Some("nyxg-1".into()),
@@ -2227,6 +2237,11 @@ async fn group_chats_share_one_thread_and_members_talk_as_guests() {
         &state,
         OWNER,
         TurnStart {
+            channel_event_id: None,
+            org_access: None,
+            attachment_ids: Vec::new(),
+            group_request_id: None,
+            group_attachments: Vec::new(),
             trigger: None,
             conversation_id: Some(thread.id.clone()),
             text: "Private note to myself".into(),
@@ -2708,6 +2723,8 @@ fn telegram_mentions_and_replies_to_the_bot_are_recognised() {
     let mut row: NyxbotChannel = {
         let now = Utc::now();
         NyxbotChannel {
+            follow_capacity_revision: 0,
+            follow_binding_generation: 0,
             id: "c".into(),
             user_id: OWNER.into(),
             channel_bot_id: "b".into(),
@@ -3230,6 +3247,11 @@ async fn the_owners_private_chats_share_the_agents_own_thread() {
         &state,
         OWNER,
         TurnStart {
+            channel_event_id: None,
+            org_access: None,
+            attachment_ids: Vec::new(),
+            group_request_id: None,
+            group_attachments: Vec::new(),
             trigger: None,
             conversation_id: Some(home.clone()),
             text: "Thanks, noted".into(),
@@ -3355,6 +3377,7 @@ async fn the_same_question_is_not_worked_on_twice() {
         .unwrap()
         .unwrap();
     let asked_from = ChannelOrigin {
+        thread: None,
         nyxbot_channel_id: telegram.id.clone(),
         partition: chat_row.partition.clone(),
         platform: "telegram".into(),
@@ -4440,6 +4463,7 @@ async fn org_group_bots_moved_to_a_specialist_keep_answering() {
         wire_protocol: crate::models::downstream_service::InferenceWireProtocol::OpenaiResponses,
         model_list: false,
         realtime: false,
+        voice: None,
     });
     state
         .db
@@ -4485,6 +4509,7 @@ async fn org_group_bots_moved_to_a_specialist_keep_answering() {
                     crate::models::downstream_service::InferenceWireProtocol::OpenaiCompletions,
                 model_list: false,
                 realtime: false,
+                voice: None,
             });
         state
             .db
@@ -4743,3 +4768,9 @@ async fn lark_groups_count_only_mentions_of_the_bot_itself() {
     );
     server.abort();
 }
+
+#[path = "nyxbot_thread_follow_tests.rs"]
+mod thread_follow_tests;
+
+#[path = "nyxbot_late_delivery_tests.rs"]
+mod late_delivery_tests;

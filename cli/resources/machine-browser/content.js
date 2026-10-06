@@ -49,7 +49,7 @@
   }
 
   chrome.runtime.onMessage.addListener((request, sender, respond) => {
-    if (sender.id !== chrome.runtime.id) return;
+    if (sender.id !== chrome.runtime.id || request?.operation === "browser") return;
     const invalid = NyxIdFillerPolicy.validate(request);
     if (invalid) {
       respond({ status: "refused", reason: invalid });

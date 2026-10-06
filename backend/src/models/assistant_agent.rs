@@ -90,6 +90,7 @@ pub struct MemoryNote {
 pub struct AssistantAgent {
     #[serde(rename = "_id")]
     pub id: String,
+    /// Polymorphic owner: a person or organization User. Only specialists may be org-owned.
     pub user_id: String,
     pub kind: AgentKind,
     /// Display name. Specialists use a short unique slug-like name.
@@ -108,9 +109,24 @@ pub struct AssistantAgent {
     /// so writers of `grants` that predate it never erase it.
     #[serde(default)]
     pub guest_access: BTreeMap<String, GuestAccess>,
+    /// Stored beside grants so older grant writers cannot erase restrictions.
+    #[serde(default)]
+    pub operation_scopes: super::agent_operation_scope::OperationScopes,
+    /// Untrusted guidance; sibling fields survive older grant writers.
+    #[serde(default)]
+    pub skills: Vec<super::catalog_skill_revision::SkillReference>,
+    #[serde(default)]
+    pub skills_revision: i64,
+    #[serde(default)]
+    pub skill_metadata: BTreeMap<String, AgentSkillMetadata>,
+    /// Includes revisions for services returned to all operations.
+    #[serde(default)]
+    pub operation_scope_revisions: BTreeMap<String, i64>,
     /// Beside grants so older replicas rewriting service grants retain these.
     #[serde(default)]
     pub machine_node_ids: Vec<String>,
+    #[serde(default)]
+    pub machine_access: Option<Box<super::machine_access::Policy>>,
     #[serde(default)]
     pub saved_login_ids: Vec<String>,
     /// `user` or `nyxbot`.
@@ -137,6 +153,12 @@ pub struct AssistantAgent {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct AgentSkillMetadata {
+    pub description: String,
+    pub size_bytes: usize,
+}
+
 impl AssistantAgent {
     pub fn is_nyxbot(&self) -> bool {
         self.kind == AgentKind::Nyxbot
@@ -148,6 +170,22 @@ impl std::fmt::Debug for AssistantAgent {
         f.debug_struct("AssistantAgent")
             .field("id", &self.id)
             .field("kind", &self.kind)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillSelection {
+    pub expected_revision: i64,
+    pub skills: Vec<super::catalog_skill_revision::SkillReference>,
+}
+
+impl std::fmt::Debug for SkillSelection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SkillSelection")
+            .field("expected_revision", &self.expected_revision)
+            .field("count", &self.skills.len())
             .finish_non_exhaustive()
     }
 }

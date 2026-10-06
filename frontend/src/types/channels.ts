@@ -173,6 +173,10 @@ export interface ManagedBotSetup {
 }
 
 export interface OutboundCapabilities {
+  /** Additive adapter declarations; absent on older servers means unsupported. */
+  readonly thread_reply?: boolean;
+  readonly thread_follow?: boolean;
+  readonly thread_history?: boolean;
   readonly media: MediaCapabilities;
   readonly initiated_send: boolean;
   readonly reply_to: boolean;

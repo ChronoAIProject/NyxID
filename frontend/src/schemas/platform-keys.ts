@@ -5,6 +5,83 @@ import {
   unitPriceSchema,
 } from "./billing-metrics";
 
+export const VOICE_BILLING_METRICS = [
+  "voice_seconds",
+  "tokens",
+  "input_tokens",
+  "output_tokens",
+  "cache_read_tokens",
+  "cache_write_tokens",
+] as const;
+const voiceId = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9_.-]+$/, "Use a provider identifier, not a URL");
+const voiceLabel = z
+  .string()
+  .trim()
+  .min(1)
+  .max(128)
+  .refine((v) => !/\p{Cc}/u.test(v), "Control characters are not allowed");
+export const voiceMetadataSchema = z
+  .object({
+    protocol: z.enum(["openai_live", "xai_realtime"]),
+    models: z
+      .array(
+        z.object({
+          id: voiceId,
+          label: voiceLabel,
+          default: z.boolean().optional(),
+        }),
+      )
+      .min(1)
+      .max(32),
+    voices: z
+      .array(z.object({ id: voiceId, label: voiceLabel }))
+      .min(1)
+      .max(64),
+    usage_source: z.enum(["provider_reported", "server_measured"]),
+    billing_metrics: z.array(z.enum(VOICE_BILLING_METRICS)).min(1).max(6),
+  })
+  .superRefine((voice, ctx) => {
+    for (const field of ["models", "voices"] as const) {
+      if (new Set(voice[field].map((v) => v.id)).size !== voice[field].length)
+        ctx.addIssue({
+          code: "custom",
+          path: [field],
+          message: "Provider IDs must be unique",
+        });
+    }
+    if (voice.models.filter((m) => m.default).length > 1)
+      ctx.addIssue({
+        code: "custom",
+        path: ["models"],
+        message: "Choose at most one default model",
+      });
+    if (
+      new Set(voice.billing_metrics).size !== voice.billing_metrics.length ||
+      !voice.billing_metrics.includes("voice_seconds")
+    )
+      ctx.addIssue({
+        code: "custom",
+        path: ["billing_metrics"],
+        message: "Unique metrics including voice seconds are required",
+      });
+    if (
+      voice.usage_source !==
+      (voice.protocol === "openai_live"
+        ? "provider_reported"
+        : "server_measured")
+    )
+      ctx.addIssue({
+        code: "custom",
+        path: ["usage_source"],
+        message: "Usage source must match the provider protocol",
+      });
+  });
+export type VoiceMetadata = z.infer<typeof voiceMetadataSchema>;
+
 export const inferenceMetadataSchema = z.object({
   wire_protocol: z.enum([
     "anthropic_messages",
@@ -13,6 +90,7 @@ export const inferenceMetadataSchema = z.object({
   ]),
   model_list: z.boolean(),
   realtime: z.boolean().optional(),
+  voice: voiceMetadataSchema.nullish(),
 });
 export const inferenceViewSchema = inferenceMetadataSchema.extend({
   binding: z.enum(["platform", "user"]),

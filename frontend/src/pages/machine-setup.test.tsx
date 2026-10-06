@@ -36,6 +36,7 @@ vi.mock("@/hooks/use-nyxbot-agents", () => ({
   useNyxBotAgents: () => ({ data: { agents: [] } }),
 }));
 vi.mock("@/hooks/use-machines", () => ({
+  useVerifiedUpdaterImage: () => ({ data: {version: "0.39.0", image: "ghcr.io/chronoaiproject/nyxid/nyxid-machine-updater@sha256:" + "ab".repeat(32)} }),
   useMachineSetup: () => ({ data: mock.setup }),
   useCreateMachineSetup: () => ({ mutateAsync: mock.create }),
   issueMachineSetup: mock.issue,
@@ -73,7 +74,10 @@ it("shows one reviewed command only on the private setup page and removes it whe
     screen.getByRole("button", { name: "Create my setup command" }),
   );
   await waitFor(() =>
-    expect(mock.issue).toHaveBeenCalledWith("intent", choices),
+    expect(mock.issue).toHaveBeenCalledWith("intent", {
+      ...choices,
+      automatic_updates: true,
+    }),
   );
   await waitFor(() =>
     expect(screen.getByText(/docker run -d/)).toHaveTextContent(token),
@@ -115,12 +119,13 @@ it("pairing shows machine details and requires explicit recognition before appro
   expect(
     screen.getByRole("button", { name: "Approve pairing" }),
   ).toBeDisabled();
-  fireEvent.click(screen.getByRole("checkbox"));
+  fireEvent.click(screen.getByRole("checkbox", { name: /I started this setup/ }));
   fireEvent.click(screen.getByRole("button", { name: "Approve pairing" }));
   await waitFor(() =>
     expect(mock.decide).toHaveBeenCalledWith({
       code: "ABCD-2345",
       approve: true,
+      automatic_updates: true,
     }),
   );
 });
@@ -144,4 +149,12 @@ it("quotes setup credentials and URLs, installs the CLI if missing and preserves
       machineSetupCommand(choices, token, "wss://example.test", version),
     ).toThrow();
   }
+});
+
+it("renders a browser-only setup without broad computer access", () => {
+  const token = `nyx_nreg_${"b".repeat(64)}`;
+  const command = machineSetupCommand({ ...choices, where: "vm", capabilities: ["browser"] }, token, "wss://example.test");
+  expect(command).toContain("--browser");
+  expect(command).not.toContain("--computer");
+  expect(command).not.toContain("--shell");
 });

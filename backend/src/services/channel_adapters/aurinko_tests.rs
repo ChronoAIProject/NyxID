@@ -2,7 +2,9 @@ use super::*;
 use crate::models::{
     api_key::ApiKey,
     channel_email::{EmailSend, EmailSubscription, SENDS, SUBSCRIPTIONS},
+    channel_thread::{ThreadAddress, ThreadKind},
 };
+use crate::services::channel_adapters::thread_facts;
 use crate::services::{channel_bot_service as bots, channel_routing_service as routes};
 use axum::{
     Json, Router, body::Bytes, extract::State, http::Uri, response::IntoResponse, routing::any,
@@ -188,6 +190,9 @@ impl Fixture {
         crate::services::coordination_service::ensure_indexes(&db)
             .await
             .unwrap();
+        crate::services::audit_service::init_audit_chain_hmac_key(zeroize::Zeroizing::new(
+            [2u8; 32],
+        ));
         let state = crate::test_utils::test_app_state(db.clone());
         let mock = Arc::new(Mutex::new(Mock::default()));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -324,6 +329,7 @@ impl Fixture {
                     reply_to_platform_message_id: original.platform_message_id.clone(),
                     metadata,
                 },
+                None,
             )
             .await?
             .into_result()
@@ -388,6 +394,113 @@ async fn aurinko_signed_pending_handshake_tamper_account_and_subscription_bindin
 }
 
 #[tokio::test]
+async fn aurinko_missing_fingerprint_key_preserves_legacy_inbound_and_callback() {
+    use crate::services::channel_relay_service::{build_callback_payload, inbound_metadata};
+
+    let f = Fixture::new().await;
+    let mut message = mail("reply-shape");
+    message["inReplyTo"] = json!("<parent@example.com>");
+    // Inject absent key state without clearing the process-global OnceLock
+    // while other adapter tests are running.
+    let legacy = normalize_with_key(&f.bot, &account(42), &message, None)
+        .unwrap()
+        .unwrap();
+    let legacy_raw = json!({"account_id":"42", "message_id":"reply-shape",
+        "thread_id":"thread-1", "subject":"Private subject", "has_attachments":false});
+    assert_eq!(
+        serde_json::to_value(&legacy).unwrap(),
+        json!({
+            "platform_message_id":"reply-shape", "conversation_id":conversation_id("42", "thread-1"),
+            "conversation_type":"private", "sender_platform_id":"sender@example.com",
+            "sender_display_name":"Sender", "content_type":"text",
+            "text":"Subject: Private subject\n\nPrivate message body", "attachments":[],
+            "reply_to_platform_message_id":null, "thread_id":"thread-1", "raw_data":legacy_raw,
+        })
+    );
+    assert!(thread_facts::aurinko(&legacy).is_none());
+
+    let enriched = normalize(&f.bot, &account(42), &message).unwrap().unwrap();
+    assert_eq!(
+        thread_facts::aurinko(&enriched)
+            .unwrap()
+            .parent_message_id
+            .as_deref(),
+        Some("<parent@example.com>")
+    );
+    let mut enriched_json = serde_json::to_value(&enriched).unwrap();
+    enriched_json["raw_data"]
+        .as_object_mut()
+        .unwrap()
+        .remove("email");
+    assert_eq!(enriched_json, serde_json::to_value(&legacy).unwrap());
+    let source = inbound_metadata(
+        &f.bot.id,
+        &f.route.id,
+        &f.bot.user_id,
+        "aurinko",
+        &enriched,
+        &f.key.id,
+        "source-shape",
+    );
+    assert_eq!(source.reply_to_platform_message_id, None);
+    let callback = |inbound: &InboundMessage| {
+        serde_json::to_value(build_callback_payload(
+            &source,
+            &f.route,
+            &f.key.id,
+            &f.key.name,
+            inbound,
+            None,
+            &f.state.config.base_url,
+        ))
+        .unwrap()
+    };
+    let legacy_callback = callback(&legacy);
+    assert_eq!(
+        legacy_callback,
+        json!({
+            "message_id":"source-shape", "correlation_id":"", "platform":"aurinko",
+            "agent":{"api_key_id":f.key.id, "name":f.key.name},
+            "conversation":{"id":f.route.id, "platform_id":legacy.conversation_id, "type":"private"},
+            "sender":{"platform_id":"sender@example.com", "display_name":"Sender"},
+            "content":{"type":"text", "text":"Subject: Private subject\n\nPrivate message body"},
+            "thread_id":"thread-1", "timestamp":source.created_at.to_rfc3339(),
+            "raw_platform_data":legacy_raw,
+        })
+    );
+    let mut enriched_callback = callback(&enriched);
+    enriched_callback["raw_platform_data"]
+        .as_object_mut()
+        .unwrap()
+        .remove("email");
+    assert_eq!(enriched_callback, legacy_callback);
+}
+
+#[test]
+fn aurinko_history_without_fingerprint_key_is_partial_and_contains_no_messages() {
+    let now = Utc::now();
+    let mut message = mail("history");
+    message["receivedAt"] = json!((now - chrono::Duration::minutes(1)).to_rfc3339());
+    let history = email_history(std::slice::from_ref(&message), "thread-1", now, None);
+    assert!(history.partial);
+    assert!(history.messages.is_empty());
+    let key = [2u8; 32];
+    let history = email_history(&[message], "thread-1", now, Some(&key));
+    assert!(!history.partial);
+    assert_eq!(history.messages.len(), 1);
+    let fingerprint = hash_email("sender@example.com", Some(&key)).unwrap();
+    assert!(
+        history.messages[0]
+            .participant_hashes
+            .contains(&fingerprint)
+    );
+    assert_ne!(
+        Some(fingerprint),
+        hash_email("sender@example.com", Some(&[3u8; 32]))
+    );
+}
+
+#[tokio::test]
 async fn aurinko_filters_threads_and_automation_without_retaining_body() {
     let f = Fixture::new().await;
     let original = mail("one");
@@ -396,6 +509,63 @@ async fn aurinko_filters_threads_and_automation_without_retaining_body() {
         normalized.text.as_deref(),
         Some("Subject: Private subject\n\nPrivate message body")
     );
+    let facts = thread_facts::aurinko(&normalized).unwrap();
+    assert_eq!(facts.kind, ThreadKind::Email);
+    assert_eq!(facts.address, ThreadAddress::MailboxTo);
+    assert!(facts.sender_hash.is_some());
+    assert!(!facts.participant_hashes.is_empty());
+    let plain_sender_hash = hex::encode(Sha256::digest(b"sender@example.com"));
+    assert_ne!(
+        facts.sender_hash.as_deref(),
+        Some(plain_sender_hash.as_str())
+    );
+    assert!(
+        facts.participant_hashes.contains(
+            &hash_email(
+                "sender@example.com",
+                crate::services::audit_service::audit_chain_hmac_key()
+            )
+            .unwrap()
+        )
+    );
+    assert!(
+        facts.participant_hashes.contains(
+            &hash_email(
+                "mailbox@example.com",
+                crate::services::audit_service::audit_chain_hmac_key()
+            )
+            .unwrap()
+        )
+    );
+    // Reply-To controls the single-recipient send policy, but is not proof
+    // that an address participated in the inbound message.
+    assert!(
+        !facts.participant_hashes.contains(
+            &hash_email(
+                "reply@example.com",
+                crate::services::audit_service::audit_chain_hmac_key()
+            )
+            .unwrap()
+        )
+    );
+    let mut reply = original.clone();
+    reply["inReplyTo"] = json!("one");
+    let normalized_reply = normalize(&f.bot, &account(42), &reply).unwrap().unwrap();
+    assert_eq!(normalized_reply.reply_to_platform_message_id, None);
+    assert_eq!(
+        thread_facts::aurinko(&normalized_reply)
+            .unwrap()
+            .parent_message_id
+            .as_deref(),
+        Some("one")
+    );
+    assert_eq!(normalized_reply.raw_data["email"]["reply_parent_id"], "one");
+    let legacy = normalize_with_key(&f.bot, &account(42), &reply, None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(legacy.reply_to_platform_message_id, None);
+    assert!(legacy.raw_data.get("email").is_none());
+    assert!(thread_facts::aurinko(&legacy).is_none());
     for label in ["sent", "draft", "junk", "trash"] {
         let mut value = original.clone();
         value["sysLabels"] = json!([label]);
@@ -430,6 +600,13 @@ async fn aurinko_filters_threads_and_automation_without_retaining_body() {
     assert!(long.conversation_id.len() < 256);
     assert_ne!(long.conversation_id, normalized.conversation_id);
     f.event(&["one"]).await.unwrap();
+    reply["id"] = json!("reply-shape");
+    f.mock
+        .lock()
+        .await
+        .messages
+        .insert("reply-shape".into(), reply.clone());
+    f.event(&["reply-shape"]).await.unwrap();
     let stored = f
         .state
         .db
@@ -451,6 +628,12 @@ async fn aurinko_filters_threads_and_automation_without_retaining_body() {
     );
     assert!(!callback.to_string().contains(TOKEN));
     assert!(!callback.to_string().contains(SECRET));
+    let reply_callback = f.mock.lock().await.callbacks.last().unwrap().clone();
+    assert!(reply_callback.get("reply_to_platform_message_id").is_none());
+    assert_eq!(
+        reply_callback["raw_platform_data"]["email"]["reply_parent_id"],
+        "one"
+    );
     let route = f
         .state
         .db
@@ -1363,8 +1546,8 @@ async fn aurinko_individual_delete_busy_ingress_keeps_bot_visible_until_retry() 
     let f = Fixture::new().await;
     f.mock.lock().await.delays.insert("one".into(), 400);
     f.mock.lock().await.requests.clear();
-    let effect = f.event(&["one"]);
-    let deletion = async {
+    let effect = Box::pin(f.event(&["one"]));
+    let deletion = Box::pin(async {
         tokio::time::timeout(Duration::from_secs(3), async {
             loop {
                 if f.mock
@@ -1382,7 +1565,7 @@ async fn aurinko_individual_delete_busy_ingress_keeps_bot_visible_until_retry() 
         .await
         .unwrap();
         assert!(
-            bots::delete_bot(
+            Box::pin(bots::delete_bot(
                 &f.state.db,
                 &f.state.config,
                 &f.state.http_client,
@@ -1390,7 +1573,7 @@ async fn aurinko_individual_delete_busy_ingress_keeps_bot_visible_until_retry() 
                 &f.adapter,
                 &f.bot.id,
                 &f.bot.user_id
-            )
+            ))
             .await
             .is_err()
         );
@@ -1413,11 +1596,11 @@ async fn aurinko_individual_delete_busy_ingress_keeps_bot_visible_until_retry() 
                 .unwrap()
                 .is_active
         );
-    };
+    });
     let (delivered, ()) = tokio::join!(effect, deletion);
     delivered.unwrap();
     assert_eq!(
-        bots::delete_bot(
+        Box::pin(bots::delete_bot(
             &f.state.db,
             &f.state.config,
             &f.state.http_client,
@@ -1425,7 +1608,7 @@ async fn aurinko_individual_delete_busy_ingress_keeps_bot_visible_until_retry() 
             &f.adapter,
             &f.bot.id,
             &f.bot.user_id
-        )
+        ))
         .await
         .unwrap(),
         Some("removed")

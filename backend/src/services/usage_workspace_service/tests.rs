@@ -29,6 +29,7 @@ fn workspace_rejects_invalid_queries_and_duplicate_panels() {
 fn workspace_preserves_legacy_width_and_validates_panel_layout_and_interval() {
     let legacy = config();
     assert!(legacy.draft.panels[0].span.is_none());
+    assert!(legacy.draft.panels[0].table_display.is_none());
     assert!(legacy.draft.panels[0].wide);
     assert!(validate(&legacy).is_ok());
     for span in [1, 2, 3] {
@@ -37,20 +38,26 @@ fn workspace_preserves_legacy_width_and_validates_panel_layout_and_interval() {
         panel.span = Some(span);
         panel.height = Some("tall".into());
         panel.interval = Some("week".into());
+        panel.table_display = Some("accordion".into());
         panel.measure = "prompt_tokens".into();
         assert!(validate(&value).is_ok());
         let restored: WorkspaceConfig =
             serde_json::from_value(serde_json::to_value(&value).unwrap()).unwrap();
         assert_eq!(restored.draft.panels[0].span, Some(span));
         assert_eq!(restored.draft.panels[0].interval.as_deref(), Some("week"));
+        assert_eq!(
+            restored.draft.panels[0].table_display.as_deref(),
+            Some("accordion")
+        );
     }
-    for field in ["span", "height", "interval"] {
+    for field in ["span", "height", "interval", "table_display"] {
         let mut value = config();
         let panel = &mut value.draft.panels[0];
         match field {
             "span" => panel.span = Some(4),
             "height" => panel.height = Some("unbounded".into()),
-            _ => panel.interval = Some("minute".into()),
+            "interval" => panel.interval = Some("minute".into()),
+            _ => panel.table_display = Some("missing".into()),
         }
         assert!(validate(&value).is_err());
     }

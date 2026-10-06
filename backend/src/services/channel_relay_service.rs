@@ -27,6 +27,8 @@ type HmacSha256 = Hmac<Sha256>;
 #[derive(Clone, Serialize)]
 pub struct CallbackPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_context: Option<crate::models::channel_thread::ChannelThreadFacts>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub activity: Option<super::channel_activity_service::CallbackActivity>,
     pub message_id: String,
     pub correlation_id: String,
@@ -190,6 +192,7 @@ pub(crate) fn inbound_metadata(
     message_id: &str,
 ) -> ChannelMessage {
     ChannelMessage {
+        thread_context: None,
         activity: None,
         platform_send: None,
         attachments: inbound
@@ -250,6 +253,7 @@ pub async fn store_outbound_message(
 ) -> AppResult<ChannelMessage> {
     let now = Utc::now();
     let message = ChannelMessage {
+        thread_context: None,
         activity: None,
         platform_send,
         attachments: vec![],
@@ -317,6 +321,7 @@ pub async fn store_device_event_message(
     inherited_thread_id: Option<String>,
 ) -> AppResult<ChannelMessage> {
     let message = ChannelMessage {
+        thread_context: None,
         activity: None,
         platform_send: None,
         attachments: vec![],
@@ -696,6 +701,7 @@ pub fn build_callback_payload(
         .collect();
 
     CallbackPayload {
+        thread_context: message.thread_context.clone(),
         activity: None,
         message_id: message.id.clone(),
         correlation_id: String::new(),
@@ -1104,6 +1110,7 @@ mod tests {
     #[test]
     fn callback_payload_serializes_to_json() {
         let payload = CallbackPayload {
+            thread_context: None,
             activity: None,
             message_id: "msg-1".to_string(),
             correlation_id: String::new(),
@@ -1154,6 +1161,7 @@ mod tests {
     #[test]
     fn callback_payload_includes_reply_token_when_present() {
         let payload = CallbackPayload {
+            thread_context: None,
             activity: None,
             message_id: "msg-1".to_string(),
             correlation_id: String::new(),
@@ -1228,6 +1236,7 @@ mod tests {
     fn build_callback_payload_preserves_provider_attachment_handles() {
         let now = Utc::now();
         let message = ChannelMessage {
+            thread_context: None,
             activity: None,
             platform_send: None,
             attachments: vec![],
@@ -1321,7 +1330,7 @@ mod tests {
     #[test]
     fn callback_payload_reports_the_messages_own_chat_type() {
         let now = Utc::now();
-        let message = inbound_metadata(
+        let mut message = inbound_metadata(
             "bot-1",
             "route-1",
             "user-1",
@@ -1384,6 +1393,39 @@ mod tests {
         );
         assert_eq!(payload.conversation.conversation_type, "group");
         assert_eq!(payload.conversation.platform_id, "oc_group");
+        assert!(
+            serde_json::to_value(&payload)
+                .unwrap()
+                .get("thread_context")
+                .is_none(),
+            "legacy callbacks omit the additive metadata field"
+        );
+        let facts = crate::models::channel_thread::ChannelThreadFacts {
+            version: 1,
+            kind: crate::models::channel_thread::ThreadKind::Native,
+            chat_id: "oc_group".into(),
+            message_id: "om_group".into(),
+            root_id: Some("om_root".into()),
+            ..Default::default()
+        };
+        message.thread_context = Some(facts.clone());
+        let mut untrusted = group.clone();
+        untrusted.raw_data = serde_json::json!({"thread_context": {"root_id": "wrong-root"}});
+        let payload = build_callback_payload(
+            &message,
+            &route,
+            "key-1",
+            "agent",
+            &untrusted,
+            None,
+            "https://nyx.example",
+        );
+        assert_eq!(payload.thread_context, Some(facts));
+        assert_eq!(
+            serde_json::to_value(&payload).unwrap()["thread_context"]["root_id"],
+            "om_root",
+            "only stored normalized facts populate the signed callback field"
+        );
         // An adapter that does not say keeps the route's type.
         let unknown = InboundMessage {
             conversation_type: String::new(),
@@ -1408,6 +1450,7 @@ mod tests {
 
     fn test_payload() -> CallbackPayload {
         CallbackPayload {
+            thread_context: None,
             activity: None,
             message_id: "msg-test".to_string(),
             correlation_id: String::new(),
@@ -1501,6 +1544,7 @@ mod tests {
             telegram_webhook_secret: None,
             telegram_webhook_url: None,
             telegram_bot_username: None,
+            openai_apps_challenge_token: None,
             approval_expiry_interval_secs: 5,
             connect_link_expiry_sweep_interval_secs: 60,
             agent_key_login_sweep_interval_secs: 60,
