@@ -31,9 +31,15 @@ export function matchingConnections(
     !filters.service_group_ids.includes(group.id)
   )
     return [];
+  // Auto-connected rows are provisioned onto your own account, so once shown
+  // they qualify a service for the Personal view like a personal connection.
   if (
     filters.source === "personal" &&
-    !group.connections.some((key) => connectionSource(key) === "personal")
+    !group.connections.some(
+      (key) =>
+        connectionSource(key) === "personal" ||
+        (filters.show_auto_connected && key.auto_connected),
+    )
   )
     return [];
   const needle = filters.search.trim().toLowerCase();

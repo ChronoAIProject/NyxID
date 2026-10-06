@@ -472,6 +472,20 @@ const MOCK_KEYS = [
     },
   },
 ];
+// Provisioned automatically by NyxID; hidden until "Auto-connected" is shown.
+MOCK_KEYS.push({
+  ...MOCK_KEYS[0]!,
+  id: "key-auto-0001",
+  label: "Tavily Search",
+  slug: "tavily-search",
+  endpoint_url: "https://api.tavily.com",
+  endpoint_id: "ep-auto-0001",
+  catalog_service_id: "cs-tavily",
+  catalog_service_slug: "tavily-search",
+  catalog_service_name: "Tavily Search",
+  auto_connected: true,
+  last_used_at: null,
+} as (typeof MOCK_KEYS)[number]);
 
 // ── External API Keys (credentials) ──
 const MOCK_EXTERNAL_API_KEYS = [

@@ -629,12 +629,16 @@ describe("live grouped services", () => {
     }
     const user = userEvent.setup();
     render(preview());
-    fireEvent.click(
-      screen.getByRole("button", { name: "Auto-connected services: hidden" }),
-    );
     expect(
       screen.queryByRole("region", { name: "Platform-only service" }),
     ).not.toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Auto-connected services: hidden" }),
+    );
+    // Shown auto-connected services belong to your account, so they list too.
+    expect(
+      screen.getByRole("region", { name: "Platform-only service" }),
+    ).toBeInTheDocument();
     const card = screen.getByRole("region", { name: "OpenAI" });
     expect(within(card).getByText("3 connections")).toBeVisible();
     expect(within(card).getByText("1 NyxID · 2 BYOK")).toBeVisible();

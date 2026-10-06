@@ -52,6 +52,16 @@ const group: ServiceConnectionGroup = {
 };
 
 describe("service view matching", () => {
+  it("lists a service whose only connection is auto-connected once shown, in Personal view", () => {
+    const autoOnly = {
+      ...group,
+      connections: group.connections.filter((key) => key.auto_connected),
+    };
+    expect(matchingConnections(autoOnly, DEFAULT_SERVICE_FILTERS)).toEqual([]);
+    expect(matchingConnections(autoOnly, SHOWN).map((key) => key.id)).toEqual([
+      "platform",
+    ]);
+  });
   it("hides auto-connected connections by default", () => {
     expect(
       matchingConnections(group, DEFAULT_SERVICE_FILTERS).map((key) => key.id),
@@ -63,12 +73,16 @@ describe("service view matching", () => {
       "org",
       "platform",
     ]);
+    const withoutPersonal = {
+      ...group,
+      connections: group.connections.slice(1),
+    };
     expect(
-      matchingConnections(
-        { ...group, connections: group.connections.slice(1) },
-        SHOWN,
-      ),
+      matchingConnections(withoutPersonal, DEFAULT_SERVICE_FILTERS),
     ).toEqual([]);
+    expect(
+      matchingConnections(withoutPersonal, SHOWN).map((key) => key.id),
+    ).toEqual(["org", "platform"]);
   });
   it("applies explicit filters to counterparts without requiring them to match the personal row", () => {
     expect(
