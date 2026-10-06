@@ -46,6 +46,19 @@ pub(crate) const DEFAULT_PROXY_USER_AGENT: &str =
 pub enum ProxyBody {
     /// Body has been buffered in memory (approval path, node proxy, Codex path).
     Buffered(Option<bytes::Bytes>),
+    /// Opaque uploads from the machine gateway, with a metered ingress cap.
+    Streaming(axum::body::Body),
+}
+
+impl ProxyBody {
+    fn buffered(self) -> AppResult<Option<bytes::Bytes>> {
+        match self {
+            Self::Buffered(bytes) => Ok(bytes),
+            Self::Streaming(_) => Err(AppError::BadRequest(
+                "This authentication method requires a bounded structured request body".into(),
+            )),
+        }
+    }
 }
 
 /// Result of resolving a proxy target.
@@ -445,6 +458,7 @@ pub(crate) fn forwarded_caller_token<'a>(
 /// narrow enough to keep sensitive NyxID/infrastructure headers (authorization,
 /// cookie, x-nyxid-*) outside the passthrough.
 const ALLOWED_FORWARD_HEADERS: &[&str] = &[
+    "git-protocol",
     "content-type",
     "accept",
     "accept-language",
@@ -1375,7 +1389,7 @@ pub async fn resolve_proxy_target(
 
 /// Resolve proxy target with lenient credential handling for node-routed requests.
 ///
-async fn resolve_catalog_platform_target(
+pub(crate) async fn resolve_catalog_platform_target(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
     owner_id: &str,
@@ -3023,7 +3037,7 @@ async fn finish_resolution(
     }
 
     if api_key.status != "active" {
-        return Err(AppError::BadRequest(format!(
+        return Err(AppError::CredentialUnavailable(format!(
             "API key is {}",
             api_key.status
         )));
@@ -3333,7 +3347,7 @@ pub async fn read_agent_credential_override_identity(
     )
     .await?;
     if api_key.status != "active" || !credential_is_materializable(db, &api_key).await? {
-        return Err(AppError::BadRequest(
+        return Err(AppError::CredentialUnavailable(
             "Bound credential is not executable".to_string(),
         ));
     }
@@ -3393,7 +3407,7 @@ pub async fn resolve_agent_credential_override_identity(
     .await?;
 
     if api_key.status != "active" {
-        return Err(AppError::BadRequest(format!(
+        return Err(AppError::CredentialUnavailable(format!(
             "Override credential is {}",
             api_key.status
         )));
@@ -3622,11 +3636,13 @@ pub(crate) async fn credential_is_materializable(
 
 fn missing_user_api_key_credential_error(api_key: &UserApiKey) -> AppError {
     match api_key.credential_type.as_str() {
-        "oauth2" if api_key.provider_config_id.is_some() => AppError::BadRequest(
+        "oauth2" if api_key.provider_config_id.is_some() => AppError::CredentialUnavailable(
             "OAuth connection is not complete. Connect your account first.".to_string(),
         ),
-        "oauth2" => AppError::BadRequest("OAuth token has no credential stored".to_string()),
-        _ => AppError::BadRequest(
+        "oauth2" => {
+            AppError::CredentialUnavailable("OAuth token has no credential stored".to_string())
+        }
+        _ => AppError::CredentialUnavailable(
             "No credential stored. Add a credential or route through a node.".to_string(),
         ),
     }
@@ -3745,6 +3761,7 @@ fn build_minimal_downstream_service(
         issues_url: None,
         capabilities: None,
         inference: None,
+        git_http: None,
         inference_admin_modified: false,
         billing,
         auth_notes: None,
@@ -3922,6 +3939,10 @@ fn target_http_client() -> Client {
 }
 
 fn build_target_http_client(builder: reqwest::ClientBuilder) -> Client {
+    // See `pool_no_redirect_http_client`: reused mock-server ports make idle
+    // sockets in this process-wide client fail after dispatch in tests.
+    #[cfg(test)]
+    let builder = builder.pool_max_idle_per_host(0);
     builder
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(std::time::Duration::from_secs(10))
@@ -3985,7 +4006,7 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
     };
 
     let destination_client;
-    let client = if target.target_id.is_some() {
+    let client = if target.target_id.is_some() || target.auth_method == "github_git" {
         destination_client = target_http_client();
         &destination_client
     } else {
@@ -4025,7 +4046,7 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
     );
 
     if target.auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD {
-        let ProxyBody::Buffered(body) = body;
+        let body = body.buffered()?;
         return nyxid_service_adapters::ifttt::client()
             .forward(
                 &target.base_url,
@@ -4045,7 +4066,7 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
             });
     }
     if target.auth_method == nyxid_service_adapters::ifttt_mcp::AUTH_METHOD {
-        let ProxyBody::Buffered(body) = body;
+        let body = body.buffered()?;
         return nyxid_service_adapters::ifttt_mcp::client()
             .forward(
                 &target.base_url,
@@ -4090,16 +4111,13 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
             )
             .into());
         }
-        match body {
-            ProxyBody::Buffered(existing) => {
-                let merged = inject_credential_into_json_body(
-                    existing.as_deref(),
-                    &target.auth_key_name,
-                    &target.credential,
-                )?;
-                ProxyBody::Buffered(Some(merged))
-            }
-        }
+        let existing = body.buffered()?;
+        let merged = inject_credential_into_json_body(
+            existing.as_deref(),
+            &target.auth_key_name,
+            &target.credential,
+        )?;
+        ProxyBody::Buffered(Some(merged))
     } else {
         body
     };
@@ -4119,6 +4137,12 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
             let body_bytes_for_key: &[u8] = match &body {
                 ProxyBody::Buffered(Some(b)) => b.as_ref(),
                 ProxyBody::Buffered(None) => &[][..],
+                ProxyBody::Streaming(_) => {
+                    return Err(AppError::BadRequest(
+                        "Signed body authentication requires a bounded structured body".into(),
+                    )
+                    .into());
+                }
             };
             let path_and_query = match prepared.query.as_deref() {
                 Some(q) => format!("{}?{}", prepared.path, q),
@@ -4170,6 +4194,9 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
             // Use the request builder's query method to properly URL-encode parameters.
             // This preserves the original HTTP method, headers, and body.
             request = request.query(&[(&target.auth_key_name, &target.credential)]);
+        }
+        "github_git" => {
+            request = request.basic_auth(&target.auth_key_name, Some(&target.credential));
         }
         "basic" => {
             // credential format: "username:password"
@@ -4238,6 +4265,12 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
             let body_bytes: &[u8] = match &body {
                 ProxyBody::Buffered(Some(b)) => b.as_ref(),
                 ProxyBody::Buffered(None) => &[][..],
+                ProxyBody::Streaming(_) => {
+                    return Err(AppError::BadRequest(
+                        "Signed body authentication requires a bounded structured body".into(),
+                    )
+                    .into());
+                }
             };
             let creds = AwsCredentials::from_json(&target.credential).map_err(|e| {
                 tracing::error!(error = %e, "aws_sigv4 credential malformed");
@@ -4280,6 +4313,9 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
             request = request.body(body_bytes);
         }
         ProxyBody::Buffered(None) => {}
+        ProxyBody::Streaming(body) => {
+            request = request.body(reqwest::Body::wrap_stream(body.into_data_stream()));
+        }
     }
 
     let response = request.send().await?;
@@ -5661,6 +5697,9 @@ mod tests {
                 description: None,
                 allowed_service_ids: vec![],
                 allowed_platform_service_ids: Vec::new(),
+                assistant_group_id: None,
+                assistant_agent_owner_id: None,
+                assistant_operation_scopes: Default::default(),
                 allowed_node_ids: vec![],
                 allow_all_services: true,
                 allow_auto_connected_services: false,
@@ -5925,6 +5964,7 @@ mod tests {
                 issues_url: None,
                 capabilities: None,
                 inference: None,
+                git_http: None,
                 inference_admin_modified: false,
                 billing: None,
                 auth_notes: None,
@@ -7252,6 +7292,7 @@ mod tests {
                 issues_url: None,
                 capabilities: None,
                 inference: None,
+                git_http: None,
                 inference_admin_modified: false,
                 billing: None,
                 auth_notes: None,
@@ -7596,6 +7637,7 @@ mod tests {
                 issues_url: None,
                 capabilities: None,
                 inference: None,
+                git_http: None,
                 inference_admin_modified: false,
                 billing: None,
                 auth_notes: None,
@@ -7826,6 +7868,7 @@ mod tests {
                 issues_url: None,
                 capabilities: None,
                 inference: None,
+                git_http: None,
                 inference_admin_modified: false,
                 billing: None,
                 auth_notes: None,
@@ -8073,6 +8116,7 @@ mod tests {
             issues_url: None,
             capabilities: None,
             inference: None,
+            git_http: None,
             inference_admin_modified: false,
             billing: None,
             auth_notes: None,
@@ -8482,7 +8526,9 @@ mod tests {
             credential_epoch: 1,
         };
         let err = missing_user_api_key_credential_error(&key);
-        assert!(matches!(err, AppError::BadRequest(m) if m.contains("OAuth connection")));
+        assert!(
+            matches!(err, AppError::CredentialUnavailable(m) if m.contains("OAuth connection"))
+        );
     }
 
     #[test]
@@ -8515,7 +8561,7 @@ mod tests {
             credential_epoch: 1,
         };
         let err = missing_user_api_key_credential_error(&key);
-        assert!(matches!(err, AppError::BadRequest(m) if m.contains("No credential")));
+        assert!(matches!(err, AppError::CredentialUnavailable(m) if m.contains("No credential")));
     }
 
     // ---- forward header: AWS and GCP prefixes ----

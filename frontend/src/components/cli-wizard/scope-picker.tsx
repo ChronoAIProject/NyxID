@@ -94,7 +94,7 @@ function ScopeChip({
   return (
     <label
       className={
-        "inline-flex cursor-pointer select-none items-center gap-1.5 rounded-full border px-3 py-1.5 text-[12px] transition-colors duration-300 " +
+        "inline-flex cursor-pointer select-none items-center gap-1.5 rounded-full border px-3 py-1.5 text-12 transition-colors duration-300 " +
         (checked
           ? "border-primary bg-primary/15 text-foreground"
           : "border-border bg-transparent text-muted-foreground hover:border-border hover:bg-muted/40")

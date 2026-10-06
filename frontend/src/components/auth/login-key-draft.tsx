@@ -91,7 +91,7 @@ export function LoginKeyDraft({
             kind="new"
             customize={
               <>
-                <h4 className="text-[12px] font-semibold">
+                <h4 className="text-12 font-semibold">
                   Requested access filters
                 </h4>
                 <LoginPermissionPicker
@@ -157,7 +157,7 @@ export function LoginKeyDraft({
                   disabled={disabled || data.allow_all_services}
                 />
                 <ApiKeyExpiryField form={form} />
-                <p className="text-[11px] text-muted-foreground">
+                <p className="text-11 text-muted-foreground">
                   Dates expire at the end of the selected day (23:59:59 UTC).
                   {summary.expires_at && (
                     <span className="block">
@@ -271,7 +271,7 @@ export function LoginKeyDraft({
             actions={
               <div className="space-y-3">
                 {!comparison.matches && (
-                  <p role="alert" className="text-[12px] text-warning">
+                  <p role="alert" className="text-12 text-warning">
                     Complete the highlighted access selections, or edit the
                     filters in Customize.
                   </p>

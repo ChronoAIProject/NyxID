@@ -14,6 +14,8 @@ const OPENAPI_PROBE_PATHS: &[&str] = &[
     "/swagger.json",
     "/docs/openapi.json",
     "/.well-known/openapi",
+    "/openapi.yaml",
+    "/openapi.yml",
 ];
 
 const ASYNCAPI_PROBE_PATHS: &[&str] = &["/asyncapi.json", "/.well-known/asyncapi"];
@@ -22,8 +24,24 @@ const SPEC_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 const SPEC_CACHE_TTL: Duration = Duration::from_secs(60);
 const MAX_SPEC_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
 const MAX_SPEC_CACHE_ENTRIES: usize = 128;
+// YAML aliases and merge keys expand while a spec is converted to JSON, so the
+// expanded document is bounded on its own, not only by the response size. A
+// dense spec at the response limit has roughly 460k nodes. The depth is
+// serde-saphyr's default, which the recursive conversion stays within on a
+// 2 MiB thread stack even in debug builds.
+const MAX_YAML_SPEC_NODES: usize = 1_000_000;
+const MAX_YAML_SPEC_SCALAR_BYTES: usize = 2 * MAX_SPEC_RESPONSE_BYTES;
+const MAX_YAML_SPEC_ANCHOR_EVENTS: usize = 250_000;
+const MAX_YAML_SPEC_DEPTH: usize = 64;
+const MAX_SPEC_ERROR_DETAIL_CHARS: usize = 300;
+// A large YAML document can briefly use tens of MiB while it expands. Spec URLs
+// can be set on user services, so only a few such parses run at once.
+const MAX_CONCURRENT_YAML_PARSES: usize = 4;
+const YAML_PARSE_QUEUE_WAIT: Duration = Duration::from_secs(10);
 
 static SPEC_CACHE: LazyLock<DashMap<String, CachedSpecEntry>> = LazyLock::new(DashMap::new);
+static YAML_PARSE_PERMITS: LazyLock<Arc<tokio::sync::Semaphore>> =
+    LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_YAML_PARSES)));
 static SPEC_FETCH_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
@@ -137,8 +155,9 @@ pub fn is_auto_discovered_asyncapi_spec_url(base_url: &str, spec_url: &str) -> b
     is_probe_url(base_url, spec_url, ASYNCAPI_PROBE_PATHS)
 }
 
-/// Fetch a JSON spec from a URL using the hardened fetch path (DNS pinning,
-/// response-size limit, redirect policy, 60s cache). Returns the cached Arc.
+/// Fetch a JSON or YAML spec from a URL using the hardened fetch path (DNS
+/// pinning, response-size limit, redirect policy, 60s cache). Returns the
+/// cached Arc, always as a JSON value.
 pub async fn fetch_spec_json(url: &str) -> AppResult<Arc<serde_json::Value>> {
     fetch_json_spec_internal(url, None).await
 }
@@ -913,7 +932,14 @@ async fn fetch_json_spec_internal(
         )));
     }
 
-    let mut response = response;
+    let body = read_spec_body(response, &log_url).await?;
+    let spec = Arc::new(parse_spec_body(body).await?);
+    cache_spec(&cache_key, spec.clone());
+    Ok(spec)
+}
+
+/// Read a spec response body, refusing it once it exceeds the size limit.
+async fn read_spec_body(mut response: reqwest::Response, log_url: &str) -> AppResult<bytes::Bytes> {
     let mut body = BytesMut::new();
     while let Some(chunk) = response.chunk().await.map_err(|error| {
         tracing::warn!(url = %log_url, %error, "Failed to read downstream API spec body");
@@ -932,13 +958,142 @@ async fn fetch_json_spec_internal(
         }
         body.extend_from_slice(&chunk);
     }
+    Ok(body.freeze())
+}
 
-    let spec = Arc::new(
-        serde_json::from_slice::<serde_json::Value>(&body)
-            .map_err(|e| AppError::BadRequest(format!("Spec was not valid JSON: {e}")))?,
-    );
-    cache_spec(&cache_key, spec.clone());
-    Ok(spec)
+/// Parse a fetched spec body. JSON is tried first, so JSON specs behave
+/// exactly as before. Anything else is read as YAML on the blocking pool,
+/// because YAML parsing is roughly ten times slower than JSON.
+pub(crate) async fn parse_spec_body(body: bytes::Bytes) -> AppResult<serde_json::Value> {
+    parse_spec_body_with_permits(body, &YAML_PARSE_PERMITS, YAML_PARSE_QUEUE_WAIT).await
+}
+
+async fn parse_spec_body_with_permits(
+    body: bytes::Bytes,
+    permits: &Arc<tokio::sync::Semaphore>,
+    queue_wait: Duration,
+) -> AppResult<serde_json::Value> {
+    let json_error = match serde_json::from_slice::<serde_json::Value>(&body) {
+        Ok(spec) => return Ok(spec),
+        Err(error) => error,
+    };
+    // The permit moves into the blocking task, so it stays held until parsing
+    // ends even if the caller stops waiting.
+    let permit = tokio::time::timeout(queue_wait, Arc::clone(permits).acquire_owned())
+        .await
+        .map_err(|_| AppError::RateLimited)?
+        .map_err(|_| AppError::Internal("YAML spec parsing is unavailable".into()))?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        parse_yaml_spec_body(&body, &json_error)
+    })
+    .await
+    .map_err(|error| AppError::Internal(format!("YAML spec parsing task failed: {error}")))?
+}
+
+/// A YAML spec must be an OpenAPI, Swagger, or AsyncAPI mapping, so a text or
+/// HTML page served at a probe path is never taken for a spec.
+fn parse_yaml_spec_body(
+    body: &[u8],
+    json_error: &serde_json::Error,
+) -> AppResult<serde_json::Value> {
+    let invalid = |detail: &dyn std::fmt::Display| {
+        let detail: String = detail
+            .to_string()
+            .chars()
+            .take(MAX_SPEC_ERROR_DETAIL_CHARS)
+            .collect();
+        AppError::BadRequest(format!("Spec was not valid JSON or YAML: {detail}"))
+    };
+    match parse_yaml_spec(body) {
+        Ok(spec) if is_api_description_document(&spec) => Ok(spec),
+        Err(YamlSpecError::LimitExceeded) => Err(invalid(
+            &"the YAML document exceeds the nesting depth, node count, text size, or alias expansion limits",
+        )),
+        // A body shaped like JSON was meant as JSON; its JSON error is the useful one.
+        _ if looks_like_json(body) => Err(invalid(json_error)),
+        Ok(_) => Err(invalid(
+            &"the YAML document is not an OpenAPI, Swagger, or AsyncAPI mapping",
+        )),
+        Err(YamlSpecError::Invalid(detail)) => Err(invalid(&detail)),
+    }
+}
+
+enum YamlSpecError {
+    LimitExceeded,
+    Invalid(String),
+}
+
+fn parse_yaml_spec(body: &[u8]) -> Result<serde_json::Value, YamlSpecError> {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    // A budget breach inside an alias expansion surfaces as a generic alias
+    // error, so the budget report is the reliable signal that a limit was hit.
+    let limit_exceeded = Rc::new(Cell::new(false));
+    let report_breach = Rc::clone(&limit_exceeded);
+    let options = serde_saphyr::options! {
+        budget: serde_saphyr::budget! {
+            max_depth: MAX_YAML_SPEC_DEPTH,
+            max_nodes: MAX_YAML_SPEC_NODES,
+            max_events: 2 * MAX_YAML_SPEC_NODES,
+            max_total_scalar_bytes: MAX_YAML_SPEC_SCALAR_BYTES,
+            max_recorded_anchor_events: MAX_YAML_SPEC_ANCHOR_EVENTS,
+            max_recorded_anchor_bytes: MAX_SPEC_RESPONSE_BYTES,
+            // Nodes and bytes already bound expansion; the alias:anchor ratio
+            // would also reject a spec that reuses one anchored schema often.
+            enforce_alias_anchor_ratio: false,
+        },
+        // Replayed events are charged to the budget, which trips first.
+        alias_limits: serde_saphyr::alias_limits! {
+            max_total_replayed_events: 2 * MAX_YAML_SPEC_NODES,
+        },
+        emit_comments: false,
+        // YAML 1.2 core schema, as OpenAPI specifies: `yes`/`no`/`on`/`off` stay strings.
+        strict_booleans: true,
+        // `.inf`/`.nan` have no JSON number form; keep them as strings.
+        reject_non_finite_typeless_float: false,
+        // Errors carry a line and column, never a snippet of the fetched document.
+        with_snippet: false,
+    }
+    .with_budget_report(move |report| {
+        if report.breached.is_some() {
+            report_breach.set(true);
+        }
+    });
+    serde_saphyr::from_slice_with_options(body, options).map_err(|error| {
+        use serde_saphyr::Error;
+        if limit_exceeded.get()
+            || matches!(
+                error,
+                Error::AliasReplayCounterOverflow { .. }
+                    | Error::AliasReplayLimitExceeded { .. }
+                    | Error::AliasExpansionLimitExceeded { .. }
+                    | Error::AliasReplayStackDepthExceeded { .. }
+            )
+        {
+            return YamlSpecError::LimitExceeded;
+        }
+        let mut render = serde_saphyr::RenderOptions::new(&serde_saphyr::UserMessageFormatter);
+        render.snippets = serde_saphyr::SnippetMode::Off;
+        YamlSpecError::Invalid(error.render_with_options(render))
+    })
+}
+
+fn is_api_description_document(spec: &serde_json::Value) -> bool {
+    spec.as_object().is_some_and(|document| {
+        ["openapi", "swagger", "asyncapi"]
+            .iter()
+            .any(|field| document.contains_key(*field))
+    })
+}
+
+fn looks_like_json(body: &[u8]) -> bool {
+    let body = body.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(body);
+    matches!(
+        body.iter().find(|byte| !byte.is_ascii_whitespace()),
+        Some(b'{' | b'[')
+    )
 }
 
 /// The compiled overlay a hosted catalog spec URL names, on any host: such
@@ -1225,14 +1380,257 @@ fn is_rfc6598_cgnat(ipv4: Ipv4Addr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        CachedSpecEntry, MAX_SPEC_CACHE_ENTRIES, ServiceDocumentationMetadata, SpecCacheTestGuard,
-        build_asyncapi_document, cache_spec, catalog_csp, detect_streaming_from_openapi,
-        discover_service_docs_for_category, fetch_spec_json, get_cached_spec, render_scalar_html,
-        scalar_docs_csp, validate_spec_fetch_target,
+        CachedSpecEntry, MAX_SPEC_CACHE_ENTRIES, MAX_SPEC_RESPONSE_BYTES, MAX_YAML_SPEC_DEPTH,
+        ServiceDocumentationMetadata, SpecCacheTestGuard, build_asyncapi_document, cache_spec,
+        catalog_csp, detect_streaming_from_openapi, discover_service_docs_for_category,
+        fetch_spec_json, get_cached_spec, parse_spec_body, parse_spec_body_with_permits,
+        read_spec_body, render_scalar_html, scalar_docs_csp, validate_spec_fetch_target,
     };
     use crate::errors::AppError;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
+
+    async fn parse_spec(body: &str) -> Result<serde_json::Value, AppError> {
+        parse_spec_body(bytes::Bytes::copy_from_slice(body.as_bytes())).await
+    }
+
+    async fn spec_error(body: &str) -> String {
+        match parse_spec(body).await {
+            Err(AppError::BadRequest(message)) => message,
+            other => panic!("expected a BadRequest spec error, got {other:?}"),
+        }
+    }
+
+    // Shaped like n8n's Public API spec (served only as YAML at /api/v1/openapi.yml),
+    // plus the YAML features a spec may use: integer response keys, anchors,
+    // aliases, and merge keys.
+    const N8N_STYLE_YAML_SPEC: &str = r#"openapi: 3.0.0
+info:
+  title: n8n Public API
+  version: 1.1.1
+servers:
+  - url: /api/v1
+x-error: &error-response
+  description: Unauthorized
+  content:
+    application/json:
+      schema:
+        type: object
+paths:
+  /workflows:
+    get:
+      operationId: getWorkflows
+      summary: Retrieve all workflows
+      parameters:
+        - name: mode
+          in: query
+          schema:
+            type: string
+            enum: [yes, no, on, off]
+      responses:
+        200:
+          description: Operation successful.
+        401: *error-response
+  /workflows/{id}:
+    delete:
+      operationId: deleteWorkflow
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          <<: *error-response
+          description: Deleted
+"#;
+
+    #[tokio::test]
+    async fn yaml_specs_parse_to_the_equivalent_json_document() {
+        let spec = parse_spec(N8N_STYLE_YAML_SPEC).await.expect("YAML spec");
+        let list = &spec["paths"]["/workflows"]["get"];
+        assert_eq!(spec["openapi"], "3.0.0");
+        assert_eq!(
+            list["responses"]["200"]["description"],
+            "Operation successful."
+        );
+        assert_eq!(list["responses"]["401"], spec["x-error"]);
+        assert_eq!(
+            list["parameters"][0]["schema"]["enum"],
+            serde_json::json!(["yes", "no", "on", "off"])
+        );
+        let deleted = &spec["paths"]["/workflows/{id}"]["delete"]["responses"]["200"];
+        assert_eq!(deleted["description"], "Deleted");
+        assert_eq!(deleted["content"], spec["x-error"]["content"]);
+
+        let endpoints = crate::services::openapi_parser::parse_openapi_spec_value(&spec)
+            .expect("YAML spec endpoints");
+        let mut operations: Vec<_> = endpoints
+            .iter()
+            .map(|endpoint| (endpoint.method.as_str(), endpoint.path.as_str()))
+            .collect();
+        operations.sort_unstable();
+        assert_eq!(
+            operations,
+            [("DELETE", "/workflows/{id}"), ("GET", "/workflows")]
+        );
+    }
+
+    #[tokio::test]
+    async fn json_specs_parse_as_before() {
+        let body = r#"{"openapi":"3.1.0","paths":{"/a":{"get":{"responses":{"200":{"description":"ok"}}}}}}"#;
+        assert_eq!(
+            parse_spec(body).await.expect("JSON spec"),
+            serde_json::from_str::<serde_json::Value>(body).unwrap()
+        );
+        // Any JSON document is still returned as-is; callers check its kind.
+        assert_eq!(
+            parse_spec("[1, 2]").await.expect("JSON array"),
+            serde_json::json!([1, 2])
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_specs_are_rejected_with_clear_errors() {
+        for (body, expected) in [
+            (
+                "<!doctype html>\n<html><body><div id=root></div></body></html>\n",
+                "not an OpenAPI, Swagger, or AsyncAPI mapping",
+            ),
+            (
+                "Error: not found\n",
+                "not an OpenAPI, Swagger, or AsyncAPI mapping",
+            ),
+            ("", "not an OpenAPI, Swagger, or AsyncAPI mapping"),
+            (r#"{"openapi": "3.0.0","#, "EOF while parsing"),
+            (r#"[1, 2,]"#, "trailing comma"),
+            ("openapi: 3.0.0\npaths: : :\n", "line 2"),
+            ("openapi: 3.0.0\n---\nopenapi: 3.1.0\n", "multiple"),
+            ("openapi: 3.0.0\nopenapi: 3.1.0\n", "duplicate mapping key"),
+        ] {
+            let message = spec_error(body).await;
+            assert!(
+                message.starts_with("Spec was not valid JSON or YAML: "),
+                "{body:?}: {message}"
+            );
+            assert!(message.contains(expected), "{body:?}: {message}");
+        }
+    }
+
+    #[tokio::test]
+    async fn yaml_parses_wait_for_a_bounded_permit_and_json_needs_none() {
+        let permits = Arc::new(tokio::sync::Semaphore::new(1));
+        let held = Arc::clone(&permits).acquire_owned().await.unwrap();
+        let yaml = bytes::Bytes::from_static(b"openapi: 3.0.0\npaths: {}\n");
+        let json = bytes::Bytes::from_static(br#"{"openapi":"3.0.0","paths":{}}"#);
+
+        // JSON never waits for the YAML pool.
+        assert!(
+            parse_spec_body_with_permits(json, &permits, Duration::from_millis(50))
+                .await
+                .is_ok()
+        );
+        // YAML waits for a permit and gives up after the queue wait.
+        assert!(matches!(
+            parse_spec_body_with_permits(yaml.clone(), &permits, Duration::from_millis(50)).await,
+            Err(AppError::RateLimited)
+        ));
+        drop(held);
+        assert!(
+            parse_spec_body_with_permits(yaml, &permits, Duration::from_millis(50))
+                .await
+                .is_ok()
+        );
+        // The permit is released when parsing finishes.
+        assert_eq!(permits.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn yaml_alias_bombs_are_rejected() {
+        let mut bomb = String::from(
+            "openapi: 3.0.0\nlol0: &lol0 [lol, lol, lol, lol, lol, lol, lol, lol, lol]\n",
+        );
+        for level in 1..10 {
+            let previous = format!("*lol{}", level - 1);
+            let items = [previous.as_str(); 9].join(", ");
+            bomb.push_str(&format!("lol{level}: &lol{level} [{items}]\n"));
+        }
+        let message = spec_error(&bomb).await;
+        assert!(message.contains("alias expansion limits"), "{message}");
+
+        // A few aliases of one large scalar are bounded by expanded text size.
+        let text = "x".repeat(1024 * 1024);
+        let aliases = ["*text"; 12].join(", ");
+        let message = spec_error(&format!(
+            "openapi: 3.0.0\ntext: &text {text}\ncopies: [{aliases}]\n"
+        ))
+        .await;
+        assert!(message.contains("alias expansion limits"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn yaml_nesting_is_bounded_including_through_aliases() {
+        let nested = |depth: usize| format!("{}1{}", "[".repeat(depth), "]".repeat(depth));
+        // The root mapping is one level.
+        parse_spec(&format!(
+            "openapi: 3.0.0\nx: {}\n",
+            nested(MAX_YAML_SPEC_DEPTH - 1)
+        ))
+        .await
+        .expect("nesting at the limit");
+        let message = spec_error(&format!(
+            "openapi: 3.0.0\nx: {}\n",
+            nested(MAX_YAML_SPEC_DEPTH)
+        ))
+        .await;
+        assert!(message.contains("nesting depth"), "{message}");
+
+        let half = MAX_YAML_SPEC_DEPTH / 2;
+        let message = spec_error(&format!(
+            "openapi: 3.0.0\nbase: &base {}\nuse: {}*base{}\n",
+            nested(half),
+            "[".repeat(half),
+            "]".repeat(half)
+        ))
+        .await;
+        assert!(message.contains("nesting depth"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn spec_responses_over_the_size_limit_are_refused() {
+        let server = wiremock::MockServer::start().await;
+        let yaml_line = "openapi: 3.0.0\n";
+        let at_limit = yaml_line.repeat(MAX_SPEC_RESPONSE_BYTES / yaml_line.len());
+        for (path, body) in [
+            ("/at-limit.yaml", at_limit.clone()),
+            (
+                "/over-limit.yaml",
+                format!("{at_limit}{}", "#".repeat(yaml_line.len() + 1)),
+            ),
+        ] {
+            wiremock::Mock::given(wiremock::matchers::path(path))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_string(body))
+                .mount(&server)
+                .await;
+        }
+
+        let response = reqwest::get(format!("{}/at-limit.yaml", server.uri()))
+            .await
+            .unwrap();
+        let body = read_spec_body(response, "test")
+            .await
+            .expect("body at the limit");
+        assert_eq!(body.len(), at_limit.len());
+
+        let response = reqwest::get(format!("{}/over-limit.yaml", server.uri()))
+            .await
+            .unwrap();
+        let err = read_spec_body(response, "test").await.unwrap_err();
+        assert!(
+            matches!(&err, AppError::BadRequest(message) if message.contains("byte limit")),
+            "{err:?}"
+        );
+    }
 
     #[test]
     fn detects_streaming_media_type_in_openapi() {
@@ -1510,6 +1908,14 @@ mod tests {
         assert!(super::is_auto_discovered_openapi_spec_url(
             "https://api.example.com",
             "https://api.example.com/.well-known/openapi"
+        ));
+        assert!(super::is_auto_discovered_openapi_spec_url(
+            "https://api.example.com",
+            "https://api.example.com/openapi.yaml"
+        ));
+        assert!(super::is_auto_discovered_openapi_spec_url(
+            "https://api.example.com",
+            "https://api.example.com/openapi.yml"
         ));
     }
 

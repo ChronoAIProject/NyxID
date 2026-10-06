@@ -314,7 +314,7 @@ export function AdminInviteCodesPage() {
             <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
               <MysteryBoxIcon className="h-64 w-64 text-muted-foreground" />
               <div className="space-y-1">
-                <p className="text-[12px] font-medium text-muted-foreground">
+                <p className="text-12 font-medium text-muted-foreground">
                   Failed to load invite codes
                 </p>
                 <p className="text-xs text-muted-foreground">
@@ -326,7 +326,7 @@ export function AdminInviteCodesPage() {
             <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
               <MysteryBoxIcon className="h-64 w-64 text-muted-foreground" />
               <div className="space-y-1">
-                <p className="text-[12px] font-medium text-muted-foreground">
+                <p className="text-12 font-medium text-muted-foreground">
                   No invite codes found
                 </p>
                 <p className="text-xs text-muted-foreground">
@@ -342,7 +342,7 @@ export function AdminInviteCodesPage() {
                   <div
                     key={ic.id}
                     className={cn(
-                      "rounded-xl border border-border/50 bg-card p-4 transition-colors hover:bg-white/[0.03] cursor-pointer",
+                      "rounded-xl border border-border/50 bg-card p-4 transition-colors hover:bg-overlay cursor-pointer",
                       isSaving && "pointer-events-none opacity-60",
                     )}
                     onClick={() => {
@@ -461,7 +461,7 @@ export function AdminInviteCodesPage() {
                         <TableCell>{getStatusBadge(ic)}</TableCell>
                         <TableCell>
                           {ic.note ? (
-                            <span className="text-[11px] text-text-tertiary">
+                            <span className="text-11 text-text-tertiary">
                               {ic.note}
                             </span>
                           ) : (
@@ -540,7 +540,7 @@ export function AdminInviteCodesPage() {
             <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
               <MysteryBoxIcon className="h-64 w-64 text-muted-foreground" />
               <div className="space-y-1">
-                <p className="text-[12px] font-medium text-muted-foreground">
+                <p className="text-12 font-medium text-muted-foreground">
                   Failed to load invite codes
                 </p>
                 <p className="text-xs text-muted-foreground">
@@ -912,7 +912,7 @@ export function AdminInviteCodesPage() {
                   </span>
                 </div>
                 {selectedCode.usages.length === 0 ? (
-                  <div className="rounded-md border border-dashed border-border py-8 text-center text-[11px] text-text-tertiary">
+                  <div className="rounded-md border border-dashed border-border py-8 text-center text-11 text-text-tertiary">
                     No redemptions yet.
                   </div>
                 ) : (
@@ -1012,7 +1012,7 @@ function InviteCodesByUserView({
       <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
         <MysteryBoxIcon className="h-64 w-64 text-muted-foreground" />
         <div className="space-y-1">
-          <p className="text-[12px] font-medium text-muted-foreground">
+          <p className="text-12 font-medium text-muted-foreground">
             No redemptions found
           </p>
           <p className="text-xs text-muted-foreground">
@@ -1031,7 +1031,7 @@ function InviteCodesByUserView({
           <div
             key={r.id}
             className={cn(
-              "rounded-xl border border-border/50 bg-card p-4 transition-colors hover:bg-white/[0.03]",
+              "rounded-xl border border-border/50 bg-card p-4 transition-colors hover:bg-overlay",
               isSaving && "pointer-events-none opacity-60",
             )}
           >
@@ -1062,7 +1062,7 @@ function InviteCodesByUserView({
                 {r.note ? (
                   <span>{r.note}</span>
                 ) : (
-                  <span className="text-muted-foreground/50">No note</span>
+                  <span className="text-text-tertiary">No note</span>
                 )}
               </div>
               <span className="shrink-0 tabular-nums">
@@ -1115,7 +1115,7 @@ function InviteCodesByUserView({
                 </TableCell>
                 <TableCell>
                   {r.note ? (
-                    <span className="text-[11px] text-text-tertiary">
+                    <span className="text-11 text-text-tertiary">
                       {r.note}
                     </span>
                   ) : (

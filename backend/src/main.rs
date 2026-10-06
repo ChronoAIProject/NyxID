@@ -168,6 +168,7 @@ pub struct AppState {
     /// settings writes. Enforcement reads this in-memory snapshot, never
     /// MongoDB, so broker checks do not add per-request database work.
     pub broker_policy: Arc<std::sync::RwLock<BrokerPolicy>>,
+    pub upload_retention: services::assistant_upload_retention::Cache,
     /// Server-side HMAC key used to derive `CliPairing.code_hash`.
     /// Lives in process memory only (never persisted), so a MongoDB
     /// snapshot alone doesn't let an attacker brute-force the 32^8
@@ -320,8 +321,16 @@ enum Commands {
     CleanupOrphans(cleanup_cli::CleanupArgs),
 }
 
+fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--attachment-worker") {
+        services::attachment_extraction::worker();
+        return;
+    }
+    server_main();
+}
+
 #[tokio::main]
-async fn main() {
+async fn server_main() {
     // Pick a rustls `CryptoProvider` explicitly before ANY TLS use.
     // Feature unification can compile multiple providers into the
     // backend (notably aws_lc_rs and ring), and rustls cannot
@@ -558,6 +567,9 @@ async fn main() {
     services::inference_service::backfill(&db)
         .await
         .expect("Failed to backfill inference metadata");
+    services::utility_inference_service::seed(&db)
+        .await
+        .expect("Failed to seed utility inference defaults");
 
     services::retired_service_service::retire_legacy_vendors(&db)
         .await
@@ -946,6 +958,7 @@ async fn main() {
             60,
         ),
         broker_policy: Arc::new(std::sync::RwLock::new(broker_policy)),
+        upload_retention: Default::default(),
         cli_pairing_hmac_key,
         auth_device_hmac_key,
         audit_chain_hmac_key,
@@ -978,6 +991,11 @@ async fn main() {
         config.billing_reconcile_interval_secs,
     );
     state.billing.spawn_refresh_worker();
+    services::assistant_upload_retention::refresh(&state.db, &state.upload_retention)
+        .await
+        .expect("Upload retention policy");
+    services::assistant_upload_retention::spawn(state.clone());
+    services::assistant_agent_learning::spawn(state.clone());
     spawn_broker_policy_refresh_task(state.clone());
 
     let login_cleanup_db = state.db.clone();
@@ -1013,6 +1031,8 @@ async fn main() {
     // Live assistant changes: one change stream for this process, and the
     // NyxBot reaction to finished links and new bots.
     handlers::nyxbot::spawn_live_dispatch(state.clone());
+    handlers::machine_update::spawn(state.clone());
+    services::machine_access_service::spawn(state.clone());
     {
         let live = state.assistant_live.clone();
         let db = state.db.clone();

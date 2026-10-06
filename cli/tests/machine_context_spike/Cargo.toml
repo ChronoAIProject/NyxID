@@ -1,0 +1,21 @@
+[package]
+name = "nyxid-machine-context-spike"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Deliberately independent: this is an acceptance experiment, not a shipped mode.
+[workspace]
+
+[dependencies]
+anyhow = "1"
+libc = "0.2"
+tokio = { version = "1", features = ["process", "rt", "macros"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.dev]
+debug = 0
+incremental = false
+

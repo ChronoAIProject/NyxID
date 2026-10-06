@@ -20,9 +20,12 @@ const liveEventSchema = z.discriminatedUnion("type", [
     group_id: z.string().nullable().default(null),
     turn_id: z.string().nullable().default(null),
     messages: z.number().int().nonnegative().default(0),
+    title_changed: z.boolean().optional(),
   }),
   z.object({ type: z.literal("group"), id: z.string() }),
   z.object({ type: z.literal("channels") }),
+  z.object({ type: z.literal("channel_thread"), id: z.string(), channel_id: z.string(),
+    parent_id: z.string().nullable(), conversation_id: z.string().nullable() }),
   z.object({ type: z.literal("resync") }),
 ]);
 export type NyxAgentLiveEvent = z.infer<typeof liveEventSchema>;

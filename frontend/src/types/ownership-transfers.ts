@@ -4,6 +4,8 @@ export interface OwnershipResource {
   readonly id: string;
   readonly name: string;
   readonly owner_user_id: string;
+  readonly owner_name?: string | null;
+  readonly owner_email?: string | null;
   readonly platform: string | null;
   readonly slug: string | null;
 }

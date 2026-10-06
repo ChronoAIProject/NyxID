@@ -280,7 +280,13 @@ pub async fn run(command: PoolCommands) -> Result<()> {
             } else {
                 "/service-pools/candidates".into()
             };
-            let mut query = format!("{endpoint}?method={}", urlencoding::encode(&method));
+            let mut query = format!("{endpoint}?limit={limit}");
+            if method.is_none() && path.is_none() {
+                query.push_str("&check_operation=false");
+            }
+            if let Some(method) = method {
+                query.push_str(&format!("&method={}", urlencoding::encode(&method)));
+            }
             if let Some(contract) = contract {
                 query.push_str(&format!(
                     "&member_contract={}",
@@ -297,7 +303,6 @@ pub async fn run(command: PoolCommands) -> Result<()> {
                 let org = resolve_org_id(&mut api, &org).await?;
                 query.push_str(&format!("&org_id={}", urlencoding::encode(&org)));
             }
-            query.push_str(&format!("&limit={limit}"));
             if let Some(after) = after {
                 query.push_str(&format!("&after={}", urlencoding::encode(&after)));
             }
@@ -445,21 +450,37 @@ fn snapshot_revision(current: &Value) -> Result<Value> {
 }
 
 async fn resolve_pool(api: &mut ApiClient, pool: &str, org: Option<&str>) -> Result<String> {
-    let Some(org) = org else {
+    // Preserve direct access to authorized organization IDs without requiring
+    // --org. A missing ID may still be an accepted UUID-shaped personal slug.
+    if org.is_none() && uuid::Uuid::parse_str(pool).is_ok() {
+        match api
+            .get::<Value>(&format!("/service-pools/{}", urlencoding::encode(pool)))
+            .await
+        {
+            Ok(_) => return Ok(pool.to_owned()),
+            Err(error)
+                if error
+                    .downcast_ref::<crate::api::ApiError>()
+                    .is_some_and(|error| error.status() == reqwest::StatusCode::NOT_FOUND) => {}
+            Err(error) => return Err(error),
+        }
+    } else if org.is_none() && pool != "candidates" {
         return Ok(pool.to_owned());
-    };
-    let owner = resolve_org_id(api, org).await?;
-    let response: Value = api.get(&service_pools_path(Some(&owner))).await?;
-    let matches: Vec<_> = response["pools"]
-        .as_array()
-        .ok_or_else(|| anyhow!("Invalid pool list"))?
-        .iter()
-        .filter(|row| row["id"].as_str() == Some(pool) || row["slug"].as_str() == Some(pool))
-        .collect();
-    if matches.len() != 1 {
-        bail!("Pool '{pool}' is not uniquely available in this organization");
     }
-    Ok(matches[0]["id"]
+    let owner = match org {
+        Some(org) => Some(resolve_org_id(api, org).await?),
+        None => None,
+    };
+    let response: Value = api.get(&service_pools_path(owner.as_deref())).await?;
+    let rows = response["pools"]
+        .as_array()
+        .ok_or_else(|| anyhow!("Invalid pool list"))?;
+    let selected = rows
+        .iter()
+        .find(|row| row["id"].as_str() == Some(pool))
+        .or_else(|| rows.iter().find(|row| row["slug"].as_str() == Some(pool)))
+        .ok_or_else(|| anyhow!("Pool '{pool}' is not available for this owner"))?;
+    Ok(selected["id"]
         .as_str()
         .ok_or_else(|| anyhow!("Pool has no ID"))?
         .to_owned())
@@ -472,6 +493,8 @@ fn print_candidates(output: OutputFormat, result: &Value) -> Result<()> {
     }
     if let (Some(method), Some(path)) = (result["method"].as_str(), result["path"].as_str()) {
         eprintln!("Operation: {method} {path}");
+    } else if result["operation_checked"] == false {
+        eprintln!("Connection inventory. Use --method and --path to check an operation.");
     }
     let mut table = Table::new();
     table.load_preset(UTF8_FULL_CONDENSED);
@@ -659,7 +682,7 @@ fn print_pool_detail(pool: &Value) {
         let mut table = Table::new();
         table.load_preset(UTF8_FULL_CONDENSED);
         table.set_header([
-            "Service ID",
+            "Connection",
             "Priority",
             "Model",
             "Weight",
@@ -676,12 +699,11 @@ fn print_pool_detail(pool: &Value) {
                         .find(|row| row["user_service_id"] == member["user_service_id"])
                 });
             table.add_row([
-                member
-                    .get("user_service_id")
-                    .and_then(Value::as_str)
-                    .map(crate::commands::short_id)
+                health
+                    .and_then(|row| row["slug"].as_str())
+                    .or_else(|| member.get("user_service_id").and_then(Value::as_str))
                     .unwrap_or("-")
-                    .to_string(),
+                    .to_owned(),
                 member
                     .get("priority")
                     .and_then(Value::as_u64)
@@ -707,13 +729,23 @@ fn print_pool_detail(pool: &Value) {
                     .and_then(|h| h["cooldown_until"].as_str())
                     .unwrap_or("-")
                     .into(),
-                health
-                    .and_then(|h| h["reason"].as_str())
-                    .unwrap_or("Available")
-                    .into(),
+                member_health_label(health).into(),
             ]);
         }
         eprintln!("{table}");
+    }
+}
+
+fn member_health_label(health: Option<&Value>) -> &str {
+    match health {
+        None => "Not checked",
+        Some(row) => row["reason"]
+            .as_str()
+            .unwrap_or(if row["eligible"] == true {
+                "Available"
+            } else {
+                "Unknown"
+            }),
     }
 }
 
@@ -1057,7 +1089,11 @@ mod tests {
                                 .is_some_and(|v| v == "same_api")
                             && query.get("strategy").is_some_and(|v| v == "round_robin")
                     } else {
-                        !query.contains_key("path")
+                        query
+                            .get("check_operation")
+                            .is_some_and(|value| value == "false")
+                            && !query.contains_key("method")
+                            && !query.contains_key("path")
                             && !query.contains_key("member_contract")
                             && !query.contains_key("strategy")
                     }
@@ -1073,7 +1109,7 @@ mod tests {
                 pool: Some("ai".into()),
                 contract: explicit.then(|| "same_api".into()),
                 strategy: explicit.then_some(PoolStrategyArg::RoundRobin),
-                method: "POST".into(),
+                method: explicit.then(|| "POST".into()),
                 path: explicit.then(|| "/items".into()),
                 org: None,
                 after: None,
@@ -1133,3 +1169,119 @@ mod tests {
 #[cfg(test)]
 #[path = "pool_failover_tests.rs"]
 mod failover_tests;
+
+#[cfg(test)]
+mod relook_tests {
+    use super::*;
+    use crate::test_support::mock_auth_with_output;
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const ID: &str = "ba284955-976e-42f2-ab43-5ac59c070b38";
+    const UUID_SLUG: &str = "c86980d8-1658-4f24-81cf-cd4a6dd1d2db";
+
+    #[test]
+    fn pool_detail_never_invents_checked_health() {
+        assert_eq!(member_health_label(None), "Not checked");
+        assert_eq!(member_health_label(Some(&json!({}))), "Unknown");
+        assert_eq!(
+            member_health_label(Some(&json!({"eligible":true}))),
+            "Available"
+        );
+        assert_eq!(
+            member_health_label(Some(&json!({"eligible":false,"reason":"cooldown"}))),
+            "cooldown"
+        );
+    }
+
+    #[tokio::test]
+    async fn pool_show_resolves_reserved_and_uuid_shaped_personal_slugs_to_ids() {
+        for slug in ["candidates", UUID_SLUG] {
+            let server = MockServer::start().await;
+            if slug == UUID_SLUG {
+                Mock::given(method("GET"))
+                    .and(path(format!("/api/v1/service-pools/{slug}")))
+                    .respond_with(ResponseTemplate::new(404))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+            }
+            Mock::given(method("GET"))
+                .and(path("/api/v1/service-pools"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({"pools":[{"id":ID,"slug":slug}]})),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path(format!("/api/v1/service-pools/{ID}")))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({"id":ID,"slug":slug})),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path(format!("/api/v1/service-pools/{ID}/health")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"candidates":[]})))
+                .expect(1)
+                .mount(&server)
+                .await;
+            run(PoolCommands::Show {
+                pool: slug.into(),
+                org: None,
+                method: None,
+                path: None,
+                auth: mock_auth_with_output(server.uri(), OutputFormat::Json),
+            })
+            .await
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn pool_concrete_org_id_works_without_org_and_authorization_errors_do_not_fall_back() {
+        for status in [200, 403] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path(format!("/api/v1/service-pools/{ID}")))
+                .respond_with(
+                    ResponseTemplate::new(status)
+                        .set_body_json(json!({"id":ID,"user_id":"organization","slug":"org-pool"})),
+                )
+                .expect(if status == 200 { 2 } else { 1 })
+                .mount(&server)
+                .await;
+            if status == 200 {
+                Mock::given(method("GET"))
+                    .and(path(format!("/api/v1/service-pools/{ID}/health")))
+                    .respond_with(
+                        ResponseTemplate::new(200).set_body_json(json!({"candidates":[]})),
+                    )
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+            }
+            let result = run(PoolCommands::Show {
+                pool: ID.into(),
+                org: None,
+                method: None,
+                path: None,
+                auth: mock_auth_with_output(server.uri(), OutputFormat::Json),
+            })
+            .await;
+            assert_eq!(result.is_ok(), status == 200);
+            assert!(
+                server
+                    .received_requests()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .all(|request| request.url.path() != "/api/v1/service-pools")
+            );
+        }
+    }
+}

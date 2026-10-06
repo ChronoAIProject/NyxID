@@ -76,7 +76,7 @@ export function ServiceAvatarStack({
                 <p className="font-medium">{item.name}</p>
                 {item.detail && <p className="mt-1">{item.detail}</p>}
                 {item.description && (
-                  <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+                  <p className="mt-1 text-11 leading-relaxed text-muted-foreground">
                     {item.description}
                   </p>
                 )}
@@ -89,7 +89,7 @@ export function ServiceAvatarStack({
               aria-label={`${showAll ? "Collapse" : `Show all ${items.length} entries`} · ${label}`}
               aria-expanded={showAll}
               onClick={() => setShowAll((value) => !value)}
-              className="relative ml-1 flex size-6 shrink-0 items-center justify-center rounded-full bg-muted text-[10px] font-medium ring-2 ring-card focus-visible:outline-2 focus-visible:outline-ring"
+              className="relative ml-1 flex size-6 shrink-0 items-center justify-center rounded-full bg-muted text-10 font-medium ring-2 ring-card focus-visible:outline-2 focus-visible:outline-ring"
             >
               {showAll ? "−" : `+${items.length - 4}`}
             </button>

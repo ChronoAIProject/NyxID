@@ -945,7 +945,10 @@ pub async fn run_thread(
     let agent = super::assistant_team_service::agent(db, &trigger.user_id, agent_id).await?;
     let policy = thread_policy.unwrap_or_else(|| default_thread_policy(trigger.source, &agent));
     let home = if policy == ThreadPolicy::Home {
-        Some(super::assistant_team_service::home_thread(db, keys, &agent).await?)
+        Some(
+            super::assistant_team_service::home_thread_for(db, keys, &trigger.user_id, &agent)
+                .await?,
+        )
     } else {
         None
     };
@@ -1024,6 +1027,7 @@ pub(crate) async fn run_thread_in_session(
         super::assistant_team_service::create_automation_thread(
             db,
             keys,
+            &run.user_id,
             agent,
             &trigger.label,
             session,

@@ -128,7 +128,7 @@ function ConnectionMetadata({
       : []),
   ];
   return (
-    <dl className="grid gap-x-6 gap-y-3 px-1 py-2 text-[11px] sm:grid-cols-2 lg:grid-cols-3">
+    <dl className="grid gap-x-6 gap-y-3 px-1 py-2 text-11 sm:grid-cols-2 lg:grid-cols-3">
       {rows.map(([label, value]) => (
         <div key={label} className="min-w-0">
           <dt className="text-muted-foreground">{label}</dt>
@@ -333,17 +333,17 @@ export function ServiceConnectionTable({
                         {readiness.reason}
                       </Badge>
                     </div>
-                    <p className="mt-1 flex min-w-0 items-center gap-1 text-[11px] text-muted-foreground">
+                    <p className="mt-1 flex min-w-0 items-center gap-1 text-11 text-muted-foreground">
                       <code className="truncate" title={key.slug}>
                         {key.slug}
                       </code>
-                      <span className="shrink-0 text-[10px] uppercase tracking-wide">
+                      <span className="shrink-0 text-10 uppercase tracking-wide">
                         · {key.service_type}
                         {key.streaming_supported ? " · Streaming" : ""}
                         {key.websocket_supported ? " · WebSocket" : ""}
                       </span>
                     </p>
-                    <p className="mt-1 flex flex-wrap items-center gap-x-2 text-[11px] text-muted-foreground">
+                    <p className="mt-1 flex flex-wrap items-center gap-x-2 text-11 text-muted-foreground">
                       <span
                         title={
                           key.expires_at
@@ -368,7 +368,7 @@ export function ServiceConnectionTable({
                           key={pool.id}
                           type="button"
                           onClick={() => onViewPool?.(pool.id)}
-                          className="mt-1 flex max-w-full items-center gap-1.5 text-left text-[11px] text-primary hover:underline"
+                          className="mt-1 flex max-w-full items-center gap-1.5 text-left text-11 text-primary hover:underline"
                           title={`${poolStrategyLabel(pool)} · ${pool.members.length} connections${!pool.is_active ? " · pool disabled" : ""}${!member.enabled ? " · member disabled" : ""}`}
                         >
                           <GitBranch
@@ -402,7 +402,7 @@ export function ServiceConnectionTable({
                       </span>
                     </div>
                     <p
-                      className="mt-1 truncate text-[11px] text-muted-foreground"
+                      className="mt-1 truncate text-11 text-muted-foreground"
                       title={credentialLabel(key, billing)}
                     >
                       {credentialLabel(key, billing)}
@@ -457,7 +457,7 @@ export function ServiceConnectionTable({
                             ? "No recorded use with exact connection attribution in the last 30 days"
                             : "Use is not reported by this server"
                       }
-                      className="mt-1 flex max-w-full items-center gap-1.5 rounded-sm text-left text-[11px] hover:text-primary focus-visible:outline-2 focus-visible:outline-ring"
+                      className="mt-1 flex max-w-full items-center gap-1.5 rounded-sm text-left text-11 hover:text-primary focus-visible:outline-2 focus-visible:outline-ring"
                     >
                       <Clock3
                         className="size-3.5 shrink-0 text-muted-foreground"
@@ -528,7 +528,7 @@ export function ServiceConnectionTable({
                           {billing &&
                             (billingCategory === "platform" ||
                               billingCategory === "byok") && (
-                              <span className="mt-1 block truncate text-[11px] text-muted-foreground">
+                              <span className="mt-1 block truncate text-11 text-muted-foreground">
                                 {plainBilling(key, billing, catalog).short}
                               </span>
                             )}
@@ -578,12 +578,12 @@ export function ServiceConnectionTable({
                     {editable ? (
                       <>
                         <p
-                          className="truncate font-mono text-[11px]"
+                          className="truncate font-mono text-11"
                           title={target(key)}
                         >
                           {target(key)}
                         </p>
-                        <p className="mt-1 flex flex-wrap items-center gap-x-2 text-[11px] text-muted-foreground">
+                        <p className="mt-1 flex flex-wrap items-center gap-x-2 text-11 text-muted-foreground">
                           <span className="truncate" title={configCounts}>
                             {authNames[key.auth_method] ?? key.auth_method} ·{" "}
                             {route}
@@ -601,7 +601,7 @@ export function ServiceConnectionTable({
                         </p>
                       </>
                     ) : (
-                      <p className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                      <p className="flex items-center gap-1.5 text-11 text-muted-foreground">
                         <LockKeyhole
                           className="size-3 shrink-0"
                           aria-hidden="true"
@@ -611,7 +611,7 @@ export function ServiceConnectionTable({
                           : "Editors only"}
                       </p>
                     )}
-                    <p className="mt-1 flex flex-wrap items-center gap-x-2 text-[11px]">
+                    <p className="mt-1 flex flex-wrap items-center gap-x-2 text-11">
                       <span
                         className="truncate"
                         title={

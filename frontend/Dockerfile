@@ -17,6 +17,7 @@ COPY frontend/ ./
 # Public docs site source. The docs-sync plugin resolves it relative to the
 # frontend dir (`../docs/site`), so it must land at /build/docs/site.
 COPY docs/ /build/docs/
+COPY cli/resources/machine-container/seccomp.json /build/cli/resources/machine-container/seccomp.json
 
 # Telemetry config (DSN, host, share-back flag) is fetched at runtime
 # from the backend's /api/v1/public/config endpoint — no build-time
@@ -30,6 +31,7 @@ FROM nginxinc/nginx-unprivileged:1.27-alpine
 
 # Copy the built SPA
 COPY --from=builder /build/frontend/dist /usr/share/nginx/html
+COPY --from=builder /build/frontend/dist/legal-cache.conf /etc/nginx/legal-cache.conf
 
 # Copy the nginx config template (envsubst runs automatically via nginx entrypoint)
 COPY frontend/nginx.conf.template /etc/nginx/templates/default.conf.template

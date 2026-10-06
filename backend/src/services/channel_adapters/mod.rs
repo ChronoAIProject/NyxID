@@ -5,6 +5,10 @@ pub mod openclaw;
 pub mod slack;
 pub mod telegram;
 pub mod telegram_new;
+mod thread_facts;
+mod thread_support;
+#[cfg(test)]
+mod thread_tests;
 pub mod whatsapp;
 mod whatsapp_managed;
 pub mod x;
@@ -49,10 +53,12 @@ pub fn outbound_capabilities(
         Ok(adapter) => ChannelCapabilities {
             outbound: adapter.outbound_capabilities(),
             media: adapter.media_capabilities(),
+            threads: adapter.thread_capabilities(),
         },
         Err(_) => ChannelCapabilities {
             outbound: OutboundCapabilities::NONE,
             media: MediaCapabilities::NONE,
+            threads: Default::default(),
         },
     }
 }

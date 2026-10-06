@@ -42,6 +42,7 @@ import ApiGoogleCloudIcon from "./api-google-cloud";
 import ApiGithubIcon from "./api-github";
 import ApiGithubPatIcon from "./api-github-pat";
 import ApiFacebookIcon from "./api-facebook";
+import ApiLinkedinIcon from "./api-linkedin";
 import ApiDiscordIcon from "./api-discord";
 import ApiDiscordBotIcon from "./api-discord-bot";
 import ApiSpotifyIcon from "./api-spotify";
@@ -111,6 +112,7 @@ export const SPEC_CATALOG_SLUGS = [
   "api-github",
   "api-github-pat",
   "api-facebook",
+  "api-linkedin",
   "api-discord",
   "api-discord-bot",
   "api-spotify",
@@ -180,6 +182,7 @@ export const SERVICE_ICONS: Readonly<Record<string, IconComponent>> = {
   "api-github": ApiGithubIcon,
   "api-github-pat": ApiGithubPatIcon,
   "api-facebook": ApiFacebookIcon,
+  "api-linkedin": ApiLinkedinIcon,
   "api-discord": ApiDiscordIcon,
   "api-discord-bot": ApiDiscordBotIcon,
   "api-spotify": ApiSpotifyIcon,

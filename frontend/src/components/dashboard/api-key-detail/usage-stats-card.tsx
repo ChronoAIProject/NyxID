@@ -129,7 +129,7 @@ export function UsageStatsCard({
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Activity className="h-4 w-4 text-primary" />
-            <CardTitle className="text-[15px]">Usage</CardTitle>
+            <CardTitle className="text-15">Usage</CardTitle>
           </div>
           <Select value={String(days)} onValueChange={(v) => setDays(Number(v))}>
             <SelectTrigger className="h-8 w-[160px] text-xs">
@@ -158,25 +158,25 @@ export function UsageStatsCard({
           <>
             <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
               <div className="rounded-lg border border-border p-3">
-                <p className="text-[11px] font-semibold uppercase tracking-[1.5px] text-text-tertiary">
+                <p className="text-11 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
                   Requests
                 </p>
                 <p className="mt-1 text-lg font-semibold">{data.request_count}</p>
               </div>
               <div className="rounded-lg border border-border p-3">
-                <p className="text-[11px] font-semibold uppercase tracking-[1.5px] text-text-tertiary">
+                <p className="text-11 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
                   Successes
                 </p>
                 <p className="mt-1 text-lg font-semibold">{data.success_count}</p>
               </div>
               <div className="rounded-lg border border-border p-3">
-                <p className="text-[11px] font-semibold uppercase tracking-[1.5px] text-text-tertiary">
+                <p className="text-11 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
                   Errors
                 </p>
                 <p className="mt-1 text-lg font-semibold">{data.error_count}</p>
               </div>
               <div className="rounded-lg border border-border p-3">
-                <p className="text-[11px] font-semibold uppercase tracking-[1.5px] text-text-tertiary">
+                <p className="text-11 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
                   Error Rate
                 </p>
                 <p className="mt-1 text-lg font-semibold">

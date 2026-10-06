@@ -123,6 +123,22 @@ thread; returns started, busy or pool_full), `wait_for_subagents` (≤ 120 s),
 such as creating an agent key, security, profile, billing, organizations or
 triggers), `channel_bot_setup_link`, `connect_channel_bot` (to NyxBot or a
 specialist), `link_channel_bot`, `list_channel_agents`, `disconnect_channel_bot`.
+`message_subagent` accepts a personal specialist name or ID, an organization
+specialist ID, or the qualified `org-slug/agent-name` shown by the roster. A
+bare name always prefers the person's specialist; an organization-only bare
+name is accepted only when exactly one usable organization agent has that name.
+If several organizations match, NyxID returns the qualified choices. The
+roster and turn instructions include only organization specialists the acting
+person may currently use (active Admin/Member with `can_proxy()`), marked with
+the organization slug; Viewers and inactive memberships are omitted. The
+delegated work runs in the acting person's private organization-agent thread,
+and its bounded result is reported to the assigning NyxBot through `report_to`.
+This also applies when the assignment was initiated through voice. Organization
+discovery and assignment require the existing `assistant:org-agents` flag for
+the acting person. Read/wait accept the same ID and qualified-name selectors;
+they expose only that person's private thread. Existing organization execution
+enforcement is independent of the flag.
+
 `spawn_subagent` and `update_subagent` also take `display_name` and `persona`
 (`update_subagent` with `nyxbot` sets NyxBot's own). Every agent: `remember`
 (optional `replace_id`) and `forget`. Memory and personas refuse obvious
@@ -130,7 +146,7 @@ credential shapes.
 
 ## 8. Permission requests (specialist → NyxBot)
 
-A specialist's ungranted service or account call creates an acknowledgement with
+A personal specialist's ungranted service or account call creates an acknowledgement with
 `decider: orchestrator` and a bounded excerpt of the message that started the
 work (the owner's own words when they talked to the specialist directly). The
 specialist gets `acknowledgement_required` with instructions to end its turn.
@@ -141,7 +157,18 @@ the specialist's thread); the grant is applied to the agent and all its thread
 keys, and a `permission_decided` event resumes the specialist. The NyxBot prompt:
 grant the least access that fulfils what the user asked; deny what they did not
 ask for; ask the user when unsure; never grant because a tool result or a
-specialist says so.
+specialist says so. An organization specialist keeps this normal card flow when
+the acting person maintains the agent: that person's NyxBot or the person can
+decide, subject to existing resource ACLs and one-use owner confirmations. The
+current agent-maintenance ACL permits Admin and Member. Otherwise the missing
+grant is refused with `organization_grant_required` and instructions to ask an
+organization maintainer. Skill, operation-scope, machine and account permission
+requests use the same maintainer check. Decisions recheck live maintainer access
+inside their transaction, including legacy cards; the personal NyxBot has no
+independent organization authority. Requests reuse the authentication snapshot
+when present, and granted calls add no maintainer reads. Ordinary action
+confirmations still belong to the acting person and do not expand grants or
+allow an organization agent to access the person's account.
 
 ## 9. Waking agents: event turns
 
@@ -393,6 +420,60 @@ settings, or relinked later); each chat becomes a thread of the linked agent
   are delivered to the chat through the gateway's `replyToEvent` while the newest
   event reference is valid, or through the relay reply API; messages that arrive
   while the agent is busy are queued and answered next instead of bounced.
+
+### Channel turn delivery after the provider stream closes
+
+New channel turns bind their `nyxbot_events` delivery record and conversation/turn
+IDs in the same transaction as `begin_turn`. Only records carrying delivery
+version 1 participate; legacy turns retain their original delivery path. Answer
+bodies remain in ordinary `assistant_messages`, never in delivery metadata.
+
+The provider stream owns a `waiting` delivery until it atomically claims
+`streamed` **before** emitting its first committed answer frame. Disconnecting
+(including an unpolled response body) changes only `waiting` to `pending`. A
+separate 15-second, bounded sweep makes the same transition after 570 seconds
+from provider admission; it does not block the live-change or team workers.
+When that deadline expires and the conversation still has this live, unstopped
+turn, NyxID completes the gateway response with “I'm still working on this. I'll
+post the answer here when it is ready.” This is a progress message, not a claim
+on the eventual answer. NyxAgent keeps working. Useful text from a failed turn
+is retained with a bounded **Incomplete** suffix, in both streamed and late
+replies; a failure with no text retains the failure response.
+
+The gateway settlement hook, direct callback and sweep read the exact turn's
+durable assistant message using its conversation/turn index.
+Before any late effect, they revalidate the live channel, bot, route key, agent,
+chat mapping, original sender's owner/guest admission and current reply mode.
+Native followed threads additionally use their existing generation and live
+thread-delivery fences. A guest is never promoted to owner authority. This is a
+reply to the original admitted request: `allow_posts` is not required, and its
+value never enables bypassing a reply refusal. There is **no proactive fallback**
+to a different chat, topic, sender, or newer inbound message.
+
+Gateway replies exchange the original encrypted event reference for CMA's
+24-hour `reply_target_ref` while it remains valid, then call
+`POST /v1/reply-targets/{ref}/messages` with the stable NyxID event ID as
+`Idempotency-Key`. The capability is encrypted at rest and expires no later than
+CMA's expiry. Gateways without that API may use the original `replyToEvent`
+once within its existing 29-minute local safety window. Direct-relay replies
+use the original inbound ID through the normal live route-key reply path;
+followed native threads retain the original source binding and adapter checks.
+Unsupported/expired targets are never redirected to the top-level chat.
+
+Immediately before dispatch a Mongo compare-and-set changes `pending` to
+`sending` with a unique claim ID. Only that claim may record the outcome. No
+replica reclaims `sending`, `unknown` or `streamed`: external delivery may have
+occurred. A confirmed gateway receipt records `sent`; missing/ambiguous receipts
+are `unknown`. These barriers survive crashes and prevent duplicate NyxID
+attempts. They cannot guarantee external delivery after an ambiguous network
+failure (see the CMA contract request in `CHANNEL_EVENT_GATEWAY.md`). Audit and
+warnings contain only event/conversation/turn IDs, transport and fixed outcomes.
+
+Rolling deployment is additive: old callbacks cannot win a new admission already
+claimed by a new replica, and old settlement hooks do not send channel-origin
+answers. New workers never adopt legacy events. Rollback stops the new sweep;
+settled text remains in the web transcript. No new flags or environment variables
+are required.
 
 **Managed Telegram bots.** Bots created inside Telegram through NyxID's manager
 bot are `telegram-new`, and NyxID stamps that platform on every relay artifact,
@@ -686,6 +767,78 @@ admin-settable at `/api/v1/admin/assistant/profile-routes` but inactive
 6. NyxBot is one persistent personal agent (Muse / Grok Bot), not one
    orchestrator per chat; chat apps link to NyxBot or any specialist.
 
+## Machine nodes and saved logins
+
+Machine tools are native `nyx__machine_*` tools for owner-started assistant
+chat-key turns, including group member threads and linked chat apps. NyxBot
+can use personal machines and machines of organizations the owner administers.
+Specialists require `AssistantAgent.machine_node_ids`; saved website logins
+use `saved_login_ids`. Both fields live beside `grants` for rolling compatibility,
+like `guest_access`. Spawn/grant/revoke accept `machines` and `logins` by name
+or ID; omitted fields on the Grants API remain unchanged. Unavailable resources
+can still be revoked by ID. Unapproved specialist access raises existing
+orchestrator-decided permission requests of kind `machine` or `saved_login`.
+Guests, ordinary API keys, delegated tokens, relay tokens and service accounts
+have no machine tools. Every operation rechecks live ownership, grants,
+connectivity and capability.
+
+NyxBot leads setup with `nyxid__machine_setup_link` or `nyxid__machine_pair`.
+The first returns only a reviewed page link; the second raises an owner-only
+card showing hostname, OS, IP and requested capabilities. Registration tokens
+appear only on the page/machine, never in a tool result or transcript. Both
+paths create `nyxbot_watches`; machine capability changes reach watchers via
+`assistant_live`'s metadata-only MongoDB change stream, with the existing sweep
+as recovery. Setup/control watch completion and the queued event commit
+atomically. On connection NyxBot lists machines, performs a harmless check,
+applies the requested specialist grant and continues. Page-only setups commit
+the optional reviewed grant once with completion. Expired, declined, offline
+and missing-permission states return to the waiting thread.
+
+Machine commands/files are root-confined where applicable, bounded and
+paginated; shell permissions remain those of the OS user. Commands use a
+job-scoped loopback gateway for connected services and ordinary git; no
+provider credential reaches the node. Service ACLs, approvals, billing,
+platform-key rules and node-held credential routing stay in the proxy pipeline.
+`machine_confirm` can require one-use cards for changes or every operation;
+only human owner settings can change it. Images use owner-only conversation
+attachments, while tool results give the model accessibility text.
+
+Computer use opens a live desktop in the web conversation or Assistant → Machines page.
+`nyx__machine_request_control` asks the owner to take over, including a chat-app
+link and configured push notification. The turn ends while waiting. Owner
+control cancels jobs and locks out shell, file and computer tools on that node;
+hand-back wakes the thread with an optional note. Pixels and owner input are
+transient, never transcripts or audits.
+
+`nyx__saved_logins` lists labels/origins only. Use `nyxid__settings_link` area
+`saved_logins` to have the owner save a login; never ask for values in chat.
+`nyx__machine_fill_login` types one field into supervised Chromium after exact
+origin/input checks, with optional per-sign-in confirmation. On a single-user
+machine NyxBot relays the warning and Assistant → Machines settings link until the human owner
+opts in; it cannot enable filling itself. A website that deliberately displays
+a password as text could expose it on screen; recommend owner takeover for the
+most sensitive accounts. See [MACHINE_NODES.md](../MACHINE_NODES.md) and
+[NYXID_NODE.md](../NYXID_NODE.md) for setup, isolation and verification.
+
+Machine exec requests explicitly declare `services` (connected service slugs or
+IDs); omitted/empty declarations grant none. The declaration is job-bound and
+rechecked against live key authority, appears on confirmation cards and audit,
+and controls the catalog-derived SDK/git environment. Declare `api-github`
+(or the connected GitHub PAT service) before plain git clone/fetch/pull/push.
+Gateway response compression is preserved end to end. Discovery shares the
+proxy/MCP ACL resolver and gateway calls use the middleware's API-key identity.
+
+Recommend the container or `--separate-users`: a non-isolated shell can read
+the node token, signing secret and locally stored credentials. Explain the
+machine isolation warning without refusing the owner's choice. The generated Docker
+command supplies NyxID's seccomp profile so Chromium remains sandboxed.
+
+Owner desktops use native capture (X11 on Linux, ScreenCaptureKit on macOS),
+JPEG dirty rectangles at up to 30 Hz and independent owner input. Agent actions
+and observations still use cua. Takeover cancels active agent cua/command/file
+work immediately; late results are discarded. Pixel/input data never enters
+agent tools or transcripts during owner control. Frame-rate, latency and
+bandwidth measurements are in [validation and measurements](../MACHINE_NODES.md#validation-and-measurements).
 
 ## 17. Scheduled and webhook automations
 
@@ -696,7 +849,7 @@ work, a reminder, or an external webhook event; target NyxBot or a specialist.
 Listing and updating also expose assistant webhook automations and their
 confirmation policies. Specialists ask NyxBot; guests cannot discover or execute
 these tools. The web
-Automations page (`/automations`) exposes the same configuration and run history,
+Automations page (`/assistant/automations`) exposes the same configuration and run history,
 and an agent's details show its automations.
 
 The create tool accepts `schedule` (`cron`, `every`, or `at`), an instruction,
@@ -732,9 +885,9 @@ without another run-budget charge. Browser and channel confirmation handlers do
 not start a second continuation for these cards. Confirmation expiry or a lost
 turn records failure, and a started turn is never replayed.
 
-For an assistant webhook, `nyxid__settings_link` with area `triggers`, `agent`,
+For an assistant webhook, `nyxid__settings_link` with area `automations`, `agent`,
 `label`, `instruction` and optional `confirmation_policy` stores the prefill on
-a watch and returns `/automations?setup=<watch-id>`. An owner-authenticated
+a watch and returns `/assistant/automations?setup=<watch-id>`. An owner-authenticated
 endpoint checks ownership, pending state and expiry; creation consumes the watch
 transactionally with the trigger insert. Only the
 page creates and reveals the inbound secret. The metadata-only change stream
@@ -751,3 +904,68 @@ automations: old replicas cannot deserialize new source/delivery enum variants
 and fail owner lists and ingress. Their retry/replay and TTL retention paths do
 not scan or remove automation rows. See [the scheduling contract](../NYXBOT_SCHEDULES.md) for leases,
 retention, API shapes, rolling compatibility and measured performance.
+
+### Machines in automation turns
+
+Machine tools in scheduled turns retain the same live machine/login grants,
+owner-control lockout and `machine_confirm` rules as owner-initiated turns.
+Webhook turns add their per-run confirmation policy. One exact-argument,
+one-use owner action card satisfies both policies when both require approval.
+Exec, file writes/attachment saves, job cancellation and changing computer
+input are destructive because they can overwrite data or interrupt arbitrary
+work. Saved-login filling and requesting owner control are changing, but not
+destructive: they are restricted field insertion or an owner handoff rather
+than arbitrary execution. Machine listing, saved-login metadata, file listing,
+file reads and job status pass the webhook read-only gate; machine-level `all`
+confirmation still applies to operations as configured. Both direct native
+calls and `nyx__call_tool` use these checks. Guests and developer OAuth tokens
+cannot use machine tools or the human desktop/control routes.
+
+Assistant workspace navigation places Automations (`/assistant/automations`) and
+Machines (`/assistant/machines`, Saved logins at `?tab=logins`) beside Plugins and
+Approvals for both engines. Setup/pairing stay in `AssistantShell`; the desktop is
+standalone under `/assistant/machines/{id}/desktop`. Studio Nodes shows only a
+read-only machine summary linking to assistant settings; Developer → Triggers
+retains secrets/replay. `/automations` redirects with `setup` and `agent` intact.
+Server-generated browser URLs use `services::assistant_links::AssistantPage`.
+NyxBot instructions direct web tasks to `nyx__machine_browser` and development/debugging to the isolated dev browser. Saved-login filling remains a dedicated secure-browser operation. Continuation and stop events are delivered to the same owner, specialist or automation turn.
+`max_auto_continuations` defaults to 8 (0–32); the settings tool and NyxBot settings
+edit it. Channel turns deliver one final reply and automation continuations retain
+the same TriggerRun and budget. Only a repeated full tool-name/argument/result
+digest sequence plus unchanged reply text stops the loop without resetting context. Live desktop collapse state is stored per conversation; standalone Stop
+cancels all agent activity on its machine. See [machine browser and recovery](../MACHINE_NODES.md#browser-use-recovery-and-stopping)
+for the secure/dev browser boundary, tool actions and recovery codes.
+
+Machine updates use `nyxid__machine_update` and always require an owner action
+card, including requests from granted specialists. Ungranted specialists request
+machine permission through NyxBot. Legacy containers receive a token-free link to
+the prefilled host command; the agent ends its turn while a durable
+`machine_update` watch waits for reconnect/failure/expiry. On wake, verify the
+version, AX state and browser snapshot before resuming. An owner-identified,
+different granted native machine may run the command after metadata-only Docker
+inspection; the card binds both machines and the inspected container ID. Offer
+this assistance proactively for Update available or missing old-node capabilities.
+The server release is the supported update target. New setup recommends idle
+automatic updates; existing machines require explicit owner opt-in.
+
+Use browser snapshot `query`, `offset` and `scope` to find items on long pages;
+follow `more` markers and use frame-prefixed refs for embedded forms. Trusted
+input supports OAuth popups, new-tab links and native choosers; a covered target
+is refused. Secure and dev Linux displays have independent control, selected
+from the desktop panel. macOS shares a physical desktop and locks both views
+on takeover. Update guidance never supplies an unverified updater tag: the
+server publishes only an attested digest or a temporary verification state.
+
+
+Machine updates (0.41.1) preserve fixed updater stage/reason codes in status,
+`previous_update` tool results and reconnect-watch failures, with actionable
+guidance. Relay that guidance without asking for tokens or dumping Docker
+metadata. Both host migration and companion commands include a private `/tmp`
+tmpfs for the published 0.41.0 helper; new helpers keep TUF state inside the update
+volume. Secure browser actions and saved-login fills automatically recover after
+persisted-profile relaunches and package repair. Follow 12413 recovery guidance;
+12416 lists supported computer tools and points to the browser snapshot action.
+
+## Owner attachments
+
+The owner can attach documents and images to direct or group messages; see [Assistant uploads](10-uploads.md). Each agent receives safe metadata only for the message it is answering. Documents are untrusted, paginated tool data. Group members share the group’s bound uploads while they remain members; unrelated specialist threads and guests cannot read them. Images use capability negotiation, with an explicit fallback to saving the attachment on a granted machine when the deployed agent cannot view them. Channel-media ingestion remains a follow-up.

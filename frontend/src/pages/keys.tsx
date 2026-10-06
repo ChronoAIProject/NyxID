@@ -93,7 +93,7 @@ function ConnectionReconnect({
     <Button
       size="sm"
       variant="link"
-      className="mt-1 flex h-auto p-0 text-[11px]"
+      className="mt-1 flex h-auto p-0 text-11"
       onClick={() => onReconnect(connection)}
     >
       <RefreshCw className="size-3" />
@@ -226,7 +226,7 @@ function NyxIdApiKeysTab({
               <Shield className="h-4 w-4 text-primary" />
             </div>
             <div className="space-y-1">
-              <h3 className="text-[13px] font-semibold text-foreground">
+              <h3 className="text-13 font-semibold text-foreground">
                 Set up an isolated AI agent
               </h3>
               <p className="max-w-2xl text-xs text-muted-foreground">
@@ -247,9 +247,7 @@ function NyxIdApiKeysTab({
       <div className="space-y-3">
         <div className="flex items-center gap-2">
           <KeySquare className="h-4 w-4 text-muted-foreground" />
-          <h3 className="text-[13px] font-semibold text-foreground">
-            Agent Keys
-          </h3>
+          <h3 className="text-13 font-semibold text-foreground">Agent Keys</h3>
         </div>
         <ApiKeyTable viewMode={viewMode} />
       </div>

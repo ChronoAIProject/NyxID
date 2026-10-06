@@ -1,0 +1,5 @@
+# Test-only CA import tooling; supervisor and browser are the production image.
+ARG MACHINE_IMAGE=nyxid-node-machine:local
+FROM ${MACHINE_IMAGE}
+RUN apt-get update && apt-get install -y --no-install-recommends libnss3-tools \
+    && rm -rf /var/lib/apt/lists/*

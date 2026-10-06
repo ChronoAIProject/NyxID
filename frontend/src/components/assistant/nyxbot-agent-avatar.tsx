@@ -8,10 +8,10 @@ import { cn } from "@/lib/utils";
 import type { AssistantAgentKind } from "@/schemas/assistant-nyxagent";
 
 const SIZES = {
-  xs: "h-4 w-4 text-[9px] tracking-[-0.04em]",
-  sm: "h-5 w-5 text-[9px]",
-  md: "h-6 w-6 text-[9px]",
-  lg: "h-8 w-8 text-[11px]",
+  xs: "h-4 w-4 text-9 tracking-[-0.04em]",
+  sm: "h-5 w-5 text-9",
+  md: "h-6 w-6 text-9",
+  lg: "h-8 w-8 text-11",
 } as const;
 
 /**

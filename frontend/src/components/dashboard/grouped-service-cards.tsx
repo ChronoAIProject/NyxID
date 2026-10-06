@@ -320,7 +320,7 @@ function GroupCard({
               <div className="min-w-0 flex-1">
                 <h3
                   id={headingId}
-                  className="text-[15px] font-semibold tracking-tight"
+                  className="text-15 font-semibold tracking-tight"
                 >
                   <button
                     type="button"
@@ -475,7 +475,7 @@ function GroupCard({
             </Button>
             <div className="flex items-center gap-2 pr-2">
               {matchingCount < count && (
-                <span className="text-[11px] text-muted-foreground">
+                <span className="text-11 text-muted-foreground">
                   {matchingCount} of {count} match
                 </span>
               )}

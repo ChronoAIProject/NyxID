@@ -141,6 +141,7 @@ export const PROBE_REGISTRY: Readonly<Record<string, ProbeRecipe | null>> = {
   "api-twitch": { path: "users" }, // base is .../helix
   "api-microsoft": { path: "me" }, // base is .../v1.0
   "api-facebook": { path: "me" }, // base is .../v21.0
+  "api-linkedin": { path: "v2/userinfo" },
   "api-slack": { path: "auth.test" }, // base is .../api
   "api-lark": { path: "authen/v1/user_info" }, // base is .../open-apis
   "api-feishu": { path: "authen/v1/user_info" }, // base is .../open-apis

@@ -277,6 +277,9 @@ pub async fn register_node(
     let signing_secret_hash = hash_token(&raw_signing_secret);
 
     let node = Node {
+        machine: None,
+        machine_confirm: Default::default(),
+        allow_single_user_saved_logins: false,
         // Registration-token ids are reserved as the future node identity.
         // This gives callers one stable, secret-free resource reference for
         // both the pending registration and the registered node.
@@ -354,6 +357,9 @@ pub async fn create_for_device(
     let signing_secret_hash = hash_token(raw_signing_secret.as_str());
 
     let node = Node {
+        machine: None,
+        machine_confirm: Default::default(),
+        allow_single_user_saved_logins: false,
         id: node_id.clone(),
         user_id: input.user_id.to_string(),
         name: device_node_name(input.label, &node_id),
@@ -427,6 +433,17 @@ pub async fn get_node_signing_secret(
             "Node {node_id} not found during request signing"
         )));
     };
+
+    signing_secret_from_node(encryption_keys, &node).await
+}
+
+/// Machine tools already batch-load their live nodes. Reusing that snapshot
+/// avoids a second database read solely to decrypt the signing key.
+pub(crate) async fn signing_secret_from_node(
+    encryption_keys: &EncryptionKeys,
+    node: &Node,
+) -> AppResult<Zeroizing<Vec<u8>>> {
+    let node_id = &node.id;
 
     let Some(encrypted_secret) = node.signing_secret_encrypted.as_deref() else {
         return Err(AppError::NodeOffline(format!(
@@ -1800,6 +1817,9 @@ mod tests {
     fn make_node(owner_id: &str, name: &str) -> Node {
         let now = Utc::now();
         Node {
+            machine: None,
+            machine_confirm: Default::default(),
+            allow_single_user_saved_logins: false,
             id: Uuid::new_v4().to_string(),
             user_id: owner_id.to_string(),
             name: name.to_string(),

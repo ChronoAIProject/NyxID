@@ -48,7 +48,7 @@ export function OneTimeSecretDialog({
         <div className="space-y-4">
           {values.map((value) => (
             <div key={value.label} className="space-y-2">
-              <p className="text-[10px] font-medium uppercase tracking-[1.5px] text-text-tertiary">
+              <p className="text-10 font-medium uppercase tracking-[1.5px] text-text-tertiary">
                 {value.label}
               </p>
               <div className="flex items-center gap-2 rounded-lg border border-border bg-muted px-3 py-2">

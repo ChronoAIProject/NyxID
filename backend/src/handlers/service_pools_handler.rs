@@ -578,6 +578,12 @@ pub struct PoolCandidatesQuery {
     pub member_contract: Option<PoolMemberContract>,
     /// Comma-separated selected UserService IDs in the draft (maximum 50).
     pub peer_ids: Option<String>,
+    /// Return only draft peer IDs, independently of inventory search/pagination.
+    #[serde(default)]
+    pub selected_only: bool,
+    /// Inspect a concrete operation (default true for compatibility).
+    /// False browses connections without operation checks or cooldown health.
+    pub check_operation: Option<bool>,
     pub method: Option<String>,
     pub path: Option<String>,
 }
@@ -585,6 +591,7 @@ pub struct PoolCandidatesQuery {
 #[derive(Serialize, ToSchema)]
 pub struct PoolCandidateResponse {
     pub user_service_id: String,
+    pub name: String,
     pub slug: String,
     pub is_active: bool,
     pub eligible: bool,
@@ -592,6 +599,10 @@ pub struct PoolCandidateResponse {
     pub credential_binding: String,
     pub protocol: Option<crate::models::downstream_service::InferenceWireProtocol>,
     pub catalog_service_id: Option<String>,
+    /// Authoritative original catalog grouping metadata. Custom connections
+    /// use the stable "Custom connections" group and a null catalog ID.
+    pub group_name: String,
+    pub group_slug: Option<String>,
     pub requires_compatibility_declaration: bool,
     pub cooldown_until: Option<String>,
     pub consecutive_failures: i64,
@@ -600,8 +611,9 @@ pub struct PoolCandidateResponse {
 
 #[derive(Serialize, ToSchema)]
 pub struct PoolCandidatesResponse {
-    pub method: String,
-    pub path: String,
+    pub operation_checked: bool,
+    pub method: Option<String>,
+    pub path: Option<String>,
     pub next_cursor: Option<String>,
     pub has_more: bool,
     pub candidates: Vec<PoolCandidateResponse>,
@@ -618,6 +630,7 @@ async fn inspect_pool_candidates(
     let allowed =
         (!auth.allow_all_services).then(|| auth.allowed_service_ids.iter().cloned().collect());
     let nodes = (!auth.allow_all_nodes).then(|| auth.allowed_node_ids.iter().cloned().collect());
+    let check_operation = query.check_operation.unwrap_or(true);
     let method = query.method.as_deref().unwrap_or("POST");
     http::Method::from_bytes(method.as_bytes())
         .map_err(|_| AppError::BadRequest("Invalid method".into()))?;
@@ -645,6 +658,9 @@ async fn inspect_pool_candidates(
         } else {
             "/"
         });
+    if check_operation {
+        crate::services::proxy_authorization::CanonicalPath::from_rest_decoded(path)?;
+    }
     let peers = query.peer_ids.as_ref().map(|value| {
         value
             .split(',')
@@ -684,14 +700,17 @@ async fn inspect_pool_candidates(
             search: query.search.as_deref(),
             limit: query.limit.unwrap_or(100),
             members_only,
+            selected_only: query.selected_only && !members_only,
+            inventory_only: !check_operation,
             peer_ids: peers.as_deref(),
             declared_peer_ids: query.declared_peer_ids.as_deref(),
         },
     )
     .await?;
     Ok(Json(PoolCandidatesResponse {
-        method: method.into(),
-        path: path.into(),
+        operation_checked: check_operation,
+        method: check_operation.then(|| method.into()),
+        path: check_operation.then(|| path.into()),
         has_more: candidates.next_cursor.is_some(),
         next_cursor: candidates.next_cursor,
         candidates: candidates
@@ -699,6 +718,7 @@ async fn inspect_pool_candidates(
             .into_iter()
             .map(|row| PoolCandidateResponse {
                 user_service_id: row.user_service_id,
+                name: row.name,
                 slug: row.slug,
                 is_active: row.is_active,
                 eligible: row.eligible,
@@ -706,6 +726,8 @@ async fn inspect_pool_candidates(
                 credential_binding: row.credential_binding,
                 protocol: row.protocol,
                 catalog_service_id: row.catalog_service_id,
+                group_name: row.group_name,
+                group_slug: row.group_slug,
                 requires_compatibility_declaration: row.requires_compatibility_declaration,
                 cooldown_until: row.cooldown_until.map(|t| t.to_rfc3339()),
                 consecutive_failures: row.consecutive_failures,

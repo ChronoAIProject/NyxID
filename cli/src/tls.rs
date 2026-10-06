@@ -10,7 +10,9 @@ use pki_types::{CertificateDer, pem::PemObject};
 use rustls::{ClientConfig, RootCertStore};
 use serde::Serialize;
 
+#[path = "tls/environment.rs"]
 pub(crate) mod environment;
+#[path = "tls/verifier.rs"]
 mod verifier;
 
 pub const ENV_HELP: &str = "Network / TLS:\n  NYXID_CA_CERT   Additional CA certificates (PEM file)\n  SSL_CERT_FILE  System CA bundle override\n  SSL_CERT_DIR   System CA directories (platform path separator)\n  HTTPS_PROXY / NO_PROXY  HTTP proxy and bypass hosts (WSS connects directly)\n  Run nyxid doctor for trust sources and network diagnostics.";
@@ -214,4 +216,5 @@ fn system_source(name: &'static str, path: String, count: usize) -> TrustSource 
 }
 
 #[cfg(test)]
+#[path = "tls/tests.rs"]
 pub(crate) mod tests;

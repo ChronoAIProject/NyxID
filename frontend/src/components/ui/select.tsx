@@ -1,6 +1,8 @@
 import * as React from "react";
 import * as SelectPrimitive from "@radix-ui/react-select";
 import { Check, ChevronDown, ChevronUp } from "lucide-react";
+import { OverlayLayer } from "@/components/ui/overlay-layer";
+import { useOverlayLayer } from "@/lib/overlay-layer";
 import { cn } from "@/lib/utils";
 
 /* ── NyxID Select Components ── */
@@ -16,7 +18,7 @@ const SelectTrigger = React.forwardRef<
   <SelectPrimitive.Trigger
     ref={ref}
     className={cn(
-      "flex h-8 w-full items-center justify-between gap-2 rounded-lg border border-input bg-transparent px-3 py-1.5 text-left text-[12px] text-foreground transition-colors duration-200 placeholder:text-text-tertiary focus-visible:outline-none focus-visible:border-white/[0.15] aria-invalid:border-destructive aria-invalid:focus-visible:border-destructive disabled:cursor-not-allowed disabled:opacity-50 [&>span]:min-w-0 [&>span]:line-clamp-1",
+      "flex h-8 w-full items-center justify-between gap-2 rounded-lg border border-input bg-transparent px-3 py-1.5 text-left text-12 text-foreground transition-colors duration-200 placeholder:text-text-tertiary focus-visible:outline-none focus-visible:border-input-focus aria-invalid:border-destructive aria-invalid:focus-visible:border-destructive disabled:cursor-not-allowed disabled:opacity-50 [&>span]:min-w-0 [&>span]:line-clamp-1",
       className,
     )}
     {...props}
@@ -67,7 +69,10 @@ SelectScrollDownButton.displayName =
 const SelectContent = React.forwardRef<
   React.ComponentRef<typeof SelectPrimitive.Content>,
   React.ComponentPropsWithoutRef<typeof SelectPrimitive.Content>
->(({ className, children, position = "popper", ...props }, ref) => (
+>(({ className, children, position = "popper", style, ...props }, ref) => {
+  const layer = useOverlayLayer();
+  return (
+  <OverlayLayer layer={layer}>
   <SelectPrimitive.Portal>
     <SelectPrimitive.Content
       ref={ref}
@@ -79,6 +84,7 @@ const SelectContent = React.forwardRef<
       )}
       position={position}
       {...props}
+      style={{ ...style, zIndex: layer }}
     >
       <SelectScrollUpButton />
       <SelectPrimitive.Viewport
@@ -93,7 +99,9 @@ const SelectContent = React.forwardRef<
       <SelectScrollDownButton />
     </SelectPrimitive.Content>
   </SelectPrimitive.Portal>
-));
+  </OverlayLayer>
+  );
+});
 SelectContent.displayName = SelectPrimitive.Content.displayName;
 
 const SelectLabel = React.forwardRef<
@@ -103,7 +111,7 @@ const SelectLabel = React.forwardRef<
   <SelectPrimitive.Label
     ref={ref}
     className={cn(
-      "px-3.5 py-2 text-[13px] font-medium text-muted-foreground",
+      "px-3.5 py-2 text-13 font-medium text-muted-foreground",
       className,
     )}
     {...props}
@@ -118,7 +126,7 @@ const SelectItem = React.forwardRef<
   <SelectPrimitive.Item
     ref={ref}
     className={cn(
-      "relative flex w-full cursor-pointer select-none items-center rounded-md py-1.5 pl-3 pr-8 text-[12px] outline-none transition-colors duration-200 focus:bg-white/[0.06] focus:text-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
+      "relative flex w-full cursor-pointer select-none items-center rounded-md py-1.5 pl-3 pr-8 text-12 outline-none transition-colors duration-200 focus:bg-overlay-strong focus:text-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
       className,
     )}
     {...props}

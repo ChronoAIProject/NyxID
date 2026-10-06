@@ -601,3 +601,210 @@ The signing secret may be out of sync. Rotate the node's token from the NyxID da
 ### Streaming responses not working
 
 Streaming is automatic when the downstream service returns `Content-Type: text/event-stream`. Verify the downstream service is configured correctly and the proxy request includes appropriate headers (e.g., `Accept: text/event-stream`).
+
+## Machine access for NyxBot and specialists
+
+Ask NyxBot to set up a machine. It returns an owner-only review page with one
+copyable command and watches until the node connects. The page offers this
+computer, a VM or Docker, independent command/file/computer capabilities, an
+organization owner when you administer one, and an optional specialist grant.
+Keep the command on that page: never paste its registration token into chat.
+A VM or container is recommended. Agents act with their OS user's full access,
+and content they encounter can contain prompt injection. Workspace roots
+constrain file tools and command working directories; they do not sandbox a
+shell command.
+
+On a machine you already have access to, run:
+
+```sh
+nyxid node setup --machine --computer
+```
+
+Without a token this prints an expiring pairing code and link. Open the link
+and explicitly confirm the hostname, OS, IP and capabilities, or tell NyxBot
+only the short code and approve its action card. Setup registers the node,
+installs the pinned computer driver when requested, then installs/starts the
+profile's launchd or systemd daemon. `--profile NAME` isolates node identities.
+`--root DIR` can be repeated; the default workspace is `~/nyxid-workspace`.
+`--token` is supported for the page-generated command. Existing `register` and
+`daemon install` commands still work.
+
+```sh
+nyxid node machine enable                    # commands and files
+nyxid node machine enable --computer         # independent computer capability
+nyxid node machine enable --shell --files --root /srv/workspace
+nyxid node machine disable --computer
+nyxid node machine disable --all
+nyxid node machine status
+```
+
+Capabilities default off and the local configuration is authoritative. Changes
+apply on daemon restart or reconnect. Shell/computer processes may run as root
+only with explicit `--allow-root`. Commands have a clean environment, no TTY,
+a process group killed on timeout/cancel, four concurrent jobs by default, a
+one-hour timeout ceiling and bounded output. Foreground results preserve the
+beginning and end of large output with byte totals; background output paginates
+by absolute offset from a bounded ring. Both share the configured memory cap.
+Background jobs survive socket reconnects, but a daemon restart ends them.
+
+Computer use runs the MIT cua driver **0.30.4**, verified against the release
+hashes in `cli/resources/cua/release.json`, through MCP stdio with telemetry
+disabled. NyxID never installs the AGPL perception extension. `--cua-driver PATH`
+uses an existing binary after checking its version. Standard mode may require
+human consent for some actions. `--computer-mode unrestricted` is explicit on
+hosts; it is the machine container default. On macOS, grant Screen Recording
+and Accessibility for the app launching the node, then restart it. The direct
+MCP driver's TCC attribution belongs to its launching app (for example Terminal).
+`machine status` and node details report both grants; a successful tool listing
+alone does not mean capture/input permissions are available. Captures that need
+a temporary filename use a private 128 MiB RAM volume, removed when the driver
+stops. If that volume cannot be created, computer use fails without writing a
+frame to disk. Linux capture stays in memory.
+
+### Container and separated Linux VM
+
+The published image is
+`ghcr.io/chronoaiproject/nyxid/nyxid-node-machine:<server-version>`. The Assistant → Machines setup page
+reads the server release from public config and provides the complete, pinned
+`docker run`. The CLI `nyxid node docker … --machine` defaults to `latest`;
+use the setup page command to pin the deployed server release. See
+[container upgrades](MACHINE_NODES.md#rollout-and-container-upgrades) before updating. Persist both `/workspace` and `/var/lib/nyxid-machine`; without
+`NYXID_NODE_TOKEN` the first boot prints a pairing code in its logs. It contains
+Chromium, Xvfb, Openbox, git, curl, Python, Node.js, ripgrep and build tools.
+The supervisor drops privileges: shell/file tools use `agent`, while Chromium
+and cua use `browser`. The browser profile is private; X authentication is
+unavailable to `agent`. Chromium retains its renderer sandbox through user and
+PID namespaces. The generated Docker command supplies the shipped seccomp
+profile with `--security-opt seccomp=...`, allowing those namespaces without
+added capabilities. Do not add `--no-sandbox`; see the sandbox instructions
+below for the equivalent manual command.
+
+For the same OS-user separation on a Linux VM:
+
+```sh
+sudo nyxid node setup --machine --computer --separate-users --root /srv/workspace
+```
+
+Setup creates profile-specific users and a system supervisor service. The
+supervisor running as root does not authorize commands as root: children drop
+to the configured users. A single-user host remains supported.
+
+### Connected services, files and desktop
+
+Each command receives `NYXID_GATEWAY_URL` on loopback and a fresh, job-limited
+`NYXID_GATEWAY_TOKEN`. Calls to `/s/{slug}/{path}` travel over the node socket
+and run through NyxID's live proxy authorization, approval, billing and audit
+pipeline. Declare the needed services in `nyx__machine_exec.services`; omitted
+means none. SDK base/key variables point there only for those declarations.
+For example, curl the GitHub API at `$NYXID_GATEWAY_URL/s/api-github/...` with
+the local bearer token. No connected-service credential is sent to the machine.
+
+After declaring the connected GitHub service, plain `git clone`, `fetch`, `pull`
+and `push` use it
+through smart HTTP. Per-process `GIT_CONFIG_*` rewrites HTTPS and `git@github.com:`
+URLs and adds only the local token; global/repository configuration and remotes
+retain the original URL. Git traffic streams with a route-specific 16 GiB
+upload limit and a one-hour response-header allowance for receive-pack; stream
+idle limits and the command's own timeout still apply. Set `timeout_secs` to a
+suitable value for large clones/pushes (the command default is 120 seconds).
+With no GitHub connection, git goes direct. An ungranted,
+disabled, approval-required or expired service returns a NyxID error.
+
+Conversation attachments can stream to the workspace. Verified PNG/JPEG/GIF/WebP
+files up to 5 MiB can be shared back, at most eight images per turn. Computer
+screenshots use the same owner-only attachment path, while the agent receives
+accessibility text. Clipboard file/image inputs are staged from the agent's
+readable workspace (5 MiB cap); cua cannot use them to open private browser
+files. Screenshot output-file options are disabled.
+
+The live desktop opens in NyxBot or from node details. Multiple owner viewers
+can watch; one takes control. Taking control cancels agent jobs and blocks
+computer, shell and file operations on that machine. Hand back with an optional
+note to wake the waiting thread. Owner frames and input are never persisted or
+returned to the model. Human capture uses X11 on Linux and ScreenCaptureKit on
+macOS; Linux owner input uses XTest, independently of capture and agent cua
+calls. macOS owner input uses a separate cua session. Idle sessions close.
+
+### Saved website logins
+
+Save labels, exact HTTPS origins, usernames, passwords and optional TOTP on the
+human-only Saved logins page. Secrets are write-only and envelope-encrypted.
+NyxBot can use the owner's logins; specialists need explicit grants. Guests
+never receive machine or saved-login tools.
+
+Filling works only in node-managed Chromium with admin-installed policies and
+the signed NyxID native-messaging extension. Policies disable DevTools,
+`javascript:` URLs, password saving and autofill. The extension checks the
+focused origin and input type, inserts with browser editing events and pins
+password fields against reveal toggles until submit/navigation. The native
+socket is inaccessible to the agent OS user on separated machines. Values and
+common encodings are scrubbed from machine text, file and job outputs.
+
+Setup requests administrator access once for the policies. Declining (or using
+`--skip-browser-policy`) leaves filling unavailable and preserves other machine
+features. On single-user hosts, filling is additionally off until the owner
+acknowledges the warning and enables it in Assistant → Machines settings: agent commands run
+as the same user as the browser and could read typed values. Prefer the
+container or a separated VM. Only the human owner can change this setting or
+`machine_confirm` (`none`, `changes`, `all`). A login can also require a card
+for every sign-in.
+
+The approved website and managed browser profile are trusted recipients; a
+website that deliberately re-displays a password as text could make it visible
+on screen, so use owner takeover for the most sensitive accounts.
+
+Interactive TTY machine sessions and Windows containers are follow-ups.
+See [MACHINE_NODES.md](MACHINE_NODES.md) for the authority model, protocol,
+acceptance coverage and repeatable performance checks.
+
+### Machine gateway declarations and isolation
+
+Declare connected services on each command, for example:
+
+```json
+{"machine":"dev","command":"git clone https://github.com/owner/private.git","services":["api-github"]}
+```
+
+Only declared, still-accessible services are available to that job. Omission
+means no service access. Git and SDK environment is set only for declarations;
+plain git works after declaring the connected host. Undeclared calls return an
+HTTP error instructing the agent to declare the missing service. Confirmation
+cards and machine audit metadata list declarations. SDK variables come from
+catalog `inference.wire_protocol`; git origins and Basic usernames come from
+`git_http` metadata (GitHub seeds use `https://github.com` / `x-access-token`).
+The signed environment spec contains local gateway paths, never provider
+credentials. Both gateway hops preserve Content-Encoding and Content-Length,
+so SDKs and git decode compressed responses normally while bodies stream.
+
+Prefer the machine container or a VM installed with `--separate-users`. On a
+single-user machine with shell enabled, commands can read the node's config,
+stored credentials, signing secret and node token. Workspace limits apply to
+file tools and working directories, not the shell. Setup/status and the Nodes
+page show this warning; Machines keeps a Not isolated badge. The owner may proceed.
+
+Chromium runs with its renderer sandbox enabled. Docker's default seccomp
+profile blocks Chromium's namespace setup; use the versioned profile shipped at
+`cli/resources/machine-container/seccomp.json`:
+
+```sh
+docker run --rm --shm-size=1g \
+  --security-opt seccomp=cli/resources/machine-container/seccomp.json \
+  ghcr.io/chronoaiproject/nyxid/nyxid-node-machine:latest
+```
+
+The setup page downloads this profile in its single copyable command, and
+`nyxid node docker start --machine` writes the embedded profile automatically.
+The profile adds clone/unshare/setns to the Moby default; no additional
+capabilities are needed. Agent commands, file workers, cua and Chromium inherit
+NoNewPrivs. The container test verifies nested renderer namespaces, seccomp and
+NoNewPrivs; Chromium never receives `--no-sandbox`.
+
+Owner live view uses X11/XFixes capture and independent XTest input on Linux,
+and ScreenCaptureKit with a separate human cua input session on macOS. Agent
+observations/actions remain on cua. At 30 Hz the encoder compares 64-pixel tiles
+and sends a JPEG dirty rectangle only when pixels change. Sequence-bound deltas
+recover with a full frame after loss; idle bandwidth is zero. Pixel buffers stay
+in memory and only reach owner browser sockets. Takeover cancels in-flight
+agent operations immediately, including file transfers, without capture locks.
+See [validation and measurements](MACHINE_NODES.md#validation-and-measurements) for measured frame rate,
+input latency, takeover latency and the exact macOS benchmark command.

@@ -20,6 +20,8 @@ log_format nyxid_frontend '$remote_addr - $remote_user [$time_local] '
     '"$nyxid_access_request" $status $body_bytes_sent '
     '"$nyxid_access_referrer" "$http_user_agent"';
 
+include /etc/nginx/legal-cache.conf;
+
 server {
     listen 8080;
     server_name _;
@@ -109,6 +111,36 @@ server {
         add_header X-Content-Type-Options "nosniff" always;
         add_header Referrer-Policy $nyxid_referrer_policy always;
         try_files $uri =404;
+    }
+
+    # Stable content hashes let clients reuse unchanged pages after their
+    # 24-hour freshness window, even when unrelated deployments occur.
+    location = /privacy {
+        default_type text/html;
+        etag off;
+        if_modified_since off;
+        if ($request_method !~ ^(GET|HEAD)$) { return 405; }
+        if ($http_if_none_match = $nyxid_legal_etag) { return 304; }
+        add_header ETag $nyxid_legal_etag;
+        add_header Cache-Control "public, max-age=86400, must-revalidate";
+        add_header X-Frame-Options "DENY" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy $nyxid_referrer_policy always;
+        try_files /privacy.html =404;
+    }
+
+    location = /terms {
+        default_type text/html;
+        etag off;
+        if_modified_since off;
+        if ($request_method !~ ^(GET|HEAD)$) { return 405; }
+        if ($http_if_none_match = $nyxid_legal_etag) { return 304; }
+        add_header ETag $nyxid_legal_etag;
+        add_header Cache-Control "public, max-age=86400, must-revalidate";
+        add_header X-Frame-Options "DENY" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy $nyxid_referrer_policy always;
+        try_files /terms.html =404;
     }
 
     # SPA fallback -- serve index.html for all non-file routes.

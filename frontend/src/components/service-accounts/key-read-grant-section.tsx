@@ -52,7 +52,7 @@ export function KeyReadGrantSection({ saId }: { readonly saId: string }) {
   return (
     <DetailSection title="Connection metadata access">
       <div className="space-y-4 p-5">
-        <p className="text-[12px] text-muted-foreground">
+        <p className="text-12 text-muted-foreground">
           Optional access to selected private connections owned by a person or
           organization. Catalog editors read the platform catalog through their
           catalog scopes granted by a platform administrator and do not need this grant. For private connection

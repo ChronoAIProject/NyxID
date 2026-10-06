@@ -31,6 +31,7 @@ import type {
 } from "@/schemas/usage-analytics";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { ChevronDown } from "lucide-react";
 import "./visualization.css";
 
 const COLORS = [
@@ -195,10 +196,10 @@ export function ChartView({
   };
   const chart = noUsage ? (
     <div className="flex h-full flex-col items-center justify-center gap-2 text-muted-foreground">
-      <span className="text-[15px] font-medium text-foreground">
+      <span className="text-15 font-medium text-foreground">
         No usage in this view
       </span>
-      <span className="text-[12px]">
+      <span className="text-12">
         Try a different time range or clear a filter.
       </span>
     </div>
@@ -242,7 +243,7 @@ export function ChartView({
         </PieChart>
       </ResponsiveContainer>
     ) : (
-      <div className="flex h-full items-center justify-center text-[12px] text-muted-foreground">
+      <div className="flex h-full items-center justify-center text-12 text-muted-foreground">
         {data.slices.some((slice) => slice.value === null)
           ? "Cost is unavailable for this selection."
           : "No positive values to display."}
@@ -515,7 +516,7 @@ export function ChartView({
           <span
             className={cn(
               "font-display font-medium tracking-tight tabular-nums",
-              compact ? "text-[22px]" : "text-[28px]",
+              compact ? "text-22" : "text-28",
             )}
           >
             {format(
@@ -523,9 +524,9 @@ export function ChartView({
               true,
             )}
           </span>
-          <span className="ml-2 text-[11px] text-muted-foreground">{unit}</span>
+          <span className="ml-2 text-11 text-muted-foreground">{unit}</span>
         </div>
-        <span className="text-[10px] text-muted-foreground">
+        <span className="text-10 text-muted-foreground">
           {temporal
             ? `${INTERVAL_LABELS[data.granularity]} · UTC`
             : panel.top
@@ -534,7 +535,7 @@ export function ChartView({
         </span>
       </div>
       {panel.chart === "combo" && (
-        <div className="mb-2 flex justify-between text-[10px] text-muted-foreground">
+        <div className="mb-2 flex justify-between text-10 text-muted-foreground">
           <span>Bars · {unit} · left axis</span>
           <span>Line · requests · right axis</span>
         </div>
@@ -555,7 +556,7 @@ export function ChartView({
       </div>
       <div
         id={`${chartId}-coverage`}
-        className="mt-3 space-y-1 text-[11px] text-muted-foreground"
+        className="mt-3 space-y-1 text-11 text-muted-foreground"
       >
         {temporal &&
           data.points.some((point) => partialBucket(point.bucket, data)) && (
@@ -588,7 +589,7 @@ export function ChartView({
             <div
               key={`${slice.id}-${index}`}
               className={cn(
-                "flex items-center justify-between gap-3 text-[11px]",
+                "flex items-center justify-between gap-3 text-11",
                 compact && "max-w-[46%]",
               )}
               title={`${slice.label}: ${format(analyticsAmount(slice))} ${unit}`}
@@ -603,7 +604,7 @@ export function ChartView({
                 {onSelect && slice.id && panel.top !== 0 ? (
                   <Button
                     variant="link"
-                    className="h-auto min-w-0 justify-start p-0 text-[11px] text-foreground"
+                    className="h-auto min-w-0 justify-start p-0 text-11 text-foreground"
                     title={`Filter to ${slice.label}`}
                     onClick={() => onSelect(slice.id!)}
                   >
@@ -628,81 +629,108 @@ export function ChartView({
         </div>
       )}
       <div className={cn("pt-4", compact && "mt-auto")}>
-        <details className="border-t border-border/50 pt-3">
-          <summary className="cursor-pointer text-[11px] text-muted-foreground hover:text-foreground">
-            View data table
-          </summary>
-          <div className="mt-3 max-h-72 overflow-auto rounded-lg border border-border/50">
-            <table className="w-full text-left text-[11px]">
-              <caption className="sr-only">{panel.title} data</caption>
-              <thead className="bg-muted/40">
-                <tr>
-                  <th className="px-3 py-2 font-medium">
-                    {temporal ? "Time (UTC)" : "Group"}
-                  </th>
-                  <th className="px-3 py-2 text-right font-medium">{unit}</th>
-                  {temporal &&
-                    panel.top !== 0 &&
-                    data.series.map((series, index) => (
-                      <th
-                        key={index}
-                        className="whitespace-nowrap px-3 py-2 text-right font-medium"
-                      >
-                        {series.label}
-                      </th>
-                    ))}
-                  {panel.chart === "combo" && (
-                    <th className="px-3 py-2 text-right font-medium">
-                      Requests
+        <section
+          className="border-t border-border/50 pt-3"
+          aria-label={`${panel.title} data table`}
+        >
+          <details
+            key={panel.table_display ?? "always"}
+            open={panel.table_display === "accordion" ? undefined : true}
+            className="group"
+          >
+            <summary
+              className={cn(
+                "flex cursor-pointer list-none items-center justify-between text-11 font-medium text-muted-foreground [&::-webkit-details-marker]:hidden",
+                panel.table_display !== "accordion" && "hidden",
+              )}
+            >
+              Data table
+              <ChevronDown className="size-3.5 transition-transform group-open:rotate-180" />
+            </summary>
+            {panel.table_display !== "accordion" && (
+              <h4 className="text-11 font-medium text-muted-foreground">
+                Data table
+              </h4>
+            )}
+            <div
+              className={cn(
+                "mt-2 overflow-auto rounded-lg border border-border/50",
+                compact ? "max-h-44" : "max-h-72",
+              )}
+            >
+              <table className="w-full text-left text-11">
+                <caption className="sr-only">{panel.title} data</caption>
+                <thead className="sticky top-0 bg-muted/90">
+                  <tr>
+                    <th className="px-3 py-2 font-medium">
+                      {temporal ? "Time (UTC)" : "Group"}
                     </th>
-                  )}
-                </tr>
-              </thead>
-              <tbody>
-                {temporal
-                  ? data.points.map((point, pointIndex) => (
-                      <tr
-                        key={point.bucket}
-                        className="border-t border-border/40"
-                      >
-                        <td className="whitespace-nowrap px-3 py-2">
-                          {timeLabel(point.bucket)}
-                        </td>
-                        <td className="px-3 py-2 text-right font-mono">
-                          {format(analyticsAmount(point))}
-                        </td>
-                        {panel.top !== 0 &&
-                          data.series.map((series, index) => (
-                            <td
-                              key={index}
-                              className="px-3 py-2 text-right font-mono"
-                            >
-                              {format(
-                                analyticsAmount(
-                                  series.points[pointIndex] ?? { value: null },
-                                ),
-                              )}
-                            </td>
-                          ))}
-                        {panel.chart === "combo" && (
-                          <td className="px-3 py-2 text-right font-mono">
-                            {point.requests.toLocaleString()}
+                    <th className="px-3 py-2 text-right font-medium">{unit}</th>
+                    {temporal &&
+                      panel.top !== 0 &&
+                      data.series.map((series, index) => (
+                        <th
+                          key={index}
+                          className="whitespace-nowrap px-3 py-2 text-right font-medium"
+                        >
+                          {series.label}
+                        </th>
+                      ))}
+                    {panel.chart === "combo" && (
+                      <th className="px-3 py-2 text-right font-medium">
+                        Requests
+                      </th>
+                    )}
+                  </tr>
+                </thead>
+                <tbody>
+                  {temporal
+                    ? data.points.map((point, pointIndex) => (
+                        <tr
+                          key={point.bucket}
+                          className="border-t border-border/40"
+                        >
+                          <td className="whitespace-nowrap px-3 py-2">
+                            {timeLabel(point.bucket)}
                           </td>
-                        )}
-                      </tr>
-                    ))
-                  : data.slices.map((slice, index) => (
-                      <tr key={index} className="border-t border-border/40">
-                        <td className="px-3 py-2">{slice.label}</td>
-                        <td className="px-3 py-2 text-right font-mono">
-                          {format(analyticsAmount(slice))}
-                        </td>
-                      </tr>
-                    ))}
-              </tbody>
-            </table>
-          </div>
-        </details>
+                          <td className="px-3 py-2 text-right font-mono">
+                            {format(analyticsAmount(point))}
+                          </td>
+                          {panel.top !== 0 &&
+                            data.series.map((series, index) => (
+                              <td
+                                key={index}
+                                className="px-3 py-2 text-right font-mono"
+                              >
+                                {format(
+                                  analyticsAmount(
+                                    series.points[pointIndex] ?? {
+                                      value: null,
+                                    },
+                                  ),
+                                )}
+                              </td>
+                            ))}
+                          {panel.chart === "combo" && (
+                            <td className="px-3 py-2 text-right font-mono">
+                              {point.requests.toLocaleString()}
+                            </td>
+                          )}
+                        </tr>
+                      ))
+                    : data.slices.map((slice, index) => (
+                        <tr key={index} className="border-t border-border/40">
+                          <td className="px-3 py-2">{slice.label}</td>
+                          <td className="px-3 py-2 text-right font-mono">
+                            {format(analyticsAmount(slice))}
+                          </td>
+                        </tr>
+                      ))}
+                </tbody>
+              </table>
+            </div>
+          </details>
+        </section>
       </div>
     </div>
   );

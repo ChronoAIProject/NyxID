@@ -121,3 +121,28 @@ Both authentication paths share one durable send barrier per bot/original messag
 Supported onboarding is **account-token entry**. NyxID does not offer managed Aurinko OAuth. The official [Account OAuth Flow](https://docs.aurinko.io/authentication/oauth-flow/account-oauth-flow) and [OpenAPI specification](https://apirefs.aurinko.io/assets/swagger.json) describe `GET /v1/auth/authorize` with `clientId`, `serviceType`, `scopes`, `responseType`, `returnUrl`, and `state`, followed by Basic-authenticated `POST /v1/auth/token/{code}` returning `accountId` and `accessToken`. These differ from NyxID's generic OAuth parser. Neither inspected contract documents PKCE challenge/verifier support. NyxID requires PKCE, so an interoperable managed flow needs official documentation/confirmation and testing of that support first. No security requirement is relaxed and no implicit/fake connection flow is exposed.
 
 Official references: [documentation index](https://docs.aurinko.io/llms.txt), [webhooks](https://docs.aurinko.io/unified-apis/webhooks-api), [webhook authentication](https://docs.aurinko.io/unified-apis/webhooks-api/authentication), [authentication scopes](https://docs.aurinko.io/authentication/authentication-scopes), and the OpenAPI specification above. The Aurinko overlay participates in the existing spec-drift map. Local validation uses mock Aurinko HTTP and a real MongoDB replica set; it does not establish production delivery latency, provider app verification, Google approval, or actual recipient delivery.
+
+## Followed mailbox threads
+
+When the default-off `nyxbot:thread-follow` flag is enabled, an Aurinko
+message addressed to the connected mailbox in `To`, or a verified reply to a
+retained NyxID message, can open one shared child conversation for that
+provider `threadId`. The existing `private_chats` sender gate is checked for
+every participant; sender-specific policy conflicts stop activation with the
+stable `thread_policy_conflict` code and preserve legacy routing.
+
+Replies continue to use the original message's single Reply-To/from recipient,
+empty CC/BCC and text-only body. The durable send barrier remains in force, so
+an uncertain provider submission is never retried automatically and follow
+does not enable reply-all. History is filtered by bounded provider participant
+proof stored as keyed, domain-separated HMAC-SHA256 fingerprints under the
+`email-participant` domain; missing proof yields metadata-only context rather
+than exposing another participant's mail. No additional Aurinko scope is
+requested automatically.
+
+The legacy `reply_to_platform_message_id` remains absent even when mail has an
+RFC In-Reply-To header. The parent is carried only in additive transient
+`raw_platform_data.email.reply_parent_id` and persisted thread facts. Email
+enrichment is best-effort: if the server HMAC key is unavailable, the email
+block is omitted and ordinary private routing continues; history items without
+participant fingerprints are omitted and the result is marked partial.

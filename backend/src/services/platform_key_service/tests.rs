@@ -625,6 +625,9 @@ async fn platform_key_http_llm_gateway_and_mcp_use_server_credential_and_live_ac
     .unwrap();
     let ctx = mcp_service::McpExecContext {
         attribution: None,
+        org_agent_access: None,
+        agent_owner: None,
+        operation_scopes: None,
         api_key_id: None,
         allow_all_nodes: true,
         allowed_node_ids: &[],

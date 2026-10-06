@@ -63,3 +63,24 @@ describe("GroupPendingActions", () => {
     ).toThrow();
   });
 });
+
+it("shows the triggering person and hides decisions from other participants", () => {
+  const metadata = { ...action, confirm_phrase: undefined };
+  render(<GroupPendingActions actions={[{ ...metadata, triggering_person: { id: "b", display_name: "Blair" }, can_decide: false }]}
+    members={[]} sending={false} onAnswer={vi.fn()} onDecide={vi.fn()} />);
+  expect(screen.getByText("Awaiting Blair")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Allow" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Deny" })).not.toBeInTheDocument();
+});
+
+it("decides an org card by id instead of posting a confirmation phrase", async () => {
+  const onDecide = vi.fn().mockResolvedValue(undefined);
+  const onAnswer = vi.fn();
+  const card = { ...action, confirm_phrase: undefined, triggering_person: { id: "b", display_name: "Blair" }, can_decide: true };
+  render(<GroupPendingActions actions={[card]} members={[]} sending={false} onAnswer={onAnswer} onDecide={onDecide} />);
+  await userEvent.click(screen.getByRole("button", { name: "Allow" }));
+  expect(onDecide).toHaveBeenLastCalledWith(card, "allow");
+  await userEvent.click(screen.getByRole("button", { name: "Deny" }));
+  expect(onDecide).toHaveBeenLastCalledWith(card, "deny");
+  expect(onAnswer).not.toHaveBeenCalled();
+});

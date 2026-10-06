@@ -437,6 +437,9 @@ mod tests {
         let requested_node_ids = vec![TEST_NODE_ID.to_string()];
         db.collection::<Node>(NODES)
             .insert_one(Node {
+                machine: None,
+                machine_confirm: Default::default(),
+                allow_single_user_saved_logins: false,
                 id: TEST_NODE_ID.to_string(),
                 user_id: TEST_USER_ID.to_string(),
                 name: "full-router-scope-node".to_string(),
@@ -1120,6 +1123,12 @@ mod tests {
 
     fn catalog_auth(method: AuthMethod) -> AuthUser {
         AuthUser {
+            org_agent_access: None,
+            assistant_group_id: None,
+            assistant_agent_owner_id: None,
+            assistant_operation_scopes: Default::default(),
+            assistant_turn_fence: None,
+            assistant_chat: None,
             user_id: uuid::Uuid::new_v4(),
             session_id: None,
             scope: catalog_delegation_service::MCP_CATALOG_READ_SCOPE.to_string(),
@@ -1589,6 +1598,12 @@ mod tests {
         let claims = jwt::verify_token(&state.jwt_keys, &state.config, token)
             .expect("verify minted delegated token");
         AuthUser {
+            org_agent_access: None,
+            assistant_group_id: None,
+            assistant_agent_owner_id: None,
+            assistant_operation_scopes: Default::default(),
+            assistant_turn_fence: None,
+            assistant_chat: None,
             user_id: Uuid::parse_str(&claims.sub).expect("delegated subject is a UUID"),
             session_id: None,
             scope: claims.scope,
@@ -1634,7 +1649,7 @@ mod tests {
     ) -> AppResult<
         AxumJson<crate::services::exact_service_approval_service::ExactServiceApprovalResult>,
     > {
-        exact_service_approvals::redeem_request(
+        Box::pin(exact_service_approvals::redeem_request(
             State(state.clone()),
             Extension(
                 crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
@@ -1644,7 +1659,7 @@ mod tests {
             auth.clone(),
             Path(created.request_id.clone()),
             AxumJson(fence),
-        )
+        ))
         .await
     }
 
@@ -1913,11 +1928,11 @@ mod tests {
             .count_documents(mongodb::bson::doc! {})
             .await
             .expect("count approvals before delegated hidden-target create");
-        let row_1_error = exact_service_approvals::create_request(
+        let row_1_error = Box::pin(exact_service_approvals::create_request(
             State(state.clone()),
             delegated_auth.clone(),
             AxumJson(generic_create(None, "matrix-row-1-delegated-hidden")),
-        )
+        ))
         .await
         .expect_err("delegated generic target must be outside the exact view");
         assert!(matches!(
@@ -1938,11 +1953,11 @@ mod tests {
         access_token_auth.scope = "proxy".to_string();
         access_token_auth.acting_client_id = None;
         access_token_auth.token_jti = None;
-        let AxumJson(row_3_created) = exact_service_approvals::create_request(
+        let AxumJson(row_3_created) = Box::pin(exact_service_approvals::create_request(
             State(state.clone()),
             access_token_auth.clone(),
             AxumJson(generic_create(None, "matrix-row-3-access-token-generic")),
-        )
+        ))
         .await
         .expect("non-delegated generic target remains approvable");
         assert_eq!(row_3_created.exact_view_digest, None);
@@ -1996,14 +2011,14 @@ mod tests {
             Some(200)
         );
 
-        let row_4_error = exact_service_approvals::create_request(
+        let row_4_error = Box::pin(exact_service_approvals::create_request(
             State(state.clone()),
             access_token_auth,
             AxumJson(generic_create(
                 Some(discovery.exact_view_digest.clone()),
                 "matrix-row-4-access-token-generic-with-view",
             )),
-        )
+        ))
         .await
         .expect_err("an out-of-view target cannot bind the exact-view digest");
         assert!(matches!(
@@ -2015,7 +2030,7 @@ mod tests {
             .count_documents(mongodb::bson::doc! {})
             .await
             .expect("count approvals before delegated omission");
-        let omitted_error = exact_service_approvals::create_request(
+        let omitted_error = Box::pin(exact_service_approvals::create_request(
             State(state.clone()),
             delegated_auth.clone(),
             AxumJson(
@@ -2032,7 +2047,7 @@ mod tests {
                     arguments: arguments.clone(),
                 },
             ),
-        )
+        ))
         .await
         .expect_err("delegated exact create requires the caller exact-view digest");
         assert!(matches!(
@@ -2063,25 +2078,25 @@ mod tests {
                 arguments: arguments.clone(),
             }
         };
-        let AxumJson(missing_generation) = exact_service_approvals::create_request(
+        let AxumJson(missing_generation) = Box::pin(exact_service_approvals::create_request(
             State(state.clone()),
             delegated_auth.clone(),
             AxumJson(generation_input(None, "integration-generation-missing")),
-        )
+        ))
         .await
         .expect("delegated create may omit the advisory generation");
         assert_eq!(
             Some(missing_generation.operation_generation),
             operation.operation_generation
         );
-        let AxumJson(mismatched_generation) = exact_service_approvals::create_request(
+        let AxumJson(mismatched_generation) = Box::pin(exact_service_approvals::create_request(
             State(state.clone()),
             delegated_auth.clone(),
             AxumJson(generation_input(
                 Some(operation.operation_generation.unwrap() + 1),
                 "integration-generation-mismatch",
             )),
-        )
+        ))
         .await
         .expect("caller generation mismatch is advisory at create");
         assert_eq!(
@@ -2097,11 +2112,11 @@ mod tests {
         let mut current_digest_input =
             generation_input(None, "integration-current-exact-view-digest");
         current_digest_input.exact_view_digest = Some(current_exact_view_digest);
-        let AxumJson(current_digest_created) = exact_service_approvals::create_request(
+        let AxumJson(current_digest_created) = Box::pin(exact_service_approvals::create_request(
             State(state.clone()),
             delegated_auth.clone(),
             AxumJson(current_digest_input),
-        )
+        ))
         .await
         .expect("create accepts the additive v2 digest during rolling compatibility");
         assert_eq!(
@@ -2118,7 +2133,7 @@ mod tests {
             "advisory generations and both v2 digest projections create approvals"
         );
 
-        let AxumJson(created) = exact_service_approvals::create_request(
+        let AxumJson(created) = Box::pin(exact_service_approvals::create_request(
             State(state.clone()),
             delegated_auth.clone(),
             AxumJson(
@@ -2135,7 +2150,7 @@ mod tests {
                     arguments: arguments.clone(),
                 },
             ),
-        )
+        ))
         .await
         .expect("real exact create handler with delegated digest");
         assert_eq!(
@@ -2164,7 +2179,7 @@ mod tests {
         .await
         .expect("approve per-request exact request");
 
-        let AxumJson(redeemed) = exact_service_approvals::redeem_request(
+        let AxumJson(redeemed) = Box::pin(exact_service_approvals::redeem_request(
             State(state.clone()),
             Extension(
                 crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
@@ -2183,7 +2198,7 @@ mod tests {
                     idempotency_key: created.idempotency_key.clone(),
                 },
             ),
-        )
+        ))
         .await
         .expect("real exact redeem handler");
         assert_eq!(
@@ -2195,7 +2210,7 @@ mod tests {
             Some(200)
         );
 
-        let AxumJson(redeem_omission) = exact_service_approvals::create_request(
+        let AxumJson(redeem_omission) = Box::pin(exact_service_approvals::create_request(
             State(state.clone()),
             delegated_auth.clone(),
             AxumJson(
@@ -2212,7 +2227,7 @@ mod tests {
                     arguments: arguments.clone(),
                 },
             ),
-        )
+        ))
         .await
         .expect("create delegated request for redeem omission");
         approval_service::process_decision(
@@ -2253,7 +2268,7 @@ mod tests {
             "digest omission must not claim redemption"
         );
 
-        let AxumJson(provider_bound) = exact_service_approvals::create_request(
+        let AxumJson(provider_bound) = Box::pin(exact_service_approvals::create_request(
             State(state.clone()),
             delegated_auth.clone(),
             AxumJson(
@@ -2270,7 +2285,7 @@ mod tests {
                     arguments,
                 },
             ),
-        )
+        ))
         .await
         .expect("create provider-bound exact request");
         approval_service::process_decision(
@@ -2334,7 +2349,7 @@ mod tests {
             "provider identity must move the exact-view fence"
         );
 
-        let AxumJson(provider_drifted) = exact_service_approvals::redeem_request(
+        let AxumJson(provider_drifted) = Box::pin(exact_service_approvals::redeem_request(
             State(state),
             Extension(
                 crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
@@ -2353,7 +2368,7 @@ mod tests {
                     idempotency_key: provider_bound.idempotency_key.clone(),
                 },
             ),
-        )
+        ))
         .await
         .expect("provider binding drift returns a typed fail-closed result");
         assert_eq!(
@@ -2846,6 +2861,9 @@ mod tests {
             .db
             .collection::<Node>(NODES)
             .insert_one(Node {
+                machine: None,
+                machine_confirm: Default::default(),
+                allow_single_user_saved_logins: false,
                 id: TEST_OUT_OF_SCOPE_NODE_ID.to_string(),
                 user_id: TEST_USER_ID.to_string(),
                 name: "full-router-out-of-scope-node".to_string(),

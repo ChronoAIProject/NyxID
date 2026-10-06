@@ -88,6 +88,32 @@ host route. If route detection fails, NyxID falls back to `HOSTNAME` and then
 
 ## Assistant Diagnostics
 
+### Upload ingress
+
+Assistant uploads add no environment variables. Every reverse proxy, CDN and
+ingress in front of NyxID must allow request bodies of at least **21 MiB** on
+`POST /api/v1/assistant/nyxagent/{conversations|groups}/{id}/attachments`.
+For nginx, set `client_max_body_size 21m;` in the existing location handling those
+paths, preserving its upstream configuration. NyxID itself accepts at most
+20 MiB per file and ten files per message, with 30 upload attempts per owner per
+minute across replicas. Larger files return HTTP 400; rate excess returns HTTP
+429. An earlier HTTP 413 can indicate a lower ingress body limit.
+
+Each replica admits four uploads and runs two isolated parser workers. Extraction
+has an eight-second worker deadline plus document/image expansion limits.
+Retention is configured at **Admin → Upload retention**, stored in MongoDB and
+refreshed across replicas every five seconds; it has no environment variable.
+Defaults are 24 hours for unsent files, 30 days for sent images/documents and the
+conversation lifetime for tool images. Admins can also delete images after their
+first turn settles. Reads enforce the current policy immediately; cleanup is a
+bounded, leased background sweep. This controls only NyxID's copy, not NyxAgent
+sessions or model-provider copies. Upgrade all replicas before changing policy;
+startup removes the old attachment TTL index. See [retention](chat/10-uploads.md#retention)
+for bounds and lifecycle details, and [Assistant uploads: ingress and operator limits](chat/10-uploads.md#ingress-and-operator-limits)
+for the complete limits, failure behavior and deployment contract.
+
+### Engine and diagnostics
+
 The default NyxAgent assistant introduces **no environment variable**. Its catalog
 slug `llm-nyx` and default-on feature flag `assistant:nyxagent-engine` are code-level
 configuration. The catalog row provides the upstream base URL. Readiness reports
@@ -381,6 +407,7 @@ Requires all four values. Create a Services ID and key at the [Apple Developer p
 | `TELEGRAM_WEBHOOK_SECRET` | | Secret for verifying Telegram webhook callbacks |
 | `TELEGRAM_WEBHOOK_URL` | | Public URL for Telegram webhooks (e.g. `https://auth.nyxid.dev/api/v1/webhooks/telegram`). Omit to use long polling mode. |
 | `TELEGRAM_BOT_USERNAME` | | Bot username without @ (for link instructions) |
+| `OPENAI_APPS_CHALLENGE_TOKEN` | | OpenAI plugin-portal domain verification token, served as plain text at `/.well-known/openai-apps-challenge` on the MCP host. Unset = 404 |
 | `APPROVAL_EXPIRY_INTERVAL_SECS` | `5` | Interval between approval expiry sweeps (seconds) |
 
 The approval system works without Telegram -- users can always approve/reject via the web UI. Telegram delivery requires `TELEGRAM_BOT_TOKEN`.
@@ -566,3 +593,28 @@ pre-v2 servers/reconcilers first. The acknowledgement and
 migration completion are durable; new replicas/restarts resume without the flag.
 Fresh databases need no acknowledgement. Do not restart old writers after
 cutover. See [Exact accounting](BILLING_EXACT_ACCOUNTING.md#d5-cutover-and-operations).
+
+### Machine node process environments
+
+Machine support adds no backend deployment environment variables. The machine
+container reads `NYXID_NODE_TOKEN` only during first registration (omit it for
+pairing), and `NYXID_NODE_URL` selects the existing node WebSocket endpoint.
+The entrypoint removes the registration token before starting the daemon.
+`NYXID_PROFILE` keeps the existing CLI profile convention.
+
+The supervisor sets `CUA_DRIVER_RS_TELEMETRY_ENABLED=false` for every cua child.
+`DISPLAY`/`XAUTHORITY` are passed only to browser/cua children, never command
+children. `NYXID_BROWSER_SOCKET` identifies the protected native-messaging
+socket inside the managed browser process; it contains no credential and is
+not inherited by agent commands.
+
+Every machine command receives a fresh local `NYXID_GATEWAY_TOKEN` and
+`NYXID_GATEWAY_URL=http://127.0.0.1:<ephemeral-port>`. The token is job-bound,
+redacted from output, and expires at completion. Granted SDK services also get
+`OPENAI_BASE_URL`/`OPENAI_API_KEY`, `ANTHROPIC_BASE_URL`/`ANTHROPIC_API_KEY`, or
+`XAI_BASE_URL`/`XAI_API_KEY`, with the local token in place of a provider key.
+Git receives gateway URL rewrites and headers through process-only
+`GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_n`, `GIT_CONFIG_VALUE_n`. Nothing writes
+these settings to a global or repository config. No NyxID or provider
+credential is inherited or copied to the command environment. See
+[MACHINE_NODES.md](MACHINE_NODES.md).

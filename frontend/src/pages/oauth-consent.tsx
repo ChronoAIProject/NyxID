@@ -21,8 +21,11 @@ import {
   Mail,
   RefreshCw,
   Save,
+  ShieldCheck,
   ShieldQuestion,
   UserRound,
+  UsersRound,
+  Waypoints,
 } from "lucide-react";
 import { OAUTH_SCOPE_META } from "@/lib/constants";
 import { useApplyTheme } from "@/hooks/use-theme";
@@ -177,19 +180,19 @@ function StoredIncrementalConsent({ handle }: { readonly handle: string }) {
   );
 }
 
+const SCOPE_ICONS: Readonly<Record<string, typeof CircleUserRound>> = {
+  openid: CircleUserRound,
+  profile: UserRound,
+  email: Mail,
+  roles: ShieldCheck,
+  groups: UsersRound,
+  proxy: Waypoints,
+  offline_access: RefreshCw,
+  "urn:nyxid:scope:broker_binding": KeyRound,
+};
+
 function ScopeIcon({ scope }: { readonly scope: string }) {
-  const Icon =
-    scope === "openid"
-      ? CircleUserRound
-      : scope === "profile"
-        ? UserRound
-        : scope === "email"
-          ? Mail
-          : scope === "offline_access"
-            ? RefreshCw
-            : scope === "urn:nyxid:scope:broker_binding"
-              ? KeyRound
-              : ShieldQuestion;
+  const Icon = SCOPE_ICONS[scope] ?? ShieldQuestion;
   return <Icon className="h-4 w-4" aria-hidden="true" />;
 }
 
@@ -301,8 +304,8 @@ function StandardConsentPage({
   const bindingGrantId = search.get("binding_grant_id") ?? "";
   const consentRequest = search.get("consent_request") ?? "";
   // Server-resolved hints: the app's declared default services matched to
-  // this user (pre-selected), and declared services the user has no match
-  // for (informational only).
+  // this user (fixed on the consent screen), and declared services the
+  // user has no match for (informational only).
   const bindingReview =
     search.get("binding_review") === "true" && Boolean(bindingGrantId);
   const currentBindingAllowsAllServices =
@@ -369,16 +372,21 @@ function StandardConsentPage({
     () =>
       Array.from(
         new Set([
+          ...preselectServiceIds,
           ...requiredServiceIds,
           ...resourceSelectedServiceIds,
           ...selectedServiceIds,
         ]),
       ).filter(
         (id) =>
-          requiredServiceIds.includes(id) || !deselectedServiceIds.includes(id),
+          preselectServiceIds.includes(id) ||
+          requiredServiceIds.includes(id) ||
+          resourceSelectedServiceIds.includes(id) ||
+          !deselectedServiceIds.includes(id),
       ),
     [
       deselectedServiceIds,
+      preselectServiceIds,
       requiredServiceIds,
       resourceSelectedServiceIds,
       selectedServiceIds,
@@ -401,11 +409,8 @@ function StandardConsentPage({
           secondary: service ? serviceSecondaryText(service) : "",
           description: service?.catalog_service_description?.trim() || "",
           orgName: service ? serviceOrgName(service) : null,
-          requestedByApp:
-            preselectServiceIds.includes(id) ||
-            resourceSelectedServiceIds.includes(id) ||
-            requiredServiceIds.includes(id),
           requiredByApp:
+            preselectServiceIds.includes(id) ||
             resourceSelectedServiceIds.includes(id) ||
             requiredServiceIds.includes(id),
           currentlyAuthorized:
@@ -430,7 +435,13 @@ function StandardConsentPage({
   );
 
   function toggleService(serviceId: string, checked: boolean) {
-    if (!checked && requiredServiceIds.includes(serviceId)) return;
+    if (
+      !checked &&
+      (preselectServiceIds.includes(serviceId) ||
+        resourceSelectedServiceIds.includes(serviceId) ||
+        requiredServiceIds.includes(serviceId))
+    )
+      return;
     setSelectedServiceIds((current) => {
       if (checked) {
         return current.includes(serviceId) ? current : [...current, serviceId];
@@ -449,7 +460,7 @@ function StandardConsentPage({
     return (
       <ConsentShell email={email} preview={Boolean(preview)}>
         <header className="py-12 text-center">
-          <h1 className="text-[22px] font-bold leading-tight text-foreground sm:text-[28px]">
+          <h1 className="text-22 font-bold leading-tight text-foreground sm:text-28">
             Invalid consent request
           </h1>
         </header>
@@ -470,7 +481,7 @@ function StandardConsentPage({
             </div>
             <span className="text-xs font-medium text-foreground">NyxID</span>
           </div>
-          <h1 className="break-words text-[22px] font-bold leading-tight text-foreground sm:text-[28px]">
+          <h1 className="break-words text-22 font-bold leading-tight text-foreground sm:text-28">
             {bindingReview
               ? isLarkBinding
                 ? "Review Lark bot access"
@@ -479,7 +490,7 @@ function StandardConsentPage({
                 ? "Authorize Lark bot"
                 : "Authorize application"}
           </h1>
-          <p className="max-w-md break-words text-[12px] leading-relaxed text-muted-foreground">
+          <p className="max-w-md break-words text-12 leading-relaxed text-muted-foreground">
             {bindingReview ? (
               <>
                 Review the NyxID services available to{" "}
@@ -498,7 +509,7 @@ function StandardConsentPage({
             )}
           </p>
           {preview && (
-            <p className="text-[11px] font-medium uppercase text-muted-foreground">
+            <p className="text-11 font-medium uppercase text-muted-foreground">
               Preview · Decisions disabled
             </p>
           )}
@@ -508,16 +519,13 @@ function StandardConsentPage({
       <section aria-labelledby="oauth-permissions" className="pb-5">
         <h2
           id="oauth-permissions"
-          className="text-[15px] font-semibold text-foreground"
+          className="text-15 font-semibold text-foreground"
         >
           This will allow {clientName} to:
         </h2>
         <div className="mt-4 divide-y divide-border/60">
           {scopes.map((item) => {
-            const meta = OAUTH_SCOPE_META[item] ?? {
-              title: "Custom permission",
-              description: "This app is requesting a non-standard permission.",
-            };
+            const meta = OAUTH_SCOPE_META[item];
             return (
               <div
                 key={`meta-${item}`}
@@ -527,12 +535,21 @@ function StandardConsentPage({
                   <ScopeIcon scope={item} />
                 </span>
                 <div className="min-w-0 flex-1">
-                  <p className="break-words text-[13px] font-medium text-foreground">
-                    {meta.title}
+                  <p
+                    className={`text-13 font-medium text-foreground ${meta ? "break-words" : "break-all font-mono"}`}
+                  >
+                    {meta?.title ?? item}
                   </p>
-                  <p className="mt-1 text-[12px] leading-relaxed text-muted-foreground">
-                    {meta.description}
-                  </p>
+                  {meta && (
+                    <>
+                      <p className="mt-1 text-12 leading-relaxed text-muted-foreground">
+                        {meta.description}
+                      </p>
+                      <code className="mt-1 block break-all text-11 text-muted-foreground">
+                        {item}
+                      </code>
+                    </>
+                  )}
                 </div>
               </div>
             );
@@ -547,7 +564,7 @@ function StandardConsentPage({
         <div className="flex items-center justify-between gap-4">
           <h2
             id="oauth-services"
-            className="text-[15px] font-semibold text-foreground"
+            className="text-15 font-semibold text-foreground"
           >
             Service access
           </h2>
@@ -563,7 +580,7 @@ function StandardConsentPage({
             {customize ? "Done" : "Customize"}
           </Button>
         </div>
-        <p className="mt-1.5 text-[12px] leading-relaxed text-muted-foreground">
+        <p className="mt-1.5 text-12 leading-relaxed text-muted-foreground">
           {serviceAccess.allow_all_services
             ? bindingReview && currentBindingAllowsAllServices
               ? "This binding currently authorizes all available services."
@@ -585,28 +602,28 @@ function StandardConsentPage({
                     className="flex flex-col gap-2 py-3.5 sm:flex-row sm:items-start sm:justify-between sm:gap-4"
                   >
                     <div className="min-w-0">
-                      <p className="break-words text-[13px] font-medium text-foreground">
+                      <p className="break-words text-13 font-medium text-foreground">
                         {item.primary}
                       </p>
                       {item.description && (
                         <p
-                          className="mt-1 line-clamp-2 break-words text-[12px] leading-relaxed text-muted-foreground"
+                          className="mt-1 line-clamp-2 break-words text-12 leading-relaxed text-muted-foreground"
                           title={item.description}
                         >
                           {item.description}
                         </p>
                       )}
                       {item.secondary && (
-                        <p className="mt-1 break-words text-[11px] text-text-tertiary">
+                        <p className="mt-1 break-words text-11 text-text-tertiary">
                           {item.secondary}
                         </p>
                       )}
                       {item.orgName && (
                         <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-                          <Badge variant="secondary" className="text-[10px]">
+                          <Badge variant="secondary" className="text-10">
                             Org
                           </Badge>
-                          <span className="break-words text-[11px] text-muted-foreground">
+                          <span className="break-words text-11 text-muted-foreground">
                             {item.orgName}
                           </span>
                         </div>
@@ -614,23 +631,17 @@ function StandardConsentPage({
                     </div>
                     <div className="flex shrink-0 flex-wrap gap-1 sm:justify-end">
                       {item.currentlyAuthorized && bindingReview && (
-                        <Badge variant="secondary" className="text-[10px]">
+                        <Badge variant="secondary" className="text-10">
                           Authorized now
                         </Badge>
                       )}
-                      {item.requiredByApp ? (
-                        <Badge variant="secondary" className="text-[10px]">
+                      {item.requiredByApp && (
+                        <Badge variant="secondary" className="text-10">
                           Required by app
                         </Badge>
-                      ) : (
-                        item.requestedByApp && (
-                          <Badge variant="secondary" className="text-[10px]">
-                            Requested by app
-                          </Badge>
-                        )
                       )}
                       {item.newlySelected && (
-                        <Badge variant="accent" className="text-[10px]">
+                        <Badge variant="accent" className="text-10">
                           New
                         </Badge>
                       )}
@@ -639,7 +650,7 @@ function StandardConsentPage({
                 ))}
                 {unmatchedDefaults.map((name) => (
                   <div key={`unmatched-${name}`} className="py-3.5">
-                    <p className="break-words text-[12px] leading-relaxed text-muted-foreground">
+                    <p className="break-words text-12 leading-relaxed text-muted-foreground">
                       <span className="font-medium text-foreground">
                         {name}
                       </span>{" "}
@@ -666,12 +677,16 @@ function StandardConsentPage({
               {!allowAllServices && (
                 <ServiceScrollList bordered={false}>
                   {!preview && userServicesLoading ? (
-                    <p className="py-3.5 text-[12px] text-muted-foreground">
+                    <p className="py-3.5 text-12 text-muted-foreground">
                       Loading services...
                     </p>
                   ) : selectableServices.length > 0 ? (
                     selectableServices.map((service) => {
                       const orgName = serviceOrgName(service);
+                      const requiredByApp =
+                        preselectServiceIds.includes(service.id) ||
+                        resourceSelectedServiceIds.includes(service.id) ||
+                        requiredServiceIds.includes(service.id);
                       return (
                         <div
                           key={service.id}
@@ -682,7 +697,7 @@ function StandardConsentPage({
                             checked={effectiveSelectedServiceIds.includes(
                               service.id,
                             )}
-                            disabled={requiredServiceIds.includes(service.id)}
+                            disabled={requiredByApp}
                             onCheckedChange={(checked) =>
                               toggleService(service.id, checked === true)
                             }
@@ -690,21 +705,21 @@ function StandardConsentPage({
                           <div className="min-w-0">
                             <Label
                               htmlFor={`oauth-service-${service.id}`}
-                              className="cursor-pointer text-[13px] leading-5 text-foreground"
+                              className={`${requiredByApp ? "cursor-default" : "cursor-pointer"} text-13 leading-5 text-foreground`}
                             >
                               <span className="block break-words font-medium">
                                 {serviceDisplayName(service)}
                               </span>
                               {service.catalog_service_description?.trim() && (
                                 <span
-                                  className="mt-1 line-clamp-2 break-words text-[12px] font-normal leading-relaxed text-muted-foreground"
+                                  className="mt-1 line-clamp-2 break-words text-12 font-normal leading-relaxed text-muted-foreground"
                                   title={service.catalog_service_description}
                                 >
                                   {service.catalog_service_description}
                                 </span>
                               )}
                               {serviceSecondaryText(service) && (
-                                <span className="mt-1 block break-words text-[11px] font-normal text-text-tertiary">
+                                <span className="mt-1 block break-words text-11 font-normal text-text-tertiary">
                                   {serviceSecondaryText(service)}
                                 </span>
                               )}
@@ -713,11 +728,11 @@ function StandardConsentPage({
                               <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                                 <Badge
                                   variant="secondary"
-                                  className="text-[10px]"
+                                  className="text-10"
                                 >
                                   Org
                                 </Badge>
-                                <span className="break-words text-[11px] font-normal text-muted-foreground">
+                                <span className="break-words text-11 font-normal text-muted-foreground">
                                   {orgName}
                                 </span>
                               </div>
@@ -730,15 +745,15 @@ function StandardConsentPage({
                                   )) && (
                                   <Badge
                                     variant="secondary"
-                                    className="text-[10px]"
+                                    className="text-10"
                                   >
                                     Authorized now
                                   </Badge>
                                 )}
-                              {requiredServiceIds.includes(service.id) && (
+                              {requiredByApp && (
                                 <Badge
                                   variant="secondary"
-                                  className="text-[10px]"
+                                  className="text-10"
                                 >
                                   Required by app
                                 </Badge>
@@ -754,7 +769,7 @@ function StandardConsentPage({
                                 !requiredServiceIds.includes(service.id) && (
                                   <Badge
                                     variant="accent"
-                                    className="text-[10px]"
+                                    className="text-10"
                                   >
                                     New
                                   </Badge>
@@ -765,7 +780,7 @@ function StandardConsentPage({
                       );
                     })
                   ) : (
-                    <p className="py-3.5 text-[12px] text-muted-foreground">
+                    <p className="py-3.5 text-12 text-muted-foreground">
                       No active services are available.
                     </p>
                   )}
@@ -799,11 +814,11 @@ function StandardConsentPage({
           <div>
             <h2
               id="oauth-trust"
-              className="text-[14px] font-semibold text-foreground"
+              className="text-14 font-semibold text-foreground"
             >
               Make sure you trust {clientName}
             </h2>
-            <p className="mt-2 text-[12px] leading-relaxed text-muted-foreground">
+            <p className="mt-2 text-12 leading-relaxed text-muted-foreground">
               This app may receive the account information above and use the
               services you approve. Continue only if you trust it. You can
               revoke access later from Authorized Applications.
@@ -813,7 +828,7 @@ function StandardConsentPage({
       </section>
 
       <details className="group border-t border-border py-4">
-        <summary className="flex cursor-pointer list-none items-center justify-between text-[12px] font-medium text-muted-foreground [&::-webkit-details-marker]:hidden">
+        <summary className="flex cursor-pointer list-none items-center justify-between text-12 font-medium text-muted-foreground [&::-webkit-details-marker]:hidden">
           App details
           <ChevronDown
             className="h-4 w-4 transition-transform group-open:rotate-180"

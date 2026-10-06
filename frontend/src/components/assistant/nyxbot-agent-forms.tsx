@@ -1,4 +1,14 @@
 import { useState } from "react";
+import { useOrgs } from "@/hooks/use-orgs";
+import { useFeature } from "@/hooks/use-feature-flag";
+import { FEATURE_FLAG } from "@/lib/feature-flags";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -23,6 +33,7 @@ import {
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
+import { MachineGrantPicker } from "./machine-grant-picker";
 import { useKeys } from "@/hooks/use-keys";
 import { useCreateNyxBotAgent } from "@/hooks/use-nyxbot-agents";
 import {
@@ -35,7 +46,7 @@ import {
 export const PERSONA_HINT = "e.g. warm, concise, uses emoji sparingly";
 
 export const TEXTAREA_CLASS =
-  "min-h-20 w-full rounded-lg border border-input bg-transparent px-3 py-1.5 text-[12px] leading-relaxed text-foreground placeholder:text-text-tertiary focus-visible:border-white/[0.15] focus-visible:outline-none aria-invalid:border-destructive";
+  "min-h-20 w-full rounded-lg border border-input bg-transparent px-3 py-1.5 text-12 leading-relaxed text-foreground placeholder:text-text-tertiary focus-visible:border-input-focus focus-visible:outline-none aria-invalid:border-destructive";
 
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
@@ -49,15 +60,22 @@ export function ServiceGrantPicker({
   value,
   onChange,
   disabled,
+  org,
 }: {
+  readonly org?: string;
   readonly value: readonly string[];
   readonly onChange: (slugs: string[]) => void;
   readonly disabled?: boolean;
 }) {
   const keys = useKeys();
   const services = (keys.data ?? [])
-    .filter((key) => key.is_active)
-    .map((key) => ({ slug: key.slug, label: key.label }));
+    .filter((key) => key.is_active &&
+        (!org ||
+          (key.credential_source?.type === "org" &&
+            key.credential_source.org_id === org &&
+            key.credential_source.allowed)),
+    )
+    .map((key) => ({ slug: org ? key.id : key.slug, label: key.label }));
   const known = new Set(services.map((service) => service.slug));
   const rows = [
     ...services,
@@ -67,11 +85,13 @@ export function ServiceGrantPicker({
     onChange(checked ? [...value, slug] : value.filter((item) => item !== slug));
   }
   if (keys.isPending) {
-    return <p className="text-[12px] text-text-tertiary">Loading your services...</p>;
+    return (
+      <p className="text-12 text-text-tertiary">Loading your services...</p>
+    );
   }
   if (!rows.length) {
     return (
-      <p className="rounded-lg bg-overlay px-3 py-2 text-[12px] text-muted-foreground">
+      <p className="rounded-lg border border-dashed border-border px-3 py-2 text-12 text-muted-foreground">
         You have no connected services yet. The agent can ask NyxBot for access later.
       </p>
     );
@@ -87,7 +107,7 @@ export function ServiceGrantPicker({
           <li key={service.slug}>
             <label
               htmlFor={id}
-              className="flex cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 text-[12px] hover:bg-overlay"
+              className="flex cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 text-12 hover:bg-overlay"
             >
               <Checkbox
                 id={id}
@@ -95,8 +115,10 @@ export function ServiceGrantPicker({
                 disabled={disabled}
                 onCheckedChange={(checked) => toggle(service.slug, checked === true)}
               />
-              <span className="min-w-0 flex-1 truncate text-foreground">{service.label}</span>
-              <span className="shrink-0 font-mono text-[10px] text-text-tertiary">
+              <span className="min-w-0 flex-1 truncate text-foreground">
+                {service.label}
+              </span>
+              <span className="shrink-0 font-mono text-10 text-text-tertiary">
                 {service.slug}
               </span>
             </label>
@@ -104,6 +126,48 @@ export function ServiceGrantPicker({
         );
       })}
     </ul>
+  );
+}
+
+function AgentOwnerPicker({
+  value,
+  onChange,
+}: {
+  readonly value?: string;
+  readonly onChange: (id: string | undefined) => void;
+}) {
+  const orgs = useOrgs();
+  const writable = (orgs.data ?? []).filter((org) =>
+    ["admin", "member", "owner"].includes(org.your_role),
+  );
+  return (
+    <div className="space-y-2">
+      <label className="text-12 font-medium" htmlFor="agent-owner">
+        Ownership
+      </label>
+      <Select
+        value={value ?? "personal"}
+        onValueChange={(id) => onChange(id === "personal" ? undefined : id)}
+      >
+        <SelectTrigger id="agent-owner">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="personal">Personal</SelectItem>
+          {writable.map((org) => (
+            <SelectItem key={org.id} value={org.id}>
+              {org.display_name ?? org.slug}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      {value ? (
+        <p className="text-11 text-muted-foreground">
+          Admins and Members maintain this agent. Each member has private chats;
+          memory is shared.
+        </p>
+      ) : null}
+    </div>
   );
 }
 
@@ -116,6 +180,7 @@ export function NewAgentDialog({
   readonly onCreated: (created: { id: string; home_conversation_id: string }) => void;
 }) {
   const create = useCreateNyxBotAgent();
+  const orgAgentsEnabled = useFeature(FEATURE_FLAG.ORG_AGENTS);
   const form = useAppForm<AssistantAgentCreate>({
     resolver: zodResolver(assistantAgentCreateSchema),
     defaultValues: {
@@ -130,6 +195,7 @@ export function NewAgentDialog({
   const [error, setError] = useState<string>();
   const name = form.watch("name");
   const description = form.watch("description");
+  const org = form.watch("org");
 
   async function submit(values: AssistantAgentCreate) {
     setError(undefined);
@@ -148,17 +214,33 @@ export function NewAgentDialog({
         if (!open && !create.isPending) onClose();
       }}
     >
-      <DialogContent scrollMode="body" className="z-[90] md:max-w-lg">
+      <DialogContent scrollMode="body" className="md:max-w-lg">
         <DialogHeader className="shrink-0 pr-6">
           <DialogTitle>New agent</DialogTitle>
           <DialogDescription>
-            A specialist keeps its own memory and threads, uses only the services you grant here,
-            and asks NyxBot for anything else.
+            A specialist keeps its own memory and threads, uses only the
+            services you grant here, and asks NyxBot for anything else.
           </DialogDescription>
         </DialogHeader>
         <Form {...form}>
           <form noValidate onSubmit={form.handleSubmit(submit)}>
             <DialogBody className="space-y-4 pb-1">
+              {orgAgentsEnabled ? (
+                <AgentOwnerPicker
+                  value={org}
+                  onChange={(id) => {
+                    form.setValue("org", id);
+                    form.setValue("services", []);
+                    form.setValue("machines", []);
+                    form.setValue("logins", []);
+                    form.setValue("account_read", false);
+                  }}
+                />
+              ) : (
+                <p className="text-11 text-text-tertiary">
+                  Organization agents are not enabled yet.
+                </p>
+              )}
               <FormField
                 control={form.control}
                 name="name"
@@ -174,7 +256,7 @@ export function NewAgentDialog({
                         onChange={(event) => field.onChange(event.target.value.toLowerCase())}
                       />
                     </FormControl>
-                    <FormDescription className="text-[11px]">
+                    <FormDescription className="text-11">
                       The @handle: lowercase letters, digits and hyphens.
                     </FormDescription>
                     <FormMessage />
@@ -187,7 +269,10 @@ export function NewAgentDialog({
                 render={({ field }) => (
                   <FormItem>
                     <FormLabel>
-                      Display name <span className="font-normal text-text-tertiary">(optional)</span>
+                      Display name{" "}
+                      <span className="font-normal text-text-tertiary">
+                        (optional)
+                      </span>
                     </FormLabel>
                     <FormControl>
                       <Input
@@ -197,7 +282,7 @@ export function NewAgentDialog({
                         {...field}
                       />
                     </FormControl>
-                    <FormDescription className="text-[11px]">
+                    <FormDescription className="text-11">
                       Shown instead of the @handle.
                     </FormDescription>
                     <FormMessage />
@@ -228,7 +313,10 @@ export function NewAgentDialog({
                 render={({ field }) => (
                   <FormItem>
                     <FormLabel>
-                      Persona <span className="font-normal text-text-tertiary">(optional)</span>
+                      Persona{" "}
+                      <span className="font-normal text-text-tertiary">
+                        (optional)
+                      </span>
                     </FormLabel>
                     <FormControl>
                       <textarea
@@ -238,8 +326,9 @@ export function NewAgentDialog({
                         {...field}
                       />
                     </FormControl>
-                    <FormDescription className="text-[11px]">
-                      Personality and tone only; it never changes what the agent may do.
+                    <FormDescription className="text-11">
+                      Personality and tone only; it never changes what the agent
+                      may do.
                     </FormDescription>
                     <FormMessage />
                   </FormItem>
@@ -251,12 +340,29 @@ export function NewAgentDialog({
                 render={({ field }) => (
                   <FormItem>
                     <FormLabel>Services it may use</FormLabel>
-                    <ServiceGrantPicker value={field.value} onChange={field.onChange} />
+                    <ServiceGrantPicker
+                      org={org}
+                      value={field.value} onChange={field.onChange} />
                     <FormMessage />
                   </FormItem>
                 )}
               />
-              <FormField
+              {(["machines", ...(org ? [] : ["logins"])] as (
+                  | "machines"
+                  | "logins"
+                )[]
+              ).map((kind) => (
+                <FormField key={kind} control={form.control} name={kind} render={({ field }) => (
+                  <FormItem>
+                      <MachineGrantPicker
+                        org={org}
+                        kind={kind} value={field.value ?? []} onChange={field.onChange} disabled={create.isPending} />
+                      <FormMessage />
+                    </FormItem>
+                )} />
+              ))}
+              {!org ? (
+                <FormField
                 control={form.control}
                 name="account_read"
                 render={({ field }) => (
@@ -264,10 +370,10 @@ export function NewAgentDialog({
                     <div className="flex items-center justify-between gap-4 rounded-lg border border-border p-4">
                       <div className="space-y-1">
                         <FormLabel>Read my account</FormLabel>
-                        <FormDescription className="text-[12px]">
-                          Lets it look up your keys, services and nodes. It can never change or
-                          delete them.
-                        </FormDescription>
+                        <FormDescription className="text-12">
+                            Lets it look up your keys, services and nodes. It
+                            can never change or delete them.
+                          </FormDescription>
                       </div>
                       <FormControl>
                         <Switch checked={field.value} onCheckedChange={field.onChange} />
@@ -276,8 +382,9 @@ export function NewAgentDialog({
                   </FormItem>
                 )}
               />
+              ) : null}
               {error ? (
-                <p role="alert" className="text-[12px] text-destructive">
+                <p role="alert" className="text-12 text-destructive">
                   {error}
                 </p>
               ) : null}

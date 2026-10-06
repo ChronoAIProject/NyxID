@@ -22,18 +22,18 @@ function ServiceIdentity({
   const source = service.credential_source;
   return (
     <span className="block min-w-0">
-      <span className="block break-words text-[13px] font-medium text-foreground">
+      <span className="block break-words text-13 font-medium text-foreground">
         {service.label || service.catalog_service_name || service.slug}
       </span>
       {service.catalog_service_description && (
-        <span className="mt-1 line-clamp-2 block break-words text-[12px] leading-relaxed text-muted-foreground">
+        <span className="mt-1 line-clamp-2 block break-words text-12 leading-relaxed text-muted-foreground">
           {service.catalog_service_description}
         </span>
       )}
-      <span className="mt-1 block break-all text-[11px] font-normal text-text-tertiary">
+      <span className="mt-1 block break-all text-11 font-normal text-text-tertiary">
         {service.slug}
       </span>
-      <span className="mt-1 block text-[11px] font-normal text-muted-foreground">
+      <span className="mt-1 block text-11 font-normal text-muted-foreground">
         {source.type === "org"
           ? `Organization · ${source.org_name}`
           : "Personal"}
@@ -114,7 +114,7 @@ export function OAuthIncrementalConsentPage({
     if (!service && !retained) return null;
     if (!service) {
       return (
-        <div key={id} className="py-3.5 text-[12px] text-muted-foreground">
+        <div key={id} className="py-3.5 text-12 text-muted-foreground">
           {isLoading || isError
             ? "Previously authorized service details unavailable: "
             : "Previously authorized service unavailable: "}
@@ -133,7 +133,7 @@ export function OAuthIncrementalConsentPage({
         </div>
         <Badge
           variant={retained ? "secondary" : "accent"}
-          className="shrink-0 text-[10px]"
+          className="shrink-0 text-10"
         >
           {retained ? "Authorized" : "Required"}
         </Badge>
@@ -157,17 +157,17 @@ export function OAuthIncrementalConsentPage({
             </div>
             <span className="text-xs font-medium text-foreground">NyxID</span>
           </div>
-          <h1 className="break-words text-[22px] font-bold leading-tight text-foreground sm:text-[28px]">
+          <h1 className="break-words text-22 font-bold leading-tight text-foreground sm:text-28">
             Update service access
           </h1>
-          <p className="max-w-md break-words text-[12px] leading-relaxed text-muted-foreground">
+          <p className="max-w-md break-words text-12 leading-relaxed text-muted-foreground">
             <span className="font-medium text-foreground">
               {snapshot?.client_name ?? "This application"}
             </span>{" "}
             is requesting additional access to your NyxID account.
           </p>
           {request && (
-            <p className="break-all text-[11px] text-muted-foreground">
+            <p className="break-all text-11 text-muted-foreground">
               Return to{" "}
               {new URL(request.redirect_uri).host ||
                 new URL(request.redirect_uri).protocol.slice(0, -1)}
@@ -182,7 +182,7 @@ export function OAuthIncrementalConsentPage({
                 {isLoading && needsServiceInventory ? (
                   <p
                     role="status"
-                    className="py-5 text-[12px] text-muted-foreground"
+                    className="py-5 text-12 text-muted-foreground"
                   >
                     Loading services...
                   </p>
@@ -194,13 +194,13 @@ export function OAuthIncrementalConsentPage({
                     >
                       <h2
                         id="incremental-services"
-                        className="text-[15px] font-semibold text-foreground"
+                        className="text-15 font-semibold text-foreground"
                       >
                         {additions.length
                           ? `Allow ${additions.length} additional ${additions.length === 1 ? "service" : "services"}`
                           : "No additional services needed"}
                       </h2>
-                      <p className="mt-1.5 text-[12px] leading-relaxed text-muted-foreground">
+                      <p className="mt-1.5 text-12 leading-relaxed text-muted-foreground">
                         {requiredAdditions.length
                           ? "These services are required to continue. Cancel if you do not want to grant access."
                           : "The requested services are already included in this application's access."}
@@ -227,7 +227,7 @@ export function OAuthIncrementalConsentPage({
                             <ServiceIdentity service={service} />
                             <Badge
                               variant="accent"
-                              className="shrink-0 text-[10px]"
+                              className="shrink-0 text-10"
                             >
                               Optional
                             </Badge>
@@ -236,7 +236,7 @@ export function OAuthIncrementalConsentPage({
                       })}
                       {optional.length > 0 && (
                         <details className="group mt-4">
-                          <summary className="flex cursor-pointer list-none items-center justify-between text-[12px] font-medium text-muted-foreground [&::-webkit-details-marker]:hidden">
+                          <summary className="flex cursor-pointer list-none items-center justify-between text-12 font-medium text-muted-foreground [&::-webkit-details-marker]:hidden">
                             Add optional services{" "}
                             <ChevronDown
                               className="h-4 w-4 transition-transform group-open:rotate-180"
@@ -279,7 +279,7 @@ export function OAuthIncrementalConsentPage({
                       >
                         <h2
                           id="incremental-permissions"
-                          className="text-[15px] font-semibold text-foreground"
+                          className="text-15 font-semibold text-foreground"
                         >
                           Allow {addedScopes.length} additional{" "}
                           {addedScopes.length === 1
@@ -288,7 +288,7 @@ export function OAuthIncrementalConsentPage({
                         </h2>
                         <div className="mt-4 divide-y divide-border/60 border-y border-border/60">
                           {addedScopes.map((scope) => (
-                            <div key={scope} className="py-3.5 text-[12px]">
+                            <div key={scope} className="py-3.5 text-12">
                               <p className="font-medium text-foreground">
                                 {OAUTH_SCOPE_META[scope]?.title ?? scope}
                               </p>
@@ -308,11 +308,11 @@ export function OAuthIncrementalConsentPage({
                     >
                       <h2
                         id="incremental-existing"
-                        className="text-[15px] font-semibold text-foreground"
+                        className="text-15 font-semibold text-foreground"
                       >
                         Already authorized
                       </h2>
-                      <p className="mt-1.5 text-[12px] leading-relaxed text-muted-foreground">
+                      <p className="mt-1.5 text-12 leading-relaxed text-muted-foreground">
                         {snapshot.allow_all_services
                           ? "This application already has access to all available services. This access will be retained."
                           : "Your existing access will be retained. You can manage it separately in Authorized Applications."}
@@ -330,7 +330,7 @@ export function OAuthIncrementalConsentPage({
                         )}
                       {!snapshot.allow_all_services &&
                         currentIds.length === 0 && (
-                          <p className="mt-3 text-[12px] text-muted-foreground">
+                          <p className="mt-3 text-12 text-muted-foreground">
                             No services previously authorized.
                           </p>
                         )}
@@ -344,10 +344,10 @@ export function OAuthIncrementalConsentPage({
                       aria-hidden="true"
                     />
                     <div>
-                      <h2 className="text-[14px] font-semibold text-foreground">
+                      <h2 className="text-14 font-semibold text-foreground">
                         Make sure you trust {snapshot.client_name}
                       </h2>
-                      <p className="mt-2 text-[12px] leading-relaxed text-muted-foreground">
+                      <p className="mt-2 text-12 leading-relaxed text-muted-foreground">
                         This app may receive the account information above and
                         use the services you approve. You can revoke access
                         later from Authorized Applications.
@@ -356,7 +356,7 @@ export function OAuthIncrementalConsentPage({
                   </div>
                 </section>
                 <details className="group border-t border-border py-4">
-                  <summary className="flex cursor-pointer list-none items-center justify-between text-[12px] font-medium text-muted-foreground [&::-webkit-details-marker]:hidden">
+                  <summary className="flex cursor-pointer list-none items-center justify-between text-12 font-medium text-muted-foreground [&::-webkit-details-marker]:hidden">
                     App details{" "}
                     <ChevronDown
                       className="h-4 w-4 transition-transform group-open:rotate-180"

@@ -158,7 +158,7 @@ export function BillingPage() {
           <TabsTrigger value="usage">Usage</TabsTrigger>
         </TabsList>
         {billingCapability && !billingReady && (
-          <div className="mt-6 rounded-lg border border-warning/20 bg-warning/5 px-4 py-3 text-[12px] text-warning">
+          <div className="mt-6 rounded-lg border border-warning/20 bg-warning/5 px-4 py-3 text-12 text-warning">
             Billing is not available on this deployment.
           </div>
         )}
@@ -228,7 +228,7 @@ export function BillingPage() {
               <Card className="usage-results">
                 <CardHeader>
                   <CardTitle>Usage breakdown</CardTitle>
-                  <p className="text-[12px] text-muted-foreground">
+                  <p className="text-12 text-muted-foreground">
                     Expand a service for its models, agents, and funding.
                   </p>
                 </CardHeader>

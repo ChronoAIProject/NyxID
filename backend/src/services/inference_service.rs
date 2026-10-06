@@ -1,6 +1,7 @@
 use crate::errors::AppResult;
 use crate::models::downstream_service::{
-    COLLECTION_NAME, DownstreamService, InferenceWireProtocol, ServiceInference,
+    COLLECTION_NAME, DownstreamService, InferenceWireProtocol, ServiceCapabilities,
+    ServiceInference, VoiceInference,
 };
 use crate::models::service_billing::{BillingMetric, LanePricing, PricingSyncStatus};
 use mongodb::bson::{self, doc};
@@ -16,6 +17,7 @@ pub struct InferenceView {
     pub status_slug: Option<String>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub realtime: bool,
+    pub voice: Option<VoiceInference>,
 }
 
 #[derive(Clone, Debug, Serialize, ToSchema)]
@@ -63,7 +65,8 @@ pub fn view(
     service.inference.as_ref().map(|inference| InferenceView {
         wire_protocol: inference.wire_protocol,
         model_list: inference.model_list,
-        realtime: inference.realtime,
+        realtime: inference.realtime || inference.voice.is_some(),
+        voice: inference.voice.clone(),
         binding: if available { "platform" } else { "user" }.to_string(),
         status_slug: (!available).then(|| provider_slug.unwrap_or(&service.slug).to_string()),
     })
@@ -84,6 +87,7 @@ pub fn default_inference(slug: &str) -> Option<ServiceInference> {
         wire_protocol,
         model_list: true,
         realtime,
+        voice: super::inference_voice::default_voice(slug),
     })
 }
 
@@ -102,6 +106,35 @@ pub async fn backfill(db: &mongodb::Database) -> AppResult<()> {
             doc! { "slug": slug, "inference": bson::Bson::Null, "inference_admin_modified": { "$ne": true } },
             doc! { "$set": { "inference": bson::to_bson(&default_inference(slug)).expect("inference serialization") } },
         ).await?;
+        if let Some(voice) = super::inference_voice::default_voice(slug) {
+            // Do not replace an existing inference block or resurrect an admin clear.
+            db.collection::<DownstreamService>(COLLECTION_NAME).update_many(
+                doc! { "slug": slug, "inference": { "$type": "object" }, "inference.voice": bson::Bson::Null, "inference_admin_modified": { "$ne": true } },
+                doc! { "$set": { "inference.voice": bson::to_bson(&voice).expect("voice serialization") } },
+            ).await?;
+        }
     }
     Ok(())
+}
+
+/// Response-only projection: the derived voice flag is never persisted or accepted on writes.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct ServiceCapabilitiesView {
+    #[serde(flatten)]
+    pub transport: ServiceCapabilities,
+    pub supports_realtime_voice: bool,
+}
+
+pub fn capabilities(service: &DownstreamService) -> Option<ServiceCapabilitiesView> {
+    let voice = service.inference.as_ref().and_then(|i| i.voice.as_ref());
+    (service.capabilities.is_some() || voice.is_some()).then(|| ServiceCapabilitiesView {
+        transport: service.capabilities.clone().unwrap_or_default(),
+        supports_realtime_voice: voice.is_some(),
+    })
+}
+
+pub fn normalized(inference: &ServiceInference) -> ServiceInference {
+    let mut inference = inference.clone();
+    inference.realtime |= inference.voice.is_some();
+    inference
 }

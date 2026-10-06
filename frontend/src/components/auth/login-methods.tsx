@@ -38,13 +38,13 @@ export function LoginMethods({
     <>
       <div className={appOpen ? undefined : "flex flex-col gap-2.5"}>
         {!appOpen && isPending && (
-          <p role="status" className="text-[12px] text-muted-foreground">
+          <p role="status" className="text-12 text-muted-foreground">
             Loading sign-in methods...
           </p>
         )}
         {!appOpen && isError && (
           <div className="space-y-2">
-            <p role="alert" className="text-[12px] text-destructive">
+            <p role="alert" className="text-12 text-destructive">
               Could not load sign-in methods.
             </p>
             <Button
@@ -91,7 +91,7 @@ export function LoginMethods({
         </>
       )}
       {!appOpen && (
-        <div className="mt-8 text-center text-[13px] text-muted-foreground">
+        <div className="mt-8 text-center text-13 text-muted-foreground">
           Don&apos;t have an account?{" "}
           {onSignUp ? (
             <button

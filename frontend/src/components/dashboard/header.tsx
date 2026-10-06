@@ -104,11 +104,11 @@ export function Header({
               aria-label="User menu"
             >
               <div className="hidden flex-col items-end gap-0.5 sm:flex">
-                <span className="text-[13px] font-medium text-foreground">
+                <span className="text-13 font-medium text-foreground">
                   {user?.display_name ?? user?.email ?? "User"}
                 </span>
                 {user?.display_name && (
-                  <span className="text-[11px] text-text-tertiary">
+                  <span className="text-11 text-text-tertiary">
                     {user.email}
                   </span>
                 )}

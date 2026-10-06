@@ -73,6 +73,11 @@ crate::exact_credit_model! {
         pub completion_tokens: i64,
         pub cached_tokens: i64,
         pub cache_creation_tokens: i64,
+        /// Absent on summaries folded before audio metering.
+        #[serde(default)]
+        pub audio_input_tokens: i64,
+        #[serde(default)]
+        pub audio_output_tokens: i64,
         pub rows_folded: i64,
     }
 }

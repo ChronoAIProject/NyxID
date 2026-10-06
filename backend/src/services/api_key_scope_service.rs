@@ -1145,6 +1145,9 @@ mod tests {
     fn test_node(id: &str, owner_id: &str, status: NodeStatus) -> Node {
         let now = Utc::now();
         Node {
+            machine: None,
+            machine_confirm: Default::default(),
+            allow_single_user_saved_logins: false,
             id: id.to_string(),
             user_id: owner_id.to_string(),
             name: format!("node-{}", &id[..8]),

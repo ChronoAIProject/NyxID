@@ -7,6 +7,8 @@ export type { DefaultRequestHeader } from "@/schemas/default-request-headers";
 
 export interface KeyInfo {
   readonly can_edit_configuration?: boolean;
+  readonly inference?: InferenceView | null;
+  readonly capabilities?: import("./api").ServiceCapabilities | null;
   readonly authorship?: import("@/schemas/service-history").ServiceAuthorship;
   readonly credential_binding?: "platform" | "user";
   readonly platform_key_available?: boolean;

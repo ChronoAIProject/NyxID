@@ -108,7 +108,7 @@ export function LoginConnectionChoices({
   );
   return (
     <div className="mt-2 space-y-1 rounded-lg border border-border/70 bg-background/50 p-2">
-      <p className="mb-2 flex items-center gap-1.5 text-[10px] font-medium text-muted-foreground">
+      <p className="mb-2 flex items-center gap-1.5 text-10 font-medium text-muted-foreground">
         <Link2 className="size-3" />
         {choices.length ? "Use an existing connection" : "Not connected"}
       </p>
@@ -134,12 +134,12 @@ export function LoginConnectionChoices({
                   {connection.label || service.name}
                 </span>
                 <span
-                  className={`text-[10px] ${status === "Exact match" ? "text-success" : "text-muted-foreground"}`}
+                  className={`text-10 ${status === "Exact match" ? "text-success" : "text-muted-foreground"}`}
                 >
                   {status}
                 </span>
               </span>
-              <span className="block break-words text-[10px] text-muted-foreground">
+              <span className="block break-words text-10 text-muted-foreground">
                 {service.name}
                 {implied ? " · Included by your broader grant" : ""}
               </span>
@@ -148,19 +148,19 @@ export function LoginConnectionChoices({
                   <span
                     key={p.scope}
                     title={[p.scope, p.description].filter(Boolean).join(" · ")}
-                    className="max-w-full break-words rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground"
+                    className="max-w-full break-words rounded border border-border px-1.5 py-0.5 text-10 text-muted-foreground"
                   >
                     {p.label}
                   </span>
                 ))}
                 {permissions.length > 3 && (
-                  <span className="text-[10px] text-muted-foreground">
+                  <span className="text-10 text-muted-foreground">
                     +{permissions.length - 3} more
                   </span>
                 )}
               </span>
               {connection.node_id && (
-                <span className="block text-[10px] text-warning">
+                <span className="block text-10 text-warning">
                   Requires node access:{" "}
                   {selection.inventory.options.nodes.find(
                     (n) => n.id === connection.node_id,
@@ -172,7 +172,7 @@ export function LoginConnectionChoices({
         );
       })}
       {!choices.length && (
-        <p className="text-[11px] text-muted-foreground">
+        <p className="text-11 text-muted-foreground">
           Connect an account in AI Services to grant this access. You can still
           use its permissions as filters.
         </p>

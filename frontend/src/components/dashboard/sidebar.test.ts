@@ -21,3 +21,11 @@ describe("getVisibleMainNav", () => {
     ).toContain("/billing");
   });
 });
+
+it("keeps NyxBot workspace features out of Studio navigation", () => {
+  const items = getVisibleMainNav(null);
+  for (const label of ["Automations", "Saved logins", "Machines"]) {
+    expect(items.map((item) => item.label)).not.toContain(label);
+  }
+  expect(items.map((item) => item.to)).toContain("/nodes");
+});

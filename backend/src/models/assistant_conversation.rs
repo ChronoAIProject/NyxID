@@ -69,6 +69,8 @@ pub struct AgentEvent {
 /// channel bot through the Agent Event Gateway. Identifiers only.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChannelOrigin {
+    #[serde(default)]
+    pub thread: Option<Box<super::channel_thread_follow::ThreadTurnBinding>>,
     /// The NyxBot channel (`nyxbot_channels._id`).
     pub nyxbot_channel_id: String,
     /// The chat partition (`nyxbot_threads.partition`): a gateway conversation
@@ -82,6 +84,8 @@ pub struct ChannelOrigin {
 /// the label is a tool identifier, never arguments, results, or secrets.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TurnActivity {
+    #[serde(default)]
+    pub machine: Option<Box<super::machine_receipt::MachineReceipt>>,
     pub id: String,
     pub label: String,
     /// `running`, `completed`, or `error`.
@@ -96,6 +100,12 @@ pub struct TurnActivity {
 /// `assistant_attachments`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TurnAttachment {
+    #[serde(default)]
+    pub image_input: Option<String>,
+    #[serde(default)]
+    pub origin: String,
+    #[serde(default)]
+    pub pages: Option<usize>,
     pub id: String,
     pub content_type: String,
     pub size: i64,
@@ -103,8 +113,33 @@ pub struct TurnAttachment {
     pub label: String,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ToolProgress {
+    pub started: i64,
+    pub calls: i64,
+    pub digest: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
+    /// Server-only event binding for durable channel answer delivery.
+    #[serde(default)]
+    pub channel_event_id: Option<String>,
+    #[serde(default)]
+    pub initiating_message_seq: Option<i64>,
+    #[serde(default)]
+    pub voice_request_id: Option<String>,
+    /// Nodes admitted by this turn; Stop uses the durable list across replicas.
+    #[serde(default)]
+    pub machine_node_ids: Vec<String>,
+    #[serde(default)]
+    pub continuations: u32,
+    /// Rolling hashes only; never persist tool arguments or results. Reset per continuation.
+    #[serde(default)]
+    pub tool_progress: ToolProgress,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub lease_expires_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub trigger_run_id: Option<String>,
     pub turn_id: String,
@@ -143,12 +178,27 @@ pub struct ActiveTurn {
     pub also_deliver: Vec<ChannelOrigin>,
 }
 
+/// Absent on old rows: their existing title is final until the owner renames it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TitleSource {
+    Provisional,
+    Generated,
+    #[default]
+    User,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantConversation {
+    /// Human opt-in only; command previews are encrypted and expire within 30 days.
+    #[serde(default)]
+    pub machine_previews: bool,
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,
     pub title: String,
+    #[serde(default)]
+    pub title_source: TitleSource,
     pub model: String,
     #[serde(default)]
     pub access_mode: AccessMode,
@@ -175,6 +225,18 @@ pub struct AssistantConversation {
     /// including when its previous home was deleted. Explicit home runs leave this false.
     #[serde(default)]
     pub automation_thread: bool,
+    /// Voice task threads are private execution contexts for a visible call.
+    /// Trigger automation threads intentionally leave this absent.
+    #[serde(default)]
+    pub voice_parent_conversation_id: Option<String>,
+    /// Stable agent owner binding; the conversation itself belongs to the person.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_owner_id: Option<String>,
+    /// L1 enrollment cohort. Missing or zero-valued legacy rows are not
+    /// eligible evidence; new rows set this only when learning is enabled and
+    /// the owner/member has opted in.
+    #[serde(default)]
+    pub learning_epoch: Option<i64>,
     /// Specialist threads only: the NyxBot thread that assigned the current
     /// work, which receives its report and permission requests.
     #[serde(default)]
@@ -204,6 +266,8 @@ pub struct AssistantConversation {
     /// The newest group message this member has already been given.
     #[serde(default)]
     pub group_seen_seq: i64,
+    #[serde(default)]
+    pub group_request_id: Option<String>,
     /// The newest turn was started by someone other than the owner, e.g. a
     /// member of a group chat. Its tool calls are restricted (NyxBot: none;
     /// specialists: their grants, as far as the owner's guest access for each

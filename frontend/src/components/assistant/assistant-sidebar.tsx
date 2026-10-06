@@ -1,3 +1,4 @@
+import { agentOwnerSections } from "@/lib/assistant/nyxbot-labels";
 import { useState, type ReactNode } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useAppForm } from "@/components/ui/form";
@@ -25,7 +26,8 @@ import {
   MoreHorizontal,
   PencilLine,
   Plus,
-  Server,
+  Monitor,
+  CalendarClock,
   ShieldCheck,
   SlidersHorizontal,
   Trash2,
@@ -71,7 +73,7 @@ const TITLE_FADE =
 
 function GroupLabel({ children }: { readonly children: string }) {
   return (
-    <div className="px-3 py-2 text-[9px] font-medium uppercase tracking-[1.5px] text-text-tertiary/50">
+    <div className="px-3 py-2 text-9 font-medium uppercase tracking-[1.5px] text-text-tertiary">
       {children}
     </div>
   );
@@ -92,7 +94,7 @@ function ComingSoonItem({
       <TooltipTrigger asChild>
         <div
           aria-disabled="true"
-          className="flex w-full cursor-not-allowed items-center gap-3 rounded-lg px-3 py-2 text-[13px] text-muted-foreground opacity-50"
+          className="flex w-full cursor-not-allowed items-center gap-3 rounded-lg px-3 py-2 text-13 text-muted-foreground opacity-50"
         >
           <Icon className="h-4 w-4 shrink-0 text-text-tertiary" />
           <span className="min-w-0 flex-1 truncate">{label}</span>
@@ -159,7 +161,7 @@ function ConversationRow({
         aria-label={shownTitle}
         aria-describedby={showDraft ? draftPreviewId : undefined}
         className={cn(
-          "w-full overflow-hidden px-3 py-2 text-left text-[13px] transition-colors",
+          "w-full overflow-hidden px-3 py-2 text-left text-13 transition-colors",
           active
             ? "font-medium text-foreground"
             : "text-muted-foreground group-hover:text-foreground",
@@ -178,7 +180,7 @@ function ConversationRow({
         {showDraft && (
           <span
             id={draftPreviewId}
-            className="mt-0.5 flex min-w-0 items-center gap-1 text-[11px] leading-4 text-text-tertiary"
+            className="mt-0.5 flex min-w-0 items-center gap-1 text-11 leading-4 text-text-tertiary"
           >
             <PencilLine aria-hidden="true" className="h-2.5 w-2.5 shrink-0" />
             <span className="sr-only">Draft: </span>
@@ -205,10 +207,9 @@ function ConversationRow({
           </button>
         </DropdownMenuTrigger>
         {/* Above the z-[80] mobile sidebar drawer this can be opened from. */}
-        <DropdownMenuContent align="end" className="z-[90] min-w-[160px]">
+        <DropdownMenuContent align="end" className="min-w-[160px]">
           {onRequestRename ? (
             <DropdownMenuItem
-              disabled={Boolean(conversation.active_turn)}
               onSelect={onRequestRename}
             >
               <PencilLine aria-hidden="true" />
@@ -311,30 +312,37 @@ function ChannelThreadsGroup({
         aria-label={`${group.label} on ${platform}, ${String(count)} ${count === 1 ? "chat" : "chats"}${running ? ", working" : ""}`}
         onClick={() => setPinned({ open: !open, active: activeThreadId })}
         data-keep-drawer-open=""
-        className="flex w-full items-center gap-1.5 rounded-lg px-3 py-1.5 text-left text-[12px] text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
+        className="flex w-full items-center gap-1.5 rounded-lg px-3 py-1.5 text-left text-12 text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
       >
         <ChevronRight
           aria-hidden="true"
           className={cn("h-3 w-3 shrink-0 transition-transform", open && "rotate-90")}
         />
         <span className="min-w-0 flex-1 truncate">{group.label}</span>
-        <span className="shrink-0 rounded-md border border-hairline bg-overlay px-1 text-[9px] font-medium leading-4 text-text-tertiary">
+        <span className="shrink-0 rounded-md border border-hairline bg-overlay px-1 text-9 font-medium leading-4 text-text-tertiary">
           {platform}
         </span>
         {running ? (
           <span aria-hidden="true" className="h-1.5 w-1.5 shrink-0 rounded-full bg-primary" />
         ) : null}
-        <span className="shrink-0 tabular-nums text-[11px]">{count}</span>
+        <span className="shrink-0 tabular-nums text-11">{count}</span>
       </button>
       {open ? (
         <div className="ml-3 space-y-0.5 border-l border-border/60 pl-1.5">
-          {visible.map((thread) => renderThread(thread))}
+          {Array.from(new Set(visible.map((thread) => thread.channel?.parent_chat_id ?? thread.channel?.chat_id ?? thread.id))).map((chatId) => {
+            const children = visible.filter((thread) => (thread.channel?.parent_chat_id ?? thread.channel?.chat_id ?? thread.id) === chatId);
+            const followed = children.some((thread) => thread.channel?.thread_id);
+            return <div key={chatId}>
+              {followed ? <p className="px-3 pt-1 text-11 text-text-tertiary">{children.find((thread) => thread.channel?.parent_title)?.channel?.parent_title ?? "Channel chat"}</p> : null}
+              <div className={followed ? "ml-2 border-l border-hairline pl-1" : undefined}>{children.map(renderThread)}</div>
+            </div>;
+          })}
           {hidden > 0 ? (
             <button
               type="button"
               onClick={() => setShown((value) => value + CHANNEL_THREADS_SHOWN * 4)}
               data-keep-drawer-open=""
-              className="w-full rounded-lg px-3 py-1 text-left text-[11px] text-text-tertiary transition-colors hover:bg-overlay hover:text-muted-foreground"
+              className="w-full rounded-lg px-3 py-1 text-left text-11 text-text-tertiary transition-colors hover:bg-overlay hover:text-muted-foreground"
             >
               Show {String(Math.min(hidden, CHANNEL_THREADS_SHOWN * 4))} more
             </button>
@@ -378,7 +386,7 @@ function AgentRow({
         aria-label={agentAccessibleName(agent)}
         aria-expanded={selected}
         className={cn(
-          "flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-[13px] transition-colors",
+          "flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-13 transition-colors",
           selected
             ? "font-medium text-foreground"
             : "text-muted-foreground hover:bg-overlay hover:text-foreground",
@@ -397,7 +405,7 @@ function AgentRow({
         <span className="min-w-0 flex-1">
           <span className="block truncate">{name}</span>
           {subtitle ? (
-            <span className="block truncate text-[10px] font-normal text-text-tertiary">
+            <span className="block truncate text-10 font-normal text-text-tertiary">
               {subtitle}
             </span>
           ) : null}
@@ -405,14 +413,14 @@ function AgentRow({
         {platforms.slice(0, 1).map((platform) => (
           <span
             key={platform}
-            className="shrink-0 rounded-md border border-hairline bg-overlay px-1 text-[9px] font-medium leading-4 text-text-tertiary"
+            className="shrink-0 rounded-md border border-hairline bg-overlay px-1 text-9 font-medium leading-4 text-text-tertiary"
           >
             {channelPlatformName(platform)}
             {platforms.length > 1 ? ` +${String(platforms.length - 1)}` : ""}
           </span>
         ))}
         {pending > 0 ? (
-          <span className="shrink-0 rounded-md border border-warning/30 bg-warning/10 px-1.5 text-[10px] font-medium text-warning">
+          <span className="shrink-0 rounded-md border border-warning/30 bg-warning/10 px-1.5 text-10 font-medium text-warning">
             {pending}
           </span>
         ) : null}
@@ -425,7 +433,9 @@ function AgentRow({
         >
           {threads.own.map((conversation) => renderThread(conversation))}
           {model.threadsLoading && !model.threads.length ? (
-            <p className="px-3 py-1.5 text-[11px] text-text-tertiary">Loading threads...</p>
+            <p className="px-3 py-1.5 text-11 text-text-tertiary">
+              Loading threads...
+            </p>
           ) : null}
           {threads.bots.map((group) => (
             <ChannelThreadsGroup
@@ -435,12 +445,12 @@ function AgentRow({
               renderThread={renderThread}
             />
           ))}
-          {agent.status === "destroyed" ? null : (
+          {agent.status === "destroyed" || agent.can_use === false ? null : (
             <button
               type="button"
               onClick={() => model.onNewThread(agent.id)}
               aria-label={`New chat with ${name}`}
-              className="flex w-full items-center gap-2 rounded-lg px-3 py-1.5 text-left text-[12px] text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
+              className="flex w-full items-center gap-2 rounded-lg px-3 py-1.5 text-left text-12 text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
             >
               <Plus aria-hidden="true" className="h-3 w-3" />
               New chat
@@ -469,7 +479,12 @@ function AgentsSection({
     .sort((a, b) => Number(b.kind === "nyxbot") - Number(a.kind === "nyxbot"));
   return (
     <div className="space-y-0.5">
-      {visible.map((agent) => (
+      {agentOwnerSections(visible).map((section) => (
+        <section key={section.id} aria-label={section.label}>
+          <p className="px-3 pb-1 pt-3 text-10 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
+            {section.label}
+          </p>
+          {section.agents.map((agent) => (
         <AgentRow
           key={agent.id}
           agent={agent}
@@ -478,13 +493,15 @@ function AgentsSection({
           activeThreadId={activeThreadId}
           renderThread={renderThread}
         />
+          ))}
+        </section>
       ))}
       {destroyed.length ? (
         <button
           type="button"
           aria-pressed={showDestroyed}
           onClick={() => setShowDestroyed((value) => !value)}
-          className="w-full rounded-lg px-3 py-1.5 text-left text-[11px] text-text-tertiary transition-colors hover:bg-overlay hover:text-muted-foreground"
+          className="w-full rounded-lg px-3 py-1.5 text-left text-11 text-text-tertiary transition-colors hover:bg-overlay hover:text-muted-foreground"
         >
           {showDestroyed ? "Hide destroyed" : `Show destroyed (${String(destroyed.length)})`}
         </button>
@@ -494,9 +511,16 @@ function AgentsSection({
 }
 
 function GroupsSection({ model }: { readonly model: SidebarGroups }) {
+  const sections = new Map<string, typeof model.groups>();
+  for (const group of model.groups) {
+    const key = group.owner?.type === "org" ? group.owner.id : "personal";
+    sections.set(key, [...(sections.get(key) ?? []), group]);
+  }
   return (
     <div className="space-y-0.5">
-      {model.groups.map((group) => {
+      {[...sections.entries()].map(([owner, groups]) => <div key={owner}>
+        <p className="px-3 pt-2 pb-1 text-10 font-medium text-text-tertiary">{owner === "personal" ? "Personal" : groups[0]?.owner?.name}</p>
+        {groups.map((group) => {
         const working = group.working_agent_ids.length;
         const selected = group.id === model.selectedGroupId;
         return (
@@ -509,7 +533,7 @@ function GroupsSection({ model }: { readonly model: SidebarGroups }) {
               .map((member) => agentTitle(member))
               .join(", ")}${working ? `, ${String(working)} working` : ""}`}
             className={cn(
-              "flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-[13px] transition-colors",
+              "flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-13 transition-colors",
               selected
                 ? "bg-overlay-strong font-medium text-foreground"
                 : "text-muted-foreground hover:bg-overlay hover:text-foreground",
@@ -525,16 +549,16 @@ function GroupsSection({ model }: { readonly model: SidebarGroups }) {
             ) : null}
           </button>
         );
-      })}
+      })}</div>)}
       {model.loading && !model.groups.length ? (
-        <p className="px-3 py-1.5 text-[11px] text-text-tertiary">Loading groups...</p>
+        <p className="px-3 py-1.5 text-11 text-text-tertiary">Loading groups...</p>
       ) : null}
       {!model.loading && !model.groups.length ? (
         <button
           type="button"
           onClick={model.onNewGroup}
           data-keep-drawer-open=""
-          className="w-full rounded-lg px-3 py-1.5 text-left text-[11px] text-text-tertiary transition-colors hover:bg-overlay hover:text-muted-foreground"
+          className="w-full rounded-lg px-3 py-1.5 text-left text-11 text-text-tertiary transition-colors hover:bg-overlay hover:text-muted-foreground"
         >
           Chat with several agents at once
         </button>
@@ -558,7 +582,8 @@ export function AssistantSidebar({
 }: {
   readonly conversations: readonly Conversation[];
   readonly activeConversationId: string | undefined;
-  readonly activeView?: "chat" | "plugins" | "approvals";
+  readonly activeView?:
+    | "chat" | "plugins" | "approvals" | "automations" | "machines";
   readonly deletingId?: string;
   readonly notice?: string;
   readonly onNewChat: () => void;
@@ -613,6 +638,10 @@ export function AssistantSidebar({
   }
 
   function renderRow(conversation: Conversation) {
+    if (renameTarget?.id === conversation.id && onRename) {
+      return <RenameChatInline key={conversation.id} conversation={conversation}
+        onClose={() => setRenameTarget(undefined)} onRename={onRename} />;
+    }
     return (
       <ConversationRow
         key={conversation.id}
@@ -657,7 +686,7 @@ export function AssistantSidebar({
             type="button"
             onClick={agents.onHome}
             aria-current={agents.homeActive ? "page" : undefined}
-            className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-[13px] transition-colors ${
+            className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-13 transition-colors ${
               agents.homeActive
                 ? "bg-overlay-strong font-medium text-foreground"
                 : "text-muted-foreground hover:bg-overlay hover:text-foreground"
@@ -668,10 +697,57 @@ export function AssistantSidebar({
             />
             <span className="truncate">Home</span>
           </button>
-        ) : null}
+        ) : (
+          <Link
+            to="/assistant"
+            className="flex items-center gap-3 rounded-lg px-3 py-2 text-13 text-muted-foreground hover:bg-overlay hover:text-foreground"
+          >
+            <House className="h-4 w-4" />
+            Home
+          </Link>
+        )}
+        {(
+          [
+            {
+              view: "automations",
+              to: "/assistant/automations",
+              label: "Automations",
+              icon: CalendarClock,
+            },
+            {
+              view: "machines",
+              to: "/assistant/machines",
+              label: "Machines",
+              icon: Monitor,
+            },
+          ] as const
+        ).map((item) => (
+          <Link
+            key={item.view}
+            to={item.to}
+            aria-current={activeView === item.view ? "page" : undefined}
+            className={cn(
+              "flex w-full items-center gap-3 rounded-lg px-3 py-2 text-13 transition-colors",
+              activeView === item.view
+                ? "bg-overlay-strong font-medium text-foreground"
+                : "text-muted-foreground hover:bg-overlay hover:text-foreground",
+            )}
+          >
+            <item.icon
+              className={cn(
+                "h-4 w-4 shrink-0",
+                activeView === item.view
+                  ? "text-nyx-secondary-400"
+                  : "text-text-tertiary",
+              )}
+            />
+            <span className="truncate">{item.label}</span>
+          </Link>
+        ))}
         <Link
           to="/assistant/plugins"
-          className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-[13px] transition-colors ${
+          aria-current={pluginsActive ? "page" : undefined}
+          className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-13 transition-colors ${
             pluginsActive
               ? "bg-overlay-strong font-medium text-foreground"
               : "text-muted-foreground hover:bg-overlay hover:text-foreground"
@@ -686,14 +762,15 @@ export function AssistantSidebar({
           icon={FileText}
           label="Artifacts"
           trailing={
-            <span className="font-mono text-[9px] text-text-tertiary">
+            <span className="font-mono text-9 text-text-tertiary">
               {counts.data?.artifacts ?? 0}
             </span>
           }
         />
         <Link
           to="/assistant/approvals"
-          className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-[13px] transition-colors ${
+          aria-current={approvalsActive ? "page" : undefined}
+          className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-13 transition-colors ${
             approvalsActive
               ? "bg-overlay-strong font-medium text-foreground"
               : "text-muted-foreground hover:bg-overlay hover:text-foreground"
@@ -704,19 +781,18 @@ export function AssistantSidebar({
           />
           <span className="min-w-0 flex-1 truncate">Approvals</span>
           {(counts.data?.pendingApprovals ?? 0) > 0 && (
-            <span className="rounded-md border border-warning/30 bg-warning/10 px-1.5 text-[10px] font-medium text-warning">
+            <span className="rounded-md border border-warning/30 bg-warning/10 px-1.5 text-10 font-medium text-warning">
               {counts.data?.pendingApprovals}
             </span>
           )}
         </Link>
-        <ComingSoonItem icon={Server} label="Devices & Nodes" />
         <ComingSoonItem icon={Activity} label="Activity" />
       </div>
 
       {notice ? (
         <p
           role="status"
-          className="mx-2 mb-2 rounded-md border border-border bg-overlay px-2.5 py-2 text-[10px] leading-relaxed text-muted-foreground"
+          className="mx-2 mb-2 rounded-md border border-border bg-overlay px-2.5 py-2 text-10 leading-relaxed text-muted-foreground"
         >
           {notice}
         </p>
@@ -776,7 +852,7 @@ export function AssistantSidebar({
       <div className="shrink-0 border-t border-border/60 p-2">
         <Link
           to="/dashboard"
-          className="flex items-center gap-3 rounded-lg px-3 py-2 text-[13px] text-muted-foreground transition-colors hover:bg-overlay hover:text-foreground"
+          className="flex items-center gap-3 rounded-lg px-3 py-2 text-13 text-muted-foreground transition-colors hover:bg-overlay hover:text-foreground"
         >
           <SlidersHorizontal className="h-4 w-4 text-text-tertiary" />
           <span className="flex-1">Studio</span>
@@ -787,35 +863,23 @@ export function AssistantSidebar({
             <User className="h-3.5 w-3.5 text-text-tertiary" />
           </div>
           <div className="min-w-0">
-            <p className="truncate text-[12px] font-medium text-foreground">
+            <p className="truncate text-12 font-medium text-foreground">
               {user?.display_name ?? "User"}
             </p>
-            <p className="truncate text-[10px] text-text-tertiary">
+            <p className="truncate text-10 text-text-tertiary">
               {user?.email ?? ""}
             </p>
           </div>
         </div>
       </div>
 
-      {renameTarget && onRename ? (
-        <RenameChatDialog
-          key={renameTarget.id}
-          conversation={renameTarget}
-          onClose={() => setRenameTarget(undefined)}
-          onRename={onRename}
-        />
-      ) : null}
       <Dialog
         open={deleteTarget !== undefined}
         onOpenChange={(open) => {
           if (!open) setDeleteTarget(undefined);
         }}
       >
-        {/* Lifts the panel over the z-[80] mobile sidebar drawer this can be
-            opened from. Dialog's own overlay stays at z-50 and so sits under
-            that drawer, which only shows during the slide transition -- the
-            settled mobile panel is opaque and full-screen. */}
-        <DialogContent className="z-[90] md:max-w-md">
+        <DialogContent className="md:max-w-md">
           <DialogHeader>
             <DialogTitle>Delete chat?</DialogTitle>
             <DialogDescription>
@@ -850,7 +914,7 @@ export function AssistantSidebar({
   );
 }
 
-function RenameChatDialog({
+function RenameChatInline({
   conversation,
   onClose,
   onRename,
@@ -865,15 +929,7 @@ function RenameChatDialog({
   });
   const [error, setError] = useState<string>();
   return (
-    <Dialog open onOpenChange={(open) => {
-      if (!open) onClose();
-    }}>
-      <DialogContent className="z-[90] md:max-w-md">
-        <DialogHeader>
-          <DialogTitle>Rename chat</DialogTitle>
-          <DialogDescription>Choose a title for this conversation.</DialogDescription>
-        </DialogHeader>
-        <form onSubmit={form.handleSubmit(async ({ title }) => {
+        <form className="space-y-2 rounded-lg border border-hairline p-2" aria-label="Rename chat" onKeyDown={(event) => { if (event.key === "Escape") onClose(); }} onSubmit={form.handleSubmit(async ({ title }) => {
           try {
             await onRename(conversation.id, title);
             onClose();
@@ -881,11 +937,19 @@ function RenameChatDialog({
             setError("Could not rename this chat. Try again.");
           }
         })}>
-          <label htmlFor="chat-title" className="text-[12px]">Title</label>
-          <Input id="chat-title" maxLength={200} {...form.register("title")} />
-          {error ? <p role="alert" className="mt-2 text-[12px] text-destructive">{error}</p> : null}
-          <DialogFooter className="mt-4">
-            <Button type="button" variant="ghost" onClick={onClose}>Cancel</Button>
+          <label htmlFor="chat-title" className="text-12">
+            Title
+          </label>
+          <Input autoFocus id="chat-title" maxLength={200} {...form.register("title")} />
+          {error ? (
+            <p role="alert" className="mt-2 text-12 text-destructive">
+              {error}
+            </p>
+          ) : null}
+          <div className="flex justify-end gap-1">
+            <Button type="button" variant="ghost" onClick={onClose}>
+              Cancel
+            </Button>
             <Button
               type="submit"
               variant="primary"
@@ -894,9 +958,7 @@ function RenameChatDialog({
             >
               Save
             </Button>
-          </DialogFooter>
+          </div>
         </form>
-      </DialogContent>
-    </Dialog>
   );
 }

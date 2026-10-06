@@ -105,6 +105,8 @@ async fn researcher(state: &AppState) -> AssistantAgent {
         &state.encryption_keys,
         OWNER,
         CreateRequest {
+            machines: None,
+            logins: None,
             name: "researcher".into(),
             description: "Summarizes notes".into(),
             display_name: None,
@@ -169,6 +171,8 @@ async fn group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_ar
         State(state.clone()),
         test_auth_user(OWNER),
         Json(CreateGroupRequest {
+            org: None,
+            participant_user_ids: Vec::new(),
             name: "Launch team".into(),
             member_agent_ids: vec![researcher.id.clone(), nyxbot.id.clone()],
         }),
@@ -185,6 +189,7 @@ async fn group_messages_reach_the_lead_or_the_mentioned_members_and_hand_offs_ar
         test_auth_user(OWNER),
         Path(id.clone()),
         Json(PostMessageRequest {
+            attachment_ids: Vec::new(),
             text: "hello team".into(),
         }),
     )

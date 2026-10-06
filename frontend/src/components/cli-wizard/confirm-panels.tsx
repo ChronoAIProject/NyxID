@@ -202,10 +202,10 @@ export function ApiKeyCreateConfirm({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-[28px] font-normal">
+        <h2 className="font-serif text-28 font-normal">
           Create an API key
         </h2>
-        <p className="text-[12px] text-muted-foreground">
+        <p className="text-12 text-muted-foreground">
           Review the details your CLI sent and confirm to mint the key.
         </p>
       </div>
@@ -239,7 +239,7 @@ export function ApiKeyCreateConfirm({
                   side="right"
                   align="start"
                   sideOffset={8}
-                  className="max-w-[340px] whitespace-normal px-5 py-4 text-[13px] leading-[1.55]"
+                  className="max-w-[340px] whitespace-normal px-5 py-4 text-13 leading-[1.55]"
                 >
                   <div className="flex flex-col gap-4">
                     <p>
@@ -309,7 +309,7 @@ export function ApiKeyCreateConfirm({
                   allowAutoConnectedServices: false,
                 }));
               }}
-              className="flex h-10 w-full rounded-xl border border-input bg-transparent px-[14px] py-2 text-[13px] text-foreground transition-colors duration-300 focus-visible:outline-none"
+              className="flex h-10 w-full rounded-xl border border-input bg-transparent px-[14px] py-2 text-13 text-foreground transition-colors duration-300 focus-visible:outline-none focus-visible:border-input-focus"
             >
               <option value="">Personal (your account)</option>
               {orgs.data
@@ -396,10 +396,10 @@ export function ApiKeyRotateConfirm({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-[28px] font-normal">
+        <h2 className="font-serif text-28 font-normal">
           Rotate API key
         </h2>
-        <p className="text-[12px] text-muted-foreground">
+        <p className="text-12 text-muted-foreground">
           Rotating <strong>{prefill.display_name}</strong> will issue a
           new key and immediately revoke the previous one.
         </p>
@@ -480,10 +480,10 @@ export function NodeRegisterConfirm({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-[28px] font-normal">
+        <h2 className="font-serif text-28 font-normal">
           Generate node registration token
         </h2>
-        <p className="text-[12px] text-muted-foreground">
+        <p className="text-12 text-muted-foreground">
           Use this token with <code>nyxid node register</code> to
           connect a new node.
         </p>
@@ -562,10 +562,10 @@ export function NodeRotateConfirm({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-[28px] font-normal">
+        <h2 className="font-serif text-28 font-normal">
           Rotate node token
         </h2>
-        <p className="text-[12px] text-muted-foreground">
+        <p className="text-12 text-muted-foreground">
           Rotating <strong>{prefill.display_name}</strong> issues a new
           auth token + signing secret and revokes the previous pair.
         </p>
@@ -677,7 +677,7 @@ export function ServiceAccountCreateConfirm({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-[28px] font-normal">
+        <h2 className="font-serif text-28 font-normal">
           Create a service account
         </h2>
         <p className="text-sm text-muted-foreground">
@@ -730,7 +730,7 @@ export function ServiceAccountCreateConfirm({
               onChange={(e) => {
                 setOwnerId(e.target.value);
               }}
-              className="flex h-10 w-full rounded-[10px] border border-input bg-transparent px-[14px] py-2 text-[13px] text-foreground ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+              className="flex h-10 w-full rounded-[10px] border border-input bg-transparent px-[14px] py-2 text-13 text-foreground ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
             >
               <option value="">Personal (your admin account)</option>
               {orgs.data?.map((org) => (
@@ -807,7 +807,7 @@ export function ServiceAccountRotateSecretConfirm({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-[28px] font-normal">
+        <h2 className="font-serif text-28 font-normal">
           Rotate service account secret
         </h2>
         <p className="text-sm text-muted-foreground">
@@ -958,7 +958,7 @@ export function DeveloperAppCreateConfirm({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-[28px] font-normal">
+        <h2 className="font-serif text-28 font-normal">
           Create a developer OAuth app
         </h2>
         <p className="text-sm text-muted-foreground">
@@ -1061,7 +1061,7 @@ export function DeveloperAppCreateConfirm({
               onChange={(e) => {
                 setOwnerId(e.target.value);
               }}
-              className="flex h-10 w-full rounded-[10px] border border-input bg-transparent px-[14px] py-2 text-[13px] text-foreground ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+              className="flex h-10 w-full rounded-[10px] border border-input bg-transparent px-[14px] py-2 text-13 text-foreground ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
             >
               <option value="">Personal</option>
               {orgs.data?.map((org) => (
@@ -1133,7 +1133,7 @@ export function DeveloperAppRotateSecretConfirm({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-[28px] font-normal">
+        <h2 className="font-serif text-28 font-normal">
           Rotate developer app secret
         </h2>
         <p className="text-sm text-muted-foreground">
@@ -1269,7 +1269,7 @@ export function MfaSetupConfirm({
     return (
       <div className="flex flex-col gap-4">
         <div className="flex flex-col gap-1">
-          <h2 className="font-serif text-[28px] font-normal">
+          <h2 className="font-serif text-28 font-normal">
             Setting up MFA
           </h2>
           <p className="text-sm text-muted-foreground">
@@ -1284,7 +1284,7 @@ export function MfaSetupConfirm({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-[28px] font-normal">
+        <h2 className="font-serif text-28 font-normal">
           Add MFA to your account
         </h2>
         <p className="text-sm text-muted-foreground">
@@ -1326,7 +1326,7 @@ export function MfaSetupConfirm({
           </Button>
         </div>
         {qrUrl ? (
-          <p className="break-all text-[11px] text-muted-foreground">
+          <p className="break-all text-11 text-muted-foreground">
             otpauth URL: <code className="font-mono">{qrUrl}</code>
           </p>
         ) : null}
@@ -1379,7 +1379,7 @@ function Field({
 
 function ErrorLine({ message }: { readonly message: string }) {
   return (
-    <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-[12px] text-destructive">
+    <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-12 text-destructive">
       {message}
     </p>
   );

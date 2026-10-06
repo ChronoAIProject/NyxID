@@ -58,6 +58,23 @@ export const OAUTH_SCOPE_META: Readonly<Record<string, OAuthScopeMeta>> = {
       "Lets the app access your email address and verification state.",
     risk: "medium",
   },
+  roles: {
+    title: "Read your roles and permissions",
+    description:
+      "Lets the app see your assigned roles and the permissions they grant.",
+    risk: "medium",
+  },
+  groups: {
+    title: "Read your groups",
+    description: "Lets the app see which groups you belong to.",
+    risk: "medium",
+  },
+  proxy: {
+    title: "Use your connected services",
+    description:
+      "Lets the app send requests through NyxID to the services you authorize below.",
+    risk: "high",
+  },
   offline_access: {
     title: "Long-lived access",
     description:

@@ -77,6 +77,13 @@ it("keeps the dashboard and list on one route with a shared saved time range", a
   expect(get).toHaveBeenCalledWith(
     expect.stringContaining("period=7d&sort=cost"),
   );
+  await waitFor(() =>
+    expect(get).toHaveBeenCalledWith(
+      expect.stringMatching(
+        /\/admin\/usage\?from=.*&to=.*&user=11111111-1111-4111-8111-111111111111/,
+      ),
+    ),
+  );
 
   await userEvent.click(screen.getByRole("combobox", { name: "Time range" }));
   await userEvent.click(screen.getByRole("option", { name: "Last 30 days" }));
@@ -98,9 +105,7 @@ it("keeps the dashboard and list on one route with a shared saved time range", a
     "aria-selected",
     "true",
   );
-  expect(
-    screen.getAllByRole("heading", { name: /^Usage$/ }),
-  ).toHaveLength(1);
+  expect(screen.getAllByRole("heading", { name: /^Usage$/ })).toHaveLength(1);
   await waitFor(() =>
     expect(api.put).toHaveBeenCalledWith(
       "/admin/usage/workspace",

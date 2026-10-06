@@ -34,7 +34,7 @@ export function ArticleCard({ article }: { readonly article: BlogArticle }) {
 
       <div className="flex flex-1 flex-col gap-3 p-6">
         {primaryTag ? (
-          <span className="font-mono text-[11px] tracking-[1.5px] text-primary uppercase">
+          <span className="font-mono text-11 tracking-[1.5px] text-primary uppercase">
             {primaryTag}
           </span>
         ) : null}

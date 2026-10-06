@@ -73,6 +73,7 @@
   /* ── Borders & Input ── */
   --color-border: #262626;
   --color-input: #262626;
+  --color-input-focus: rgba(255, 255, 255, 0.15);
   --color-ring: #5A2AF1;
 
   /* ── Status (Brand Spec) ── */
@@ -96,11 +97,33 @@
   --color-overlay: rgba(255, 255, 255, 0.03);
   --color-overlay-strong: rgba(255, 255, 255, 0.06);
 
-  /* ── Radius ── */
-  --radius-sm: 0.375rem;
-  --radius-md: 0.625rem;
-  --radius-lg: 0.75rem;
-  --radius-xl: 0.875rem;
+  /* ── Radius ── (px, not rem: only text follows the user's text size) */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 12px;
+  --radius-xl: 14px;
+
+  /* ── Spacing ── Tailwind's default is 0.25rem; pinning it to the same 4px
+     keeps padding, gaps and control heights fixed when the Appearance text
+     size changes the root font size. */
+  --spacing: 4px;
+
+  /* ── Text scale (rem → follows the root font size set by Appearance) ──
+     `text-12` = 12px at the default 100%. Matches the DESIGN.md scale; use
+     these instead of `text-[12px]` so every size responds to the setting. */
+  --text-9: 0.5625rem;
+  --text-10: 0.625rem;
+  --text-11: 0.6875rem;
+  --text-12: 0.75rem;
+  --text-13: 0.8125rem;
+  --text-14: 0.875rem;
+  --text-15: 0.9375rem;
+  --text-17: 1.0625rem;
+  --text-20: 1.25rem;
+  --text-22: 1.375rem;
+  --text-24: 1.5rem;
+  --text-28: 1.75rem;
+  --text-36: 2.25rem;
 
   /* ── Typography (Mona Sans — closest to brand "Mono Sans") ── */
   --font-sans: "Mona Sans", system-ui, -apple-system, sans-serif;
@@ -134,50 +157,82 @@
 html.theme-light {
   color-scheme: light;
 
-  /* Semantic surfaces — off-white canvas, white elevated content */
-  --color-background: #FAFAFA;
+  /* Two neutral tones only: one zinc grey for every page-level surface
+     (canvas, sidebar, header) and white for cards/popovers. Structure comes
+     from visible borders, not extra grey fills. No hue tint. */
+  --color-background: #F4F4F5;
   --color-foreground: #18181B;
   --color-card: #FFFFFF;
   --color-card-foreground: #18181B;
   --color-popover: #FFFFFF;
   --color-popover-foreground: #18181B;
-  --color-sidebar: #FAFAFA;
+  --color-sidebar: #F4F4F5;
   --color-surface: #FFFFFF;
 
   /* Secondary / accent — faint purple tints on light */
   --color-secondary: #5A2AF10F;
-  --color-secondary-foreground: #52525B;
+  --color-secondary-foreground: #3F3F46;
   --color-accent: #5A2AF114;
   --color-accent-foreground: #18181B;
 
   /* Muted */
   --color-muted: #F4F4F5;
-  --color-muted-foreground: #52525B;
+  --color-muted-foreground: #3F3F46;
 
   /* Destructive */
   --color-destructive: #DC2626;
 
-  /* Borders & input */
-  --color-border: #E4E4E7;
-  --color-input: #E4E4E7;
+  /* Borders & input — dividers clearly visible on both tones; control edges
+     meet the 3:1 non-text contrast minimum on white */
+  --color-border: #C4C4CA;
+  --color-input: #8E8E96;
+  --color-input-focus: #7C5CF0;
 
   /* Status — deepened to the 600/700 ramp for contrast on a light canvas */
   --color-success: #059669;
   --color-warning: #B45309;
   --color-error: #DC2626;
   --color-info: #2563EB;
-  --color-text-tertiary: #71717A;
+  --color-text-tertiary: #5B5B63;
 
-  /* Interactive chrome → black-alpha overlays on light */
-  --color-hairline: rgba(0, 0, 0, 0.10);
-  --color-hairline-strong: rgba(0, 0, 0, 0.18);
-  --color-overlay: rgba(0, 0, 0, 0.04);
-  --color-overlay-strong: rgba(0, 0, 0, 0.07);
+  /* Interactive chrome → neutral black-alpha */
+  --color-hairline: rgba(0, 0, 0, 0.2);
+  --color-hairline-strong: rgba(0, 0, 0, 0.34);
+  --color-overlay: rgba(0, 0, 0, 0.035);
+  --color-overlay-strong: rgba(0, 0, 0, 0.06);
 }
 
-/* Native form controls / scrollbars track the dashboard theme. */
+/* Dark theme for themed surfaces. Lifted off near-black so surfaces, borders
+   and tertiary text separate (tertiary text ≥ 4.5:1 on cards). Scoped to
+   `html.theme-dark` so the never-themed landing/blog keep the `@theme`
+   defaults above unchanged. */
 html.theme-dark {
   color-scheme: dark;
+
+  --color-background: #17171A;
+  --color-foreground: #EFEFF1;
+  --color-card: #222225;
+  --color-card-foreground: #EFEFF1;
+  --color-popover: #222225;
+  --color-popover-foreground: #EFEFF1;
+  --color-sidebar: #141416;
+  --color-surface: #222225;
+
+  --color-secondary-foreground: #BABAC1;
+  --color-accent-foreground: #EFEFF1;
+
+  --color-muted: #2C2C30;
+  --color-muted-foreground: #BABAC1;
+
+  --color-border: #414148;
+  --color-input: #55555E;
+  --color-input-focus: #B0B0B8;
+  --color-text-tertiary: #95959F;
+
+  --color-hairline: rgba(255, 255, 255, 0.14);
+  --color-hairline-strong: rgba(255, 255, 255, 0.24);
+  --color-overlay: rgba(255, 255, 255, 0.05);
+  --color-overlay-strong: rgba(255, 255, 255, 0.095);
 }
 
 /* Helper-class light variants — these effects were authored as white-on-dark
@@ -213,6 +268,32 @@ html.theme-light ::-webkit-scrollbar-thumb {
 
 html.theme-light ::-webkit-scrollbar-thumb:hover {
   background: #A1A1AA;
+}
+
+/* Settings → Display → Motion. "Reduce" always stops animations and
+   transitions; "Follow system" does the same when the OS asks for reduced
+   motion. Themed surfaces only — landing/blog keep their own handling. */
+html.motion-reduce *,
+html.motion-reduce *::before,
+html.motion-reduce *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+  scroll-behavior: auto !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html.theme-light *,
+  html.theme-light *::before,
+  html.theme-light *::after,
+  html.theme-dark *,
+  html.theme-dark *::before,
+  html.theme-dark *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 @layer base {

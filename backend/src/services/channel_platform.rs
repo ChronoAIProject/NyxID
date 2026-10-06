@@ -247,6 +247,26 @@ pub struct ChannelCapabilities {
     #[serde(flatten)]
     pub outbound: OutboundCapabilities,
     pub media: MediaCapabilities,
+    #[serde(flatten)]
+    pub threads: ThreadCapabilities,
+}
+
+/// Implemented thread operations, independent of legacy outbound flags.
+/// Missing declarations fail closed for old clients and unsupported adapters.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ThreadCapabilities {
+    pub thread_reply: bool,
+    pub thread_follow: bool,
+    pub thread_history: bool,
+    /// The platform classifies the thread as private while still exposing a
+    /// durable shared thread (Aurinko mailbox threads).
+    #[serde(skip_serializing_if = "is_false")]
+    pub private_thread: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// What the native outbound transport actually preserves. Contract-tested in channel_adapters.
@@ -440,7 +460,27 @@ pub trait PlatformAdapter: Send + Sync {
         credentials: &BotCredentials<'_>,
         conversation_id: &str,
         reply: &OutboundReply,
+        thread_target: Option<&super::channel_thread_service::ThreadReplyTarget>,
     ) -> AppResult<SendOutcome> {
+        if let Some(target) = thread_target {
+            if self.platform_id() != bot.platform || !target.matches(bot, original, conversation_id)
+            {
+                return Err(super::channel_thread_service::unavailable());
+            }
+            return self
+                .send_bound_thread_reply(
+                    db,
+                    http,
+                    bot,
+                    original,
+                    credentials,
+                    conversation_id,
+                    target,
+                    reply,
+                )
+                .await
+                .map(SendOutcome::legacy);
+        }
         // Preserve adapter-specific send_bound_reply fences and persisted attempts.
         self.send_bound_reply(db, http, bot, original, credentials, conversation_id, reply)
             .await
@@ -461,6 +501,77 @@ pub trait PlatformAdapter: Send + Sync {
 
     fn outbound_capabilities(&self) -> OutboundCapabilities;
     fn media_capabilities(&self) -> MediaCapabilities;
+
+    fn thread_follow_guidance(&self) -> &'static str {
+        "Following needs access to ordinary messages and replies in this chat. Earlier message bodies may be unavailable; NyxID never requests extra permissions automatically."
+    }
+
+    fn thread_capabilities(&self) -> ThreadCapabilities {
+        ThreadCapabilities::default()
+    }
+
+    /// Dormant hooks: only the thread service may supply a bound target.
+    async fn resolve_thread(
+        &self,
+        _http: &reqwest::Client,
+        _credentials: &BotCredentials<'_>,
+        _facts: &crate::models::channel_thread::ChannelThreadFacts,
+        _ancestors: &[crate::models::channel_thread::ChannelThreadFacts],
+    ) -> AppResult<Option<crate::models::channel_thread::ChannelThreadFacts>> {
+        Ok(None)
+    }
+
+    async fn send_thread_reply(
+        &self,
+        _http: &reqwest::Client,
+        _credentials: &BotCredentials<'_>,
+        _target: &super::channel_thread_service::ThreadReplyTarget,
+        _reply: &OutboundReply,
+    ) -> AppResult<Option<String>> {
+        Err(super::channel_thread_service::unavailable())
+    }
+
+    /// Bound replies may need adapter-owned persistence barriers in addition
+    /// to native thread targeting. The default preserves the PR C path.
+    #[allow(clippy::too_many_arguments)]
+    async fn send_bound_thread_reply(
+        &self,
+        _db: &mongodb::Database,
+        http: &reqwest::Client,
+        _bot: &crate::models::channel_bot::ChannelBot,
+        _original: &crate::models::channel_message::ChannelMessage,
+        credentials: &BotCredentials<'_>,
+        _conversation_id: &str,
+        target: &super::channel_thread_service::ThreadReplyTarget,
+        reply: &OutboundReply,
+    ) -> AppResult<Option<String>> {
+        self.send_thread_reply(http, credentials, target, reply)
+            .await
+    }
+
+    async fn thread_history(
+        &self,
+        _http: &reqwest::Client,
+        _credentials: &BotCredentials<'_>,
+        _target: &super::channel_thread_service::ThreadReplyTarget,
+        _before: chrono::DateTime<chrono::Utc>,
+    ) -> AppResult<super::channel_thread_service::ThreadHistory> {
+        Ok(super::channel_thread_service::ThreadHistory {
+            messages: Vec::new(),
+            partial: true,
+        })
+    }
+
+    /// Positive platform evidence only; unknown addressing never means a mention.
+    /// Root resolution and sender authorization happen after this pure extraction.
+    fn thread_facts(
+        &self,
+        _inbound: &InboundMessage,
+        _bot: &crate::models::channel_bot::ChannelBot,
+        _bot_user_id: Option<&str>,
+    ) -> Option<crate::models::channel_thread::ChannelThreadFacts> {
+        None
+    }
 
     fn display_name(&self) -> &str {
         self.platform_id()

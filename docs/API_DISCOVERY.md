@@ -36,6 +36,8 @@ When you create or update a downstream service, NyxID tries to discover document
 - `/swagger.json`
 - `/docs/openapi.json`
 - `/.well-known/openapi`
+- `/openapi.yaml`
+- `/openapi.yml`
 
 ### AsyncAPI probe order
 
@@ -156,7 +158,7 @@ The `/endpoints` response includes structured endpoint data:
 
 The parsed endpoint view applies declarative MCP projections: `x-nyxid-mcp-enum` on a path/query parameter narrows its declared enum, and `x-nyxid-mcp-media` on requestBody selects a declared media type. The complete hosted HTTP OpenAPI document retains all declared choices. Google upload tools therefore advertise media/base64 only while the HTTP spec also documents multipart/related.
 
-The spec is fetched through a hardened path with DNS pinning, 5MB response size limit, redirect policy, and 60-second caching.
+The spec is fetched through a hardened path with DNS pinning, 5MB response size limit, redirect policy, and 60-second caching. Specs may be JSON or YAML: JSON is parsed first and behaves as before; any other body is read as a single YAML 1.2 document (`yes`/`no` stay strings, integer response codes become string keys, anchors, aliases and `<<` merge keys expand) and must be a mapping with an `openapi`, `swagger`, or `asyncapi` field, so text or HTML pages are never taken for a spec. Expanded YAML is bounded separately from the response size (1,000,000 nodes, 10 MiB of text, 64 levels of nesting), which rejects alias bombs. At most four YAML documents are parsed at once per server; a request that waits more than 10 seconds for a slot is answered with 429, while JSON specs never wait. Failures report `Spec was not valid JSON or YAML: <reason>`. The manual `POST /services/{id}/discover-endpoints` route uses the same parser.
 
 ### Rich catalog metadata
 
@@ -181,7 +183,7 @@ nyxid catalog endpoints <slug>          # parsed OpenAPI endpoints
 
 ## Hosted Catalog Overlay Specs
 
-Most official upstream APIs either publish no OpenAPI document, publish one in YAML (unsupported), or publish one far above the 5MB fetch limit. For those, NyxID ships small hand-curated OpenAPI 3.1 overlays in-tree under `backend/specs/catalog/` and serves them publicly at:
+Most official upstream APIs either publish no OpenAPI document, publish one far broader than agents need, or publish one far above the 5MB fetch limit. For those, NyxID ships small hand-curated OpenAPI 3.1 overlays in-tree under `backend/specs/catalog/` and serves them publicly at:
 
 ```text
 GET /api/v1/catalog-specs/{spec_key}/openapi.json
@@ -235,6 +237,26 @@ advertised model-call protocol. `wire_protocol` is `anthropic_messages`,
 own pagination fields. Optional `realtime=true` advertises WebSocket
 `/api/v1/proxy/s/{slug}/realtime`. xAI and OpenAI preserve the bearer-injected
 `wss://api.x.ai/v1/realtime` and `wss://api.openai.com/v1/realtime` transports.
+
+
+`inference.voice` adds structured voice discovery to catalog, key and MCP
+responses: `{protocol, models: [{id,label,default?}], voices: [{id,label}],
+usage_source, billing_metrics}`. `capabilities.supports_realtime_voice` derives
+solely from presence of that block; it is response-only, and `realtime` is also
+true when the block is present. Legacy `realtime:true` without voice metadata
+does not admit a NyxBot voice call. `realtime` alone does not identify the transport:
+OpenAI Live uses its dedicated session/WebRTC adapter, not the legacy `/realtime`
+proxy. Provider origins remain fixed in adapters.
+
+`nyxid catalog show` displays models, default, voices, protocol, usage source and
+billing units. Voice options read these catalog choices, intersect supported
+adapter protocols, then apply live visibility/binding and tariff/rollout gates.
+Phase 3 supports OpenAI Live; seeded xAI metadata does not enable its Phase 4
+adapter. Admins can add models without code changes after provider availability
+is verified. Startup backfills only missing voice metadata and respects
+`inference_admin_modified`, including explicit null clears. Price information
+continues through the existing admin-authored, Lago-synced lane DTOs; no default
+prices accompany voice metadata.
 
 `binding` is computed for the caller. `platform` means an authorized server-held
 key is available and omits `status_slug`; it does not change the binding of an

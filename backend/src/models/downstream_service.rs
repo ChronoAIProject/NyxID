@@ -46,6 +46,56 @@ pub struct ServiceInference {
     pub model_list: bool,
     #[serde(default)]
     pub realtime: bool,
+    #[serde(default)]
+    pub voice: Option<VoiceInference>,
+}
+
+/// Catalog metadata only; adapter endpoints and credentials are never catalog input.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VoiceProtocol {
+    OpenaiLive,
+    XaiRealtime,
+    /// Future protocols remain readable during rolling upgrades, but cannot execute.
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VoiceUsageSource {
+    ProviderReported,
+    ServerMeasured,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct VoiceModel {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub default: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct VoiceChoice {
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct VoiceInference {
+    pub protocol: VoiceProtocol,
+    pub models: Vec<VoiceModel>,
+    pub voices: Vec<VoiceChoice>,
+    pub usage_source: VoiceUsageSource,
+    pub billing_metrics: Vec<crate::models::service_billing::BillingMetric>,
+}
+
+/// Catalog-controlled smart-HTTP destination. Never authored by a machine.
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct GitHttp {
+    pub origin: String,
+    pub username: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
@@ -343,6 +393,8 @@ pub struct DownstreamService {
     pub billing: Option<ServiceBilling>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inference: Option<ServiceInference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_http: Option<GitHttp>,
     /// Explicit admin edits, including clearing metadata, suppress startup defaults.
     #[serde(default)]
     pub inference_admin_modified: bool,
@@ -522,6 +574,7 @@ pub mod test_helpers {
             issues_url: None,
             capabilities: None,
             inference: None,
+            git_http: None,
             inference_admin_modified: false,
             billing: None,
             auth_notes: None,
@@ -632,6 +685,7 @@ mod tests {
             }),
             billing: None,
             inference: None,
+            git_http: None,
             inference_admin_modified: false,
             auth_notes: Some("Bearer token required".to_string()),
             known_limitations: None,
@@ -715,6 +769,7 @@ mod tests {
             issues_url: None,
             capabilities: None,
             inference: None,
+            git_http: None,
             inference_admin_modified: false,
             billing: None,
             auth_notes: None,

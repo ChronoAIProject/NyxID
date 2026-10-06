@@ -655,7 +655,7 @@ export function DataTableColumnHeader<
         <button
           type="button"
           className={cn(
-            "group/sort flex h-full min-w-0 flex-1 items-center gap-1.5 text-left text-[10px] font-semibold uppercase tracking-normal outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50",
+            "group/sort flex h-full min-w-0 flex-1 items-center gap-1.5 text-left text-10 font-semibold uppercase tracking-normal outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50",
             direction && "text-foreground",
           )}
           disabled={disabled}

@@ -28,7 +28,7 @@ export function DetailSection({
       )}
     >
       <div className="flex items-center justify-between gap-3 border-b border-border/50 px-4 py-2.5">
-        <h3 className="text-[13px] font-semibold text-foreground">{title}</h3>
+        <h3 className="text-13 font-semibold text-foreground">{title}</h3>
         {action}
       </div>
       <div className="divide-y divide-border/30">{children}</div>

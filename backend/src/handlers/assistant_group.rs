@@ -39,6 +39,12 @@ pub struct GroupMemberResponse {
 
 #[derive(Serialize)]
 pub struct GroupResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    participants: Option<Vec<crate::services::org_group_service::Participant>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    your_role: Option<String>,
     id: String,
     name: String,
     members: Vec<GroupMemberResponse>,
@@ -59,6 +65,10 @@ pub struct GroupAgentRef {
 
 #[derive(Serialize)]
 pub struct GroupMessageResponse {
+    activities: Vec<super::assistant_nyxagent::ActivityResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    author: Option<Value>,
+    attachments: Vec<super::assistant_nyxagent::AttachmentResponse>,
     id: String,
     seq: i64,
     role: String,
@@ -81,6 +91,9 @@ fn message_response(row: GroupMessage, agents: &[AssistantAgent]) -> GroupMessag
         }
     });
     GroupMessageResponse {
+        activities: row.activities.into_iter().map(Into::into).collect(),
+        author: row.author_user_id.map(|id| json!({"id": id,"display_name":row.author_display_name.unwrap_or_else(||"Member".into())})),
+        attachments: row.attachments.into_iter().map(Into::into).collect(),
         id: row.id,
         seq: row.seq,
         role: row.role,
@@ -95,6 +108,9 @@ async fn group_response(state: &AppState, group: AssistantGroup) -> AppResult<Gr
     let members = groups::members(&state.db, &owner, &group).await?;
     let working = groups::working(&state.db, &owner, &group.id).await?;
     Ok(GroupResponse {
+        owner: None,
+        participants: None,
+        your_role: None,
         members: members
             .iter()
             .map(|agent| GroupMemberResponse {
@@ -116,10 +132,44 @@ async fn group_response(state: &AppState, group: AssistantGroup) -> AppResult<Gr
     })
 }
 
+async fn group_response_for(
+    state: &AppState,
+    access: crate::services::org_group_service::Access,
+) -> AppResult<GroupResponse> {
+    if access.org.is_none() {
+        return group_response(state, access.group).await;
+    }
+    let participants =
+        crate::services::org_group_service::participants(&state.db, &access.group).await?;
+    let owner_name =
+        crate::services::org_group_service::display_name(&state.db, &access.group.user_id).await?;
+    let role = access.role().to_owned();
+    let owner_id = access.group.user_id.clone();
+    let working: Vec<_> = crate::services::org_group_service::threads(&state.db, &access.group)
+        .await?
+        .into_iter()
+        .filter(|r| engine::live_turn(r, Utc::now()).is_some())
+        .filter_map(|r| r.agent_id)
+        .collect();
+    let mut response = group_response(state, access.group).await?;
+    response.owner = Some(json!({"type":"org","id":owner_id,"name":owner_name}));
+    response.participants = Some(participants);
+    response.your_role = Some(role);
+    for member in &mut response.members {
+        member.working = working.contains(&member.id);
+    }
+    response.working_agent_ids = working;
+    Ok(response)
+}
+
 /// Start (or keep queued) the members a group has addressed.
 pub(crate) async fn advance(state: &AppState, owner: &str, group_id: &str) {
     let result: AppResult<()> = async {
         let group = groups::get(&state.db, owner, group_id).await?;
+        if crate::services::org_group_service::is_org(&group) {
+            Box::pin(super::org_group::advance(state, &group)).await;
+            return Ok(());
+        }
         let now = Utc::now();
         for agent_id in &group.pending_agent_ids {
             // A member still answering picks up its next message afterwards.
@@ -214,6 +264,14 @@ async fn run_member(
         return Ok(());
     }
     let start = TurnStart {
+        channel_event_id: None,
+        org_access: None,
+        attachment_ids: Vec::new(),
+        group_request_id: None,
+        group_attachments: crate::services::assistant_upload_service::group_attachments(
+            &state.db, owner, &group.id, since,
+        )
+        .await?,
         trigger: None,
         conversation_id: thread.as_ref().map(|row| row.id.clone()),
         text: engine::excerpt(
@@ -265,12 +323,30 @@ pub(crate) async fn member_settled(
         return;
     };
     let owner = row.user_id.as_str();
+    if row.agent_owner_id.is_some() {
+        match crate::services::org_group_service::get(&state.db, owner, group_id, None).await {
+            Ok(access) if access.org.is_some() => {
+                Box::pin(super::org_group::member_settled(
+                    state, access, row, text, error_code,
+                ))
+                .await;
+                return;
+            }
+            Err(_) => return,
+            _ => {}
+        }
+    }
     let result: AppResult<()> = async {
         let group = groups::get(&state.db, owner, group_id).await?;
         let agent = team::agent_for_conversation(&state.db, row).await?;
         match error_code {
             None if !text.trim().is_empty() => {
-                groups::append(&state.db, owner, group_id, "agent", Some(&agent), text).await?;
+                let message =
+                    groups::append(&state.db, owner, group_id, "agent", Some(&agent), text).await?;
+                Box::pin(crate::services::machine_activity_service::publish_group(
+                    &state.db, row, &message,
+                ))
+                .await?;
                 let members = groups::members(&state.db, owner, &group).await?;
                 let live: Vec<AssistantAgent> = members
                     .into_iter()
@@ -282,25 +358,33 @@ pub(crate) async fn member_settled(
             }
             None => {}
             Some("cancelled") => {
-                groups::append(
+                let message = groups::append(
                     &state.db,
                     owner,
                     group_id,
                     "notice",
-                    None,
+                    Some(&agent),
                     &format!("{} stopped.", identifier(&agent.name)),
                 )
                 .await?;
+                Box::pin(crate::services::machine_activity_service::publish_group(
+                    &state.db, row, &message,
+                ))
+                .await?;
             }
             Some(code) => {
-                groups::append(
+                let message = groups::append(
                     &state.db,
                     owner,
                     group_id,
                     "notice",
-                    None,
+                    Some(&agent),
                     &format!("{} could not reply ({code}).", identifier(&agent.name)),
                 )
+                .await?;
+                Box::pin(crate::services::machine_activity_service::publish_group(
+                    &state.db, row, &message,
+                ))
                 .await?;
             }
         }
@@ -360,13 +444,33 @@ pub(crate) async fn post(
     text: &str,
     author: Option<&AssistantAgent>,
 ) -> AppResult<(GroupMessage, Vec<String>)> {
+    post_with_uploads(state, owner, group_id, text, author, &[]).await
+}
+
+async fn post_with_uploads(
+    state: &AppState,
+    owner: &str,
+    group_id: &str,
+    text: &str,
+    author: Option<&AssistantAgent>,
+    ids: &[String],
+) -> AppResult<(GroupMessage, Vec<String>)> {
     let text = text.trim();
-    if text.is_empty() || text.chars().count() > MAX_MESSAGE_CHARS {
+    if (text.is_empty() && ids.is_empty()) || text.chars().count() > MAX_MESSAGE_CHARS {
         return Err(AppError::ValidationError(format!(
             "A message has 1 to {MAX_MESSAGE_CHARS} characters"
         )));
     }
-    let group = groups::get(&state.db, owner, group_id).await?;
+    let access = crate::services::org_group_service::get(&state.db, owner, group_id, None).await?;
+    if access.org.is_some() {
+        if author.is_some() {
+            return Err(AppError::Forbidden(
+                "NyxBot cannot post into or follow organization groups".into(),
+            ));
+        }
+        return Box::pin(super::org_group::post(state, access, text, ids)).await;
+    }
+    let group = access.group;
     let members = groups::members(&state.db, owner, &group).await?;
     let live: Vec<AssistantAgent> = members
         .into_iter()
@@ -391,14 +495,15 @@ pub(crate) async fn post(
     {
         addressed.push(group.lead_agent_id.clone());
     }
-    let message = groups::append(
+    let message = Box::pin(groups::append_with_uploads(
         &state.db,
         owner,
         group_id,
         if author.is_some() { "agent" } else { "user" },
         author,
         text,
-    )
+        ids,
+    ))
     .await?;
     // A new request (the owner's, or NyxBot's from outside the group; it
     // cannot post from inside) restores the hand-off budget. Follow-up loops
@@ -481,6 +586,17 @@ pub(crate) async fn group_note(
     agent: &AssistantAgent,
 ) -> Option<String> {
     let group_id = row.group_id.as_deref()?;
+    if row.agent_owner_id.is_some() {
+        let access =
+            crate::services::org_group_service::get(&state.db, &row.user_id, group_id, None)
+                .await
+                .ok()?;
+        if access.org.is_some() {
+            return crate::services::org_group_service::note(&state.db, &access, agent)
+                .await
+                .ok();
+        }
+    }
     let group = groups::get(&state.db, &row.user_id, group_id).await.ok()?;
     let members = groups::members(&state.db, &row.user_id, &group)
         .await
@@ -533,14 +649,74 @@ async fn pending_actions(state: &AppState, owner: &str, group_id: &str) -> AppRe
     Ok(out)
 }
 
+pub(crate) async fn org_pending_actions(
+    state: &AppState,
+    access: &crate::services::org_group_service::Access,
+) -> AppResult<Vec<Value>> {
+    use crate::models::assistant_acknowledgement::{AssistantAcknowledgement, COLLECTION_NAME};
+    use futures::TryStreamExt;
+    use mongodb::bson::doc;
+    let mut out = Vec::new();
+    let people = crate::services::org_group_service::participants(&state.db, &access.group).await?;
+    let threads: std::collections::HashMap<_, _> =
+        crate::services::org_group_service::threads(&state.db, &access.group)
+            .await?
+            .into_iter()
+            .map(|thread| (thread.id.clone(), thread))
+            .collect();
+    let thread_ids: Vec<_> = threads.keys().cloned().collect();
+    let rows: Vec<AssistantAcknowledgement> = if thread_ids.is_empty() {
+        Vec::new()
+    } else {
+        state.db.collection(COLLECTION_NAME).find(doc! {
+            "conversation_id":{"$in":thread_ids},"kind":"action","status":"pending","decider":"user",
+            "expires_at":{"$gt":mongodb::bson::DateTime::now()}
+        }).await?.try_collect().await?
+    };
+    for ack in rows {
+        let Some(thread) = threads
+            .get(&ack.conversation_id)
+            .filter(|t| t.user_id == ack.user_id)
+        else {
+            continue;
+        };
+        let name = people
+            .iter()
+            .find(|p| p.id == thread.user_id)
+            .map(|p| p.display_name.as_str())
+            .unwrap_or("Member");
+        out.push(json!({"conversation_id":thread.id,"acknowledgement_id":ack.id,
+            "agent_id":thread.agent_id,"summary":ack.summary,"expires_at":ack.expires_at,
+            "triggering_person":{"id":thread.user_id,"display_name":name},"can_decide":thread.user_id==access.actor}));
+    }
+    let approvals: Vec<crate::models::approval_request::ApprovalRequest> = state.db
+        .collection(crate::models::approval_request::COLLECTION_NAME)
+        .find(doc! {"assistant_group.group_id":&access.group.id,"status":"pending","expires_at":{"$gt":mongodb::bson::DateTime::now()}})
+        .limit(100).await?.try_collect().await?;
+    for approval in approvals {
+        let Some(binding) = &approval.assistant_group else {
+            continue;
+        };
+        let name = people
+            .iter()
+            .find(|p| p.id == binding.actor_user_id)
+            .map(|p| p.display_name.as_str())
+            .unwrap_or("Member");
+        out.push(json!({"conversation_id":binding.conversation_id,"approval_request_id":approval.id,
+            "summary":approval.action_description.unwrap_or(approval.operation_summary),"expires_at":approval.expires_at,
+            "triggering_person":{"id":binding.actor_user_id,"display_name":name},"can_decide":binding.actor_user_id==access.actor}));
+    }
+    Ok(out)
+}
+
 // ----- HTTP -----
 
 pub async fn list_groups(State(state): State<AppState>, auth: AuthUser) -> AppResult<Json<Value>> {
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     let mut rows = Vec::new();
-    for group in groups::list(&state.db, &owner).await? {
-        rows.push(group_response(&state, group).await?);
+    for access in crate::services::org_group_service::list(&state.db, &owner).await? {
+        rows.push(group_response_for(&state, access).await?);
     }
     Ok(Json(json!({"groups": rows})))
 }
@@ -548,6 +724,10 @@ pub async fn list_groups(State(state): State<AppState>, auth: AuthUser) -> AppRe
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateGroupRequest {
+    #[serde(default)]
+    org: Option<String>,
+    #[serde(default)]
+    participant_user_ids: Vec<String>,
     name: String,
     member_agent_ids: Vec<String>,
 }
@@ -559,6 +739,27 @@ pub async fn create_group(
 ) -> AppResult<(StatusCode, Json<GroupResponse>)> {
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
+    if let Some(org) = body.org.as_deref() {
+        let access = crate::services::org_group_service::create(
+            &state.db,
+            &owner,
+            org,
+            &body.name,
+            &body.member_agent_ids,
+            &body.participant_user_ids,
+            "user",
+        )
+        .await?;
+        return Ok((
+            StatusCode::CREATED,
+            Json(group_response_for(&state, access).await?),
+        ));
+    }
+    if !body.participant_user_ids.is_empty() {
+        return Err(AppError::ValidationError(
+            "Personal groups have no participant list".into(),
+        ));
+    }
     let group = groups::create(
         &state.db,
         &owner,
@@ -580,13 +781,19 @@ pub async fn get_group(
 ) -> AppResult<Json<GroupResponse>> {
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
-    let group = groups::get(&state.db, &owner, &id).await?;
-    Ok(Json(group_response(&state, group).await?))
+    let access = crate::services::org_group_service::get(&state.db, &owner, &id, None).await?;
+    Ok(Json(group_response_for(&state, access).await?))
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateGroupRequest {
+    #[serde(default)]
+    participant_user_ids: Option<Vec<String>>,
+    #[serde(default)]
+    lead_agent_id: Option<String>,
+    #[serde(default)]
+    leave: bool,
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
@@ -601,6 +808,25 @@ pub async fn update_group(
 ) -> AppResult<Json<GroupResponse>> {
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
+    let access = crate::services::org_group_service::get(&state.db, &owner, &id, None).await?;
+    if access.org.is_some() {
+        let access = crate::services::org_group_service::update(
+            &state.db,
+            access,
+            body.name.as_deref(),
+            body.member_agent_ids.as_deref(),
+            body.participant_user_ids.as_deref(),
+            body.lead_agent_id.as_deref(),
+            body.leave,
+        )
+        .await?;
+        return Ok(Json(group_response_for(&state, access).await?));
+    }
+    if body.participant_user_ids.is_some() || body.lead_agent_id.is_some() || body.leave {
+        return Err(AppError::ValidationError(
+            "Participant settings require an organization group".into(),
+        ));
+    }
     let group = groups::update(
         &state.db,
         &owner,
@@ -619,7 +845,12 @@ pub async fn delete_group(
 ) -> AppResult<StatusCode> {
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
-    groups::delete(&state.db, &owner, &id).await?;
+    let access = crate::services::org_group_service::get(&state.db, &owner, &id, None).await?;
+    if access.org.is_some() {
+        crate::services::org_group_service::delete(&state.db, &access).await?;
+    } else {
+        groups::delete(&state.db, &owner, &id).await?;
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -643,22 +874,62 @@ pub async fn list_messages(
     if !(1..=200).contains(&limit) || query.before_seq.is_some_and(|seq| seq <= 0) {
         return Err(AppError::BadRequest("Invalid page".into()));
     }
-    let group = groups::get(&state.db, &owner, &id).await?;
-    let mut rows = groups::messages(&state.db, &owner, &id, limit + 1, query.before_seq).await?;
+    let access = crate::services::org_group_service::get(&state.db, &owner, &id, None).await?;
+    let group_owner = access.group.user_id.clone();
+    let mut rows =
+        groups::messages(&state.db, &group_owner, &id, limit + 1, query.before_seq).await?;
     let more = rows.len() > limit as usize;
     if more {
         rows.remove(0);
     }
     let before_seq = more.then(|| rows[0].seq);
-    let agents = team::agents(&state.db, &owner, true).await?;
-    let pending_actions = pending_actions(&state, &owner, &id).await?;
+    Box::pin(crate::services::machine_activity_service::refresh_group_jobs(&state.db, &mut rows))
+        .await?;
+    let agents = team::agents(&state.db, &group_owner, true).await?;
+    let pending_actions = if access.org.is_some() {
+        org_pending_actions(&state, &access).await?
+    } else {
+        pending_actions(&state, &owner, &id).await?
+    };
+    let mut messages: Vec<_> = rows
+        .into_iter()
+        .map(|row| message_response(row, &agents))
+        .collect();
+    let receipts = messages
+        .iter_mut()
+        .flat_map(|m| m.activities.iter_mut())
+        .filter_map(|a| a.machine.as_mut())
+        .collect();
+    Box::pin(super::assistant_nyxagent::resolve_machine_names(
+        &state.db, &owner, receipts,
+    ))
+    .await?;
+    if access.org.is_some() {
+        for message in &mut messages {
+            if let Some(actor) = message.author.as_ref().and_then(|a| a["id"].as_str()) {
+                Box::pin(super::assistant_nyxagent::mark_expired_attachments(
+                    &state.db,
+                    actor,
+                    message.attachments.iter_mut().collect(),
+                ))
+                .await?;
+            }
+        }
+    } else {
+        Box::pin(super::assistant_nyxagent::mark_expired_attachments(
+            &state.db,
+            &owner,
+            messages
+                .iter_mut()
+                .flat_map(|m| m.attachments.iter_mut())
+                .collect(),
+        ))
+        .await?;
+    }
     Ok(Json(json!({
-        "group": group_response(&state, group).await?,
+        "group": group_response_for(&state, access).await?,
         "pending_actions": pending_actions,
-        "messages": rows
-            .into_iter()
-            .map(|row| message_response(row, &agents))
-            .collect::<Vec<_>>(),
+        "messages": messages,
         "before_seq": before_seq,
     })))
 }
@@ -666,6 +937,8 @@ pub async fn list_messages(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PostMessageRequest {
+    #[serde(default)]
+    attachment_ids: Vec<String>,
     text: String,
 }
 
@@ -677,8 +950,12 @@ pub async fn post_message(
 ) -> AppResult<(StatusCode, Json<Value>)> {
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
-    let (message, addressed) = post(&state, &owner, &id, &body.text, None).await?;
-    let agents = team::agents(&state.db, &owner, true).await?;
+    if !body.attachment_ids.is_empty() {
+        super::login_client_context::require_first_party_human(&auth)?;
+    }
+    let (message, addressed) =
+        post_with_uploads(&state, &owner, &id, &body.text, None, &body.attachment_ids).await?;
+    let agents = team::agents(&state.db, &message.user_id, true).await?;
     Ok((
         StatusCode::ACCEPTED,
         Json(json!({

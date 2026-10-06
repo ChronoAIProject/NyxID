@@ -52,7 +52,6 @@ pub async fn post_event(
             "API key required for channel events".to_string(),
         ));
     }
-
     // Envelope shape validation. Per design doc §NOT in Scope, there is no
     // payload-size limit; only structural validation.
     validate_envelope(&envelope)?;

@@ -560,6 +560,8 @@ async fn specialist(state: &AppState) -> crate::models::assistant_agent::Assista
         &state.encryption_keys,
         OWNER,
         team::CreateRequest {
+            machines: None,
+            logins: None,
             name: "schedule-researcher".into(),
             description: "Research using only granted services".into(),
             display_name: None,
@@ -615,6 +617,12 @@ async fn schedule_specialist_authority_threads_and_guest_refusal() {
     assert!(key.allowed_service_ids.is_empty());
     assert!(key.allowed_platform_service_ids.is_empty());
     let chat = ChatAuthority {
+        org_agent_access: None,
+        turn_id: None,
+        turn_stopped: false,
+        turn_live: true,
+        machine_node_ids: Vec::new(),
+        saved_login_ids: Vec::new(),
         confirmation_policy: None,
         user_id: OWNER.into(),
         conversation_id: thread.id,
@@ -1054,6 +1062,10 @@ async fn schedule_confirmation_waits_and_resumes_without_another_budget() {
         .db
         .collection::<AssistantAcknowledgement>(ACKS)
         .insert_one(AssistantAcknowledgement {
+            voice_request_id: None,
+            continuation_receipt_id: None,
+            skill_selection: None,
+            operation_selection: None,
             id: ack_id.clone(),
             conversation_id: thread.id.clone(),
             user_id: OWNER.into(),
@@ -1076,6 +1088,7 @@ async fn schedule_confirmation_waits_and_resumes_without_another_budget() {
             request_excerpt: None,
             decided_by: None,
             reason: None,
+            machine_context: None,
         })
         .await
         .unwrap();
@@ -1908,7 +1921,7 @@ async fn schedule_webhook_prefill_watch_and_human_api_boundary() {
     let url = url::Url::parse(link["url"].as_str().unwrap()).unwrap();
     let params: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
     assert_eq!(params.len(), 1);
-    assert_eq!(url.path(), "/automations");
+    assert_eq!(url.path(), "/assistant/automations");
     let prefill = crate::handlers::triggers::setup(
         axum::extract::State(state.clone()),
         crate::test_utils::test_auth_user(OWNER),

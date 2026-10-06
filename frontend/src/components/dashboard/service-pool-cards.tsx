@@ -61,7 +61,7 @@ export function ServicePoolCards({
                     <GitBranch className="size-5" />
                   </div>
                   <div className="min-w-0 flex-1">
-                    <h3 className="truncate text-[15px] font-semibold">
+                    <h3 className="truncate text-15 font-semibold">
                       {pool.name}
                     </h3>
                     <code

@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "name": "One Cloud project",
+  "provider": "google",
+  "resource": {
+    "type": "google_api",
+    "operations": [
+      {
+        "id": "cloud.projects.get",
+        "origin": "https://cloudresourcemanager.googleapis.com",
+        "method": "GET",
+        "path": "/v3/projects/{project}",
+        "path_parameters": {
+          "project": {
+            "type": "exact",
+            "value": "123456789"
+          }
+        },
+        "query_parameters": {},
+        "body": null
+      }
+    ]
+  },
+  "allowed_operations": [
+    "cloud.projects.get"
+  ],
+  "constraints": {},
+  "hooks": []
+}

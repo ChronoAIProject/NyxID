@@ -1,8 +1,19 @@
-import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  Fragment,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { ChevronDown, ChevronLeft, ChevronRight } from "lucide-react";
 import type { AnalyticsFilters } from "@/schemas/usage-analytics";
-import { useAdminUsage, type AdminUsageParams } from "@/hooks/use-admin-usage";
+import {
+  useAdminUsage,
+  usePreloadAdminUsageDetails,
+  type AdminUsageParams,
+} from "@/hooks/use-admin-usage";
 import { credentialClassLabel } from "@/lib/billing-units";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { ArticleIcon } from "@/components/icons/empty-state";
@@ -32,6 +43,13 @@ import {
 import { DataTableBadgeCell } from "@/components/data-table/data-table-columns";
 import { formatNumber, formatEstimatedCredits } from "@/lib/billing-format";
 import { BILLING_METRICS, metricLabel } from "@/schemas/billing-metrics";
+import { MEASURE_LABELS } from "@/lib/usage-analytics";
+import { TokenMetricPicker, TokenOverlapHint } from "./token-metric-picker";
+import {
+  TOKEN_METRICS,
+  sumTokenMetrics,
+  type TokenMetric,
+} from "./token-metrics";
 import {
   normalizeAdminUsageSearch,
   usageRangeError,
@@ -54,7 +72,63 @@ const SORT_LABELS: Record<AdminUsageSearch["sort"], string> = {
   completion_tokens: "Output tokens",
   cached_tokens: "Cache-read tokens",
   cache_creation_tokens: "Cache-write tokens",
+  audio_input_tokens: "Voice input tokens",
+  audio_output_tokens: "Voice output tokens",
 };
+function listUsageParams(
+  search: AdminUsageSearch,
+  filters: AnalyticsFilters,
+): AdminUsageParams {
+  return {
+    ...search,
+    period: filters.period,
+    from: filters.from ?? undefined,
+    to: filters.to ?? undefined,
+    user: undefined,
+    service: undefined,
+    services: filters.services,
+    actors: filters.actors,
+    owners: filters.owners,
+  };
+}
+
+function detailUsageParams(
+  search: AdminUsageParams,
+  data: { window: { from: string; to: string } } | undefined,
+): AdminUsageParams {
+  return data
+    ? {
+        ...search,
+        period: "custom",
+        from: data.window.from,
+        to: data.window.to,
+        sort: "requests",
+        metric: "tokens",
+        page: 1,
+        per_page: 25,
+      }
+    : search;
+}
+
+export function AdminUsagePreload({
+  filters,
+  search,
+}: {
+  filters: AnalyticsFilters;
+  search: AdminUsageSearch;
+}) {
+  const params = useMemo(
+    () => listUsageParams(search, filters),
+    [search, filters],
+  );
+  const usage = useAdminUsage(params);
+  const detail = useMemo(
+    () => detailUsageParams(params, usage.data),
+    [params, usage.data],
+  );
+  usePreloadAdminUsageDetails(usage.data, detail);
+  return null;
+}
 
 function Choice({
   label,
@@ -90,12 +164,12 @@ function Identity({ user }: { user: AdminUsageIdentity }) {
     <div className="min-w-0">
       <Tooltip>
         <TooltipTrigger asChild>
-          <span className="text-[12px] font-medium">{user.display_name}</span>
+          <span className="text-12 font-medium">{user.display_name}</span>
         </TooltipTrigger>
         <TooltipContent>{user.id}</TooltipContent>
       </Tooltip>
       {user.email && (
-        <div className="break-all text-[11px] text-muted-foreground">
+        <div className="break-all text-11 text-muted-foreground">
           {user.email}
         </div>
       )}
@@ -105,22 +179,61 @@ function Identity({ user }: { user: AdminUsageIdentity }) {
     </div>
   );
 }
-function Quantities({ usage }: { usage: AdminUsageStats }) {
+function Quantities({
+  usage,
+  tokenView,
+}: {
+  usage: AdminUsageStats;
+  tokenView: readonly TokenMetric[];
+}) {
+  const allSelected = tokenView.length === TOKEN_METRICS.length;
   return (
-    <div className="space-y-1 font-mono text-[11px] tabular-nums">
+    <div className="space-y-1 font-mono text-11 tabular-nums">
       {Object.entries(usage.quantities).map(([metric, quantity]) => (
         <div key={metric}>
           {formatNumber(quantity)} {metricLabel(metric)}
         </div>
       ))}
-      {usage.total_tokens > 0 && (
+      {(usage.total_tokens > 0 ||
+        usage.cached_tokens > 0 ||
+        usage.cache_creation_tokens > 0) && (
         <div className="text-muted-foreground">
-          {formatNumber(usage.total_tokens)} total tokens · in{" "}
-          {formatNumber(usage.prompt_tokens)} · out{" "}
-          {formatNumber(usage.completion_tokens)}
-          <br />
-          cache read {formatNumber(usage.cached_tokens)} · cache write{" "}
-          {formatNumber(usage.cache_creation_tokens)}
+          {allSelected ? (
+            <>
+              {formatNumber(usage.total_tokens)} total tokens · in{" "}
+              {formatNumber(usage.prompt_tokens)} · out{" "}
+              {formatNumber(usage.completion_tokens)}
+              <br />
+              cache read {formatNumber(usage.cached_tokens)} · cache write{" "}
+              {formatNumber(usage.cache_creation_tokens)}
+              {usage.audio_input_tokens + usage.audio_output_tokens > 0 && (
+                <>
+                  <br />
+                  voice in {formatNumber(usage.audio_input_tokens)} · voice out{" "}
+                  {formatNumber(usage.audio_output_tokens)}
+                </>
+              )}
+            </>
+          ) : tokenView.length === 1 ? (
+            <>
+              {formatNumber(usage[tokenView[0]!])}{" "}
+              {MEASURE_LABELS[tokenView[0]!].toLowerCase()}
+            </>
+          ) : (
+            <>
+              <span className="inline-flex items-center gap-1">
+                {formatNumber(sumTokenMetrics(usage, tokenView))} selected
+                tokens
+                <TokenOverlapHint selected={tokenView} />
+              </span>
+              {tokenView.map((metric) => (
+                <div key={metric}>
+                  {formatNumber(usage[metric])}{" "}
+                  {MEASURE_LABELS[metric].toLowerCase()}
+                </div>
+              ))}
+            </>
+          )}
         </div>
       )}
     </div>
@@ -128,7 +241,7 @@ function Quantities({ usage }: { usage: AdminUsageStats }) {
 }
 function Cost({ usage }: { usage: AdminUsageStats }) {
   return (
-    <div className="space-y-1 font-mono text-[11px] tabular-nums">
+    <div className="space-y-1 font-mono text-11 tabular-nums">
       <span>
         {formatEstimatedCredits(usage.gross_cost ?? usage.gross_cost_micros)}
       </span>
@@ -156,10 +269,10 @@ function ServiceName({
   service: Pick<AdminUsageService, "service_name" | "service_slug">;
 }) {
   return (
-    <div className="text-[12px] font-medium">
+    <div className="text-12 font-medium">
       {service.service_name}
       {service.service_slug && (
-        <div className="text-[11px] font-normal text-muted-foreground">
+        <div className="text-11 font-normal text-muted-foreground">
           {service.service_slug}
         </div>
       )}
@@ -169,9 +282,11 @@ function ServiceName({
 function StatsTable({
   rows,
   firstHeading = "Service",
+  tokenView,
 }: {
   rows: { key: string; label: ReactNode; usage: AdminUsageStats }[];
   firstHeading?: string;
+  tokenView: readonly TokenMetric[];
 }) {
   return (
     <>
@@ -193,7 +308,7 @@ function StatsTable({
                   {formatNumber(row.usage.requests)}
                 </TableCell>
                 <TableCell>
-                  <Quantities usage={row.usage} />
+                  <Quantities usage={row.usage} tokenView={tokenView} />
                 </TableCell>
                 <TableCell>
                   <Cost usage={row.usage} />
@@ -210,10 +325,10 @@ function StatsTable({
             className="space-y-3 rounded-lg border border-border bg-card p-4"
           >
             {row.label}
-            <div className="font-mono text-[11px]">
+            <div className="font-mono text-11">
               {formatNumber(row.usage.requests)} requests
             </div>
-            <Quantities usage={row.usage} />
+            <Quantities usage={row.usage} tokenView={tokenView} />
             <Cost usage={row.usage} />
           </div>
         ))}
@@ -221,15 +336,22 @@ function StatsTable({
     </>
   );
 }
-function ServiceTable({ services }: { services: AdminUsageService[] }) {
+function ServiceTable({
+  services,
+  tokenView,
+}: {
+  services: AdminUsageService[];
+  tokenView: readonly TokenMetric[];
+}) {
   return (
     <StatsTable
+      tokenView={tokenView}
       rows={services.map((service) => ({
         key: `${service.service_id}:${service.service_slug}`,
         label: (
           <div className="space-y-2">
             <ServiceName service={service} />
-            <span className="text-[11px] text-muted-foreground">
+            <span className="text-11 text-muted-foreground">
               {formatNumber(service.unique_users)} users
             </span>
             <DataTableBadgeCell>
@@ -252,9 +374,11 @@ function ServiceTable({ services }: { services: AdminUsageService[] }) {
 function UserServices({
   user,
   search,
+  tokenView,
 }: {
   user: AdminUsageIdentity;
   search: AdminUsageParams;
+  tokenView: readonly TokenMetric[];
 }) {
   const usage = useAdminUsage({
     ...search,
@@ -264,7 +388,7 @@ function UserServices({
   });
   return (
     <div className="space-y-3 p-3">
-      <p className="text-[12px] font-medium">
+      <p className="text-12 font-medium">
         Services for {user.display_name}
       </p>
       {usage.isPending ? (
@@ -275,7 +399,12 @@ function UserServices({
           onRetry={() => void usage.refetch()}
         />
       ) : (
-        usage.data && <ServiceTable services={usage.data.by_service} />
+        usage.data && (
+          <ServiceTable
+            services={usage.data.by_service}
+            tokenView={tokenView}
+          />
+        )
       )}
     </div>
   );
@@ -283,9 +412,11 @@ function UserServices({
 function RankingTable({
   rows,
   search,
+  tokenView,
 }: {
   rows: AdminUsageRanking[];
   search: AdminUsageParams;
+  tokenView: readonly TokenMetric[];
 }) {
   const [expanded, setExpanded] = useState<string | null>(null);
   const rowKey = (row: AdminUsageRanking) =>
@@ -295,7 +426,7 @@ function RankingTable({
       <Identity user={row.user} />
       {row.billing_owner && (
         <div className="border-l border-border pl-2">
-          <span className="text-[10px] text-muted-foreground">Billed to</span>
+          <span className="text-10 text-muted-foreground">Billed to</span>
           <Identity user={row.billing_owner} />
         </div>
       )}
@@ -335,7 +466,7 @@ function RankingTable({
                     <ServiceName service={row} />
                   </TableCell>
                   <TableCell>
-                    <Quantities usage={row} />
+                    <Quantities usage={row} tokenView={tokenView} />
                   </TableCell>
                   <TableCell className="font-mono tabular-nums">
                     {formatNumber(row.requests)}
@@ -347,7 +478,11 @@ function RankingTable({
                 {expanded === rowKey(row) && (
                   <TableRow>
                     <TableCell colSpan={5}>
-                      <UserServices user={row.user} search={search} />
+                      <UserServices
+                        user={row.user}
+                        search={search}
+                        tokenView={tokenView}
+                      />
                     </TableCell>
                   </TableRow>
                 )}
@@ -364,13 +499,17 @@ function RankingTable({
           >
             {person(row)}
             <ServiceName service={row} />
-            <p className="font-mono text-[11px]">
+            <p className="font-mono text-11">
               {formatNumber(row.requests)} requests
             </p>
-            <Quantities usage={row} />
+            <Quantities usage={row} tokenView={tokenView} />
             <Cost usage={row} />
             {expanded === rowKey(row) && (
-              <UserServices user={row.user} search={search} />
+              <UserServices
+                user={row.user}
+                search={search}
+                tokenView={tokenView}
+              />
             )}
           </div>
         ))}
@@ -382,6 +521,7 @@ export function AdminUsageList({ filters }: { filters: AnalyticsFilters }) {
   const routeSearch = useSearch({ from: "/dashboard/admin/usage" });
   const search = normalizeAdminUsageSearch(routeSearch);
   const navigate = useNavigate();
+  const [tokenView, setTokenView] = useState<TokenMetric[]>([...TOKEN_METRICS]);
   const filterKey = JSON.stringify(filters);
   const previousFilters = useRef(filterKey);
   useEffect(() => {
@@ -395,18 +535,7 @@ export function AdminUsageList({ filters }: { filters: AnalyticsFilters }) {
         });
     }
   }, [filterKey, navigate, routeSearch, search.page]);
-  const effectiveSearch: AdminUsageParams = {
-    ...search,
-    page: search.page,
-    period: filters.period,
-    from: filters.from ?? undefined,
-    to: filters.to ?? undefined,
-    user: undefined,
-    service: undefined,
-    services: filters.services,
-    actors: filters.actors,
-    owners: filters.owners,
-  };
+  const effectiveSearch = listUsageParams(search, filters);
   const usage = useAdminUsage(effectiveSearch);
   const data = usage.data;
   const change = (patch: Partial<AdminUsageSearch>) =>
@@ -424,18 +553,11 @@ export function AdminUsageList({ filters }: { filters: AnalyticsFilters }) {
   );
   // Expansion reads the exact response window so an interaction cannot shift
   // a rolling boundary between the summary and the user's detail.
-  const detailSearch: AdminUsageParams = data
-    ? {
-        ...effectiveSearch,
-        period: "custom",
-        from: data.window.from,
-        to: data.window.to,
-      }
-    : effectiveSearch;
+  const detailSearch = detailUsageParams(effectiveSearch, data);
   return (
     <div className="space-y-6">
       {rangeError ? (
-        <p role="alert" className="text-[12px] text-destructive">
+        <p role="alert" className="text-12 text-destructive">
           {rangeError}
         </p>
       ) : usage.isError ? (
@@ -455,7 +577,7 @@ export function AdminUsageList({ filters }: { filters: AnalyticsFilters }) {
       ) : (
         data && (
           <>
-            <p className="text-[11px] text-muted-foreground">
+            <p className="text-11 text-muted-foreground">
               {new Date(data.window.from).toLocaleString()} –{" "}
               {new Date(data.window.to).toLocaleString()} ·{" "}
               {data.freshness && (
@@ -474,10 +596,10 @@ export function AdminUsageList({ filters }: { filters: AnalyticsFilters }) {
             {data.totals.events === 0 ? (
               <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
                 <ArticleIcon className="h-48 w-48 text-muted-foreground/30" />
-                <p className="text-[12px] font-medium text-muted-foreground">
+                <p className="text-12 font-medium text-muted-foreground">
                   No usage in this window.
                 </p>
-                <p className="text-[12px] text-muted-foreground">
+                <p className="text-12 text-muted-foreground">
                   Try another time range or clear filters. New usage appears
                   after services process requests with usage metering enabled.
                 </p>
@@ -485,13 +607,13 @@ export function AdminUsageList({ filters }: { filters: AnalyticsFilters }) {
             ) : (
               <>
                 {data.totals.unknown_cost_events > 0 && (
-                  <p className="rounded-lg bg-white/[0.03] px-4 py-3 text-[12px] text-muted-foreground">
+                  <p className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">
                     Costs are partial:{" "}
                     {formatNumber(data.totals.unknown_cost_events)} historical
                     events have no cached rate.
                   </p>
                 )}
-                <p className="text-[11px] text-muted-foreground">
+                <p className="text-11 text-muted-foreground">
                   Gross costs use settled amounts or current rates for legacy
                   events. Wallet{" "}
                   {formatEstimatedCredits(
@@ -510,15 +632,27 @@ export function AdminUsageList({ filters }: { filters: AnalyticsFilters }) {
                   overlap input. Quantities include each billing component and
                   resale event.
                 </p>
+                <div className="flex justify-end">
+                  <TokenMetricPicker
+                    label="Token view"
+                    selected={tokenView}
+                    onChange={setTokenView}
+                    allLabel="All token types"
+                  />
+                </div>
                 <section className="space-y-3">
-                  <h2 className="text-[15px] font-semibold">By service</h2>
-                  <ServiceTable services={data.by_service} />
+                  <h2 className="text-15 font-semibold">By service</h2>
+                  <ServiceTable
+                    services={data.by_service}
+                    tokenView={tokenView}
+                  />
                 </section>
                 <section className="space-y-3">
-                  <h2 className="text-[15px] font-semibold">
+                  <h2 className="text-15 font-semibold">
                     Platform key vs own key
                   </h2>
                   <StatsTable
+                    tokenView={tokenView}
                     firstHeading="Credential type"
                     rows={data.by_credential_class.map((lane) => ({
                       key: lane.credential_class,
@@ -534,8 +668,8 @@ export function AdminUsageList({ filters }: { filters: AnalyticsFilters }) {
                 <section className="space-y-3">
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div>
-                      <h2 className="text-[15px] font-semibold">Top users</h2>
-                      <p className="text-[11px] text-muted-foreground">
+                      <h2 className="text-15 font-semibold">Top users</h2>
+                      <p className="text-11 text-muted-foreground">
                         Ranked by user, service, and billing owner.
                       </p>
                     </div>
@@ -568,13 +702,17 @@ export function AdminUsageList({ filters }: { filters: AnalyticsFilters }) {
                       )}
                     </div>
                   </div>
-                  <RankingTable rows={data.ranking} search={detailSearch} />
+                  <RankingTable
+                    rows={data.ranking}
+                    search={detailSearch}
+                    tokenView={tokenView}
+                  />
                   {data.ranking.length === 0 && (
-                    <p className="text-[12px] text-muted-foreground">
+                    <p className="text-12 text-muted-foreground">
                       No ranking rows on this page.
                     </p>
                   )}
-                  <div className="flex flex-wrap items-center justify-between gap-3 text-[11px] text-text-tertiary">
+                  <div className="flex flex-wrap items-center justify-between gap-3 text-11 text-text-tertiary">
                     <span>
                       {formatNumber(data.ranking_total)} user/service entries
                     </span>

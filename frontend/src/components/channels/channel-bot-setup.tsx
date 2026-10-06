@@ -315,7 +315,7 @@ export function ChannelBotSetup({
                 aria-hidden="true"
               />
               <div className="space-y-1">
-                <p className="text-[13px] font-medium">
+                <p className="text-13 font-medium">
                   {createdBot?.label || label || "Channel bot created"}
                 </p>
                 <p className="text-xs leading-relaxed text-muted-foreground">
@@ -506,7 +506,7 @@ export function ChannelBotSetup({
                 className="rounded-lg border border-border/70 bg-muted/30 p-3"
                 open={!fullPage}
               >
-                <summary className="cursor-pointer text-[12px] font-medium">
+                <summary className="cursor-pointer text-12 font-medium">
                   {setupNote.title}
                 </summary>
                 <p className="mt-2 text-xs leading-relaxed text-muted-foreground">

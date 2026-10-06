@@ -32,10 +32,10 @@ export function ArtifactBlock({
             <FileText className="h-4 w-4" />
           </span>
           <span className="min-w-0 flex-1">
-            <span className="block truncate text-[11px] font-medium text-foreground">
+            <span className="block truncate text-11 font-medium text-foreground">
               {block.name}
             </span>
-            <span className="block font-mono text-[9px] text-text-tertiary">
+            <span className="block font-mono text-9 text-text-tertiary">
               {block.mime} - {formatSize(block.size_bytes)}
             </span>
           </span>
@@ -78,7 +78,7 @@ export function ArtifactBlock({
         )}
       </div>
       {open && block.preview && (
-        <pre className="whitespace-pre-wrap border-t border-border/50 bg-overlay px-4 py-3 font-mono text-[10px] leading-relaxed text-muted-foreground">
+        <pre className="whitespace-pre-wrap border-t border-border/50 bg-overlay px-4 py-3 font-mono text-10 leading-relaxed text-muted-foreground">
           {block.preview}
         </pre>
       )}

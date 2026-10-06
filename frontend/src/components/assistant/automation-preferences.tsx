@@ -31,9 +31,9 @@ export function AgentAutomations({ agentId }: { readonly agentId: string }) {
     ) ?? [];
   return (
     <section className="space-y-2">
-      <h3 className="text-[13px] font-semibold">Automations</h3>
+      <h3 className="text-13 font-semibold">Automations</h3>
       {rows.map((row) => (
-        <p key={row.id} className="text-[12px]">
+        <p key={row.id} className="text-12">
           {row.label} ·{" "}
           {row.status === "active"
             ? formatAutomationTime(
@@ -44,8 +44,8 @@ export function AgentAutomations({ agentId }: { readonly agentId: string }) {
         </p>
       ))}
       <Link
-        className="text-[12px] text-primary underline"
-        to="/automations"
+        className="text-12 text-primary underline"
+        to="/assistant/automations"
         search={{ agent: agentId }}
       >
         Manage automations ({rows.length})
@@ -59,7 +59,7 @@ export function AutomationPreferences() {
   const update = useUpdateNyxBotSettings();
   const [open, setOpen] = useState(false);
   return (
-    <div className="text-[12px]">
+    <div className="text-12">
       <button className="text-primary underline" onClick={() => setOpen(!open)}>
         Timezone and automation budgets
       </button>

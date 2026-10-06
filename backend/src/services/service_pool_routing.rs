@@ -9,6 +9,53 @@ pub enum SlugMetadataRoute {
     Legacy,
 }
 
+/// Batch pool discovery from the catalog resolver's authorized instance snapshot.
+/// A pool grants no member authority: at least one enabled, same-owner member
+/// must already be visible under the caller's role/service/node scopes. Proxy
+/// execution revalidates each member through its ordinary live resolver.
+pub async fn agent_pools_with_services(
+    db: &mongodb::Database,
+    actor: &str,
+    services: &[crate::models::user_service::UserService],
+    allowed_nodes: Option<&[String]>,
+) -> AppResult<Vec<crate::models::service_pool::ServicePool>> {
+    use futures::TryStreamExt;
+    use mongodb::bson::doc;
+    let eligible: std::collections::HashMap<_, _> = services
+        .iter()
+        .filter(|row| {
+            row.node_id
+                .as_ref()
+                .is_none_or(|node| allowed_nodes.is_none_or(|ids| ids.contains(node)))
+        })
+        .map(|row| (row.id.as_str(), row.user_id.as_str()))
+        .collect();
+    let owners: std::collections::HashSet<_> = eligible.values().copied().collect();
+    let mut pools: Vec<crate::models::service_pool::ServicePool> = db
+        .collection("service_pools")
+        .find(doc! {
+            "user_id": { "$in": owners.into_iter().collect::<Vec<_>>() },
+            "is_active": true,
+            "members": { "$elemMatch": {
+                "user_service_id": { "$in": eligible.keys().copied().collect::<Vec<_>>() },
+                "enabled": { "$ne": false },
+            } },
+        })
+        .await?
+        .try_collect()
+        .await?;
+    pools.retain(|pool| {
+        pool.members.iter().any(|member| {
+            member.enabled
+                && eligible
+                    .get(member.user_service_id.as_str())
+                    .is_some_and(|owner| *owner == pool.user_id)
+        })
+    });
+    pools.sort_by_key(|pool| (pool.user_id != actor, pool.slug.clone(), pool.id.clone()));
+    Ok(pools)
+}
+
 pub async fn select_slug_metadata(
     db: &mongodb::Database,
     encryption_keys: &crate::crypto::aes::EncryptionKeys,

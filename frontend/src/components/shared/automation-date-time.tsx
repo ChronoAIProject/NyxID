@@ -18,7 +18,7 @@ export function AutomationDateTime({
 }) {
   const [date = "", time = "09:00"] = value.split("T");
   return (
-    <fieldset className="space-y-1 text-[12px]">
+    <fieldset className="space-y-1 text-12">
       <legend>
         {label}
         {optional ? " (optional)" : ""}

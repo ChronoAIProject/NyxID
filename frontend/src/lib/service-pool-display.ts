@@ -54,21 +54,6 @@ export function orderedPoolMembers(
     : [...pool.members];
 }
 
-/** Reordering explicitly creates a strict priority sequence; equal tiers are edited numerically. */
-export function reorderPoolMembers(
-  pool: Pick<ServicePool, "strategy" | "members">,
-  from: string,
-  to: string,
-): ServicePoolMember[] {
-  const members = orderedPoolMembers(pool);
-  const start = members.findIndex((m) => m.user_service_id === from);
-  const end = members.findIndex((m) => m.user_service_id === to);
-  if (pool.strategy !== "priority" || start < 0 || end < 0 || start === end)
-    return members;
-  members.splice(end, 0, members.splice(start, 1)[0]!);
-  return members.map((member, index) => ({ ...member, priority: index }));
-}
-
 const reasons: Record<string, string> = {
   unavailable: "Connection unavailable",
   inactive: "Service disabled",

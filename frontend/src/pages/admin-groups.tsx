@@ -144,7 +144,7 @@ export function AdminGroupsPage() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <HierarchyIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-[12px] font-medium text-muted-foreground">Failed to load groups</p>
+            <p className="text-12 font-medium text-muted-foreground">Failed to load groups</p>
             <p className="text-xs text-muted-foreground">Please try again later.</p>
           </div>
         </div>
@@ -152,7 +152,7 @@ export function AdminGroupsPage() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <HierarchyIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-[12px] font-medium text-muted-foreground">No groups found</p>
+            <p className="text-12 font-medium text-muted-foreground">No groups found</p>
             <p className="text-xs text-muted-foreground">There are no groups to display.</p>
           </div>
         </div>
@@ -163,7 +163,7 @@ export function AdminGroupsPage() {
           {groups.map((group) => (
             <div
               key={group.id}
-              className="rounded-xl border border-border/50 bg-card p-4 transition-colors hover:bg-white/[0.03] cursor-pointer"
+              className="rounded-xl border border-border/50 bg-card p-4 transition-colors hover:bg-overlay cursor-pointer"
               tabIndex={0}
               role="link"
               onClick={() =>
@@ -353,7 +353,7 @@ export function AdminGroupsPage() {
                     <FormLabel>Roles</FormLabel>
                     <FormControl>
                       <select
-                        className="flex w-full rounded-lg border border-input bg-popover px-3 py-1.5 text-[12px] text-foreground shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring [&_option]:bg-popover [&_option]:text-foreground [&_option:checked]:bg-primary/20"
+                        className="flex w-full rounded-lg border border-input bg-popover px-3 py-1.5 text-12 text-foreground shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring [&_option]:bg-popover [&_option]:text-foreground [&_option:checked]:bg-primary/20"
                         multiple
                         value={
                           field.value

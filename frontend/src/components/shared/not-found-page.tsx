@@ -33,7 +33,7 @@ export function NotFoundPage({
       <p className="font-mono text-xs uppercase tracking-widest text-text-tertiary">
         {code}
       </p>
-      <h1 className="mt-2 font-serif text-[28px] font-normal text-foreground">
+      <h1 className="mt-2 font-serif text-28 font-normal text-foreground">
         {title}
       </h1>
       <p className="mt-1 max-w-sm text-sm text-muted-foreground">

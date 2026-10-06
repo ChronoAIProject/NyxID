@@ -184,6 +184,7 @@ mod tests {
             assert_eq!(entry.registration.token_fields, registration.token_fields);
             assert_eq!(entry.enabled, registration.enabled);
             assert_eq!(entry.capabilities.media, adapter.media_capabilities());
+            assert_eq!(entry.capabilities.threads, adapter.thread_capabilities());
         }
         let telegram =
             serde_json::to_value(entries.iter().find(|e| e.platform == "telegram").unwrap())
@@ -197,6 +198,7 @@ mod tests {
         assert_eq!(
             aurinko["capabilities"],
             serde_json::json!({"initiated_send":false,"reply_to":true,"thread":false,"edit":false,
+                "thread_reply":true,"thread_follow":true,"thread_history":true,"private_thread":true,
                 "media":{"inbound":[],"outbound":[]}})
         );
         assert_eq!(
@@ -220,6 +222,7 @@ mod tests {
         assert_eq!(
             telegram["capabilities"],
             serde_json::json!({"initiated_send":true,"reply_to":true,"thread":true,"edit":true,
+            "thread_reply":true,"thread_follow":true,"thread_history":false,
             "media":{"inbound":["image","file","audio","video"],"outbound":["image","file","audio","video"]}})
         );
         assert_eq!(

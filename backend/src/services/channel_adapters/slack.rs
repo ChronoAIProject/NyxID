@@ -38,6 +38,9 @@ const UNREACHABLE_TARGET_MARKERS: &[&str] = &[
     "edit_window_closed",
 ];
 
+#[path = "slack_thread.rs"]
+mod thread;
+
 use crate::services::channel_media_service as media;
 use crate::services::channel_platform::{FetchedMedia, MediaCapabilities};
 
@@ -332,7 +335,7 @@ fn build_update_message_body(
 
 #[cfg(test)]
 impl SlackAdapter {
-    pub(super) fn media_test_adapter(base: &str) -> Self {
+    pub(crate) fn media_test_adapter(base: &str) -> Self {
         Self {
             base_url: base.into(),
         }
@@ -341,6 +344,55 @@ impl SlackAdapter {
 
 #[async_trait::async_trait]
 impl PlatformAdapter for SlackAdapter {
+    async fn resolve_thread(
+        &self,
+        _http: &reqwest::Client,
+        _credentials: &crate::services::channel_platform::BotCredentials<'_>,
+        facts: &crate::models::channel_thread::ChannelThreadFacts,
+        _ancestors: &[crate::models::channel_thread::ChannelThreadFacts],
+    ) -> AppResult<Option<crate::models::channel_thread::ChannelThreadFacts>> {
+        Ok(self.resolve_native_thread(facts))
+    }
+
+    async fn send_thread_reply(
+        &self,
+        http: &reqwest::Client,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
+        target: &crate::services::channel_thread_service::ThreadReplyTarget,
+        reply: &OutboundReply,
+    ) -> AppResult<Option<String>> {
+        self.reply_in_thread(http, credentials, target, reply).await
+    }
+
+    async fn thread_history(
+        &self,
+        http: &reqwest::Client,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
+        target: &crate::services::channel_thread_service::ThreadReplyTarget,
+        before: chrono::DateTime<chrono::Utc>,
+    ) -> AppResult<crate::services::channel_thread_service::ThreadHistory> {
+        self.history_in_thread(http, credentials, target, before)
+            .await
+    }
+
+    fn thread_facts(
+        &self,
+        inbound: &InboundMessage,
+        bot: &ChannelBot,
+        bot_user_id: Option<&str>,
+    ) -> Option<crate::models::channel_thread::ChannelThreadFacts> {
+        super::thread_facts::slack(inbound, bot, bot_user_id)
+    }
+
+    fn thread_capabilities(&self) -> crate::services::channel_platform::ThreadCapabilities {
+        crate::services::channel_platform::ThreadCapabilities {
+            thread_reply: true,
+            thread_follow: true,
+            thread_history: true,
+            ..Default::default()
+        }
+    }
+
     fn display_name(&self) -> &str {
         "Slack"
     }

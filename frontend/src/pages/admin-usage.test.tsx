@@ -53,6 +53,21 @@ it("renders totals, token classes, costs, user names and org attribution without
     screen.getByRole("heading", { name: "Platform key vs own key" }),
   ).toBeInTheDocument();
 });
+it("keeps the full token breakdown by default and sums custom token selections", async () => {
+  renderPage();
+  expect(
+    screen.getAllByText(/cache read 30 · cache write 5/).length,
+  ).toBeGreaterThan(0);
+  await userEvent.click(screen.getByRole("button", { name: "Token view" }));
+  await userEvent.click(screen.getByRole("checkbox", { name: "Total tokens" }));
+  expect(screen.getByRole("button", { name: "Token view" })).toHaveTextContent(
+    "Custom (4)",
+  );
+  expect(screen.getAllByText("155 selected tokens").length).toBeGreaterThan(0);
+  expect(
+    screen.queryByText(/cache read 30 · cache write 5/),
+  ).not.toBeInTheDocument();
+});
 it("writes ranking and pagination changes into the list URL", async () => {
   const user = userEvent.setup();
   renderPage();

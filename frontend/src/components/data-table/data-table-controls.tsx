@@ -123,7 +123,7 @@ export function DataTableSearch<SearchKey extends string>({
       role="search"
       className="w-full min-w-0 flex-1 sm:min-w-[320px]"
     >
-      <div className="flex h-11 min-w-0 items-stretch overflow-hidden rounded-lg border border-input bg-transparent md:h-9">
+      <div className="flex h-11 min-w-0 items-stretch overflow-hidden rounded-lg border border-input bg-transparent transition-colors focus-within:border-input-focus md:h-9">
         <span className="flex w-9 shrink-0 items-center justify-center text-muted-foreground">
           <Search className="h-3.5 w-3.5" aria-hidden="true" />
         </span>
@@ -254,7 +254,7 @@ export function DataTableFilterPopover<FilterKey extends string>({
           <Filter className="h-3.5 w-3.5" aria-hidden="true" />
           <span>{triggerLabel}</span>
           {activeCount > 0 && (
-            <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-primary/15 px-1 text-[10px] font-semibold text-primary">
+            <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-primary/15 px-1 text-10 font-semibold text-primary">
               {String(activeCount)}
             </span>
           )}
@@ -343,7 +343,7 @@ function DataTableFilterPanel<FilterKey extends string>({
               <span className="min-w-0 flex-1 break-words">{field.label}</span>
               {active && (
                 <span
-                  className="flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-primary/15 px-1 text-[10px] font-semibold text-primary"
+                  className="flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-primary/15 px-1 text-10 font-semibold text-primary"
                   aria-label={`${String(selectedValueCount)} selected`}
                 >
                   {String(selectedValueCount)}
@@ -443,7 +443,7 @@ function DataTableFilterEditor<FilterKey extends string>({
               {field.operator}
             </span>
           </p>
-          <span className="shrink-0 text-[10px] text-muted-foreground">
+          <span className="shrink-0 text-10 text-muted-foreground">
             {String(selectedCount)} selected
           </span>
         </div>
@@ -456,94 +456,96 @@ function DataTableFilterEditor<FilterKey extends string>({
         />
       )}
       {!textOnly && (
-      <div
-        role="group"
-        aria-label={`${field.label} values`}
-        className="max-h-[250px] flex-1 space-y-1 overflow-y-auto p-2"
-      >
-        {multiple && (
-          <button
-            type="button"
-            role="checkbox"
-            aria-checked={partiallySelected ? "mixed" : allSelected}
-            className={cn(
-              "mb-2 flex min-h-11 w-full items-center gap-2 rounded-md border border-dashed px-3 py-2 text-left text-xs font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring md:min-h-9",
-              allSelected || partiallySelected
-                ? "border-primary/45 bg-primary/[0.07] text-foreground"
-                : "border-border/80 bg-muted/20 text-muted-foreground hover:border-primary/35 hover:bg-muted/35 hover:text-foreground",
-            )}
-            onClick={() =>
-              onValuesChange(
-                allSelected ? [] : field.options.map((option) => option.value),
-              )
-            }
-          >
-            <span
-              className={cn(
-                "flex h-4 w-4 shrink-0 items-center justify-center rounded-[4px] border",
-                allSelected || partiallySelected
-                  ? "border-primary bg-primary text-primary-foreground"
-                  : "border-muted-foreground/40",
-              )}
-              aria-hidden="true"
-            >
-              {allSelected ? (
-                <Check className="h-3 w-3" />
-              ) : partiallySelected ? (
-                <Minus className="h-3 w-3" />
-              ) : null}
-            </span>
-            <span>Select all</span>
-            <span className="ml-auto text-[10px] font-normal text-muted-foreground">
-              {String(field.options.length)} values
-            </span>
-          </button>
-        )}
-        {field.options.map((option) => {
-          const checked = values.includes(option.value);
-          return (
+        <div
+          role="group"
+          aria-label={`${field.label} values`}
+          className="max-h-[250px] flex-1 space-y-1 overflow-y-auto p-2"
+        >
+          {multiple && (
             <button
-              key={option.value}
               type="button"
-              role={multiple ? "checkbox" : undefined}
-              aria-checked={multiple ? checked : undefined}
-              aria-pressed={multiple ? undefined : checked}
-              title={option.label === option.value ? undefined : option.value}
+              role="checkbox"
+              aria-checked={partiallySelected ? "mixed" : allSelected}
               className={cn(
-                "flex min-h-11 w-full items-center gap-2 rounded-md border px-3 py-2 text-left text-xs outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring md:min-h-9",
-                checked
-                  ? "border-primary/40 bg-primary/10 text-foreground"
-                  : "border-transparent text-muted-foreground hover:border-border hover:bg-accent/50 hover:text-foreground",
+                "mb-2 flex min-h-11 w-full items-center gap-2 rounded-md border border-dashed px-3 py-2 text-left text-xs font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring md:min-h-9",
+                allSelected || partiallySelected
+                  ? "border-primary/45 bg-primary/[0.07] text-foreground"
+                  : "border-border/80 bg-muted/20 text-muted-foreground hover:border-primary/35 hover:bg-muted/35 hover:text-foreground",
               )}
-              onClick={() => {
-                if (!multiple) {
-                  onValuesChange([option.value]);
-                  return;
-                }
+              onClick={() =>
                 onValuesChange(
-                  checked
-                    ? values.filter((value) => value !== option.value)
-                    : [...values, option.value],
-                );
-              }}
+                  allSelected
+                    ? []
+                    : field.options.map((option) => option.value),
+                )
+              }
             >
               <span
                 className={cn(
-                  "flex h-4 w-4 shrink-0 items-center justify-center border",
-                  multiple ? "rounded-[4px]" : "rounded-full",
-                  checked
+                  "flex h-4 w-4 shrink-0 items-center justify-center rounded-[4px] border",
+                  allSelected || partiallySelected
                     ? "border-primary bg-primary text-primary-foreground"
                     : "border-muted-foreground/40",
                 )}
                 aria-hidden="true"
               >
-                {checked && <Check className="h-3 w-3" />}
+                {allSelected ? (
+                  <Check className="h-3 w-3" />
+                ) : partiallySelected ? (
+                  <Minus className="h-3 w-3" />
+                ) : null}
               </span>
-              <span className="min-w-0 break-words">{option.label}</span>
+              <span>Select all</span>
+              <span className="ml-auto text-10 font-normal text-muted-foreground">
+                {String(field.options.length)} values
+              </span>
             </button>
-          );
-        })}
-      </div>
+          )}
+          {field.options.map((option) => {
+            const checked = values.includes(option.value);
+            return (
+              <button
+                key={option.value}
+                type="button"
+                role={multiple ? "checkbox" : undefined}
+                aria-checked={multiple ? checked : undefined}
+                aria-pressed={multiple ? undefined : checked}
+                title={option.label === option.value ? undefined : option.value}
+                className={cn(
+                  "flex min-h-11 w-full items-center gap-2 rounded-md border px-3 py-2 text-left text-xs outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring md:min-h-9",
+                  checked
+                    ? "border-primary/40 bg-primary/10 text-foreground"
+                    : "border-transparent text-muted-foreground hover:border-border hover:bg-accent/50 hover:text-foreground",
+                )}
+                onClick={() => {
+                  if (!multiple) {
+                    onValuesChange([option.value]);
+                    return;
+                  }
+                  onValuesChange(
+                    checked
+                      ? values.filter((value) => value !== option.value)
+                      : [...values, option.value],
+                  );
+                }}
+              >
+                <span
+                  className={cn(
+                    "flex h-4 w-4 shrink-0 items-center justify-center border",
+                    multiple ? "rounded-[4px]" : "rounded-full",
+                    checked
+                      ? "border-primary bg-primary text-primary-foreground"
+                      : "border-muted-foreground/40",
+                  )}
+                  aria-hidden="true"
+                >
+                  {checked && <Check className="h-3 w-3" />}
+                </span>
+                <span className="min-w-0 break-words">{option.label}</span>
+              </button>
+            );
+          })}
+        </div>
       )}
       <DataTableFilterActions
         hasValue={selectedCount > 0}
@@ -601,7 +603,7 @@ function DataTableCustomTextFilter<FilterKey extends string>({
           maxLength={MAX_CUSTOM_VALUE_LENGTH}
           aria-label={`Custom ${field.label} value`}
           placeholder={`Contains…`}
-          className="h-11 min-w-0 flex-1 rounded-md border border-input bg-transparent px-2.5 text-xs outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-white/[0.15] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring md:h-9"
+          className="h-11 min-w-0 flex-1 rounded-md border border-input bg-transparent px-2.5 text-xs outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-input-focus focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring md:h-9"
           onChange={(event) => setDraft(event.target.value)}
         />
         <Button type="submit" variant="outline" size="sm" disabled={!canAdd}>
@@ -613,7 +615,7 @@ function DataTableCustomTextFilter<FilterKey extends string>({
           {values.map((value) => (
             <span
               key={value}
-              className="flex max-w-full items-center gap-1 rounded-md border border-primary/40 bg-primary/10 py-1 pl-2 pr-1 text-[11px] text-foreground"
+              className="flex max-w-full items-center gap-1 rounded-md border border-primary/40 bg-primary/10 py-1 pl-2 pr-1 text-11 text-foreground"
             >
               <span className="text-muted-foreground">contains</span>
               <span className="min-w-0 break-all font-medium">{value}</span>
@@ -630,7 +632,7 @@ function DataTableCustomTextFilter<FilterKey extends string>({
             </span>
           ))}
           {full && (
-            <span className="self-center text-[10px] text-muted-foreground">
+            <span className="self-center text-10 text-muted-foreground">
               {String(MAX_CUSTOM_VALUES)} value limit reached
             </span>
           )}
@@ -695,7 +697,7 @@ function DataTableDateFilterEditor<FilterKey extends string>({
               {mode === "dates" ? "on any selected date" : "between"}
             </span>
           </p>
-          <span className="shrink-0 text-[10px] text-muted-foreground">
+          <span className="shrink-0 text-10 text-muted-foreground">
             {mode === "dates"
               ? `${String(selectedDates.length)} selected`
               : hasValue
@@ -749,7 +751,7 @@ function DataTableDateFilterEditor<FilterKey extends string>({
 
         {mode === "dates" ? (
           <div className="space-y-1.5">
-            <span className="text-[11px] font-medium text-muted-foreground">
+            <span className="text-11 font-medium text-muted-foreground">
               Dates
             </span>
             <DatePicker
@@ -770,7 +772,7 @@ function DataTableDateFilterEditor<FilterKey extends string>({
                   <button
                     key={date}
                     type="button"
-                    className="flex min-h-8 items-center gap-1.5 rounded-md border border-border/80 bg-muted/25 px-2 text-[11px] text-foreground outline-none transition-colors hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
+                    className="flex min-h-8 items-center gap-1.5 rounded-md border border-border/80 bg-muted/25 px-2 text-11 text-foreground outline-none transition-colors hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
                     aria-label={`Remove selected date ${date}`}
                     onClick={() =>
                       onValuesChange([
@@ -792,7 +794,7 @@ function DataTableDateFilterEditor<FilterKey extends string>({
         ) : (
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="space-y-1.5">
-              <span className="text-[11px] font-medium text-muted-foreground">
+              <span className="text-11 font-medium text-muted-foreground">
                 From
               </span>
               <DatePicker
@@ -805,7 +807,7 @@ function DataTableDateFilterEditor<FilterKey extends string>({
               />
             </div>
             <div className="space-y-1.5">
-              <span className="text-[11px] font-medium text-muted-foreground">
+              <span className="text-11 font-medium text-muted-foreground">
                 To
               </span>
               <DatePicker
@@ -971,7 +973,10 @@ export function DataTableFilterChips<
   );
 
   return (
-    <div className={cn("flex flex-wrap items-center gap-1.5", className)} aria-label={ariaLabel}>
+    <div
+      className={cn("flex flex-wrap items-center gap-1.5", className)}
+      aria-label={ariaLabel}
+    >
       {search && (
         <div
           role="group"
@@ -1024,7 +1029,7 @@ export function DataTableFilterChips<
               return (
                 <Fragment key={value.toLocaleLowerCase()}>
                   {valueIndex > 0 && (
-                    <span className="flex items-center border-l border-border/70 px-2 text-[10px] font-semibold text-muted-foreground">
+                    <span className="flex items-center border-l border-border/70 px-2 text-10 font-semibold text-muted-foreground">
                       OR
                     </span>
                   )}
@@ -1061,7 +1066,14 @@ export function DataTableFilterChips<
         );
       })}
       {filters.map(
-        ({ field, values, valueLabels, operatorLabel, valueSummary, custom }) => {
+        ({
+          field,
+          values,
+          valueLabels,
+          operatorLabel,
+          valueSummary,
+          custom,
+        }) => {
           const resolvedOperatorLabel =
             operatorLabel ??
             (values.length > 1
@@ -1078,7 +1090,10 @@ export function DataTableFilterChips<
           const fullValueSummary = valueSummary ?? valueLabels.join(", ");
           // A filter's options and its custom text get their own chips, so
           // clearing one leaves the other applied.
-          const chipLabel = custom === true ? `${field.label} custom text` : `${field.label} filter`;
+          const chipLabel =
+            custom === true
+              ? `${field.label} custom text`
+              : `${field.label} filter`;
           return (
             <div
               key={`${field.key}:${custom === true ? "custom" : "values"}`}

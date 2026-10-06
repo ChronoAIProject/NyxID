@@ -217,7 +217,7 @@ function UsageTrendChart({
               aria-pressed={option === measure}
               onClick={() => setPicked(option)}
               className={cn(
-                "rounded px-2 py-0.5 text-[11px] text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring",
+                "rounded px-2 py-0.5 text-11 text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring",
                 option === measure && "bg-muted font-medium text-foreground",
               )}
             >
@@ -315,7 +315,7 @@ function FundingBar({ summary }: { readonly summary: ServiceUsageSummary }) {
           />
         ))}
       </div>
-      <ul className="flex flex-wrap gap-x-4 gap-y-1 text-[11px]">
+      <ul className="flex flex-wrap gap-x-4 gap-y-1 text-11">
         {parts.map((part) => (
           <li key={part.label} className="inline-flex items-center gap-1.5">
             <span
@@ -373,7 +373,7 @@ function BreakdownBars({
         ))}
       </ul>
       {items.length > shown.length && (
-        <p className="text-[11px] text-muted-foreground">
+        <p className="text-11 text-muted-foreground">
           +{items.length - shown.length} more
         </p>
       )}
@@ -450,7 +450,7 @@ function UsageWindows({ slug }: { readonly slug: string }) {
           />
         </BarChart>
       </ChartContainer>
-      <figcaption className="text-[11px] text-muted-foreground">
+      <figcaption className="text-11 text-muted-foreground">
         {windows
           .map(
             (slot) =>
@@ -515,7 +515,7 @@ function ConnectionUsage({
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h5
           id={`usage-history-${connection.id}`}
-          className="text-[10px] font-semibold uppercase tracking-[1.5px] text-text-tertiary"
+          className="text-10 font-semibold uppercase tracking-[1.5px] text-text-tertiary"
         >
           Usage history
         </h5>
@@ -632,7 +632,7 @@ function ConnectionUsage({
           )}
         </>
       )}
-      <p className="text-[11px] text-muted-foreground">
+      <p className="text-11 text-muted-foreground">
         Counts calls made through <code>{connection.slug}</code> that were
         billed to your personal account. Other connections using the same
         address are counted together.
@@ -723,7 +723,7 @@ function ConnectionBillingPanel({
           >
             <h5
               id={`billing-details-${connection.id}`}
-              className="text-[10px] font-semibold uppercase tracking-[1.5px] text-text-tertiary"
+              className="text-10 font-semibold uppercase tracking-[1.5px] text-text-tertiary"
             >
               Details
             </h5>
@@ -732,7 +732,7 @@ function ConnectionBillingPanel({
                 <dt className="text-muted-foreground">Whose key or app</dt>
                 <dd className="mt-1 font-medium">{plain.key.title}</dd>
                 {plain.key.note && (
-                  <dd className="mt-0.5 text-[11px] text-muted-foreground">
+                  <dd className="mt-0.5 text-11 text-muted-foreground">
                     {plain.key.note}
                   </dd>
                 )}
@@ -747,7 +747,7 @@ function ConnectionBillingPanel({
               </div>
             </dl>
             {!!plain.tips.length && (
-              <ul className="list-disc space-y-1 pl-4 text-[11px] text-muted-foreground">
+              <ul className="list-disc space-y-1 pl-4 text-11 text-muted-foreground">
                 {plain.tips.map((tip) => (
                   <li key={tip}>{tip}</li>
                 ))}
@@ -806,7 +806,7 @@ export function ConnectionInsightPanel({
               ? "Agent keys in scope"
               : "Agent keys with access"}
           </h4>
-          <span className="text-[11px] text-muted-foreground">
+          <span className="text-11 text-muted-foreground">
             {usage.access.visibility === "own_keys"
               ? "Your keys only"
               : "Keys you manage"}{" "}
@@ -891,7 +891,7 @@ export function ConnectionInsightPanel({
             inventory.
           </p>
         )}
-        <p className="text-[11px] text-muted-foreground">
+        <p className="text-11 text-muted-foreground">
           {usage.access.basis === "configuration"
             ? "Configured scope; live permissions and credentials are checked at execution. "
             : ""}
@@ -926,7 +926,7 @@ export function ConnectionInsightPanel({
         <h4 className="inline-flex items-center gap-2 text-sm font-medium">
           <Activity className="size-4 text-primary" /> Recent requests
         </h4>
-        <span className="text-[11px] text-muted-foreground">
+        <span className="text-11 text-muted-foreground">
           {usage.activity.visibility === "own_requests"
             ? "Your requests"
             : "Visible requests"}{" "}
@@ -993,7 +993,7 @@ export function ConnectionInsightPanel({
         </p>
       )}
       {usage.activity.request_count > 0 && (
-        <p className="text-[11px] text-muted-foreground">
+        <p className="text-11 text-muted-foreground">
           {usage.activity.request_count.toLocaleString()} recorded
           {usage.activity.request_count === 1 ? " request" : " requests"}
           {usage.activity.truncated
@@ -1001,7 +1001,7 @@ export function ConnectionInsightPanel({
             : " in this period"}
         </p>
       )}
-      <p className="text-[11px] text-muted-foreground">
+      <p className="text-11 text-muted-foreground">
         {usage.activity.tracking === "partial"
           ? "Tracking is partial. Older requests and unsupported request paths may not identify this connection. "
           : ""}

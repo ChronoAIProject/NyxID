@@ -1,5 +1,4 @@
 import {
-  Fragment,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -28,6 +27,7 @@ import type {
   ChatSessionState,
 } from "@/lib/assistant/chat-types";
 import { cn } from "@/lib/utils";
+import { MachineToolCard } from "./machine-tool-card";
 
 const EMPTY_MESSAGES: readonly ChatMessage[] = [];
 
@@ -58,7 +58,7 @@ function ThinkingBlock({
         type="button"
         onClick={() => setOpen((value) => !value)}
         aria-expanded={open}
-        className="flex items-center gap-1.5 py-1 text-[11px] text-text-tertiary transition-colors hover:text-muted-foreground"
+        className="flex items-center gap-1.5 py-1 text-11 text-text-tertiary transition-colors hover:text-muted-foreground"
       >
         <ChevronRight
           className={cn("h-3 w-3 transition-transform", open && "rotate-90")}
@@ -68,7 +68,7 @@ function ThinkingBlock({
         {streaming ? <PulseDot /> : null}
       </button>
       {open ? (
-        <div className="ml-3.5 max-h-56 overflow-auto border-l border-hairline pl-3 text-[11px] leading-relaxed text-text-tertiary whitespace-pre-wrap">
+        <div className="ml-3.5 max-h-56 overflow-auto border-l border-hairline pl-3 text-11 leading-relaxed text-text-tertiary whitespace-pre-wrap">
           {text}
         </div>
       ) : null}
@@ -78,7 +78,7 @@ function ThinkingBlock({
 
 function ActivityBlock({ message }: { readonly message: ChatMessage }) {
   const steps = message.steps ?? [];
-  const tools = message.toolCalls ?? [];
+  const tools = (message.toolCalls ?? []).filter((tool) => !tool.machine);
   const count = steps.length + tools.length;
   const [open, setOpen] = useState(false);
   if (!count) return null;
@@ -91,18 +91,18 @@ function ActivityBlock({ message }: { readonly message: ChatMessage }) {
         type="button"
         onClick={() => setOpen((value) => !value)}
         aria-expanded={open}
-        className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-[11px] text-muted-foreground hover:bg-overlay"
+        className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-11 text-muted-foreground hover:bg-overlay"
       >
         <ChevronRight
           className={cn("h-3 w-3 transition-transform", open && "rotate-90")}
         />
-        {running ? <PulseDot /> : <Check className="h-3 w-3 text-success" />}
+        {running ? <PulseDot /> : tools.some((tool) => tool.status === "error") || steps.some((step) => step.status === "error") ? <X className="h-3 w-3 text-destructive" /> : <Check className="h-3 w-3 text-success" />}
         <span>{count} {count === 1 ? "action" : "actions"}</span>
       </button>
       {open ? (
         <div className="space-y-1 border-t border-hairline px-2.5 py-2">
           {steps.map((step) => (
-            <div key={step.id} className="flex items-start gap-2 text-[11px]">
+            <div key={step.id} className="flex items-start gap-2 text-11">
               {step.status === "running" ? (
                 <PulseDot className="mt-1" />
               ) : step.status === "error" ? (
@@ -114,14 +114,14 @@ function ActivityBlock({ message }: { readonly message: ChatMessage }) {
                 {step.name || "Processing"}
               </span>
               {step.stepType ? (
-                <span className="shrink-0 font-mono text-[9px] text-text-tertiary">
+                <span className="shrink-0 font-mono text-9 text-text-tertiary">
                   {step.stepType}
                 </span>
               ) : null}
             </div>
           ))}
           {tools.map((tool) => (
-            <details key={tool.id} className="text-[11px] text-muted-foreground">
+            <details key={tool.id} className="text-11 text-muted-foreground">
               <summary className="flex cursor-pointer list-none items-center gap-2 py-0.5">
                 {tool.status === "running" ? (
                   <PulseDot />
@@ -131,7 +131,7 @@ function ActivityBlock({ message }: { readonly message: ChatMessage }) {
                 <span className="font-mono">{tool.name || tool.id}</span>
               </summary>
               {tool.result ? (
-                <pre className="ml-5 mt-1 max-h-32 overflow-auto whitespace-pre-wrap rounded-md bg-overlay px-2 py-1.5 font-mono text-[10px] text-text-tertiary">
+                <pre className="ml-5 mt-1 max-h-32 overflow-auto whitespace-pre-wrap rounded-md bg-overlay px-2 py-1.5 font-mono text-10 text-text-tertiary">
                   {tool.result.slice(0, 500)}
                 </pre>
               ) : null}
@@ -157,8 +157,13 @@ export function ChatMessageBubble({
       : message.content;
   if (message.role === "user") {
     return (
-      <div className="ml-auto max-w-[78%] rounded-lg bg-overlay-strong px-3 py-2 text-[12px] leading-relaxed text-foreground whitespace-pre-wrap">
+      <div className="ml-auto max-w-[78%] rounded-lg bg-overlay-strong px-3 py-2 text-12 leading-relaxed text-foreground whitespace-pre-wrap">
         {content}
+        {message.images?.length ? (
+          <div className="mt-2 flex flex-wrap gap-2">
+            {message.images.map((image) => <ToolImage key={image.id} image={image} />)}
+          </div>
+        ) : null}
       </div>
     );
   }
@@ -190,10 +195,13 @@ export function ChatMessageBubble({
       <div className="min-w-0 max-w-[min(84%,758px)] flex-1 pt-0.5">
         <ThinkingBlock text={message.thinking ?? ""} streaming={streaming} />
         <ActivityBlock message={message} />
+        {message.toolCalls?.filter((tool) => tool.machine).map((tool) => (
+          <MachineToolCard key={tool.id} receipt={tool.machine!} conversationId={tool.conversationId} images={message.images} />
+        ))}
         {content ? <TextBlock text={content} streaming={streaming} /> : null}
         {message.images?.length ? (
           <div className="mt-2 flex flex-wrap gap-2">
-            {message.images.map((image) => (
+            {message.images.filter((image) => !message.toolCalls?.some((tool) => tool.machine?.screenshot_id === image.id)).map((image) => (
               <ToolImage key={image.id} image={image} />
             ))}
           </div>
@@ -223,7 +231,7 @@ export function ChatMessageBubble({
             {runningTool ? (
               <span
                 data-running-tool
-                className="ml-1.5 truncate font-mono text-[11px] text-muted-foreground"
+                className="ml-1.5 truncate font-mono text-11 text-muted-foreground"
               >
                 {runningTool.name}
               </span>
@@ -231,7 +239,7 @@ export function ChatMessageBubble({
           </div>
         ) : null}
         {message.status === "error" && message.error ? (
-          <div className="mt-2 flex items-start gap-2 rounded-lg border border-destructive/25 bg-destructive/[0.05] px-3 py-2 text-[11px] text-destructive">
+          <div className="mt-2 flex items-start gap-2 rounded-lg border border-destructive/25 bg-destructive/[0.05] px-3 py-2 text-11 text-destructive">
             <CircleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
             <span>{message.error}</span>
           </div>
@@ -262,7 +270,7 @@ export function ChatMessageEntry({
         {authorName ? (
           <div
             className={cn(
-              "text-[10px] text-text-tertiary",
+              "text-10 text-text-tertiary",
               message.role === "user" ? "self-end" : "ml-8",
             )}
           >
@@ -284,12 +292,12 @@ export function ChatMessageEntry({
         <MessageSquare className="h-3 w-3" />
       </div>
       <div className="min-w-0 max-w-[84%] flex-1">
-        <div className="text-[11px] font-medium text-foreground">{displayName}</div>
+        <div className="text-11 font-medium text-foreground">{displayName}</div>
         {message.thinking ? (
-          <p className="mt-1 text-[11px] italic text-text-tertiary">{message.thinking}</p>
+          <p className="mt-1 text-11 italic text-text-tertiary">{message.thinking}</p>
         ) : null}
         {message.content ? (
-          <div className="mt-1 text-[12px] leading-relaxed text-foreground whitespace-pre-wrap">
+          <div className="mt-1 text-12 leading-relaxed text-foreground whitespace-pre-wrap">
             {message.content}
           </div>
         ) : null}
@@ -300,7 +308,7 @@ export function ChatMessageEntry({
 
 function EmptyState({ children }: { readonly children?: ReactNode }) {
   return (
-    <div className="flex flex-1 items-center justify-center px-6 text-center text-[12px] text-text-tertiary">
+    <div className="flex flex-1 items-center justify-center px-6 text-center text-12 text-text-tertiary">
       {children ?? "Ask NyxID to help with services, access, and account operations."}
     </div>
   );
@@ -405,16 +413,16 @@ export function ChatMessageList({
         {notice ? (
           <div
             role="status"
-            className="rounded-lg border border-border bg-overlay px-3 py-2 text-[11px] text-muted-foreground"
+            className="rounded-lg border border-border bg-overlay px-3 py-2 text-11 text-muted-foreground"
           >
             {notice}
           </div>
         ) : null}
         {!messages.length ? <EmptyState>{emptyDescription}</EmptyState> : null}
         {messages.map((message) => (
-          <Fragment key={message.id}>
+          <div id={`message-${message.id}`} key={message.id}>
             {renderMessage?.(message) ?? <ChatMessageEntry message={message} />}
-          </Fragment>
+          </div>
         ))}
         {footer}
         {emptyTurnDetected ? (

@@ -2808,6 +2808,7 @@ mod tests {
             issues_url: None,
             capabilities: None,
             inference: None,
+            git_http: None,
             inference_admin_modified: false,
             billing: None,
             auth_notes: None,

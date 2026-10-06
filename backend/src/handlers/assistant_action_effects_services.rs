@@ -1108,6 +1108,9 @@ mod tests {
     fn test_node(id: &str, owner_id: &str) -> Node {
         let now = chrono::Utc::now();
         Node {
+            machine: None,
+            machine_confirm: Default::default(),
+            allow_single_user_saved_logins: false,
             id: id.to_string(),
             user_id: owner_id.to_string(),
             name: "route-node".to_string(),

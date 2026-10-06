@@ -46,7 +46,7 @@ export function ServiceSavedViews({
           >
             <Bookmark className="size-3.5" aria-hidden="true" />
             Saved views
-            <span className="rounded-full bg-muted px-1.5 text-[10px] tabular-nums">
+            <span className="rounded-full bg-muted px-1.5 text-10 tabular-nums">
               {view.hasDefault ? 1 : 0}
             </span>
             <ChevronDown className="size-3" aria-hidden="true" />
@@ -57,7 +57,7 @@ export function ServiceSavedViews({
           className="w-80 max-w-[calc(100vw-2rem)] space-y-3"
         >
           <div>
-            <h3 className="text-[13px] font-semibold">Saved views</h3>
+            <h3 className="text-13 font-semibold">Saved views</h3>
             <p className="mt-1 text-xs text-muted-foreground">
               Your default opens when you return to AI Services.
             </p>
@@ -78,7 +78,7 @@ export function ServiceSavedViews({
               />
               <span className="min-w-0 flex-1">
                 <span className="block text-xs font-medium">My default</span>
-                <span className="mt-1 block break-words text-[11px] text-muted-foreground">
+                <span className="mt-1 block break-words text-11 text-muted-foreground">
                   {savedDescription}
                 </span>
               </span>
@@ -96,7 +96,7 @@ export function ServiceSavedViews({
             </p>
           )}
           {!view.canSave && (
-            <p className="text-[11px] text-muted-foreground">
+            <p className="text-11 text-muted-foreground">
               Saving account defaults requires the updated server.
             </p>
           )}
@@ -117,7 +117,7 @@ export function ServiceSavedViews({
       {view.isDefault ? (
         <span
           role="status"
-          className="inline-flex items-center gap-1.5 text-[11px] text-muted-foreground"
+          className="inline-flex items-center gap-1.5 text-11 text-muted-foreground"
         >
           <Check className="size-3 text-success" aria-hidden="true" />
           Default view

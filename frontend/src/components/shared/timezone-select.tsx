@@ -30,7 +30,7 @@ export function TimezoneSelect({
     ]),
   ].filter(Boolean);
   return (
-    <div className="space-y-1 text-[12px]">
+    <div className="space-y-1 text-12">
       <span>{label}</span>
       <Popover open={open} onOpenChange={setOpen}>
         <PopoverTrigger asChild>
@@ -68,7 +68,7 @@ export function TimezoneSelect({
                   type="button"
                   role="option"
                   aria-selected={zone === value}
-                  className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12px] hover:bg-accent focus-visible:bg-accent"
+                  className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-12 hover:bg-accent focus-visible:bg-accent"
                   onClick={() => {
                     onChange(zone);
                     setOpen(false);

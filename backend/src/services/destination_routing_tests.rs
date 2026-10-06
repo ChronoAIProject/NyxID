@@ -520,6 +520,9 @@ pub(crate) async fn mcp_call(
         &state.cloud_response_cache,
         &mcp_service::McpExecContext {
             attribution: None,
+            org_agent_access: None,
+            agent_owner: None,
+            operation_scopes: None,
             api_key_id: None,
             allow_all_nodes: true,
             allowed_node_ids: &[],
@@ -848,6 +851,7 @@ async fn workspace_node_v2_reaches_target_and_refuses_legacy_capability() {
         "node",
         &NodeCapabilitiesMsg {
             http_signature_v2: true,
+            proxy_upload_v1: true,
             http_cancellation: false,
             ..Default::default()
         },

@@ -108,6 +108,8 @@ export function sampleAnalytics(
     completion_tokens: 0,
     cached_tokens: 0,
     cache_creation_tokens: 0,
+    audio_input_tokens: 0,
+    audio_output_tokens: 0,
     total_tokens: 0,
     gross_cost_micros: 0,
     wallet_cost_micros: 0,
@@ -162,6 +164,11 @@ export function sampleAnalytics(
       cache_write_tokens: Math.round(input * 0.05),
       images: row.service === uid(10) ? row.requests : 0,
     };
+    // OpenAI and xAI carry a share of realtime voice traffic.
+    const voice =
+      row.service === uid(1) ? 0.35 : row.service === uid(4) ? 0.5 : 0;
+    const audioInput = Math.round(input * voice),
+      audioOutput = Math.round(output * voice);
     const wallet = Math.floor(row.cost * 0.68),
       grants = Math.floor(row.cost * 0.21),
       allowance = row.cost - wallet - grants;
@@ -171,6 +178,8 @@ export function sampleAnalytics(
       completion_tokens: output,
       cached_tokens: quantities.cache_read_tokens!,
       cache_creation_tokens: quantities.cache_write_tokens!,
+      audio_input_tokens: audioInput,
+      audio_output_tokens: audioOutput,
     };
     const eventCounts: Record<string, number> = {
       events: row.requests,
@@ -225,6 +234,8 @@ export function sampleAnalytics(
     stats.total_tokens += row.tokens;
     stats.cached_tokens += quantities.cache_read_tokens!;
     stats.cache_creation_tokens += quantities.cache_write_tokens!;
+    stats.audio_input_tokens += audioInput;
+    stats.audio_output_tokens += audioOutput;
     stats.gross_cost_micros! += row.cost;
     stats.wallet_cost_micros! += wallet;
     stats.grant_cost_micros! += grants;

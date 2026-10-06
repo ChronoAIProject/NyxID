@@ -11,10 +11,14 @@ pub mod encryption;
 pub mod error;
 #[path = "node/keychain.rs"]
 mod keychain;
+#[path = "node/machine/runtime.rs"]
+pub mod machine;
 #[path = "node/metrics.rs"]
 mod metrics;
 #[path = "node/proxy_executor.rs"]
 pub mod proxy_executor;
+#[path = "node/proxy_upload.rs"]
+pub mod proxy_upload;
 #[path = "node/secret_backend.rs"]
 mod secret_backend;
 #[path = "node/signing.rs"]
@@ -77,6 +81,7 @@ fn test_credentials(
         },
         signing: config::SigningConfig::default(),
         ssh: config::SshConfig::default(),
+        machine: Default::default(),
         storage_backend: "file".to_string(),
         credentials,
         ssh_keys: Vec::new(),
@@ -93,7 +98,6 @@ mod test_support {
     }
 }
 
-#[cfg(test)]
-mod node {
-    pub use crate::config;
+pub mod node {
+    pub use crate::{config, machine, proxy_upload, ws_client};
 }

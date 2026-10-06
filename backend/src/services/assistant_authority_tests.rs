@@ -125,6 +125,7 @@ pub(crate) async fn new_orchestrator(
         &state.db,
         owner,
         &engine::TurnRequest {
+            attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
             text: text.into(),
@@ -155,6 +156,8 @@ pub(crate) async fn fixture(name: &str) -> Fixture {
         &state.encryption_keys,
         &owner,
         super::assistant_team_service::CreateRequest {
+            machines: None,
+            logins: None,
             name: "worker".into(),
             description: "Help with the user's account".into(),
             display_name: None,
@@ -172,6 +175,7 @@ pub(crate) async fn fixture(name: &str) -> Fixture {
         &state.db,
         &owner,
         &engine::TurnRequest {
+            attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: Some(home.id.clone()),
             text: "Please manage my account".into(),
@@ -187,6 +191,12 @@ pub(crate) async fn fixture(name: &str) -> Fixture {
 
 fn orchestrator_chat() -> acks::ChatAuthority {
     acks::ChatAuthority {
+        org_agent_access: None,
+        turn_id: None,
+        turn_stopped: false,
+        turn_live: true,
+        machine_node_ids: Vec::new(),
+        saved_login_ids: Vec::new(),
         confirmation_policy: None,
         conversation_id: "nyxa-00000000000000000000000000000000".into(),
         user_id: "owner".into(),
@@ -451,6 +461,7 @@ async fn acknowledgements_deny_expire_and_reask_only_after_a_new_user_message() 
         db,
         &f.owner,
         &engine::TurnRequest {
+            attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: Some(f.row.id.clone()),
             text: "Ask for access again".into(),
@@ -543,6 +554,7 @@ async fn action_acknowledgements_bind_arguments_key_conversation_and_are_single_
         db,
         &f.owner,
         &engine::TurnRequest {
+            attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
             text: "other chat".into(),
@@ -1291,6 +1303,7 @@ async fn legacy_ask_conversation_upgrades_to_full_on_its_next_turn_and_credentia
         &f.state.db,
         &f.owner,
         &engine::TurnRequest {
+            attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: Some(f.row.id.clone()),
             text: "Continue".into(),
@@ -1357,6 +1370,7 @@ async fn assert_assistant_key_boundaries(f: &Fixture) {
         &f.state.db,
         &f.owner,
         &engine::TurnRequest {
+            attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
             text: "Another conversation".into(),
@@ -1650,6 +1664,7 @@ async fn conversation_provisioning_rolls_back_its_key_when_the_first_message_can
         db,
         &f.owner,
         &engine::TurnRequest {
+            attachment_ids: Vec::new(),
             agent_id: None,
             conversation_id: None,
             text: "reject this message".into(),

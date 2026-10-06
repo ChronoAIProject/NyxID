@@ -1,4 +1,9 @@
-use axum::{Json, extract::State};
+use axum::{
+    Json,
+    extract::State,
+    http::{StatusCode, header},
+    response::{IntoResponse, Response},
+};
 
 use crate::AppState;
 use crate::services::oauth_broker_service;
@@ -136,11 +141,27 @@ pub async fn jwks(State(state): State<AppState>) -> Json<serde_json::Value> {
     }))
 }
 
+/// GET /.well-known/openai-apps-challenge
+///
+/// OpenAI plugin-portal domain verification for the MCP host. Returns the
+/// configured token as bare plain text, or 404 when none is configured.
+pub async fn openai_apps_challenge(State(state): State<AppState>) -> Response {
+    match &state.config.openai_apps_challenge_token {
+        Some(token) => (
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            token.clone(),
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         OAUTH_AUTHORIZATION_SERVER_SCOPES_SUPPORTED, OPENID_CONFIGURATION_SCOPES_SUPPORTED,
-        oauth_authorization_server_metadata, oauth_protected_resource, openid_configuration,
+        oauth_authorization_server_metadata, oauth_protected_resource, openai_apps_challenge,
+        openid_configuration,
     };
     use crate::services::oauth_broker_service::{BROKER_BINDING_SCOPE, BROKER_SUBJECT_TOKEN_TYPE};
     use axum::extract::State;
@@ -149,6 +170,34 @@ mod tests {
     fn public_discovery_scopes_do_not_include_broker_binding_scope() {
         assert!(!OPENID_CONFIGURATION_SCOPES_SUPPORTED.contains(&BROKER_BINDING_SCOPE));
         assert!(!OAUTH_AUTHORIZATION_SERVER_SCOPES_SUPPORTED.contains(&BROKER_BINDING_SCOPE));
+    }
+
+    #[tokio::test]
+    async fn openai_apps_challenge_serves_configured_token_as_plain_text() {
+        let mut state = crate::test_utils::test_app_state_no_db().await;
+        state.config.openai_apps_challenge_token = Some("challenge-token-123".to_string());
+
+        let response = openai_apps_challenge(State(state)).await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            response.headers()[axum::http::header::CONTENT_TYPE],
+            "text/plain; charset=utf-8"
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert_eq!(&body[..], b"challenge-token-123");
+    }
+
+    #[tokio::test]
+    async fn openai_apps_challenge_is_not_found_when_unconfigured() {
+        let mut state = crate::test_utils::test_app_state_no_db().await;
+        state.config.openai_apps_challenge_token = None;
+
+        let response = openai_apps_challenge(State(state)).await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

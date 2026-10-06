@@ -1,4 +1,7 @@
+import { ThreadTitle } from "@/components/assistant/thread-title";
 import { useEffect, useState, type ReactNode } from "react";
+import { OverlayLayer } from "@/components/ui/overlay-layer";
+import { ASSISTANT_OVERLAY_BASE } from "@/lib/overlay-layer";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { LogOut, Menu, Settings, User, X } from "lucide-react";
 import { NyxidLogo } from "@/components/brand/nyxid-logo";
@@ -12,19 +15,28 @@ import {
 import { useLogout } from "@/hooks/use-auth";
 import { useApplyTheme } from "@/hooks/use-theme";
 import { useAuthStore } from "@/stores/auth-store";
+import { useThemeStore } from "@/stores/theme-store";
+import { SidebarResizeHandle } from "@/components/layout/sidebar-resize-handle";
 
 export function AssistantShell({
   title,
   sidebar,
   headerActions,
+  onRenameTitle,
+  titleKey,
   children,
 }: {
   readonly title: string;
   readonly sidebar: ReactNode;
   readonly headerActions?: ReactNode;
+  readonly onRenameTitle?: (title: string) => Promise<void>;
+  readonly titleKey?: string;
   readonly children: ReactNode;
 }) {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const savedSidebarWidth = useThemeStore((s) => s.sidebarWidths.assistant);
+  const [previewWidth, setPreviewWidth] = useState<number | null>(null);
+  const sidebarWidth = previewWidth ?? savedSidebarWidth;
   const user = useAuthStore((state) => state.user);
   const logout = useLogout();
   const navigate = useNavigate();
@@ -68,23 +80,23 @@ export function AssistantShell({
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-48 p-2">
         <div className="px-2 py-1.5">
-          <p className="truncate text-[12px] font-medium text-foreground">
+          <p className="truncate text-12 font-medium text-foreground">
             {user?.display_name ?? "User"}
           </p>
-          <p className="truncate text-[11px] text-text-tertiary">
+          <p className="truncate text-11 text-text-tertiary">
             {user?.email ?? ""}
           </p>
         </div>
         <DropdownMenuItem
           onClick={() => void navigate({ to: "/settings" })}
-          className="rounded-md text-[12px]"
+          className="rounded-md text-12"
         >
           <Settings />
           Settings
         </DropdownMenuItem>
         <DropdownMenuItem
           onClick={() => void handleLogout()}
-          className="rounded-md text-[12px] text-destructive focus:text-destructive"
+          className="rounded-md text-12 text-destructive focus:text-destructive"
         >
           <LogOut />
           Log out
@@ -94,6 +106,7 @@ export function AssistantShell({
   );
 
   return (
+    <OverlayLayer layer={ASSISTANT_OVERLAY_BASE}>
     <div
       className="flex h-dvh flex-col overflow-hidden bg-background"
       style={{
@@ -103,7 +116,7 @@ export function AssistantShell({
       }}
     >
       <header className="flex h-[52px] shrink-0 items-center border-b border-border/60">
-        <div className="hidden h-full w-[200px] shrink-0 items-center px-4 md:flex">
+        <div className="hidden h-full shrink-0 items-center px-4 md:flex" style={{ width: sidebarWidth }}>
           <Link to="/assistant" search={{}} aria-label="Assistant home">
             <NyxidLogo className="h-5 w-auto" />
           </Link>
@@ -117,14 +130,14 @@ export function AssistantShell({
           >
             <Menu className="h-4 w-4" />
           </button>
-          <div className="hidden shrink-0 text-[12px] text-text-tertiary sm:block">
+          <div className="hidden shrink-0 text-12 text-text-tertiary sm:block">
             assistant
           </div>
-          <span className="hidden text-[12px] text-text-tertiary sm:block">
+          <span className="hidden text-12 text-text-tertiary sm:block">
             /
           </span>
-          <div className="min-w-0 flex-1 truncate text-[12px] text-muted-foreground">
-            {title}
+          <div className="min-w-0 flex-1 truncate text-12 text-muted-foreground">
+            {onRenameTitle ? <ThreadTitle key={titleKey} title={title} onRename={onRenameTitle} /> : title}
           </div>
           {headerActions}
           <ThemeToggle className="shrink-0" />
@@ -133,8 +146,16 @@ export function AssistantShell({
       </header>
 
       <div className="flex min-h-0 flex-1 overflow-hidden">
-        <aside className="hidden w-[200px] shrink-0 border-r border-border/60 md:block">
-          {sidebar}
+        <aside
+          className="relative hidden shrink-0 border-r border-border/60 md:block"
+          style={{ width: sidebarWidth }}
+        >
+          <div className="h-full overflow-hidden">{sidebar}</div>
+          <SidebarResizeHandle
+            sidebar="assistant"
+            label="Resize sidebar"
+            onPreview={setPreviewWidth}
+          />
         </aside>
         <main className="min-w-0 flex-1 overflow-hidden">{children}</main>
       </div>
@@ -189,5 +210,6 @@ export function AssistantShell({
         </div>
       )}
     </div>
+    </OverlayLayer>
   );
 }

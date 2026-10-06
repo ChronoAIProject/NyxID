@@ -20,6 +20,8 @@ export const MEASURE_LABELS: Record<AnalyticsPanel["measure"], string> = {
   completion_tokens: "Output tokens",
   cached_tokens: "Cache-read tokens",
   cache_creation_tokens: "Cache-write tokens",
+  audio_input_tokens: "Voice input (audio tokens)",
+  audio_output_tokens: "Voice output (audio tokens)",
   quantity: "Billed units",
   wallet_cost: "Wallet cost",
   grant_cost: "Grant cost",
@@ -51,6 +53,10 @@ export const MEASURE_DESCRIPTIONS: Record<AnalyticsPanel["measure"], string> = {
     "Provider-reported cached input reads. This can overlap input tokens.",
   cache_creation_tokens:
     "Provider-reported cache writes. Provider accounting varies; do not add this to total tokens.",
+  audio_input_tokens:
+    "Provider-reported audio input tokens from realtime voice and audio chat. Already included in input tokens; not priced separately.",
+  audio_output_tokens:
+    "Provider-reported audio output tokens from realtime voice and audio chat. Already included in output tokens; not priced separately.",
   quantity:
     "Sum of metered units in the selected billing metric. These can differ from provider-reported tokens.",
   wallet_cost: "Usage cost funded by purchased wallet credits.",
@@ -198,6 +204,17 @@ export function newView(
               title: "Active user traffic",
               measure: "requests",
               breakdown: "user",
+              chart: "bar",
+            }),
+            newPanel({
+              title: "Voice output",
+              measure: "audio_output_tokens",
+              chart: "line",
+              span: 2,
+            }),
+            newPanel({
+              title: "Voice input",
+              measure: "audio_input_tokens",
               chart: "bar",
             }),
           ]

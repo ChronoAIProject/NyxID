@@ -254,14 +254,14 @@ export function AssistantServiceRouteDialog({
           <div className="flex items-start gap-3 border-y border-border py-4">
             <Server className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
             <div className="min-w-0 space-y-1">
-              <p className="text-[13px] font-medium">
+              <p className="text-13 font-medium">
                 {observedNodeId ? "Routed through node" : "Direct routing"}
               </p>
-              <p className="break-all font-mono text-[12px] text-muted-foreground">
+              <p className="break-all font-mono text-12 text-muted-foreground">
                 {observedNodeId ?? "no node"}
               </p>
               {verified ? (
-                <p className="text-[11px] text-success">
+                <p className="text-11 text-success">
                   Routing evidence verified.
                 </p>
               ) : null}
@@ -270,7 +270,7 @@ export function AssistantServiceRouteDialog({
         )}
 
         {error ? (
-          <p role="alert" className="text-[12px] text-destructive">
+          <p role="alert" className="text-12 text-destructive">
             {error}
           </p>
         ) : null}

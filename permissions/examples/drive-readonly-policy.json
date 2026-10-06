@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "name": "Drive read-only folder trial",
+  "provider": "google_drive",
+  "resource": {
+    "type": "google_drive_folder",
+    "root_folder_id": "REPLACE_WITH_GOOGLE_FOLDER_ID",
+    "include_descendants": true
+  },
+  "allowed_operations": ["drive.files.list", "drive.files.get"],
+  "constraints": {
+    "drive.files.list": [
+      { "location": "query", "name": "pageSize", "required": true, "rule": { "type": "max_integer", "value": 100 } }
+    ]
+  }
+}

@@ -1,3 +1,8 @@
+import { AgentSkills } from "./agent-skills";
+import { AgentLearningReview } from "./agent-learning-review";
+import { MachineCapabilities } from "./machine-capabilities";
+import { AgentOperationScopes } from "./agent-operation-scopes";
+import { MachineGrantPicker } from "./machine-grant-picker";
 import { AgentAutomations } from "./automation-preferences";
 import { useState, type ReactNode } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -53,6 +58,7 @@ import {
   useDeleteNyxBotAgent,
   useDestroyNyxBotAgent,
   useForgetNyxBotMemory,
+  useRememberNyxBotMemory,
   useNyxBotAgent,
   useSetNyxBotAgentGrants,
   useUpdateNyxBotAgent,
@@ -62,6 +68,8 @@ import { AGENT_STATUS_LABEL, agentHandle, agentTitle } from "@/lib/assistant/nyx
 import { formatDateTime } from "@/lib/utils";
 import {
   ASSISTANT_AGENT_DISPLAY_NAME_MAX,
+  ASSISTANT_MEMORY_NOTE_MAX,
+  assistantMemoryNoteSchema,
   ASSISTANT_AGENT_PERSONA_MAX,
   assistantAgentGrantsSchema,
   assistantAgentProfileSchema,
@@ -89,8 +97,10 @@ function Section({
   return (
     <section aria-label={title} className="space-y-3">
       <div className="space-y-1">
-        <h3 className="text-[13px] font-semibold text-foreground">{title}</h3>
-        {description ? <p className="text-[12px] text-muted-foreground">{description}</p> : null}
+        <h3 className="text-13 font-semibold text-foreground">{title}</h3>
+        {description ? (
+          <p className="text-12 text-muted-foreground">{description}</p>
+        ) : null}
       </div>
       {children}
     </section>
@@ -138,9 +148,11 @@ export function AgentDetailsSheet({
           ) : null}
           {agent ? (
             <>
-              <div className="flex flex-wrap items-center gap-2 text-[11px] text-text-tertiary">
+              <div className="flex flex-wrap items-center gap-2 text-11 text-text-tertiary">
                 <AgentAvatar agent={agent} size="lg" />
-                <span className="text-[15px] font-semibold text-foreground">{agentTitle(agent)}</span>
+                <span className="text-15 font-semibold text-foreground">
+                  {agentTitle(agent)}
+                </span>
                 {agentHandle(agent) ? <span>{agentHandle(agent)}</span> : null}
                 <AgentKindBadge kind={agent.kind} />
                 <Badge variant={agent.status === "running" ? "success" : "secondary"}>
@@ -150,9 +162,18 @@ export function AgentDetailsSheet({
                   {agent.kind === "specialist"
                     ? `Created by ${agent.created_by === "nyxbot" ? "NyxBot" : "you"} · `
                     : ""}
-                  {agent.memory_count} {agent.memory_count === 1 ? "memory" : "memories"}
+                  {agent.memory_count}{" "}
+                  {agent.memory_count === 1 ? "memory" : "memories"}
                 </span>
               </div>
+              <Section
+                title="Ownership"
+                description={
+                  agent.owner_kind === "org"
+                    ? `${agent.owner_name ?? agent.owner_id} · Maintained by Admins and Members. Your role: ${agent.org_role ?? "member"}.${agent.can_maintain === false ? " Read-only; viewers cannot maintain or chat." : " Chats are private to you; memory is shared with the organization."}`
+                    : "Personal agent"
+                }
+              />
               <ProfileForm
                 key={[agent.id, agent.name, agent.description, agent.display_name, agent.persona].join(
                   ":",
@@ -165,14 +186,21 @@ export function AgentDetailsSheet({
                   agent={agent}
                 />
               ) : (
-                <Section
-                  title="Access"
-                  description="NyxBot runs with full access to your connected services and account. Destructive actions follow your confirmation setting."
-                />
+                <Section title="Access" description="NyxBot runs with full access to your connected services and account. Machine capabilities are assigned separately. Destructive actions follow your confirmation setting.">
+                  <MachineCapabilities agentId={agent.id} disabled={agent.status === "destroyed"} />
+                </Section>
               )}
-              <AgentAutomations agentId={agent.id} />
-              <MemoryList agent={agent} memory={detail.data?.memory ?? []} />
-              {agent.status === "destroyed" ? null : (
+              <AgentSkills agentId={agent.id} readOnly={agent.status === "destroyed" || agent.can_maintain === false
+                } />
+              <AgentLearningReview agentId={agent.id} readOnly={agent.status === "destroyed" || agent.can_maintain === false} />
+              {agent.can_use !== false ? (
+                <AgentAutomations agentId={agent.id} />
+              ) : null}
+              {agent.can_maintain !== false ? (
+                <MemoryList agent={agent} memory={detail.data?.memory ?? []} />
+              ) : null}
+              {agent.status === "destroyed" ||
+              agent.owner_kind === "org" ? null : (
                 <Section
                   title="Channel bots"
                   description={`Chat with ${agentTitle(agent)} from these bots.`}
@@ -180,7 +208,7 @@ export function AgentDetailsSheet({
                   <ChannelBotsManager agents={agents} agent={agent} />
                 </Section>
               )}
-              {agent.kind === "specialist" ? (
+              {agent.kind === "specialist" && agent.can_maintain !== false ? (
                 <Lifecycle agent={agent} onDeleted={onDeleted} />
               ) : null}
             </>
@@ -194,7 +222,7 @@ export function AgentDetailsSheet({
 function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
   const update = useUpdateNyxBotAgent();
   const nyxbot = agent.kind === "nyxbot";
-  const readOnly = agent.status === "destroyed";
+  const readOnly = agent.status === "destroyed" || agent.can_maintain === false;
   const form = useAppForm<AssistantAgentProfile>({
     resolver: zodResolver(assistantAgentProfileSchema(agent.kind)),
     defaultValues: {
@@ -243,7 +271,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                       onChange={(event) => field.onChange(event.target.value.toLowerCase())}
                     />
                   </FormControl>
-                  <FormDescription className="text-[11px]">
+                  <FormDescription className="text-11">
                     The @handle used in groups and by NyxBot.
                   </FormDescription>
                   <FormMessage />
@@ -266,8 +294,9 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                     {...field}
                   />
                 </FormControl>
-                <FormDescription className="text-[11px]">
-                  Shown instead of {nyxbot ? "NyxBot" : `@${agent.name}`}. Leave empty to use it.
+                <FormDescription className="text-11">
+                  Shown instead of {nyxbot ? "NyxBot" : `@${agent.name}`}. Leave
+                  empty to use it.
                 </FormDescription>
                 <FormMessage />
               </FormItem>
@@ -307,15 +336,16 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                     {...field}
                   />
                 </FormControl>
-                <FormDescription className="text-[11px]">
-                  Personality and tone only; it never changes what the agent may do.
+                <FormDescription className="text-11">
+                  Personality and tone only; it never changes what the agent may
+                  do.
                 </FormDescription>
                 <FormMessage />
               </FormItem>
             )}
           />
           {error ? (
-            <p role="alert" className="text-[12px] text-destructive">
+            <p role="alert" className="text-12 text-destructive">
               {error}
             </p>
           ) : null}
@@ -340,11 +370,13 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
 
 function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
   const grants = useSetNyxBotAgentGrants();
-  const readOnly = agent.status === "destroyed";
+  const readOnly = agent.status === "destroyed" || agent.can_maintain === false;
   const form = useAppForm<AssistantAgentGrants>({
     resolver: zodResolver(assistantAgentGrantsSchema),
     defaultValues: {
       services: agent.services,
+      machines: agent.machines ?? [],
+      logins: agent.logins ?? [],
       account_read: agent.account_read,
       guest_access: agent.guest_access,
     },
@@ -365,6 +397,8 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
       await grants.mutateAsync({
         id: agent.id,
         services: values.services,
+        ...(form.getFieldState("machines").isDirty ? { machines: values.machines } : {}),
+        ...(form.getFieldState("logins").isDirty ? { logins: values.logins } : {}),
         account_read: values.account_read,
         ...(Object.keys(changed).length ? { guest_access: changed } : {}),
       });
@@ -387,6 +421,7 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
             render={({ field }) => (
               <FormItem>
                 <ServiceGrantPicker
+                  org={agent.owner_kind === "org" ? agent.owner_id : undefined}
                   value={field.value}
                   onChange={field.onChange}
                   disabled={readOnly}
@@ -394,7 +429,23 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
               </FormItem>
             )}
           />
-          {services.length ? (
+          {(["machines", ...(agent.owner_kind === "org" ? [] : ["logins"])] as (
+              | "machines"
+              | "logins"
+            )[]
+          ).map((kind) => (
+            <FormField key={kind} control={form.control} name={kind} render={({ field }) => (
+                <FormItem>
+                  <MachineGrantPicker
+                    org={
+                      agent.owner_kind === "org" ? agent.owner_id : undefined
+                    }
+                    kind={kind} value={field.value ?? []} onChange={field.onChange} disabled={readOnly} />
+                </FormItem>
+              )}
+            />
+          ))}
+          {services.length && agent.owner_kind !== "org" ? (
             <FormField
               control={form.control}
               name="guest_access"
@@ -410,7 +461,8 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
               )}
             />
           ) : null}
-          <FormField
+          {agent.owner_kind !== "org" ? (
+            <FormField
             control={form.control}
             name="account_read"
             render={({ field }) => (
@@ -418,9 +470,9 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
                 <div className="flex items-center justify-between gap-4 rounded-lg border border-border p-4">
                   <div className="space-y-1">
                     <FormLabel>Read my account</FormLabel>
-                    <FormDescription className="text-[12px]">
-                      Look up keys, services and nodes; never change them.
-                    </FormDescription>
+                    <FormDescription className="text-12">
+                        Look up keys, services and nodes; never change them.
+                      </FormDescription>
                   </div>
                   <FormControl>
                     <Switch
@@ -433,8 +485,9 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
               </FormItem>
             )}
           />
+          ) : null}
           {error ? (
-            <p role="alert" className="text-[12px] text-destructive">
+            <p role="alert" className="text-12 text-destructive">
               {error}
             </p>
           ) : null}
@@ -453,6 +506,12 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
           )}
         </form>
       </Form>
+      {agent.can_maintain !== false ? (
+        <>
+          <AgentOperationScopes agentId={agent.id} disabled={readOnly} />
+          <MachineCapabilities agentId={agent.id} disabled={readOnly} />
+        </>
+      ) : null}
     </Section>
   );
 }
@@ -482,14 +541,15 @@ function GuestAccessList({
   return (
     <div className="space-y-2 rounded-lg border border-border p-4">
       <div className="space-y-1">
-        <p className="text-[12px] font-medium text-foreground">
+        <p className="text-12 font-medium text-foreground">
           What others in its chats may do
         </p>
-        <p className="text-[12px] text-muted-foreground">
-          For people other than you in the agent&apos;s group and shared chats. &ldquo;Use&rdquo;
-          lets them look things up, create and act (send a message, turn a light on), but not
-          change or delete what already exists. Anything behind your approval stays yours. You
-          can also ask NyxBot to change this.
+        <p className="text-12 text-muted-foreground">
+          For people other than you in the agent&apos;s group and shared chats.
+          &ldquo;Use&rdquo; lets them look things up, create and act (send a
+          message, turn a light on), but not change or delete what already
+          exists. Anything behind your approval stays yours. You can also ask
+          NyxBot to change this.
         </p>
       </div>
       <ul aria-label="Guest access" className="space-y-1.5">
@@ -499,7 +559,7 @@ function GuestAccessList({
             <li key={slug} className="flex items-center justify-between gap-3">
               <label
                 htmlFor={id}
-                className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground"
+                className="min-w-0 flex-1 truncate font-mono text-11 text-muted-foreground"
               >
                 {slug}
               </label>
@@ -539,6 +599,26 @@ function MemoryList({
   const forget = useForgetNyxBotMemory();
   const [error, setError] = useState<string>();
   const name = agentTitle(agent);
+  const remember = useRememberNyxBotMemory();
+  const memoryForm = useAppForm<{ text: string }>({
+    resolver: zodResolver(assistantMemoryNoteSchema),
+    defaultValues: { text: "" },
+  });
+  const [editing, setEditing] = useState<string>();
+  async function saveNote({ text }: { text: string }) {
+    setError(undefined);
+    try {
+      await remember.mutateAsync({
+        agentId: agent.id,
+        text,
+        replaceId: editing,
+      });
+      memoryForm.reset({ text: "" });
+      setEditing(undefined);
+    } catch (cause) {
+      setError(errorMessage(cause, "Could not save shared memory."));
+    }
+  }
 
   async function remove(note: AssistantAgentMemoryNote) {
     setError(undefined);
@@ -552,25 +632,87 @@ function MemoryList({
   return (
     <Section
       title="Memory"
-      description={`What ${name} remembers across its threads and chat apps.`}
+      description={
+        agent.owner_kind === "org"
+          ? "Shared organization memory. Never save private member content here."
+          : `What ${name} remembers across its threads and chat apps.`}
     >
       {error ? (
-        <p role="alert" className="text-[12px] text-destructive">
+        <p role="alert" className="text-12 text-destructive">
           {error}
         </p>
+      ) : null}
+      {agent.owner_kind === "org" && agent.status !== "destroyed" ? (
+        <form
+          aria-label="Shared memory"
+          onSubmit={memoryForm.handleSubmit(saveNote)}
+          className="space-y-2"
+        >
+          <label
+            htmlFor="shared-memory-note"
+            className="text-12 font-medium"
+          >
+            {editing ? "Edit shared note" : "Add shared note"}
+          </label>
+          <textarea
+            id="shared-memory-note"
+            className={TEXTAREA_CLASS}
+            maxLength={ASSISTANT_MEMORY_NOTE_MAX}
+            {...memoryForm.register("text")}
+          />
+          <div className="flex justify-end gap-2">
+            {editing ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  setEditing(undefined);
+                  memoryForm.reset({ text: "" });
+                }}
+              >
+                Cancel edit
+              </Button>
+            ) : null}
+            <Button
+              type="submit"
+              size="sm"
+              variant="primary"
+              isLoading={remember.isPending}
+              disabled={
+                !memoryForm.formState.isDirty ||
+                !memoryForm.watch("text").trim()
+              }
+            >
+              Save shared note
+            </Button>
+          </div>
+        </form>
       ) : null}
       {memory.length ? (
         <ul aria-label={`${name} memory`} className="divide-y divide-border/30 rounded-lg border border-border">
           {memory.map((note) => (
             <li key={note.id} className="flex items-start gap-2 px-3 py-2.5">
               <div className="min-w-0 flex-1 space-y-0.5">
-                <p className="whitespace-pre-wrap break-words text-[12px] text-foreground">
+                <p className="whitespace-pre-wrap break-words text-12 text-foreground">
                   {note.text}
                 </p>
-                <p className="font-mono text-[10px] text-text-tertiary">
+                <p className="font-mono text-10 text-text-tertiary">
                   {formatDateTime(note.updated_at)}
                 </p>
               </div>
+              {agent.owner_kind === "org" && agent.status !== "destroyed" ? (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => {
+                    setEditing(note.id);
+                    memoryForm.reset({ text: note.text });
+                  }}
+                >
+                  Edit note
+                </Button>
+              ) : null}
               <Button
                 size="icon"
                 variant="ghost"
@@ -585,7 +727,7 @@ function MemoryList({
           ))}
         </ul>
       ) : (
-        <p className="rounded-lg bg-overlay px-4 py-3 text-[12px] text-muted-foreground">
+        <p className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">
           Nothing remembered yet.
         </p>
       )}
@@ -633,10 +775,10 @@ function Lifecycle({
       className="space-y-3 rounded-xl border border-destructive/40 p-4"
     >
       <div className="space-y-1">
-        <h3 className="text-[13px] font-semibold text-destructive">
+        <h3 className="text-13 font-semibold text-destructive">
           {destroyed ? "Delete permanently" : "Destroy agent"}
         </h3>
-        <p className="text-[12px] text-destructive/70">
+        <p className="text-12 text-destructive/70">
           {destroyed
             ? `${agentTitle(agent)} was destroyed${agent.destroyed_at ? ` on ${formatDateTime(agent.destroyed_at)}` : ""}. Deleting removes it and all of its threads for good.`
             : "Stops its work, revokes its access and disconnects its channel bots. Its threads stay readable."}
@@ -660,7 +802,7 @@ function Lifecycle({
           if (!open && !pending) setConfirm(undefined);
         }}
       >
-        <DialogContent className="z-[90] md:max-w-md">
+        <DialogContent className="md:max-w-md">
           <DialogHeader>
             <DialogTitle>
               {confirm === "delete"
@@ -674,7 +816,7 @@ function Lifecycle({
             </DialogDescription>
           </DialogHeader>
           {error ? (
-            <p role="alert" className="text-[12px] text-destructive">
+            <p role="alert" className="text-12 text-destructive">
               {error}
             </p>
           ) : null}
