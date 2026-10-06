@@ -17,6 +17,7 @@ import {
 } from "@/schemas/providers";
 import { ApiError } from "@/lib/api-client";
 import { PageHeader } from "@/components/shared/page-header";
+import { useBreadcrumbLabel } from "@/components/layout/breadcrumb-context";
 import { Separator } from "@/components/ui/separator";
 import {
   useAppForm,
@@ -50,6 +51,7 @@ import {
 export function ProviderEditPage() {
   const { providerId } = useParams({ strict: false }) as { providerId: string };
   const { data: provider, isLoading, error, refetch } = useProvider(providerId);
+  useBreadcrumbLabel(provider?.name);
   if (isLoading && !provider) return <Skeleton className="h-96 w-full" />;
   if (!provider)
     return (

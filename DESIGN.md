@@ -68,7 +68,7 @@ Light mode uses exactly two neutral tones (zinc grey page, white cards) with no 
 - **Loading:** Google Fonts CDN
 
 ### Scale (in-app)
-Use the `text-{px}` tokens (`text-9` … `text-36`, defined as rem in `app.css`), never `text-[Npx]`. They follow the user's Settings → Display text size (87.5–125% via the root font size); spacing is px (`--spacing: 4px`), so only text scales. Display → Density scales `--spacing` instead (3.5/4/4.5px), so use spacing utilities rather than fixed `[Npx]` paddings/heights. `text-12` is 12px at the default 100%.
+Use the `text-{px}` tokens (`text-9` … `text-36`, defined as rem in `app.css`), never `text-[Npx]`. They follow the user's Settings → Display text size (0.5×–2× in 0.01× steps via the root font size). Display → Spacing independently scales the default 4px `--spacing` unit from 0.5×–2× in 0.01× steps, so use spacing utilities rather than fixed `[Npx]` paddings/heights. Both sliders show a draft multiplier while dragging, then apply and save on release; native keyboard adjustments apply as the value changes. `text-12` is 12px at the default 1×.
 
 | Size | Use |
 |------|-----|
@@ -220,7 +220,7 @@ Top bar spans full width. Sidebar + content sit below it. The right panel is **o
 - **Border:** `border-b border-border/60`
 - **Logo zone (desktop):** width tracks the sidebar (`var(--sidebar-width)`), 16px left padding, NyxID icon (`h-5 w-5`), links to `/dashboard`
 - **Logo zone (mobile):** when not on a root page, replaced with a back arrow (`window.history.back()`); otherwise the icon links to `/dashboard`
-- **Breadcrumbs:** rendered inline left of the actions on `md+`. `text-12`; intermediate crumbs are links (`text-text-tertiary` → `text-foreground` on hover), the last crumb is plain `text-muted-foreground`. Detail pages register their own label via `useBreadcrumbLabel(label)`.
+- **Breadcrumbs:** rendered inline left of the actions on `md+`. `text-12`; intermediate crumbs are links (`text-text-tertiary` → `text-foreground` on hover), the last crumb is plain `text-muted-foreground` with `aria-current="page"`. `lib/studio-breadcrumbs.ts` resolves each Studio route and its URL-selected subsection. Parent links explicitly select the appropriate `tab` or `view` and clear unrelated action/callback parameters. Detail pages register their entity name via `useBreadcrumbLabel(label)`; parent entity names can be registered with an explicit path. Permission-dependent tabs publish the visible section via `useBreadcrumbSection(tab)`.
 - **Actions (right):** Search trigger (opens command palette, shows `/` keybind hint), profile dropdown (icon button → menu with name/email/Settings/Log out), GitHub link. All actions use the same `border-hairline` chrome.
 - **Mobile:** profile dropdown + hamburger (`Menu`) that opens the full-screen `MobileNav`
 
@@ -235,7 +235,7 @@ Triggered by the search button or `/` key. Searches all sidebar destinations plu
 - **Collapsed mode:** label is replaced with a short divider line (`mx-auto w-3 border-t border-border/40`) so the visual separation survives.
 - **Active nav item:** `bg-overlay-strong font-medium text-foreground`, icon: `text-nyx-secondary-400`
 - **Hover:** `bg-overlay`
-- **Nav item:** `text-13`, icon `h-[16px] w-[16px]`, `py-2` height, `gap-3 px-3` when expanded / `justify-center px-0 gap-0` when collapsed. Label transitions via `max-width: 0 → 160px` and `opacity: 0 → 1` (animated, never conditionally rendered, so layout never jumps).
+- **Nav item:** `text-13`, icon `h-[16px] w-[16px]`, `py-2` height, `gap-3 px-3` when expanded / `justify-center px-0 gap-0` when collapsed. Labels use the remaining row width and truncate only when their text exceeds it. Collapse transitions via `max-width: 0 → 100%` and `opacity: 0 → 1` (animated, never conditionally rendered, so layout never jumps).
 - **Sidebar control:** bottom popover with 3 mode options, active option indicated by purple-filled `Circle` dot
 - **Expand on hover:** outer `<aside>` is 52px in document flow, inner `<div>` is absolutely positioned and transitions width with shadow on the expanded state. 120ms enter delay, 250ms leave delay (via refs) to prevent flicker. Content is never blocked.
 
@@ -275,15 +275,15 @@ The sidebar label and page title can drift; track this when writing breadcrumbs 
 
 | Sidebar | Page title (`PageHeader`) | Tabs (if any) |
 |---------|---------------------------|---------------|
-| AI Services | Services & Credentials (`keys.tsx`) | External Services, Agent Keys |
+| AI Services | Services & Credentials (`keys.tsx`) | External Services, Service Pools, Agent Keys |
 | Access & Auth | Access & Authorizations (`consents.tsx`) | Authorized Apps, Authorizations |
-| Settings | Account Settings (`settings.tsx`) | Profile, Security, Sessions, MCP, Privacy |
+| Settings | Account Settings (`settings.tsx`) | Profile, Security, Sessions, MCP, Display, Privacy |
 | Nodes | Credential Nodes (`nodes.tsx`) | — |
 | Guide | Setup Guide (`guide.tsx`) | — |
 | Integration | Integration & SDK Guide (`integration-guide.tsx`) | — |
 | AI Setup | AI Setup Guide (`ai-setup.tsx`) | — |
 
-The breadcrumb labels in `dashboard-layout.tsx` (`SIDEBAR_ITEMS`) and the command-palette entries in `command-palette.tsx` (`ALL_ITEMS`) should match the page-title column above, not the sidebar column.
+The breadcrumb labels in `lib/studio-breadcrumbs.ts` and the command-palette entries in `command-palette.tsx` (`ALL_ITEMS`) should match the page-title column above, not the sidebar column.
 
 ## Motion
 - **Approach:** Minimal-functional
