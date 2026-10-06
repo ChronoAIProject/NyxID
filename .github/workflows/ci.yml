@@ -264,15 +264,30 @@ jobs:
         run: python3 scripts/validate-cursor-plugin.py
 
   # Claude plugin: manifest, remote MCP, skills, and directory bundle limits.
+  # The repository-limit step runs on every PR because the Claude directory
+  # also reads repository-wide size and entry counts; the package steps run
+  # only when the plugin or its validator changes.
   claude-plugin-validate:
     name: Claude Plugin Validate
     needs: changes
-    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.claude_plugin == 'true'
     runs-on: ubuntu-latest
+    env:
+      CLAUDE_CODE_VERSION: 2.1.284
+      PACKAGE_CHANGED: ${{ inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.claude_plugin == 'true' }}
     steps:
       - uses: actions/checkout@v6
+      - name: Check repository limits for the Claude directory
+        run: python3 scripts/validate-claude-plugin.py --repo-only
+      - uses: actions/setup-node@v6
+        if: env.PACKAGE_CHANGED == 'true'
+        with:
+          node-version-file: .node-version
+      - name: Install pinned Claude Code
+        if: env.PACKAGE_CHANGED == 'true'
+        run: npm install --global "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
       - name: Validate Claude plugin
-        run: python3 scripts/validate-claude-plugin.py
+        if: env.PACKAGE_CHANGED == 'true'
+        run: python3 scripts/validate-claude-plugin.py --require-claude
 
   oracle-worker-test:
     name: Oracle Worker Test

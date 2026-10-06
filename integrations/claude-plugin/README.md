@@ -16,7 +16,7 @@ The plugin runs no local code, scripts, or hooks.
 - Claude talks only to `https://nyx-api.chrono-ai.fun`, NyxID's API, over HTTPS.
 - Signing in uses OAuth 2.1 with PKCE in your browser at `https://nyx.chrono-ai.fun`. NyxID supports Google, GitHub, and Apple sign-in.
 - When you connect a service, you enter that service's credentials on NyxID's or the provider's own website, never in Claude. NyxID stores them encrypted.
-- When Claude calls a service tool, NyxID forwards the request to that third-party service with your stored credential and returns the response to Claude. Only services you connected are reachable.
+- When Claude calls a service tool, NyxID forwards the request to that third-party service with the stored credential and returns the response to Claude. Only services available to your account are reachable: the ones you connected, services that need no credential, and services shared with you through an organization you belong to, subject to your grants and organization permissions.
 - Accounts with those capabilities enabled also expose NyxID's SSH command and browser-relay ("Oracle") tools.
 
 See the [privacy policy](https://nyx.chrono-ai.fun/privacy) and [terms](https://nyx.chrono-ai.fun/terms).

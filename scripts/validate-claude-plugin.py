@@ -1,14 +1,24 @@
 #!/usr/bin/env python3
-"""Validate the NyxID Claude plugin against the Claude directory's submission rules.
+"""Conservative local checks for the NyxID Claude directory plugin.
 
 Uses only the Python standard library. Covers the manifest, remote MCP server,
 skill frontmatter, README/LICENSE, and the directory's bundle limits (file
-count, file size, symlinks, blocked file types). When the `claude` CLI is on
-PATH, its strict manifest validator runs as well.
+count, file size, symlinks, blocked file types). The directory treats the
+512-file and 256 KiB thresholds as review holds; this script fails on them so
+the package never needs one. It is not a substitute for the portal's own
+validation and security scan.
+
+  validate-claude-plugin.py                  package checks; `claude plugin
+                                             validate --strict` if on PATH
+  validate-claude-plugin.py --require-claude same, but fail when `claude` is
+                                             missing (used by CI)
+  validate-claude-plugin.py --repo-only      repository-wide directory limits
+                                             (archive size, entry count)
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import re
 import shutil
@@ -16,17 +26,23 @@ import subprocess
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent / "integrations" / "claude-plugin"
+REPO = Path(__file__).resolve().parent.parent
+ROOT = REPO / "integrations" / "claude-plugin"
 
 NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$")
 URL_FIELDS = ("homepage", "documentationUrl", "supportUrl", "privacyPolicyUrl", "termsOfServiceUrl")
 MAX_FILES = 512
 MAX_FILE_BYTES = 256 * 1024
+MAX_ANY_FILE_BYTES = 5 * 1024 * 1024
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}
-BLOCKED_SUFFIXES = {".ico", ".pdf", ".zip"}
-BLOCKED_NAMES = {".DS_Store"}
+BLOCKED_SUFFIXES = {".ico", ".pdf", ".zip", ".exe", ".dll", ".so", ".dylib", ".bin"}
+BLOCKED_NAMES = {".DS_Store", "Thumbs.db", "desktop.ini", "Icon\r"}
 MIN_README_WORDS = 40
+# Repository-wide limits the directory also reads, with headroom kept by CI.
+MAX_REPO_ARCHIVE_BYTES = 50 * 1024 * 1024
+MAX_REPO_UNPACKED_BYTES = 256 * 1024 * 1024
+MAX_REPO_ENTRIES = 10_000
 
 
 class ValidationError(Exception):
@@ -115,8 +131,9 @@ def validate_docs() -> None:
     readme = ROOT / "README.md"
     if not readme.is_file():
         fail("README.md is required in the plugin folder")
-    if len(readme.read_text(encoding="utf-8").split()) < MIN_README_WORDS:
-        fail(f"README.md must contain at least {MIN_README_WORDS} words")
+    prose = re.sub(r"```.*?```", " ", readme.read_text(encoding="utf-8"), flags=re.DOTALL)
+    if len(prose.split()) < MIN_README_WORDS:
+        fail(f"README.md must contain at least {MIN_README_WORDS} words outside code blocks")
     if not (ROOT / "LICENSE").is_file():
         fail("LICENSE is required in the plugin folder")
 
@@ -134,13 +151,18 @@ def validate_bundle_limits() -> None:
         relative = path.relative_to(ROOT)
         if path.name in BLOCKED_NAMES or path.suffix.lower() in BLOCKED_SUFFIXES:
             fail(f"file type is not allowed in the plugin bundle: {relative}")
-        if path.suffix.lower() not in IMAGE_SUFFIXES and path.stat().st_size > MAX_FILE_BYTES:
+        size = path.stat().st_size
+        if size > MAX_ANY_FILE_BYTES:
+            fail(f"{relative} exceeds the {MAX_ANY_FILE_BYTES}-byte file cap")
+        if path.suffix.lower() not in IMAGE_SUFFIXES and size > MAX_FILE_BYTES:
             fail(f"{relative} exceeds {MAX_FILE_BYTES} bytes")
 
 
-def validate_with_claude_cli() -> None:
+def validate_with_claude_cli(required: bool) -> None:
     claude = shutil.which("claude")
     if claude is None:
+        if required:
+            fail("claude CLI not found on PATH; install it to run `claude plugin validate --strict`")
         print("note: claude CLI not found; skipped `claude plugin validate --strict`")
         return
     result = subprocess.run(
@@ -153,14 +175,45 @@ def validate_with_claude_cli() -> None:
         fail(f"claude plugin validate --strict failed:\n{result.stdout}{result.stderr}")
 
 
+def validate_repository_limits() -> None:
+    """Directory checks that read the whole repository, not just the plugin folder."""
+    tracked = subprocess.run(
+        ["git", "ls-files", "-z"], cwd=REPO, capture_output=True, check=True
+    ).stdout.decode().split("\0")
+    files = [name for name in tracked if name]
+    directories = {str(parent) for name in files for parent in Path(name).parents if str(parent) != "."}
+    entries = len(files) + len(directories)
+    if entries > MAX_REPO_ENTRIES:
+        fail(f"repository has {entries} files and folders; the directory limit is {MAX_REPO_ENTRIES}")
+    unpacked = sum((REPO / name).stat().st_size for name in files if (REPO / name).is_file())
+    if unpacked > MAX_REPO_UNPACKED_BYTES:
+        fail(f"repository is {unpacked} bytes unpacked; the directory limit is {MAX_REPO_UNPACKED_BYTES}")
+    archive = subprocess.run(
+        ["git", "archive", "--format=zip", "HEAD"], cwd=REPO, capture_output=True, check=True
+    ).stdout
+    if len(archive) > MAX_REPO_ARCHIVE_BYTES:
+        fail(f"repository archive is {len(archive)} bytes; the directory limit is {MAX_REPO_ARCHIVE_BYTES}")
+    print(
+        f"repository limits ok: {entries} entries, {unpacked // (1024 * 1024)} MiB unpacked, "
+        f"{len(archive) // (1024 * 1024)} MiB archived"
+    )
+
+
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--require-claude", action="store_true", help="fail when the claude CLI is missing")
+    parser.add_argument("--repo-only", action="store_true", help="check repository-wide limits only")
+    args = parser.parse_args()
     try:
+        if args.repo_only:
+            validate_repository_limits()
+            return 0
         validate_manifest()
         validate_mcp()
         validate_skills()
         validate_docs()
         validate_bundle_limits()
-        validate_with_claude_cli()
+        validate_with_claude_cli(args.require_claude)
     except ValidationError as exc:
         print(f"Claude plugin validation failed: {exc}", file=sys.stderr)
         return 1
