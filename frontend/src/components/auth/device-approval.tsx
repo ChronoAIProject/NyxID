@@ -460,11 +460,11 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                 <NyxidIcon className="size-9" />
               </div>
               <div className="space-y-1.5">
-                <h1 className="text-[22px] font-semibold tracking-tight">
+                <h1 className="text-22 font-semibold tracking-tight">
                   Approve {flow === "device" ? "device" : "Agent Key"} login
                 </h1>
                 {!terminal && (
-                  <p className="text-[12px] leading-relaxed text-muted-foreground">
+                  <p className="text-12 leading-relaxed text-muted-foreground">
                     {step === 1
                       ? context
                         ? "Match this code with the one on your requesting device."
@@ -490,11 +490,11 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
               <div className="space-y-2">
                 <h1
                   id="expired-request-title"
-                  className="text-[22px] font-semibold tracking-tight"
+                  className="text-22 font-semibold tracking-tight"
                 >
                   Request expired
                 </h1>
-                <p className="text-[12px] leading-relaxed text-muted-foreground">
+                <p className="text-12 leading-relaxed text-muted-foreground">
                   Get a new code from the device or terminal you’re signing in
                   to, then enter it here.
                 </p>
@@ -514,18 +514,18 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
               ) : (
                 <ShieldX className="mx-auto size-8 text-destructive" />
               )}
-              <h2 className="text-[15px] font-semibold">
+              <h2 className="text-15 font-semibold">
                 {terminal === "approved"
                   ? "Approved — return to the requesting device"
                   : "Request denied"}
               </h2>
-              <p className="text-[12px] text-muted-foreground">
+              <p className="text-12 text-muted-foreground">
                 {terminal === "approved"
                   ? "The requester can now receive the approved credential."
                   : "This request cannot be approved. Start a new login on the requesting device."}
               </p>
               {approval.identity?.verified && (
-                <p className="text-[12px] text-muted-foreground">
+                <p className="text-12 text-muted-foreground">
                   {approval.identity.keep_signed_in
                     ? "You are also signed in to NyxID in this browser."
                     : "Identity verified only for this request. No browser sign-in was created."}
@@ -553,12 +553,12 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                           type="button"
                           disabled={busy || index > completed}
                           aria-current={current ? "step" : undefined}
-                          className="group relative flex w-full cursor-pointer flex-col items-center gap-2 rounded-lg px-1 text-center text-[11px] focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-primary disabled:cursor-default"
+                          className="group relative flex w-full cursor-pointer flex-col items-center gap-2 rounded-lg px-1 text-center text-11 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-primary disabled:cursor-default"
                           onClick={() => setStep(index + 1)}
                         >
                           <span
                             aria-hidden="true"
-                            className={`flex size-7 items-center justify-center rounded-full border text-[12px] font-semibold transition-colors ${complete ? "border-success bg-success text-white" : latest ? (current ? "border-primary bg-primary text-white" : "border-primary bg-card text-foreground") : "border-border bg-card text-muted-foreground"} ${reviewing ? "outline outline-1 outline-offset-4 outline-success" : current ? "outline outline-1 outline-offset-4 outline-primary" : ""}`}
+                            className={`flex size-7 items-center justify-center rounded-full border text-12 font-semibold transition-colors ${complete ? "border-success bg-success text-white" : latest ? (current ? "border-primary bg-primary text-white" : "border-primary bg-card text-foreground") : "border-border bg-card text-muted-foreground"} ${reviewing ? "outline outline-1 outline-offset-4 outline-success" : current ? "outline outline-1 outline-offset-4 outline-primary" : ""}`}
                           >
                             {index + 1}
                           </span>
@@ -574,7 +574,7 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                             <span className="sr-only">Step {index + 1}: </span>
                             {label}
                             <span
-                              className={`mt-1 block text-[10px] font-normal ${complete ? "text-success" : latest ? "text-primary" : "text-muted-foreground"}`}
+                              className={`mt-1 block text-10 font-normal ${complete ? "text-success" : latest ? "text-primary" : "text-muted-foreground"}`}
                             >
                               {reviewing
                                 ? "Reviewing"
@@ -602,7 +602,7 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                 </div>
               )}
               {step > 1 && context && (
-                <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-muted-foreground">
+                <div className="flex flex-wrap items-center justify-between gap-2 text-11 text-muted-foreground">
                   <span>
                     {context.client_label ||
                       context.client_app ||
@@ -666,7 +666,7 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                     />
                     <ApprovalCaution />
                     {isLoading ? (
-                      <p className="text-[12px]">Verifying your identity…</p>
+                      <p className="text-12">Verifying your identity…</p>
                     ) : !isAuthenticated ? (
                       <LoginIdentityCard
                         approval={approval}
@@ -694,8 +694,8 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                 )}
               </section>
               <section hidden={step !== 2} className="space-y-4">
-                <h2 className="text-[15px] font-semibold">Choose access</h2>
-                <p className="text-[12px] text-muted-foreground">
+                <h2 className="text-15 font-semibold">Choose access</h2>
+                <p className="text-12 text-muted-foreground">
                   Choose the access this device should receive.
                 </p>
                 <div className="grid gap-3 sm:grid-cols-2">
@@ -738,7 +738,7 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                         onChange={() => setMode(value)}
                         className="peer absolute inset-0 z-10 h-full w-full cursor-pointer opacity-0 disabled:cursor-not-allowed"
                       />
-                      <span className="flex h-full flex-col gap-3 rounded-xl border border-border bg-background/30 p-4 transition-colors group-hover:bg-white/[0.03] peer-checked:border-primary/70 peer-checked:bg-primary/5 peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-primary peer-disabled:cursor-not-allowed peer-disabled:opacity-60">
+                      <span className="flex h-full flex-col gap-3 rounded-xl border border-border bg-background/30 p-4 transition-colors group-hover:bg-overlay peer-checked:border-primary/70 peer-checked:bg-primary/5 peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-primary peer-disabled:cursor-not-allowed peer-disabled:opacity-60">
                         <span className="flex items-center justify-between">
                           <span
                             className={`flex size-9 items-center justify-center rounded-lg border ${mode === value ? "border-primary/25 bg-primary/10 text-primary" : "border-border bg-muted/40 text-muted-foreground"}`}
@@ -759,14 +759,14 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                           </span>
                         </span>
                         <span className="space-y-1">
-                          <strong className="block text-[13px] font-semibold">
+                          <strong className="block text-13 font-semibold">
                             {title}
                           </strong>
-                          <span className="block text-[12px] leading-relaxed text-muted-foreground">
+                          <span className="block text-12 leading-relaxed text-muted-foreground">
                             {description}
                           </span>
                         </span>
-                        <span className="mt-auto border-t border-border/50 pt-2 text-[11px] text-muted-foreground">
+                        <span className="mt-auto border-t border-border/50 pt-2 text-11 text-muted-foreground">
                           {detail}
                         </span>
                       </span>
@@ -774,7 +774,7 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                   ))}
                 </div>
                 {mode === "agent" && !supportsRestricted && (
-                  <p role="alert" className="text-[12px] text-warning">
+                  <p role="alert" className="text-12 text-warning">
                     This legacy request cannot receive an Agent Key. Start a
                     capable request, or explicitly choose full account access.
                   </p>
@@ -795,10 +795,10 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
               <section hidden={step !== 3} className="space-y-4">
                 {((!chosen && choice !== "new") || mode === "full") && (
                   <>
-                    <h2 className="text-[15px] font-semibold">
+                    <h2 className="text-15 font-semibold">
                       Scope &amp; approval
                     </h2>
-                    <p className="text-[11px] text-muted-foreground">
+                    <p className="text-11 text-muted-foreground">
                       {mode === "full"
                         ? "Full account access · No scope configuration needed."
                         : "Scope optional · Select permissions to find a matching key."}
@@ -807,7 +807,7 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                 )}
                 {mode === "full" ? (
                   <>
-                    <p className="text-[12px] text-muted-foreground">
+                    <p className="text-12 text-muted-foreground">
                       Approve full account access for the requesting device. Its
                       session can refresh until it expires or you revoke it in
                       Settings.
@@ -840,7 +840,7 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                         />
                       )}
                       {problems.length > 0 && (
-                        <p role="alert" className="text-[12px] text-warning">
+                        <p role="alert" className="text-12 text-warning">
                           Unknown permissions or services: {problems.join(", ")}
                           . Remove them or clear the filters.
                         </p>
@@ -849,7 +849,7 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                         <>
                           {!chosen && (
                             <>
-                              <div className="flex justify-between text-[12px]">
+                              <div className="flex justify-between text-12">
                                 <h3
                                   ref={keyChoiceTitle}
                                   tabIndex={-1}
@@ -878,7 +878,7 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                                     aria-label={key.name}
                                     className="w-full space-y-2 rounded-xl border border-border p-3 text-left hover:bg-muted/30 focus-visible:outline-2 focus-visible:outline-primary"
                                   >
-                                    <span className="flex items-center gap-2 text-[12px]">
+                                    <span className="flex items-center gap-2 text-12">
                                       <KeyRound
                                         className="size-3 shrink-0"
                                         aria-hidden="true"
@@ -887,14 +887,14 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                                         {key.name}
                                       </strong>
                                       <span
-                                        className={`ml-auto shrink-0 text-[10px] ${comparison.exact ? "text-success" : "text-warning"}`}
+                                        className={`ml-auto shrink-0 text-10 ${comparison.exact ? "text-success" : "text-warning"}`}
                                       >
                                         {comparison.exact
                                           ? "Exact match"
                                           : `Matched + ${comparison.extras.length} extra${comparison.extras.length === 1 ? "" : "s"}`}
                                       </span>
                                     </span>
-                                    <span className="block break-words pl-6 text-[11px] text-muted-foreground">
+                                    <span className="block break-words pl-6 text-11 text-muted-foreground">
                                       {key.owner_name} ·{" "}
                                       {effectivePermissions(key.scopes)} ·{" "}
                                       {key.allow_all_services
@@ -905,7 +905,7 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                                 ))}
                               </fieldset>
                               {!comparisons.length && (
-                                <p className="text-[12px] text-muted-foreground">
+                                <p className="text-12 text-muted-foreground">
                                   No matching Agent Key. Create one with the
                                   requested access or edit the filters.
                                 </p>
@@ -923,7 +923,7 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                                 </Button>
                               </LoginActions>
                               {hints.key_source === "new" && (
-                                <p className="text-[11px] text-muted-foreground">
+                                <p className="text-11 text-muted-foreground">
                                   The requester suggested creating a new key.
                                   You can also choose a matching existing key.
                                 </p>
@@ -950,7 +950,7 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                                 customize={
                                   <>
                                     <AgentKeyPermissions apiKey={chosen.key} />
-                                    <label className="block space-y-2 text-[12px]">
+                                    <label className="block space-y-2 text-12">
                                       Login credential expiry (optional)
                                       <Input
                                         type="datetime-local"
@@ -1053,7 +1053,7 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
           )}
         </div>
         {isAuthenticated && !terminal && (
-          <footer className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 border-t border-border/50 px-5 py-3 text-[11px] text-muted-foreground sm:px-6">
+          <footer className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 border-t border-border/50 px-5 py-3 text-11 text-muted-foreground sm:px-6">
             <span>
               Approving as{" "}
               <strong className="text-foreground">
@@ -1096,7 +1096,7 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
           </footer>
         )}
       </div>
-      <p className="text-center text-[11px] text-muted-foreground">
+      <p className="text-center text-11 text-muted-foreground">
         Device login by NyxID
       </p>
     </LoginDeviceShell>

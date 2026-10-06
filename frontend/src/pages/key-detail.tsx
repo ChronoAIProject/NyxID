@@ -127,7 +127,7 @@ function LarkPermissionSetupCard({
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <ShieldCheck className="h-4 w-4 text-text-tertiary" />
-            <CardTitle className="text-[15px]">Configure Permissions</CardTitle>
+            <CardTitle className="text-15">Configure Permissions</CardTitle>
           </div>
           <Button variant="primary" asChild>
             <a href={url} target="_blank" rel="noopener noreferrer">
@@ -238,7 +238,7 @@ function GooglePermissionsSection({
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <ShieldCheck className="h-4 w-4 text-text-tertiary" />
-            <CardTitle className="text-[15px]">Google permissions</CardTitle>
+            <CardTitle className="text-15">Google permissions</CardTitle>
           </div>
           <Button
             size="icon"
@@ -259,7 +259,7 @@ function GooglePermissionsSection({
       <CardContent className="space-y-3">
         <dl className="divide-y divide-border/50">
           {rows.map(([label, value]) => (
-            <div key={label} className="flex items-center justify-between gap-3 py-2 text-[12px]">
+            <div key={label} className="flex items-center justify-between gap-3 py-2 text-12">
               <dt>{label}</dt>
               <dd>
                 <Badge variant={value === "Not granted" ? "warning" : value === "Unknown" ? "secondary" : "success"}>
@@ -270,12 +270,12 @@ function GooglePermissionsSection({
           ))}
         </dl>
         {lastAuthorizedAt && (
-          <p className="text-[11px] text-muted-foreground">
+          <p className="text-11 text-muted-foreground">
             Last authorized {new Date(lastAuthorizedAt).toLocaleString()}
           </p>
         )}
         {granted && (
-          <details className="text-[11px] text-muted-foreground">
+          <details className="text-11 text-muted-foreground">
             <summary className="cursor-pointer">Reported OAuth scopes</summary>
             <ul className="mt-2 space-y-1 break-all font-mono">
               {grantedScopes?.map((scope) => <li key={scope}>{scope}</li>)}
@@ -338,7 +338,7 @@ function EndpointSection({
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
           <Globe className="h-4 w-4 text-primary" />
-          <CardTitle className="text-[15px]">Endpoint</CardTitle>
+          <CardTitle className="text-15">Endpoint</CardTitle>
         </div>
         <CardDescription>Target URL for proxied requests</CardDescription>
       </CardHeader>
@@ -349,7 +349,7 @@ function EndpointSection({
               value={url}
               onChange={(e) => setUrl(e.target.value)}
               placeholder="https://api.example.com/v1"
-              className="flex-1 text-[12px]"
+              className="flex-1 text-12"
             />
             <Button size="icon" variant="ghost" onClick={handleCancel}>
               <X className="h-4 w-4" />
@@ -379,7 +379,7 @@ function EndpointSection({
           </div>
         ) : (
           <div className="flex items-center justify-between gap-2">
-            <code className="truncate rounded bg-muted px-2 py-1 font-mono text-[12px]">
+            <code className="truncate rounded bg-muted px-2 py-1 font-mono text-12">
               {endpointUrl}
             </code>
             {!readOnly && (
@@ -456,7 +456,7 @@ function OpenApiSpecSection({
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
           <FileJson className="h-4 w-4 text-primary" />
-          <CardTitle className="text-[15px]">OpenAPI Spec</CardTitle>
+          <CardTitle className="text-15">OpenAPI Spec</CardTitle>
         </div>
         <CardDescription>
           Optional — lets AI agents discover concrete API operations instead of
@@ -470,7 +470,7 @@ function OpenApiSpecSection({
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               placeholder="https://api.example.com/openapi.json"
-              className="flex-1 text-[12px]"
+              className="flex-1 text-12"
               type="url"
             />
             <Button size="icon" variant="ghost" onClick={handleCancel}>
@@ -487,7 +487,7 @@ function OpenApiSpecSection({
           </div>
         ) : specUrl ? (
           <div className="flex items-center justify-between gap-2">
-            <code className="truncate rounded bg-muted px-2 py-1 font-mono text-[12px]">
+            <code className="truncate rounded bg-muted px-2 py-1 font-mono text-12">
               {specUrl}
             </code>
             {!readOnly && (
@@ -581,7 +581,7 @@ function RecommendedSkillsSection({
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
           <FileJson className="h-4 w-4 text-primary" />
-          <CardTitle className="text-[15px]">Recommended Skills</CardTitle>
+          <CardTitle className="text-15">Recommended Skills</CardTitle>
         </div>
         <CardDescription>
           Optional — skill names (Ornn or bundled) agents should load to use
@@ -595,7 +595,7 @@ function RecommendedSkillsSection({
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               placeholder="nyxid-service-skill-authoring, my-service-skill"
-              className="flex-1 text-[12px]"
+              className="flex-1 text-12"
             />
             <Button size="icon" variant="ghost" onClick={handleCancel}>
               <X className="h-4 w-4" />
@@ -616,7 +616,7 @@ function RecommendedSkillsSection({
                 <Badge
                   key={skill}
                   variant="secondary"
-                  className="font-mono text-[11px]"
+                  className="font-mono text-11"
                 >
                   {skill}
                 </Badge>
@@ -711,7 +711,7 @@ function ApiKeySection({
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <KeyRound className="h-4 w-4 text-primary" />
-            <CardTitle className="text-[15px]">API Key</CardTitle>
+            <CardTitle className="text-15">API Key</CardTitle>
           </div>
           {showRotateInHeader && (
             <Button
@@ -925,7 +925,7 @@ function ServiceSection({
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Server className="h-4 w-4 text-primary" />
-            <CardTitle className="text-[15px]">Service</CardTitle>
+            <CardTitle className="text-15">Service</CardTitle>
           </div>
           {/* Disable is reversible, so it is not a destructive action —
               `destructive` (red) is reserved for Delete, the one action here
@@ -959,7 +959,7 @@ function ServiceSection({
       </CardHeader>
       <CardContent className="space-y-3">
         <div className="flex items-center gap-3">
-          <code className="rounded bg-muted px-2 py-1 font-mono text-[12px]">
+          <code className="rounded bg-muted px-2 py-1 font-mono text-12">
             /proxy/s/{slug}
           </code>
           <Badge variant={badgeVariant}>{badgeLabel}</Badge>
@@ -1046,7 +1046,7 @@ function UserAgentOverrideSection({
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
           <Server className="h-4 w-4 text-primary" />
-          <CardTitle className="text-[15px]">User-Agent override</CardTitle>
+          <CardTitle className="text-15">User-Agent override</CardTitle>
         </div>
         <CardDescription>
           Optional outgoing User-Agent override for proxied HTTP requests.
@@ -1173,7 +1173,7 @@ function NodeSetupHelper({
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
           <Terminal className="h-4 w-4 text-primary" />
-          <CardTitle className="text-[15px]">Node Setup</CardTitle>
+          <CardTitle className="text-15">Node Setup</CardTitle>
         </div>
         <CardDescription>
           Run this on your node to configure credentials
@@ -1181,7 +1181,7 @@ function NodeSetupHelper({
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
-        <p className="text-[11px] font-medium text-muted-foreground">
+        <p className="text-11 font-medium text-muted-foreground">
           Recommended (auto-detects requirements):
         </p>
         <div className="relative">
@@ -1197,7 +1197,7 @@ function NodeSetupHelper({
             <Copy className="h-3.5 w-3.5" />
           </Button>
         </div>
-        <p className="text-[11px] font-medium text-muted-foreground">Manual:</p>
+        <p className="text-11 font-medium text-muted-foreground">Manual:</p>
         <div className="relative">
           <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 min-h-[44px] font-mono text-xs leading-relaxed">
             {manualCommand}
@@ -1211,7 +1211,7 @@ function NodeSetupHelper({
             <Copy className="h-3.5 w-3.5" />
           </Button>
         </div>
-        <p className="text-[11px] text-muted-foreground">
+        <p className="text-11 text-muted-foreground">
           The agent will prompt for the secret value securely. After adding, the
           credential will be encrypted and stored locally on the node.
         </p>
@@ -1245,14 +1245,14 @@ function SshConnectionSection({
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
           <Shield className="h-4 w-4 text-primary" />
-          <CardTitle className="text-[15px]">SSH Connection</CardTitle>
+          <CardTitle className="text-15">SSH Connection</CardTitle>
         </div>
         <CardDescription>
           SSH certificate authentication details
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
-        <div className="grid gap-4 text-[12px] sm:grid-cols-2">
+        <div className="grid gap-4 text-12 sm:grid-cols-2">
           <div>
             <span className="text-xs font-medium text-muted-foreground">
               Host
@@ -1566,7 +1566,7 @@ function ApiUsageSection({
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div className="flex items-center gap-2">
             <Code className="h-4 w-4 text-primary" />
-            <CardTitle className="text-[15px]">API Usage</CardTitle>
+            <CardTitle className="text-15">API Usage</CardTitle>
           </div>
           {showAgentSetup && (
             <Button variant="outline" asChild>
@@ -1592,11 +1592,11 @@ function ApiUsageSection({
       </CardHeader>
       <CardContent className="min-w-0 space-y-4">
         <div>
-          <p className="mb-1.5 text-[11px] font-medium text-muted-foreground">
+          <p className="mb-1.5 text-11 font-medium text-muted-foreground">
             Base URL
           </p>
           <div className="relative">
-            <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-[12px]">
+            <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-12">
               {proxyUrl}
             </pre>
             <Button
@@ -1608,7 +1608,7 @@ function ApiUsageSection({
               <Copy className="h-3.5 w-3.5" />
             </Button>
           </div>
-          <p className="mt-1.5 text-[11px] text-muted-foreground">
+          <p className="mt-1.5 text-11 text-muted-foreground">
             Append the downstream API path after this URL
             {examplePath ? (
               <>
@@ -1623,7 +1623,7 @@ function ApiUsageSection({
             . {authNote}
           </p>
           {showGenericEndpointExample && (
-            <p className="mt-1.5 text-[11px] text-muted-foreground">
+            <p className="mt-1.5 text-11 text-muted-foreground">
               Run{" "}
               <code className="rounded bg-background px-1">
                 nyxid catalog endpoints {catalogSlug}
@@ -1634,7 +1634,7 @@ function ApiUsageSection({
         </div>
 
         <div>
-          <p className="mb-1.5 text-[11px] font-medium text-muted-foreground">
+          <p className="mb-1.5 text-11 font-medium text-muted-foreground">
             Authentication
           </p>
           <div className="space-y-2 text-xs text-muted-foreground">
@@ -1670,11 +1670,11 @@ function ApiUsageSection({
 
         {apiKeyExample && (
           <div>
-            <p className="mb-1.5 text-[11px] font-medium text-muted-foreground">
+            <p className="mb-1.5 text-11 font-medium text-muted-foreground">
               Example (with API key)
             </p>
             {modelExample.needsProviderModelNote && requestBody && (
-              <p className="mb-1.5 text-[11px] text-muted-foreground">
+              <p className="mb-1.5 text-11 text-muted-foreground">
                 Replace{" "}
                 <code className="rounded bg-background px-1">gpt-4o</code> with
                 your provider&apos;s model.
@@ -1702,7 +1702,7 @@ function ApiUsageSection({
               Advanced: Bearer token example
             </summary>
             <div className="mt-3 space-y-2">
-              <p className="text-[11px] text-muted-foreground">
+              <p className="text-11 text-muted-foreground">
                 Bearer auth is intended for self-hosted deployments or
                 environments where you already have a NyxID access token. For
                 most users, prefer the API Key example above.
@@ -1846,7 +1846,7 @@ function LabelEditor({
   if (readOnly) {
     return (
       <h2
-        className="text-[28px] font-bold leading-none tracking-tight"
+        className="text-28 font-bold leading-none tracking-tight"
         style={{ letterSpacing: "-0.03em" }}
       >
         {currentLabel}
@@ -1913,7 +1913,7 @@ function LabelEditor({
   return (
     <div className="flex items-center gap-2">
       <h2
-        className="text-[28px] font-bold leading-none tracking-tight"
+        className="text-28 font-bold leading-none tracking-tight"
         style={{ letterSpacing: "-0.03em" }}
       >
         {currentLabel}
@@ -2079,7 +2079,7 @@ function AccessPolicySection({
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
           <ShieldCheck className="h-4 w-4 text-primary" />
-          <CardTitle className="text-[15px]">Access policy</CardTitle>
+          <CardTitle className="text-15">Access policy</CardTitle>
         </div>
         <CardDescription>
           Org-owned services can require an admin role for proxy execution.
@@ -2091,7 +2091,7 @@ function AccessPolicySection({
             <Label htmlFor="admin-only-policy" className="text-xs font-medium">
               Admin-only execution
             </Label>
-            <p className="text-[11px] text-muted-foreground">
+            <p className="text-11 text-muted-foreground">
               When enabled, regular organization members cannot proxy this
               service. Organization admins retain access.
             </p>
@@ -2185,7 +2185,7 @@ function DefaultHeadersSection({
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
           <FileJson className="h-4 w-4 text-primary" />
-          <CardTitle className="text-[15px]">Default request headers</CardTitle>
+          <CardTitle className="text-15">Default request headers</CardTitle>
         </div>
         <CardDescription>
           Headers NyxID injects on every proxied request for this service.
@@ -2197,7 +2197,7 @@ function DefaultHeadersSection({
       <CardContent className="space-y-4">
         {catalogHeaders && catalogHeaders.length > 0 && (
           <div className="space-y-2">
-            <p className="text-[11px] font-semibold uppercase tracking-[1.5px] text-text-tertiary">
+            <p className="text-11 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
               From catalog (admin-configured)
             </p>
             <DefaultHeadersEditor
@@ -2213,7 +2213,7 @@ function DefaultHeadersSection({
 
         <div className="space-y-2">
           <div className="flex items-center justify-between">
-            <p className="text-[11px] font-semibold uppercase tracking-[1.5px] text-text-tertiary">
+            <p className="text-11 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
               Your headers
             </p>
             {!readOnly && !editing && (
@@ -2346,10 +2346,10 @@ function WsFrameInjectionsSection({
     <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
       <div className="flex items-center justify-between border-b border-border/50 px-5 py-3">
         <div>
-          <h3 className="text-[13px] font-semibold text-foreground">
+          <h3 className="text-13 font-semibold text-foreground">
             WebSocket auth frames
           </h3>
-          <p className="text-[11px] text-muted-foreground mt-0.5">
+          <p className="text-11 text-muted-foreground mt-0.5">
             User-owned frame injection rules for post-upgrade auth.
           </p>
         </div>
@@ -2398,7 +2398,7 @@ function WsFrameInjectionsSection({
         <div className="px-5 py-4">
           <Badge variant="secondary">{rules.length}/4 rules</Badge>
           {rules.length === 0 && (
-            <p className="mt-2 text-[12px] text-muted-foreground">
+            <p className="mt-2 text-12 text-muted-foreground">
               No user-owned WebSocket auth-frame rules.
             </p>
           )}
@@ -2583,7 +2583,7 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
             <div className="flex flex-col gap-2">
               {keyInfo.auto_connected ? (
                 <h2
-                  className="text-[28px] font-bold leading-none tracking-tight"
+                  className="text-28 font-bold leading-none tracking-tight"
                   style={{ letterSpacing: "-0.03em" }}
                 >
                   {keyInfo.label}
@@ -2596,7 +2596,7 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
                 />
               )}
               <div className="flex items-center gap-2">
-                <p className="text-[12px] text-muted-foreground">
+                <p className="text-12 text-muted-foreground">
                   {keyInfo.catalog_service_name
                     ? `${keyInfo.catalog_service_name} -- /proxy/s/${keyInfo.slug}`
                     : `/proxy/s/${keyInfo.slug}`}
@@ -2668,10 +2668,10 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
               <Shield className="h-4.5 w-4.5 text-success" />
             </div>
             <div>
-              <p className="text-[13px] font-semibold text-foreground">
+              <p className="text-13 font-semibold text-foreground">
                 Shared from {source.org_name}
               </p>
-              <p className="text-[11px] text-muted-foreground">
+              <p className="text-11 text-muted-foreground">
                 You are a {source.role} of this organization and can
                 {source.allowed
                   ? " use this credential through the proxy, but only admins can modify it."
@@ -2684,10 +2684,10 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
           <div className="flex items-start gap-3 rounded-xl border border-warning/15 bg-warning/[0.04] px-4 py-3">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
             <div className="space-y-1">
-              <p className="text-[13px] font-semibold text-foreground">
+              <p className="text-13 font-semibold text-foreground">
                 Credential missing
               </p>
-              <p className="text-[12px] text-warning">
+              <p className="text-12 text-warning">
                 The stored credential no longer exists. Reconnect or delete this service.
               </p>
             </div>
@@ -2712,11 +2712,11 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
           <TabsContent value="overview" className="space-y-4">
           <Card>
             <CardHeader>
-              <CardTitle className="text-[15px]">Service Details</CardTitle>
+              <CardTitle className="text-15">Service Details</CardTitle>
               <CardDescription>{autoConnectedDescription}</CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
-              <div className="grid gap-4 text-[12px] sm:grid-cols-2">
+              <div className="grid gap-4 text-12 sm:grid-cols-2">
                 <div>
                   <span className="text-xs font-medium text-muted-foreground">
                     Endpoint

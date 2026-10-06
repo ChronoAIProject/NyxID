@@ -279,7 +279,7 @@ export function ServiceDetailPage() {
         />
         {service.developer_app_ids && service.developer_app_ids.length > 0 && (
           <div className="space-y-1 py-2">
-            <p className="text-[12px] text-muted-foreground">
+            <p className="text-12 text-muted-foreground">
               Developer App Scoping
             </p>
             <div className="flex flex-wrap gap-1.5">
@@ -407,7 +407,7 @@ export function ServiceDetailPage() {
                 )}
               </>
             ) : (
-              <p className="text-[12px] text-muted-foreground">
+              <p className="text-12 text-muted-foreground">
                 SSH configuration is missing for this service.
               </p>
             )}
@@ -609,7 +609,7 @@ export function ServiceDetailPage() {
                   )}
                 {service.capabilities && (
                   <div className="space-y-1 py-2">
-                    <p className="text-[12px] text-muted-foreground">
+                    <p className="text-12 text-muted-foreground">
                       Capabilities
                     </p>
                     <div className="flex flex-wrap gap-1.5">
@@ -653,7 +653,7 @@ export function ServiceDetailPage() {
                 />
               </div>
             ) : (
-              <div className="m-4 rounded-lg bg-white/[0.03] px-4 py-3 text-[12px] text-muted-foreground">
+              <div className="m-4 rounded-lg bg-overlay px-4 py-3 text-12 text-muted-foreground">
                 No default headers configured for this service.
               </div>
             )}
@@ -773,7 +773,7 @@ function ServiceCredentialPushSection({
             void form.handleSubmit(handlePushCredential)(event)
           }
         >
-          <p className="text-[12px] text-muted-foreground">
+          <p className="text-12 text-muted-foreground">
             Create pending metadata for the node, then encrypt the secret in the
             browser on the accept page.
           </p>
@@ -967,7 +967,7 @@ function AnonymousEndpointsSection({
       <div className="space-y-5 p-5">
         <div className="flex items-center gap-2">
           <Globe2 className="h-4 w-4 text-primary" />
-          <span className="text-[13px] font-medium">Public proxy rules</span>
+          <span className="text-13 font-medium">Public proxy rules</span>
         </div>
 
         <Form {...form}>
@@ -1058,7 +1058,7 @@ function AnonymousEndpointsSection({
         <div className="space-y-2">
           {isLoading && <Skeleton className="h-12 w-full" />}
           {!isLoading && (!endpoints || endpoints.length === 0) && (
-            <div className="rounded-lg bg-white/[0.03] px-4 py-3 text-[12px] text-muted-foreground">
+            <div className="rounded-lg bg-overlay px-4 py-3 text-12 text-muted-foreground">
               No anonymous endpoints configured.
             </div>
           )}
@@ -1097,7 +1097,7 @@ const PUBLIC_METHODS = [
  */
 function WideOpenAnonymousWarning() {
   return (
-    <div className="flex items-start gap-3 rounded-xl border border-warning/15 bg-warning/[0.04] px-4 py-3 text-[12px] text-warning">
+    <div className="flex items-start gap-3 rounded-xl border border-warning/15 bg-warning/[0.04] px-4 py-3 text-12 text-warning">
       <span className="flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-[6px] border border-warning/20 bg-warning/10">
         <AlertTriangle className="h-3.5 w-3.5" />
       </span>
@@ -1196,7 +1196,7 @@ function AnonymousEndpointRow({
           }}
         />
       )}
-      <div className="grid gap-3 rounded-lg border border-white/[0.08] bg-white/[0.02] p-3 md:grid-cols-[88px_120px_minmax(180px,1fr)_120px_auto_auto] md:items-center">
+      <div className="grid gap-3 rounded-lg border border-hairline bg-overlay p-3 md:grid-cols-[88px_120px_minmax(180px,1fr)_120px_auto_auto] md:items-center">
         <div className="flex items-center gap-2">
           <Switch
             checked={enabled}
@@ -1342,7 +1342,7 @@ function YourRoutingSection({
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Router className="h-4 w-4 text-primary" />
-            <CardTitle className="text-[15px]">Your Routing</CardTitle>
+            <CardTitle className="text-15">Your Routing</CardTitle>
           </div>
           <Button
             variant="outline"

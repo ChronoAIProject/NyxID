@@ -9,6 +9,7 @@ export const SETTINGS_TABS = [
   "security",
   "sessions",
   "mcp",
+  "display",
   "privacy",
 ] as const;
 export type SettingsTab = (typeof SETTINGS_TABS)[number];

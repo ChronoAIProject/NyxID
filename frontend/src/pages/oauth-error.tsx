@@ -59,7 +59,7 @@ export function OAuthErrorPage() {
             <CardTitle>{title}</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
-            <p className="text-[12px] leading-relaxed text-muted-foreground">
+            <p className="text-12 leading-relaxed text-muted-foreground">
               {isMissingRequiredService
                 ? `${serviceName} is required by this app but is not connected to your NyxID account. Connect it, then retry authorization.`
                 : message}
@@ -71,14 +71,14 @@ export function OAuthErrorPage() {
                   <p className="truncate text-xs font-medium text-foreground">
                     {serviceName}
                   </p>
-                  <p className="truncate text-[11px] text-text-tertiary">
+                  <p className="truncate text-11 text-text-tertiary">
                     {serviceSlug}
                   </p>
                 </div>
               </div>
             )}
             <div className="rounded-lg border border-border bg-muted px-3 py-2">
-              <p className="text-[11px] text-text-tertiary">Error code</p>
+              <p className="text-11 text-text-tertiary">Error code</p>
               <p className="text-xs text-foreground">{code}</p>
             </div>
             {isMissingRequiredService ? (
@@ -115,7 +115,7 @@ export function OAuthErrorPage() {
           </CardContent>
         </Card>
 
-        <p className="text-center text-[11px] text-text-tertiary">
+        <p className="text-center text-11 text-text-tertiary">
           If this issue persists, contact the application developer.
         </p>
       </div>

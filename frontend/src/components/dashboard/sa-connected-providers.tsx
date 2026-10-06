@@ -182,7 +182,7 @@ export function SaConnectedProviders({ saId }: SaConnectedProvidersProps) {
             </Table>
           </div>
         ) : (
-          <p className="text-[12px] text-muted-foreground">
+          <p className="text-12 text-muted-foreground">
             No providers connected to this service account.
           </p>
         )}

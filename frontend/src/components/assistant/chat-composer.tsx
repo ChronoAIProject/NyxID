@@ -654,7 +654,7 @@ function DraftedChatComposer({
                     onMouseDown={(event) => event.preventDefault()}
                     onClick={() => chooseMention(option.name)}
                     className={cn(
-                      "flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-1.5 text-[12px] text-foreground",
+                      "flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-1.5 text-12 text-foreground",
                       selected ? "bg-overlay-strong" : "hover:bg-overlay",
                     )}
                   >
@@ -662,10 +662,10 @@ function DraftedChatComposer({
                     <span className="min-w-0 flex-1 truncate">
                       {option.display_name?.trim() || option.name}
                       {option.display_name?.trim() ? (
-                        <span className="ml-1.5 text-[11px] text-text-tertiary">@{option.name}</span>
+                        <span className="ml-1.5 text-11 text-text-tertiary">@{option.name}</span>
                       ) : null}
                     </span>
-                    <span className="shrink-0 text-[10px] text-text-tertiary">
+                    <span className="shrink-0 text-10 text-text-tertiary">
                       {option.kind === "nyxbot" ? "Personal agent" : "Specialist"}
                     </span>
                   </li>
@@ -676,7 +676,7 @@ function DraftedChatComposer({
           <span
             ref={textMeasureRef}
             aria-hidden
-            className="pointer-events-none absolute invisible inline-block w-max whitespace-pre text-[13px] leading-relaxed"
+            className="pointer-events-none absolute invisible inline-block w-max whitespace-pre text-13 leading-relaxed"
           >
             {content}
           </span>
@@ -726,7 +726,7 @@ function DraftedChatComposer({
                      ? "Steer active task..."
                      : (placeholder ?? "Message NyxID Assistant...")
               }
-              className="assistant-scrollbar block min-h-8 w-full resize-none overflow-hidden bg-transparent px-0 py-1 text-[13px] leading-relaxed text-foreground outline-none transition-[height] duration-150 ease-out placeholder:text-text-tertiary disabled:cursor-not-allowed disabled:opacity-50 motion-reduce:transition-none"
+              className="assistant-scrollbar block min-h-8 w-full resize-none overflow-hidden bg-transparent px-0 py-1 text-13 leading-relaxed text-foreground outline-none transition-[height] duration-150 ease-out placeholder:text-text-tertiary disabled:cursor-not-allowed disabled:opacity-50 motion-reduce:transition-none"
             />
             <div
               aria-hidden

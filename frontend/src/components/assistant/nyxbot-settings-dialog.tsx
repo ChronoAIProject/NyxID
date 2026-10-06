@@ -78,7 +78,7 @@ export function NyxBotSettingsDialog({ onClose }: { readonly onClose: () => void
         </DialogHeader>
         <DialogBody className="space-y-6 pb-1">
           {settings.isPending ? (
-            <p className="text-[12px] text-text-tertiary">Loading settings...</p>
+            <p className="text-12 text-text-tertiary">Loading settings...</p>
           ) : settings.error ? (
             <ErrorBanner
               message={`Could not load settings. ${settings.error.message}`}
@@ -155,7 +155,7 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
               <div className="flex items-center justify-between gap-4 rounded-lg border border-border p-4">
                 <div className="space-y-1">
                   <FormLabel>Confirm destructive actions</FormLabel>
-                  <FormDescription className="text-[12px]">
+                  <FormDescription className="text-12">
                     NyxBot asks before deleting keys, bots, services or nodes.
                   </FormDescription>
                 </div>
@@ -166,7 +166,7 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
               {!confirm ? (
                 <div
                   role="alert"
-                  className="flex items-start gap-2 rounded-xl border border-warning/15 bg-warning/[0.04] px-3 py-2.5 text-[12px] text-warning"
+                  className="flex items-start gap-2 rounded-xl border border-warning/15 bg-warning/[0.04] px-3 py-2.5 text-12 text-warning"
                 >
                   <AlertTriangle aria-hidden="true" className="mt-0.5 h-3.5 w-3.5 shrink-0" />
                   <span>
@@ -197,7 +197,7 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
                     onChange={(event) => field.onChange(event.target.valueAsNumber)}
                   />
                 </FormControl>
-                <FormDescription className="text-[11px]">
+                <FormDescription className="text-11">
                   0 to {settings.max_live_subagents_limit}. 0 stops new specialists.
                 </FormDescription>
                 <FormMessage />
@@ -222,7 +222,7 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
                     onChange={(event) => field.onChange(event.target.valueAsNumber)}
                   />
                 </FormControl>
-                <FormDescription className="text-[11px]">
+                <FormDescription className="text-11">
                   1 to {settings.max_concurrent_subagent_turns_limit}.
                 </FormDescription>
                 <FormMessage />
@@ -249,7 +249,7 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
                     onChange={(event) => field.onChange(event.target.valueAsNumber)}
                   />
                 </FormControl>
-                <FormDescription className="text-[11px]">
+                <FormDescription className="text-11">
                   How many times agents in a group may pass work to each other after one of your
                   messages. 0 to {settings.max_group_handoffs_limit}; 0 turns hand-offs off.
                 </FormDescription>
@@ -275,7 +275,7 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
                     onChange={(event) => field.onChange(event.target.valueAsNumber)}
                   />
                 </FormControl>
-                <FormDescription className="text-[11px]">
+                <FormDescription className="text-11">
                   Across all your groups. 0 to {settings.max_group_handoffs_per_hour_limit}.
                 </FormDescription>
                 <FormMessage />
@@ -283,12 +283,12 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
             )}
           />
         </div>
-        <p className="text-[11px] text-muted-foreground">
+        <p className="text-11 text-muted-foreground">
           Every specialist turn and group hand-off is billed to your credits like any other NyxBot
           turn, so higher limits can spend credits faster.
         </p>
         {error ? (
-          <p role="alert" className="text-[12px] text-destructive">
+          <p role="alert" className="text-12 text-destructive">
             {error}
           </p>
         ) : null}
@@ -312,10 +312,10 @@ function ChannelBotsSection() {
   return (
     <section aria-labelledby="nyxbot-channel-bots" className="space-y-3">
       <div className="space-y-1">
-        <h3 id="nyxbot-channel-bots" className="text-[13px] font-semibold text-foreground">
+        <h3 id="nyxbot-channel-bots" className="text-13 font-semibold text-foreground">
           Channel bots
         </h3>
-        <p className="text-[12px] text-muted-foreground">
+        <p className="text-12 text-muted-foreground">
           Each channel bot reaches one agent: NyxBot or a specialist. The agent only replies to
           the chat account you verify with a one-time link.
         </p>

@@ -120,7 +120,7 @@ export function AgentKeyCreateForm({
           />
           <div className="space-y-2">
             <label
-              className="text-[12px] font-medium"
+              className="text-12 font-medium"
               htmlFor="agent-key-expiry-choice"
             >
               Key expiry

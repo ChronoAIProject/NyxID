@@ -110,21 +110,21 @@ function StepDetails({ step }: { readonly step: ChatActorStep }) {
   return (
     <div className="min-w-0 flex-1">
       <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-        <span className="min-w-0 break-words text-[12px] font-medium text-foreground">
+        <span className="min-w-0 break-words text-12 font-medium text-foreground">
           {step.description}
         </span>
         <span
-          className={`text-[10px] font-medium ${STATUS_STYLE[step.status]}`}
+          className={`text-10 font-medium ${STATUS_STYLE[step.status]}`}
         >
           {words(step.status)}
         </span>
         <span
-          className={`rounded border px-1.5 py-0.5 text-[9px] font-medium ${effectStyle(step.externalEffect)}`}
+          className={`rounded border px-1.5 py-0.5 text-9 font-medium ${effectStyle(step.externalEffect)}`}
         >
           {words(step.externalEffect)}
         </span>
       </div>
-      <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-text-tertiary">
+      <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-10 text-text-tertiary">
         <span>{sourceDetail}</span>
         {step.estimate ? <span>~{step.estimate.seconds}s</span> : null}
         {step.addedInPlanRevision ? (
@@ -132,12 +132,12 @@ function StepDetails({ step }: { readonly step: ChatActorStep }) {
         ) : null}
       </div>
       {operationDetail ? (
-        <div className="mt-1.5 break-words rounded bg-overlay px-2 py-1 font-mono text-[9px] text-muted-foreground">
+        <div className="mt-1.5 break-words rounded bg-overlay px-2 py-1 font-mono text-9 text-muted-foreground">
           {operationDetail}
         </div>
       ) : null}
       {step.source.kind === "condition" ? (
-        <div className="mt-1.5 text-[10px] text-muted-foreground">
+        <div className="mt-1.5 text-10 text-muted-foreground">
           {step.source.condition.observedValue} gte{" "}
           {step.source.condition.effectiveThreshold}
           {" / "}
@@ -147,7 +147,7 @@ function StepDetails({ step }: { readonly step: ChatActorStep }) {
         </div>
       ) : null}
       {step.guard ? (
-        <div className="mt-1 text-[10px] text-muted-foreground">
+        <div className="mt-1 text-10 text-muted-foreground">
           Guard {step.guard.conditionStepId}: {step.guard.requiredOutcome}
         </div>
       ) : null}
@@ -156,7 +156,7 @@ function StepDetails({ step }: { readonly step: ChatActorStep }) {
           {step.substeps.map((substep) => (
             <li
               key={substep.substepId}
-              className="flex min-w-0 items-center gap-1.5 text-[10px] text-muted-foreground"
+              className="flex min-w-0 items-center gap-1.5 text-10 text-muted-foreground"
             >
               {substep.status === "done" ? (
                 <Check className="h-3 w-3 shrink-0 text-success" />
@@ -171,14 +171,14 @@ function StepDetails({ step }: { readonly step: ChatActorStep }) {
         </ul>
       ) : null}
       {step.approvalObservation ? (
-        <div className="mt-1.5 flex items-center gap-1.5 text-[10px] text-muted-foreground">
+        <div className="mt-1.5 flex items-center gap-1.5 text-10 text-muted-foreground">
           <ShieldCheck className="h-3 w-3 shrink-0" />
           {step.approvalObservation.decisionMode} /{" "}
           {words(step.approvalObservation.receiptStatus)}
         </div>
       ) : null}
       {step.safeMessage ? (
-        <p className="mt-1.5 break-words text-[10px] text-destructive">
+        <p className="mt-1.5 break-words text-10 text-destructive">
           {step.safeMessage}
         </p>
       ) : null}
@@ -224,27 +224,27 @@ export function TaskPlanCard({
     >
       <div className="flex flex-wrap items-start justify-between gap-2 border-b border-border bg-overlay/50 px-3 py-2.5">
         <div className="min-w-0 flex-1">
-          <h3 className="break-words text-[12px] font-semibold text-foreground">
+          <h3 className="break-words text-12 font-semibold text-foreground">
             {plan.title}
           </h3>
-          <p className="mt-0.5 text-[10px] text-text-tertiary">
+          <p className="mt-0.5 text-10 text-text-tertiary">
             Revision {plan.planRevision} / state {block.state_version} /
             sequence {block.progress_sequence}
           </p>
         </div>
         <div className="flex shrink-0 flex-wrap items-center gap-1.5">
-          <span className="rounded border border-border bg-background px-1.5 py-0.5 text-[9px] font-medium text-muted-foreground">
+          <span className="rounded border border-border bg-background px-1.5 py-0.5 text-9 font-medium text-muted-foreground">
             {words(plan.status)}
           </span>
           {plan.gate ? (
-            <span className="rounded border border-warning/25 bg-warning/[0.07] px-1.5 py-0.5 text-[9px] font-medium text-warning">
+            <span className="rounded border border-warning/25 bg-warning/[0.07] px-1.5 py-0.5 text-9 font-medium text-warning">
               {plan.gate.mode} / {plan.gate.status ?? "ready"}
             </span>
           ) : null}
         </div>
       </div>
       {plan.gate?.reason ? (
-        <p className="border-b border-border px-3 py-2 text-[10px] leading-relaxed text-muted-foreground">
+        <p className="border-b border-border px-3 py-2 text-10 leading-relaxed text-muted-foreground">
           {plan.gate.reason}
         </p>
       ) : null}
@@ -290,7 +290,7 @@ export function TaskPlanCard({
           >
             <div className="flex flex-col items-center gap-1 pt-0.5">
               <StepIcon status={step.status} />
-              <span className="font-mono text-[9px] text-text-tertiary">
+              <span className="font-mono text-9 text-text-tertiary">
                 {step.order}
               </span>
             </div>

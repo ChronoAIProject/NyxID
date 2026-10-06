@@ -41,10 +41,10 @@ import { cn } from "@/lib/utils";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
 import { useFeature } from "@/hooks/use-feature-flag";
 import { useAuthStore } from "@/stores/auth-store";
+import { useThemeStore, type SidebarMode } from "@/stores/theme-store";
+import { SidebarResizeHandle } from "@/components/layout/sidebar-resize-handle";
 import { canAdminWrite, hasAdminRead, isBillingAvailable } from "@/types/api";
 
-type SidebarMode = "expanded" | "collapsed" | "hover";
-const STORAGE_KEY = "nyxid:sidebar-mode";
 
 export const MAIN_NAV = [
   { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard" },
@@ -148,7 +148,7 @@ function NavItem({
       onClick={onClick}
       title={collapsed ? item.label : undefined}
       className={cn(
-        "group/nav flex items-center rounded-lg py-2 text-[13px] overflow-hidden",
+        "group/nav flex items-center rounded-lg py-2 text-13 overflow-hidden",
         "transition-[padding,gap,background-color,color] duration-300 ease-in-out",
         collapsed ? "justify-center px-0 gap-0" : "gap-3 px-3",
         active
@@ -195,7 +195,7 @@ export function AssistantNavEntry({
       className={cn(
         "group/assistant mb-1.5 flex w-full items-center overflow-hidden rounded-lg border border-nyx-500/30 font-medium text-foreground",
         "transition-[padding,gap,background-color,border-color] duration-300 ease-in-out hover:border-nyx-500/40 hover:bg-overlay",
-        mobile ? "gap-3 px-4 py-3 text-[14px]" : "py-[7px] text-[12px]",
+        mobile ? "gap-3 px-4 py-3 text-14" : "py-[7px] text-12",
         !mobile && (collapsed ? "justify-center gap-0 px-0" : "gap-[9px] px-3"),
       )}
     >
@@ -215,7 +215,7 @@ export function AssistantNavEntry({
       </span>
       <span
         className={cn(
-          "ml-auto rounded-md border border-nyx-500/30 bg-nyx-500/15 px-1.5 text-[9px] font-semibold text-nyx-secondary-400",
+          "ml-auto rounded-md border border-nyx-500/30 bg-nyx-500/15 px-1.5 text-9 font-semibold text-nyx-secondary-400",
           collapsed && "hidden",
         )}
       >
@@ -223,24 +223,6 @@ export function AssistantNavEntry({
       </span>
     </Link>
   );
-}
-
-function readMode(): SidebarMode {
-  try {
-    const v = localStorage.getItem(STORAGE_KEY);
-    if (v === "expanded" || v === "collapsed" || v === "hover") return v;
-  } catch {
-    // ignore
-  }
-  return "expanded";
-}
-
-function writeMode(mode: SidebarMode) {
-  try {
-    localStorage.setItem(STORAGE_KEY, mode);
-  } catch {
-    // ignore
-  }
 }
 
 export function Sidebar({
@@ -253,15 +235,21 @@ export function Sidebar({
   const mainNav = getVisibleMainNav(user);
   const adminNav = getVisibleAdminNav(user);
 
-  const [mode, setMode] = useState<SidebarMode>(readMode);
+  const mode = useThemeStore((s) => s.sidebarMode);
+  const setSidebarMode = useThemeStore((s) => s.setSidebarMode);
+  const savedWidth = useThemeStore((s) => s.sidebarWidths.dashboard);
+  const [previewWidth, setPreviewWidth] = useState<number | null>(null);
+  const width = previewWidth ?? savedWidth;
   const [hovered, setHovered] = useState(false);
   const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const changeMode = useCallback((next: SidebarMode) => {
-    setMode(next);
-    writeMode(next);
-    setHovered(false);
-  }, []);
+  const changeMode = useCallback(
+    (next: SidebarMode) => {
+      setSidebarMode(next);
+      setHovered(false);
+    },
+    [setSidebarMode],
+  );
 
   useEffect(() => {
     return () => {
@@ -272,11 +260,6 @@ export function Sidebar({
   const isVisuallyExpanded =
     mobile || mode === "expanded" || (mode === "hover" && hovered);
   const isCollapsed = !isVisuallyExpanded;
-
-  useEffect(() => {
-    const width = mode === "expanded" ? "200px" : "52px";
-    document.documentElement.style.setProperty("--sidebar-width", width);
-  }, [mode]);
 
   function handleMouseEnter() {
     if (mode !== "hover") return;
@@ -312,7 +295,7 @@ export function Sidebar({
           {isCollapsed ? (
             <div className="mx-auto w-3 border-t border-border/40" />
           ) : (
-            <span className="text-[9px] font-medium uppercase tracking-[1.5px] text-text-tertiary/50">
+            <span className="text-9 font-medium uppercase tracking-[1.5px] text-text-tertiary">
               Approvals
             </span>
           )}
@@ -333,7 +316,7 @@ export function Sidebar({
           {isCollapsed ? (
             <div className="mx-auto w-3 border-t border-border/40" />
           ) : (
-            <span className="text-[9px] font-medium uppercase tracking-[1.5px] text-text-tertiary/50">
+            <span className="text-9 font-medium uppercase tracking-[1.5px] text-text-tertiary">
               Developer
             </span>
           )}
@@ -356,7 +339,7 @@ export function Sidebar({
               {isCollapsed ? (
                 <div className="mx-auto w-3 border-t border-border/40" />
               ) : (
-                <span className="text-[9px] font-medium uppercase tracking-[1.5px] text-text-tertiary/50">
+                <span className="text-9 font-medium uppercase tracking-[1.5px] text-text-tertiary">
                   Admin
                 </span>
               )}
@@ -398,7 +381,7 @@ export function Sidebar({
               sideOffset={8}
             >
               <div className="px-4 py-2.5 border-b border-border/50">
-                <p className="text-[13px] font-medium text-foreground">
+                <p className="text-13 font-medium text-foreground">
                   Sidebar control
                 </p>
               </div>
@@ -445,8 +428,9 @@ export function Sidebar({
           className={cn(
             "absolute inset-y-0 left-0 z-30 flex flex-col border-r border-border/60 bg-background overflow-hidden",
             "transition-[width,box-shadow] duration-200 ease-out",
-            hovered ? "w-[200px] shadow-xl shadow-black/20" : "w-[52px]",
+            hovered ? "shadow-xl shadow-black/20" : "w-[52px]",
           )}
+          style={hovered ? { width } : undefined}
         >
           {sidebarContent}
         </div>
@@ -457,11 +441,21 @@ export function Sidebar({
   return (
     <aside
       className={cn(
-        "flex h-full flex-col border-r border-border/60 overflow-hidden transition-[width] duration-300 ease-in-out",
-        mode === "collapsed" ? "w-[52px]" : "w-[200px]",
+        "relative flex h-full flex-col border-r border-border/60",
+        // No width animation while dragging, so the edge tracks the pointer.
+        previewWidth === null && "transition-[width] duration-300 ease-in-out",
+        mode === "collapsed" && "w-[52px]",
       )}
+      style={mode === "collapsed" ? undefined : { width }}
     >
-      {sidebarContent}
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">{sidebarContent}</div>
+      {mode === "expanded" && (
+        <SidebarResizeHandle
+          sidebar="dashboard"
+          label="Resize sidebar"
+          onPreview={setPreviewWidth}
+        />
+      )}
     </aside>
   );
 }
@@ -480,7 +474,7 @@ function SidebarModeOption({
       type="button"
       onClick={onClick}
       className={cn(
-        "flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-[13px] transition-colors duration-200 hover:bg-overlay-strong",
+        "flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-13 transition-colors duration-200 hover:bg-overlay-strong",
         active
           ? "text-foreground"
           : "text-muted-foreground hover:text-foreground",

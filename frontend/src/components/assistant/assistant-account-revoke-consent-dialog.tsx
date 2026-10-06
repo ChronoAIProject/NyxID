@@ -57,8 +57,8 @@ export function AssistantAccountRevokeConsentDialog({
           <DialogTitle>{verifiedUserId ? "Consent revoked" : "Revoke app consent"}</DialogTitle>
           <DialogDescription>{verifiedUserId ? "The consent projection is absent, confirming revocation." : "This app will need to ask for consent again before it can act."}</DialogDescription>
         </DialogHeader>
-        {!verifiedUserId ? <div className="space-y-3 border-y border-border py-4 text-[12px]"><div className="flex items-center justify-between"><span className="text-muted-foreground">Client</span><Badge variant="secondary" className="font-mono">{params.clientId}</Badge></div><label className="flex items-start gap-2"><Checkbox checked={confirmed} onCheckedChange={(value) => setConfirmed(value === true)} /><span>I understand this app will need fresh consent.</span></label></div> : null}
-        {error ? <p role="alert" className="text-[11px] text-destructive">{error}</p> : null}
+        {!verifiedUserId ? <div className="space-y-3 border-y border-border py-4 text-12"><div className="flex items-center justify-between"><span className="text-muted-foreground">Client</span><Badge variant="secondary" className="font-mono">{params.clientId}</Badge></div><label className="flex items-start gap-2"><Checkbox checked={confirmed} onCheckedChange={(value) => setConfirmed(value === true)} /><span>I understand this app will need fresh consent.</span></label></div> : null}
+        {error ? <p role="alert" className="text-11 text-destructive">{error}</p> : null}
         <DialogFooter>{verifiedUserId ? <Button type="button" variant="primary" onClick={() => { onComplete(verifiedUserId); close(); }}>Done</Button> : <><Button type="button" variant="outline" onClick={close}>Cancel</Button><Button type="button" variant="destructive" isLoading={submitting} disabled={submitting || !confirmed} onClick={() => void submit()}>Revoke consent</Button></>}</DialogFooter>
       </DialogContent>
     </Dialog>

@@ -102,12 +102,12 @@ function AnalyticsPanelCard({
       <div className="mb-4 flex shrink-0 items-start justify-between gap-3">
         <div className="min-w-0">
           <h3
-            className="truncate font-display text-[15px] font-semibold leading-none tracking-tight"
+            className="truncate font-display text-15 font-semibold leading-none tracking-tight"
             title={panel.title}
           >
             {panel.title || "Untitled panel"}
           </h3>
-          <p className="mt-1 text-[12px] text-muted-foreground">
+          <p className="mt-1 text-12 text-muted-foreground">
             {MEASURE_LABELS[panel.measure]} ·{" "}
             {panel.top === 0
               ? "All selected usage"
@@ -119,7 +119,7 @@ function AnalyticsPanelCard({
       {filterError(view.filters) ? (
         <div
           className={cn(
-            "flex items-center justify-center text-[12px] text-muted-foreground",
+            "flex items-center justify-center text-12 text-muted-foreground",
             compact ? "h-[260px]" : "h-[330px]",
           )}
         >
@@ -225,18 +225,18 @@ function Summary({
     >
       {stats.map((stat) => (
         <Card key={stat.label} className="min-w-0 px-4 py-4">
-          <p className="text-[10px] font-medium uppercase tracking-[1.5px] text-muted-foreground">
+          <p className="text-10 font-medium uppercase tracking-[1.5px] text-muted-foreground">
             {stat.label}
           </p>
           <div className="mt-3 flex flex-wrap items-baseline gap-x-2">
-            <span className="font-display text-[28px] font-medium leading-none tracking-tight tabular-nums">
+            <span className="font-display text-28 font-medium leading-none tracking-tight tabular-nums">
               {stat.value}
             </span>
-            <span className="text-[10px] text-muted-foreground">
+            <span className="text-10 text-muted-foreground">
               {stat.suffix}
             </span>
           </div>
-          <p className="mt-2 text-[10px] leading-relaxed text-muted-foreground">
+          <p className="mt-2 text-10 leading-relaxed text-muted-foreground">
             {stat.note}
           </p>
         </Card>
@@ -297,8 +297,8 @@ export function AnalyticsCanvas({
       <div className="grid items-start gap-4 lg:grid-cols-[260px_minmax(0,1fr)]">
         <aside className="rounded-xl border border-border bg-card p-4 text-card-foreground shadow-sm">
           <div className="mb-5 border-b border-border/50 pb-4">
-            <h3 className="text-[15px] font-semibold">Build an insight</h3>
-            <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+            <h3 className="text-15 font-semibold">Build an insight</h3>
+            <p className="mt-1 text-11 leading-relaxed text-muted-foreground">
               Choose what to measure and how to see it.
             </p>
           </div>
@@ -347,7 +347,7 @@ export function AnalyticsCanvas({
       <Summary view={view} sample={sample} />
       {operations && (
         <div className="flex items-center justify-between gap-3">
-          <p className="text-[10px] font-semibold uppercase tracking-[1.5px] text-muted-foreground">
+          <p className="text-10 font-semibold uppercase tracking-[1.5px] text-muted-foreground">
             Usage monitors{" "}
             <span className="ml-2 font-mono font-normal">
               {view.panels.length} panels
@@ -567,8 +567,8 @@ export function AnalyticsCanvas({
         <DragOverlay dropAnimation={null}>
           {activePanel && (
             <Card className="border-primary p-4 shadow-xl">
-              <p className="text-[15px] font-semibold">{activePanel.title}</p>
-              <p className="mt-1 text-[12px] text-muted-foreground">
+              <p className="text-15 font-semibold">{activePanel.title}</p>
+              <p className="mt-1 text-12 text-muted-foreground">
                 Move to a new position
               </p>
             </Card>

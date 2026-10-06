@@ -94,7 +94,7 @@ export function ApiKeyDetailPage() {
       />
 
       {apiKey.assistant_conversation_id ? (
-        <p className="text-[12px] text-muted-foreground">
+        <p className="text-12 text-muted-foreground">
           Used by assistant chat · {" "}
           <Link
             to="/assistant"

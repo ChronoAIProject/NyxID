@@ -41,7 +41,7 @@ export function DocsIndexPage() {
                     <Icon className="h-5 w-5 text-nyx-700 dark:text-nyx-secondary-400" aria-hidden />
                   </div>
                   {i === 0 && (
-                    <span className="rounded-full bg-nyx-100 px-2 py-0.5 text-[10px] font-medium text-nyx-700 dark:bg-nyx-500/15 dark:text-nyx-secondary-400">
+                    <span className="rounded-full bg-nyx-100 px-2 py-0.5 text-10 font-medium text-nyx-700 dark:bg-nyx-500/15 dark:text-nyx-secondary-400">
                       Start here
                     </span>
                   )}
@@ -58,7 +58,7 @@ export function DocsIndexPage() {
         </div>
 
         <div className="mt-12">
-          <p className="mb-3 font-mono text-[11px] tracking-widest text-text-tertiary uppercase">Concepts</p>
+          <p className="mb-3 font-mono text-11 tracking-widest text-text-tertiary uppercase">Concepts</p>
           <div className="grid gap-2 sm:grid-cols-2">
             {DOCS_SHARED[0]?.pages.map((p) => (
               <Link

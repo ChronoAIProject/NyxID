@@ -159,7 +159,7 @@ export function ChannelBotsManager({
         />
       ) : null}
       {error ? (
-        <p role="alert" className="text-[12px] text-destructive">
+        <p role="alert" className="text-12 text-destructive">
           {error}
         </p>
       ) : null}
@@ -171,7 +171,7 @@ export function ChannelBotsManager({
               <li key={row.id} className="space-y-2 rounded-lg border border-border px-3 py-2.5">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0 space-y-1">
-                    <p className="truncate text-[12px] font-medium text-foreground">
+                    <p className="truncate text-12 font-medium text-foreground">
                       {row.bot_label}
                       {row.bot_username ? (
                         <span className="ml-1.5 font-normal text-text-tertiary">
@@ -199,13 +199,13 @@ export function ChannelBotsManager({
                   />
                 </div>
                 {row.last_error ? (
-                  <p className="text-[11px] text-destructive">Last error: {row.last_error}</p>
+                  <p className="text-11 text-destructive">Last error: {row.last_error}</p>
                 ) : null}
                 {!row.owner_linked && row.inbound_hint ? (
-                  <p className="text-[11px] text-muted-foreground">{row.inbound_hint}</p>
+                  <p className="text-11 text-muted-foreground">{row.inbound_hint}</p>
                 ) : null}
                 {row.delivery_status === "failing" ? (
-                  <p className="text-[11px] text-destructive">
+                  <p className="text-11 text-destructive">
                     Messages are not reaching the agent: {row.delivery_reason ?? "delivery failed"}
                     {row.delivery_failed_at
                       ? ` (${formatRelativeTime(row.delivery_failed_at)})`
@@ -225,7 +225,7 @@ export function ChannelBotsManager({
                 )}
                 {confirming === row.id ? (
                   <div className="flex flex-wrap items-center justify-end gap-2 rounded-lg bg-overlay px-3 py-2">
-                    <span className="mr-auto text-[12px] text-muted-foreground">
+                    <span className="mr-auto text-12 text-muted-foreground">
                       Stop answering through {row.bot_label}?
                     </span>
                     <Button size="sm" variant="ghost" onClick={() => setConfirming(undefined)}>
@@ -274,7 +274,7 @@ export function ChannelBotsManager({
         />
       ) : null}
       {bots.isPending ? (
-        <p className="text-[12px] text-text-tertiary">Loading your channel bots...</p>
+        <p className="text-12 text-text-tertiary">Loading your channel bots...</p>
       ) : bots.error ? (
         <ErrorBanner
           message="Could not load your channel bots."
@@ -291,8 +291,8 @@ export function ChannelBotsManager({
                 className="flex items-center justify-between gap-2 rounded-lg border border-border px-3 py-2.5"
               >
                 <div className="min-w-0">
-                  <p className="truncate text-[12px] font-medium text-foreground">{bot.label}</p>
-                  <p className="text-[11px] text-text-tertiary">
+                  <p className="truncate text-12 font-medium text-foreground">{bot.label}</p>
+                  <p className="text-11 text-text-tertiary">
                     {channelPlatformName(bot.platform)}
                     {bot.user_id !== currentUserId ? ` · ${orgName(bot.user_id) ?? ""}` : ""}
                   </p>
@@ -324,7 +324,7 @@ export function ChannelBotsManager({
           })}
         </ul>
       ) : connected.length ? null : (
-        <p className="rounded-lg bg-overlay px-4 py-3 text-[12px] text-muted-foreground">
+        <p className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">
           {bots.data?.length
             ? "All your channel bots are connected to other agents. Move one here with its agent selector in NyxBot settings."
             : "You have no channel bots yet. Register one under Channel Bots, then connect it here."}
@@ -352,8 +352,8 @@ function OwnerLink({
       className="space-y-3 rounded-xl border border-info/15 bg-info/[0.04] px-4 py-3"
     >
       <div className="space-y-1">
-        <p className="text-[12px] font-medium text-foreground">Verify your account for {label}</p>
-        <p className="text-[12px] text-muted-foreground">{link.instructions}</p>
+        <p className="text-12 font-medium text-foreground">Verify your account for {label}</p>
+        <p className="text-12 text-muted-foreground">{link.instructions}</p>
       </div>
       {link.url ? (
         <Button asChild variant="primary" size="sm">
@@ -365,7 +365,7 @@ function OwnerLink({
       ) : null}
       <CopyableField label="Link code" value={link.code} size="sm" />
       <div className="flex items-center justify-between gap-3">
-        <p className="text-[11px] text-text-tertiary">
+        <p className="text-11 text-text-tertiary">
           Single use. Expires {formatDateTime(link.expires_at)}.
         </p>
         <Button size="sm" variant="outline" disabled={busy} onClick={onRenew}>

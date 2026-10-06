@@ -50,7 +50,7 @@ export function MachineSettings({
     allow !== (node.allow_single_user_saved_logins ?? false);
   return (
     <DetailSection title="Machine access">
-      <div className="max-w-2xl space-y-4 text-[12px]">
+      <div className="max-w-2xl space-y-4 text-12">
         <p>
           {[
             machine.shell && "Commands",

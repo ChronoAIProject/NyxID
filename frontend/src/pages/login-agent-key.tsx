@@ -111,7 +111,7 @@ function MintLoginCodePage() {
     <LoginDeviceShell>
       <header className="space-y-3 text-center">
         <NyxidIcon className="mx-auto size-10" />
-        <h1 className="text-[22px] font-bold">One-time login code</h1>
+        <h1 className="text-22 font-bold">One-time login code</h1>
       </header>
       {error && <ErrorBanner message={error} />}
       {issued ? (
@@ -136,7 +136,7 @@ function MintLoginCodePage() {
         </Button>
       ) : (
         <div className="space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-2 text-[12px]">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-12">
             <span>{user?.display_name ?? user?.email}</span>
             <Button
               variant="link"
@@ -148,7 +148,7 @@ function MintLoginCodePage() {
           </div>
           {step === "review" && (
             <div className="space-y-3">
-              <p className="text-[12px] text-muted-foreground">
+              <p className="text-12 text-muted-foreground">
                 Anyone with this code can redeem the selected access once,
                 within five minutes. Restricted Agent Key access is recommended.
               </p>
@@ -170,10 +170,10 @@ function MintLoginCodePage() {
           )}
           {step === "account" && (
             <section className="space-y-4">
-              <h2 className="text-[15px] font-semibold">
+              <h2 className="text-15 font-semibold">
                 Confirm full account access
               </h2>
-              <p className="text-[12px] text-muted-foreground">
+              <p className="text-12 text-muted-foreground">
                 This code grants a refreshable account session with your
                 account, services, credentials, and organization permissions.
               </p>
@@ -192,7 +192,7 @@ function MintLoginCodePage() {
           )}
           {step === "options" && options.data && (
             <section className="space-y-4">
-              <h2 className="text-[15px] font-semibold">Choose an Agent Key</h2>
+              <h2 className="text-15 font-semibold">Choose an Agent Key</h2>
               <fieldset disabled={busy} className="space-y-3">
                 {options.data.keys.map((key) => (
                   <label
@@ -212,7 +212,7 @@ function MintLoginCodePage() {
                     </div>
                   </label>
                 ))}
-                <label className="flex items-center gap-2 text-[12px]">
+                <label className="flex items-center gap-2 text-12">
                   <input
                     type="radio"
                     name="mint-key"
@@ -249,14 +249,14 @@ function MintLoginCodePage() {
           )}
           {step === "confirm" && summary && (
             <section className="space-y-4">
-              <h2 className="text-[15px] font-semibold">
+              <h2 className="text-15 font-semibold">
                 Confirm effective permissions
               </h2>
               <AgentKeyPermissions apiKey={summary} />
               <AgentKeyIssuanceNotice
                 existing={selection?.kind === "existing"}
               />
-              <label className="block space-y-2 text-[12px]">
+              <label className="block space-y-2 text-12">
                 Login credential expiry (optional)
                 <Input
                   type="datetime-local"

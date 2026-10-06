@@ -172,7 +172,7 @@ const OAUTH_CLIENT_COLUMNS: readonly DataTableColumn<OAuthClientSortField>[] = [
     field: "created_by",
     label: "Created By",
     defaultWidth: 200,
-    cellClassName: "font-mono text-[11px] text-muted-foreground",
+    cellClassName: "font-mono text-11 text-muted-foreground",
   },
   {
     field: "broker",
@@ -646,7 +646,7 @@ export function AdminOAuthClientsPage() {
               {client.client_name}
             </p>
             <p
-              className="line-clamp-2 break-all font-mono text-[11px] text-muted-foreground"
+              className="line-clamp-2 break-all font-mono text-11 text-muted-foreground"
               title={client.id}
             >
               {client.id}
@@ -683,7 +683,7 @@ export function AdminOAuthClientsPage() {
                 stageBrokerCapability(client, checked)
               }
             />
-            <span className="whitespace-nowrap text-[11px] font-medium text-foreground">
+            <span className="whitespace-nowrap text-11 font-medium text-foreground">
               {client.broker_capability_effective
                 ? "Broker enabled"
                 : "No broker"}
@@ -713,7 +713,7 @@ export function AdminOAuthClientsPage() {
               }
               onCheckedChange={(checked) => stageActive(client, checked)}
             />
-            <span className="whitespace-nowrap text-[11px] font-medium text-foreground">
+            <span className="whitespace-nowrap text-11 font-medium text-foreground">
               {client.is_active ? "Active" : "Inactive"}
             </span>
           </div>
@@ -982,7 +982,7 @@ export function AdminOAuthClientsPage() {
             </div>
 
             <div className="flex flex-col gap-3 border-t border-border/60 px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
-              <p className="text-[11px] text-text-tertiary">
+              <p className="text-11 text-text-tertiary">
                 Showing {String((displayedPage - 1) * displayedPerPage + 1)}-
                 {String(Math.min(displayedPage * displayedPerPage, total))} of{" "}
                 {String(total)} clients
@@ -1043,7 +1043,7 @@ export function AdminOAuthClientsPage() {
                 >
                   <ChevronLeft />
                 </Button>
-                <span className="min-w-[84px] text-center text-[11px] text-text-tertiary">
+                <span className="min-w-[84px] text-center text-11 text-text-tertiary">
                   Page {String(displayedPage)} of {String(displayedTotalPages)}
                 </span>
                 <Button
@@ -1083,7 +1083,7 @@ export function AdminOAuthClientsPage() {
               <p className="text-sm font-medium">
                 {pendingClientAction.client.client_name}
               </p>
-              <p className="mt-1 font-mono text-[11px] text-muted-foreground">
+              <p className="mt-1 font-mono text-11 text-muted-foreground">
                 {pendingClientAction.client.id}
               </p>
             </div>
@@ -1314,13 +1314,13 @@ function ScopeList({ scopes }: { readonly scopes: string }) {
           {visibleItems.map((scope) => (
             <span
               key={scope}
-              className="inline-flex max-w-[112px] truncate rounded-md bg-muted px-2 py-0.5 font-mono text-[10px] font-medium text-muted-foreground"
+              className="inline-flex max-w-[112px] truncate rounded-md bg-muted px-2 py-0.5 font-mono text-10 font-medium text-muted-foreground"
             >
               {scope}
             </span>
           ))}
           {hiddenItems.length > 0 && (
-            <span className="inline-flex h-6 shrink-0 items-center rounded-md border border-border/80 bg-muted px-2 text-[10px] font-medium text-muted-foreground">
+            <span className="inline-flex h-6 shrink-0 items-center rounded-md border border-border/80 bg-muted px-2 text-10 font-medium text-muted-foreground">
               +{String(hiddenItems.length)} more
             </span>
           )}
@@ -1335,7 +1335,7 @@ function ScopeList({ scopes }: { readonly scopes: string }) {
             <Badge
               key={scope}
               variant="secondary"
-              className="max-w-full break-all font-mono text-[10px]"
+              className="max-w-full break-all font-mono text-10"
             >
               {scope}
             </Badge>

@@ -60,7 +60,7 @@ export default function CreditsDeniedDialog({
         />
         <DialogHeader className="items-center space-y-2 text-center">
           <DialogTitle>Not enough credits to continue</DialogTitle>
-          <DialogDescription className="max-w-[330px] text-[12px] leading-relaxed">
+          <DialogDescription className="max-w-[330px] text-12 leading-relaxed">
             {org
               ? `This request is billed to ${orgName ?? "your organization"}'s credits, which have been used up or have expired, so it couldn't run.`
               : "Your free platform credits have been used up or have expired, so this request couldn't run."}
@@ -85,7 +85,7 @@ export default function CreditsDeniedDialog({
           )}
         </ul>
         {payer === "unknown" && (
-          <p className="text-[11px] leading-relaxed text-muted-foreground">
+          <p className="text-11 leading-relaxed text-muted-foreground">
             If this is billed to an organization, ask one of its admins instead.
           </p>
         )}
@@ -120,18 +120,18 @@ function OptionRow({
   children: ReactNode;
 }) {
   return (
-    <li className="flex items-start gap-3 rounded-lg border border-border/60 bg-white/[0.02] px-3 py-2.5">
+    <li className="flex items-start gap-3 rounded-lg border border-border/60 bg-overlay px-3 py-2.5">
       <span
-        className="mt-px flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-white/[0.08] bg-white/[0.04] text-muted-foreground"
+        className="mt-px flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-hairline bg-overlay text-muted-foreground"
         aria-hidden="true"
       >
         {icon}
       </span>
       <span className="min-w-0 space-y-0.5">
-        <span className="block text-[12px] font-medium text-foreground">
+        <span className="block text-12 font-medium text-foreground">
           {title}
         </span>
-        <span className="block text-[11px] leading-relaxed text-muted-foreground">
+        <span className="block text-11 leading-relaxed text-muted-foreground">
           {children}
         </span>
       </span>

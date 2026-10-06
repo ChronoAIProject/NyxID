@@ -84,7 +84,7 @@ export function RotateKeyDialog({
               </DialogDescription>
             </DialogHeader>
             <div className="flex items-center gap-2">
-              <code className="flex-1 rounded-lg bg-muted p-3 font-mono text-[12px] break-all select-all">
+              <code className="flex-1 rounded-lg bg-muted p-3 font-mono text-12 break-all select-all">
                 {newKeyValue}
               </code>
               <Button

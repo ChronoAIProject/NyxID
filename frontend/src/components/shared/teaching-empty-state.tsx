@@ -65,7 +65,7 @@ const DEFAULT_ICON_CLASS = "h-48 w-48 text-muted-foreground/40";
  * made these surfaces look like decorative filler.
  *
  * Visual defaults intentionally match the pre-primitive bespoke shapes
- * (`h-48 w-48` illustration at `/40`, `text-[15px]` title, `AddCtaButton`
+ * (`h-48 w-48` illustration at `/40`, `text-15` title, `AddCtaButton`
  * for actionable CTAs) so converting a surface to the primitive preserves
  * its existing hierarchy. Pass `iconClassName` to opt into a smaller icon
  * when the empty state lives inside a constrained sub-card.
@@ -107,15 +107,15 @@ export function TeachingEmptyState({
     >
       <Icon className={cn(iconClassName ?? DEFAULT_ICON_CLASS)} />
       <div className="space-y-1.5 max-w-md">
-        <p className="text-[15px] font-semibold text-foreground">{title}</p>
-        <p className="text-[12px] text-muted-foreground leading-relaxed">
+        <p className="text-15 font-semibold text-foreground">{title}</p>
+        <p className="text-12 text-muted-foreground leading-relaxed">
           {description}
         </p>
       </div>
       {ctaButton}
       {jumpStarts.length > 0 ? (
         <div className="mt-1 flex flex-wrap items-center justify-center gap-2">
-          <span className="text-[11px] text-muted-foreground">Or start with:</span>
+          <span className="text-11 text-muted-foreground">Or start with:</span>
           {jumpStarts.map((j) => (
             <Button
               key={j.label}

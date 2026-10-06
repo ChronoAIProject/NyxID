@@ -267,7 +267,7 @@ export function OrgDetailPage() {
                 </button>
               </PopoverTrigger>
               <PopoverContent side="bottom" align="start" className="w-[280px] p-3 space-y-3">
-                <p className="text-[12px] font-medium text-foreground">Change avatar</p>
+                <p className="text-12 font-medium text-foreground">Change avatar</p>
                 <div className="flex gap-2">
                   <Input
                     value={avatarUrlInput}
@@ -315,7 +315,7 @@ export function OrgDetailPage() {
                 {org.avatar_url && (
                   <button
                     type="button"
-                    className="flex items-center gap-1 text-[11px] text-destructive hover:underline"
+                    className="flex items-center gap-1 text-11 text-destructive hover:underline"
                     onClick={async () => {
                       try {
                         await avatarUpdateMutation.mutateAsync({ orgId, body: { avatar_url: "" } });
@@ -367,7 +367,7 @@ export function OrgDetailPage() {
             <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
               <BenchesIcon className="h-64 w-64 text-muted-foreground" />
               <div className="space-y-1">
-                <p className="text-[12px] font-medium text-muted-foreground">No Members</p>
+                <p className="text-12 font-medium text-muted-foreground">No Members</p>
                 <p className="text-xs text-muted-foreground">No members yet.</p>
               </div>
             </div>
@@ -395,19 +395,19 @@ export function OrgDetailPage() {
                           </Button>
                         </div>
                       )}
-                      <p className="pr-10 text-[13px] font-semibold text-foreground truncate">
+                      <p className="pr-10 text-13 font-semibold text-foreground truncate">
                         {displayName}
-                        {isSelf && <span className="ml-1 text-[11px] font-normal text-muted-foreground">(you)</span>}
+                        {isSelf && <span className="ml-1 text-11 font-normal text-muted-foreground">(you)</span>}
                       </p>
                       {member.email && member.display_name && (
-                        <p className="text-[11px] text-muted-foreground truncate">{member.email}</p>
+                        <p className="text-11 text-muted-foreground truncate">{member.email}</p>
                       )}
                       <div className="mt-2 flex flex-wrap gap-1.5">
                         <RoleBadge role={member.role} />
                         <Badge variant={scopeList != null ? "info" : "secondary"} className="text-xs">{scopeLabel}</Badge>
                         {member.scope_source === "override" && <Badge variant="info" className="text-xs">Custom scope</Badge>}
                       </div>
-                      <div className="mt-3 text-[11px] text-muted-foreground">
+                      <div className="mt-3 text-11 text-muted-foreground">
                         Joined {formatRelativeTime(member.created_at) ?? "—"}
                       </div>
                     </div>
@@ -469,7 +469,7 @@ export function OrgDetailPage() {
             <RolePermissionsPanel orgId={orgId} />
           ) : (
             <Card>
-              <CardContent className="py-6 text-center text-[12px] text-muted-foreground">
+              <CardContent className="py-6 text-center text-12 text-muted-foreground">
                 Only admins can manage role permissions.
               </CardContent>
             </Card>
@@ -483,7 +483,7 @@ export function OrgDetailPage() {
             </div>
           ) : (
             <Card>
-              <CardContent className="py-6 text-center text-[12px] text-muted-foreground">
+              <CardContent className="py-6 text-center text-12 text-muted-foreground">
                 Only admins can manage invites.
               </CardContent>
             </Card>
@@ -497,7 +497,7 @@ export function OrgDetailPage() {
                 <Card>
                   <CardContent className="flex flex-col items-center justify-center gap-1 py-8 text-center">
                     <MailSendingIcon className="h-48 w-48 text-muted-foreground" />
-                    <p className="text-[12px] text-muted-foreground">No pending invites.</p>
+                    <p className="text-12 text-muted-foreground">No pending invites.</p>
                   </CardContent>
                 </Card>
               ) : (
@@ -528,12 +528,12 @@ export function OrgDetailPage() {
                               </Button>
                             </div>
                           )}
-                          <p className="pr-20 text-[12px] font-mono text-foreground break-all">{invite.nonce}</p>
+                          <p className="pr-20 text-12 font-mono text-foreground break-all">{invite.nonce}</p>
                           <div className="mt-2 flex flex-wrap gap-1.5">
                             <RoleBadge role={invite.role} />
                             {isRedeemed ? <Badge variant="success">Redeemed</Badge> : isExpired ? <Badge variant="warning">Expired</Badge> : <Badge variant="info">Pending</Badge>}
                           </div>
-                          <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+                          <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-11 text-muted-foreground">
                             <span>{timeline}</span>
                             {usedBy && <span>Used by {usedBy}</span>}
                           </div>
@@ -662,7 +662,7 @@ export function OrgDetailPage() {
             <OrgApprovalConfigs orgId={orgId} />
           ) : (
             <Card>
-              <CardContent className="py-6 text-center text-[12px] text-muted-foreground">
+              <CardContent className="py-6 text-center text-12 text-muted-foreground">
                 Only admins can manage org approval policies.
               </CardContent>
             </Card>
@@ -696,7 +696,7 @@ export function OrgDetailPage() {
             />
           ) : (
             <Card>
-              <CardContent className="py-6 text-center text-[12px] text-muted-foreground">
+              <CardContent className="py-6 text-center text-12 text-muted-foreground">
                 Only admins can edit organization settings.
               </CardContent>
             </Card>
@@ -909,7 +909,7 @@ function RolePermissionCard({
       <CardContent className="space-y-4 p-4">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <p className="text-[13px] font-semibold text-foreground">
+            <p className="text-13 font-semibold text-foreground">
               {roleLabel(role)}
             </p>
             <p className="text-xs text-muted-foreground">
@@ -917,7 +917,7 @@ function RolePermissionCard({
             </p>
           </div>
           {scope.is_default && (
-            <Badge variant="secondary" className="text-[11px]">
+            <Badge variant="secondary" className="text-11">
               Default
             </Badge>
           )}
@@ -926,7 +926,7 @@ function RolePermissionCard({
         <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-muted/30 p-3">
           <Label
             htmlFor={`role-scope-full-${role}`}
-            className="text-[12px] font-medium"
+            className="text-12 font-medium"
           >
             Full access
           </Label>
@@ -972,7 +972,7 @@ function RolePermissionCard({
                       htmlFor={id}
                       className="flex-1 cursor-pointer space-y-0.5"
                     >
-                      <span className="block text-[12px] font-medium text-foreground">
+                      <span className="block text-12 font-medium text-foreground">
                         {service.label}
                       </span>
                       <span className="block text-xs text-muted-foreground">
@@ -1184,7 +1184,7 @@ function SettingsPanel({
                         }
                       />
                       <span className="space-y-1">
-                        <span className="block text-[13px] font-medium text-foreground">
+                        <span className="block text-13 font-medium text-foreground">
                           Opt out of credential accept fingerprint verification
                         </span>
                         <span className="block text-xs text-muted-foreground">
@@ -1199,7 +1199,7 @@ function SettingsPanel({
               />
 
               {form.formState.errors.root && (
-                <p className="text-[12px] text-destructive">
+                <p className="text-12 text-destructive">
                   {form.formState.errors.root.message}
                 </p>
               )}
@@ -1217,7 +1217,7 @@ function SettingsPanel({
       <Card>
         <CardContent className="flex flex-col gap-4 p-4">
           <div>
-            <p className="text-[12px] font-medium text-foreground">Danger zone</p>
+            <p className="text-12 font-medium text-foreground">Danger zone</p>
             <p className="text-xs text-muted-foreground">
               Deleting the organization removes memberships and invites. Shared
               services stay in place so admins can rescue credentials.

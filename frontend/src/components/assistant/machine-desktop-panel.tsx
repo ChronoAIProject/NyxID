@@ -285,7 +285,7 @@ export function MachineDesktopPanel({
   return (
     <section
       ref={panel}
-      className="space-y-3 rounded-xl border border-border/50 bg-card p-3 text-[12px]"
+      className="space-y-3 rounded-xl border border-border/50 bg-card p-3 text-12"
       aria-label="Live machine desktop"
       data-private="true"
       data-ph-no-capture

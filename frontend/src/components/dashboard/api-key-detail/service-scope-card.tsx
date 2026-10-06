@@ -128,7 +128,7 @@ export function ServiceScopeCard({
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
           <Shield className="h-4 w-4 text-primary" />
-          <CardTitle className="text-[15px]">Service Scope</CardTitle>
+          <CardTitle className="text-15">Service Scope</CardTitle>
         </div>
         <CardDescription>
           Which external services this key can access via proxy
@@ -143,7 +143,7 @@ export function ServiceScopeCard({
                 checked={allowAll}
                 onCheckedChange={(checked) => setAllowAll(checked === true)}
               />
-              <Label htmlFor="allow-all-services" className="text-[12px]">
+              <Label htmlFor="allow-all-services" className="text-12">
                 Allow all services
               </Label>
             </div>

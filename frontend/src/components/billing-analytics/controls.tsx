@@ -200,7 +200,7 @@ export function FilterBar({
           {(["from", "to"] as const).map((bound) => (
             <label
               key={bound}
-              className="flex items-center gap-2 whitespace-nowrap text-[11px] text-muted-foreground"
+              className="flex items-center gap-2 whitespace-nowrap text-11 text-muted-foreground"
             >
               <span>
                 {bound === "from" ? "Start (UTC)" : "End (UTC, exclusive)"}
@@ -232,7 +232,7 @@ export function FilterBar({
         </div>
       )}
       {error && (
-        <p role="alert" className="text-[12px] text-warning">
+        <p role="alert" className="text-12 text-warning">
           {error}
         </p>
       )}
@@ -248,7 +248,7 @@ export function PanelControls({
 }) {
   return (
     <div className="space-y-4">
-      <label className="block space-y-1.5 text-[10px] font-medium text-muted-foreground">
+      <label className="block space-y-1.5 text-10 font-medium text-muted-foreground">
         Panel title
         <Input
           value={panel.title}
@@ -274,7 +274,7 @@ export function PanelControls({
           label: MEASURE_LABELS[value],
         }))}
       />
-      <p className="text-[11px] leading-relaxed text-muted-foreground">
+      <p className="text-11 leading-relaxed text-muted-foreground">
         {MEASURE_DESCRIPTIONS[panel.measure]}
       </p>
       {panel.measure === "quantity" && (
@@ -351,11 +351,11 @@ export function PanelControls({
               label: INTERVAL_LABELS[value],
             }))}
           />
-          <p className="text-[11px] leading-relaxed text-muted-foreground">
+          <p className="text-11 leading-relaxed text-muted-foreground">
             Weeks start Monday; months follow the calendar, in UTC. Edge buckets
             include only the selected dates.
           </p>
-          <p className="text-[11px] leading-relaxed text-muted-foreground">
+          <p className="text-11 leading-relaxed text-muted-foreground">
             Trends use the same Top 5/10 groups across the whole window. Other
             keeps the remaining usage visible. Combined charts stack these
             groups with total requests on the right axis.

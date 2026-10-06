@@ -65,7 +65,7 @@ function EventCard({ notice }: { readonly notice: EventNotice }) {
     <div
       role="note"
       aria-label={`NyxID event: ${notice.summary}`}
-      className="overflow-hidden rounded-lg border border-hairline bg-overlay/35 text-[11px]"
+      className="overflow-hidden rounded-lg border border-hairline bg-overlay/35 text-11"
     >
       {notice.detail ? (
         <button
@@ -118,11 +118,11 @@ const NYXBOT_MARK = { id: "nyxbot", name: "NyxBot", kind: "nyxbot" } as const;
 export function NyxBotOrchestratorMessage({ message }: { readonly message: ChatMessage }) {
   return (
     <article aria-label="Message from NyxBot" className="flex flex-col items-end gap-1">
-      <div className="flex items-center gap-1.5 text-[10px] text-text-tertiary">
+      <div className="flex items-center gap-1.5 text-10 text-text-tertiary">
         <AgentAvatar agent={NYXBOT_MARK} size="xs" />
         From NyxBot
       </div>
-      <div className="ml-auto max-w-[78%] whitespace-pre-wrap rounded-lg border border-hairline bg-overlay px-3 py-2 text-[12px] leading-relaxed text-foreground">
+      <div className="ml-auto max-w-[78%] whitespace-pre-wrap rounded-lg border border-hairline bg-overlay px-3 py-2 text-12 leading-relaxed text-foreground">
         {message.content}
       </div>
     </article>

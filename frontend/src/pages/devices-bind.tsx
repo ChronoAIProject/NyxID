@@ -145,10 +145,10 @@ export function DevicesBindPage() {
       style={{ maxWidth: "min(48rem, calc(100vw - 2rem))" }}
     >
       <header className="flex flex-col gap-1">
-        <h1 className="text-[24px] font-semibold leading-tight text-foreground sm:text-[28px]">
+        <h1 className="text-24 font-semibold leading-tight text-foreground sm:text-28">
           Bind device
         </h1>
-        <p className="break-words text-[13px] text-muted-foreground">
+        <p className="break-words text-13 text-muted-foreground">
           Approve a device-code request and create scoped device credentials.
         </p>
       </header>
@@ -285,18 +285,18 @@ export function DevicesBindPage() {
                     return (
                       <FormItem>
                         <FormLabel>Grant proxy access to (optional)</FormLabel>
-                        <FormDescription className="text-[12px] leading-relaxed">
+                        <FormDescription className="text-12 leading-relaxed">
                           Pick which of your services this device should be
                           allowed to proxy through. You can add more later from
                           the API Keys page.
                         </FormDescription>
                         <div className="max-h-56 space-y-1 overflow-y-auto rounded-lg border border-border bg-muted/25 p-2">
                           {isServicesLoading ? (
-                            <p className="px-2 py-3 text-[12px] text-muted-foreground">
+                            <p className="px-2 py-3 text-12 text-muted-foreground">
                               Loading services...
                             </p>
                           ) : grantableServices.length === 0 ? (
-                            <p className="px-2 py-3 text-[12px] text-muted-foreground">
+                            <p className="px-2 py-3 text-12 text-muted-foreground">
                               {selectedOwner
                                 ? "This org has no services available for device access."
                                 : "Your personal account has no services available for device access."}
@@ -331,10 +331,10 @@ export function DevicesBindPage() {
                                       htmlFor={checkboxId}
                                       className="min-w-0 flex-1 cursor-pointer"
                                     >
-                                      <span className="block truncate text-[13px] font-medium text-foreground">
+                                      <span className="block truncate text-13 font-medium text-foreground">
                                         {service.label}
                                       </span>
-                                      <span className="block truncate font-mono text-[12px] text-muted-foreground">
+                                      <span className="block truncate font-mono text-12 text-muted-foreground">
                                         {service.slug}
                                       </span>
                                     </label>
@@ -389,7 +389,7 @@ function ApprovalSuccess({ device }: { readonly device: ApproveDeviceResponse })
         </div>
       </CardHeader>
       <CardContent>
-        <dl className="grid gap-3 text-[13px] sm:grid-cols-2">
+        <dl className="grid gap-3 text-13 sm:grid-cols-2">
           <DetailRow label="Device" value={device.device_label} />
           <DetailRow label="HW ID" value={device.hw_id} />
           <DetailRow label="API key" value={maskIdentifier(device.api_key_id)} />
@@ -409,10 +409,10 @@ function DetailRow({
 }) {
   return (
     <div className="min-w-0 rounded-lg border border-border bg-background/30 px-3 py-2">
-      <dt className="text-[11px] font-medium uppercase text-muted-foreground">
+      <dt className="text-11 font-medium uppercase text-muted-foreground">
         {label}
       </dt>
-      <dd className="mt-1 truncate font-mono text-[13px] text-foreground">
+      <dd className="mt-1 truncate font-mono text-13 text-foreground">
         {value}
       </dd>
     </div>

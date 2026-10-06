@@ -112,7 +112,7 @@ function TopUpHistory({
       <CardHeader className="history-heading">
         <div>
           <CardTitle>Top-up history</CardTitle>
-          <p className="mt-1 text-[12px] text-muted-foreground">
+          <p className="mt-1 text-12 text-muted-foreground">
             Payments, their status, and downloadable receipts.
           </p>
         </div>
@@ -206,7 +206,7 @@ function TopUpHistory({
               </div>
             ))
           ) : (
-            <p className="py-8 text-center text-[12px] text-muted-foreground">
+            <p className="py-8 text-center text-12 text-muted-foreground">
               No top-ups yet.
             </p>
           )}

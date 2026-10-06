@@ -34,7 +34,7 @@ function MachineCard({
     <article className="space-y-3 rounded-xl border border-border/50 bg-card p-4">
       <div className="flex flex-wrap items-center gap-2">
         <Monitor className="h-4 w-4 text-text-tertiary" />
-        <h3 className="min-w-0 flex-1 truncate text-[13px] font-medium">
+        <h3 className="min-w-0 flex-1 truncate text-13 font-medium">
           {node.name}
         </h3>
         <NodeStatusBadge status={node.status} isConnected={node.is_connected} />
@@ -42,7 +42,7 @@ function MachineCard({
           <Badge variant="warning">Not isolated</Badge>
         ) : null}
       </div>
-      <p className="text-[12px] text-muted-foreground">
+      <p className="text-12 text-muted-foreground">
         {[
           machine.shell && "Commands",
           machine.files && "Files",
@@ -52,7 +52,7 @@ function MachineCard({
           .join(" · ")}{" "}
         · {machine.os} / {machine.arch}
       </p>
-      <p className="text-[12px] text-muted-foreground">
+      <p className="text-12 text-muted-foreground">
         {node.owner.display_name} ·{" "}
         {node.is_connected ? "Connected" : "Disconnected"}
         {machine.computer && !machine.computer_ready
@@ -129,7 +129,7 @@ export function MachinesPage() {
             <p role="status">Loading machines…</p>
           ) : null}
           {nodes.error || orgs.error ? (
-            <p role="alert" className="text-[12px] text-destructive">
+            <p role="alert" className="text-12 text-destructive">
               Could not load machines.{" "}
               {nodes.error?.message ?? orgs.error?.message}
             </p>
@@ -139,7 +139,7 @@ export function MachinesPage() {
           !nodes.error &&
           !orgs.error &&
           !machines.length ? (
-            <p className="rounded-xl border border-border/50 p-6 text-[12px] text-muted-foreground">
+            <p className="rounded-xl border border-border/50 p-6 text-12 text-muted-foreground">
               Add a machine to let NyxBot run commands, work with files and use
               a desktop.
             </p>

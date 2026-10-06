@@ -90,12 +90,12 @@ function Identity({ user }: { user: AdminUsageIdentity }) {
     <div className="min-w-0">
       <Tooltip>
         <TooltipTrigger asChild>
-          <span className="text-[12px] font-medium">{user.display_name}</span>
+          <span className="text-12 font-medium">{user.display_name}</span>
         </TooltipTrigger>
         <TooltipContent>{user.id}</TooltipContent>
       </Tooltip>
       {user.email && (
-        <div className="break-all text-[11px] text-muted-foreground">
+        <div className="break-all text-11 text-muted-foreground">
           {user.email}
         </div>
       )}
@@ -107,7 +107,7 @@ function Identity({ user }: { user: AdminUsageIdentity }) {
 }
 function Quantities({ usage }: { usage: AdminUsageStats }) {
   return (
-    <div className="space-y-1 font-mono text-[11px] tabular-nums">
+    <div className="space-y-1 font-mono text-11 tabular-nums">
       {Object.entries(usage.quantities).map(([metric, quantity]) => (
         <div key={metric}>
           {formatNumber(quantity)} {metricLabel(metric)}
@@ -128,7 +128,7 @@ function Quantities({ usage }: { usage: AdminUsageStats }) {
 }
 function Cost({ usage }: { usage: AdminUsageStats }) {
   return (
-    <div className="space-y-1 font-mono text-[11px] tabular-nums">
+    <div className="space-y-1 font-mono text-11 tabular-nums">
       <span>
         {formatEstimatedCredits(usage.gross_cost ?? usage.gross_cost_micros)}
       </span>
@@ -156,10 +156,10 @@ function ServiceName({
   service: Pick<AdminUsageService, "service_name" | "service_slug">;
 }) {
   return (
-    <div className="text-[12px] font-medium">
+    <div className="text-12 font-medium">
       {service.service_name}
       {service.service_slug && (
-        <div className="text-[11px] font-normal text-muted-foreground">
+        <div className="text-11 font-normal text-muted-foreground">
           {service.service_slug}
         </div>
       )}
@@ -210,7 +210,7 @@ function StatsTable({
             className="space-y-3 rounded-lg border border-border bg-card p-4"
           >
             {row.label}
-            <div className="font-mono text-[11px]">
+            <div className="font-mono text-11">
               {formatNumber(row.usage.requests)} requests
             </div>
             <Quantities usage={row.usage} />
@@ -229,7 +229,7 @@ function ServiceTable({ services }: { services: AdminUsageService[] }) {
         label: (
           <div className="space-y-2">
             <ServiceName service={service} />
-            <span className="text-[11px] text-muted-foreground">
+            <span className="text-11 text-muted-foreground">
               {formatNumber(service.unique_users)} users
             </span>
             <DataTableBadgeCell>
@@ -264,7 +264,7 @@ function UserServices({
   });
   return (
     <div className="space-y-3 p-3">
-      <p className="text-[12px] font-medium">
+      <p className="text-12 font-medium">
         Services for {user.display_name}
       </p>
       {usage.isPending ? (
@@ -295,7 +295,7 @@ function RankingTable({
       <Identity user={row.user} />
       {row.billing_owner && (
         <div className="border-l border-border pl-2">
-          <span className="text-[10px] text-muted-foreground">Billed to</span>
+          <span className="text-10 text-muted-foreground">Billed to</span>
           <Identity user={row.billing_owner} />
         </div>
       )}
@@ -364,7 +364,7 @@ function RankingTable({
           >
             {person(row)}
             <ServiceName service={row} />
-            <p className="font-mono text-[11px]">
+            <p className="font-mono text-11">
               {formatNumber(row.requests)} requests
             </p>
             <Quantities usage={row} />
@@ -435,7 +435,7 @@ export function AdminUsageList({ filters }: { filters: AnalyticsFilters }) {
   return (
     <div className="space-y-6">
       {rangeError ? (
-        <p role="alert" className="text-[12px] text-destructive">
+        <p role="alert" className="text-12 text-destructive">
           {rangeError}
         </p>
       ) : usage.isError ? (
@@ -455,7 +455,7 @@ export function AdminUsageList({ filters }: { filters: AnalyticsFilters }) {
       ) : (
         data && (
           <>
-            <p className="text-[11px] text-muted-foreground">
+            <p className="text-11 text-muted-foreground">
               {new Date(data.window.from).toLocaleString()} –{" "}
               {new Date(data.window.to).toLocaleString()} ·{" "}
               {data.freshness && (
@@ -474,10 +474,10 @@ export function AdminUsageList({ filters }: { filters: AnalyticsFilters }) {
             {data.totals.events === 0 ? (
               <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
                 <ArticleIcon className="h-48 w-48 text-muted-foreground/30" />
-                <p className="text-[12px] font-medium text-muted-foreground">
+                <p className="text-12 font-medium text-muted-foreground">
                   No usage in this window.
                 </p>
-                <p className="text-[12px] text-muted-foreground">
+                <p className="text-12 text-muted-foreground">
                   Try another time range or clear filters. New usage appears
                   after services process requests with usage metering enabled.
                 </p>
@@ -485,13 +485,13 @@ export function AdminUsageList({ filters }: { filters: AnalyticsFilters }) {
             ) : (
               <>
                 {data.totals.unknown_cost_events > 0 && (
-                  <p className="rounded-lg bg-white/[0.03] px-4 py-3 text-[12px] text-muted-foreground">
+                  <p className="rounded-lg bg-overlay px-4 py-3 text-12 text-muted-foreground">
                     Costs are partial:{" "}
                     {formatNumber(data.totals.unknown_cost_events)} historical
                     events have no cached rate.
                   </p>
                 )}
-                <p className="text-[11px] text-muted-foreground">
+                <p className="text-11 text-muted-foreground">
                   Gross costs use settled amounts or current rates for legacy
                   events. Wallet{" "}
                   {formatEstimatedCredits(
@@ -511,11 +511,11 @@ export function AdminUsageList({ filters }: { filters: AnalyticsFilters }) {
                   resale event.
                 </p>
                 <section className="space-y-3">
-                  <h2 className="text-[15px] font-semibold">By service</h2>
+                  <h2 className="text-15 font-semibold">By service</h2>
                   <ServiceTable services={data.by_service} />
                 </section>
                 <section className="space-y-3">
-                  <h2 className="text-[15px] font-semibold">
+                  <h2 className="text-15 font-semibold">
                     Platform key vs own key
                   </h2>
                   <StatsTable
@@ -534,8 +534,8 @@ export function AdminUsageList({ filters }: { filters: AnalyticsFilters }) {
                 <section className="space-y-3">
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div>
-                      <h2 className="text-[15px] font-semibold">Top users</h2>
-                      <p className="text-[11px] text-muted-foreground">
+                      <h2 className="text-15 font-semibold">Top users</h2>
+                      <p className="text-11 text-muted-foreground">
                         Ranked by user, service, and billing owner.
                       </p>
                     </div>
@@ -570,11 +570,11 @@ export function AdminUsageList({ filters }: { filters: AnalyticsFilters }) {
                   </div>
                   <RankingTable rows={data.ranking} search={detailSearch} />
                   {data.ranking.length === 0 && (
-                    <p className="text-[12px] text-muted-foreground">
+                    <p className="text-12 text-muted-foreground">
                       No ranking rows on this page.
                     </p>
                   )}
-                  <div className="flex flex-wrap items-center justify-between gap-3 text-[11px] text-text-tertiary">
+                  <div className="flex flex-wrap items-center justify-between gap-3 text-11 text-text-tertiary">
                     <span>
                       {formatNumber(data.ranking_total)} user/service entries
                     </span>

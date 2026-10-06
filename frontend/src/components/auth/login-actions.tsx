@@ -35,7 +35,7 @@ export function LoginActions({
           type="button"
           disabled={disabled}
           onClick={onDeny}
-          className="min-h-8 rounded-sm text-left text-[11px] text-muted-foreground hover:text-foreground hover:underline underline-offset-4 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:pointer-events-none disabled:opacity-50"
+          className="min-h-8 rounded-sm text-left text-11 text-muted-foreground hover:text-foreground hover:underline underline-offset-4 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:pointer-events-none disabled:opacity-50"
         >
           Cancel request
         </button>

@@ -124,7 +124,7 @@ function AgentPicker({
             <label
               htmlFor={id}
               className={cn(
-                "flex cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 text-[12px] hover:bg-overlay",
+                "flex cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 text-12 hover:bg-overlay",
                 row.destroyed && "opacity-50",
                 disabled && "cursor-not-allowed",
               )}
@@ -144,7 +144,7 @@ function AgentPicker({
               <AgentAvatar agent={row} size="sm" />
               <span className="min-w-0 flex-1">
                 <span className="block truncate text-foreground">{row.name}</span>
-                <span className="block truncate text-[11px] text-text-tertiary">
+                <span className="block truncate text-11 text-text-tertiary">
                   {row.description}
                 </span>
               </span>
@@ -257,7 +257,7 @@ export function NewGroupDialog({
             <DialogBody className="space-y-4 pb-1">
               <GroupFields form={form} rows={pickerRows(agents)} />
               {error ? (
-                <p role="alert" className="text-[12px] text-destructive">
+                <p role="alert" className="text-12 text-destructive">
                   {error}
                 </p>
               ) : null}
@@ -365,7 +365,7 @@ export function GroupSettingsDialog({
               <DialogBody className="space-y-4 pb-1">
                 <GroupFields form={form} rows={pickerRows(agents, group)} />
                 {error ? (
-                  <p role="alert" className="text-[12px] text-destructive">
+                  <p role="alert" className="text-12 text-destructive">
                     {error}
                   </p>
                 ) : null}
@@ -397,8 +397,8 @@ export function GroupSettingsDialog({
             className="mt-2 flex items-center justify-between gap-4 rounded-xl border border-destructive/40 p-4"
           >
             <div className="space-y-1">
-              <h3 className="text-[13px] font-semibold text-destructive">Delete group</h3>
-              <p className="text-[12px] text-destructive/70">
+              <h3 className="text-13 font-semibold text-destructive">Delete group</h3>
+              <p className="text-12 text-destructive/70">
                 Removes the group and its messages. Your agents and their own threads stay.
               </p>
             </div>
@@ -431,7 +431,7 @@ export function GroupSettingsDialog({
             </DialogDescription>
           </DialogHeader>
           {error ? (
-            <p role="alert" className="text-[12px] text-destructive">
+            <p role="alert" className="text-12 text-destructive">
               {error}
             </p>
           ) : null}

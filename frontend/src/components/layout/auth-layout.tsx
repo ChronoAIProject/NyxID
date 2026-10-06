@@ -59,10 +59,10 @@ export function AuthLayout() {
             <GitHubButton
               label="View source on GitHub"
               size={16}
-              className="text-[11px] font-medium text-muted-foreground hover:text-foreground"
+              className="text-11 font-medium text-muted-foreground hover:text-foreground"
             />
           </div>
-          <p className="text-center text-[11px] leading-relaxed text-muted-foreground">
+          <p className="text-center text-11 leading-relaxed text-muted-foreground">
             By continuing, you agree to NyxID&apos;s{" "}
             <Link to={"/terms" as string} className="text-muted-foreground underline underline-offset-2 hover:text-foreground">Terms of Service</Link>{" "}
             and

@@ -87,7 +87,7 @@ export function RoutingSection({
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Router className="h-4 w-4 text-primary" />
-            <CardTitle className="text-[15px]">{title}</CardTitle>
+            <CardTitle className="text-15">{title}</CardTitle>
           </div>
           {!readOnly && !picking && (
             <Button variant="outline" className="text-text-tertiary hover:text-muted-foreground" onClick={() => setPicking(true)}>

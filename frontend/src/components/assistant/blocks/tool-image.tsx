@@ -38,7 +38,7 @@ export function ToolImage({ image }: { readonly image: ChatImage }) {
     return (
       <div
         role="status"
-        className="flex items-center gap-2 rounded-lg border border-hairline px-3 py-2 text-[11px] text-muted-foreground"
+        className="flex items-center gap-2 rounded-lg border border-hairline px-3 py-2 text-11 text-muted-foreground"
       >
         <ImageOff className="h-3.5 w-3.5" aria-hidden="true" />
         Image unavailable

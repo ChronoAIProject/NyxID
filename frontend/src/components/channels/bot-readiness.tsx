@@ -35,7 +35,7 @@ export function CredentialVerification({
   return (
     <DetailSection title="Credential Verification">
       <div
-        className="space-y-3 p-4 text-[12px] text-muted-foreground"
+        className="space-y-3 p-4 text-12 text-muted-foreground"
         aria-live="polite"
       >
         <Badge
@@ -95,7 +95,7 @@ export function RouteReadiness({
             ? "An agent route is configured. Confirm callback acceptance with a real incoming message."
             : "Select a key registered with your agent runtime.";
   return (
-    <div className="space-y-2 rounded-lg border border-border bg-muted/50 p-3 text-[12px] text-muted-foreground">
+    <div className="space-y-2 rounded-lg border border-border bg-muted/50 p-3 text-12 text-muted-foreground">
       <p className="font-medium text-foreground">Agent setup · {ownerLabel}</p>
       <p>{message}</p>
       <p>

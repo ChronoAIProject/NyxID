@@ -225,7 +225,7 @@ function CredentialForm({
         ) : (
           <KeyRound className="size-4 text-muted-foreground" />
         )}
-        <h2 className="text-[15px] font-semibold">{provider.label}</h2>
+        <h2 className="text-15 font-semibold">{provider.label}</h2>
         <Badge variant={provider.available ? "success" : "secondary"}>
           {refreshRequired
             ? "Refresh required"
@@ -366,7 +366,7 @@ function CredentialForm({
         )}
       </div>
       <div className="max-w-2xl space-y-3">
-        <h3 className="text-[13px] font-medium">Setup checklist</h3>
+        <h3 className="text-13 font-medium">Setup checklist</h3>
         <ol className="list-decimal space-y-3 pl-4 text-xs text-muted-foreground">
           {provider.setup_checklist.map((step) => (
             <li key={step}>{step}</li>

@@ -147,14 +147,14 @@ function ConnectionStatusNotice({
         <p
           className={
             destructive
-              ? "text-[12px] text-destructive"
-              : "text-[12px] text-warning"
+              ? "text-12 text-destructive"
+              : "text-12 text-warning"
           }
         >
           {meta.tooltip}
         </p>
         {errorMessage && (
-          <p className="break-words font-mono text-[11px] text-muted-foreground">
+          <p className="break-words font-mono text-11 text-muted-foreground">
             {errorMessage}
           </p>
         )}
@@ -184,10 +184,10 @@ function DetailRow({
 }) {
   return (
     <div className="flex items-baseline justify-between gap-4 py-2">
-      <span className="shrink-0 text-[11px] uppercase tracking-[0.5px] text-text-tertiary">
+      <span className="shrink-0 text-11 uppercase tracking-[0.5px] text-text-tertiary">
         {label}
       </span>
-      <span className="min-w-0 text-right text-[12px] text-foreground">
+      <span className="min-w-0 text-right text-12 text-foreground">
         {children}
       </span>
     </div>
@@ -226,8 +226,8 @@ function ReplaceCredential({ apiKeyId }: { readonly apiKeyId: string }) {
     return (
       <div className="flex items-center justify-between gap-4 py-2.5">
         <div>
-          <p className="text-[12px] font-medium text-foreground">Credential</p>
-          <p className="text-[11px] text-text-tertiary">
+          <p className="text-12 font-medium text-foreground">Credential</p>
+          <p className="text-11 text-text-tertiary">
             Paste a new secret to replace the stored one.
           </p>
         </div>
@@ -245,7 +245,7 @@ function ReplaceCredential({ apiKeyId }: { readonly apiKeyId: string }) {
 
   return (
     <div className="space-y-2 py-2.5">
-      <p className="text-[12px] font-medium text-foreground">
+      <p className="text-12 font-medium text-foreground">
         Replace credential
       </p>
       <Input
@@ -375,7 +375,7 @@ function ConnectionPanel({
   if (error || !key) {
     return (
       <div className="flex h-40 flex-col items-center justify-center gap-3 text-center">
-        <p className="text-[12px] text-muted-foreground">
+        <p className="text-12 text-muted-foreground">
           Couldn't load this connection.
         </p>
         <Button
@@ -406,7 +406,7 @@ function ConnectionPanel({
       <section>
         {showLabel && (
           <div className="flex items-center justify-between gap-2 pb-1">
-            <p className="min-w-0 truncate text-[12px] font-medium text-foreground">
+            <p className="min-w-0 truncate text-12 font-medium text-foreground">
               {key.label}
             </p>
             <Badge variant={statusMeta.variant}>{statusMeta.label}</Badge>
@@ -421,7 +421,7 @@ function ConnectionPanel({
               <div className="flex items-start gap-3 rounded-xl border border-warning/15 bg-warning/[0.04] px-4 py-3">
                 <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
                 <div className="min-w-0 flex-1 space-y-1.5">
-                  <p className="text-[12px] text-warning">
+                  <p className="text-12 text-warning">
                     The stored credential is missing. Reconnect or delete this service.
                   </p>
                   {reconnectable && (
@@ -468,7 +468,7 @@ function ConnectionPanel({
                 {grantedScopes.map((scope) => (
                   <span
                     key={scope}
-                    className="rounded bg-overlay-strong px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground"
+                    className="rounded bg-overlay-strong px-1.5 py-0.5 font-mono text-10 text-muted-foreground"
                   >
                     {scope}
                   </span>
@@ -484,7 +484,7 @@ function ConnectionPanel({
                   void navigator.clipboard?.writeText(key.proxy_url ?? "");
                   toast.success("Proxy URL copied");
                 }}
-                className="inline-flex max-w-full items-center gap-1.5 font-mono text-[11px] text-muted-foreground transition-colors hover:text-foreground"
+                className="inline-flex max-w-full items-center gap-1.5 font-mono text-11 text-muted-foreground transition-colors hover:text-foreground"
               >
                 <span className="truncate">{key.proxy_url}</span>
                 <Copy className="h-3 w-3 shrink-0" />
@@ -498,10 +498,10 @@ function ConnectionPanel({
             <>
               <div className="flex items-center justify-between gap-4 py-2.5">
                 <div>
-                  <p className="text-[12px] font-medium text-foreground">
+                  <p className="text-12 font-medium text-foreground">
                     Enabled
                   </p>
-                  <p className="text-[11px] text-text-tertiary">
+                  <p className="text-11 text-text-tertiary">
                     Disable to stop the assistant using this connection. Your
                     credential is kept — you can enable it again any time.
                   </p>
@@ -521,7 +521,7 @@ function ConnectionPanel({
               )}
             </>
           ) : (
-            <div className="flex items-center gap-2 py-2.5 text-[11px] text-text-tertiary">
+            <div className="flex items-center gap-2 py-2.5 text-11 text-text-tertiary">
               <Lock className="h-3 w-3 shrink-0" />
               {readOnlyReason(key)}
             </div>
@@ -607,7 +607,7 @@ export function ManageConnectionModal({
       <DialogContent className="max-w-md">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2.5">
-            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-muted text-[12px] font-semibold text-muted-foreground">
+            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-muted text-12 font-semibold text-muted-foreground">
               {iconSlug ? (
                 <ServiceIcon slug={iconSlug} size="md" />
               ) : (

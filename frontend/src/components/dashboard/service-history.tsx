@@ -36,7 +36,7 @@ export function HistoryTime({
           dateTime={value}
           tabIndex={0}
           aria-label={exact}
-          className="rounded-sm font-mono text-[11px] focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring"
+          className="rounded-sm font-mono text-11 focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring"
         >
           {expanded
             ? exact
@@ -79,7 +79,7 @@ export function ServiceAuthorshipFooter({
   return (
     <div
       className={cn(
-        "mt-3 flex min-w-0 flex-col items-end gap-1 text-right text-[11px] text-muted-foreground",
+        "mt-3 flex min-w-0 flex-col items-end gap-1 text-right text-11 text-muted-foreground",
         className,
       )}
       aria-label="Service authorship"
@@ -160,12 +160,12 @@ export function ServiceHistory({ serviceId }: { readonly serviceId: string }) {
         />
       </div>
       {query.isPending && (
-        <p role="status" className="text-[12px] text-muted-foreground">
+        <p role="status" className="text-12 text-muted-foreground">
           Loading service history…
         </p>
       )}
       {query.isError && (
-        <div role="alert" className="space-y-2 text-[12px]">
+        <div role="alert" className="space-y-2 text-12">
           <p>
             {query.error instanceof ApiError &&
             [403, 404].includes(query.error.status)
@@ -182,12 +182,12 @@ export function ServiceHistory({ serviceId }: { readonly serviceId: string }) {
         </div>
       )}
       {first?.deleted && (
-        <p className="text-[12px] text-muted-foreground">
+        <p className="text-12 text-muted-foreground">
           This service was deleted. Its recorded history is retained.
         </p>
       )}
       {first?.legacy && (
-        <p className="text-[12px] text-muted-foreground">
+        <p className="text-12 text-muted-foreground">
           Creator and earlier edits may not have been recorded.
           {first.tracked_since && (
             <>
@@ -199,7 +199,7 @@ export function ServiceHistory({ serviceId }: { readonly serviceId: string }) {
         </p>
       )}
       {first && groups.length === 0 && (
-        <p className="text-[12px] text-muted-foreground">
+        <p className="text-12 text-muted-foreground">
           {actions.length
             ? "No changes match these filters."
             : "No recorded changes yet."}
@@ -217,7 +217,7 @@ export function ServiceHistory({ serviceId }: { readonly serviceId: string }) {
           return (
             <li key={group.id}>
               <details className="rounded-xl border border-border/50 bg-card p-4">
-                <summary className="cursor-pointer text-[12px] focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring">
+                <summary className="cursor-pointer text-12 focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring">
                   <span className="font-medium">
                     {summaryEvent.action_label || "Service updated"}
                   </span>
@@ -230,7 +230,7 @@ export function ServiceHistory({ serviceId }: { readonly serviceId: string }) {
                 </summary>
                 <div className="mt-3 space-y-4">
                   {group.events.map((event) => (
-                    <div key={event.id} className="space-y-2 text-[12px]">
+                    <div key={event.id} className="space-y-2 text-12">
                       <p>
                         {event.action_label || "Service updated"} ·{" "}
                         {actorName(event.actor)} ·{" "}

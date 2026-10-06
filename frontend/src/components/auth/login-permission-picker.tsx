@@ -135,7 +135,7 @@ export function LoginPermissionPicker({
       option,
     ]);
   return (
-    <div className="space-y-3 text-[12px]">
+    <div className="space-y-3 text-12">
       <div className="space-y-1">
         <div className="flex justify-between gap-2">
           <h3
@@ -146,11 +146,11 @@ export function LoginPermissionPicker({
           >
             Permission filters
           </h3>
-          <span role="status" className="text-[11px]">
+          <span role="status" className="text-11">
             {total} selected
           </span>
         </div>
-        <p className="text-[11px] text-muted-foreground">
+        <p className="text-11 text-muted-foreground">
           {connections
             ? "Find permissions and choose the connected accounts to include."
             : "Find keys that include these permissions. Matching keys may grant more access."}
@@ -229,7 +229,7 @@ export function LoginPermissionPicker({
           ref={menu}
           align="start"
           aria-label="Permission options"
-          className="flex w-[var(--radix-popover-trigger-width)] max-h-[var(--radix-popover-content-available-height)] flex-col rounded-lg bg-card p-3 text-[12px]"
+          className="flex w-[var(--radix-popover-trigger-width)] max-h-[var(--radix-popover-content-available-height)] flex-col rounded-lg bg-card p-3 text-12"
           id="login-permission-options"
           onOpenAutoFocus={(event) => event.preventDefault()}
           onCloseAutoFocus={(event) => event.preventDefault()}
@@ -241,7 +241,7 @@ export function LoginPermissionPicker({
             searchInput.current?.focus({ preventScroll: true });
           }}
         >
-          <div className="mb-2 flex shrink-0 justify-between text-[11px] text-muted-foreground">
+          <div className="mb-2 flex shrink-0 justify-between text-11 text-muted-foreground">
             <span>
               {connections
                 ? "Permissions and connected accounts"
@@ -298,7 +298,7 @@ export function LoginPermissionPicker({
                   {visible.map((option) => (
                     <label
                       key={option.id}
-                      className="flex items-start gap-2 rounded-md py-1 pl-3 hover:bg-white/[0.03]"
+                      className="flex items-start gap-2 rounded-md py-1 pl-3 hover:bg-overlay"
                       title={[option.value, option.description]
                         .filter(Boolean)
                         .join(" · ")}
@@ -335,7 +335,7 @@ export function LoginPermissionPicker({
               items.length === group.length;
             return (
               <div key={id} className="flex flex-wrap items-center gap-1.5">
-                <span className="mr-1 flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                <span className="mr-1 flex items-center gap-1.5 text-11 text-muted-foreground">
                   <PermissionIcon group={id} />
                   {items[0]!.service}
                 </span>
@@ -350,7 +350,7 @@ export function LoginPermissionPicker({
                         .map((p) => `${p.service}: ${p.value}`)
                         .join(", ")}
                       aria-label={`Remove ${items[0]!.service}: ${all ? `All ${items.length} permissions` : pill[0]!.label}`}
-                      className="flex max-w-full items-center gap-2 rounded-md border border-border bg-overlay px-2 py-1 text-[11px] hover:bg-overlay-strong focus-visible:outline-2 focus-visible:outline-primary"
+                      className="flex max-w-full items-center gap-2 rounded-md border border-border bg-overlay px-2 py-1 text-11 hover:bg-overlay-strong focus-visible:outline-2 focus-visible:outline-primary"
                       onClick={(e) => remove(pill, e.currentTarget)}
                     >
                       <span className="break-all">
@@ -378,7 +378,7 @@ export function LoginPermissionPicker({
             <Button
               variant="link"
               size="sm"
-              className="h-auto px-0 py-1 text-[11px]"
+              className="h-auto px-0 py-1 text-11"
               disabled={disabled}
               onClick={() => onChange(linkFilters)}
             >
@@ -392,7 +392,7 @@ export function LoginPermissionPicker({
               variant="link"
               size="sm"
               disabled={disabled}
-              className="h-auto px-0 py-1 text-[11px]"
+              className="h-auto px-0 py-1 text-11"
               onClick={() =>
                 onChange({
                   permissions: [],

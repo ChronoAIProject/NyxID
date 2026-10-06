@@ -99,7 +99,7 @@ function BotRow({
 
   return (
     <TableRow
-      className="cursor-pointer hover:bg-white/[0.03]"
+      className="cursor-pointer hover:bg-overlay"
       onClick={() => void navigate({ to: "/channel-bots/$botId", params: { botId: bot.id } })}
     >
       <TableCell>
@@ -165,7 +165,7 @@ function BotCard({
       tabIndex={0}
       onClick={() => void navigate({ to: "/channel-bots/$botId", params: { botId: bot.id } })}
       onKeyDown={(e) => { if (e.key === "Enter") void navigate({ to: "/channel-bots/$botId", params: { botId: bot.id } }); }}
-      className="relative rounded-xl border border-border/50 bg-card p-4 transition-colors hover:bg-white/[0.03] cursor-pointer"
+      className="relative rounded-xl border border-border/50 bg-card p-4 transition-colors hover:bg-overlay cursor-pointer"
     >
       <div className="absolute right-3 top-3" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
         <Button
@@ -178,8 +178,8 @@ function BotCard({
           <Trash2 className="h-3.5 w-3.5 text-destructive" />
         </Button>
       </div>
-      <p className="pr-10 text-[13px] font-semibold text-foreground truncate">{bot.label}</p>
-      <p className="text-[11px] text-muted-foreground">{bot.platform_bot_username || "No username"}</p>
+      <p className="pr-10 text-13 font-semibold text-foreground truncate">{bot.label}</p>
+      <p className="text-11 text-muted-foreground">{bot.platform_bot_username || "No username"}</p>
       <div className="mt-2 flex flex-wrap gap-1.5">
         {ownerLabel && <Badge variant="secondary">{ownerLabel}</Badge>}
         <Badge variant="secondary">{getPlatform(bot.platform).label}</Badge>
@@ -187,7 +187,7 @@ function BotCard({
           {bot.status.split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ")}
         </Badge>
       </div>
-      <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+      <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-11 text-muted-foreground">
         <span>{getPlatform(bot.platform).webhookIngestion === false ? "Polling" : bot.webhook_registered ? "Webhook registered" : "No webhook"}</span>
         <span>{formatDate(bot.created_at)}</span>
       </div>
@@ -265,7 +265,7 @@ function EmptyState() {
     <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
       <RobotIcon className="h-64 w-64 text-muted-foreground" />
       <div className="space-y-1">
-        <p className="text-[12px] font-medium text-muted-foreground">No channel bots yet</p>
+        <p className="text-12 font-medium text-muted-foreground">No channel bots yet</p>
         <p className="text-xs text-muted-foreground">
           Add a messaging platform bot to relay conversations to your AI agents.
         </p>
@@ -570,11 +570,11 @@ function DeviceChannelCard({
           <Trash2 className="h-3.5 w-3.5 text-destructive" />
         </Button>
       </div>
-      <p className="pr-10 text-[13px] font-semibold text-foreground truncate">
+      <p className="pr-10 text-13 font-semibold text-foreground truncate">
         {conversation.platform_conversation_id}
       </p>
       <div className="mt-1 flex items-center gap-2">
-        <code className="font-mono text-[10px] text-muted-foreground" title={conversation.id}>
+        <code className="font-mono text-10 text-muted-foreground" title={conversation.id}>
           {conversation.id.slice(0, 8)}…
         </code>
         <Button
@@ -593,7 +593,7 @@ function DeviceChannelCard({
           {conversation.is_active ? "Active" : "Inactive"}
         </Badge>
       </div>
-      <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+      <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-11 text-muted-foreground">
         <span>Agent: {conversation.agent_api_key_id.slice(0, 8)}…</span>
         <span>{formatDate(conversation.created_at)}</span>
       </div>
@@ -706,7 +706,7 @@ function DeviceChannelsSection({
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0">
           <h2 className="text-lg font-semibold">Device Channels</h2>
-          <p className="text-[12px] text-muted-foreground">
+          <p className="text-12 text-muted-foreground">
             HTTP Event Gateway channels for analyzers, sensors, and other
             non-bot event sources.
           </p>
@@ -725,7 +725,7 @@ function DeviceChannelsSection({
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <SmartSpeakerIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-[12px] font-medium text-muted-foreground">No device channels yet</p>
+            <p className="text-12 font-medium text-muted-foreground">No device channels yet</p>
             <p className="text-xs text-muted-foreground">
               Create one to let devices push events into the channel relay
               pipeline.

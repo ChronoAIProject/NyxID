@@ -21,7 +21,7 @@ export function CodexConnectionSection() {
   return (
     <section className="mb-6 border-b border-border/50 pb-4">
       <button type="button" onClick={() => setOpen(!open)} aria-expanded={open}
-        className="flex min-h-8 items-center gap-2 text-[13px] font-medium">
+        className="flex min-h-8 items-center gap-2 text-13 font-medium">
         {open ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}Codex connection
       </button>
       {open && <div className="mt-3 space-y-4">

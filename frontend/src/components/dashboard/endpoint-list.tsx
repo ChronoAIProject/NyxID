@@ -147,7 +147,7 @@ function EndpointListEditor({ serviceId, hasApiSpecUrl }: EndpointListProps) {
       {!endpoints || endpoints.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-1 py-8">
           <PowerBoltIcon className="h-48 w-48 text-muted-foreground/30" />
-          <div className="rounded-lg bg-white/[0.03] px-4 py-3 text-[12px] text-muted-foreground/30">
+          <div className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">
             No endpoints configured.{" "}
             {hasApiSpecUrl
               ? "Use auto-discover or add one manually."
@@ -156,7 +156,7 @@ function EndpointListEditor({ serviceId, hasApiSpecUrl }: EndpointListProps) {
         </div>
       ) : (
         <div className="rounded-lg border">
-          <table className="w-full text-[12px]">
+          <table className="w-full text-12">
             <thead>
               <tr className="border-b bg-muted/50">
                 <th className="px-3 py-2 text-left font-medium text-muted-foreground">
@@ -180,7 +180,7 @@ function EndpointListEditor({ serviceId, hasApiSpecUrl }: EndpointListProps) {
                     <div className="flex items-center gap-2">
                       <span className="text-xs">{ep.name}</span>
                       {!ep.is_active && (
-                        <Badge variant="secondary" className="text-[10px]">
+                        <Badge variant="secondary" className="text-10">
                           Inactive
                         </Badge>
                       )}
@@ -189,7 +189,7 @@ function EndpointListEditor({ serviceId, hasApiSpecUrl }: EndpointListProps) {
                   <td className="px-3 py-2">
                     <Badge
                       variant="secondary"
-                      className={`text-[10px] ${getMethodColor(ep.method)}`}
+                      className={`text-10 ${getMethodColor(ep.method)}`}
                     >
                       {ep.method}
                     </Badge>

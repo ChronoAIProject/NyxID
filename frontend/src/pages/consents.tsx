@@ -61,7 +61,7 @@ function ServiceAccess({ consent }: { readonly consent: Consent }) {
         <Badge variant="warning" className="text-xs">
           Legacy grant
         </Badge>
-        <p className="text-[11px] text-muted-foreground">
+        <p className="text-11 text-muted-foreground">
           Full service access until the app asks you to sign in again.
         </p>
       </div>
@@ -193,7 +193,7 @@ function AuthorizedAppsTab({ viewMode }: { readonly viewMode: ViewMode }) {
       <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
         <SmartLockIcon className="h-64 w-64 text-muted-foreground" />
         <div className="space-y-1">
-          <p className="text-[12px] font-medium text-muted-foreground">No Authorized Apps</p>
+          <p className="text-12 font-medium text-muted-foreground">No Authorized Apps</p>
           <p className="text-xs text-muted-foreground">
             No applications have been authorized.
           </p>
@@ -221,7 +221,7 @@ function AuthorizedAppsTab({ viewMode }: { readonly viewMode: ViewMode }) {
                 <Trash2 className="h-4 w-4 text-destructive" />
               </Button>
             </div>
-            <p className="pr-10 text-[13px] font-bold">
+            <p className="pr-10 text-13 font-bold">
               {consent.client_name}
             </p>
             <div className="mt-2 flex flex-wrap gap-1">
@@ -232,17 +232,17 @@ function AuthorizedAppsTab({ viewMode }: { readonly viewMode: ViewMode }) {
               ))}
             </div>
             <div className="mt-3 space-y-1">
-              <p className="text-[11px] font-medium text-muted-foreground">
+              <p className="text-11 font-medium text-muted-foreground">
                 Service access
               </p>
               <ServiceAccess consent={consent} />
             </div>
             <div className="mt-3 space-y-1">
-              <p className="text-[11px] text-muted-foreground">
+              <p className="text-11 text-muted-foreground">
                 <span className="font-medium">Granted:</span>{" "}
                 {formatDate(consent.granted_at)}
               </p>
-              <p className="text-[11px] text-muted-foreground">
+              <p className="text-11 text-muted-foreground">
                 <span className="font-medium">Expires:</span>{" "}
                 {consent.expires_at
                   ? formatDate(consent.expires_at)
@@ -271,7 +271,7 @@ function AuthorizedAppsTab({ viewMode }: { readonly viewMode: ViewMode }) {
                   <Trash2 className="h-4 w-4 text-destructive" />
                 </Button>
               </div>
-              <p className="pr-10 text-[13px] font-bold">
+              <p className="pr-10 text-13 font-bold">
                 {consent.client_name}
               </p>
               <div className="mt-2 flex flex-wrap gap-1">
@@ -282,17 +282,17 @@ function AuthorizedAppsTab({ viewMode }: { readonly viewMode: ViewMode }) {
                 ))}
               </div>
               <div className="mt-3 space-y-1">
-                <p className="text-[11px] font-medium text-muted-foreground">
+                <p className="text-11 font-medium text-muted-foreground">
                   Service access
                 </p>
                 <ServiceAccess consent={consent} />
               </div>
               <div className="mt-3 space-y-1">
-                <p className="text-[11px] text-muted-foreground">
+                <p className="text-11 text-muted-foreground">
                   <span className="font-medium">Granted:</span>{" "}
                   {formatDate(consent.granted_at)}
                 </p>
-                <p className="text-[11px] text-muted-foreground">
+                <p className="text-11 text-muted-foreground">
                   <span className="font-medium">Expires:</span>{" "}
                   {consent.expires_at
                     ? formatDate(consent.expires_at)
@@ -452,7 +452,7 @@ function AuthorizationsTab({ viewMode }: { readonly viewMode: ViewMode }) {
       <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
         <BiometricLockIcon className="h-64 w-64 text-muted-foreground" />
         <div className="space-y-1">
-          <p className="text-[12px] font-medium text-muted-foreground">No Authorizations</p>
+          <p className="text-12 font-medium text-muted-foreground">No Authorizations</p>
           <p className="text-xs text-muted-foreground">
             No broker authorizations issued. Apps that hold server-side credentials on your behalf will appear here.
           </p>
@@ -480,11 +480,11 @@ function AuthorizationsTab({ viewMode }: { readonly viewMode: ViewMode }) {
                 <Trash2 className="h-4 w-4 text-destructive" />
               </Button>
             </div>
-            <p className="pr-10 text-[13px] font-bold">
+            <p className="pr-10 text-13 font-bold">
               {binding.client_name ?? binding.client_id}
             </p>
             <p
-              className={`mt-1 text-[11px] ${
+              className={`mt-1 text-11 ${
                 binding.external_subject
                   ? "text-foreground"
                   : "text-muted-foreground"
@@ -500,11 +500,11 @@ function AuthorizationsTab({ viewMode }: { readonly viewMode: ViewMode }) {
               ))}
             </div>
             <div className="mt-3 space-y-1">
-              <p className="text-[11px] text-muted-foreground">
+              <p className="text-11 text-muted-foreground">
                 <span className="font-medium">Created:</span>{" "}
                 {formatDate(binding.created_at)}
               </p>
-              <p className="text-[11px] text-muted-foreground">
+              <p className="text-11 text-muted-foreground">
                 <span className="font-medium">Last used:</span>{" "}
                 {binding.last_used_at
                   ? formatDate(binding.last_used_at)
@@ -533,11 +533,11 @@ function AuthorizationsTab({ viewMode }: { readonly viewMode: ViewMode }) {
                   <Trash2 className="h-4 w-4 text-destructive" />
                 </Button>
               </div>
-              <p className="pr-10 text-[13px] font-bold">
+              <p className="pr-10 text-13 font-bold">
                 {binding.client_name ?? binding.client_id}
               </p>
               <p
-                className={`mt-1 text-[11px] ${
+                className={`mt-1 text-11 ${
                   binding.external_subject
                     ? "text-foreground"
                     : "text-muted-foreground"
@@ -553,11 +553,11 @@ function AuthorizationsTab({ viewMode }: { readonly viewMode: ViewMode }) {
                 ))}
               </div>
               <div className="mt-3 space-y-1">
-                <p className="text-[11px] text-muted-foreground">
+                <p className="text-11 text-muted-foreground">
                   <span className="font-medium">Created:</span>{" "}
                   {formatDate(binding.created_at)}
                 </p>
-                <p className="text-[11px] text-muted-foreground">
+                <p className="text-11 text-muted-foreground">
                   <span className="font-medium">Last used:</span>{" "}
                   {binding.last_used_at
                     ? formatDate(binding.last_used_at)

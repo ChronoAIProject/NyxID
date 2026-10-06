@@ -9,7 +9,7 @@ export function MachineSummary({ node }: { readonly node: NodeInfo }) {
   if (!machine) return null;
   return (
     <DetailSection title="Machine access">
-      <div className="space-y-3 text-[12px]">
+      <div className="space-y-3 text-12">
         <p>
           {[
             machine.shell && "Commands",

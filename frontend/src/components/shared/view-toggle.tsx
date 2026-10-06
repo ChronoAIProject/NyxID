@@ -34,7 +34,7 @@ export function ViewToggle({
   return (
     <div className="relative hidden items-center rounded-lg border border-border/50 p-0.5 md:flex">
       <div
-        className="absolute top-0.5 h-7 w-7 rounded-md bg-white/[0.08] transition-transform duration-200 ease-out"
+        className="absolute top-0.5 h-7 w-7 rounded-md bg-overlay-strong transition-transform duration-200 ease-out"
         style={{ transform: viewMode === "grid" ? "translateX(0)" : "translateX(100%)" }}
       />
       <button

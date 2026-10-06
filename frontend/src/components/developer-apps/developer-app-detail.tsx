@@ -237,7 +237,7 @@ export function DeveloperAppDetail({
             <p className="text-xs uppercase tracking-wide text-text-tertiary">
               Client ID
             </p>
-            <p className="break-all font-mono text-[12px] text-foreground">
+            <p className="break-all font-mono text-12 text-foreground">
               {app.id}
             </p>
           </div>
@@ -245,7 +245,7 @@ export function DeveloperAppDetail({
             <p className="text-xs uppercase tracking-wide text-text-tertiary">
               Created At
             </p>
-            <p className="text-[12px] text-foreground">
+            <p className="text-12 text-foreground">
               {new Date(app.created_at).toLocaleString()}
             </p>
           </div>
@@ -269,7 +269,7 @@ export function DeveloperAppDetail({
             </div>
           ))}
           {app.redirect_uris.length === 0 && (
-            <p className="text-[12px] text-muted-foreground">
+            <p className="text-12 text-muted-foreground">
               No redirect URIs configured.
             </p>
           )}
@@ -317,7 +317,7 @@ export function DeveloperAppDetail({
               ))}
             </div>
           ) : (
-            <p className="text-[12px] text-muted-foreground">
+            <p className="text-12 text-muted-foreground">
               No default services declared. Users see a sign-in-only consent
               unless they customize.
             </p>
@@ -341,7 +341,7 @@ export function DeveloperAppDetail({
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-2">
-              <label className="text-[12px] font-medium" htmlFor="edit-app-name">
+              <label className="text-12 font-medium" htmlFor="edit-app-name">
                 Application Name
               </label>
               <Input
@@ -352,7 +352,7 @@ export function DeveloperAppDetail({
             </div>
             <div className="space-y-2">
               <label
-                className="text-[12px] font-medium"
+                className="text-12 font-medium"
                 htmlFor="edit-redirect-uris"
               >
                 Redirect URIs (one per line)
@@ -361,11 +361,11 @@ export function DeveloperAppDetail({
                 id="edit-redirect-uris"
                 value={redirectUrisText}
                 onChange={(event) => setRedirectUrisText(event.target.value)}
-                className="flex min-h-[120px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-[12px] placeholder:text-muted-foreground focus-visible:outline-none"
+                className="flex min-h-[120px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-12 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus"
               />
             </div>
             <div className="space-y-3">
-              <label className="text-[12px] font-medium">Allowed Scopes</label>
+              <label className="text-12 font-medium">Allowed Scopes</label>
               <div className="space-y-2">
                 {OIDC_SCOPES.map((scope) => (
                   <div key={scope.id} className="flex items-start gap-2">
@@ -384,7 +384,7 @@ export function DeveloperAppDetail({
                     <div className="grid gap-0.5 leading-none">
                       <label
                         htmlFor={`scope-edit-${scope.id}`}
-                        className="text-[12px] font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
+                        className="text-12 font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
                       >
                         {scope.label}
                         {scope.required && (
@@ -405,7 +405,7 @@ export function DeveloperAppDetail({
             </div>
             <div className="space-y-3">
               <div>
-                <label className="text-[12px] font-medium">
+                <label className="text-12 font-medium">
                   Default Services
                 </label>
                 <p className="text-xs text-muted-foreground">
@@ -431,7 +431,7 @@ export function DeveloperAppDetail({
                     />
                     <label
                       htmlFor={`default-service-${entry.slug}`}
-                      className="cursor-pointer text-[12px] font-medium leading-none"
+                      className="cursor-pointer text-12 font-medium leading-none"
                     >
                       {entry.name}
                       <span className="ml-1 text-xs font-normal text-muted-foreground">

@@ -14,13 +14,13 @@ export function LoginCodeStatus({ issued, onClearCode, onNew }: { issued: LoginC
   useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(timer); }, []);
   useEffect(() => { if (!pending) onClearCode(); }, [pending, onClearCode]);
   return <section className="space-y-4" aria-live="polite">
-    <h2 className="text-[15px] font-semibold">{pending ? "One-time terminal login" : status.data?.status === "redeemed" ? "Login redeemed" : "Login code closed"}</h2>
+    <h2 className="text-15 font-semibold">{pending ? "One-time terminal login" : status.data?.status === "redeemed" ? "Login redeemed" : "Login code closed"}</h2>
     {pending && <>
-      <code data-sensitive className="block text-center font-mono text-[28px]">{issued.code}</code>
-      <p className="text-[12px] text-muted-foreground">Expires {new Date(issued.expires_at).toLocaleTimeString()}</p>
-      <p className="flex items-center gap-2 text-[12px]"><Terminal className="size-4" /><code>nyxid login --code</code></p>
+      <code data-sensitive className="block text-center font-mono text-28">{issued.code}</code>
+      <p className="text-12 text-muted-foreground">Expires {new Date(issued.expires_at).toLocaleTimeString()}</p>
+      <p className="flex items-center gap-2 text-12"><Terminal className="size-4" /><code>nyxid login --code</code></p>
     </>}
-    {status.data?.redeemed_at && <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-[12px]">
+    {status.data?.redeemed_at && <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-12">
       <dt>Device</dt><dd className="break-all">{status.data.client_label ?? "Not provided"}</dd>
       <dt>IP address</dt><dd>{status.data.client_ip ?? "Unavailable"} ({status.data.client_ip_attribution})</dd>
       <dt>Redeemed</dt><dd>{new Date(status.data.redeemed_at).toLocaleString()}</dd>

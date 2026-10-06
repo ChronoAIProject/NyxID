@@ -90,8 +90,8 @@ function Section({
   return (
     <section aria-label={title} className="space-y-3">
       <div className="space-y-1">
-        <h3 className="text-[13px] font-semibold text-foreground">{title}</h3>
-        {description ? <p className="text-[12px] text-muted-foreground">{description}</p> : null}
+        <h3 className="text-13 font-semibold text-foreground">{title}</h3>
+        {description ? <p className="text-12 text-muted-foreground">{description}</p> : null}
       </div>
       {children}
     </section>
@@ -139,9 +139,9 @@ export function AgentDetailsSheet({
           ) : null}
           {agent ? (
             <>
-              <div className="flex flex-wrap items-center gap-2 text-[11px] text-text-tertiary">
+              <div className="flex flex-wrap items-center gap-2 text-11 text-text-tertiary">
                 <AgentAvatar agent={agent} size="lg" />
-                <span className="text-[15px] font-semibold text-foreground">{agentTitle(agent)}</span>
+                <span className="text-15 font-semibold text-foreground">{agentTitle(agent)}</span>
                 {agentHandle(agent) ? <span>{agentHandle(agent)}</span> : null}
                 <AgentKindBadge kind={agent.kind} />
                 <Badge variant={agent.status === "running" ? "success" : "secondary"}>
@@ -244,7 +244,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                       onChange={(event) => field.onChange(event.target.value.toLowerCase())}
                     />
                   </FormControl>
-                  <FormDescription className="text-[11px]">
+                  <FormDescription className="text-11">
                     The @handle used in groups and by NyxBot.
                   </FormDescription>
                   <FormMessage />
@@ -267,7 +267,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                     {...field}
                   />
                 </FormControl>
-                <FormDescription className="text-[11px]">
+                <FormDescription className="text-11">
                   Shown instead of {nyxbot ? "NyxBot" : `@${agent.name}`}. Leave empty to use it.
                 </FormDescription>
                 <FormMessage />
@@ -308,7 +308,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                     {...field}
                   />
                 </FormControl>
-                <FormDescription className="text-[11px]">
+                <FormDescription className="text-11">
                   Personality and tone only; it never changes what the agent may do.
                 </FormDescription>
                 <FormMessage />
@@ -316,7 +316,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
             )}
           />
           {error ? (
-            <p role="alert" className="text-[12px] text-destructive">
+            <p role="alert" className="text-12 text-destructive">
               {error}
             </p>
           ) : null}
@@ -424,7 +424,7 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
                 <div className="flex items-center justify-between gap-4 rounded-lg border border-border p-4">
                   <div className="space-y-1">
                     <FormLabel>Read my account</FormLabel>
-                    <FormDescription className="text-[12px]">
+                    <FormDescription className="text-12">
                       Look up keys, services and nodes; never change them.
                     </FormDescription>
                   </div>
@@ -440,7 +440,7 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
             )}
           />
           {error ? (
-            <p role="alert" className="text-[12px] text-destructive">
+            <p role="alert" className="text-12 text-destructive">
               {error}
             </p>
           ) : null}
@@ -488,10 +488,10 @@ function GuestAccessList({
   return (
     <div className="space-y-2 rounded-lg border border-border p-4">
       <div className="space-y-1">
-        <p className="text-[12px] font-medium text-foreground">
+        <p className="text-12 font-medium text-foreground">
           What others in its chats may do
         </p>
-        <p className="text-[12px] text-muted-foreground">
+        <p className="text-12 text-muted-foreground">
           For people other than you in the agent&apos;s group and shared chats. &ldquo;Use&rdquo;
           lets them look things up, create and act (send a message, turn a light on), but not
           change or delete what already exists. Anything behind your approval stays yours. You
@@ -505,7 +505,7 @@ function GuestAccessList({
             <li key={slug} className="flex items-center justify-between gap-3">
               <label
                 htmlFor={id}
-                className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground"
+                className="min-w-0 flex-1 truncate font-mono text-11 text-muted-foreground"
               >
                 {slug}
               </label>
@@ -561,7 +561,7 @@ function MemoryList({
       description={`What ${name} remembers across its threads and chat apps.`}
     >
       {error ? (
-        <p role="alert" className="text-[12px] text-destructive">
+        <p role="alert" className="text-12 text-destructive">
           {error}
         </p>
       ) : null}
@@ -570,10 +570,10 @@ function MemoryList({
           {memory.map((note) => (
             <li key={note.id} className="flex items-start gap-2 px-3 py-2.5">
               <div className="min-w-0 flex-1 space-y-0.5">
-                <p className="whitespace-pre-wrap break-words text-[12px] text-foreground">
+                <p className="whitespace-pre-wrap break-words text-12 text-foreground">
                   {note.text}
                 </p>
-                <p className="font-mono text-[10px] text-text-tertiary">
+                <p className="font-mono text-10 text-text-tertiary">
                   {formatDateTime(note.updated_at)}
                 </p>
               </div>
@@ -591,7 +591,7 @@ function MemoryList({
           ))}
         </ul>
       ) : (
-        <p className="rounded-lg bg-overlay px-4 py-3 text-[12px] text-muted-foreground">
+        <p className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">
           Nothing remembered yet.
         </p>
       )}
@@ -639,10 +639,10 @@ function Lifecycle({
       className="space-y-3 rounded-xl border border-destructive/40 p-4"
     >
       <div className="space-y-1">
-        <h3 className="text-[13px] font-semibold text-destructive">
+        <h3 className="text-13 font-semibold text-destructive">
           {destroyed ? "Delete permanently" : "Destroy agent"}
         </h3>
-        <p className="text-[12px] text-destructive/70">
+        <p className="text-12 text-destructive/70">
           {destroyed
             ? `${agentTitle(agent)} was destroyed${agent.destroyed_at ? ` on ${formatDateTime(agent.destroyed_at)}` : ""}. Deleting removes it and all of its threads for good.`
             : "Stops its work, revokes its access and disconnects its channel bots. Its threads stay readable."}
@@ -680,7 +680,7 @@ function Lifecycle({
             </DialogDescription>
           </DialogHeader>
           {error ? (
-            <p role="alert" className="text-[12px] text-destructive">
+            <p role="alert" className="text-12 text-destructive">
               {error}
             </p>
           ) : null}

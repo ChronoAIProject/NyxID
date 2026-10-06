@@ -165,7 +165,7 @@ export function AssistantServiceDeleteDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-3 border-y border-border py-4 text-[12px]">
+        <div className="space-y-3 border-y border-border py-4 text-12">
           <p className="break-all font-mono text-muted-foreground">
             {params.userServiceId}
           </p>
@@ -190,7 +190,7 @@ export function AssistantServiceDeleteDialog({
         </div>
 
         {error ? (
-          <p role="alert" className="text-[12px] text-destructive">
+          <p role="alert" className="text-12 text-destructive">
             {error}
           </p>
         ) : null}

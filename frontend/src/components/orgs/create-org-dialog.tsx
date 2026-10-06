@@ -130,7 +130,7 @@ export function CreateOrgDialog({ open, onOpenChange }: CreateOrgDialogProps) {
             />
 
             {form.formState.errors.root && (
-              <p className="text-[12px] text-destructive">
+              <p className="text-12 text-destructive">
                 {form.formState.errors.root.message}
               </p>
             )}

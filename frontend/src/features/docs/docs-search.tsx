@@ -143,11 +143,11 @@ export function DocsSearch({
                       onClick={onClose}
                       onMouseEnter={() => setActiveIndex(i)}
                       className={`block rounded-lg px-3 py-2 transition-colors ${
-                        active ? "bg-white/[0.06]" : "hover:bg-white/[0.04]"
+                        active ? "bg-overlay-strong" : "hover:bg-overlay"
                       }`}
                     >
                       <div className="flex items-center gap-2">
-                        <span className="font-mono text-[10px] tracking-wider text-nyx-secondary-400 uppercase">
+                        <span className="font-mono text-10 tracking-wider text-nyx-secondary-400 uppercase">
                           {TAB_LABEL[docTabForSlug(slug)] ?? ""}
                         </span>
                         <span className="text-sm font-medium text-foreground">{e.title}</span>
@@ -162,7 +162,7 @@ export function DocsSearch({
             </ul>
           )}
         </div>
-        <div className="flex items-center gap-4 border-t border-border px-4 py-2 text-[11px] text-text-tertiary">
+        <div className="flex items-center gap-4 border-t border-border px-4 py-2 text-11 text-text-tertiary">
           <span className="flex items-center gap-1">
             <kbd className="rounded border border-border px-1 font-mono">↑</kbd>
             <kbd className="rounded border border-border px-1 font-mono">↓</kbd>

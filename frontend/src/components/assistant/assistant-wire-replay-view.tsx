@@ -141,19 +141,19 @@ export function AssistantWireReplayView({
   return (
     <div className="space-y-3" data-testid="wire-replay-view">
       {replay.partial ? (
-        <p className="rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-[11px] text-warning">
+        <p className="rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-11 text-warning">
           Partial replay: the delivered capture was truncated or ended without a
           clean terminal frame.
         </p>
       ) : null}
-      <p className="text-[11px] leading-5 text-text-tertiary">
+      <p className="text-11 leading-5 text-text-tertiary">
         Message content uses the production chat renderer. Actor facts are
         diagnostic only and cannot be acted on here.
       </p>
       {replay.message ? (
         <ChatMessageEntry message={replay.message} interactiveCards={false} />
       ) : replay.actorFacts.length === 0 ? (
-        <p className="py-5 text-center text-[11px] text-text-tertiary">
+        <p className="py-5 text-center text-11 text-text-tertiary">
           No renderable chat content in this capture.
         </p>
       ) : null}
@@ -164,14 +164,14 @@ export function AssistantWireReplayView({
         >
           <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2">
             <FileJson2 className="h-3.5 w-3.5 text-text-tertiary" />
-            <span className="text-[11px] font-medium text-foreground">
+            <span className="text-11 font-medium text-foreground">
               Actor facts
             </span>
-            <span className="ml-auto text-[10px] text-text-tertiary">
+            <span className="ml-auto text-10 text-text-tertiary">
               Diagnostic only
             </span>
           </div>
-          <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-all p-3 font-mono text-[10px] leading-5 text-muted-foreground">
+          <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-all p-3 font-mono text-10 leading-5 text-muted-foreground">
             {JSON.stringify(replay.actorFacts, null, 2)}
           </pre>
         </section>

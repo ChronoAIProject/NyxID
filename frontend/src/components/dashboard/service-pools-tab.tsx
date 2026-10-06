@@ -131,7 +131,7 @@ function Choice({
   disabled?: boolean;
 }) {
   return (
-    <label className="space-y-1 text-[12px]">
+    <label className="space-y-1 text-12">
       <span>{label}</span>
       <Select value={value} onValueChange={onChange} disabled={disabled}>
         <SelectTrigger aria-label={label}>
@@ -162,7 +162,7 @@ function NumberInput({
   max?: number;
 }) {
   return (
-    <label className="space-y-1 text-[12px]">
+    <label className="space-y-1 text-12">
       <span>{label}</span>
       <Input
         aria-label={label}
@@ -185,7 +185,7 @@ function Toggle({
   onChange: (checked: boolean) => void;
 }) {
   return (
-    <label className="flex items-center justify-between gap-3 text-[12px]">
+    <label className="flex items-center justify-between gap-3 text-12">
       <span>{label}</span>
       <Switch aria-label={label} checked={checked} onCheckedChange={onChange} />
     </label>
@@ -262,12 +262,12 @@ function PolicyEditor({
         }
       />
       <fieldset className="space-y-2">
-        <legend className="text-[12px] font-medium">Retry causes</legend>
+        <legend className="text-12 font-medium">Retry causes</legend>
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
           {retryTriggers.map((trigger) => (
             <label
               key={trigger}
-              className="flex items-center gap-2 text-[12px]"
+              className="flex items-center gap-2 text-12"
             >
               <Checkbox
                 checked={policy.retry_on.includes(trigger)}
@@ -290,7 +290,7 @@ function PolicyEditor({
         checked={policy.retry_ambiguous_dispatch}
         onChange={(v) => set("retry_ambiguous_dispatch", v)}
       />
-      <p className="text-[12px] text-muted-foreground">
+      <p className="text-12 text-muted-foreground">
         A timeout or 5xx may follow completed work. Enabling replay for POST can
         duplicate provider work and charges. A provider 429 rejection can fall
         back without this option. Set maximum attempts to 1 to disable fallback.
@@ -523,7 +523,7 @@ export function PoolEditor({
               onChange={(v) => form.setValue("is_active", v)}
             />
             <section className="space-y-3">
-              <h3 className="text-[13px] font-semibold">Members</h3>
+              <h3 className="text-13 font-semibold">Members</h3>
               {members.map((member, index) => {
                 const id = member.user_service_id!;
                 const candidate = selectedRows.get(id);
@@ -534,13 +534,13 @@ export function PoolEditor({
                   >
                     <div className="flex items-center justify-between gap-3">
                       <div>
-                        <p className="text-[12px] font-medium">
+                        <p className="text-12 font-medium">
                           {candidate?.slug ??
                             selectedLabels[id] ??
                             savedLabels.get(id) ??
                             id}
                         </p>
-                        <p className="text-[11px] text-muted-foreground">
+                        <p className="text-11 text-muted-foreground">
                           {candidate
                             ? `${candidate.credential_binding} · ${candidate.protocol ?? "Same API"} · ${reason(candidate)}`
                             : "Select the candidate operation to inspect availability"}
@@ -577,7 +577,7 @@ export function PoolEditor({
                         onChange={(weight) => setMember(id, { weight })}
                       />
                       {priority && values.member_contract === "ai_chat" && (
-                        <label className="space-y-1 text-[12px]">
+                        <label className="space-y-1 text-12">
                           <span>
                             Model{" "}
                             {values.member_contract === "ai_chat"
@@ -600,7 +600,7 @@ export function PoolEditor({
                       onChange={(enabled) => setMember(id, { enabled })}
                     />
                     {priority && values.member_contract !== "ai_chat" && (
-                      <label className="flex items-start gap-2 text-[12px]">
+                      <label className="flex items-start gap-2 text-12">
                         <Checkbox
                           aria-label={`Confirm API compatibility for member ${index + 1}`}
                           checked={member.same_api_compatible ?? false}
@@ -630,7 +630,7 @@ export function PoolEditor({
                       "HEAD",
                     ].map((m) => [m, m])}
                   />
-                  <label className="space-y-1 text-[12px]">
+                  <label className="space-y-1 text-12">
                     <span>Candidate operation path</span>
                     <Input
                       aria-label="Candidate operation path"
@@ -666,11 +666,11 @@ export function PoolEditor({
                   .map((row) => (
                     <div
                       key={row.user_service_id}
-                      className="flex items-center justify-between gap-3 rounded-lg p-2 hover:bg-white/[0.03]"
+                      className="flex items-center justify-between gap-3 rounded-lg p-2 hover:bg-overlay"
                     >
                       <div>
-                        <p className="text-[12px]">{row.slug}</p>
-                        <p className="text-[11px] text-muted-foreground">
+                        <p className="text-12">{row.slug}</p>
+                        <p className="text-11 text-muted-foreground">
                           {row.credential_binding} ·{" "}
                           {row.protocol ?? "Same API"} · {reason(row)}
                         </p>
@@ -727,7 +727,7 @@ export function PoolEditor({
                     onChange={(v) => form.setValue("failover", v)}
                   />
                 ) : (
-                  <p className="text-[12px] text-muted-foreground">
+                  <p className="text-12 text-muted-foreground">
                     Defaults: up to 3 attempts, 60 seconds per attempt, 120
                     seconds overall, and 5–300 second cooldown. Ambiguous POST
                     replay is off.
@@ -806,7 +806,7 @@ export function PoolHealthDialog({
             )}
             onChange={setMethod}
           />
-          <label className="space-y-1 text-[12px]">
+          <label className="space-y-1 text-12">
             <span>Operation path</span>
             <Input
               aria-label="Operation path"
@@ -824,13 +824,13 @@ export function PoolHealthDialog({
               className="flex items-center justify-between gap-3 rounded-xl border border-border/50 p-3"
             >
               <div>
-                <p className="text-[12px] font-medium">
+                <p className="text-12 font-medium">
                   {row.slug}{" "}
                   <Badge variant={row.eligible ? "success" : "warning"}>
                     {reason(row)}
                   </Badge>
                 </p>
-                <p className="text-[11px] text-muted-foreground">
+                <p className="text-11 text-muted-foreground">
                   {row.credential_binding} · {row.consecutive_failures} failures
                   {row.last_status ? ` · HTTP ${row.last_status}` : ""}
                   {row.cooldown_until
@@ -949,7 +949,7 @@ export function ServicePoolsTab({
           onClick={() => onCreateOpenChange(true)}
         />
       </div>
-      <p className="text-[12px] text-muted-foreground">
+      <p className="text-12 text-muted-foreground">
         Route through <code>/api/v1/proxy/s/&lt;slug&gt;</code>. AI chat pools
         also accept <code>model: pool:&lt;slug&gt;</code> at the LLM gateway.
       </p>
@@ -963,7 +963,7 @@ export function ServicePoolsTab({
       )}
       {pools.isLoading && <Skeleton className="h-24" />}
       {pools.data?.length === 0 && (
-        <div className="rounded-xl border border-border/50 bg-card p-6 text-center text-[12px] text-muted-foreground">
+        <div className="rounded-xl border border-border/50 bg-card p-6 text-center text-12 text-muted-foreground">
           No service pools for this owner. Create a pool to group compatible
           connections.
         </div>
@@ -1015,8 +1015,8 @@ export function ServicePoolsTab({
                 className="flex items-center justify-between rounded-xl border border-border/50 bg-card p-4"
               >
                 <div>
-                  <p className="text-[13px] font-medium">{pool.name}</p>
-                  <p className="text-[12px] text-muted-foreground">
+                  <p className="text-13 font-medium">{pool.name}</p>
+                  <p className="text-12 text-muted-foreground">
                     {pool.slug} · {strategyLabels[pool.strategy]} ·{" "}
                     {pool.is_active ? "Enabled" : "Disabled"}
                   </p>

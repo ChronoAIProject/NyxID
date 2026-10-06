@@ -23,7 +23,7 @@ export function AccessEntries({
     groups.set(id, [...(groups.get(id) ?? []), entry]);
   }
   return (
-    <div className="space-y-2 text-[11px]">
+    <div className="space-y-2 text-11">
       <h4 className="font-semibold">{label}</h4>
       {[...groups].map(([id, items]) => (
         <div key={id} className="space-y-1">
@@ -86,7 +86,7 @@ export function LoginGrantReview({
             <h3
               ref={heading}
               tabIndex={-1}
-              className="min-w-0 break-words text-[15px] font-semibold outline-none"
+              className="min-w-0 break-words text-15 font-semibold outline-none"
             >
               {apiKey.name}
             </h3>
@@ -94,7 +94,7 @@ export function LoginGrantReview({
               {kind === "new" ? "Creates new key" : "Existing key"}
             </Badge>
           </div>
-          <p className="break-words text-[11px] text-muted-foreground">
+          <p className="break-words text-11 text-muted-foreground">
             {apiKey.owner_name} ·{" "}
             {expiry
               ? `Expires ${new Date(expiry).toLocaleDateString()}`
@@ -102,7 +102,7 @@ export function LoginGrantReview({
           </p>
         </div>
       </div>
-      <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+      <div className="flex flex-wrap items-center justify-between gap-2 text-11">
         <p className="font-medium">Allow this device to access</p>
         <span
           className={
@@ -120,7 +120,7 @@ export function LoginGrantReview({
       {(apiKey.allow_all_services ||
         apiKey.allow_auto_connected_services ||
         apiKey.allow_all_nodes) && (
-        <p className="text-[11px] text-warning">
+        <p className="text-11 text-warning">
           {apiKey.allow_all_services
             ? "All current and future services. "
             : apiKey.allow_auto_connected_services
@@ -130,7 +130,7 @@ export function LoginGrantReview({
         </p>
       )}
       <details className="group border-t border-border">
-        <summary className="flex cursor-pointer list-none items-center gap-2 py-3 text-[11px] font-medium text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-primary [&::-webkit-details-marker]:hidden">
+        <summary className="flex cursor-pointer list-none items-center gap-2 py-3 text-11 font-medium text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-primary [&::-webkit-details-marker]:hidden">
           Customize
           <ChevronDown
             aria-hidden="true"

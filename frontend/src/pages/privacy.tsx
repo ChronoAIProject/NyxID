@@ -18,7 +18,7 @@ function Section({
   return (
     <section className="space-y-3">
       <h2 className="text-base font-semibold text-foreground">{title}</h2>
-      <div className="space-y-2 text-[12px] leading-relaxed text-muted-foreground">
+      <div className="space-y-2 text-12 leading-relaxed text-muted-foreground">
         {children}
       </div>
     </section>
@@ -99,7 +99,7 @@ export function PrivacyPage() {
               <li>User-agent string and device type</li>
               <li>Timestamps of login events and API requests</li>
             </ul>
-            <p className="mt-2 text-muted-foreground text-[12px]">
+            <p className="mt-2 text-muted-foreground text-12">
               These are received by our servers as part of normal HTTPS
               requests. The web application does not collect, store, or share
               this technical metadata beyond what the server needs for security

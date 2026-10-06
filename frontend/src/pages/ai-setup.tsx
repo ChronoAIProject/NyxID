@@ -50,7 +50,7 @@ function CodeBlock({
 }) {
   return (
     <div className="space-y-2">
-      <Badge variant="secondary" className="text-[10px]">
+      <Badge variant="secondary" className="text-10">
         {label}
       </Badge>
       <div className="relative">
@@ -75,7 +75,7 @@ function EmptyState() {
   return (
     <div className="flex flex-col items-center gap-1 py-12">
       <BrainIcon className="h-48 w-48 text-muted-foreground" />
-      <p className="text-[12px] text-muted-foreground">
+      <p className="text-12 text-muted-foreground">
         Create an OAuth client first to generate AI setup configs.
       </p>
     </div>
@@ -173,7 +173,7 @@ function AiSkillSetupCard({
                     variant={
                       skillInfo.type === "auto-refresh" ? "default" : "secondary"
                     }
-                    className="text-[10px]"
+                    className="text-10"
                   >
                     {skillInfo.type === "auto-refresh"
                       ? "Auto-refresh"
@@ -183,7 +183,7 @@ function AiSkillSetupCard({
                           ? "Provider-level"
                           : "Per-session"}
                   </Badge>
-                  <span className="text-[11px] text-muted-foreground">
+                  <span className="text-11 text-muted-foreground">
                     {skillInfo.note}
                   </span>
                 </div>
@@ -192,18 +192,18 @@ function AiSkillSetupCard({
           ))}
         </Tabs>
 
-        <p className="text-[11px] text-muted-foreground">
+        <p className="text-11 text-muted-foreground">
           Skills are powered by the NyxID playbook at{" "}
-          <code className="rounded bg-muted px-1 py-0.5 text-[10px]">
+          <code className="rounded bg-muted px-1 py-0.5 text-10">
             {baseUrl}/llms.txt
           </code>
           . Tools with auto-refresh fetch the latest version automatically.
           Check skill status:{" "}
-          <code className="rounded bg-muted px-1 py-0.5 text-[10px]">
+          <code className="rounded bg-muted px-1 py-0.5 text-10">
             nyxid ai-setup status
           </code>
           . Update the CLI by re-running the installer:{" "}
-          <code className="rounded bg-muted px-1 py-0.5 text-[10px]">
+          <code className="rounded bg-muted px-1 py-0.5 text-10">
             bash -c &quot;$(curl -fsSL ...install.sh)&quot;
           </code>
         </p>
@@ -289,10 +289,10 @@ export function AiSetupPage() {
   return (
     <div className="space-y-8">
       <div>
-        <h2 className="text-[28px] font-bold leading-none tracking-tight" style={{ letterSpacing: "-0.03em" }}>
+        <h2 className="text-28 font-bold leading-none tracking-tight" style={{ letterSpacing: "-0.03em" }}>
           AI Setup Guide
         </h2>
-        <p className="text-[12px] text-muted-foreground">
+        <p className="text-12 text-muted-foreground">
           Configure your AI coding assistant to work with NyxID. Pick a tool and
           an app, copy the config, done.
         </p>
@@ -305,7 +305,7 @@ export function AiSetupPage() {
               <Shield className="h-4 w-4 text-primary" />
             </div>
             <div className="space-y-1">
-              <h3 className="text-[13px] font-semibold text-foreground">
+              <h3 className="text-13 font-semibold text-foreground">
                 Isolate this AI agent before handing it credentials
               </h3>
               <p className="max-w-2xl text-xs text-muted-foreground">
@@ -353,7 +353,7 @@ export function AiSetupPage() {
             <CardContent className="space-y-6">
               {/* App selector */}
               <div className="space-y-2">
-                <label className="text-[12px] font-medium">OAuth Client</label>
+                <label className="text-12 font-medium">OAuth Client</label>
                 <Select
                   value={selectedClient?.id ?? ""}
                   onValueChange={setSelectedClientId}
@@ -366,7 +366,7 @@ export function AiSetupPage() {
                       <SelectItem key={client.id} value={client.id}>
                         <span className="flex items-center gap-2">
                           {client.client_name}
-                          <Badge variant="secondary" className="text-[10px]">
+                          <Badge variant="secondary" className="text-10">
                             {client.client_type}
                           </Badge>
                         </span>
@@ -394,7 +394,7 @@ export function AiSetupPage() {
                   <TabsContent key={tool.id} value={tool.id}>
                     <div className="space-y-4">
                       {tool.configFilePath && (
-                        <p className="text-[12px] text-muted-foreground">
+                        <p className="text-12 text-muted-foreground">
                           Save to{" "}
                           <code className="rounded bg-muted px-1.5 py-0.5 text-xs">
                             {tool.configFilePath}
@@ -429,7 +429,7 @@ export function AiSetupPage() {
                 <CardTitle>Client Details</CardTitle>
               </CardHeader>
               <CardContent>
-                <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-2 text-[12px]">
+                <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-2 text-12">
                   <dt className="text-muted-foreground">Client ID</dt>
                   <dd className="text-xs">{selectedClient.id}</dd>
                   <dt className="text-muted-foreground">Type</dt>

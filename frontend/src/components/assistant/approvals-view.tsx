@@ -91,10 +91,10 @@ function PendingSection({
         <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-success/25 bg-success/[0.06]">
           <ShieldCheck className="h-5 w-5 text-success" />
         </div>
-        <p className="mt-3 text-[13px] font-medium text-foreground">
+        <p className="mt-3 text-13 font-medium text-foreground">
           Nothing waiting on you
         </p>
-        <p className="mt-1 text-[11px] text-muted-foreground">
+        <p className="mt-1 text-11 text-muted-foreground">
           Approval requests show up here when a write needs your sign-off.
         </p>
       </div>
@@ -105,14 +105,14 @@ function PendingSection({
     <>
       {/* A div, not a p: `Badge` renders a div, which is invalid inside a p and
           gets reparented by the browser. */}
-      <div className="mb-2.5 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[1.5px] text-text-tertiary">
+      <div className="mb-2.5 flex items-center gap-2 text-10 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
         Waiting on you
         <Badge variant="warning">{entries.length}</Badge>
       </div>
       <div className="space-y-5">
         {entries.map((entry) => (
           <div key={entry.requestId}>
-            <p className="mb-2 flex items-center gap-1.5 text-[12px] font-medium text-muted-foreground">
+            <p className="mb-2 flex items-center gap-1.5 text-12 font-medium text-muted-foreground">
               <ServiceIcon slug={`api-${entry.block.service_slug}`} size="xs" />
               <span className="truncate">{entry.serviceName}</span>
             </p>
@@ -134,7 +134,7 @@ function HistorySection({
 }) {
   if (entries.length === 0) {
     return (
-      <div className="rounded-lg bg-overlay px-4 py-3 text-[12px] text-muted-foreground">
+      <div className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">
         Decided approvals will show up here.
       </div>
     );
@@ -150,22 +150,22 @@ function HistorySection({
             className="rounded-xl border border-border/50 bg-card p-4"
           >
             <div className="flex items-start justify-between gap-2">
-              <p className="min-w-0 text-[13px] font-medium text-foreground line-clamp-2">
+              <p className="min-w-0 text-13 font-medium text-foreground line-clamp-2">
                 {entry.block.body}
               </p>
               {entry.block.decision !== null &&
                 getDecisionBadge(entry.block.decision)}
             </div>
-            <p className="mt-1.5 flex items-center gap-1.5 text-[11px] text-muted-foreground">
+            <p className="mt-1.5 flex items-center gap-1.5 text-11 text-muted-foreground">
               <ServiceCell slug={entry.block.service_slug} />
               {entry.block.decision_channel !== null &&
                 `via ${channelLabel(entry.block.decision_channel)}`}
             </p>
             <div className="mt-3 flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
-              <span className="text-[11px] text-muted-foreground">
+              <span className="text-11 text-muted-foreground">
                 {formatDate(entry.decidedAt ?? entry.requestedAt)}
               </span>
-              <span className="text-[11px] text-text-tertiary">
+              <span className="text-11 text-text-tertiary">
                 {entry.block.agent_key_prefix}
               </span>
             </div>
@@ -196,7 +196,7 @@ function HistorySection({
                     >
                       {entry.block.body}
                     </span>
-                    <span className="text-[11px] text-text-tertiary">
+                    <span className="text-11 text-text-tertiary">
                       {entry.block.agent_key_prefix}
                     </span>
                   </div>
@@ -272,10 +272,10 @@ export function ApprovalsView() {
   return (
     <div className="h-full min-h-0 overflow-y-auto overscroll-contain">
       <div className="px-5 pt-6 sm:px-8">
-        <h1 className="text-[22px] font-bold tracking-[-0.03em] sm:text-[28px]">
+        <h1 className="text-22 font-bold tracking-[-0.03em] sm:text-28">
           Approvals
         </h1>
-        <p className="mt-1 max-w-2xl text-[12px] text-muted-foreground">
+        <p className="mt-1 max-w-2xl text-12 text-muted-foreground">
           Write actions gated by your NyxID policy wait here for your decision.
           Deciding here, in Telegram, or on mobile converges to the same result.
         </p>
@@ -295,7 +295,7 @@ export function ApprovalsView() {
           <>
             {approvals.isError ? (
               <div className="mb-4 flex items-center justify-between gap-3 rounded-xl border border-dashed border-border px-4 py-2.5">
-                <p className="text-[12px] text-muted-foreground">
+                <p className="text-12 text-muted-foreground">
                   Approvals may be out of date until the backend responds.
                 </p>
                 <Button
@@ -311,7 +311,7 @@ export function ApprovalsView() {
             ) : null}
             <PendingSection entries={pending} onDecide={handleDecide} />
 
-            <p className="mb-2.5 mt-8 text-[10px] font-semibold uppercase tracking-[1.5px] text-text-tertiary">
+            <p className="mb-2.5 mt-8 text-10 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
               History
             </p>
             <HistorySection entries={decided} />

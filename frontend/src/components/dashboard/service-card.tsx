@@ -48,7 +48,7 @@ export function ServiceCard({
 
   return (
     <div
-      className="group relative flex cursor-pointer flex-col gap-4 rounded-xl border border-border/50 bg-transparent p-4 transition-colors duration-300 hover:border-white/[0.15]"
+      className="group relative flex cursor-pointer flex-col gap-4 rounded-xl border border-border/50 bg-transparent p-4 transition-colors duration-300 hover:border-hairline-strong"
       onClick={() =>
         void navigate({
           to: "/services/$serviceId",
@@ -98,7 +98,7 @@ export function ServiceCard({
 
       {/* Description (if exists) */}
       {service.description && (
-        <p className="text-[12px] text-muted-foreground line-clamp-2">
+        <p className="text-12 text-muted-foreground line-clamp-2">
           {service.description}
         </p>
       )}

@@ -58,7 +58,7 @@ export function PlatformServiceFields({
   return (
     <div className="space-y-5">
       <section className="space-y-3">
-        <h3 className="text-[13px] font-semibold">Inference</h3>
+        <h3 className="text-13 font-semibold">Inference</h3>
         <Label htmlFor="inference-protocol">Wire protocol</Label>
         <Select
           value={inference?.wire_protocol ?? "none"}
@@ -119,7 +119,7 @@ export function PlatformServiceFields({
       </section>
       {credentialSupported && (
         <section className="space-y-3">
-          <h3 className="text-[13px] font-semibold">Platform key</h3>
+          <h3 className="text-13 font-semibold">Platform key</h3>
           {!form.watch("platform_key") && service?.legacy_public_master && (
             <p className="text-xs text-muted-foreground">
               Enabled, public (implicit)
@@ -197,7 +197,7 @@ export function PlatformServiceFields({
         </section>
       )}
       <section className="space-y-3">
-        <h3 className="text-[13px] font-semibold">Endpoint policy</h3>
+        <h3 className="text-13 font-semibold">Endpoint policy</h3>
         <p className="text-xs text-muted-foreground">
           These HTTP method and path rules apply to every binding of this
           service, including own keys, platform keys, and agents. An empty
@@ -307,7 +307,7 @@ export function PlatformServiceFields({
         )}
       </section>
       <section className="space-y-3">
-        <h3 className="text-[13px] font-semibold">Billing lanes</h3>
+        <h3 className="text-13 font-semibold">Billing lanes</h3>
         {!form.watch("byok_pricing") && !form.watch("platform_key_pricing") && (
           <p className="text-xs text-muted-foreground">
             No lane prices are configured. Legacy billing below still applies.
@@ -513,7 +513,7 @@ export function PlatformServiceFields({
                     >
                       Add component
                     </Button>
-                    <p className="text-[11px] text-muted-foreground">
+                    <p className="text-11 text-muted-foreground">
                       Prices support up to 12 decimal places. Each unit is
                       charged separately.
                     </p>

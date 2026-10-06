@@ -193,7 +193,7 @@ export function AdminServiceAccountsPage() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <RoboticArmIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-[12px] font-medium text-muted-foreground">Failed to load service accounts</p>
+            <p className="text-12 font-medium text-muted-foreground">Failed to load service accounts</p>
             <p className="text-xs text-muted-foreground">Please try again later.</p>
           </div>
         </div>
@@ -201,7 +201,7 @@ export function AdminServiceAccountsPage() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <RoboticArmIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-[12px] font-medium text-muted-foreground">No service accounts found</p>
+            <p className="text-12 font-medium text-muted-foreground">No service accounts found</p>
             <p className="text-xs text-muted-foreground">
               {search
                 ? "No service accounts match your search."
@@ -216,7 +216,7 @@ export function AdminServiceAccountsPage() {
             {accounts.map((sa) => (
               <div
                 key={sa.id}
-                className="rounded-xl border border-border/50 bg-card p-4 transition-colors hover:bg-white/[0.03] cursor-pointer"
+                className="rounded-xl border border-border/50 bg-card p-4 transition-colors hover:bg-overlay cursor-pointer"
                 tabIndex={0}
                 role="link"
                 onClick={() =>
@@ -317,7 +317,7 @@ export function AdminServiceAccountsPage() {
           </div>
 
           <div className="flex items-center justify-between">
-            <p className="text-[11px] text-text-tertiary">
+            <p className="text-11 text-text-tertiary">
               Showing {String((page - 1) * PER_PAGE + 1)}-
               {String(Math.min(page * PER_PAGE, total))} of {String(total)}{" "}
               service accounts
@@ -332,7 +332,7 @@ export function AdminServiceAccountsPage() {
               >
                 <ChevronLeft className="h-3 w-3" />
               </Button>
-              <span className="text-[11px] text-text-tertiary">
+              <span className="text-11 text-text-tertiary">
                 Page {String(page)} of {String(totalPages)}
               </span>
               <Button

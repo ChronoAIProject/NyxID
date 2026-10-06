@@ -120,7 +120,7 @@ export function InviteDialog({ orgId, open, onOpenChange }: InviteDialogProps) {
                 Invite link
               </p>
               <div className="flex items-center justify-between gap-2">
-                <span className="break-all text-[12px] text-foreground">
+                <span className="break-all text-12 text-foreground">
                   {buildOrgInviteJoinUrl(createdInvite.nonce)}
                 </span>
                 <Button
@@ -201,7 +201,7 @@ export function InviteDialog({ orgId, open, onOpenChange }: InviteDialogProps) {
               />
 
               {form.formState.errors.root && (
-                <p className="text-[12px] text-destructive">
+                <p className="text-12 text-destructive">
                   {form.formState.errors.root.message}
                 </p>
               )}

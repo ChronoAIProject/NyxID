@@ -100,13 +100,13 @@ export function FilterPicker({
       </PopoverTrigger>
       <PopoverContent align="start" className="w-80 space-y-3 p-3">
         <div className="flex items-center justify-between">
-          <span className="text-[12px] font-medium">{label}</span>
-          <span className="text-[11px] text-muted-foreground">
+          <span className="text-12 font-medium">{label}</span>
+          <span className="text-11 text-muted-foreground">
             {draft.length} selected
           </span>
         </div>
         {description && (
-          <p className="-mt-1.5 text-[11px] text-muted-foreground">
+          <p className="-mt-1.5 text-11 text-muted-foreground">
             {description}
           </p>
         )}
@@ -154,7 +154,7 @@ export function FilterPicker({
                 <span className="min-w-0">
                   <span className="block truncate">{option.label}</span>
                   {option.detail && (
-                    <span className="block truncate text-[10px] text-muted-foreground">
+                    <span className="block truncate text-10 text-muted-foreground">
                       {option.detail}
                     </span>
                   )}
@@ -162,12 +162,12 @@ export function FilterPicker({
               </Button>
             ))}
             {options.options.length === 0 && (
-              <p className="p-2 text-[12px] text-muted-foreground">
+              <p className="p-2 text-12 text-muted-foreground">
                 No matches.
               </p>
             )}
             {options.total > options.options.length && (
-              <p className="text-[10px] text-muted-foreground">
+              <p className="text-10 text-muted-foreground">
                 Search to narrow {options.total.toLocaleString()} matches.
               </p>
             )}
@@ -253,7 +253,7 @@ export function AnalyticsSelect({
     >
       <label
         htmlFor={id}
-        className="whitespace-nowrap text-[10px] font-medium text-muted-foreground"
+        className="whitespace-nowrap text-10 font-medium text-muted-foreground"
       >
         {label}
       </label>

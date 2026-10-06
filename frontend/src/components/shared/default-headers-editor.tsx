@@ -158,7 +158,7 @@ export function DefaultHeadersEditor({
                         className="font-mono text-xs"
                       />
                       {warning && (
-                        <p className="mt-1 text-[11px] text-destructive">
+                        <p className="mt-1 text-11 text-destructive">
                           {warning}
                         </p>
                       )}
@@ -176,7 +176,7 @@ export function DefaultHeadersEditor({
                         className="font-mono text-xs"
                       />
                       {valueError && (
-                        <p className="mt-1 text-[11px] text-destructive">
+                        <p className="mt-1 text-11 text-destructive">
                           {valueError}
                         </p>
                       )}
@@ -226,7 +226,7 @@ export function DefaultHeadersEditor({
       )}
 
       <div className="flex items-center justify-between">
-        <p className="text-[11px] text-muted-foreground">
+        <p className="text-11 text-muted-foreground">
           {value.length} / {MAX_DEFAULT_HEADERS} headers. Values stored in
           plaintext; do not place real secrets here.
         </p>
@@ -316,17 +316,17 @@ function ReadOnlyHeadersList({
               </TableCell>
               <TableCell className="space-x-1">
                 {row.overridable && (
-                  <Badge variant="secondary" className="text-[10px]">
+                  <Badge variant="secondary" className="text-10">
                     overridable
                   </Badge>
                 )}
                 {row.sensitive && (
-                  <Badge variant="secondary" className="text-[10px]">
+                  <Badge variant="secondary" className="text-10">
                     sensitive
                   </Badge>
                 )}
                 {fromCatalog && (
-                  <Badge variant="secondary" className="text-[10px]">
+                  <Badge variant="secondary" className="text-10">
                     from catalog
                   </Badge>
                 )}

@@ -72,13 +72,13 @@ export function MemberRow({
     <TableRow>
       <TableCell>
         <div className="flex flex-col gap-0.5">
-          <span className="text-[12px] font-medium text-foreground">
+          <span className="text-12 font-medium text-foreground">
             {displayName}
             {isSelf && (
               <span className="ml-2 text-xs text-muted-foreground">(you)</span>
             )}
             {hasCustomScope && (
-              <Badge variant="info" className="ml-2 align-middle text-[11px]">
+              <Badge variant="info" className="ml-2 align-middle text-11">
                 Custom scope
               </Badge>
             )}

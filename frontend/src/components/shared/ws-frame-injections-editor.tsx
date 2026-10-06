@@ -152,7 +152,7 @@ export function WsFrameInjectionsEditor({
         hasErrors ? "border-destructive" : "border-border/50",
       )}
     >
-      <summary className="cursor-pointer text-[13px] font-semibold text-foreground">
+      <summary className="cursor-pointer text-13 font-semibold text-foreground">
         WebSocket auth frames
       </summary>
       <div className="mt-4 space-y-3">
@@ -367,7 +367,7 @@ export function WsFrameInjectionsEditor({
                 />
                 <Label
                   htmlFor={`ws-consume-trigger-${index}`}
-                  className="text-[12px] font-normal"
+                  className="text-12 font-normal"
                 >
                   Consume trigger frame
                 </Label>
@@ -376,7 +376,7 @@ export function WsFrameInjectionsEditor({
               <div className="space-y-1.5">
                 <Label>Injected frame template</Label>
                 <textarea
-                  className="flex min-h-[96px] w-full rounded-lg border border-input bg-transparent px-3 py-2 font-mono text-xs placeholder:text-muted-foreground focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+                  className="flex min-h-[96px] w-full rounded-lg border border-input bg-transparent px-3 py-2 font-mono text-xs placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus disabled:cursor-not-allowed disabled:opacity-50"
                   value={rule.template}
                   maxLength={4096}
                   placeholder='{"type":"auth","access_token":"${credential}"}'

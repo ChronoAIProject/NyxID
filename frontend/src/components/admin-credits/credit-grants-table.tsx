@@ -70,13 +70,13 @@ export function CreditGrantsTable({
                       grant.recipient_user_id}
                   </div>
                   {grant.recipient_display_name && grant.recipient_email ? (
-                    <div className="text-[11px] text-muted-foreground">
+                    <div className="text-11 text-muted-foreground">
                       {grant.recipient_email}
                     </div>
                   ) : null}
                   {grant.target_kind === "org_members" ||
                   grant.target_kind === "groups" ? (
-                    <div className="text-[11px] text-muted-foreground">
+                    <div className="text-11 text-muted-foreground">
                       {billingTargetLabel(grant)}
                     </div>
                   ) : null}
@@ -84,7 +84,7 @@ export function CreditGrantsTable({
                 </TableCell>
                 <TableCell>
                   {formatCredits(grant.remaining ?? grant.remaining_micros)}{" "}
-                  <span className="text-[11px] text-muted-foreground">
+                  <span className="text-11 text-muted-foreground">
                     of {formatCredits(grant.amount ?? grant.amount_micros)}
                   </span>
                 </TableCell>
@@ -135,7 +135,7 @@ export function CreditGrantsTable({
         </Table>
       </div>
       {pageCount > 1 ? (
-        <div className="flex items-center justify-between text-[12px] text-muted-foreground">
+        <div className="flex items-center justify-between text-12 text-muted-foreground">
           <span>
             Page {page} of {pageCount}
           </span>

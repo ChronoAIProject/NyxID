@@ -75,10 +75,10 @@ export function MfaVerifyForm({ returnTo }: MfaVerifyFormProps) {
         <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-primary/10">
           <ShieldCheck className="h-6 w-6 text-primary" aria-hidden="true" />
         </div>
-        <h1 className="text-[28px] font-normal tracking-tight">
+        <h1 className="text-28 font-normal tracking-tight">
           MFA verification
         </h1>
-        <p className="text-[12px] text-muted-foreground">
+        <p className="text-12 text-muted-foreground">
           Enter the 6-digit code from your authenticator app
         </p>
       </div>
@@ -88,7 +88,7 @@ export function MfaVerifyForm({ returnTo }: MfaVerifyFormProps) {
           {form.formState.errors.root && (
             <div
               role="alert"
-              className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive"
+              className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive"
             >
               {form.formState.errors.root.message}
             </div>

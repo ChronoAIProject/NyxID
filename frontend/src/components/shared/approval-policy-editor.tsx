@@ -134,7 +134,7 @@ export function ApprovalPolicyEditor({
       </div>
 
       {draftRules.length === 0 ? (
-        <div className="rounded-lg bg-white/[0.03] px-3 py-2 text-xs text-muted-foreground">
+        <div className="rounded-lg bg-overlay px-3 py-2 text-xs text-muted-foreground">
           No advanced rules configured.
         </div>
       ) : (
@@ -145,7 +145,7 @@ export function ApprovalPolicyEditor({
               className="space-y-3 rounded-lg border border-border p-3"
             >
               <div className="flex items-center justify-between gap-3">
-                <span className="text-[12px] font-medium">
+                <span className="text-12 font-medium">
                   Rule {index + 1}
                 </span>
                 <Button

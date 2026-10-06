@@ -278,8 +278,8 @@ export function AiKeyConfirm({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-[28px] font-normal">{title}</h2>
-        <p className="text-[12px] text-muted-foreground">{subtitle}</p>
+        <h2 className="font-serif text-28 font-normal">{title}</h2>
+        <p className="text-12 text-muted-foreground">{subtitle}</p>
       </div>
 
       <OwnerPicker value={targetOrgId} onChange={setTargetOrgId} />
@@ -445,8 +445,8 @@ function ManageScopesPanel({
   if (!isOAuth || !entry.provider_config_id || entry.supports_oauth_scopes === false) {
     return (
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-[28px] font-normal">Manage permissions</h2>
-        <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[12px]">
+        <h2 className="font-serif text-28 font-normal">Manage permissions</h2>
+        <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-12">
           {entry.name} doesn't support managing scopes here — its permissions
           are fixed by the provider.
         </p>
@@ -482,8 +482,8 @@ function ManageScopesPanel({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-[28px] font-normal">Manage permissions</h2>
-        <p className="text-[12px] text-muted-foreground">
+        <h2 className="font-serif text-28 font-normal">Manage permissions</h2>
+        <p className="text-12 text-muted-foreground">
           Adjust what {key.label} can do, then re-authorize at the provider.
           Your CLI is waiting for you to finish here.
         </p>
@@ -538,7 +538,7 @@ function OwnerPicker({
           <OrgScopeSelect value={value} onChange={onChange} label="Owner" />
         </div>
       </div>
-      <p className="mt-1 text-[11px] text-muted-foreground">
+      <p className="mt-1 text-11 text-muted-foreground">
         Org-owned services are shared with every admin of that organization
         and can be proxied by its members.
       </p>
@@ -803,7 +803,7 @@ function CustomServiceForm({
                 setAuthKeyName(defaultAuthKeyName(next));
               }
             }}
-            className="flex h-10 w-full rounded-lg border border-input bg-transparent px-[14px] py-2 text-[13px] text-foreground focus-visible:outline-none"
+            className="flex h-10 w-full rounded-lg border border-input bg-transparent px-[14px] py-2 text-13 text-foreground focus-visible:outline-none focus-visible:border-input-focus"
             aria-required="true"
           >
             <option value="bearer">bearer (Authorization: Bearer …)</option>
@@ -876,10 +876,10 @@ function CustomServiceForm({
           // re-runs the CLI with a different `--via-node`.
           <div className="rounded-lg border border-border bg-muted/40 px-3 py-2">
             <p className="text-xs font-medium text-foreground">Routed via node</p>
-            <code className="font-mono text-[11px] text-muted-foreground">
+            <code className="font-mono text-11 text-muted-foreground">
               {viaNode}
             </code>
-            <p className="text-[11px] text-muted-foreground mt-1">
+            <p className="text-11 text-muted-foreground mt-1">
               Credential will be encrypted and pushed to this node over
               the existing WebSocket channel. NyxID never logs it.
             </p>
@@ -1087,7 +1087,7 @@ function CatalogConfirmForm({
   if (entry.service_type === "ssh") {
     return (
       <div className="flex flex-col gap-3">
-        <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[12px]">
+        <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-12">
           {entry.name} is an SSH service. Use{" "}
           <code>nyxid service add-ssh</code> from your CLI instead
           (certificate-based auth, not a credential binding).
@@ -1117,7 +1117,7 @@ function CatalogConfirmForm({
       `/keys?tab=services&slug=${encodeURIComponent(entry.slug)}`;
     return (
       <div className="flex flex-col gap-3">
-        <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[12px]">
+        <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-12">
           {entry.name} uses <code>{entry.auth_method}</code> auth,
           which isn't supported via remote pairing. Complete setup on
           the main Keys page. Your CLI will receive a cancel and
@@ -1362,10 +1362,10 @@ function CatalogConfirmForm({
         {viaNode ? (
           <div className="rounded-lg border border-border bg-muted/40 px-3 py-2">
             <p className="text-xs font-medium text-foreground">Routed via node</p>
-            <code className="font-mono text-[11px] text-muted-foreground">
+            <code className="font-mono text-11 text-muted-foreground">
               {viaNode}
             </code>
-            <p className="text-[11px] text-muted-foreground mt-1">
+            <p className="text-11 text-muted-foreground mt-1">
               Credential will be configured on the node agent. NyxID
               never sees or stores it.
             </p>
@@ -1408,7 +1408,7 @@ function Field({
 
 function ErrorLine({ message }: { readonly message: string }) {
   return (
-    <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-[12px] text-destructive">
+    <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-12 text-destructive">
       {message}
     </p>
   );

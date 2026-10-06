@@ -82,7 +82,7 @@ function GroupMessageRow({
 }) {
   if (message.role === "notice") {
     return (
-      <p role="note" aria-label="Group notice" className="px-8 text-center text-[11px] text-text-tertiary">
+      <p role="note" aria-label="Group notice" className="px-8 text-center text-11 text-text-tertiary">
         {message.text}
       </p>
     );
@@ -90,7 +90,7 @@ function GroupMessageRow({
   if (message.role === "user") {
     return (
       <div className="ml-[30px] flex justify-end">
-        <div className="max-w-[78%] whitespace-pre-wrap break-words rounded-lg bg-overlay-strong px-3 py-2 text-[12px] leading-relaxed text-foreground">
+        <div className="max-w-[78%] whitespace-pre-wrap break-words rounded-lg bg-overlay-strong px-3 py-2 text-12 leading-relaxed text-foreground">
           <UserText text={message.text} names={names} />
         </div>
       </div>
@@ -116,13 +116,13 @@ function GroupMessageRow({
       </button>
       <div className="min-w-0">
         <div className="mb-0.5 flex items-baseline gap-2">
-          <span className="text-[12px] font-medium text-foreground">{title}</span>
-          {handle ? <span className="text-[11px] text-text-tertiary">{handle}</span> : null}
+          <span className="text-12 font-medium text-foreground">{title}</span>
+          {handle ? <span className="text-11 text-text-tertiary">{handle}</span> : null}
           {agent.kind === "nyxbot" ? (
-            <span className="text-[10px] text-text-tertiary">Personal agent</span>
+            <span className="text-10 text-text-tertiary">Personal agent</span>
           ) : null}
           {time ? (
-            <time dateTime={message.created_at} className="font-mono text-[11px] text-text-tertiary">
+            <time dateTime={message.created_at} className="font-mono text-11 text-text-tertiary">
               {time}
             </time>
           ) : null}
@@ -210,7 +210,7 @@ function GroupTranscript({
           </Button>
         ) : null}
         {!messages.length ? (
-          <p className="flex flex-1 items-center justify-center px-6 text-center text-[12px] text-text-tertiary">
+          <p className="flex flex-1 items-center justify-center px-6 text-center text-12 text-text-tertiary">
             Say hello. Mention an agent with @ to ask it directly.
           </p>
         ) : null}
@@ -231,7 +231,7 @@ function GroupTranscript({
             <span className="flex w-6 justify-center">
               <AgentAvatar agent={working[0]!} size="md" />
             </span>
-            <span className="flex items-center gap-2 text-[11px] text-muted-foreground">
+            <span className="flex items-center gap-2 text-11 text-muted-foreground">
               <WorkingDots />
               {workingLabel(working.map((member) => agentTitle(member)))}
             </span>
@@ -286,7 +286,7 @@ function GroupHeader({
     <div className="shrink-0 px-4 pt-3 sm:px-6">
       <div className="mx-auto w-full max-w-[758px] space-y-1.5">
         <div className="flex items-center gap-3">
-          <h2 className="min-w-0 truncate text-[13px] font-semibold text-foreground">
+          <h2 className="min-w-0 truncate text-13 font-semibold text-foreground">
             {group.name}
           </h2>
           <div aria-label="Members" role="group" className="flex items-center gap-1">
@@ -299,7 +299,7 @@ function GroupHeader({
             ))}
           </div>
           {working ? (
-            <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+            <span className="flex items-center gap-1.5 text-11 text-muted-foreground">
               <span aria-hidden="true" className="h-1.5 w-1.5 animate-pulse rounded-full bg-success" />
               {working} working
             </span>
@@ -315,7 +315,7 @@ function GroupHeader({
             Settings
           </Button>
         </div>
-        <p className="text-[11px] text-text-tertiary">
+        <p className="text-11 text-text-tertiary">
           {lead ? `Messages go to ${agentTitle(lead)}` : "Messages go to the first agent"} unless you
           @mention someone. Agents hand work to each other the same way.
         </p>
@@ -362,7 +362,7 @@ export function GroupPendingActions({
               aria-label={`Confirm: ${action.summary}`}
               className="flex items-center gap-3 rounded-lg border border-border bg-overlay px-3 py-2"
             >
-              <p className="min-w-0 flex-1 text-[12px] text-foreground">
+              <p className="min-w-0 flex-1 text-12 text-foreground">
                 <span className="font-medium">{who}</span> wants to: {action.summary}
               </p>
               <Button
@@ -481,7 +481,7 @@ export function NyxAgentGroupPage({
           </>
         ) : transcript.error ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
-            <p className="text-[12px] text-muted-foreground">
+            <p className="text-12 text-muted-foreground">
               Could not open this group. {transcript.error.message}
             </p>
             <Button variant="outline" size="sm" onClick={() => goTo()}>
@@ -489,7 +489,7 @@ export function NyxAgentGroupPage({
             </Button>
           </div>
         ) : (
-          <div className="flex flex-1 items-center justify-center text-[12px] text-text-tertiary">
+          <div className="flex flex-1 items-center justify-center text-12 text-text-tertiary">
             Loading group...
           </div>
         )}

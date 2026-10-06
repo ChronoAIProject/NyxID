@@ -288,7 +288,7 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
           <div className="flex items-center justify-between">
             <div>
               <CardTitle className="flex items-center gap-2">
-                <span className="flex h-8 w-8 items-center justify-center rounded-[8px] border border-white/[0.08] bg-white/[0.04]">
+                <span className="flex h-8 w-8 items-center justify-center rounded-[8px] border border-hairline bg-overlay">
                   <Shield className="h-4 w-4" aria-hidden="true" />
                 </span>
                 Org Approval Policies
@@ -324,12 +324,12 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
               <ErrorBanner message="Failed to load org approval policies. Try refreshing the page." onRetry={refetchConfigs} />
             </div>
           ) : orgServices.length === 0 ? (
-            <div className="rounded-lg bg-white/[0.03] px-4 py-3 text-[12px] text-muted-foreground">
+            <div className="rounded-lg bg-overlay px-4 py-3 text-12 text-muted-foreground">
               No org-owned services yet. Add a key to this org before
               configuring approval policies.
             </div>
           ) : serviceConfigs?.configs.length === 0 ? (
-            <div className="rounded-lg bg-white/[0.03] px-4 py-3 text-[12px] text-muted-foreground">
+            <div className="rounded-lg bg-overlay px-4 py-3 text-12 text-muted-foreground">
               No org approval policies configured. Members use their personal
               approval settings.
             </div>
@@ -355,7 +355,7 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
                 >
                   <div className="flex items-center justify-between">
                     <div className="space-y-0.5">
-                      <p className="text-[12px] font-medium">
+                      <p className="text-12 font-medium">
                         {config.service_name}
                       </p>
                       <p className="text-xs text-muted-foreground">
@@ -483,7 +483,7 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
           <div className="space-y-4 py-4">
             <div className="space-y-2">
               <label
-                className="text-[12px] font-medium"
+                className="text-12 font-medium"
                 htmlFor="org-service-select"
               >
                 Service
@@ -515,7 +515,7 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
             </div>
             <div className="flex items-center justify-between rounded-lg border border-border p-4">
               <div className="space-y-0.5">
-                <p className="text-[12px] font-medium">Require Approval</p>
+                <p className="text-12 font-medium">Require Approval</p>
                 <p className="text-xs text-muted-foreground">
                   Whether members must get an admin&rsquo;s approval to use
                   this service.
@@ -533,7 +533,7 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
               <div className="space-y-4">
                 <div className="space-y-2">
                   <label
-                    className="text-[12px] font-medium"
+                    className="text-12 font-medium"
                     htmlFor="org-approval-mode-select"
                   >
                     Approval Mode
@@ -559,7 +559,7 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
                   </p>
                 </div>
                 <div className="space-y-2">
-                  <p className="text-[12px] font-medium">
+                  <p className="text-12 font-medium">
                     Require Approval For
                   </p>
                   <div className="grid gap-2 sm:grid-cols-3">
@@ -644,7 +644,7 @@ function OrgApprovalGrants({ orgId }: OrgApprovalGrantsProps) {
     <Card>
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
-          <span className="flex h-8 w-8 items-center justify-center rounded-[8px] border border-white/[0.08] bg-white/[0.04]">
+          <span className="flex h-8 w-8 items-center justify-center rounded-[8px] border border-hairline bg-overlay">
             <Shield className="h-4 w-4" aria-hidden="true" />
           </span>
           Org Approval Grants
@@ -666,7 +666,7 @@ function OrgApprovalGrants({ orgId }: OrgApprovalGrantsProps) {
             <ErrorBanner message="Failed to load org approval grants. Try refreshing the page." onRetry={refetch} />
           </div>
         ) : grants.length === 0 ? (
-          <div className="rounded-lg bg-white/[0.03] px-4 py-3 text-[12px] text-muted-foreground">
+          <div className="rounded-lg bg-overlay px-4 py-3 text-12 text-muted-foreground">
             No active org approval grants.
           </div>
         ) : (
@@ -677,7 +677,7 @@ function OrgApprovalGrants({ orgId }: OrgApprovalGrantsProps) {
                 className="flex items-center justify-between rounded-lg border border-border p-4"
               >
                 <div className="space-y-0.5">
-                  <p className="text-[12px] font-medium">{grant.service_name}</p>
+                  <p className="text-12 font-medium">{grant.service_name}</p>
                   <p className="text-xs text-muted-foreground">
                     {grant.requester_label ?? grant.requester_type} ·
                     granted {formatDate(grant.granted_at)} · expires{" "}

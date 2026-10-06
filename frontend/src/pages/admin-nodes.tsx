@@ -186,7 +186,7 @@ export function AdminNodesPage() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <MagicBoxIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-[12px] font-medium text-muted-foreground">Failed to load nodes</p>
+            <p className="text-12 font-medium text-muted-foreground">Failed to load nodes</p>
             <p className="text-xs text-muted-foreground">Please try again later.</p>
           </div>
         </div>
@@ -194,7 +194,7 @@ export function AdminNodesPage() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <MagicBoxIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-[12px] font-medium text-muted-foreground">No nodes found</p>
+            <p className="text-12 font-medium text-muted-foreground">No nodes found</p>
             <p className="text-xs text-muted-foreground">
               {search || statusFilter
                 ? "No nodes match your filters."
@@ -209,7 +209,7 @@ export function AdminNodesPage() {
             {nodes.map((node) => (
               <div
                 key={node.id}
-                className="rounded-xl border border-border/50 bg-card p-4 transition-colors hover:bg-white/[0.03]"
+                className="rounded-xl border border-border/50 bg-card p-4 transition-colors hover:bg-overlay"
               >
                 <div className="relative">
                   {canWrite && (
@@ -253,15 +253,15 @@ export function AdminNodesPage() {
                   )}
 
                   <div className="pr-8">
-                    <p className="text-[13px] font-semibold text-foreground truncate">
+                    <p className="text-13 font-semibold text-foreground truncate">
                       {node.name}
                       {node.metadata?.agent_version && (
-                        <span className="ml-2 text-[11px] font-normal text-muted-foreground">
+                        <span className="ml-2 text-11 font-normal text-muted-foreground">
                           v{node.metadata.agent_version}
                         </span>
                       )}
                     </p>
-                    <p className="text-[11px] font-mono text-muted-foreground truncate">
+                    <p className="text-11 font-mono text-muted-foreground truncate">
                       {node.id}
                     </p>
                   </div>
@@ -276,7 +276,7 @@ export function AdminNodesPage() {
                     </Badge>
                   </div>
 
-                  <div className="mt-3 text-[11px] text-muted-foreground">
+                  <div className="mt-3 text-11 text-muted-foreground">
                     Last seen:{" "}
                     {formatRelativeTime(node.last_heartbeat_at) ?? "Never"}
                   </div>
@@ -316,7 +316,7 @@ export function AdminNodesPage() {
                       </div>
                     </TableCell>
                     <TableCell>
-                      <span className="text-[11px] text-text-tertiary">
+                      <span className="text-11 text-text-tertiary">
                         {node.user_email ?? node.user_id}
                       </span>
                     </TableCell>
@@ -392,7 +392,7 @@ export function AdminNodesPage() {
           </div>
 
           <div className="flex items-center justify-between">
-            <p className="text-[11px] text-text-tertiary">
+            <p className="text-11 text-text-tertiary">
               Showing {String((page - 1) * PER_PAGE + 1)}-
               {String(Math.min(page * PER_PAGE, total))} of {String(total)}{" "}
               nodes
@@ -407,7 +407,7 @@ export function AdminNodesPage() {
               >
                 <ChevronLeft className="h-3 w-3" />
               </Button>
-              <span className="text-[11px] text-text-tertiary">
+              <span className="text-11 text-text-tertiary">
                 Page {String(page)} of {String(totalPages)}
               </span>
               <Button

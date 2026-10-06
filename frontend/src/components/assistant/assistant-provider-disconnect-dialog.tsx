@@ -168,7 +168,7 @@ export function AssistantProviderDisconnectDialog({
           </DialogDescription>
         </DialogHeader>
         {!resultId ? (
-          <div className="space-y-3 border-y border-border py-4 text-[12px]">
+          <div className="space-y-3 border-y border-border py-4 text-12">
             <div className="flex items-center justify-between gap-4">
               <span className="text-muted-foreground">Provider</span>
               <Badge variant="secondary" className="max-w-[70%] truncate font-mono">
@@ -187,8 +187,8 @@ export function AssistantProviderDisconnectDialog({
             </label>
           </div>
         ) : null}
-        {error ? <p role="alert" className="text-[11px] text-destructive">{error}</p> : null}
-        {verified ? <p className="text-[11px] text-success">Disconnect evidence verified.</p> : null}
+        {error ? <p role="alert" className="text-11 text-destructive">{error}</p> : null}
+        {verified ? <p className="text-11 text-success">Disconnect evidence verified.</p> : null}
         <DialogFooter>
           {!resultId ? (
             <>

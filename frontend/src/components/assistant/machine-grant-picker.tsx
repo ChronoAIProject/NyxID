@@ -36,16 +36,16 @@ export function MachineGrantPicker({
   const error = kind === "machines" ? nodes.error : logins.error;
   return (
     <fieldset disabled={disabled} className="space-y-2">
-      <legend className="mb-2 text-[12px] font-medium">
+      <legend className="mb-2 text-12 font-medium">
         {kind === "machines" ? "Machines" : "Saved logins"}
       </legend>
       {error ? (
-        <p role="alert" className="text-[12px] text-destructive">
+        <p role="alert" className="text-12 text-destructive">
           {error.message}
         </p>
       ) : null}
       {[...rows, ...unknown].map((row) => (
-        <label key={row.id} className="flex items-center gap-2 text-[12px]">
+        <label key={row.id} className="flex items-center gap-2 text-12">
           <Checkbox
             checked={value.includes(row.id)}
             onCheckedChange={(checked) =>
@@ -60,7 +60,7 @@ export function MachineGrantPicker({
         </label>
       ))}
       {!rows.length && !unknown.length ? (
-        <p className="text-[12px] text-muted-foreground">
+        <p className="text-12 text-muted-foreground">
           None available. The agent can ask NyxBot for access later.
         </p>
       ) : null}

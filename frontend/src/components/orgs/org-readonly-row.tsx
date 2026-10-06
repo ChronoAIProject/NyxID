@@ -8,7 +8,7 @@ export function OrgReadOnlyRow({ orgName }: OrgReadOnlyRowProps) {
       <p className="text-xs uppercase tracking-wide text-text-tertiary">
         Organization
       </p>
-      <p className="text-[12px] font-medium text-foreground">{orgName}</p>
+      <p className="text-12 font-medium text-foreground">{orgName}</p>
     </div>
   );
 }

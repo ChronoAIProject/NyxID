@@ -90,7 +90,7 @@ function StatCard({
     <Card>
       <CardContent className="flex items-start justify-between p-4">
         <div className="space-y-1">
-          <p className="text-[12px] text-muted-foreground">{title}</p>
+          <p className="text-12 text-muted-foreground">{title}</p>
           <p className="text-2xl font-semibold text-foreground">{value}</p>
           <p className="text-xs text-text-tertiary">{description}</p>
         </div>
@@ -200,7 +200,7 @@ export function OrgDeveloperAppsTab({
             <div className="space-y-4">
               <OrgReadOnlyRow orgName={orgName} />
               <div className="space-y-2">
-                <label className="text-[12px] font-medium" htmlFor="org-app-name">
+                <label className="text-12 font-medium" htmlFor="org-app-name">
                   Application Name
                 </label>
                 <Input
@@ -212,7 +212,7 @@ export function OrgDeveloperAppsTab({
               </div>
               <div className="space-y-2">
                 <label
-                  className="text-[12px] font-medium"
+                  className="text-12 font-medium"
                   htmlFor="org-redirect-uris"
                 >
                   Redirect URIs (one per line)
@@ -224,11 +224,11 @@ export function OrgDeveloperAppsTab({
                   placeholder={
                     "https://app.example.com/oauth/callback\nmyapp://oauth/callback"
                   }
-                  className="flex min-h-[120px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-[12px] placeholder:text-muted-foreground focus-visible:outline-none"
+                  className="flex min-h-[120px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-12 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus"
                 />
               </div>
               <div className="space-y-2">
-                <label className="text-[12px] font-medium">Client Type</label>
+                <label className="text-12 font-medium">Client Type</label>
                 <Select
                   value={clientType}
                   onValueChange={(value: "public" | "confidential") =>
@@ -245,7 +245,7 @@ export function OrgDeveloperAppsTab({
                 </Select>
               </div>
               <div className="space-y-3">
-                <label className="text-[12px] font-medium">Allowed Scopes</label>
+                <label className="text-12 font-medium">Allowed Scopes</label>
                 <p className="text-xs text-muted-foreground">
                   OIDC scopes this app can request. Determines what user data
                   and NyxID capabilities are included in tokens.
@@ -268,7 +268,7 @@ export function OrgDeveloperAppsTab({
                       <div className="grid gap-0.5 leading-none">
                         <label
                           htmlFor={`scope-org-create-${scope.id}`}
-                          className="text-[12px] font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
+                          className="text-12 font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
                         >
                           {scope.label}
                           {scope.required && (
@@ -364,7 +364,7 @@ export function OrgDeveloperAppsTab({
           visibleApps.map((app) => (
             <Card
               key={app.id}
-              className="cursor-pointer transition-colors duration-300 hover:border-white/[0.15]"
+              className="cursor-pointer transition-colors duration-300 hover:border-hairline-strong"
               role="link"
               tabIndex={0}
               onClick={() =>
@@ -425,7 +425,7 @@ export function OrgDeveloperAppsTab({
         {!isLoading && visibleApps.length === 0 && (
           <Card className="xl:col-span-2">
             <CardContent className="p-4 text-center">
-              <p className="text-[12px] text-muted-foreground">
+              <p className="text-12 text-muted-foreground">
                 {apps.length === 0
                   ? `No developer apps owned by ${orgName}.`
                   : `No active developer apps owned by ${orgName}. Enable "Show inactive" to view deactivated apps.`}

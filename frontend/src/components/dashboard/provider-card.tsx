@@ -83,7 +83,7 @@ export function ProviderCard({
           ? "border-primary/30 bg-primary/5"
           : needsAttention
             ? "border-warning/30 bg-warning/5"
-            : "transition-colors duration-300 hover:border-white/[0.15]"
+            : "transition-colors duration-300 hover:border-hairline-strong"
       }
     >
       <CardHeader className="pb-3">
@@ -108,7 +108,7 @@ export function ProviderCard({
             ) : SERVICE_ICONS[provider.slug] ? (
               <ServiceIcon slug={provider.slug} size="sm" />
             ) : hasBrand ? (
-              <span className={`text-[13px] font-bold ${brand.textClass}`}>
+              <span className={`text-13 font-bold ${brand.textClass}`}>
                 {brand.initial}
               </span>
             ) : (
@@ -141,7 +141,7 @@ export function ProviderCard({
               {llmStatus?.status === "ready" && (
                 <LlmReadyBadge llmStatus={llmStatus} gatewayUrl={gatewayUrl} />
               )}
-              <Badge variant="secondary" className="text-[10px]">
+              <Badge variant="secondary" className="text-10">
                 {provider.provider_type === "api_key"
                   ? "API Key"
                   : provider.provider_type === "device_code"
@@ -178,17 +178,17 @@ export function ProviderCard({
                 Connected {formatDate(token.connected_at)}
               </span>
               {token.label && (
-                <span className="text-xs text-muted-foreground/70">
+                <span className="text-xs text-text-tertiary">
                   {token.label}
                 </span>
               )}
               {token.gateway_url && (
-                <span className="truncate text-xs text-muted-foreground/70">
+                <span className="truncate text-xs text-text-tertiary">
                   {token.gateway_url}
                 </span>
               )}
               {token.expires_at && (
-                <span className="text-xs text-muted-foreground/70">
+                <span className="text-xs text-text-tertiary">
                   Expires {formatDate(token.expires_at)}
                 </span>
               )}
@@ -238,7 +238,7 @@ export function ProviderCard({
                 )}
               </div>
               {connectHint && (
-                <span className="text-xs text-muted-foreground/70">
+                <span className="text-xs text-text-tertiary">
                   {connectHint}
                 </span>
               )}

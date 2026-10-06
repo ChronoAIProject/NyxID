@@ -195,13 +195,13 @@ export function MachineSetupPage() {
             )}
           />
           <fieldset disabled={locked} className="space-y-3">
-            <legend className="mb-2 text-[12px] font-medium">
+            <legend className="mb-2 text-12 font-medium">
               Let agents use
             </legend>
             {(["shell", "files", "computer"] as const).map((capability) => (
               <label
                 key={capability}
-                className="flex items-center gap-2 text-[12px]"
+                className="flex items-center gap-2 text-12"
               >
                 <Checkbox
                   checked={capabilities.includes(capability)}
@@ -256,7 +256,7 @@ export function MachineSetupPage() {
             )}
           />
           {where !== "docker" && capabilities.includes("computer") ? (
-            <p className="text-[12px] text-muted-foreground">
+            <p className="text-12 text-muted-foreground">
               {SINGLE_USER_WARNING} Saved-login typing starts off; allow it
               later in Nodes settings. Setup asks once for administrator access
               to install browser policies. On macOS, also allow Screen Recording
@@ -278,7 +278,7 @@ export function MachineSetupPage() {
       {command ? (
         <div className="space-y-2">
           <CopyableField label="Run on your machine" value={command} />
-          <p className="text-[11px] text-text-tertiary">
+          <p className="text-11 text-text-tertiary">
             Single-use command, shown only here. Do not paste it into chat. It
             expires in 15 minutes.
           </p>
@@ -286,7 +286,7 @@ export function MachineSetupPage() {
       ) : null}
       {setup.data ? <SetupProgress setup={setup.data} /> : null}
       {error || setup.error ? (
-        <p role="alert" className="text-[12px] text-destructive">
+        <p role="alert" className="text-12 text-destructive">
           {error ?? setup.error?.message}
         </p>
       ) : null}
@@ -341,7 +341,7 @@ export function MachinePairPage() {
         </Button>
       </form>
       {details ? (
-        <div className="space-y-4 rounded-xl border border-border bg-card p-4 text-[12px]">
+        <div className="space-y-4 rounded-xl border border-border bg-card p-4 text-12">
           <dl className="grid grid-cols-2 gap-2">
             <dt>Hostname</dt>
             <dd>{details.hostname}</dd>
@@ -389,7 +389,7 @@ export function MachinePairPage() {
         </div>
       ) : null}
       {preview.error || decision.error ? (
-        <p role="alert" className="text-[12px] text-destructive">
+        <p role="alert" className="text-12 text-destructive">
           {(preview.error ?? decision.error)?.message}
         </p>
       ) : null}
@@ -400,18 +400,18 @@ export function MachinePairPage() {
 function SetupSafety() {
   return (
     <div className="space-y-3">
-      <p className="rounded-lg border border-warning/30 bg-warning/5 p-4 text-[12px] text-muted-foreground">
+      <p className="rounded-lg border border-warning/30 bg-warning/5 p-4 text-12 text-muted-foreground">
         {MACHINE_SAFETY}
       </p>
-      <p className="text-[12px] text-muted-foreground">
+      <p className="text-12 text-muted-foreground">
         {SINGLE_USER_SHELL_WARNING}
       </p>
-      <p className="text-[12px] text-muted-foreground">
+      <p className="text-12 text-muted-foreground">
         The Docker command downloads NyxID’s seccomp profile and passes
         --security-opt seccomp to enable Chromium’s user-namespace sandbox. It
         grants no additional container capabilities.
       </p>
-      <p className="text-[12px] text-muted-foreground">
+      <p className="text-12 text-muted-foreground">
         The image is pinned to this server’s release. After a server upgrade,
         recreate the container with the matching image and the same identity and
         workspace volumes to keep this machine connected.
@@ -424,7 +424,7 @@ function SetupProgress({ setup }: { readonly setup: MachineSetup }) {
   return (
     <div
       role="status"
-      className="space-y-2 rounded-xl border border-border p-4 text-[12px]"
+      className="space-y-2 rounded-xl border border-border p-4 text-12"
     >
       <p>{states[setup.status] ?? "Waiting for setup…"}</p>
       {setup.machine ? (

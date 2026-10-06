@@ -228,7 +228,7 @@ export function CreateServiceDialog({
                   <FormLabel>Description</FormLabel>
                   <FormControl>
                     <textarea
-                      className="flex min-h-[60px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-[12px] placeholder:text-muted-foreground focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+                      className="flex min-h-[60px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-12 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus disabled:cursor-not-allowed disabled:opacity-50"
                       placeholder="Optional description"
                       {...field}
                     />
@@ -276,7 +276,7 @@ export function CreateServiceDialog({
                 <div className="flex items-center justify-between rounded-lg border border-border p-3">
                   <Label
                     htmlFor="create-ssh-cert-auth"
-                    className="text-[12px] font-normal"
+                    className="text-12 font-normal"
                   >
                     Enable short-lived SSH certificates
                   </Label>

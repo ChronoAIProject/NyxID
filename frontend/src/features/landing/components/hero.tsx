@@ -93,17 +93,17 @@ export function Hero() {
           className="mb-7 h-9 w-auto drop-shadow-[0_0_24px_rgba(90,42,241,0.45)] md:h-10"
         />
         <h1
-          className="max-w-[640px] text-center text-[28px] font-bold leading-[1.1] tracking-tight text-foreground sm:text-4xl lg:text-5xl"
+          className="max-w-[640px] text-center text-28 font-bold leading-[1.1] tracking-tight text-foreground sm:text-4xl lg:text-5xl"
           style={{ letterSpacing: "-0.03em" }}
         >
           {t("hero.eyebrow")}
         </h1>
 
-        <p className="mt-5 max-w-xl text-center text-[15px] leading-relaxed text-muted-foreground sm:text-base">
+        <p className="mt-5 max-w-xl text-center text-15 leading-relaxed text-muted-foreground sm:text-base">
           {t("hero.title")}
         </p>
 
-        <p className="mt-3 max-w-xl text-center text-[13px] leading-relaxed text-muted-foreground/80 sm:text-sm">
+        <p className="mt-3 max-w-xl text-center text-13 leading-relaxed text-muted-foreground/80 sm:text-sm">
           {t("hero.subtitle")}
         </p>
 
@@ -137,7 +137,7 @@ export function Hero() {
           </a>
         </div>
 
-        <p className="mt-4 text-[11px] text-text-tertiary">{t("hero.ctaSubtext")}</p>
+        <p className="mt-4 text-11 text-text-tertiary">{t("hero.ctaSubtext")}</p>
       </div>
     </section>
   );

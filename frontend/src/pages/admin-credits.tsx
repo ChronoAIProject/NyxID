@@ -428,7 +428,7 @@ export function AdminCreditsPage() {
 
         <TabsContent value="grants" className="space-y-4">
           <div className="flex items-center justify-between gap-3">
-            <p className="text-[12px] text-muted-foreground">
+            <p className="text-12 text-muted-foreground">
               Promotional credits are consumed before purchased wallet credits.
             </p>
             {canWrite ? (
@@ -464,7 +464,7 @@ export function AdminCreditsPage() {
 
         <TabsContent value="allowances" className="space-y-4">
           <div className="flex items-center justify-between gap-3">
-            <p className="text-[12px] text-muted-foreground">
+            <p className="text-12 text-muted-foreground">
               Free metric units reset on UTC recurrence windows and settle
               against actual usage.
             </p>
@@ -505,7 +505,7 @@ export function AdminCreditsPage() {
 
         <TabsContent value="schedules" className="space-y-4">
           <div className="flex items-center justify-between gap-3">
-            <p className="text-[12px] text-muted-foreground">
+            <p className="text-12 text-muted-foreground">
               Disburse wallet credits on recurring UTC periods. These are
               credits, not metered service units.
             </p>

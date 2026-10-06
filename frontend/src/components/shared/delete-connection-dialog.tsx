@@ -68,7 +68,7 @@ export function DeleteConnectionDialog({
           </div>
         </DialogHeader>
 
-        <div className="space-y-2 text-[12px]">
+        <div className="space-y-2 text-12">
           {connectionLabel && (
             <p className="text-muted-foreground">
               Connection:{" "}

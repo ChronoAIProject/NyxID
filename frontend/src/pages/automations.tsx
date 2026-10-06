@@ -194,7 +194,7 @@ export function AutomationsPage() {
       {triggers.isPending ? (
         <Skeleton className="h-36 w-full" aria-label="Loading automations" />
       ) : rows.length === 0 ? (
-        <p className="text-[13px] text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           No automations yet. Ask NyxBot to schedule a task or create one here.
         </p>
       ) : (
@@ -220,7 +220,7 @@ export function AutomationsPage() {
                         onClick={() => setHistory(row)}
                       >
                         {row.label}
-                        <span className="block text-[11px] text-muted-foreground">
+                        <span className="block text-11 text-muted-foreground">
                           {row.source ?? "webhook"}
                         </span>
                       </button>
@@ -241,7 +241,7 @@ export function AutomationsPage() {
                         {row.status === "active" ? "Active" : "Paused"}
                       </Badge>
                       {row.pause_reason && (
-                        <span className="block text-[11px]">
+                        <span className="block text-11">
                           {row.pause_reason.replaceAll("_", " ")}
                         </span>
                       )}
@@ -262,18 +262,18 @@ export function AutomationsPage() {
                   <button onClick={() => setHistory(row)}>{row.label}</button>
                   {actions(row)}
                 </div>
-                <p className="text-[12px] text-muted-foreground">
+                <p className="text-12 text-muted-foreground">
                   {target(row)} ·{" "}
                   {row.status === "active" ? "Active" : "Paused"}
                 </p>
-                <p className="text-[12px]">
+                <p className="text-12">
                   Next: {formatAutomationTime(row.next_run_at, zone)}
                 </p>
-                <p className="text-[12px] capitalize">
+                <p className="text-12 capitalize">
                   Last run: {row.last_run?.outcome ?? "—"}
                 </p>
                 {row.pause_reason && (
-                  <p className="text-[12px]">
+                  <p className="text-12">
                     {row.pause_reason.replaceAll("_", " ")}
                   </p>
                 )}
@@ -282,7 +282,7 @@ export function AutomationsPage() {
           </div>
         </>
       )}
-      <p className="text-[12px] text-muted-foreground">
+      <p className="text-12 text-muted-foreground">
         <Link className="underline" to="/triggers">
           Webhook secrets and delivery replay
         </Link>
@@ -426,7 +426,7 @@ export function AutomationEditor({
   const preview = useSchedulePreview(spec);
   function input(name: keyof AutomationForm, label: string, type = "text") {
     return (
-      <label className="block space-y-1 text-[12px]" key={name}>
+      <label className="block space-y-1 text-12" key={name}>
         {label}
         <Input
           type={type}
@@ -448,7 +448,7 @@ export function AutomationEditor({
     disabled = false,
   ) {
     return (
-      <div className="block space-y-1 text-[12px]">
+      <div className="block space-y-1 text-12">
         {label}
         <Select
           value={String(form.watch(name)) || "__empty"}
@@ -587,7 +587,7 @@ export function AutomationEditor({
                 ])}
                 {values.kind === "cron" ? (
                   <>
-                    <div className="space-y-1 text-[12px]">
+                    <div className="space-y-1 text-12">
                       <span>Preset</span>
                       <Select
                         onValueChange={(value) =>
@@ -611,7 +611,7 @@ export function AutomationEditor({
                       </Select>
                     </div>
                     {input("expression", "Cron expression")}
-                    <p className="text-[11px] text-muted-foreground">
+                    <p className="text-11 text-muted-foreground">
                       Minute · hour · day · month · weekday. Missing DST times
                       run once at the first valid time after the gap; repeated
                       times use the earlier instant.
@@ -630,7 +630,7 @@ export function AutomationEditor({
                 ) : (
                   dateTime("at", "Run at", false)
                 )}
-                <div aria-live="polite" className="text-[12px]">
+                <div aria-live="polite" className="text-12">
                   <strong>Next runs</strong>
                   {preview.isFetching ? (
                     <Skeleton
@@ -658,7 +658,7 @@ export function AutomationEditor({
                   )}
                 </div>
                 <details>
-                  <summary className="cursor-pointer text-[12px]">
+                  <summary className="cursor-pointer text-12">
                     Start, end and run limits
                   </summary>
                   <div className="mt-3 space-y-3">
@@ -711,7 +711,7 @@ export function AutomationEditor({
                       ["destructive", "Only destructive actions"],
                     ])}
                     {values.confirmation_policy === "destructive" && (
-                      <p role="alert" className="text-[12px] text-warning">
+                      <p role="alert" className="text-12 text-warning">
                         Untrusted webhook content can cause changes using your
                         account without confirmation. Choose this only for event
                         sources you trust.
@@ -732,7 +732,7 @@ export function AutomationEditor({
                 ])}
                 {values.source === "webhook" &&
                   values.thread_policy === "home" && (
-                    <p role="alert" className="text-[12px] text-warning">
+                    <p role="alert" className="text-12 text-warning">
                       Untrusted webhook content will remain in your home thread
                       and can influence later owner turns, including private
                       channel chats, with full account authority. Webhook
@@ -740,7 +740,7 @@ export function AutomationEditor({
                       this only if you accept that risk.
                     </p>
                   )}
-                <label className="block space-y-1 text-[12px]">
+                <label className="block space-y-1 text-12">
                   Instruction
                   <Textarea {...form.register("instruction")} />
                   {form.formState.errors.instruction && (
@@ -776,7 +776,7 @@ export function AutomationEditor({
               ["queue", "Queue one"],
             ])}
             {error && (
-              <p role="alert" className="text-[12px] text-destructive">
+              <p role="alert" className="text-12 text-destructive">
                 {error}
               </p>
             )}
@@ -839,7 +839,7 @@ function AutomationHistory({
             {runs.map((run) => (
               <li
                 key={run.id}
-                className="rounded-lg border border-border p-3 text-[12px]"
+                className="rounded-lg border border-border p-3 text-12"
               >
                 <strong className="capitalize">{run.outcome}</strong> ·{" "}
                 {formatAutomationTime(run.scheduled_at, zone)}

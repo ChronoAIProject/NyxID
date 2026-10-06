@@ -197,7 +197,7 @@ export function VerifyKeyCard({
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
           <ShieldCheck className="h-4 w-4 text-primary" />
-          <CardTitle className="text-[15px]">Verify key</CardTitle>
+          <CardTitle className="text-15">Verify key</CardTitle>
         </div>
         <CardDescription>
           Prove this key is scoped correctly — it should reach an allowed
@@ -208,7 +208,7 @@ export function VerifyKeyCard({
         <div className="space-y-1.5">
           <label
             htmlFor="verify-key-paste"
-            className="text-[11px] font-medium text-foreground"
+            className="text-11 font-medium text-foreground"
           >
             Agent key
           </label>
@@ -222,7 +222,7 @@ export function VerifyKeyCard({
             onChange={(e) => setPastedKey(e.target.value)}
             disabled={status === "pending"}
           />
-          <p className="text-[11px] leading-relaxed text-muted-foreground">
+          <p className="text-11 leading-relaxed text-muted-foreground">
             Paste the agent key you copied when you created it. NyxID does not
             store this paste — it&apos;s only used for this test.
           </p>
@@ -232,7 +232,7 @@ export function VerifyKeyCard({
           <div className="space-y-1.5">
             <label
               htmlFor="verify-key-slug-picker"
-              className="text-[11px] font-medium text-foreground"
+              className="text-11 font-medium text-foreground"
             >
               Test against
             </label>
@@ -241,7 +241,7 @@ export function VerifyKeyCard({
               value={allowedSlug ?? ""}
               onChange={(e) => setOverrideSlug(e.target.value)}
               disabled={status === "pending"}
-              className="w-full rounded-md border border-input bg-background px-3 py-2 text-[12px] focus:outline-none focus:ring-2 focus:ring-ring"
+              className="w-full rounded-md border border-input bg-background px-3 py-2 text-12 focus:outline-none focus:ring-2 focus:ring-ring"
             >
               {candidateSlugs.map((c) => (
                 <option key={c.slug} value={c.slug}>
@@ -249,7 +249,7 @@ export function VerifyKeyCard({
                 </option>
               ))}
             </select>
-            <p className="text-[11px] leading-relaxed text-muted-foreground">
+            <p className="text-11 leading-relaxed text-muted-foreground">
               Pick a service whose downstream credential is fully configured.
               The test will probe this slug (should return 2xx) and a
               deliberately-invalid slug (should return 4xx).
@@ -287,7 +287,7 @@ export function VerifyKeyCard({
                 key={`${r.expected}-${r.slug}`}
                 className="flex items-center justify-between rounded-lg border border-border/50 px-3 py-2"
               >
-                <span className="inline-flex items-center gap-2 text-[12px]">
+                <span className="inline-flex items-center gap-2 text-12">
                   {r.ok ? (
                     <Check className="h-3.5 w-3.5 text-success" />
                   ) : (
@@ -300,7 +300,7 @@ export function VerifyKeyCard({
                 </span>
                 <span
                   className={cn(
-                    "text-[11px] font-medium",
+                    "text-11 font-medium",
                     r.expected === "allowed"
                       ? "text-success/80"
                       : "text-destructive/80",
@@ -314,19 +314,19 @@ export function VerifyKeyCard({
         )}
 
         {errorMessage && (
-          <p className="text-[11px] leading-relaxed text-destructive">
+          <p className="text-11 leading-relaxed text-destructive">
             {errorMessage}
           </p>
         )}
 
         {allowedSlug === null && (
-          <p className="text-[11px] leading-relaxed text-muted-foreground">
+          <p className="text-11 leading-relaxed text-muted-foreground">
             Connect a service first so this key has something allowed to call.
           </p>
         )}
 
         {status === "pending" && (
-          <p className="inline-flex items-center gap-1.5 text-[11px] text-muted-foreground">
+          <p className="inline-flex items-center gap-1.5 text-11 text-muted-foreground">
             <Loader2 className="h-3 w-3 animate-spin" />
             Probing…
           </p>

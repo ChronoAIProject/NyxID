@@ -49,7 +49,7 @@ function PluginTile({
   readonly children: React.ReactNode;
 }) {
   return (
-    <div className="flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-md bg-muted text-[13px] font-semibold text-muted-foreground">
+    <div className="flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-md bg-muted text-13 font-semibold text-muted-foreground">
       {children}
     </div>
   );
@@ -114,10 +114,10 @@ function PluginCard({
           )}
         </PluginTile>
         <div className="min-w-0">
-          <p className="truncate text-[13px] font-medium text-foreground">
+          <p className="truncate text-13 font-medium text-foreground">
             {item.name}
           </p>
-          <p className="text-[10px] uppercase tracking-[0.5px] text-text-tertiary">
+          <p className="text-10 uppercase tracking-[0.5px] text-text-tertiary">
             {item.category}
           </p>
         </div>
@@ -126,7 +126,7 @@ function PluginCard({
           the bottom; the clamp lives on the text itself, or `flex-1` would
           stretch the box past three lines and clip a fourth mid-glyph. */}
       <div className="min-h-0 flex-1">
-        <p className="break-words text-[12px] leading-[17px] text-muted-foreground line-clamp-3">
+        <p className="break-words text-12 leading-[17px] text-muted-foreground line-clamp-3">
           {item.description}
         </p>
       </div>
@@ -143,19 +143,19 @@ function PluginCard({
               <Badge variant="success">{addedBadge}</Badge>
             )}
             {addedMeta && (
-              <span className="truncate font-mono text-[10px] text-text-tertiary">
+              <span className="truncate font-mono text-10 text-text-tertiary">
                 {addedMeta}
               </span>
             )}
           </span>
         ) : (
-          <span className="font-mono text-[10px] text-text-tertiary">
+          <span className="font-mono text-10 text-text-tertiary">
             {item.meta}
           </span>
         )}
         <span
           aria-hidden
-          className={`flex shrink-0 items-center gap-1 text-[12px] transition-colors ${
+          className={`flex shrink-0 items-center gap-1 text-12 transition-colors ${
             interactive
               ? "text-muted-foreground group-hover:text-foreground"
               : "text-text-tertiary"
@@ -179,20 +179,20 @@ function AddYourOwnSkillCard() {
           <Plus className="h-3.5 w-3.5" />
         </div>
         <div className="min-w-0">
-          <p className="text-[13px] font-medium text-foreground">
+          <p className="text-13 font-medium text-foreground">
             Add your own skill
           </p>
-          <p className="text-[10px] uppercase tracking-[0.5px] text-text-tertiary">
+          <p className="text-10 uppercase tracking-[0.5px] text-text-tertiary">
             Skill
           </p>
         </div>
       </div>
-      <p className="flex-1 text-[12px] leading-[17px] text-muted-foreground line-clamp-3">
+      <p className="flex-1 text-12 leading-[17px] text-muted-foreground line-clamp-3">
         Register a skill from a Git repo or paste a SKILL.md - your assistant
         loads it on demand in every chat.
       </p>
       <div className="flex shrink-0 items-center justify-between gap-2">
-        <span className="font-mono text-[10px] text-text-tertiary">
+        <span className="font-mono text-10 text-text-tertiary">
           git url or upload
         </span>
         <Button type="button" variant="outline" size="sm" disabled>
@@ -205,7 +205,7 @@ function AddYourOwnSkillCard() {
 
 function SectionHeading({ children }: { readonly children: React.ReactNode }) {
   return (
-    <p className="mb-2.5 text-[10px] font-semibold uppercase tracking-[1.5px] text-text-tertiary">
+    <p className="mb-2.5 text-10 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
       {children}
     </p>
   );
@@ -306,7 +306,7 @@ function ConnectorsTab({ query }: { readonly query: string }) {
 
   if (searching && added.length === 0 && available.length === 0) {
     return (
-      <p className="py-14 text-center text-[11px] text-text-tertiary">
+      <p className="py-14 text-center text-11 text-text-tertiary">
         No plugins match this search.
       </p>
     );
@@ -316,7 +316,7 @@ function ConnectorsTab({ query }: { readonly query: string }) {
     <>
       {loadFailed ? (
         <div className="mb-4 flex items-center justify-between gap-3 rounded-xl border border-dashed border-border px-4 py-2.5">
-          <p className="text-[12px] text-muted-foreground">
+          <p className="text-12 text-muted-foreground">
             Some plugins may be missing until the catalog loads.
           </p>
           <Button
@@ -350,7 +350,7 @@ function ConnectorsTab({ query }: { readonly query: string }) {
               </CardGrid>
             </div>
           ) : (
-            <p className="mb-7 rounded-xl border border-dashed border-border px-4 py-6 text-center text-[12px] text-muted-foreground">
+            <p className="mb-7 rounded-xl border border-dashed border-border px-4 py-6 text-center text-12 text-muted-foreground">
               {loadFailed
                 ? "Connected services could not be loaded right now."
                 : "No connected services yet. Connect one below and your assistant can call it through the NyxID proxy."}
@@ -445,7 +445,7 @@ function SkillsTab({ query }: { readonly query: string }) {
 
   if (searching && items.length === 0) {
     return (
-      <p className="py-14 text-center text-[11px] text-text-tertiary">
+      <p className="py-14 text-center text-11 text-text-tertiary">
         No plugins match this search.
       </p>
     );
@@ -513,10 +513,10 @@ export function PluginsView() {
   return (
     <div className="h-full min-h-0 overflow-y-auto overscroll-contain">
       <div className="px-5 pt-6 sm:px-8">
-        <h1 className="text-[22px] font-bold tracking-[-0.03em] sm:text-[28px]">
+        <h1 className="text-22 font-bold tracking-[-0.03em] sm:text-28">
           Plugins
         </h1>
-        <p className="mt-1 max-w-2xl text-[12px] text-muted-foreground">
+        <p className="mt-1 max-w-2xl text-12 text-muted-foreground">
           Plugins are connectors to services, MCP servers, and data sources;
           skills teach your assistant new workflows. Installing provisions the
           endpoint, credential, and proxy route in one step.
@@ -528,7 +528,7 @@ export function PluginsView() {
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               placeholder="Search the catalog..."
-              className="min-w-0 flex-1 bg-transparent text-[12px] text-foreground outline-none placeholder:text-text-tertiary"
+              className="min-w-0 flex-1 bg-transparent text-12 text-foreground outline-none placeholder:text-text-tertiary"
             />
           </label>
           <div className="flex h-8" role="tablist" aria-label="Plugin type">
@@ -544,7 +544,7 @@ export function PluginsView() {
                 role="tab"
                 aria-selected={tab === value}
                 onClick={() => setTab(value)}
-                className={`border-b-2 px-3 text-[12px] transition-colors ${
+                className={`border-b-2 px-3 text-12 transition-colors ${
                   tab === value
                     ? "border-primary font-medium text-foreground"
                     : "border-transparent text-text-tertiary hover:text-foreground"

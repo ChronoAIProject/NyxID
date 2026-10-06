@@ -118,7 +118,7 @@ export function UserCredentialsDialog({
         </DialogHeader>
 
         {isLoading ? (
-          <div className="py-8 text-center text-[12px] text-muted-foreground">
+          <div className="py-8 text-center text-12 text-muted-foreground">
             Loading...
           </div>
         ) : (
@@ -137,7 +137,7 @@ export function UserCredentialsDialog({
                 href={provider.documentation_url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="inline-flex items-center gap-1.5 text-[12px] text-primary hover:underline"
+                className="inline-flex items-center gap-1.5 text-12 text-primary hover:underline"
               >
                 How to create an OAuth app
                 <ExternalLink className="h-3 w-3" />
@@ -150,7 +150,7 @@ export function UserCredentialsDialog({
                 className="space-y-4"
               >
                 {form.formState.errors.root && (
-                  <div className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive">
+                  <div className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive">
                     {form.formState.errors.root.message}
                   </div>
                 )}
@@ -276,7 +276,7 @@ function ExistingCredentialsInfo({
   if (!credentials?.has_credentials) return null;
 
   return (
-    <div className="flex items-center gap-2 rounded-lg bg-muted p-3 text-[12px]">
+    <div className="flex items-center gap-2 rounded-lg bg-muted p-3 text-12">
       <Badge variant="success">Configured</Badge>
       <div className="flex flex-col gap-0.5 text-xs text-muted-foreground">
         {credentials.label && <span>{credentials.label}</span>}

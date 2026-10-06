@@ -57,7 +57,7 @@ export function ApiKeyResourceFields({
                     <FormLabel>
                       {kind === "services" ? "Services" : "Nodes"}
                     </FormLabel>
-                    <label className="flex items-center gap-2 text-[12px]">
+                    <label className="flex items-center gap-2 text-12">
                       <Checkbox
                         checked={field.value ?? false}
                         onCheckedChange={(checked) => {
@@ -82,7 +82,7 @@ export function ApiKeyResourceFields({
                         <label
                           key={resource.id}
                           htmlFor={`${prefix}-${kind}-${resource.id}`}
-                          className="flex items-start gap-2 text-[12px]"
+                          className="flex items-start gap-2 text-12"
                         >
                           <Checkbox
                             id={`${prefix}-${kind}-${resource.id}`}
@@ -99,7 +99,7 @@ export function ApiKeyResourceFields({
                         </label>
                       ))}
                       {resources.length === 0 && (
-                        <p className="text-[12px] text-muted-foreground">
+                        <p className="text-12 text-muted-foreground">
                           No {kind} available.
                         </p>
                       )}
@@ -178,7 +178,7 @@ export function ApiKeyScopesField({ form }: Props) {
               return (
                 <label
                   key={scope}
-                  className="flex cursor-pointer items-center gap-2 text-[12px]"
+                  className="flex cursor-pointer items-center gap-2 text-12"
                 >
                   <Checkbox
                     checked={isSelected}
