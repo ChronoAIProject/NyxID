@@ -2601,6 +2601,48 @@ pub fn generate_tool_definitions(
     tools
 }
 
+/// MCP behavior hints (`readOnlyHint`, `destructiveHint`, `openWorldHint`)
+/// for a tool listed by [`generate_tool_definitions`]. OpenAI plugin review
+/// requires all three as explicit booleans on every listed tool.
+///
+/// Meta-tools use a fixed table. Service tools derive the hints from their
+/// HTTP method; generic proxies accept any method and are therefore treated
+/// as potentially destructive. Unknown names return `None`.
+pub fn tool_annotations(name: &str, services: &[McpToolService]) -> Option<serde_json::Value> {
+    let (read_only, destructive, open_world) = match name {
+        "nyx__search_tools"
+        | "nyx__discover_services"
+        | "nyx__list_connected_services"
+        | "nyx__wait_for_connection"
+        | "nyx__ssh_list_services"
+        | "nyx__oracle_pools"
+        | "nyx__oracle_result"
+        | "nyx__oracle_session" => (true, false, false),
+        "nyx__connect_service"
+        | "nyx__oracle_ask"
+        | "nyx__oracle_attach"
+        | "nyx__oracle_extract" => (false, false, true),
+        "nyx__call_tool" | "nyx__ssh_exec" => (false, true, true),
+        _ => {
+            let (service, endpoint) = resolve_tool_call(name, services)?;
+            if service.is_generic_proxy {
+                (false, true, true)
+            } else {
+                match endpoint.method.to_ascii_uppercase().as_str() {
+                    "GET" | "HEAD" | "OPTIONS" => (true, false, true),
+                    "POST" => (false, false, true),
+                    _ => (false, true, true),
+                }
+            }
+        }
+    };
+    Some(serde_json::json!({
+        "readOnlyHint": read_only,
+        "destructiveHint": destructive,
+        "openWorldHint": open_world,
+    }))
+}
+
 pub async fn load_public_tools(db: &mongodb::Database) -> AppResult<Vec<McpToolService>> {
     let services: Vec<DownstreamService> = db
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
@@ -7646,6 +7688,68 @@ mod tests {
     }
 
     // -- list_connected_services tests --
+
+    #[test]
+    fn tool_annotations_cover_every_meta_tool_with_boolean_hints() {
+        for tool in generate_tool_definitions(&[], None) {
+            let annotations = tool_annotations(&tool.name, &[])
+                .unwrap_or_else(|| panic!("{} has no annotations", tool.name));
+            for hint in ["readOnlyHint", "destructiveHint", "openWorldHint"] {
+                assert!(
+                    annotations[hint].is_boolean(),
+                    "{} is missing boolean {hint}",
+                    tool.name
+                );
+            }
+        }
+        let call_tool = tool_annotations("nyx__call_tool", &[]).unwrap();
+        assert_eq!(call_tool["destructiveHint"], true);
+        let search = tool_annotations("nyx__search_tools", &[]).unwrap();
+        assert_eq!(search["readOnlyHint"], true);
+    }
+
+    #[test]
+    fn tool_annotations_follow_service_endpoint_method() {
+        let mut delete = make_endpoint("remove_item", "Remove an item");
+        delete.method = "DELETE".to_string();
+        let mut create = make_endpoint("create_item", "Create an item");
+        create.method = "post".to_string();
+        let services = [make_service(
+            "svc-1",
+            "Items",
+            "items",
+            vec![make_endpoint("list_items", "List items"), delete, create],
+        )];
+
+        let hints = |name: &str| {
+            let a = tool_annotations(name, &services).unwrap();
+            (a["readOnlyHint"].clone(), a["destructiveHint"].clone())
+        };
+        assert_eq!(
+            hints("items__list_items"),
+            (serde_json::json!(true), serde_json::json!(false))
+        );
+        assert_eq!(
+            hints("items__remove_item"),
+            (serde_json::json!(false), serde_json::json!(true))
+        );
+        assert_eq!(
+            hints("items__create_item"),
+            (serde_json::json!(false), serde_json::json!(false))
+        );
+        assert!(tool_annotations("items__unknown", &services).is_none());
+
+        let mut generic = make_service(
+            "svc-2",
+            "Proxy",
+            "items",
+            vec![make_endpoint("list_items", "List items")],
+        );
+        generic.is_generic_proxy = true;
+        let generic = [generic];
+        let a = tool_annotations("items__list_items", &generic).unwrap();
+        assert_eq!(a["destructiveHint"], true);
+    }
 
     #[test]
     fn list_connected_services_filters_by_name_slug_and_description() {
