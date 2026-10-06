@@ -1,0 +1,18 @@
+{
+  "name": "nyxid",
+  "version": "0.8.9",
+  "description": "Connect services through NyxID's credential broker and call their APIs without exposing API keys or OAuth tokens to Claude.",
+  "author": {
+    "name": "ChronoAI",
+    "url": "https://nyx.chrono-ai.fun"
+  },
+  "homepage": "https://nyx.chrono-ai.fun",
+  "repository": "https://github.com/ChronoAIProject/NyxID",
+  "license": "Apache-2.0",
+  "keywords": ["nyxid", "credentials", "oauth", "mcp", "connectors"],
+  "icon": "./assets/icon.svg",
+  "documentationUrl": "https://github.com/ChronoAIProject/NyxID/blob/main/integrations/claude-plugin/README.md",
+  "supportUrl": "https://github.com/ChronoAIProject/NyxID/issues",
+  "privacyPolicyUrl": "https://nyx.chrono-ai.fun/privacy",
+  "termsOfServiceUrl": "https://nyx.chrono-ai.fun/terms"
+}

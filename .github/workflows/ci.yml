@@ -72,6 +72,7 @@ jobs:
       sdk: ${{ steps.filter.outputs.sdk }}
       wizard: ${{ steps.filter.outputs.wizard }}
       cursor_plugin: ${{ steps.filter.outputs.cursor_plugin }}
+      claude_plugin: ${{ steps.filter.outputs.claude_plugin }}
       oracle_worker: ${{ steps.filter.outputs.oracle_worker }}
       ci: ${{ steps.filter.outputs.ci }}
     steps:
@@ -197,6 +198,9 @@ jobs:
               - 'integrations/cursor-plugin/**'
               - '.cursor-plugin/**'
               - 'scripts/validate-cursor-plugin.py'
+            claude_plugin:
+              - 'integrations/claude-plugin/**'
+              - 'scripts/validate-claude-plugin.py'
             oracle_worker:
               - 'integrations/oracle/cdp-worker/**'
               - '.node-version'
@@ -258,6 +262,17 @@ jobs:
       - uses: actions/checkout@v6
       - name: Validate Cursor plugin
         run: python3 scripts/validate-cursor-plugin.py
+
+  # Claude plugin: manifest, remote MCP, skills, and directory bundle limits.
+  claude-plugin-validate:
+    name: Claude Plugin Validate
+    needs: changes
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.claude_plugin == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Validate Claude plugin
+        run: python3 scripts/validate-claude-plugin.py
 
   oracle-worker-test:
     name: Oracle Worker Test
@@ -1174,6 +1189,7 @@ jobs:
       - changes
       - workflow-permissions
       - cursor-plugin-validate
+      - claude-plugin-validate
       - oracle-worker-test
       - rust-fmt
       - rust-clippy
@@ -1203,6 +1219,7 @@ jobs:
             changes=${{ needs.changes.result }}
             workflow-permissions=${{ needs.workflow-permissions.result }}
             cursor-plugin-validate=${{ needs.cursor-plugin-validate.result }}
+            claude-plugin-validate=${{ needs.claude-plugin-validate.result }}
             oracle-worker-test=${{ needs.oracle-worker-test.result }}
             rust-fmt=${{ needs.rust-fmt.result }}
             rust-clippy=${{ needs.rust-clippy.result }}
