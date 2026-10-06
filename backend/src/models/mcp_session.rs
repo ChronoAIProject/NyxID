@@ -33,6 +33,12 @@ pub struct McpSessionRecord {
     pub activated_service_ids: Vec<String>,
     #[serde(default)]
     pub proxy_authorized: bool,
+    /// Whether the session may authenticate on its own after the bearer token
+    /// that created it is missing or expired. Only unrestricted first-party
+    /// access tokens set it; rows written before this field read as false, so
+    /// they must re-present a live credential.
+    #[serde(default)]
+    pub session_fallback_allowed: bool,
     #[serde(default)]
     pub notification_sequence: i64,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
@@ -58,6 +64,7 @@ pub struct McpSessionSlot {
 pub struct McpSessionAccess {
     pub user_id: String,
     pub proxy_authorized: bool,
+    pub session_fallback_allowed: bool,
 }
 
 pub struct McpSession {
@@ -67,6 +74,7 @@ pub struct McpSession {
     pub expires_at: DateTime<Utc>,
     pub activated_service_ids: HashSet<String>,
     pub proxy_authorized: bool,
+    pub session_fallback_allowed: bool,
     pub notification_sequence: i64,
     pub notification_tx: Option<mpsc::Sender<serde_json::Value>>,
 }
@@ -199,16 +207,17 @@ impl McpSessionStore {
     }
 
     pub async fn create(&self, user_id: &str) -> Result<Option<String>, mongodb::error::Error> {
-        self.create_with_proxy_access(user_id, false).await
+        self.create_with_proxy_access(user_id, false, false).await
     }
 
     pub async fn create_with_proxy_access(
         &self,
         user_id: &str,
         proxy_authorized: bool,
+        session_fallback_allowed: bool,
     ) -> Result<Option<String>, mongodb::error::Error> {
         let Some(db) = &self.db else {
-            return Ok(self.create_in_memory(user_id, proxy_authorized));
+            return Ok(self.create_in_memory(user_id, proxy_authorized, session_fallback_allowed));
         };
 
         for slot in 0..MAX_PER_USER_SESSIONS {
@@ -222,6 +231,7 @@ impl McpSessionStore {
                 client_info: None,
                 activated_service_ids: Vec::new(),
                 proxy_authorized,
+                session_fallback_allowed,
                 notification_sequence: 0,
                 created_at: now,
                 last_active_at: now,
@@ -291,6 +301,7 @@ impl McpSessionStore {
             .map(|record| McpSessionAccess {
                 user_id: record.user_id,
                 proxy_authorized: record.proxy_authorized,
+                session_fallback_allowed: record.session_fallback_allowed,
             }))
     }
 
@@ -842,7 +853,12 @@ impl McpSessionStore {
         Ok(false)
     }
 
-    fn create_in_memory(&self, user_id: &str, proxy_authorized: bool) -> Option<String> {
+    fn create_in_memory(
+        &self,
+        user_id: &str,
+        proxy_authorized: bool,
+        session_fallback_allowed: bool,
+    ) -> Option<String> {
         let mut sessions = self
             .sessions
             .write()
@@ -867,6 +883,7 @@ impl McpSessionStore {
                 expires_at: now + chrono::Duration::seconds(MCP_SESSION_MAX_IDLE_SECS as i64),
                 activated_service_ids: HashSet::new(),
                 proxy_authorized,
+                session_fallback_allowed,
                 notification_sequence: 0,
                 notification_tx: Some(tx),
             },
@@ -891,6 +908,7 @@ impl McpSessionStore {
             session.expires_at = record.expires_at;
             session.activated_service_ids = record.activated_service_ids.into_iter().collect();
             session.proxy_authorized = record.proxy_authorized;
+            session.session_fallback_allowed = record.session_fallback_allowed;
             session.notification_sequence = record.notification_sequence;
             return;
         }
@@ -905,6 +923,7 @@ impl McpSessionStore {
                 expires_at: record.expires_at,
                 activated_service_ids: record.activated_service_ids.into_iter().collect(),
                 proxy_authorized: record.proxy_authorized,
+                session_fallback_allowed: record.session_fallback_allowed,
                 notification_sequence: record.notification_sequence,
                 notification_tx: Some(tx),
             },
@@ -928,6 +947,7 @@ impl McpSessionStore {
                 client_info: None,
                 activated_service_ids: session.activated_service_ids.iter().cloned().collect(),
                 proxy_authorized: session.proxy_authorized,
+                session_fallback_allowed: session.session_fallback_allowed,
                 notification_sequence: session.notification_sequence,
                 created_at: session.created_at,
                 last_active_at: session.last_active,
@@ -977,6 +997,7 @@ mod tests {
             client_info: None,
             activated_service_ids: Vec::new(),
             proxy_authorized: true,
+            session_fallback_allowed: true,
             notification_sequence: 0,
             created_at: now,
             last_active_at: now,
@@ -1006,7 +1027,7 @@ mod tests {
         let store = McpSessionStore::new();
         let ordinary = store.create("user-1").await.unwrap().expect("create");
         let proxy = store
-            .create_with_proxy_access("user-2", true)
+            .create_with_proxy_access("user-2", true, true)
             .await
             .unwrap()
             .expect("create proxy session");
@@ -1248,7 +1269,7 @@ mod tests {
             Duration::from_millis(10),
         );
         let id = owner
-            .create_with_proxy_access("user-1", true)
+            .create_with_proxy_access("user-1", true, true)
             .await
             .unwrap()
             .expect("create");

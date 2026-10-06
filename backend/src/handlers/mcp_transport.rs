@@ -516,6 +516,21 @@ impl McpAuthContext {
             || self.auth_method == AuthMethod::Delegated
     }
 
+    /// Whether an MCP session minted from this auth may later authenticate on
+    /// its own once the bearer is missing or expired (the session-fallback
+    /// path). The session records none of the token's restrictions, and
+    /// `AuthMethod::Session` is allow-all and skips the approval flow, so only
+    /// unrestricted first-party access tokens qualify. Tokens issued to an
+    /// OAuth client (Codex, Claude, any DCR app), tokens narrowed to specific
+    /// services or nodes, and service-account tokens keep their session for
+    /// notifications but must re-present a live bearer on every request.
+    fn allows_session_fallback(&self) -> bool {
+        self.auth_method == AuthMethod::AccessToken
+            && self.oauth_client_id.is_none()
+            && self.allow_all_services
+            && self.allow_all_nodes
+    }
+
     fn approval_requester_type(&self) -> Option<&'static str> {
         match &self.auth_method {
             AuthMethod::ApiKey => Some("api_key"),
@@ -835,6 +850,12 @@ async fn authenticate_mcp(
         if !session.proxy_authorized {
             return Err(mcp_403_insufficient_scope());
         }
+        // Sessions created by restricted or client-issued tokens (and legacy
+        // rows without the flag) cannot stand in for the bearer: a 401 makes
+        // the client refresh and re-present a token whose restrictions apply.
+        if !session.session_fallback_allowed {
+            return Err(mcp_401(&state.config.base_url));
+        }
         let user_id = verify_user_active(state, session.user_id).await?;
         let mut ctx = McpAuthContext::user(user_id, AuthMethod::Session);
         ctx.ip_address = request_ip;
@@ -1113,6 +1134,7 @@ pub async fn mcp_post(
                 &user_id,
                 &request,
                 auth.is_stateless(),
+                auth.allows_session_fallback(),
                 auth.api_key_id.as_deref(),
                 auth.api_key_name.as_deref(),
                 auth.ip_address.as_deref(),
@@ -1414,6 +1436,7 @@ async fn handle_initialize(
     user_id: &str,
     request: &JsonRpcRequest,
     stateless: bool,
+    session_fallback_allowed: bool,
     api_key_id: Option<&str>,
     api_key_name: Option<&str>,
     ip_address: Option<&str>,
@@ -1430,7 +1453,7 @@ async fn handle_initialize(
     } else {
         match state
             .mcp_sessions
-            .create_with_proxy_access(user_id, true)
+            .create_with_proxy_access(user_id, true, session_fallback_allowed)
             .await
         {
             Ok(Some(id)) => {
@@ -1592,6 +1615,7 @@ async fn handle_tools_list(
                 "inputSchema": webhook_tool_schema(auth, &t.input_schema),
             });
             if let Some(annotations) = mcp_service::tool_annotations(&t.name, &services) {
+                tool["title"] = annotations["title"].clone();
                 tool["annotations"] = annotations;
             }
             tool
@@ -3342,6 +3366,25 @@ async fn handle_meta_discover(
     }
 }
 
+/// Refusal for a restricted caller asking to connect a service outside its
+/// grant. API keys are managed on the key itself; an OAuth app's access is the
+/// user's consent, which they change by revoking the app and reconnecting.
+fn restricted_connect_refusal(auth: &McpAuthContext, frontend_url: &str) -> String {
+    if auth.is_api_key {
+        return "API key does not have access to this service".to_string();
+    }
+    let consents_url = format!("{}/settings/consents", frontend_url.trim_end_matches('/'));
+    serde_json::json!({
+        "error": "service_not_granted",
+        "message": "The user's NyxID sign-in for this app does not include this service.",
+        "instructions": format!(
+            "Ask the user to open {consents_url}, revoke this app, then reconnect it and choose the services to share (or all services)."
+        ),
+        "manage_access_url": consents_url,
+    })
+    .to_string()
+}
+
 async fn handle_meta_connect(
     state: &AppState,
     auth: &McpAuthContext,
@@ -3377,7 +3420,7 @@ async fn handle_meta_connect(
     {
         return tool_result(
             request_id,
-            "API key does not have access to this service",
+            &restricted_connect_refusal(auth, &state.config.frontend_url),
             true,
         );
     }
@@ -5553,6 +5596,108 @@ mod tests {
     }
 
     #[test]
+    fn only_unrestricted_first_party_access_tokens_allow_session_fallback() {
+        // A session records none of the token's restrictions, and session auth
+        // is allow-all and skips approval. Restricted and client-issued tokens
+        // keep a session for notifications but must not be able to drop their
+        // bearer and continue as `AuthMethod::Session`.
+        let first_party = McpAuthContext::user("user-1".to_string(), AuthMethod::AccessToken);
+        assert!(first_party.allows_session_fallback());
+
+        let mut client_issued = first_party.clone();
+        client_issued.oauth_client_id = Some("codex-dcr-client".to_string());
+        assert!(!client_issued.allows_session_fallback());
+
+        let mut zero_services = first_party.clone();
+        zero_services.allow_all_services = false;
+        assert!(!zero_services.allows_session_fallback());
+
+        let mut node_restricted = first_party.clone();
+        node_restricted.allow_all_nodes = false;
+        assert!(!node_restricted.allows_session_fallback());
+
+        for method in [
+            AuthMethod::ApiKey,
+            AuthMethod::Relay,
+            AuthMethod::Delegated,
+            AuthMethod::ServiceAccount,
+            AuthMethod::Session,
+        ] {
+            let label = format!("{method:?}");
+            assert!(
+                !McpAuthContext::user("user-1".to_string(), method).allows_session_fallback(),
+                "{label} must not mint a fallback-capable session"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn restricted_token_session_cannot_stand_in_for_the_bearer() {
+        let state = crate::test_utils::test_app_state_no_db().await;
+        let sid = state
+            .mcp_sessions
+            .create_with_proxy_access("user-1", true, false)
+            .await
+            .unwrap()
+            .expect("session created");
+
+        // No bearer at all: the session alone must not authenticate.
+        let mut headers = HeaderMap::new();
+        headers.insert("mcp-session-id", sid.parse().unwrap());
+        let refused = authenticate_mcp(&state, &headers, true)
+            .await
+            .expect_err("session fallback must be refused");
+        assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+
+        // An expired or invalid bearer falls through to the same refusal.
+        headers.insert("authorization", "Bearer not-a-valid-jwt".parse().unwrap());
+        let refused = authenticate_mcp(&state, &headers, true)
+            .await
+            .expect_err("invalid bearer must not fall back to the session");
+        assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn restricted_connect_refusal_points_oauth_users_at_their_consents() {
+        let mut api_key = McpAuthContext::user("user-1".to_string(), AuthMethod::ApiKey);
+        api_key.is_api_key = true;
+        assert_eq!(
+            restricted_connect_refusal(&api_key, "https://nyx.example/"),
+            "API key does not have access to this service"
+        );
+
+        let oauth = McpAuthContext::user("user-1".to_string(), AuthMethod::AccessToken);
+        let refusal: serde_json::Value =
+            serde_json::from_str(&restricted_connect_refusal(&oauth, "https://nyx.example/"))
+                .expect("structured refusal");
+        assert_eq!(refusal["error"], "service_not_granted");
+        assert_eq!(
+            refusal["manage_access_url"],
+            "https://nyx.example/settings/consents"
+        );
+        assert!(!refusal.to_string().contains("API key"));
+    }
+
+    #[test]
+    fn legacy_session_rows_without_the_flag_do_not_allow_fallback() {
+        let now = bson::DateTime::now();
+        let legacy = bson::doc! {
+            "_id": "sess-legacy",
+            "user_id": "user-1",
+            "client_info": bson::Bson::Null,
+            "activated_service_ids": [],
+            "proxy_authorized": true,
+            "notification_sequence": 0_i64,
+            "created_at": now,
+            "last_active_at": now,
+            "expires_at": now,
+        };
+        let record: crate::models::mcp_session::McpSessionRecord =
+            bson::from_document(legacy).expect("legacy row deserializes");
+        assert!(!record.session_fallback_allowed);
+    }
+
+    #[test]
     fn mcp_extract_ip_prefers_forwarded_for() {
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-for", "1.2.3.4, 5.6.7.8".parse().unwrap());
@@ -6211,7 +6356,7 @@ mod curation_auth_regressions {
         let sid = f
             .state
             .mcp_sessions
-            .create_with_proxy_access(&f.sa.id, true)
+            .create_with_proxy_access(&f.sa.id, true, true)
             .await
             .unwrap()
             .unwrap();
