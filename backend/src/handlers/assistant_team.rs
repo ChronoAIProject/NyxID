@@ -2731,7 +2731,7 @@ pub fn spawn_sweeps(state: AppState) {
             if let Err(error) = super::nyxbot::check_deliveries(&state).await {
                 tracing::debug!(%error, "NyxBot delivery sweep deferred");
             }
-            // Personal bots on a platform the gateway now relays move there.
+            // Reconcile personal and org bot transports against their linking person's flags.
             if let Err(error) = super::nyxbot::switch_to_gateway(&state).await {
                 tracing::debug!(%error, "NyxBot gateway switch-over deferred");
             }
