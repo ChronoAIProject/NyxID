@@ -59,6 +59,11 @@ async function fixture(page: Page, count = 3, longLabels = false) {
     count,
     longLabels,
     deletedIds: [] as string[],
+    disabledIds: [] as string[],
+    grouped: false,
+    withPool: false,
+    legacySource: false,
+    viewWrites: [] as unknown[],
     writes: [] as { ordered: string[]; expected_version: number }[],
   };
   await page.route("**/api/v1/**", async (route) => {
@@ -76,11 +81,51 @@ async function fixture(page: Page, count = 3, longLabels = false) {
         email_verified: true,
         feature_flags: {},
         profile_config: {
+          onboarding: { ai_services_completed_at: "2026-10-07T00:00:00Z" },
           services_view: {
-            search: "", organization_ids: [], service_group_ids: [],
-            source: "all", state: "all", service_type: "all", show_auto_connected: false,
+            search: "",
+            organization_ids: [],
+            service_group_ids: [],
+            source: "all",
+            state: "all",
+            service_type: "all",
+            show_auto_connected: false,
           },
         },
+      };
+    else if (path === "/api/v1/users/me/preferences/services") {
+      state.viewWrites.push(req.postDataJSON());
+      body = req.postDataJSON();
+    } else if (path === "/api/v1/service-insights") body = { connections: [] };
+    else if (
+      path === "/api/v1/service-pools" ||
+      path.endsWith("/service-pools")
+    )
+      body = {
+        pools:
+          state.withPool && !new URL(req.url()).searchParams.has("org_id")
+            ? [
+                {
+                  id: "pool",
+                  user_id: "human",
+                  name: "Example route",
+                  slug: "example-route",
+                  strategy: "priority",
+                  members: [
+                    {
+                      user_service_id: ids[0],
+                      enabled: true,
+                      weight: 1,
+                      priority: 7,
+                    },
+                  ],
+                  rr_counter: 0,
+                  is_active: true,
+                  created_at: "2026-10-07",
+                  updated_at: "2026-10-07",
+                },
+              ]
+            : [],
       };
     else if (path === "/api/v1/public/config")
       body = { telemetry_dsn: null, telemetry_share_analytics: false };
@@ -122,7 +167,18 @@ async function fixture(page: Page, count = 3, longLabels = false) {
         ? { message: "Inventory unavailable", error_code: 1000 }
         : {
             keys: Array.from({ length: state.count }, (_, i) => {
-              const row = service(i);
+              const row = {
+                ...service(i),
+                is_active: !state.disabledIds.includes(ids[i]!),
+              };
+              if (state.legacySource && i === 2)
+                Reflect.deleteProperty(row, "credential_source");
+              if (state.grouped)
+                Object.assign(row, {
+                  catalog_service_id: "example-api",
+                  catalog_service_slug: "example-api",
+                  catalog_service_name: "Example API",
+                });
               if (state.longLabels && i === 2)
                 row.label =
                   "Gamma with a very long service label that wraps on a narrow mobile screen";
@@ -132,7 +188,12 @@ async function fixture(page: Page, count = 3, longLabels = false) {
               return { ...row, preference_rank: rank < 0 ? null : rank + 1 };
             }).filter((row) => !state.deletedIds.includes(row.id!)),
           };
-    } else if (path === "/api/v1/user-services") body = { services: [] };
+    } else if (path === "/api/v1/user-services")
+      body = {
+        services: state.legacySource
+          ? [{ id: ids[2], credential_source: service(2).credential_source }]
+          : [],
+      };
     else if (path === "/api/v1/nodes") body = { nodes: [] };
     else if (path === "/api/v1/orgs") body = { orgs: [] };
     else if (path === "/api/v1/catalog") body = { entries: [] };
@@ -153,8 +214,14 @@ async function enter(page: Page) {
   await expect(
     page.getByRole("form", { name: "Service preference order" }),
   ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: /^Drag / }).first(),
+  ).toBeEnabled();
 }
 async function drag(page: Page, from: string, to: string) {
+  await page
+    .getByRole("button", { name: `Drag ${from}`, exact: true })
+    .scrollIntoViewIfNeeded();
   const a = await page
     .getByRole("button", { name: `Drag ${from}`, exact: true })
     .boundingBox();
@@ -171,23 +238,29 @@ async function drag(page: Page, from: string, to: string) {
   await page.mouse.up();
 }
 
-test("mouse order, grid/table saved pills, auto toggle, focus and reload persistence", async ({
+test("mouse order, grid/table saved pills, full inventory, focus and reload persistence", async ({
   page,
 }) => {
   const state = await fixture(page);
   await expect(
-    page.getByLabel("Preference order 1", { exact: true }),
+    page.getByRole("button", {
+      name: "Discovery preference 1 · Alpha",
+      exact: true,
+    }),
   ).toBeVisible();
   await expect(
-    page.getByLabel("Preference order 2", { exact: true }),
+    page.getByLabel("Discovery preference 2", { exact: true }),
   ).toHaveCount(0);
   await enter(page);
   await expect(
-    page.getByRole("button", { name: "Auto-connected services: shown", exact: true }),
-  ).toHaveAttribute("aria-pressed", "true");
+    page.getByText(
+      "Editing your complete inventory · 3 connections. Filters and saved views are not applied here and are not changed.",
+    ),
+  ).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Auto-connected services: shown", exact: true }),
-  ).toBeDisabled();
+    page.getByRole("region", { name: "Service filters" }),
+  ).toHaveCount(0);
+  await expect(page.getByText("Auto-connected", { exact: true })).toBeVisible();
   await expect(
     page.getByRole("button", { name: "Drag Alpha", exact: true }),
   ).toBeFocused();
@@ -198,7 +271,7 @@ test("mouse order, grid/table saved pills, auto toggle, focus and reload persist
   await expect(
     page
       .locator(`[data-preference-item="${ids[2]}"]`)
-      .getByLabel("Preference order 1", { exact: true }),
+      .getByLabel("Discovery preference 1", { exact: true }),
   ).toBeVisible();
   await page.getByRole("button", { name: "Save", exact: true }).click();
   await expect(
@@ -210,18 +283,175 @@ test("mouse order, grid/table saved pills, auto toggle, focus and reload persist
   });
   await page.reload();
   await expect(
-    page.getByLabel("Preference order 1", { exact: true }),
+    page.getByRole("button", {
+      name: "Discovery preference 1 · Gamma",
+      exact: true,
+    }),
   ).toBeVisible();
   await expect(
-    page.getByLabel("Preference order 2", { exact: true }),
+    page.getByRole("button", {
+      name: "Discovery preference 2 · Alpha",
+      exact: true,
+    }),
   ).toBeVisible();
+  expect(state.viewWrites).toEqual([]);
   await page.getByRole("button", { name: /table view/i }).click();
   await expect(
-    page.getByLabel("Preference order 1", { exact: true }),
+    page.getByLabel("Discovery preference 1", { exact: true }),
   ).toBeVisible();
   await enter(page);
   await expect(page.locator("form a")).toHaveCount(0);
   await page.getByRole("button", { name: "Cancel", exact: true }).click();
+});
+
+test("group chip uses complete inventory, pills preserve order and filters, editor leaves saved views unchanged", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  state.grouped = true;
+  state.withPool = true;
+  state.ordered = [ids[1]!, ids[2]!, ids[0]!];
+  await page.reload();
+  const group = page.getByRole("region", { name: "Example API", exact: true });
+  const chip = group.getByRole("button", {
+    name: "Discovery preference 1 · Beta",
+    exact: true,
+  });
+  await expect(chip).toHaveText("Discovery #1");
+  await expect(chip).toHaveAttribute(
+    "title",
+    "#3 · Alpha\n#1 · Beta\n#2 · Gamma",
+  );
+  await chip.click();
+  const table = group.getByRole("table");
+  await expect(
+    table.getByRole("link", { name: /^View .+ connection details/ }),
+  ).toHaveText(["Alpha", "Gamma"]);
+  const alpha = table.getByRole("link", {
+    name: "View Alpha connection details (Personal)",
+    exact: true,
+  });
+  await expect(alpha.locator("xpath=following-sibling::*[1]")).toHaveAttribute(
+    "aria-label",
+    "Discovery preference 3",
+  );
+  await expect(alpha.locator("xpath=following-sibling::*[2]")).toContainText(
+    "Credential check needed",
+  );
+  await expect(alpha.locator("xpath=ancestor::tr")).toContainText(
+    "Example route · Priority 7",
+  );
+  await expect(
+    table.getByLabel("Discovery preference 2", { exact: true }),
+  ).toHaveText("Discovery #2");
+
+  await page.getByRole("button", { name: "Organization", exact: true }).click();
+  await page
+    .getByRole("checkbox", {
+      name: "A very long organization name that wraps on mobile",
+      exact: true,
+    })
+    .check();
+  await page.keyboard.press("Escape");
+  await expect(
+    table.getByLabel("Discovery preference 2", { exact: true }),
+  ).toHaveText("Discovery #2");
+  await expect(
+    table.getByLabel("Discovery preference 3", { exact: true }),
+  ).toHaveCount(0);
+  await page
+    .getByRole("button", { name: "Clear filters", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Service view: All services", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Service", exact: true }).click();
+  await page
+    .getByRole("checkbox", { name: "Example API", exact: true })
+    .check();
+  await page.keyboard.press("Escape");
+  const search = page.getByRole("textbox", {
+    name: "Search services and connections",
+    exact: true,
+  });
+  await search.fill("Alpha");
+  await search.press("Enter");
+  await expect(
+    table.getByRole("link", { name: /^View .+ connection details/ }),
+  ).toHaveText(["Alpha"]);
+  const filters = page.getByRole("region", { name: "Service filters" });
+  const before = await filters.innerText();
+  for (const outcome of ["Cancel", "Save"] as const) {
+    await enter(page);
+    await expect(
+      page.getByText(
+        "Editing your complete inventory · 3 connections. Filters and saved views are not applied here and are not changed.",
+      ),
+    ).toBeVisible();
+    await expect(page.locator("[data-preference-item]")).toHaveCount(4);
+    await expect(
+      page.getByRole("button", { name: "Drag Gamma", exact: true }),
+    ).toBeVisible();
+    await expect(page.locator("form a")).toHaveCount(0);
+    await expect(filters).toHaveCount(0);
+    if (outcome === "Save")
+      await page
+        .getByRole("button", { name: "Unrank Beta", exact: true })
+        .click();
+    await page.getByRole("button", { name: outcome, exact: true }).click();
+    await expect(filters).toBeVisible();
+    await expect.poll(() => filters.innerText()).toBe(before);
+    await expect(
+      group.getByRole("button", {
+        name: "Collapse Example API connections",
+        exact: true,
+      }),
+    ).toBeVisible();
+    expect(state.viewWrites).toEqual([]);
+  }
+  await group
+    .getByRole("link", {
+      name: "View all Example API service details",
+      exact: true,
+    })
+    .click();
+  await expect(
+    page.getByRole("heading", { name: "Example API", exact: true }),
+  ).toBeVisible();
+  const overview = page.getByRole("table");
+  await expect(
+    overview.getByRole("link", { name: /^View .+ connection details/ }),
+  ).toHaveText(["Alpha", "Beta", "Gamma"]);
+  await expect(
+    overview.getByLabel("Discovery preference 2", { exact: true }),
+  ).toHaveText("Discovery #2");
+  await expect(
+    overview.getByLabel("Discovery preference 1", { exact: true }),
+  ).toHaveText("Discovery #1");
+  await expect(
+    overview
+      .getByRole("link", {
+        name: "View Alpha connection details (Personal)",
+        exact: true,
+      })
+      .locator("xpath=following-sibling::*[1]"),
+  ).toHaveAttribute("aria-label", "Discovery preference 2");
+  await page.goto("/keys?view=routing");
+  await expect(
+    page.getByRole("button", { name: "Reorder", exact: true }),
+  ).toHaveCount(0);
+  await page
+    .getByRole("button", {
+      name: "Discovery preference 1 · Gamma",
+      exact: true,
+    })
+    .click();
+  await expect(
+    page
+      .getByRole("table")
+      .getByLabel("Discovery preference 2", { exact: true }),
+  ).toBeVisible();
+  expect(state.viewWrites).toEqual([]);
 });
 
 test("keyboard drag, escape cancellation, divider and dirty view/tab confirmation", async ({
@@ -230,18 +460,56 @@ test("keyboard drag, escape cancellation, divider and dirty view/tab confirmatio
   await fixture(page);
   await enter(page);
   const handle = page.getByRole("button", { name: "Drag Beta", exact: true });
+  await expect
+    .poll(() =>
+      page
+        .locator("[data-preference-item]")
+        .evaluateAll((items) =>
+          items.every((item) =>
+            item
+              .getAnimations()
+              .every((animation) => animation.playState !== "running"),
+          ),
+        ),
+    )
+    .toBe(true);
   await handle.focus();
   await page.keyboard.press("Space");
   await expect(handle).toHaveAttribute("aria-pressed", "true");
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      ),
+  );
   await page.keyboard.press("ArrowUp");
   await page.keyboard.press("Escape");
   await expect(handle).not.toHaveAttribute("aria-pressed", "true");
   await expect(
     page.getByRole("button", { name: "Save", exact: true }),
   ).toBeDisabled();
+  await expect
+    .poll(() =>
+      page
+        .locator("[data-preference-item]")
+        .evaluateAll((items) =>
+          items.every((item) =>
+            item
+              .getAnimations()
+              .every((animation) => animation.playState !== "running"),
+          ),
+        ),
+    )
+    .toBe(true);
   await handle.focus();
   await page.keyboard.press("Space");
   await expect(handle).toHaveAttribute("aria-pressed", "true");
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      ),
+  );
   await page.keyboard.press("ArrowUp");
   await expect(page.locator('[role="status"][aria-live]')).toContainText(
     "Moved to position 1",
@@ -250,7 +518,7 @@ test("keyboard drag, escape cancellation, divider and dirty view/tab confirmatio
   await expect(
     page
       .locator(`[data-preference-item="${ids[1]}"]`)
-      .getByLabel("Preference order 1", { exact: true }),
+      .getByLabel("Discovery preference 1", { exact: true }),
   ).toBeVisible();
   await expect(handle).toBeFocused();
   await expect(page.locator('[role="status"][aria-live]')).toHaveCount(1);
@@ -266,19 +534,25 @@ test("keyboard drag, escape cancellation, divider and dirty view/tab confirmatio
   ).toBeVisible();
   await drag(page, "Unranked divider", "Beta");
   await expect(
-    page.locator('[data-preference-item] [aria-label^="Preference order"]'),
+    page.locator('[data-preference-item] [aria-label^="Discovery preference"]'),
   ).toHaveCount(0);
   await page.getByRole("button", { name: "Cancel", exact: true }).click();
 });
 
 for (const outcome of ["Save", "Cancel"] as const) {
-  test(`${outcome} restores focus after the closing inventory refetch becomes available`, async ({ page }) => {
+  test(`${outcome} restores focus after the closing inventory refetch becomes available`, async ({
+    page,
+  }) => {
     await fixture(page);
     await enter(page);
     if (outcome === "Save")
-      await page.getByRole("button", { name: "Rank Gamma", exact: true }).click();
+      await page
+        .getByRole("button", { name: "Rank Gamma", exact: true })
+        .click();
     let release: () => void = () => {};
-    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
     let held = false;
     let reads = 0;
     await page.route("**/api/v1/keys", async (route) => {
@@ -292,7 +566,9 @@ for (const outcome of ["Save", "Cancel"] as const) {
     });
     await page.getByRole("button", { name: outcome, exact: true }).click();
     await expect.poll(() => held).toBe(true);
-    await expect(page.getByRole("form", { name: "Service preference order" })).toHaveCount(0);
+    await expect(
+      page.getByRole("form", { name: "Service preference order" }),
+    ).toHaveCount(0);
     const reorder = page.getByRole("button", { name: "Reorder", exact: true });
     await expect(reorder).toBeDisabled();
     await expect(reorder).not.toBeFocused();
@@ -316,7 +592,7 @@ test("save failure retains edits, conflict overwrite refetches version and persi
   await expect(
     page
       .locator(`[data-preference-item="${ids[2]}"]`)
-      .getByLabel("Preference order 3", { exact: true }),
+      .getByLabel("Discovery preference 3", { exact: true }),
   ).toBeVisible();
   state.failSave = false;
   state.conflict = true;
@@ -334,7 +610,7 @@ test("save failure retains edits, conflict overwrite refetches version and persi
   await expect(
     page
       .locator(`[data-preference-item="${ids[2]}"]`)
-      .getByLabel("Preference order 3", { exact: true }),
+      .getByLabel("Discovery preference 3", { exact: true }),
   ).toBeVisible();
 });
 
@@ -354,6 +630,11 @@ test("read failure fails closed, Retry, single service, compatibility and empty 
   state.failRead = false;
   await page.getByRole("button", { name: "Retry", exact: true }).click();
   await enter(page);
+  await expect(
+    page.getByText(
+      "Editing your complete inventory · 1 connection. Filters and saved views are not applied here and are not changed.",
+    ),
+  ).toBeVisible();
   await page.getByRole("button", { name: "Unrank Alpha", exact: true }).click();
   await page.getByRole("button", { name: "Save", exact: true }).click();
   await expect.poll(() => state.writes.at(-1)?.ordered).toEqual([]);
@@ -383,6 +664,9 @@ test("real touch drag and long mobile labels without overflow", async ({
   const page = await context.newPage();
   await fixture(page, 3, true);
   await enter(page);
+  await page
+    .getByRole("button", { name: /^Drag Gamma/ })
+    .scrollIntoViewIfNeeded();
   const session = await context.newCDPSession(page);
   const a = await page
     .getByRole("button", { name: /^Drag Gamma/ })
@@ -410,7 +694,7 @@ test("real touch drag and long mobile labels without overflow", async ({
   await expect(
     page
       .locator(`[data-preference-item="${ids[2]}"]`)
-      .getByLabel("Preference order 1", { exact: true }),
+      .getByLabel("Discovery preference 1", { exact: true }),
   ).toBeVisible();
   expect(
     await page.evaluate(
@@ -452,7 +736,7 @@ test("conflict reload clears dirty and inventory recovery preserves edits", asyn
   await expect(
     page
       .locator(`[data-preference-item="${ids[2]}"]`)
-      .getByLabel("Preference order 3", { exact: true }),
+      .getByLabel("Discovery preference 3", { exact: true }),
   ).toBeVisible();
   state.failInventory = false;
   await page
@@ -521,7 +805,9 @@ test("deferred conflict recovery cannot write as a switched account or resurrect
 });
 
 test("editor screenshots for PM", async ({ page }, testInfo) => {
-  await fixture(page);
+  const state = await fixture(page, 3, true);
+  state.disabledIds = [ids[2]!];
+  await page.reload();
   await enter(page);
   await page.screenshot({
     path: testInfo.outputPath("desktop-editor.png"),
@@ -531,6 +817,22 @@ test("editor screenshots for PM", async ({ page }, testInfo) => {
   await page.screenshot({
     path: testInfo.outputPath("mobile-editor.png"),
     fullPage: true,
+  });
+  await page
+    .getByRole("button", { name: /^Drag Gamma/ })
+    .scrollIntoViewIfNeeded();
+  await expect(
+    page
+      .locator(`[data-preference-item="${ids[2]}"]`)
+      .getByText("Disabled", { exact: true }),
+  ).toBeVisible();
+  await page.screenshot({
+    path: testInfo.outputPath("mobile-editor-details.png"),
+    fullPage: true,
+  });
+  await testInfo.attach("mobile editor details", {
+    path: testInfo.outputPath("mobile-editor-details.png"),
+    contentType: "image/png",
   });
   await testInfo.attach("desktop editor", {
     path: testInfo.outputPath("desktop-editor.png"),
@@ -570,7 +872,7 @@ test("actual stale-ID 400 refreshes inventory before dropping IDs and permits re
   await expect(
     page
       .locator(`[data-preference-item="${ids[2]}"]`)
-      .getByLabel("Preference order 2", { exact: true }),
+      .getByLabel("Discovery preference 2", { exact: true }),
   ).toBeVisible();
   await page.getByRole("button", { name: "Save", exact: true }).click();
   await expect
@@ -609,4 +911,51 @@ test("conflict recovery remains available after preference refetch fails", async
     page.getByRole("form", { name: "Service preference order" }),
   ).toHaveCount(0);
   expect(state.writes.at(-1)).toEqual({ ordered: ids, expected_version: 2 });
+});
+
+test("legacy org provenance joins late and survives stale inventory refresh without resetting order", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  state.legacySource = true;
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route("**/api/v1/user-services", async (route) => {
+    await gate;
+    await route.fallback();
+  });
+  await page.reload();
+  await enter(page);
+  await page.getByRole("button", { name: "Rank Gamma", exact: true }).click();
+  const gamma = page.locator(`[data-preference-item="${ids[2]}"]`);
+  release();
+  await expect(
+    gamma.getByText("Org: A very long organization name that wraps on mobile", {
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(
+    gamma.getByLabel("Discovery preference 3", { exact: true }),
+  ).toHaveText("Discovery #3");
+  expect(state.writes).toEqual([]);
+  state.deletedIds.push(ids[0]!);
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await page.getByRole("button", { name: "Retry", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "Drag Alpha", exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    gamma.getByText("Org: A very long organization name that wraps on mobile", {
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(
+    gamma.getByLabel("Discovery preference 2", { exact: true }),
+  ).toHaveText("Discovery #2");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect
+    .poll(() => state.writes.at(-1))
+    .toEqual({ ordered: [ids[1], ids[2]], expected_version: 1 });
 });

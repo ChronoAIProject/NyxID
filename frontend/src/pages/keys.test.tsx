@@ -9,6 +9,7 @@ import {
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { ServicePool } from "@/schemas/pools";
 import type { KeyInfo } from "@/types/keys";
 
 function render(ui: ReactNode) {
@@ -41,6 +42,7 @@ const { mockNavigate, mockPoolOwner, state } = vi.hoisted(() => ({
     preferenceFetching: false,
     keysError: null as unknown,
     userServices: [] as unknown[],
+    routingPools: [] as ServicePool[],
     nodes: [] as { id: string; name: string }[],
   },
 }));
@@ -125,7 +127,7 @@ vi.mock("@/hooks/use-pools", () => ({
 
 vi.mock("@/hooks/use-service-routing-pools", () => ({
   useServiceRoutingPools: () => ({
-    pools: [],
+    pools: state.routingPools,
     loading: false,
     incomplete: false,
   }),
@@ -260,6 +262,7 @@ describe("KeysPage", () => {
     state.keysError = null;
     state.userServices = [];
     state.nodes = [];
+    state.routingPools = [];
   });
 
   it.each(["keysFetching", "preferenceFetching"] as const)(
@@ -291,14 +294,38 @@ describe("KeysPage", () => {
         preference_rank: 1,
       }),
     ];
+    state.routingPools = [
+      {
+        id: "route",
+        user_id: "human",
+        name: "Example route",
+        slug: "example-route",
+        strategy: "priority",
+        members: [
+          { user_service_id: "alpha", enabled: true, weight: 1, priority: 7 },
+        ],
+        rr_counter: 0,
+        is_active: true,
+        created_at: "2026-10-07",
+        updated_at: "2026-10-07",
+      },
+    ];
     render(<KeysPage />);
-    expect(screen.getByLabelText("Preference order 2")).toHaveTextContent("#2");
+    const chip = screen.getByRole("button", {
+      name: "Discovery preference 1 · Auto",
+    });
+    expect(chip).toHaveTextContent("Discovery #1");
+    expect(chip).toHaveAttribute("title", "#3 · Gamma\n#2 · Alpha\n#1 · Auto");
     expect(
-      screen.queryByLabelText("Preference order 1"),
+      screen.queryByLabelText("Discovery preference 1"),
     ).not.toBeInTheDocument();
-    expandConnections();
-    expect(screen.getByLabelText("Preference order 2")).toHaveTextContent("#2");
-    expect(screen.getByLabelText("Preference order 3")).toHaveTextContent("#3");
+    await userEvent.click(chip);
+    expect(screen.getByLabelText("Discovery preference 2")).toHaveTextContent(
+      "#2",
+    );
+    expect(screen.getByLabelText("Discovery preference 3")).toHaveTextContent(
+      "#3",
+    );
     const alpha = screen.getByRole("link", {
       name: "View Alpha connection details (Personal)",
     });
@@ -306,17 +333,30 @@ describe("KeysPage", () => {
       name: "View Gamma connection details (Personal)",
     });
     expect(
-      alpha.compareDocumentPosition(gamma) & Node.DOCUMENT_POSITION_FOLLOWING,
+      gamma.compareDocumentPosition(alpha) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
+    expect(
+      within(alpha.closest("tr")!).getByText("Example route · Priority 7"),
+    ).toBeVisible();
+    expect(alpha.nextElementSibling).toBe(
+      screen.getByLabelText("Discovery preference 2"),
+    );
+    expect(
+      screen.getByLabelText("Discovery preference 2").nextElementSibling,
+    ).toHaveTextContent("Credential check needed");
     await userEvent.click(screen.getByRole("button", { name: /table view/i }));
-    expect(screen.getByLabelText("Preference order 2")).toHaveTextContent("#2");
-    expect(screen.getByLabelText("Preference order 3")).toHaveTextContent("#3");
+    expect(screen.getByLabelText("Discovery preference 2")).toHaveTextContent(
+      "#2",
+    );
+    expect(screen.getByLabelText("Discovery preference 3")).toHaveTextContent(
+      "#3",
+    );
     expect(
       screen
-        .getByRole("link", { name: "View Alpha connection details (Personal)" })
+        .getByRole("link", { name: "View Gamma connection details (Personal)" })
         .compareDocumentPosition(
           screen.getByRole("link", {
-            name: "View Gamma connection details (Personal)",
+            name: "View Alpha connection details (Personal)",
           }),
         ) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();

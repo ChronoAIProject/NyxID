@@ -5316,8 +5316,7 @@ impl ToolSearch {
     }
 }
 
-/// Search ALL user tools (regardless of activation state) and return matches
-/// plus the service IDs they belong to.
+/// Stably order ranked user connections before unranked services.
 pub fn order_services_by_preference(services: &mut [McpToolService], ranks: &HashMap<String, u32>) {
     services.sort_by_key(|service| preference_rank(service, ranks).unwrap_or(u32::MAX));
 }
@@ -5335,6 +5334,8 @@ pub fn search_all_tools(services: &[McpToolService], query: &str) -> SearchResul
     search_all_tools_ranked(services, query, &HashMap::new())
 }
 
+/// Search ALL user tools (regardless of activation state) and return matches
+/// plus the service IDs they belong to.
 pub fn search_all_tools_ranked(
     services: &[McpToolService],
     query: &str,

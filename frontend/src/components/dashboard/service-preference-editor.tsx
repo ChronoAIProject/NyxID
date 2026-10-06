@@ -18,7 +18,7 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { GripVertical } from "lucide-react";
+import { GripVertical, Info } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -34,6 +34,10 @@ import {
 } from "@/schemas/service-preference";
 import type { KeyInfo } from "@/types/keys";
 import type { ViewMode } from "@/components/shared/view-toggle";
+
+import { ServiceIcon } from "@/components/service-icon";
+import { ServiceOwnerAvatar } from "./service-owner-avatar";
+import { connectionSource, connectionSourceLabel } from "@/lib/service-view";
 
 const DIVIDER = "__unranked__";
 function initialItems(
@@ -102,30 +106,57 @@ function SortableItem({
       >
         <GripVertical className="h-4 w-4" />
       </Button>
+      {item && (
+        <ServiceIcon
+          slug={item.catalog_service_slug ?? item.slug}
+          iconUrl={item.icon_url}
+          size="sm"
+        />
+      )}
       <div className="min-w-0 flex-1">
         <p className="break-words text-12 font-medium">{label}</p>
-        <div className="mt-1 break-words text-11 text-muted-foreground">
-          {item ? (
-            <Badge
-              variant="secondary"
-              className="max-w-full whitespace-normal break-words"
-            >
-              {item.credential_source?.type === "org"
-                ? `Org: ${item.credential_source.org_name}`
-                : "Personal"}
-            </Badge>
-          ) : (
-            "Services below this divider have no preference rank"
-          )}
-        </div>
+        {item ? (
+          <>
+            <p className="mt-1 break-words text-11 text-muted-foreground [overflow-wrap:anywhere]">
+              <code>{item.slug}</code> ·{" "}
+              {item.catalog_service_name ?? "Custom service"}
+            </p>
+            <div className="mt-1 flex flex-wrap items-center gap-1.5 text-11 text-muted-foreground">
+              <ServiceOwnerAvatar
+                type={connectionSource(item)}
+                name={connectionSourceLabel(item)}
+                avatarUrl={
+                  item.credential_source?.type === "org"
+                    ? item.credential_source.avatar_url
+                    : undefined
+                }
+              />
+              <Badge
+                variant="secondary"
+                className="max-w-full whitespace-normal break-words"
+              >
+                {item.credential_source?.type === "org" ? "Org: " : ""}
+                {connectionSourceLabel(item)}
+              </Badge>
+              {item.auto_connected && (
+                <Badge variant="secondary">Auto-connected</Badge>
+              )}
+              {!item.is_active && <Badge variant="secondary">Disabled</Badge>}
+            </div>
+          </>
+        ) : (
+          <p className="mt-1 text-11 text-muted-foreground">
+            Services below this divider have no preference rank
+          </p>
+        )}
       </div>
       {item && (
         <div className="flex shrink-0 flex-col items-end gap-2 sm:flex-row sm:items-center">
           <Badge
             variant={rank ? "accent" : "secondary"}
-            aria-label={rank ? `Preference order ${rank}` : undefined}
+            aria-label={rank ? `Discovery preference ${rank}` : undefined}
           >
-            {rank ? `#${rank}` : "Unranked"}
+            {rank ? `Discovery #${rank}` : "Unranked"}
           </Badge>
           <Button
             type="button"
@@ -146,6 +177,7 @@ function SortableItem({
 export function ServicePreferenceEditor({
   preference,
   inventory,
+  enrichInventory = (items) => items,
   viewMode,
   blocked,
   onClose,
@@ -155,6 +187,9 @@ export function ServicePreferenceEditor({
 }: {
   readonly preference: ServicePreference;
   readonly inventory: readonly KeyInfo[];
+  readonly enrichInventory?: (
+    inventory: readonly KeyInfo[],
+  ) => readonly KeyInfo[];
   readonly viewMode: ViewMode;
   readonly blocked: boolean;
   readonly onClose: () => void;
@@ -182,6 +217,7 @@ export function ServicePreferenceEditor({
   const [message, setMessage] = useState("");
   const [recovering, setRecovering] = useState(false);
   const [editorInventory, setEditorInventory] = useState(inventory);
+  const displayInventory = enrichInventory(editorInventory);
   const save = useSaveServicePreference();
   const form = useAppForm<ServicePreferenceRequest>({
     resolver: zodResolver(servicePreferenceRequestSchema),
@@ -193,9 +229,18 @@ export function ServicePreferenceEditor({
   const dirty = form.formState.isDirty;
   const busy = recovering || save.isPending;
   const root = useRef<HTMLFormElement>(null);
+  const needsInitialFocus = useRef(true);
   useEffect(() => {
-    root.current?.querySelector<HTMLButtonElement>("button")?.focus();
-  }, []);
+    if (blocked || !needsInitialFocus.current) return;
+    const frame = requestAnimationFrame(() => {
+      const handle = root.current?.querySelector<HTMLButtonElement>("button");
+      if (handle && !handle.disabled) {
+        handle.focus();
+        needsInitialFocus.current = false;
+      }
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [blocked]);
   useEffect(() => {
     onDirtyChange(dirty);
   }, [dirty, onDirtyChange]);
@@ -312,11 +357,24 @@ export function ServicePreferenceEditor({
       className="min-w-0 space-y-4"
       aria-label="Service preference order"
     >
-      <p className="rounded-xl border bg-overlay p-4 text-12">
-        Drag the handle to set the order agents see first at equal relevance.
-        Keyboard: focus a handle, press Space, use the arrow keys, press Space
-        again. Escape cancels a drag. Items below the divider are unranked.
+      <p className="text-12 text-muted-foreground">
+        Editing your complete inventory · {editorInventory.length}{" "}
+        {editorInventory.length === 1 ? "connection" : "connections"}. Filters
+        and saved views are not applied here and are not changed.
       </p>
+      <div className="flex items-start gap-3 rounded-xl border border-primary/15 bg-primary/[0.04] px-4 py-3">
+        <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+          <Info className="size-4" aria-hidden="true" />
+        </span>
+        <p className="text-12 text-muted-foreground">
+          Drag the handle to set the order agents see first when tools tie on
+          relevance. Keyboard: focus a handle, press Space, use the arrow keys,
+          press Space again. Escape cancels a drag. Items below the divider are
+          unranked. This does not choose which connection runs a request: that
+          is the slug the agent calls, pool priority or rotation, and the
+          personal → organization → platform credential cascade.
+        </p>
+      </div>
       {message && (
         <p role="status" className="text-12 text-muted-foreground">
           {message}
@@ -396,7 +454,7 @@ export function ServicePreferenceEditor({
               <SortableItem
                 key={id}
                 id={id}
-                item={editorInventory.find((item) => item.id === id)}
+                item={displayInventory.find((item) => item.id === id)}
                 rank={index < items.indexOf(DIVIDER) ? index + 1 : undefined}
                 viewMode={viewMode}
                 disabled={busy || blocked}

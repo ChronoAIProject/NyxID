@@ -141,12 +141,18 @@ function LoadingSkeleton() {
 }
 
 function ExternalServicesTab({
-  preferenceAction,
+  editor,
   onAdd,
   onReconnect,
   viewMode,
 }: {
-  readonly preferenceAction?: (compact: boolean) => ReactNode;
+  readonly editor?: {
+    readonly inventory: readonly KeyInfo[];
+    readonly render: (
+      inventory: readonly KeyInfo[],
+      enrichInventory: (inventory: readonly KeyInfo[]) => readonly KeyInfo[],
+    ) => ReactNode;
+  };
   readonly onAdd: () => void;
   readonly onReconnect: (keyInfo: KeyInfo) => void;
   readonly viewMode: ViewMode;
@@ -167,6 +173,14 @@ function ExternalServicesTab({
     return map;
   }, [userServices]);
 
+  const joinSources = (inventory: readonly KeyInfo[]) =>
+    inventory.map((keyInfo) => ({
+      ...keyInfo,
+      credential_source:
+        keyInfo.credential_source ?? sourceById.get(keyInfo.id),
+    }));
+
+  if (editor) return editor.render(joinSources(editor.inventory), joinSources);
   if (isLoading) return <LoadingSkeleton />;
 
   if (error) {
@@ -182,22 +196,15 @@ function ExternalServicesTab({
 
   return (
     <GroupedServiceCards
-      keys={keys.map((keyInfo) => ({
-        ...keyInfo,
-        credential_source:
-          keyInfo.credential_source ?? sourceById.get(keyInfo.id),
-      }))}
+      keys={joinSources(keys)}
       catalog={catalog}
       actions={(compact) => (
-        <>
-          {preferenceAction?.(compact)}
-          <AddCtaButton
-            label="Connect Service"
-            onClick={onAdd}
-            compact={compact}
-            compactLabel="Connect"
-          />
-        </>
+        <AddCtaButton
+          label="Connect Service"
+          onClick={onAdd}
+          compact={compact}
+          compactLabel="Connect"
+        />
       )}
       renderTable={
         viewMode === "table"
@@ -525,8 +532,6 @@ export function KeysPage() {
         {!compact && "Reorder"}
       </Button>
     ) : null;
-  const headerReorder =
-    editing || !pageKeys?.length || inventory.isLoading || inventory.isError;
 
   function setTab(value: string) {
     if (!discardOrder()) return;
@@ -569,7 +574,7 @@ export function KeysPage() {
             <TabsTrigger value="nyxid">Agent Keys</TabsTrigger>
           </TabsList>
           <div className="flex flex-wrap items-center justify-between gap-3 sm:pb-1">
-            {tab === "services" && headerReorder && reorderAction()}
+            {tab === "services" && reorderAction()}
             {tab !== "pools" && !(tab === "services" && previewActive) && (
               <ViewToggle
                 viewMode={
@@ -613,50 +618,7 @@ export function KeysPage() {
               onRetry={() => void inventory.refetch()}
             />
           )}
-          {editing && (
-            <div className="flex flex-wrap items-center gap-3">
-              <Button
-                variant="outline"
-                disabled
-                aria-pressed="true"
-                aria-label="Auto-connected services: shown"
-              >
-                Auto-connected
-              </Button>
-              <p className="text-11 text-muted-foreground">
-                All authorized connections are shown while reordering. Your
-                filters and saved view return when you finish.
-              </p>
-            </div>
-          )}
-          {editing && editorSnapshot ? (
-            <ServicePreferenceEditor
-              key={identity}
-              preference={editorSnapshot.preference}
-              inventory={editorSnapshot.inventory}
-              viewMode={servicesViewMode}
-              blocked={
-                preference.isError ||
-                inventory.isError ||
-                inventory.isFetching ||
-                preference.isFetching
-              }
-              onClose={closeEditor}
-              onDirtyChange={setPreferenceDirty}
-              reloadPreference={async () => {
-                const result = await preference.refetch();
-                if (result.isError || !result.data)
-                  throw new Error("Could not load preference order");
-                return result.data;
-              }}
-              refreshInventory={async () => {
-                const result = await inventory.refetch();
-                if (result.isError || !result.data)
-                  throw new Error("Could not load services");
-                return result.data;
-              }}
-            />
-          ) : previewActive && RoutingPreview ? (
+          {previewActive && RoutingPreview ? (
             <Suspense fallback={<Skeleton className="h-96 w-full" />}>
               <RoutingPreview
                 actions={(compact) => (
@@ -680,7 +642,45 @@ export function KeysPage() {
             </Suspense>
           ) : (
             <ExternalServicesTab
-              preferenceAction={headerReorder ? undefined : reorderAction}
+              key={editing ? "order" : "browse"}
+              editor={
+                editing && editorSnapshot
+                  ? {
+                      inventory: editorSnapshot.inventory,
+                      render: (joinedInventory, joinSources) => (
+                        <ServicePreferenceEditor
+                          key={identity}
+                          preference={editorSnapshot.preference}
+                          inventory={joinedInventory}
+                          enrichInventory={joinSources}
+                          viewMode={servicesViewMode}
+                          blocked={
+                            preference.isError ||
+                            inventory.isError ||
+                            inventory.isFetching ||
+                            preference.isFetching
+                          }
+                          onClose={closeEditor}
+                          onDirtyChange={setPreferenceDirty}
+                          reloadPreference={async () => {
+                            const result = await preference.refetch();
+                            if (result.isError || !result.data)
+                              throw new Error(
+                                "Could not load preference order",
+                              );
+                            return result.data;
+                          }}
+                          refreshInventory={async () => {
+                            const result = await inventory.refetch();
+                            if (result.isError || !result.data)
+                              throw new Error("Could not load services");
+                            return joinSources(result.data);
+                          }}
+                        />
+                      ),
+                    }
+                  : undefined
+              }
               onAdd={() => setAddServiceOpen(true)}
               onReconnect={(keyInfo) => {
                 setReconnectKey(keyInfo);

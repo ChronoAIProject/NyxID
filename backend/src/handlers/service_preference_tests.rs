@@ -499,7 +499,7 @@ async fn service_preference_live_org_visibility_revocation_keeps_storage_unchang
     let membership = test_membership(&org, &owner, OrgRole::Viewer, None);
     state
         .db
-        .collection(MEMBERSHIPS)
+        .collection::<crate::models::org_membership::OrgMembership>(MEMBERSHIPS)
         .insert_one(&membership)
         .await
         .unwrap();

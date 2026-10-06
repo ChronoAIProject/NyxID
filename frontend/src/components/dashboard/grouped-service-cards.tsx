@@ -342,9 +342,21 @@ function GroupCard({
                 </p>
               </div>
               {!expanded && preferred?.preference_rank != null && (
-                <button type="button" onClick={() => onToggle(cardRef.current)} className="min-w-0 max-w-[55%] rounded-full focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" aria-label={`Discovery order ${preferred.preference_rank} for ${preferred.label}. Expand ${group.name} connections`} title={`Discovery preference for connection ${preferred.label} (${preferred.slug}); current filters do not change this saved rank`}>
-                  <Badge variant="accent" className="max-w-full whitespace-normal break-words">
-                    Discovery #{preferred.preference_rank} · {preferred.label}
+                <button
+                  type="button"
+                  onClick={() => onToggle(cardRef.current)}
+                  className="min-w-0 rounded-full focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+                  aria-label={`Discovery preference ${preferred.preference_rank} · ${preferred.label}`}
+                  title={group.connections
+                    .filter((connection) => connection.preference_rank != null)
+                    .map(
+                      (connection) =>
+                        `#${connection.preference_rank} · ${connection.label}`,
+                    )
+                    .join("\n")}
+                >
+                  <Badge variant="accent">
+                    Discovery #{preferred.preference_rank}
                   </Badge>
                 </button>
               )}

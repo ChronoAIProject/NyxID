@@ -3258,7 +3258,7 @@ async fn service_preference_discovery_guest_dense_and_explicit_target_unchanged(
         "arguments":{"method":"GET", "path":"/ok"}
     });
     let baseline = result(
-        call(&f, &auth, "nyx__call_tool", call_args.clone()).await,
+        direct_call(&f, &auth, "nyx__call_tool", call_args.clone()).await,
         false,
     )
     .await;
@@ -3294,7 +3294,7 @@ async fn service_preference_discovery_guest_dense_and_explicit_target_unchanged(
     assert_eq!(listed["services"][0]["preference_rank"], 1);
     assert!(listed.to_string().contains(&hidden));
     let searched = result(
-        direct_call(&f, &auth, "nyx__search_tools", json!({"query":"proxy"})).await,
+        direct_call(&f, &auth, "nyx__search_tools", json!({"query":"request"})).await,
         false,
     )
     .await;
@@ -3340,7 +3340,11 @@ async fn service_preference_discovery_guest_dense_and_explicit_target_unchanged(
     .unwrap();
     assert_eq!(before, after);
     assert_eq!(
-        result(call(&f, &auth, "nyx__call_tool", call_args).await, false).await,
+        result(
+            direct_call(&f, &auth, "nyx__call_tool", call_args).await,
+            false
+        )
+        .await,
         baseline
     );
     assert_eq!(hits.load(Ordering::SeqCst), 2);
@@ -3414,6 +3418,53 @@ async fn service_preference_discovery_guest_dense_and_explicit_target_unchanged(
     assert_eq!(listed["services"][0]["service_id"], b);
     assert_eq!(listed["services"][0]["preference_rank"], 1);
     assert!(!listed.to_string().contains(&hidden));
+    let relay = crate::crypto::jwt::generate_relay_access_token(
+        &f.state.jwt_keys,
+        &f.state.config,
+        &uuid::Uuid::parse_str(&f.owner).unwrap(),
+        "proxy",
+        None,
+        &crate::crypto::jwt::RelayAgentScope {
+            api_key_id: scoped.api_key_id.clone().unwrap(),
+            api_key_name: "preference-scoped".into(),
+            allowed_service_ids: vec![a.clone(), b.clone()],
+            allowed_node_ids: vec![],
+            allow_all_services: false,
+            allow_all_nodes: false,
+        },
+    )
+    .unwrap();
+    let mut relay_headers = HeaderMap::new();
+    relay_headers.insert("authorization", format!("Bearer {relay}").parse().unwrap());
+    let relay_auth = authenticate_mcp(&f.state, &relay_headers, false)
+        .await
+        .unwrap();
+    assert_eq!(relay_auth.user_id, f.owner);
+    let relay_listed = result(
+        direct_call(&f, &relay_auth, "nyx__list_connected_services", json!({})).await,
+        false,
+    )
+    .await;
+    assert_eq!(relay_listed["services"], listed["services"]);
+    let relay_search = result(
+        direct_call(
+            &f,
+            &relay_auth,
+            "nyx__search_tools",
+            json!({"query":"request"}),
+        )
+        .await,
+        false,
+    )
+    .await;
+    assert_eq!(relay_search["matches"][0]["preference_rank"], 1);
+    assert!(
+        relay_search["matches"][0]["name"]
+            .as_str()
+            .unwrap()
+            .starts_with("beta__")
+    );
+    assert!(!relay_search.to_string().contains(&hidden));
     mark_guest(&f, true).await;
     let guest = authenticate(&f).await;
     let listed = result(

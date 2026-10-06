@@ -106,6 +106,35 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("full service page", () => {
+  it("keeps overview connection order with discovery pills beside labels and before readiness", () => {
+    state.keys = [
+      key("Development", { preference_rank: 3 }),
+      key("Team", { preference_rank: 1 }),
+      key("Unranked"),
+    ];
+    render(<ServiceOverviewPage />);
+    const links = screen.getAllByRole("link", {
+      name: /^View .+ connection details/,
+    });
+    expect(links.map((link) => link.textContent)).toEqual([
+      "Development",
+      "Team",
+      "Unranked",
+    ]);
+    expect(links[0]?.nextElementSibling).toBe(
+      screen.getByLabelText("Discovery preference 3"),
+    );
+    expect(links[1]?.nextElementSibling).toBe(
+      screen.getByLabelText("Discovery preference 1"),
+    );
+    expect(
+      screen.getByLabelText("Discovery preference 1").nextElementSibling,
+    ).toHaveTextContent("Not verified");
+    expect(
+      within(links[2]!.closest("tr")!).queryByLabelText(/Discovery preference/),
+    ).not.toBeInTheDocument();
+  });
+
   it("contains all connections for the service with full information and configuration links", async () => {
     const user = userEvent.setup();
     render(<ServiceOverviewPage />);

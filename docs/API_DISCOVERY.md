@@ -326,6 +326,12 @@ connected services sort by preference first. Ranks are dense after visibility,
 including scoped/guest filtering. Platform-source catalog fallbacks are unranked.
 `GET/PUT /api/v1/service-preferences` edits the personal connection-ID order;
 `tools/list`, `/mcp/config`, catalog digests and explicit execution are unchanged.
+REST preference GET/PUT reject relay and service-account tokens. MCP discovery
+still applies the verified relay owner's order after its live allowlist/node
+filters; service-account subjects normally have no human document and retain
+legacy order. Delegated and OAuth tokens cannot write preferences; their metadata
+GET follows management policy, and MCP applies the subject's order only when
+existing proxy scopes authorize that MCP request.
 
 NyxID cannot make an independent client (Claude Code with its own Composio or
 browser tools, Cursor, OpenClaw) prefer a NyxID service over tools NyxID does not

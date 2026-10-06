@@ -165,6 +165,17 @@ selected pool under its personal or organization owner and scrolls its expanded
 card into view. Pool configuration, member ordering and policy edits live in
 **Service Pools** only.
 
+Personal discovery preference is separate from pool selection. `Discovery #n`
+pills belong to individual connections: the shared connection table shows each
+authorized dense rank, while a collapsed group chip names its best-ranked
+connection from the complete group and expands that card. Filters hide rows
+without renumbering ranks; groups remain alphabetical and connection rows retain
+inventory order. The Reorder editor uses the complete inventory and preserves
+filters, saved views and the expanded card without writing service-view settings.
+Discovery preference breaks relevance ties; explicit execution uses the called
+slug, pool priority or rotation, and the personal → organization → platform
+credential cascade. Preference does not change those decisions or cause retries.
+
 Priority pools support bounded failover; round-robin and weighted pools select a
 single member per request. Omitted/null priority policies use server defaults, not
 "failover off". Disabled pools, disabled members and failed inspection remain
