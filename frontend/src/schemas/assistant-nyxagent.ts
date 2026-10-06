@@ -124,6 +124,7 @@ export const nyxAgentMessageSchema = z.object({
   execution_pending: z.boolean().optional(),
 });
 export const nyxAgentAcknowledgementSchema = z.object({
+  authored_skill: z.object({ agent_id: z.string(), proposal_id: z.string(), revision: z.number(), skills_revision: z.number() }).nullish(),
   continuation_owner: z.literal("server").nullish(),
   continuation_receipt_id: z.string().uuid().nullish(),
   trigger_run_id: z.string().nullable().optional(),

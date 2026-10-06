@@ -218,13 +218,30 @@ pub async fn detail_rank(
     if !preference.ordered.iter().any(|id| id == service_id) {
         return Ok(None);
     }
-    let selected: Vec<_> = preference
-        .ordered
+    let visible = visible_ordered_ids(db, user_id, &preference.ordered, scope, api_key).await?;
+    Ok(rank_map(&preference.ordered, &visible)
+        .get(service_id)
+        .copied())
+}
+
+/// Resolve saved connection IDs through live listing visibility without rendering
+/// or decrypting key metadata. Empty and scope-excluded orders need no reads.
+pub async fn visible_ordered_ids(
+    db: &Database,
+    user_id: &str,
+    ordered: &[String],
+    scope: Option<&[String]>,
+    api_key: bool,
+) -> AppResult<HashSet<String>> {
+    let selected: Vec<_> = ordered
         .iter()
         .take(MAX_ORDERED_SERVICES)
         .filter(|id| scope.is_none_or(|scope| scope.contains(id)))
         .cloned()
         .collect();
+    if selected.is_empty() {
+        return Ok(HashSet::new());
+    }
     let grants = platform_key_service::OwnerGrants::load_for_listing(db, user_id).await?;
     let tagged = super::user_service_service::list_user_services_with_sources_selected(
         db,
@@ -239,6 +256,9 @@ pub async fn detail_rank(
         .into_iter()
         .filter(|row| !api_key || !row.source.is_viewer_org())
         .collect();
+    if tagged.is_empty() {
+        return Ok(HashSet::new());
+    }
     let endpoint_ids: Vec<_> = tagged.iter().map(|row| &row.service.endpoint_id).collect();
     use futures::TryStreamExt;
     let endpoints: Vec<bson::Document> = super::service_history::collection::<bson::Document>(
@@ -254,14 +274,11 @@ pub async fn detail_rank(
         .iter()
         .filter_map(|row| row.get_str("_id").ok())
         .collect();
-    let visible = tagged
+    Ok(tagged
         .iter()
         .filter(|row| endpoints.contains(row.service.endpoint_id.as_str()))
         .map(|row| row.service.id.clone())
-        .collect();
-    Ok(rank_map(&preference.ordered, &visible)
-        .get(service_id)
-        .copied())
+        .collect())
 }
 
 #[cfg(test)]

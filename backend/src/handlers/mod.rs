@@ -170,5 +170,6 @@ pub mod admin_utility_inference;
 
 pub mod service_preference;
 
+pub mod service_concurrency;
 #[cfg(test)]
 mod service_preference_tests;

@@ -59,8 +59,15 @@ pub async fn get(
     State(state): State<AppState>,
     auth: AuthUser,
 ) -> AppResult<Json<ServicePreferenceResponse>> {
-    let visible = visible(&state, &auth).await?;
     let row = preferences::get(&state.db, &auth.user_id.to_string()).await?;
+    let visible = preferences::visible_ordered_ids(
+        &state.db,
+        &auth.user_id.to_string(),
+        row.as_ref().map_or(&[], |row| row.ordered.as_slice()),
+        auth.api_key_service_scope(),
+        auth.auth_method == AuthMethod::ApiKey,
+    )
+    .await?;
     Ok(Json(response(row.as_ref(), &visible)))
 }
 

@@ -618,6 +618,59 @@ async fn service_preference_command_monitoring_bounds_detail_and_single_listing_
                 .get_document("filter")
                 .is_ok_and(|filter| filter.contains_key("user_id") && !filter.contains_key("_id"))
     }));
+    let assert_no_inventory_reads = |commands: &[(String, Document)]| {
+        for collection in [
+            "user_services",
+            "user_endpoints",
+            "user_api_keys",
+            "provider_configs",
+            "downstream_services",
+            "org_memberships",
+        ] {
+            assert!(
+                !commands
+                    .iter()
+                    .any(|(_, command)| command.get_str("find") == Ok(collection)),
+                "empty preference GET must not read {collection}: {commands:?}"
+            );
+        }
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|(_, command)| command.get_str("find") == Ok("service_preferences"))
+                .count(),
+            1
+        );
+    };
+    commands.lock().unwrap().clear();
+    let (status, absent) =
+        request(&router, &token, "GET", "/api/v1/service-preferences", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        absent,
+        json!({"ordered":[], "version":0, "updated_at":null})
+    );
+    assert_no_inventory_reads(&commands.lock().unwrap());
+    let now = bson::DateTime::now();
+    db.collection::<Document>("service_preferences")
+        .insert_one(doc! {
+            "_id": &owner, "ordered": [], "version": 3_i64,
+            "created_at": now, "updated_at": now,
+        })
+        .await
+        .unwrap();
+    commands.lock().unwrap().clear();
+    let (status, empty) =
+        request(&router, &token, "GET", "/api/v1/service-preferences", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(empty["ordered"], json!([]));
+    assert_eq!(empty["version"], 3);
+    assert_eq!(empty["updated_at"], now.to_chrono().to_rfc3339());
+    assert_no_inventory_reads(&commands.lock().unwrap());
+    db.collection::<Document>("service_preferences")
+        .delete_one(doc! {"_id": &owner})
+        .await
+        .unwrap();
     preferences::replace(
         &db,
         &owner,
@@ -716,6 +769,63 @@ async fn service_preference_command_monitoring_bounds_detail_and_single_listing_
         command.get_str("find") == Ok("user_endpoints")
             && command.get_document("projection") == Ok(&doc! {"_id":1})
     }));
+    commands.lock().unwrap().clear();
+    let (status, saved_get) =
+        request(&router, &token, "GET", "/api/v1/service-preferences", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(saved_get["ordered"], json!([id]));
+    assert_eq!(saved_get["version"], 1);
+    let saved_reads = commands.lock().unwrap().clone();
+    assert_eq!(
+        saved_reads
+            .iter()
+            .filter(|(_, command)| command.get_str("find") == Ok("service_preferences"))
+            .count(),
+        1
+    );
+    let selected = saved_reads
+        .iter()
+        .find(|(_, command)| command.get_str("find") == Ok("user_services"))
+        .expect("saved GET resolves bounded connection IDs");
+    assert_eq!(
+        selected
+            .1
+            .get_document("filter")
+            .unwrap()
+            .get_document("_id")
+            .unwrap()
+            .get_array("$in")
+            .unwrap()
+            .len(),
+        preferences::MAX_ORDERED_SERVICES
+    );
+    for (_, command) in &saved_reads {
+        assert_ne!(command.get_str("find"), Ok("user_api_keys"));
+        assert_ne!(command.get_str("find"), Ok("provider_configs"));
+        if command.get_str("find") == Ok("user_endpoints") {
+            assert_eq!(command.get_document("projection"), Ok(&doc! {"_id":1}));
+            assert_eq!(
+                command
+                    .get_document("filter")
+                    .unwrap()
+                    .get_document("_id")
+                    .unwrap()
+                    .get_array("$in")
+                    .unwrap()
+                    .len(),
+                1,
+                "only the surviving selected service needs endpoint visibility"
+            );
+        }
+        if command.get_str("find") == Ok("downstream_services") {
+            assert_eq!(command.get_document("projection"), Ok(&doc! {"_id":1}));
+        }
+    }
+    assert!(
+        saved_reads
+            .iter()
+            .any(|(_, command)| { command.get_str("find") == Ok("user_endpoints") })
+    );
     commands.lock().unwrap().clear();
     assert_eq!(
         request(&router, &token, "GET", "/api/v1/keys", None)

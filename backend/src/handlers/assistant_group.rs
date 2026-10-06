@@ -846,12 +846,31 @@ pub async fn delete_group(
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     let access = crate::services::org_group_service::get(&state.db, &owner, &id, None).await?;
+    stop_group_threads(&state, &access).await?;
     if access.org.is_some() {
         crate::services::org_group_service::delete(&state.db, &access).await?;
     } else {
         groups::delete(&state.db, &owner, &id).await?;
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Stop every hidden member conversation before deleting its parent group.
+/// Workers that settle after the delete see a missing row and quietly no-op.
+pub(crate) async fn stop_group_threads(
+    state: &AppState,
+    access: &crate::services::org_group_service::Access,
+) -> AppResult<()> {
+    let rows = if access.org.is_some() {
+        crate::services::org_group_service::threads(&state.db, &access.group).await?
+    } else {
+        groups::member_threads(&state.db, &access.group.user_id, &access.group.id).await?
+    };
+    for row in rows {
+        engine::request_stop(&state.db, &row.user_id, &row.id).await?;
+        super::machine_cancel::conversation(state, &row.user_id, &row.id).await?;
+    }
+    Ok(())
 }
 
 #[derive(Deserialize, Default)]

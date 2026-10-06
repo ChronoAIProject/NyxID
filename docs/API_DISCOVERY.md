@@ -324,6 +324,9 @@ order. Relevance wins; the 25-result cap applies after this ordering. Search
 matches and connected-service rows carry `preference_rank` (1-based or null);
 connected services sort by preference first. Ranks are dense after visibility,
 including scoped/guest filtering. Platform-source catalog fallbacks are unranked.
+Ranks use eligible active discovered connections and can differ from `/keys`:
+if disabled UI Discovery #1 is skipped, active UI Discovery #2 becomes MCP
+`preference_rank: 1`.
 `GET/PUT /api/v1/service-preferences` edits the personal connection-ID order;
 `tools/list`, `/mcp/config`, catalog digests and explicit execution are unchanged.
 REST preference GET/PUT reject relay and service-account tokens. MCP discovery

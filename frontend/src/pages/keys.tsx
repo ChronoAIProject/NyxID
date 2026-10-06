@@ -382,7 +382,6 @@ export function KeysPage() {
   // Shared query with ExternalServicesTab; only decides header CTA placement.
   const inventory = useKeys();
   const pageKeys = inventory.data;
-  const keys = pageKeys;
   const [pendingPrefillSlug, setPendingPrefillSlug] = useState<string | null>(
     null,
   );
@@ -468,7 +467,7 @@ export function KeysPage() {
     inventory.isError ||
     preference.isError ||
     !preference.data ||
-    !keys?.length;
+    !pageKeys?.length;
 
   useEffect(() => {
     if (
@@ -502,12 +501,11 @@ export function KeysPage() {
     };
   }, [restoreFocusIdentity]);
 
-  const reorderAction = (compact = false) =>
+  const reorderAction = () =>
     preference.data !== null && !previewActive ? (
       <Button
         ref={reorderButton}
         variant="outline"
-        size={compact ? "icon" : "default"}
         aria-label="Reorder"
         title={
           editing
@@ -516,20 +514,20 @@ export function KeysPage() {
               ? "Retry the failed read to edit the order"
               : orderReadPending
                 ? "Loading services and preference order"
-                : !keys?.length
+                : !pageKeys?.length
                   ? "Connect a service to set an order"
                   : "Set the order agents see at equal relevance"
         }
         disabled={reorderUnavailable}
         onClick={() => {
-          if (identity && preference.data && keys) {
-            setEditorSnapshot({ preference: preference.data, inventory: keys });
+          if (identity && preference.data && pageKeys) {
+            setEditorSnapshot({ preference: preference.data, inventory: pageKeys });
             setEditingIdentity(identity);
           }
         }}
       >
         <ArrowUpDown className="h-4 w-4" />
-        {!compact && "Reorder"}
+        Reorder
       </Button>
     ) : null;
 

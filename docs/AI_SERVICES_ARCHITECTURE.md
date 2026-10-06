@@ -931,6 +931,9 @@ Visibility is resolved before ranking, using existing read-only inventory,
 grants and scopes. Stale IDs stay inert without a write and exposed ranks are
 dense, so a scoped caller cannot infer hidden connections from gaps. Owner and
 guest chat keys use the owner's order restricted to authorized services.
+MCP ranks use eligible active discovered connections, so they can differ from
+the full `/keys` pills: if disabled UI Discovery #1 is skipped, active UI
+Discovery #2 becomes MCP `preference_rank: 1`.
 Org-owned keys retain legacy ordering because org users cannot author a human
 preference document. Preference is never consulted for explicit execution,
 retries, approvals, authority digests, platform grants, billing or catalog digests.

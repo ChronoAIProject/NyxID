@@ -458,6 +458,41 @@ The initial broken deploy of this feature created a `unique` variant of the `(co
 The [Aurinko email adapter](./AURINKO_INTEGRATION.md) uses the channel callback and reply protocol while owning its bounded inline ingress. Aurinko supplies redelivery; NyxID persists only subscription bindings, batch digest/cursor, stable message receipts, and irreversible send barriers. No message bodies, queue, or periodic worker are added. Active claims produce retryable failures, completed items stay deduplicated across partial batches and log expiration, and callback retries retain their UUID-v4 so runtimes can suppress duplicate work after a lost acknowledgement. Device and legacy chat adapters keep their existing protocols.
 
 
+## NyxBot org bots and transport flags
+
+NyxID's CMAEG `nyxbot` provider supports personal and organization-owned bots.
+For an org bot, `nyxbot:gateway-{platform}` resolves for its **linking admin**,
+including the existing live org membership overrides. The route and route key
+remain org-owned. Gateway channel management uses the linking admin's short-lived
+`account:read` creator bearer; the separate provider/event-tool agent key is also
+person-owned, with no service grants, because provider authentication matches its
+owner to `NyxbotChannel.user_id` and the profile's owner subject.
+
+All authenticated provider endpoints recheck live org-admin membership before
+processing the event or accessing its context. Loss fails the link with
+`org_access_lost`, uses the existing audit and link-status/watch behaviour,
+releases the gateway channel, and removes its route and active/pending keys.
+The linking person's agent receives no event after this check fails. Relay
+ingress and asynchronous replies retain the same authority check.
+
+The 15-second assistant sweep attempts at most one transport move per replica.
+Flag-on moves owner-verified relay bots to the gateway; refusal leaves their
+working route unchanged and retries daily. **Flag-off now also moves existing
+personal and org gateway bots back to the relay**. Both directions build beside
+the working route, recheck authority/flag/active answers, then atomically swap the
+channel and route key. A busy bot answers first and retries in ten minutes.
+Returning releases the gateway channel and deletes its agent key and old route
+key. Telegram always uses the gateway and is excluded from flag-off returns.
+
+Lark and Feishu gateway connections remain **text-only**, including org bots;
+media handling is unchanged. These changes require no gateway-side implementation
+or new environment variables. See the [NyxBot transport contract](chat/09-nyxbot-orchestrator.md)
+for private-chat continuity, refusal handling and rolling metadata compatibility.
+
+Deploy the provider authority check to all replicas before enabling org gateway
+cohorts. If gateway flags are already enabled for linking admins, drain older
+provider replicas during rollout: they do not have the per-event org check.
+
 ## NyxBot provider late replies and CMA contract boundary
 
 This section concerns NyxID acting as CMAEG's `nyxbot` provider, not the generic

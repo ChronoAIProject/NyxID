@@ -7,8 +7,8 @@ pub const EVENTS_COLLECTION_NAME: &str = "nyxbot_events";
 pub const WATCHES_COLLECTION_NAME: &str = "nyxbot_watches";
 
 /// A channel bot linked to one of the owner's agents (NyxBot or a
-/// specialist). Personal Telegram bots, and personal bots on platforms whose
-/// `nyxbot:gateway-{platform}` feature flag is on for their owner, are reached
+/// specialist). Telegram bots, and bots on platforms whose
+/// `nyxbot:gateway-{platform}` feature flag is on for their linking person, are reached
 /// through the Agent Event Gateway (`transport = "gateway"`, NyxID is the
 /// gateway's `nyxbot` provider); other bots use NyxID's relay directly
 /// (`"direct"`).
@@ -69,10 +69,14 @@ pub struct NyxbotChannel {
     /// of the bot are recognised.
     #[serde(default)]
     pub gateway_bot_id: Option<String>,
-    /// When NyxID last tried to move this personal bot onto the gateway
-    /// (its platform's gateway flag is on for the owner); tried daily.
+    /// When NyxID last tried to move this bot onto the gateway
+    /// (its platform's gateway flag is on for the linking person); tried daily.
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub gateway_attempted_at: Option<DateTime<Utc>>,
+    /// Last claim to return a gateway bot to the relay. Busy or failed moves
+    /// retry after ten minutes; Telegram never takes this path.
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub relay_attempted_at: Option<DateTime<Utc>>,
     /// While a working bot on NyxID's relay is being moved onto the gateway:
     /// the new gateway agent key, accepted by the provider endpoints before
     /// the swap because the gateway binds its provider while creating the
@@ -163,6 +167,10 @@ pub struct NyxbotThread {
     /// chat and sender. Groups and channels: `chat_` and a digest of the chat
     /// and topic.
     pub partition: String,
+    /// Private chat's relay partition, derived from the verified provider's
+    /// chat/sender/topic IDs. Keeps its conversation across transport changes.
+    #[serde(default)]
+    pub relay_partition: Option<String>,
     #[serde(default)]
     pub conversation_id: Option<String>,
     /// `private`, `group` or `channel`; `None` on gateway sender partitions

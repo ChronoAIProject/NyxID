@@ -158,5 +158,5 @@ pub mod assistant_voice;
 
 pub mod assistant_voice_session;
 pub mod machine_access;
-
+pub mod service_concurrency;
 pub mod service_preference;

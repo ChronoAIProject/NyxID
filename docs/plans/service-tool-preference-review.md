@@ -37,8 +37,13 @@ Fable 5.1 delivered 14 implementation tasks and 24 acceptance criteria. PM revie
 added four criteria and required corrections to routing, auth, privacy, model
 defaults, concurrency, error recovery, accessibility, and validation commands.
 The final plan incorporates AC-01 through AC-28. All local acceptance checks
-have passed, and the PM has closed every substantiated finding in the tables
-below. Required CI on the corrected revision and final Opus review remain.
+passed on the prior integration base, and the PM closed the original findings.
+Opus preliminary review returned the additional findings recorded below.
+Release 0.66.0 is now integrated in the working tree. The PM has reviewed the
+merged source and corrections; fresh frontend/browser/build/lint checks pass.
+All requested local gates pass on the 0.66.0 integration. The subsequent
+frontend-only readability commit `868ce0b7` requires integration and affected
+checks before publication. Final CI and Opus sign-off remain open.
 
 ## Plan review findings
 
@@ -271,3 +276,75 @@ The first remote CI run identified the CLI parser and cloned-slice fixture
 findings; those failures are superseded only after CI passes on the corrected
 revision. Final Opus review will cover the complete plan and PR diff, followed
 by confirmation on the final revision after required CI succeeds.
+
+
+## Opus preliminary review and 0.66.0 integration
+
+Opus 5.5 reviewed committed `35af1701e8c66f1226f883773325000ed5deb28b`
+read-only. It accepted storage/CAS, REST auth, list/detail rank visibility,
+MCP relevance/order/execution separation and frontend identity/recovery boundaries.
+It withheld final sign-off while release #1795 (`566ca5f9`) was integrated.
+The PM accepted and returned every additional substantiated finding, including
+minor and documentation findings, to the same Sol implementation session.
+
+| Finding | Required correction | Status |
+|---|---|---|
+| Preference GET repeats a full inventory/render/decrypt walk even for absent/empty saved order; plan understates page reads. | Read preference first; reuse the bounded saved-ID visibility helper for GET/detail; measure absent/empty/bounded reads and correct the plan. | Closed: PM inspected shared helper and plan; merged command-monitoring regression passed |
+| Guest search/list visibility tightening is insufficiently documented. | Explain granted UserManaged/Platform discovery and omission of Internal catalog entries, preserving separate native guest authorization. | Closed: PM inspected chat/08 and chat/09 corrections |
+| UI ranks include visible disabled connections while MCP ranks reflect eligible active discovery, so numbers can differ. | Explain the dense-rank basis and a disabled-connection example in architecture/discovery docs. | Closed: PM inspected both documentation corrections |
+| Plan status, evidence heading, legacy loader order and stale-error copy are outdated. | Reconcile final status/evidence and shipped behavior. | Closed: PM inspected corrected normative text and fresh evidence; publication gates remain explicit |
+| Reorder action has an unreachable compact branch and a redundant inventory alias. | Remove both and preserve all entry/loading/focus behavior. | Closed: PM inspected source; fresh full frontend and 14 browser scenarios passed |
+
+The PM fetched release `566ca5f9` when GitHub reported a merge conflict and
+scheduled no checks on the updated PR. Sol preserved upstream delegation,
+concurrency and asynchronous native catalog construction, resolved generated
+wizard conflicts and applied review corrections before fresh validation.
+The PM inspected the discovery diff against `566ca5f9`: preferred loading remains
+limited to search and connected-service listing; verified caller claims,
+delegation projection, async native catalog construction and execution admission
+remain upstream's implementation. The shared GET/detail helper resolves at most
+200 saved IDs through live source/scope visibility and projected endpoint
+existence, avoiding provider loads and credential rendering/decryption. An
+absent, empty or scope-excluded order skips inventory work. Plan §8 now counts
+both page preference-document reads and bounded nonempty-GET work.
+The PM owns merge commit/publication.
+
+### Fresh 0.66.0 frontend validation by the PM
+
+- Full isolated suite: all 461 files and 4,723 tests passed in 168.67 seconds.
+- Browser suite: all 14 scenarios passed in 37.3 seconds with actual mouse,
+  keyboard and touch input, saved group/table/overview pills, preserved filters
+  and saved views, delayed focus, stale/conflict recovery and account fences.
+- Production build: TypeScript, Vite, legal prerender, credential-accept bundle
+  and mock-footprint assertion passed.
+- Lint: zero errors and zero feature warnings; the same 29 unrelated baseline
+  warnings remain.
+- PM inspected fresh desktop and 390-pixel mobile screenshots: instructions,
+  handles, connection identifiers, provenance, numbered pills, divider and
+  Save/Cancel controls fit; long mobile labels wrap and overflow assertions pass.
+
+Logs: `/tmp/nyxid-service-preference-066-{full-frontend,browser,build,lint}.log`.
+Screenshots: `/tmp/nyxid-service-preference-review/066-*.png`.
+The isolated frontend command and origin override are the same as recorded above.
+These results supersede the older frontend evidence for the integrated source.
+
+The fresh backend feature run passed all eight tests with no failures or ignored
+checks (3.21 seconds after 6m09 compilation). The PM inspected the actual log,
+including the extended mounted GET command-monitoring test for absent/empty
+orders, bounded saved IDs, endpoint projections and no provider/key reads.
+Log: `/tmp/service-preference-merge-566ca5f9-backend-feature.log`.
+The PM also inspected all successful merged regression logs: ten neighboring
+search/assistant/guest/audit/curation checks and seventeen delegation, proxy
+parity, skill discovery, concurrency and org-agent checks passed without failures
+or ignored tests. CLI unit and actual subprocess integration passed two tests
+each; wizard freshness passed one. Changed-package all-target Clippy with warnings
+denied passed in 4m15s. The log prefix for these checks is
+`/tmp/service-preference-merge-566ca5f9-`; exact filters and counts are in plan §19.
+An independent PM scan of 45 execution/approval/billing/insight files found no
+`service_preferences` or `preference_rank` reference.
+
+All substantiated preliminary Opus findings are now closed. Before publication,
+the frontend-only readability commit `868ce0b7` will be integrated, preserving
+its service-table and pool presentation changes and regenerating the wizard.
+The backend Rust source is unchanged by that commit; affected frontend and
+wizard checks will provide the additional integration evidence.

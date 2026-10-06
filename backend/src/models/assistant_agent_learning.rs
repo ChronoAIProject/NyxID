@@ -144,8 +144,18 @@ pub struct AssistantAgentLearningRun {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProposalSource {
+    #[default]
+    Learned,
+    Authored,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantAgentLearningProposal {
+    #[serde(default)]
+    pub source: ProposalSource,
     #[serde(rename = "_id")]
     pub id: String,
     pub agent_id: String,

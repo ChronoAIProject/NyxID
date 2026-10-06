@@ -5,6 +5,8 @@ pub const COLLECTION_NAME: &str = "assistant_acknowledgements";
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantAcknowledgement {
+    #[serde(default)]
+    pub authored_skill: Option<AuthoredSkillReview>,
     #[serde(rename = "_id")]
     pub id: String,
     pub conversation_id: String,
@@ -70,4 +72,14 @@ impl std::fmt::Debug for AssistantAcknowledgement {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("AssistantAcknowledgement { [REDACTED] }")
     }
+}
+
+/// Metadata only; content is read from the encrypted review proposal by humans.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthoredSkillReview {
+    pub agent_id: String,
+    pub proposal_id: String,
+    pub revision: i64,
+    pub skills_revision: i64,
 }
