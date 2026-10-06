@@ -8,6 +8,9 @@ import {
 import type { ServiceConnectionGroup } from "./service-groups";
 import type { KeyInfo } from "@/types/keys";
 
+// Matching cases below exercise every connection, including auto-connected ones.
+const SHOWN = { ...DEFAULT_SERVICE_FILTERS, show_auto_connected: true };
+
 const group: ServiceConnectionGroup = {
   id: "catalog:openai",
   name: "OpenAI",
@@ -49,39 +52,46 @@ const group: ServiceConnectionGroup = {
 };
 
 describe("service view matching", () => {
-  it("keeps organization and platform counterparts for services with a personal connection", () => {
+  it("hides auto-connected connections by default", () => {
     expect(
       matchingConnections(group, DEFAULT_SERVICE_FILTERS).map((key) => key.id),
-    ).toEqual(["personal", "org", "platform"]);
+    ).toEqual(["personal", "org"]);
+  });
+  it("keeps organization and platform counterparts for services with a personal connection", () => {
+    expect(matchingConnections(group, SHOWN).map((key) => key.id)).toEqual([
+      "personal",
+      "org",
+      "platform",
+    ]);
     expect(
       matchingConnections(
         { ...group, connections: group.connections.slice(1) },
-        DEFAULT_SERVICE_FILTERS,
+        SHOWN,
       ),
     ).toEqual([]);
   });
   it("applies explicit filters to counterparts without requiring them to match the personal row", () => {
     expect(
       matchingConnections(group, {
-        ...DEFAULT_SERVICE_FILTERS,
+        ...SHOWN,
         organization_ids: ["org-1"],
       }).map((key) => key.id),
     ).toEqual(["org"]);
     expect(
       matchingConnections(group, {
-        ...DEFAULT_SERVICE_FILTERS,
+        ...SHOWN,
         show_auto_connected: false,
       }).map((key) => key.id),
     ).toEqual(["personal", "org"]);
     expect(
       matchingConnections(group, {
-        ...DEFAULT_SERVICE_FILTERS,
+        ...SHOWN,
         search: "platform",
       }).map((key) => key.id),
     ).toEqual(["platform"]);
     expect(
       matchingConnections(group, {
-        ...DEFAULT_SERVICE_FILTERS,
+        ...SHOWN,
         source: "platform",
       }).map((key) => key.id),
     ).toEqual(["platform"]);
@@ -89,21 +99,21 @@ describe("service view matching", () => {
   it("combines filters on the same connection and uses service state, not credential status", () => {
     expect(
       matchingConnections(group, {
-        ...DEFAULT_SERVICE_FILTERS,
+        ...SHOWN,
         source: "org",
         state: "enabled",
       }),
     ).toEqual([]);
     expect(
       matchingConnections(group, {
-        ...DEFAULT_SERVICE_FILTERS,
+        ...SHOWN,
         source: "all",
         state: "disabled",
       }).map((key) => key.id),
     ).toEqual(["org"]);
     expect(
       matchingConnections(group, {
-        ...DEFAULT_SERVICE_FILTERS,
+        ...SHOWN,
         source: "personal",
         state: "enabled",
       }).map((key) => key.id),
@@ -112,28 +122,28 @@ describe("service view matching", () => {
   it("searches both service and connection identity without modifying the group", () => {
     expect(
       matchingConnections(group, {
-        ...DEFAULT_SERVICE_FILTERS,
+        ...SHOWN,
         source: "all",
         search: " Chrono ",
       }).map((key) => key.id),
     ).toEqual(["org"]);
     expect(
       matchingConnections(group, {
-        ...DEFAULT_SERVICE_FILTERS,
+        ...SHOWN,
         source: "all",
         search: "OPENAI",
       }),
     ).toHaveLength(3);
     expect(
       matchingConnections(group, {
-        ...DEFAULT_SERVICE_FILTERS,
+        ...SHOWN,
         source: "all",
         service_type: "ssh",
       }),
     ).toEqual([]);
     expect(
       matchingConnections(group, {
-        ...DEFAULT_SERVICE_FILTERS,
+        ...SHOWN,
         source: "all",
         show_auto_connected: false,
       }),
@@ -158,13 +168,13 @@ describe("saved service selections", () => {
         service_group_id: "catalog:openai",
       }),
     ).toEqual({
-      ...DEFAULT_SERVICE_FILTERS,
+      ...SHOWN,
       source: "all",
       organization_ids: ["org-1"],
       service_group_ids: ["catalog:openai"],
     });
     expect(serviceViewSchema.parse(legacy)).toEqual({
-      ...DEFAULT_SERVICE_FILTERS,
+      ...SHOWN,
       source: "all",
     });
     expect(
@@ -173,16 +183,16 @@ describe("saved service selections", () => {
         organization_id: null,
         service_group_id: null,
       }),
-    ).toEqual({ ...DEFAULT_SERVICE_FILTERS, source: "all" });
+    ).toEqual({ ...SHOWN, source: "all" });
     expect(
       sameServiceFilters(
         {
-          ...DEFAULT_SERVICE_FILTERS,
+          ...SHOWN,
           source: "all",
           organization_ids: ["one", "two"],
         },
         {
-          ...DEFAULT_SERVICE_FILTERS,
+          ...SHOWN,
           source: "all",
           organization_ids: ["two", "one"],
         },
@@ -190,7 +200,7 @@ describe("saved service selections", () => {
     ).toBe(true);
     expect(
       serviceViewSchema.safeParse({
-        ...DEFAULT_SERVICE_FILTERS,
+        ...SHOWN,
         source: "all",
         organization_ids: Array(101).fill("org"),
       }).success,
@@ -198,7 +208,7 @@ describe("saved service selections", () => {
   });
   it("matches any selected organization and service, requiring both filter groups", () => {
     const filters = {
-      ...DEFAULT_SERVICE_FILTERS,
+      ...SHOWN,
       source: "all" as const,
       organization_ids: ["org-1", "org-2"],
       service_group_ids: ["catalog:openai", "catalog:codex"],

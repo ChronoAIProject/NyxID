@@ -70,7 +70,8 @@ export const DEFAULT_SERVICE_FILTERS: ServiceViewFilters = {
   source: "personal",
   state: "all",
   service_type: "all",
-  show_auto_connected: true,
+  // Platform auto-provisioned connections are noise until asked for.
+  show_auto_connected: false,
 };
 
 export function sameServiceFilters(

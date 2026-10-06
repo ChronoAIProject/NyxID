@@ -628,6 +628,9 @@ describe("live grouped services", () => {
     }
     const user = userEvent.setup();
     render(preview());
+    fireEvent.click(
+      screen.getByRole("button", { name: "Auto-connected services: hidden" }),
+    );
     expect(
       screen.queryByRole("region", { name: "Platform-only service" }),
     ).not.toBeInTheDocument();
@@ -1122,6 +1125,12 @@ describe("live grouped services", () => {
     });
     const user = userEvent.setup();
     render(preview());
+    expect(
+      screen.getByText("1 service · 2 matching connections"),
+    ).toBeVisible();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Auto-connected services: hidden" }),
+    );
     const filters = screen.getByRole("region", { name: "Service filters" });
     expect(
       within(filters).getByRole("button", { name: "Service view: Personal" }),
@@ -1585,6 +1594,9 @@ describe("live grouped services", () => {
     });
     const user = userEvent.setup();
     render(preview());
+    fireEvent.click(
+      screen.getByRole("button", { name: "Auto-connected services: hidden" }),
+    );
     fireEvent.click(
       screen.getByRole("button", { name: "Service view: Personal" }),
     );

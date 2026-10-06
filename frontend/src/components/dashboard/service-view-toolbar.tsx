@@ -1,5 +1,12 @@
 import { useRef, useState, type ReactNode, type Ref } from "react";
-import { ArrowLeftRight, Layers, UserRound, X } from "lucide-react";
+import {
+  ArrowLeftRight,
+  Eye,
+  EyeOff,
+  Layers,
+  UserRound,
+  X,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Tooltip,
@@ -119,12 +126,12 @@ export function ServiceViewToolbar({
           },
         ]
       : []),
-    ...(!filters.show_auto_connected
+    ...(filters.show_auto_connected
       ? [
           {
             key: "show_auto_connected" as const,
             label: "Auto-connected",
-            value: "Hidden",
+            value: "Shown",
           },
         ]
       : []),
@@ -196,6 +203,63 @@ export function ServiceViewToolbar({
     </TooltipProvider>
   );
 
+  const autoConnected = keys.filter((key) => key.auto_connected).length;
+  const autoToggle = autoConnected > 0 && (
+    <TooltipProvider delayDuration={100} disableHoverableContent>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            variant="outline"
+            size={stuck ? "icon" : "default"}
+            className="shrink-0 rounded-full"
+            aria-pressed={filters.show_auto_connected}
+            aria-label={`Auto-connected services: ${filters.show_auto_connected ? "shown" : "hidden"}`}
+            onClick={() =>
+              setFilters({
+                ...filters,
+                show_auto_connected: !filters.show_auto_connected,
+              })
+            }
+          >
+            {filters.show_auto_connected ? (
+              <Eye className="size-3.5" aria-hidden="true" />
+            ) : (
+              <EyeOff className="size-3.5" aria-hidden="true" />
+            )}
+            {!stuck && (
+              <>
+                Auto-connected
+                <span className="text-muted-foreground tabular-nums">
+                  {autoConnected}
+                </span>
+              </>
+            )}
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent
+          side="bottom"
+          align="end"
+          sideOffset={8}
+          collisionPadding={12}
+          className="max-w-[min(18rem,calc(100vw-2rem))] space-y-1 text-left leading-relaxed"
+        >
+          <p className="font-medium">
+            {filters.show_auto_connected
+              ? "Hide auto-connected services"
+              : "Show auto-connected services"}
+          </p>
+          <p className="text-muted-foreground">
+            {autoConnected} connection{autoConnected === 1 ? " was" : "s were"}{" "}
+            added automatically by NyxID.{" "}
+            {filters.show_auto_connected
+              ? "They are currently listed."
+              : "They are hidden by default."}
+          </p>
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
+
   return (
     <div
       ref={ref}
@@ -221,7 +285,10 @@ export function ServiceViewToolbar({
                 view.restoreDefault();
               }}
             />
-            {sourceToggle}
+            <div className="flex items-center gap-2">
+              {autoToggle}
+              {sourceToggle}
+            </div>
           </div>
         )}
         <div
@@ -301,6 +368,7 @@ export function ServiceViewToolbar({
                 {typeof actions === "function" ? actions(stuck) : actions}
               </div>
             )}
+            {stuck && autoToggle}
             {stuck && sourceToggle}
           </div>
           {Boolean(selections.length || filters.search || applied.length) && (
