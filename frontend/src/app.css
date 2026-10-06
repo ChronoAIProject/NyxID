@@ -17,6 +17,14 @@
    on the never-themed public pages. */
 @custom-variant light (&:where(.theme-light, .theme-light *));
 
+@utility text-control {
+  min-height: calc(1lh + var(--spacing) * 2);
+}
+
+@utility text-input {
+  min-height: calc(1lh + var(--spacing) * 3 + 2px);
+}
+
 @theme {
   /* ── NyxID Brand Primary ── */
   --color-nyx-50: #EDE5FE;

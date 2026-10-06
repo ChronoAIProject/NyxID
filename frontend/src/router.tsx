@@ -41,6 +41,7 @@ import { parseAssistantSearch } from "@/lib/assistant/search";
 import { resolveTrustedAuthReturnTo } from "@/lib/return-url";
 import { parseAuthDeviceSearch } from "@/schemas/auth-device";
 import { nyxbotSearchSchema } from "@/schemas/nyxbot-onboarding";
+import { ADMIN_CREDITS_TABS, KEY_DETAIL_TABS, isValidTab } from "@/lib/url-tabs";
 
 import {
   LandingPage,
@@ -836,6 +837,11 @@ const keyDetailRoute = createRoute({
   path: "/keys/$keyId",
   getParentRoute: () => dashboardLayout,
   component: KeyDetailPage,
+  validateSearch: (search: Record<string, unknown>): { tab?: string; provider_status?: string; message?: string } => ({
+    ...(isValidTab(search.tab, KEY_DETAIL_TABS) ? { tab: search.tab } : {}),
+    ...(typeof search.provider_status === "string" ? { provider_status: search.provider_status } : {}),
+    ...(typeof search.message === "string" ? { message: search.message } : {}),
+  }),
 });
 
 const apiKeyDetailRoute = createRoute({
@@ -1085,6 +1091,9 @@ const adminCreditsRoute = createRoute({
   path: "credits",
   getParentRoute: () => adminLayout,
   component: AdminCreditsPage,
+  validateSearch: (search: Record<string, unknown>): { tab?: string } => ({
+    ...(isValidTab(search.tab, ADMIN_CREDITS_TABS) ? { tab: search.tab } : {}),
+  }),
 });
 
 const adminInviteCodesRoute = createRoute({

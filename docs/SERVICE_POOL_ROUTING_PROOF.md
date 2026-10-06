@@ -88,6 +88,12 @@ at most 100 indexed expired rows using a durable keyset cursor, rechecks capture
 expiry in the release transaction, and advances past known quantities/intents.
 Ordinary historical forwarded rows are not eligible for this recovery.
 
+The non-unique `usage_meter.billing_request_id_1` index bounds completion,
+lease renewal, settlement lookups and transactional cleanup by the current
+request's meter rows, including components and resale. Missing request IDs also
+use this index. These operations must not scan historical usage while the
+executor waits for accounting before fallback.
+
 A lifecycle-owned heartbeat renews leases independently of stream polling,
 bounds its database work by authoritative expiry, distinguishes unmetered traffic
 from a lost lease, and closes provider transport on loss. Dropping the client or

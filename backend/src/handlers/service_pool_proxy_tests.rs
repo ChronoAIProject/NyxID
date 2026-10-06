@@ -276,6 +276,79 @@ async fn pool_proxy_retries_429_replays_body_and_respects_cooldown() {
 }
 
 #[tokio::test]
+async fn pool_proxy_get_models_retries_configured_401_and_respects_cooldown() {
+    let fixture = fixture(
+        "pool_proxy_get_401",
+        StatusCode::UNAUTHORIZED,
+        "priority",
+        false,
+    )
+    .await;
+    fixture
+        .state
+        .db
+        .collection::<Document>("service_pools")
+        .update_one(
+            doc! { "_id": &fixture.pool_id },
+            doc! {
+                "$set": {
+                    "failover.retry_on": ["http_401"],
+                    "failover.cooldown": {
+                        "base_ms": 120_000, "max_ms": 120_000,
+                        "failures_to_open": 1, "honor_retry_after": true,
+                    },
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+    async fn models(fixture: &Fixture) -> Response {
+        let mut request = Request::builder()
+            .method(Method::GET)
+            .uri("/api/v1/proxy/s/review-route/models")
+            .body(Body::empty())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(BillingRoutePolicy::Metered(BillingIngress::Proxy));
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            super::proxy::proxy_request_by_slug(
+                State(fixture.state.clone()),
+                fixture.auth.clone(),
+                crate::telemetry::TelemetryContext::default(),
+                Path(("review-route".into(), "models".into())),
+                request,
+            ),
+        )
+        .await
+        .expect("GET failover completes before the bookkeeping timeout")
+        .expect("pool models response")
+    }
+
+    for attempts in ["2", "1"] {
+        let response = models(&fixture).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-nyxid-pool-attempts"], attempts);
+        assert_eq!(response.headers()["x-nyxid-pool-member"], "review-second");
+        assert_eq!(
+            to_bytes(response.into_body(), 1024).await.unwrap(),
+            "{\"member\":\"second\"}"
+        );
+    }
+    for (upstream, count) in [(&fixture.first, 1), (&fixture.second, 2)] {
+        let requests = upstream.requests.lock().await;
+        assert_eq!(requests.len(), count);
+        for request in requests.iter() {
+            assert_eq!(request.method, Method::GET);
+            assert!(request.body.is_empty());
+        }
+    }
+    fixture.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn pool_proxy_bad_request_does_not_try_backup() {
     let fixture = fixture("pool_proxy_400", StatusCode::BAD_REQUEST, "priority", true).await;
     let response = call(&fixture, "{}").await;
