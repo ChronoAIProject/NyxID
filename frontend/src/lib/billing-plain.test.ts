@@ -63,6 +63,33 @@ describe("plainBilling", () => {
     });
   });
 
+  it("shows the service's NyxID rate for a NyxID-app connection, like any NyxID service", () => {
+    const plain = plainBilling(
+      {
+        ...twitter,
+        platform_key_pricing: {
+          metric: "requests",
+          credits_per_unit: "0.05",
+          sync_status: "synced",
+        },
+      } as KeyInfo,
+      bill({
+        credential_class: "nyxid_platform_oauth_app",
+        credential_supplier: "nyxid",
+        credit_billing_configured: false,
+        charge_status: "not_charged",
+      }),
+    );
+    expect(plain).toMatchObject({
+      verdict: "charged",
+      headline: "Uses NyxID credits",
+      detail:
+        "Each request costs 0.05 NyxID credits, paid by you, from your personal credits.",
+      price: "0.05 credits per request",
+      short: "You pay · 0.05 credits/request",
+    });
+  });
+
   it("explains an organization's own app is free on NyxID but billed by the provider", () => {
     const plain = plainBilling(
       {
