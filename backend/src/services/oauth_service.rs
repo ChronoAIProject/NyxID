@@ -80,6 +80,22 @@ pub fn resolve_authorize_scope(requested: Option<&str>, allowed: &str) -> AppRes
     validate_scopes(requested, allowed)
 }
 
+/// Only dynamically registered clients may send unknown provider scope hints.
+/// Known scopes still pass the ordinary registered-scope subset check.
+pub fn resolve_authorize_scope_for_client(
+    requested: Option<&str>,
+    client: &OauthClient,
+) -> AppResult<String> {
+    if client.created_by.as_deref() != Some("dynamic_registration") {
+        return resolve_authorize_scope(requested, &client.allowed_scopes);
+    }
+    let known = super::oauth_client_service::known_dcr_scopes(requested.unwrap_or_default())?;
+    resolve_authorize_scope(
+        (!known.is_empty()).then_some(known.as_str()),
+        &client.allowed_scopes,
+    )
+}
+
 /// Create an authorization code for the OAuth authorization code flow.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_authorization_code(

@@ -38,20 +38,27 @@ import type { ServicePool } from "@/schemas/pools";
 import { Choice } from "./pool-controls";
 import { PoolEditor } from "./pool-editor";
 import { PoolHealthDialog } from "./pool-health-dialog";
-import { message, strategyLabels } from "./pool-labels";
+import { message, readOnlyPreview, strategyLabels } from "./pool-labels";
+import { ServicePoolCards } from "./service-pool-cards";
 
 export { PoolEditor } from "./pool-editor";
 export { PoolHealthDialog } from "./pool-health-dialog";
 
 interface ServicePoolsTabProps {
+  readonly layout?: "cards" | "table";
+  readonly initialOrgId?: string;
+  readonly initialPoolId?: string;
   readonly createOpen: boolean;
   readonly onCreateOpenChange: (open: boolean) => void;
 }
 export function ServicePoolsTab({
+  layout = "table",
+  initialOrgId,
+  initialPoolId,
   createOpen,
   onCreateOpenChange,
 }: ServicePoolsTabProps) {
-  const [owner, setOwner] = useState("personal");
+  const [owner, setOwner] = useState(initialOrgId ?? "personal");
   const orgId = owner === "personal" ? undefined : owner;
   const { data: orgs } = useOrgs();
   const managedOrgs = (orgs ?? []).filter((o) =>
@@ -123,6 +130,7 @@ export function ServicePoolsTab({
           Connections & health
         </DropdownMenuItem>
         <DropdownMenuItem
+          disabled={readOnlyPreview || update.isPending}
           onSelect={() => {
             void toggle(pool);
           }}
@@ -131,6 +139,7 @@ export function ServicePoolsTab({
         </DropdownMenuItem>
         <DropdownMenuItem
           className="text-destructive"
+          disabled={readOnlyPreview}
           onSelect={() => setDeleting(pool)}
         >
           Delete
@@ -206,7 +215,16 @@ export function ServicePoolsTab({
           </div>
         </div>
       )}
-      {(pools.data?.length ?? 0) > 0 && (
+      {(pools.data?.length ?? 0) > 0 && layout === "cards" && (
+        <ServicePoolCards
+          key={owner}
+          pools={pools.data ?? []}
+          initialOpenId={orgId === initialOrgId ? initialPoolId : undefined}
+          actions={actions}
+          onEdit={setEditing}
+        />
+      )}
+      {(pools.data?.length ?? 0) > 0 && layout === "table" && (
         <>
           <div className="hidden overflow-hidden rounded-xl border border-border/50 bg-card md:block">
             <Table className="table-fixed">
@@ -274,9 +292,7 @@ export function ServicePoolsTab({
                 className="flex items-center justify-between gap-3 rounded-xl border border-border/50 bg-card p-4"
               >
                 <div className="min-w-0 flex-1">
-                  <p className="break-words text-13 font-medium">
-                    {pool.name}
-                  </p>
+                  <p className="break-words text-13 font-medium">{pool.name}</p>
                   <p className="break-words text-12 text-muted-foreground">
                     {pool.slug} · {strategyLabels[pool.strategy]} ·{" "}
                     {pool.is_active ? "Enabled" : "Disabled"}

@@ -910,3 +910,43 @@ fn incremental_wire_contract_rejects_unknown_modes_and_invalid_exact_ids() {
         .is_err()
     );
 }
+
+#[tokio::test]
+async fn incremental_dcr_unknown_scope_hints_preserve_omitted_scope_semantics() {
+    for use_par in [false, true] {
+        let mut fixture = IncrementalFixture::new(false, false).await;
+        fixture.state.db.collection::<OauthClient>(OAUTH_CLIENTS).update_one(
+            doc! {"_id": &fixture.client_id},
+            doc! {"$set": {"created_by": "dynamic_registration", "allowed_scopes": "openid email proxy offline_access"}},
+        ).await.unwrap();
+        // email/offline_access are registered but have never been consented.
+        fixture.state.db.collection::<Consent>(CONSENTS).update_one(
+            doc! {"client_id": &fixture.client_id, "user_id": &fixture.user_id},
+            doc! {"$set": {"scopes": "openid proxy"}},
+        ).await.unwrap();
+        fixture.params.scope = Some("claudeai".to_string());
+        fixture.params.include_granted_scopes = true;
+        if use_par {
+            let form = serde_json::from_value(serde_json::json!({
+                "client_id": fixture.client_id, "client_secret": "public-client-placeholder",
+                "response_type": "code", "redirect_uri": fixture.params.redirect_uri,
+                "scope": "claudeai", "code_challenge": fixture.params.code_challenge,
+                "code_challenge_method": "S256", "include_granted_scopes": true,
+                "requested_service_ids": fixture.params.requested_service_ids,
+                "resource": fixture.params.resource, "prompt": "consent",
+            })).unwrap();
+            let (_, Json(par)) = pushed_authorization_request(State(fixture.state.clone()), HeaderMap::new(), Form(form)).await.unwrap();
+            fixture.params = resolve_pushed_authorize_params(&fixture.state, serde_json::from_value(serde_json::json!({
+                "client_id": fixture.client_id, "request_uri": par.request_uri,
+            })).unwrap()).await.unwrap();
+        }
+        let signed = fixture.request().await.unwrap();
+        let reviewed = verify_consent_request(&fixture.state, &signed, &fixture.user_id).unwrap();
+        assert_eq!(reviewed.incremental_consent.as_ref().unwrap().scopes, "openid proxy");
+        let code = fixture.code(&signed).await;
+        let Json(tokens) = fixture.exchange(&code).await.unwrap();
+        let claims = jwt::verify_token(&fixture.state.jwt_keys, &fixture.state.config, &tokens.access_token).unwrap();
+        assert_eq!(claims.scope, "openid proxy");
+        assert!(!claims.scope.contains("claudeai"));
+    }
+}

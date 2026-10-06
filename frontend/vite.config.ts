@@ -6,6 +6,7 @@ import path from "path"
 import fs from "node:fs"
 import https from "node:https"
 import { allDocPages } from "./src/features/docs/manifest"
+import { routingPreview } from "./dev/routing-preview"
 import { machineSeccomp } from "./scripts/machine-seccomp"
 
 const backendUrl = process.env.BACKEND_URL || "http://localhost:3001"
@@ -241,9 +242,13 @@ function docsSync(): Plugin {
 const BUILD_ID = process.env.SOURCE_COMMIT || Date.now().toString(36)
 
 export default defineConfig({
-  plugins: [telegramClaimReferrer(), react(), tailwindcss(), docsSync(), machineSeccomp(__dirname)],
+  plugins: [
+    ...(process.env.NYXID_ROUTING_PREVIEW === "1" ? [routingPreview(backendUrl, expectedOrigin)] : []),
+    telegramClaimReferrer(), react(), tailwindcss(), docsSync(), machineSeccomp(__dirname),
+  ],
   define: {
     __BUILD_ID__: JSON.stringify(BUILD_ID),
+    "import.meta.env.VITE_ROUTING_PREVIEW": JSON.stringify(process.env.NYXID_ROUTING_PREVIEW === "1" ? "1" : "0"),
   },
   resolve: {
     alias: {

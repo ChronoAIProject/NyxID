@@ -221,16 +221,20 @@ pub async fn resolve_token_resource_scope(
     grant_allow_all_services: bool,
 ) -> AppResult<OAuthTokenResourceScope> {
     let Some(resources) = requested_resources.filter(|resources| !resources.is_empty()) else {
-        let allowed_service_ids = if !grant_allow_all_services && !grant_resource_uris.is_empty() {
-            resolve_resource_service_ids_for_user(db, config, actor_user_id, grant_resource_uris)
-                .await?
-        } else {
-            grant_allowed_service_ids.to_vec()
-        };
+        if !grant_allow_all_services && !grant_resource_uris.is_empty() {
+            return scope_from_granted_resources(
+                db,
+                config,
+                actor_user_id,
+                grant_resource_uris,
+                grant_allowed_service_ids,
+            )
+            .await;
+        }
 
         return Ok(OAuthTokenResourceScope {
             resource_uris: grant_resource_uris.to_vec(),
-            allowed_service_ids,
+            allowed_service_ids: grant_allowed_service_ids.to_vec(),
             allow_all_services: grant_allow_all_services,
         });
     };
@@ -262,15 +266,14 @@ pub async fn resolve_token_resource_scope(
 
     if !grant_resource_uris.is_empty() {
         let resource_uris = filter_resource_narrowing(config, resources, grant_resource_uris)?;
-        let allowed_service_ids =
-            resolve_resource_service_ids_for_user(db, config, actor_user_id, &resource_uris)
-                .await?;
-
-        return Ok(OAuthTokenResourceScope {
-            resource_uris,
-            allowed_service_ids,
-            allow_all_services: false,
-        });
+        return scope_from_granted_resources(
+            db,
+            config,
+            actor_user_id,
+            &resource_uris,
+            grant_allowed_service_ids,
+        )
+        .await;
     }
 
     let resolved = resolve_requested_resources(db, config, actor_user_id, Some(resources))
@@ -305,6 +308,58 @@ pub async fn resolve_token_resource_scope(
         } else {
             grant_allowed_service_ids.to_vec()
         },
+        allow_all_services: false,
+    })
+}
+
+/// Resolve resource-bearing restricted grants without granting a recreated slug.
+async fn scope_from_granted_resources(
+    db: &mongodb::Database,
+    config: &AppConfig,
+    actor_user_id: &str,
+    resources: &[String],
+    grant_service_ids: &[String],
+) -> AppResult<OAuthTokenResourceScope> {
+    let mut resource_uris = Vec::new();
+    let mut allowed_service_ids = Vec::new();
+    let mut has_mcp = false;
+    let mut service_count = 0;
+    let mut dropped_count = 0;
+    for resource in resources {
+        validate_resource_uri(resource)?;
+        if is_mcp_resource(config, resource) {
+            has_mcp = true;
+            continue;
+        }
+        service_count += 1;
+        let service = resolve_single_resource(db, config, actor_user_id, resource).await?;
+        if !grant_service_ids.contains(&service.id) {
+            dropped_count += 1;
+            continue;
+        }
+        if !allowed_service_ids.contains(&service.id) {
+            resource_uris.push(user_service_resource_uri(config, &service.slug));
+            allowed_service_ids.push(service.id);
+        }
+    }
+    // MCP alone preserves consent, including an explicit empty grant. Service
+    // URIs that all lost their original IDs must instead remain zero-service.
+    if service_count == 0 {
+        allowed_service_ids = grant_service_ids.to_vec();
+    }
+    if has_mcp {
+        resource_uris.push(mcp_resource_uri(config));
+    }
+    if dropped_count > 0 {
+        tracing::warn!(
+            dropped_count,
+            service_count,
+            "OAuth resource IDs no longer match the consented grant"
+        );
+    }
+    Ok(OAuthTokenResourceScope {
+        resource_uris,
+        allowed_service_ids,
         allow_all_services: false,
     })
 }
@@ -391,6 +446,7 @@ async fn resolve_org_service_by_slug(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mongodb::bson::doc;
     use uuid::Uuid;
 
     #[test]
@@ -503,6 +559,158 @@ mod tests {
         assert!(scope.allow_all_services);
         assert!(scope.allowed_service_ids.is_empty());
         assert_eq!(scope.resource_uris, vec![mcp]);
+    }
+
+    #[tokio::test]
+    async fn restricted_mcp_grant_preserves_consented_services() {
+        let db = crate::test_utils::connect_test_database("restricted_mcp_grant")
+            .await
+            .expect("regression requires MongoDB");
+        let config = crate::test_utils::test_app_config();
+        let mcp = mcp_resource_uri(&config);
+        let services = vec![Uuid::new_v4().to_string(), Uuid::new_v4().to_string()];
+        for requested in [None, Some(vec![mcp.clone()]), Some(vec![format!("{mcp}/")])] {
+            let scope = resolve_token_resource_scope(
+                &db,
+                &config,
+                &Uuid::new_v4().to_string(),
+                requested.as_deref(),
+                std::slice::from_ref(&mcp),
+                &services,
+                false,
+            )
+            .await
+            .expect("restricted MCP grant resolves");
+            assert_eq!(scope.allowed_service_ids, services);
+            assert_eq!(scope.resource_uris, vec![mcp.clone()]);
+            assert!(!scope.allow_all_services);
+        }
+    }
+
+    #[tokio::test]
+    async fn restricted_resource_grants_intersect_live_ids_and_preserve_mixed_semantics() {
+        use crate::models::user_service::COLLECTION_NAME;
+        let db = crate::test_utils::connect_test_database("restricted_resource_ids")
+            .await
+            .expect("MongoDB required");
+        let config = crate::test_utils::test_app_config();
+        let actor = Uuid::new_v4().to_string();
+        let a = Uuid::new_v4().to_string();
+        let b = Uuid::new_v4().to_string();
+        let collection = db.collection::<UserService>(COLLECTION_NAME);
+        collection
+            .insert_many([
+                crate::test_utils::test_user_service(&a, &actor, "a", "endpoint", None, None),
+                crate::test_utils::test_user_service(&b, &actor, "b", "endpoint", None, None),
+            ])
+            .await
+            .unwrap();
+        let mcp = mcp_resource_uri(&config);
+        let ra = user_service_resource_uri(&config, "a");
+        let rb = user_service_resource_uri(&config, "b");
+        let grant = vec![ra.clone(), rb.clone(), mcp.clone()];
+        let ids = vec![a.clone(), b.clone()];
+        for requested in [None, Some(vec![mcp.clone()]), Some(vec![ra.clone()])] {
+            let scope = resolve_token_resource_scope(
+                &db,
+                &config,
+                &actor,
+                requested.as_deref(),
+                &grant,
+                &ids,
+                false,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                scope.allowed_service_ids,
+                if requested == Some(vec![ra.clone()]) {
+                    vec![a.clone()]
+                } else {
+                    ids.clone()
+                }
+            );
+            assert!(!scope.allow_all_services);
+        }
+        // A service under a reused slug is a different authority, even when still owned by the actor.
+        collection.delete_one(doc! {"_id": &b}).await.unwrap();
+        collection
+            .insert_one(crate::test_utils::test_user_service(
+                "replacement",
+                &actor,
+                "b",
+                "endpoint",
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        for requested in [None, Some(grant.clone())] {
+            let scope = resolve_token_resource_scope(
+                &db,
+                &config,
+                &actor,
+                requested.as_deref(),
+                &grant,
+                &ids,
+                false,
+            )
+            .await
+            .unwrap();
+            assert_eq!(scope.allowed_service_ids, vec![a.clone()]);
+            assert_eq!(scope.resource_uris, vec![ra.clone(), mcp.clone()]);
+        }
+        let replaced_grant = vec![rb.clone(), mcp.clone()];
+        for requested in [None, Some(replaced_grant.clone())] {
+            let scope = resolve_token_resource_scope(
+                &db,
+                &config,
+                &actor,
+                requested.as_deref(),
+                &replaced_grant,
+                std::slice::from_ref(&b),
+                false,
+            )
+            .await
+            .unwrap();
+            assert!(
+                scope.allowed_service_ids.is_empty(),
+                "no fallback after dropping service pairs"
+            );
+            assert_eq!(scope.resource_uris, vec![mcp.clone()]);
+            assert!(!scope.allow_all_services);
+        }
+        // MCP neutrality must not bypass URI-subset checks, even for a consented service.
+        for requested in [vec![ra], vec![format!("{mcp}?extra=1")]] {
+            assert!(matches!(
+                resolve_token_resource_scope(
+                    &db,
+                    &config,
+                    &actor,
+                    Some(&requested),
+                    std::slice::from_ref(&mcp),
+                    &ids,
+                    false
+                )
+                .await,
+                Err(AppError::InvalidTarget(_))
+            ));
+        }
+        for requested in [None, Some(vec![mcp.clone()])] {
+            let scope = resolve_token_resource_scope(
+                &db,
+                &config,
+                &actor,
+                requested.as_deref(),
+                std::slice::from_ref(&mcp),
+                &[],
+                false,
+            )
+            .await
+            .unwrap();
+            assert!(scope.allowed_service_ids.is_empty());
+            assert!(!scope.allow_all_services);
+        }
     }
 
     #[tokio::test]

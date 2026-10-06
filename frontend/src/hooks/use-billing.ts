@@ -18,11 +18,15 @@ import {
 const BILLING_WALLET_KEY = ["billing", "wallet"] as const;
 const BILLING_USAGE_KEY = ["billing", "usage"] as const;
 
-export function billingUsagePath(period?: BillingUsagePeriod): string {
-  if (!period) {
-    return "/billing/usage";
-  }
-  return `/billing/usage?period=${encodeURIComponent(period)}`;
+export function billingUsagePath(
+  period?: BillingUsagePeriod,
+  bucket?: "day",
+): string {
+  const params = new URLSearchParams();
+  if (period) params.set("period", period);
+  if (bucket) params.set("bucket", bucket);
+  const query = params.toString();
+  return query ? `/billing/usage?${query}` : "/billing/usage";
 }
 
 export function useBillingWallet() {
@@ -68,11 +72,13 @@ export function useTopUpBilling() {
   });
 }
 
-export function useBillingUsage(period?: BillingUsagePeriod) {
+export function useBillingUsage(period?: BillingUsagePeriod, bucket?: "day") {
   return useQuery({
-    queryKey: period ? [...BILLING_USAGE_KEY, period] : BILLING_USAGE_KEY,
+    queryKey: period
+      ? [...BILLING_USAGE_KEY, period, ...(bucket ? [bucket] : [])]
+      : BILLING_USAGE_KEY,
     queryFn: async (): Promise<BillingUsageResponse> => {
-      const response = await api.get<unknown>(billingUsagePath(period));
+      const response = await api.get<unknown>(billingUsagePath(period, bucket));
       return billingUsageResponseSchema.parse(response);
     },
   });

@@ -6,6 +6,7 @@ import type { WsFrameInjection } from "@/schemas/services";
 export type { DefaultRequestHeader } from "@/schemas/default-request-headers";
 
 export interface KeyInfo {
+  readonly can_edit_configuration?: boolean;
   readonly inference?: InferenceView | null;
   readonly capabilities?: import("./api").ServiceCapabilities | null;
   readonly authorship?: import("@/schemas/service-history").ServiceAuthorship;
@@ -26,6 +27,12 @@ export interface KeyInfo {
   /** The service references a credential row that no longer exists. */
   readonly credential_missing?: boolean;
   readonly credential_type: string;
+  /** Public identifier of the connection's supplied OAuth developer app. */
+  readonly oauth_client_id?: string | null;
+  /** Per-connection OAuth record; present on modern multi-connection rows. */
+  readonly connection_id?: string | null;
+  /** Resolved OAuth app source, including supported legacy connections. */
+  readonly oauth_app_source?: "platform" | "byo" | null;
   readonly auth_method: string;
   readonly auth_key_name: string;
   readonly status: string;
@@ -163,7 +170,10 @@ export interface ScopeCatalogEntry {
 export interface CatalogEntry {
   readonly billing?: import("./api").ServiceBilling | null;
   readonly inference?: InferenceView | null;
-  readonly platform_key?: { readonly available: boolean; readonly pricing?: LanePricingView | null };
+  readonly platform_key?: {
+    readonly available: boolean;
+    readonly pricing?: LanePricingView | null;
+  };
   readonly byok_pricing?: LanePricingView | null;
   readonly slug: string;
   readonly resource_uri: string;

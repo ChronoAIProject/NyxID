@@ -112,6 +112,7 @@ pub mod node_routing_service;
 pub mod node_service;
 pub mod node_ws_manager;
 pub mod notification_service;
+pub mod oauth_app_source;
 pub mod oauth_broker_service;
 pub mod oauth_client_service;
 pub mod oauth_consent_request_service;
@@ -180,6 +181,7 @@ pub mod url_validation;
 pub mod user_api_key_service;
 pub mod user_credentials_service;
 pub mod user_endpoint_service;
+pub mod user_preferences_service;
 pub mod user_service_service;
 pub mod user_token_service;
 pub mod webhook_delivery_service;
@@ -213,6 +215,8 @@ pub mod channel_turn_delivery;
 pub mod provider_link_service;
 pub mod retired_service_service;
 pub mod service_history;
+pub mod service_insights_activity;
+pub mod service_insights_billing;
 
 #[cfg(test)]
 pub(crate) mod assistant_authority_tests;

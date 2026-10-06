@@ -569,6 +569,7 @@ mod tests {
 
     fn credentials() -> ResolvedOAuthCredentials {
         ResolvedOAuthCredentials {
+            app_source: crate::services::oauth_app_source::OAuthAppSource::Platform,
             client_id: "client-id".to_string(),
             client_secret: Some("client-secret".to_string()),
             credential_user_id: None,

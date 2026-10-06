@@ -1,3 +1,4 @@
+import { useServiceCardView } from "@/stores/service-card-view-store";
 import { create } from "zustand";
 import type { User, LoginResponse } from "@/types/api";
 import { api, apiClient, ApiError } from "@/lib/api-client";
@@ -12,7 +13,8 @@ import { transitionAssistantIdentity } from "@/lib/assistant/identity";
 
 const MFA_REQUIRED_ERROR_CODE = 2002;
 
-function clearAssistantLocalState(): void {
+function clearAccountLocalState(): void {
+  useServiceCardView.setState({ accountId: undefined, filters: undefined, expanded: [] });
   useAssistantContextStore.getState().clear();
   useAssistantDraftStore.getState().clear();
   useAssistantWireLogStore.getState().reset();
@@ -23,7 +25,8 @@ function applyIdentityTransition(
   nextUser: User | null,
 ): void {
   if (previousUser?.id === nextUser?.id) return;
-  if (previousUser !== null) clearAssistantLocalState();
+  useServiceCardView.setState({ accountId: nextUser?.id, filters: undefined, expanded: [] });
+  if (previousUser !== null) clearAccountLocalState();
   transitionAssistantIdentity(nextUser?.id ?? null);
 }
 
@@ -98,7 +101,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       // Clear telemetry identity BEFORE state wipe so the next event
       // the app emits already carries a fresh anon distinct_id.
       telemetryReset();
-      clearAssistantLocalState();
+      clearAccountLocalState();
       transitionAssistantIdentity(null);
       set({
         user: null,
@@ -129,7 +132,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
         // ex-user. Parity with the explicit `logout()` branch above.
         if (!ephemeral) {
           telemetryReset();
-          clearAssistantLocalState();
+          clearAccountLocalState();
         }
         transitionAssistantIdentity(null);
         set({ user: null, isAuthenticated: false, isLoading: false });
@@ -142,7 +145,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
   setUser: (user: User | null): void => {
     const previousUser = get().user;
     if (user === null) {
-      clearAssistantLocalState();
+      clearAccountLocalState();
       transitionAssistantIdentity(null);
     } else {
       applyIdentityTransition(previousUser, user);

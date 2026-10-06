@@ -99,7 +99,7 @@ export function DashboardLayout() {
   // Shared channel onboarding must stay reachable through setup and bot routing.
   const isChannelBotRoute = pathname === "/channel-bots" || pathname.startsWith("/channel-bots/");
   if (onboarding.status === "loading") return null;
-  if (onboarding.status === "show" && !isChannelBotRoute) return <OnboardingTakeover />;
+  if (onboarding.status === "show" && !isChannelBotRoute && !(import.meta.env.DEV && import.meta.env.VITE_ROUTING_PREVIEW === "1")) return <OnboardingTakeover />;
 
   return (
     <RightPanelContext.Provider value={{ setRightPanel }}>

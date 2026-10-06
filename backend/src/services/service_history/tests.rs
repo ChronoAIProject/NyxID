@@ -189,6 +189,46 @@ async fn shared_endpoint_fanout_and_concurrent_before_after() {
     assert_eq!(transitions, (0..6).map(|v| (v, v + 1)).collect::<Vec<_>>());
 }
 
+#[test]
+fn oauth_app_metadata_refresh_does_not_count_as_a_service_edit() {
+    let now = bson::DateTime::now();
+    let before = doc! {
+        "_id": "key", "user_id": "owner", "label": "X", "credential_type": "oauth2",
+        "status": "active", "credential_epoch": 1_i64, "created_at": now, "updated_at": now,
+        "access_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![1] },
+    };
+    let mut after = before.clone();
+    after.insert(
+        "access_token_encrypted",
+        bson::Binary {
+            subtype: bson::spec::BinarySubtype::Generic,
+            bytes: vec![2],
+        },
+    );
+    after.insert(
+        "oauth_app_observation",
+        doc! { "source": "platform", "credential_epoch": 1_i64, "observed_at": now },
+    );
+    let (changes, additional, changed) = projection::diff("user_api_keys", &before, &after, true);
+    assert!(changes.is_empty());
+    assert!(!additional);
+    assert!(!changed);
+    // Later observation timestamps are operational too.
+    let mut refreshed = after.clone();
+    refreshed
+        .get_document_mut("oauth_app_observation")
+        .unwrap()
+        .insert(
+            "observed_at",
+            bson::DateTime::from_millis(now.timestamp_millis() + 1000),
+        );
+    let (changes, additional, changed) =
+        projection::diff("user_api_keys", &after, &refreshed, true);
+    assert!(changes.is_empty());
+    assert!(!additional);
+    assert!(!changed);
+}
+
 #[tokio::test]
 async fn credential_replacement_refresh_removal_and_disabled_delete() {
     let (db, mut s) = fixture().await;
@@ -1077,5 +1117,65 @@ async fn new_and_rebound_references_are_included_in_retried_backing_fanout() {
             );
             assert_eq!(service.created_by.is_some(), create);
         }
+    }
+}
+
+#[tokio::test]
+async fn authorship_summaries_stay_admin_only_within_membership_and_key_scopes() {
+    use crate::models::org_membership::OrgRole;
+    let (db, mut service) = fixture().await;
+    let actor_id = service.user_id.clone();
+    let org = uuid::Uuid::new_v4().to_string();
+    service.user_id = org.clone();
+    db.collection("users")
+        .insert_one(test_user(&org, UserType::Org))
+        .await
+        .unwrap();
+    collection::<UserService>(&db, "user_services")
+        .insert_one(&service)
+        .await
+        .unwrap();
+    let mut other = service.clone();
+    other.id = uuid::Uuid::new_v4().to_string();
+    collection::<UserService>(&db, "user_services")
+        .insert_one(&other)
+        .await
+        .unwrap();
+    let ids = vec![service.id.clone(), other.id.clone()];
+    let reader = read::Reader {
+        actor_id: &actor_id,
+        allowed_service_ids: None,
+    };
+    for role in [OrgRole::Admin, OrgRole::Member, OrgRole::Viewer] {
+        let membership = test_membership(&org, &actor_id, role, Some(vec![service.id.clone()]));
+        let summaries = read::summaries(&db, &reader, &ids, std::slice::from_ref(&membership))
+            .await
+            .unwrap();
+        if role != OrgRole::Admin {
+            // Members and viewers do not receive history metadata.
+            assert!(summaries.is_empty());
+            continue;
+        }
+        assert_eq!(summaries.len(), 1);
+        assert!(summaries.contains_key(&service.id));
+        let excluded = vec![other.id.clone()];
+        let restricted = read::Reader {
+            actor_id: &actor_id,
+            allowed_service_ids: Some(&excluded),
+        };
+        assert!(
+            read::summaries(&db, &restricted, &ids, std::slice::from_ref(&membership))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let mut revoked = membership;
+        revoked.revoked_at = Some(chrono::Utc::now());
+        assert!(
+            read::summaries(&db, &reader, &ids, &[revoked])
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }

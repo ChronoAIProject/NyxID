@@ -14,7 +14,13 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { usePoolHealth, useResetPoolHealth } from "@/hooks/use-pools";
 import type { ServicePool } from "@/schemas/pools";
-import { bindingLabel, message, reason, strategyLabels } from "./pool-labels";
+import {
+  bindingLabel,
+  message,
+  readOnlyPreview,
+  reason,
+  strategyLabels,
+} from "./pool-labels";
 import { PoolOperationCheck, type PoolOperation } from "./pool-operation-check";
 
 export function PoolHealthDialog({
@@ -132,7 +138,7 @@ export function PoolHealthDialog({
                   onClick={() => {
                     void clear(row.user_service_id);
                   }}
-                  disabled={reset.isPending}
+                  disabled={readOnlyPreview || reset.isPending}
                 >
                   Reset
                 </Button>
@@ -150,6 +156,7 @@ export function PoolHealthDialog({
                 void clear();
               }}
               isLoading={reset.isPending}
+              disabled={readOnlyPreview}
             >
               Reset all cooldowns
             </Button>
