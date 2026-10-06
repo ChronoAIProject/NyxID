@@ -53,6 +53,11 @@ const PLUGIN_SPEC: &str = "nyxid-cli@nyxid";
 const LEGACY_CLI_PLUGIN_SPEC: &str = "nyxid@nyxid";
 const FIRST_MCP_PLUGIN_VERSION: (u64, u64, u64) = (0, 9, 0);
 
+/// Status label of the Claude Code CLI-edition plugin row. Its presence comes
+/// from Claude Code's plugin registry, not the cache directory, which Claude
+/// Code keeps for a while after an uninstall.
+const CLAUDE_PLUGIN_STATUS_LABEL: &str = "plugin (all skills)";
+
 /// The default hosted NyxID URL used in the repo's SKILL.md.
 /// Replaced with the user's actual server URL at install time.
 const DEFAULT_HOSTED_URL: &str = "https://nyx-api.chrono-ai.fun";
@@ -327,7 +332,7 @@ fn skill_paths(tool: AiToolTarget) -> Result<Vec<(String, PathBuf)>> {
     match tool {
         AiToolTarget::ClaudeCode => Ok(vec![
             (
-                "plugin (all skills)".into(),
+                CLAUDE_PLUGIN_STATUS_LABEL.into(),
                 home.join(".claude/plugins/cache")
                     .join(PLUGIN_MARKETPLACE_NAME)
                     .join(PLUGIN_SPEC.split('@').next().unwrap_or(PLUGIN_SPEC)),
@@ -605,6 +610,16 @@ fn run_claude(args: &[&str]) -> Result<()> {
         args.join(" "),
         stderr.trim().lines().last().unwrap_or("unknown error")
     );
+}
+
+/// Whether a `skill_paths` entry is installed. The Claude Code plugin row is
+/// read from the plugin registry; every other entry is a file on disk.
+fn skill_entry_installed(tool: AiToolTarget, label: &str, path: &Path) -> bool {
+    if tool == AiToolTarget::ClaudeCode && label == CLAUDE_PLUGIN_STATUS_LABEL {
+        claude_cli_plugin_present()
+    } else {
+        path.exists()
+    }
 }
 
 /// Claude Code's registry of installed plugins
@@ -985,8 +1000,9 @@ async fn update(tool: Option<AiToolTarget>, base_url: &Option<String>) -> Result
     // Check which tools are installed before fetching
     for &t in &tools {
         let paths = skill_paths(t)?;
-        let installed = paths.iter().any(|(_, p)| p.exists())
-            || (t == AiToolTarget::ClaudeCode && claude_cli_plugin_present());
+        let installed = paths
+            .iter()
+            .any(|(label, p)| skill_entry_installed(t, label, p));
         if installed {
             installed_tools.push(t);
         } else if tool.is_some() {
@@ -1062,7 +1078,7 @@ fn status() -> Result<()> {
         let paths = skill_paths(tool)?;
 
         for (label, path) in &paths {
-            let status_str = if path.exists() {
+            let status_str = if skill_entry_installed(tool, label, path) {
                 let date = std::fs::metadata(path)
                     .and_then(|m| m.modified())
                     .ok()

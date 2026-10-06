@@ -6,6 +6,8 @@ The repository-root `.claude-plugin/marketplace.json` lists this folder as plugi
 
 ## Validate
 
+`claude plugin validate --strict` needs Claude Code 2.1.284 or later, the version CI pins (see [PLUGINS.md](PLUGINS.md#requirements)).
+
 ```bash
 python3 scripts/validate-claude-plugin.py                  # package checks
 python3 scripts/validate-claude-plugin.py --require-claude # also require `claude plugin validate --strict`
