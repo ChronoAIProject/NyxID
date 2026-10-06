@@ -5382,6 +5382,7 @@ pub async fn seed_default_services(
                     username: "x-access-token".into(),
                 }
             }),
+            concurrency_policy: None,
             inference_admin_modified: false,
             auth_notes: seed.auth_notes.map(String::from),
             known_limitations: seed.known_limitations.map(String::from),

@@ -280,4 +280,5 @@ pub mod voice;
 #[cfg(test)]
 mod machine_access_tests;
 
+pub mod service_concurrency_service;
 pub mod utility_inference_service;

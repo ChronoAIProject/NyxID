@@ -169,6 +169,7 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
         tracing::warn!(%error, "NyxBot reply channel reset deferred");
     }
     crate::services::coordination_service::ensure_indexes(db).await?;
+    crate::services::service_concurrency_service::ensure_indexes(db).await?;
 
     // ── assistant_wire_logs ──
     db.collection::<AssistantWireLog>(AssistantWireLog::COLLECTION_NAME)
@@ -5256,6 +5257,7 @@ mod tests {
             capabilities: None,
             inference: None,
             git_http: None,
+            concurrency_policy: None,
             inference_admin_modified: false,
             billing: None,
             auth_notes: None,

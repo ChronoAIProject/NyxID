@@ -913,6 +913,41 @@ async fn request(
     body: Option<Value>,
     model: Option<&str>,
 ) -> Result<Value, RequestFailure> {
+    let lease =
+        super::service_concurrency_service::acquire(&state.db, &route.target.service, actor)
+            .await
+            .map_err(|error| {
+                RequestFailure::terminal(match error {
+                    crate::errors::AppError::ServiceConcurrencyLimited => {
+                        "service_concurrency_limited"
+                    }
+                    _ => "dispatch_unavailable",
+                })
+            })?;
+    let execution = Box::pin(request_inner(
+        state, actor, client, service, route, path, body, model,
+    ));
+    match lease {
+        Some(lease) => tokio::select! {
+            biased;
+            () = lease.cancelled() => Err(RequestFailure::terminal("service_concurrency_limited")),
+            result = execution => result,
+        },
+        None => execution.await,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn request_inner(
+    state: &AppState,
+    actor: &str,
+    client: &reqwest::Client,
+    service: &DownstreamService,
+    route: &Route,
+    path: &str,
+    body: Option<Value>,
+    model: Option<&str>,
+) -> Result<Value, RequestFailure> {
     let body = body
         .and_then(|body| serde_json::to_vec(&body).ok())
         .map(bytes::Bytes::from);

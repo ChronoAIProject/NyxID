@@ -259,6 +259,17 @@ export function OrgPicker(props: MemberPickerProps) {
   );
 }
 
+export function PersonPicker(props: MemberPickerProps) {
+  const [search, setSearch] = useState("");
+  const deferredSearch = useDeferredValue(search.trim());
+  const query = useAdminUsers(1, 100, deferredSearch || undefined, "person");
+  return <MemberPicker {...props} kind="person"
+    items={(query.data?.users ?? []).filter((user) => user.is_active).map((user) => ({
+      id: user.id, name: user.display_name || user.email, detail: user.email,
+    }))}
+    search={search} onSearch={setSearch} loading={query.isFetching} error={query.isError} />;
+}
+
 export function GroupPicker(props: MemberPickerProps) {
   const [search, setSearch] = useState("");
   const query = useGroups();
@@ -290,7 +301,7 @@ function MemberPicker({
   loading,
   error,
 }: MemberPickerProps & {
-  readonly kind: "organization" | "group";
+  readonly kind: "organization" | "group" | "person";
   readonly items: readonly { id: string; name: string; detail: string }[];
   readonly search: string;
   readonly onSearch: (value: string) => void;

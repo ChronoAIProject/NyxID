@@ -51,6 +51,7 @@ fn proxy_error_telemetry_fields(err: &AppError) -> (u16, u32) {
         AppError::Forbidden(_) => (403, 1002),
         AppError::NotFound(_) => (404, 1003),
         AppError::RateLimited => (429, 1005),
+        AppError::ServiceConcurrencyLimited => (429, 12600),
         AppError::Internal(_) => (500, 1006),
         AppError::DatabaseError(_) => (500, 1007),
         AppError::ValidationError(_) => (400, 1008),
@@ -3837,6 +3838,48 @@ fn execute_resolved_proxy<'a>(
     resolved_slug: &'a mut String,
     resolved: ResolvedProxyExecution,
 ) -> futures::future::BoxFuture<'a, AppResult<Response>> {
+    Box::pin(async move {
+        *resolved_slug = resolved.target.service.slug.clone();
+        let lease = crate::services::service_concurrency_service::acquire(
+            &state.db,
+            &resolved.target.service,
+            &auth_user.user_id.to_string(),
+        )
+        .await?;
+        let execution = execute_resolved_proxy_boxed(
+            state,
+            auth_user,
+            service_id,
+            path,
+            request,
+            extra_outbound_headers,
+            resolved_slug,
+            resolved,
+            lease.clone(),
+        );
+        match lease {
+            Some(lease) => {
+                let response = lease.run(execution).await?;
+                Ok(lease.hold_response(response))
+            }
+            None => execution.await,
+        }
+    })
+}
+
+// Keep construction of the large dispatch future outside the guard's poll frame.
+#[allow(clippy::too_many_arguments)]
+fn execute_resolved_proxy_boxed<'a>(
+    state: &'a AppState,
+    auth_user: &'a AuthUser,
+    service_id: &'a str,
+    path: &'a str,
+    request: Request<Body>,
+    extra_outbound_headers: Vec<(String, String)>,
+    resolved_slug: &'a mut String,
+    resolved: ResolvedProxyExecution,
+    service_lease: Option<crate::services::service_concurrency_service::Lease>,
+) -> futures::future::BoxFuture<'a, AppResult<Response>> {
     Box::pin(execute_resolved_proxy_inner(
         state,
         auth_user,
@@ -3846,6 +3889,7 @@ fn execute_resolved_proxy<'a>(
         extra_outbound_headers,
         resolved_slug,
         resolved,
+        service_lease,
     ))
 }
 
@@ -3859,6 +3903,7 @@ async fn execute_resolved_proxy_inner(
     mut extra_outbound_headers: Vec<(String, String)>,
     resolved_slug: &mut String,
     resolved: ResolvedProxyExecution,
+    service_lease: Option<crate::services::service_concurrency_service::Lease>,
 ) -> AppResult<Response> {
     let permission_ingress = request.extensions().get::<PermissionIngress>().cloned();
     let permission_bound =
@@ -4942,6 +4987,7 @@ async fn execute_resolved_proxy_inner(
                 collect_realtime_llm_usage,
                 metered.clone(),
                 billing_egress_permit,
+                service_lease,
             ))
             .await;
         }
@@ -4962,6 +5008,7 @@ async fn execute_resolved_proxy_inner(
             collect_realtime_llm_usage,
             metered.clone(),
             billing_egress_permit,
+            service_lease,
         ))
         .await;
     }
@@ -7682,6 +7729,7 @@ async fn handle_ws_passthrough(
     collect_realtime_llm_usage: bool,
     metered: crate::services::billing::MeteredProxyContext,
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+    service_lease: Option<crate::services::service_concurrency_service::Lease>,
 ) -> AppResult<Response> {
     crate::services::destination_routing::reject_websocket(target)?;
     let downstream_url = build_downstream_ws_url(target, path, query, delegated)?;
@@ -7696,6 +7744,9 @@ async fn handle_ws_passthrough(
         .await?
         .ok_or(AppError::RateLimited)?;
     let slot_cancel = guard.cancellation_token();
+    if let Some(lease) = &service_lease {
+        lease.cancel_on_loss(slot_cancel.clone());
+    }
 
     // Connect to downstream BEFORE upgrading the client connection.
     // If the downstream is unreachable, the client gets a normal HTTP error.
@@ -7766,6 +7817,7 @@ async fn handle_ws_passthrough(
             )
             .await;
             drop(guard);
+            drop(service_lease);
             let platform_usage = websocket_platform_usage(&stats);
             let resale_usage = websocket_resale_usage(&metered_for_settle, &stats);
             settle_meter_async(
@@ -7818,6 +7870,7 @@ async fn handle_ws_passthrough_via_node(
     collect_realtime_llm_usage: bool,
     metered: crate::services::billing::MeteredProxyContext,
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+    service_lease: Option<crate::services::service_concurrency_service::Lease>,
 ) -> AppResult<Response> {
     crate::services::destination_routing::reject_websocket(target)?;
     use crate::services::node_ws_manager::NodeWsProxyRequest;
@@ -7890,6 +7943,9 @@ async fn handle_ws_passthrough_via_node(
         .await?
         .ok_or(AppError::RateLimited)?;
     let slot_cancel = guard.cancellation_token();
+    if let Some(lease) = &service_lease {
+        lease.cancel_on_loss(slot_cancel.clone());
+    }
 
     let session_id = uuid::Uuid::new_v4().to_string();
     let mut last_error: Option<AppError> = None;
@@ -8059,6 +8115,7 @@ async fn handle_ws_passthrough_via_node(
             // Best-effort close the node-side session.
             let _ = node_dispatch.send_ws_proxy_close(&node_id_owned, &sess_id, None, None);
             drop(guard);
+            drop(service_lease);
             let platform_usage = websocket_platform_usage(&stats);
             let resale_usage = websocket_resale_usage(&metered_for_settle, &stats);
             settle_meter_async(
@@ -10932,6 +10989,7 @@ mod tests {
 
 #[cfg(test)]
 mod proxy_resolution_integration_tests {
+    include!("proxy_concurrency_tests.rs");
     use super::{
         enforce_node_route_scope, execute_admin_proxy, proxy_request_by_slug_inner,
         proxy_request_inner,

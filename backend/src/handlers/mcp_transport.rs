@@ -133,6 +133,21 @@ fn tool_result(id: Option<serde_json::Value>, text: &str, is_error: bool) -> Res
     )
 }
 
+fn concurrency_limited_response(id: Option<serde_json::Value>) -> Response {
+    let error = crate::errors::AppError::ServiceConcurrencyLimited;
+    let mut response = rpc_error(
+        id,
+        -32000,
+        &format!("{} ({}): {error}", error.error_key(), error.error_code()),
+    );
+    *response.status_mut() = StatusCode::TOO_MANY_REQUESTS;
+    response.headers_mut().insert(
+        axum::http::header::RETRY_AFTER,
+        axum::http::HeaderValue::from_static("1"),
+    );
+    response
+}
+
 fn request_body_too_large_tool_result(
     id: Option<serde_json::Value>,
     error: &crate::errors::AppError,
@@ -1152,6 +1167,7 @@ fn app_error_to_rpc(id: Option<serde_json::Value>, err: &crate::errors::AppError
     use crate::errors::AppError;
     match err {
         AppError::RateLimited => rpc_error(id, -32005, "Rate limit exceeded"),
+        AppError::ServiceConcurrencyLimited => concurrency_limited_response(id),
         AppError::AssistantTurnRequired => rpc_error(
             id,
             -32003,
@@ -2176,7 +2192,7 @@ async fn dispatch_service_tool(
     }
 
     let exec_ctx = mcp_exec_context(auth);
-    let response = match mcp_service::execute_tool_response(
+    let mut response = match mcp_service::execute_tool_response(
         &state.http_client,
         &state.db,
         &state.encryption_keys,
@@ -2203,6 +2219,9 @@ async fn dispatch_service_tool(
         }
         Err(error @ crate::errors::AppError::RequestBodyTooLarge { .. }) => {
             return request_body_too_large_tool_result(request.id.clone(), &error);
+        }
+        Err(crate::errors::AppError::ServiceConcurrencyLimited) => {
+            return concurrency_limited_response(request.id.clone());
         }
         Err(e) => {
             tracing::warn!("Tool execution failed for {tool_name}: {e}");
@@ -2231,14 +2250,20 @@ async fn dispatch_service_tool(
         auth.api_key_name.clone(),
     );
 
+    let concurrency = response.concurrency.take();
     let (content, is_error) = service_tool_content(state, auth, tool_name, response).await;
-    content_result(request.id.clone(), content, is_error)
+    let result = content_result(request.id.clone(), content, is_error);
+    match concurrency {
+        Some(lease) => lease.hold_response(result),
+        None => result,
+    }
 }
 
 /// Build the execution context passed to `mcp_service::execute_tool` from
 /// the authenticated MCP caller -- API key identity + node scope.
 fn mcp_exec_context<'a>(auth: &'a McpAuthContext) -> mcp_service::McpExecContext<'a> {
     mcp_service::McpExecContext {
+        actor_user_id: Some(&auth.user_id),
         org_agent_access: auth.org_agent_access.as_deref(),
         agent_owner: auth.assistant_agent_owner_id.as_deref(),
         operation_scopes: Some(&auth.assistant_operation_scopes),
@@ -3026,7 +3051,7 @@ async fn handle_meta_call_tool(
     };
 
     let exec_ctx = mcp_exec_context(auth);
-    let response = match mcp_service::execute_tool_response(
+    let mut response = match mcp_service::execute_tool_response(
         &state.http_client,
         &state.db,
         &state.encryption_keys,
@@ -3054,6 +3079,9 @@ async fn handle_meta_call_tool(
         Err(error @ crate::errors::AppError::RequestBodyTooLarge { .. }) => {
             return request_body_too_large_tool_result(request_id, &error);
         }
+        Err(crate::errors::AppError::ServiceConcurrencyLimited) => {
+            return concurrency_limited_response(request_id);
+        }
         Err(e) => {
             tracing::warn!("Tool execution failed for {tool_name}: {e}");
             return tool_result(request_id, &format!("Tool execution failed: {e}"), true);
@@ -3078,10 +3106,11 @@ async fn handle_meta_call_tool(
         auth.api_key_name.clone(),
     );
 
+    let concurrency = response.concurrency.take();
     let (content, is_error) = service_tool_content(state, auth, tool_name, response).await;
 
     // Embed tools/list_changed inline for SSE-capable clients
-    if changed && client_accepts_sse {
+    let result = if changed && client_accepts_sse {
         content_result_with_notifications(
             request_id,
             content,
@@ -3093,6 +3122,10 @@ async fn handle_meta_call_tool(
         )
     } else {
         content_result(request_id, content, is_error)
+    };
+    match concurrency {
+        Some(lease) => lease.hold_response(result),
+        None => result,
     }
 }
 
@@ -4137,18 +4170,32 @@ async fn handle_mcp_ssh_exec(
         timeout_secs,
     };
 
-    // Reuse the core logic from the ssh_exec module
-    let result = execute_ssh_command_internal(
+    let concurrency = match crate::services::service_concurrency_service::acquire_policy(
+        &state.db,
+        service.concurrency_policy.as_ref(),
+        &auth.user_id,
+    )
+    .await
+    {
+        Ok(lease) => lease,
+        Err(error) => return app_error_to_rpc(request_id, &error),
+    };
+
+    // Native SSH has a separate dispatcher from HTTP-backed catalog tools.
+    let execution = Box::pin(execute_ssh_command_internal(
         state,
         auth,
         &service_id,
         &ssh_svc,
         &body,
         billing_egress_permit,
-    )
-    .await;
+    ));
+    let result = match &concurrency {
+        Some(lease) => lease.run(execution).await,
+        None => execution.await,
+    };
 
-    match result {
+    let response = match result {
         Ok(response) => {
             let response_json = serde_json::json!({
                 "exit_code": response.exit_code,
@@ -4163,7 +4210,14 @@ async fn handle_mcp_ssh_exec(
             let is_error = response.exit_code != 0;
             tool_result(request_id, &text, is_error)
         }
+        Err(crate::errors::AppError::ServiceConcurrencyLimited) => {
+            return concurrency_limited_response(request_id);
+        }
         Err(e) => tool_result(request_id, &format!("SSH exec failed: {e}"), true),
+    };
+    match concurrency {
+        Some(lease) => lease.hold_response(response),
+        None => response,
     }
 }
 
@@ -5728,6 +5782,97 @@ mod tests {
     // -----------------------------------------------------------------------
     // app_error_to_rpc tests
     // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn service_concurrency_native_ssh_cannot_bypass_catalog_limit() {
+        use crate::models::downstream_service::{DownstreamService, SshServiceConfig};
+        use crate::models::service_concurrency::ServiceConcurrencyPolicy;
+        use crate::services::service_concurrency_service as concurrency;
+        let db = crate::test_utils::connect_transaction_test_database("concurrency_mcp_ssh").await;
+        concurrency::ensure_indexes(&db).await.unwrap();
+        let actor = uuid::Uuid::new_v4().to_string();
+        db.collection(USERS)
+            .insert_one(test_user(&actor, UserType::Person))
+            .await
+            .unwrap();
+        let mut service = crate::test_utils::test_auto_connected_catalog_service();
+        service.service_type = "ssh".into();
+        service.ssh_config = Some(SshServiceConfig {
+            host: "127.0.0.1".into(),
+            port: 22,
+            ssh_auth_mode: crate::models::ssh_auth_mode::SshAuthMode::Cert,
+            certificate_auth_enabled: true,
+            certificate_ttl_minutes: 15,
+            allowed_principals: vec!["test".into()],
+            ca_private_key_encrypted: None,
+            ca_public_key: None,
+        });
+        service.concurrency_policy = Some(ServiceConcurrencyPolicy {
+            service_id: service.id.clone(),
+            default_limit: Some(1),
+            users: vec![],
+            orgs: vec![],
+        });
+        db.collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
+            .insert_one(&service)
+            .await
+            .unwrap();
+        let mut connection = test_user_service(
+            &uuid::Uuid::new_v4().to_string(),
+            &actor,
+            "limited-ssh",
+            &uuid::Uuid::new_v4().to_string(),
+            Some(&service.id),
+            None,
+        );
+        connection.service_type = "ssh".into();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(connection)
+            .await
+            .unwrap();
+        let held = concurrency::acquire(&db, &service, &actor).await.unwrap();
+        let state = test_app_state(db);
+        let auth = McpAuthContext::user(actor, AuthMethod::Session);
+        let permit =
+            crate::services::billing::route_inventory::enforce_billing_egress_classification(
+                Some(
+                    crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                        crate::services::billing::BillingIngress::Mcp,
+                    ),
+                ),
+                crate::services::billing::BillingIngress::Mcp,
+            )
+            .unwrap();
+        let response = Box::pin(handle_mcp_ssh_exec(
+            &state,
+            &auth,
+            &serde_json::json!({"service":service.id,"command":"pwd"}),
+            Some(serde_json::json!(1)),
+            permit,
+        ))
+        .await;
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers()["retry-after"], "1");
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn service_concurrency_refusal_has_http_and_typed_rpc_contract() {
+        let response = super::concurrency_limited_response(Some(serde_json::json!(7)));
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers()["retry-after"], "1");
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["id"], 7);
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("service_concurrency_limited (12600)")
+        );
+    }
 
     #[test]
     fn app_error_to_rpc_handles_rate_limited() {

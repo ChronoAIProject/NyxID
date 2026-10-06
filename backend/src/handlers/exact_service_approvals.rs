@@ -1,6 +1,7 @@
 use axum::{
     Extension, Json,
     extract::{Path, State},
+    response::{IntoResponse, Response},
 };
 
 use crate::AppState;
@@ -46,7 +47,7 @@ pub async fn redeem_request(
     auth_user: AuthUser,
     Path(request_id): Path<String>,
     Json(fence): Json<ExactServiceApprovalFence>,
-) -> AppResult<Json<ExactServiceApprovalResult>> {
+) -> AppResult<Response> {
     auth_user.ensure_rest_proxy_access()?;
     auth_user
         .ensure_live_assistant_turn(&state.db, "exact-approval.redeem")
@@ -55,10 +56,15 @@ pub async fn redeem_request(
     let caller = caller(&auth_user)?;
     let permit =
         enforce_billing_egress_classification(Some(billing_route_policy), BillingIngress::Mcp)?;
-    Ok(Json(
+    let mut result =
         exact_service_approval_service::redeem_request(&state, &caller, &request_id, fence, permit)
-            .await?,
-    ))
+            .await?;
+    let concurrency = result.concurrency.take();
+    let response = Json(result).into_response();
+    Ok(match concurrency {
+        Some(lease) => lease.hold_response(response),
+        None => response,
+    })
 }
 
 fn caller(auth_user: &AuthUser) -> AppResult<ExactServiceApprovalCaller> {
