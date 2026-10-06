@@ -401,14 +401,26 @@ describe("NyxAgent row controls", () => {
     await user.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(rename).toHaveBeenCalledExactlyOnceWith(row.id, "New title"));
   });
-  it("allows rename but disables delete while a turn is active", async () => {
+  it("allows deleting an active turn and explains that it will stop", async () => {
     const user = userEvent.setup();
-    nyxSidebar({ ...row, active_turn: { turn_id: "running", started_at: row.created_at } });
-    await user.click(screen.getByRole("button", { name: `Options for ${row.title}` }));
-    expect(screen.getByRole("menuitem", { name: "Rename" })).not.toHaveAttribute("aria-disabled", "true");
-    expect(screen.getByRole("menuitem", { name: "Delete" })).toHaveAttribute(
-      "aria-disabled", "true",
+    const onDelete = vi.fn();
+    render(
+      <TooltipProvider>
+        <AssistantSidebar
+          conversations={[{ ...row, active_turn: { turn_id: "running", started_at: row.created_at } }]}
+          activeConversationId={row.id}
+          onNewChat={vi.fn()}
+          onSelect={vi.fn()}
+          onDelete={onDelete}
+        />
+      </TooltipProvider>,
     );
+    await user.click(screen.getByRole("button", { name: `Options for ${row.title}` }));
+    expect(screen.getByRole("menuitem", { name: "Delete" })).not.toHaveAttribute("aria-disabled", "true");
+    await user.click(screen.getByRole("menuitem", { name: "Delete" }));
+    expect(screen.getByText(/running reply will stop/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Delete" }));
+    expect(onDelete).toHaveBeenCalledExactlyOnceWith(row.id);
   });
 });
 

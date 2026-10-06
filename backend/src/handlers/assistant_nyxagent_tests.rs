@@ -652,6 +652,7 @@ async fn settlement_failure_is_bounded_emits_terminal_error_and_releases_permit(
     tokio::time::timeout(
         Duration::from_secs(2),
         complete_turn(
+            &state.db,
             &row,
             &row.active_turn.as_ref().unwrap().turn_id,
             "message",

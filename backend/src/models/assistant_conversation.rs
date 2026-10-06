@@ -140,6 +140,9 @@ pub struct ActiveTurn {
     pub tool_progress: ToolProgress,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub lease_expires_at: Option<DateTime<Utc>>,
+    /// Worker liveness marker. Absent on turns written before heartbeat support.
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub heartbeat_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub trigger_run_id: Option<String>,
     pub turn_id: String,

@@ -408,8 +408,8 @@ Paths below are relative to `/api/v1/assistant/nyxagent`.
 | `GET /conversations` | `limit` 1–100 (default 50), optional `cursor`, optional `agent_id` | `{conversations,next_cursor}` |
 | `GET /conversations/{id}` | `limit` 1–100 (default 50), optional positive `before_seq` | `{conversation,messages,acknowledgements,approvals,before_seq}` |
 | `PATCH /conversations/{id}` | closed `{title}`; trimmed nonempty, max 200 Unicode scalars | conversation DTO |
-| `DELETE /conversations/{id}` | no body | 204; local hard delete, best-effort upstream session delete |
-| `POST /conversations/{id}/stop` | no body | 204; owner-only, no active turn is a no-op |
+| `DELETE /conversations/{id}` | no body | 204; stops/cancels active work, then locally hard-deletes, with best-effort upstream session delete |
+| `POST /conversations/{id}/stop` | no body | 204; owner-only, idempotent for an idle turn |
 | `PATCH /conversations/{id}/access-mode` | ignored | `410 Gone` (`access_mode_retired`) |
 | `GET` / `POST /agents` | `POST`: closed `{name,description,services?,account_read?}` | `{agents,limits}` / `201 {id,name,home_conversation_id}` |
 | `GET` / `PATCH` / `DELETE /agents/{id}` | `PATCH`: `{name?,description?}`; `DELETE` only after destroy | `{agent,memory,threads}` / agent / 204 |
@@ -471,8 +471,9 @@ Turn text is nonblank and at most 32,768 Unicode scalars; ingress is capped at
 256 KiB. Profiles use `nyxagent/` plus 1–64 lowercase letters, digits, hyphens or
 underscores. Default is `nyxagent/chat`. The first send fixes the conversation's
 profile; later sends always reuse the stored value. Title is the first 40 Unicode
-scalars of the trimmed initial message. Rename and Delete reject an active turn
-with HTTP 409 `turn_active` (the numeric code is indexed in CLAUDE.md).
+scalars of the trimmed initial message. Rename rejects an active turn with HTTP 409
+`turn_active`; Delete stops/cancels the active turn before removing the thread (the
+numeric code is indexed in CLAUDE.md).
 
 Models use authenticated `GET /v1/models` through the admin proxy, a 60-second
 server cache of successful upstream lists and an uncached fallback
@@ -543,7 +544,9 @@ polled `active_turn.attachments`). A failed fetch shows "Image unavailable".
 
 `assistant_conversations` stores owner, title, model, access mode, upstream session/last
 response IDs, credential key ID, message count, optional active turn, reset
-reason/time and creation/update dates. Index: owner + descending update + ID.
+reason/time and creation/update dates. Active turns written by current workers carry a
+`heartbeat_at`; old rows may omit it. Indexes include owner + descending update + ID and
+active heartbeat time for the orphan sweep.
 `assistant_messages` stores UUID, owner, conversation, monotonic seq, turn ID,
 role, text, completed/failed status, optional stable error and date. Unique index:
 conversation + seq. All dates use the repository BSON date helpers.
@@ -551,12 +554,17 @@ conversation + seq. All dates use the repository BSON date helpers.
 Before egress, a transaction writes the user message and claims `active_turn`.
 A competing send gets `turn_active` while the fence is live. A fence initially expires at
 `started_at + ACTIVE_TURN_TTL_SECS` (1800 seconds execution + 300 seconds settlement
-grace). Automatic continuation refreshes `lease_expires_at` on that same turn. One shared `live_turn` check governs admission, Rename, Delete, Stop and
-DTOs; an expired fence appears as `active_turn: null`. The next send transactionally
+grace). Automatic continuation refreshes `lease_expires_at` on that same turn. The
+detached worker renews `heartbeat_at` every ten seconds through execution, continuation
+gaps and settlement. Current rows use the heartbeat for orphan detection and authoritative
+Stop; the existing `live_turn` lease/TTL check remains the admission and DTO fence. Legacy
+rows without it keep the same lease/TTL behavior. The next send transactionally
 inserts an empty failed reply for the lost turn (`error_code=turn_lost`), clears
 the binding with `turn_failed`, inserts the new user message and claims its fence.
-Rename/Delete also work after expiry; Stop is a no-op. Late settlement matches the
-old turn ID and cannot overwrite a reclaimed turn. No uncertain operation is replayed.
+A 15-second cross-replica sweep reclaims only rows whose heartbeat is at least 75 seconds old,
+through the same fenced settlement path; a fresh long-running turn is never swept.
+Delete stops and cancels before removing the row, and a late worker settlement against
+the deleted row is a quiet no-op. All late settlement is fenced by the exact turn ID.
 
 A detached task owns the shared
 `DirectChatPermit`, upstream stream and settlement. Browser SSE is a broadcast
@@ -576,8 +584,11 @@ malformed or wrong-owner requests do not consume the user's turn allowance.
 Stop sets a durable flag on the exact active turn. Its worker polls every 250 ms,
 drops the upstream stream, saves partial text as failed/error `cancelled`, clears
 the binding with `turn_failed`, then emits `turn.completed(cancelled)`. A Stop
-committed before settlement wins the transaction race. There is no NyxAgent Stop
-API: stream cancellation is the supported upstream cancellation mechanism.
+committed before settlement wins the transaction race. If the worker is gone, or has
+not settled within five seconds, NyxID runs the same fenced settlement itself; a stale
+heartbeat can trigger that settlement immediately. This keeps voice acknowledgement
+state, machine activity and normal completion signaling consistent. There is no NyxAgent
+Stop API: stream cancellation is the supported upstream cancellation mechanism.
 Stop also signs a conversation-scoped node cancel: cua, process groups and
 gateway streams stop immediately, and stopped-turn machine calls are refused.
 A standalone desktop Stop applies to all agent activity on that machine.
