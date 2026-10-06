@@ -106,7 +106,7 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("full service page", () => {
-  it("keeps overview connection order with discovery pills beside labels and before readiness", () => {
+  it("keeps overview connection order with discovery pills below labels", () => {
     state.keys = [
       key("Development", { preference_rank: 3 }),
       key("Team", { preference_rank: 1 }),
@@ -121,15 +121,16 @@ describe("full service page", () => {
       "Team",
       "Unranked",
     ]);
-    expect(links[0]?.nextElementSibling).toBe(
-      screen.getByLabelText("Discovery preference 3"),
-    );
-    expect(links[1]?.nextElementSibling).toBe(
-      screen.getByLabelText("Discovery preference 1"),
-    );
     expect(
-      screen.getByLabelText("Discovery preference 1").nextElementSibling,
-    ).toHaveTextContent("Not verified");
+      within(links[0]!.closest("td")!).getByLabelText(
+        "Discovery preference 3",
+      ),
+    ).toHaveTextContent("Discovery #3");
+    const teamCell = within(links[1]!.closest("td")!);
+    expect(teamCell.getByLabelText("Discovery preference 1")).toHaveTextContent(
+      "Discovery #1",
+    );
+    expect(teamCell.getByText("Not verified")).toBeVisible();
     expect(
       within(links[2]!.closest("tr")!).queryByLabelText(/Discovery preference/),
     ).not.toBeInTheDocument();

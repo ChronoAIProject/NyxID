@@ -339,8 +339,10 @@ or `key-detail.tsx`. `@dnd-kit/core` 6.3, `@dnd-kit/sortable` 10,
 
 - **Row pill** in `ServiceConnectionTable`: for a row whose `KeyInfo.preference_rank`
   is non-null, render `<Badge variant="accent" aria-label="Discovery preference n">Discovery #n</Badge>`
-  in the Connection / Slug cell directly after the label link and before the
-  readiness badge. No new column. The component reads `preference_rank` from
+  in a wrapping metadata row below the existing connection-label/readiness
+  header, within the Connection / Slug cell. The pill must not consume the
+  label's horizontal space or overlap its text or icons. No new column.
+  The component reads `preference_rank` from
   the row it already receives, so the pill appears everywhere this renderer is
   used: table view mode (`renderTable`), an expanded group card, the
   `/keys/services/$groupId` Connections tab, and the DEV routing preview.
@@ -644,8 +646,9 @@ Frontend
     404), editor swap inside `ExternalServicesTab` in place of
     `GroupedServiceCards`, dirty confirm on view/tab change; no writes to
     `useServiceCardView` or saved views.
-13a. `components/dashboard/service-connection-table.tsx`: row pill after the
-    label link, before the readiness badge, from `KeyInfo.preference_rank`.
+13a. `components/dashboard/service-connection-table.tsx`: row pill in wrapping
+    metadata below the label/readiness header, from `KeyInfo.preference_rank`;
+    preserve the existing label's available width and prevent overlap.
 13b. `components/dashboard/grouped-service-cards.tsx`: collapsed-card chip from
     `group.connections` that expands the card; no change to group or row order.
 14. Tests: `pages/keys.test.tsx` (on the upstream harness, with
@@ -733,6 +736,10 @@ no database; the combined `service_preference` filter also selects DB tests.
   an Organization/Service selection or Personal/All toggled, visible pill text
   is unchanged and no row or group changes position relative to the upstream
   order; a pool-member row shows both `Priority n` and `Discovery #n`.
+  At a 1440-pixel viewport, the rendered connection-label text retains usable
+  width and overlaps neither the discovery pill nor the readiness badge.
+  Tablet (1024 pixels) and mobile (390 pixels) retain visible rank metadata
+  without introducing page-wide horizontal overflow.
 - **AC-18** (local, `keys.test.tsx`): Reorder is disabled with no authorized
   services, while loading or refetching, and on error, and hidden in the
   routing preview and after a preference GET 404; clicking it replaces the
@@ -1242,3 +1249,34 @@ freshness check passed; backend regressions, CLI preference tests and Clippy are
 not repeated because Rust source is unchanged and the only CLI delta is the
 regenerated embedding. No known unresolved source findings remain. The fresh
 §20 UI results supersede §19's UI baseline; backend evidence remains applicable.
+
+## 21. Follow-up normal-page comparison and label spacing
+
+The PM freshly verified that current main `868ce0b7` is included in the branch
+and rendered main and the PR with identical sample data. The normal External
+Services page retains main's grouped cards, filters, connection table, billing
+and routing presentation. Editor screenshots must be identified as the Reorder
+editing state.
+
+The inline rank pill could consume all horizontal space for the connection-label
+text. Task 13a and §6.1 now place it in metadata below the existing label/readiness
+header. AC-17 additionally requires usable rendered label width, no badge overlap
+at 1440 pixels, and visible rank metadata with contained table scrolling at
+1024/390 pixels. The new browser regression measures the actual label span rather
+than its icon-bearing link. Shared-renderer unit tests assert rank text in the
+correct connection cell; the saved-view scenario checks semantic filter values
+and absence of writes.
+
+- [x] PM directly reviewed the source and all follow-up test corrections.
+- [x] Focused frontend: 3 files, 60 tests passed in 4.53 seconds.
+- [x] Real-route browser suite: 15/15 passed in 38.8 seconds, including the expanded
+  grouped-table geometry and narrow-table containment regression.
+- [x] Production build passed; changed-file ESLint has zero errors/warnings;
+  whitespace checks passed.
+- [x] Main/PR visual comparison: 2/2 passed in 6.7 seconds; PM inspected the
+  corrected collapsed and expanded screenshots with identical sample data.
+
+The follow-up changes no Rust source or wizard dependency, so the existing
+backend/CLI proof remains applicable. The PM records the revised head's required
+CI and Opus plan/PR sign-off in PR #1796. Full evidence and the temporary,
+production OAuth-backed local review setup are in the PM review record.

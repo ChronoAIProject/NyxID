@@ -371,3 +371,59 @@ Screenshots: `/tmp/nyxid-service-preference-review/868-*.png`.
 Plan §20 records exact checks. CI and Opus's final plan/PR sign-off are recorded
 in the PR body against the published head, avoiding an evidence-only commit
 after the final review.
+
+### Follow-up visual comparison with current main
+
+The PM fetched main again on 7 October 2026. Both `origin/main` and the
+production health endpoint identify `868ce0b7`; that commit is an ancestor of
+the reviewed branch. No main commits are missing. The PM rendered main and the
+PR with identical sample connections and inspected the normal collapsed cards
+and expanded connection table. The earlier editor screenshots represented the
+Reorder editing state, not the normal External Services page.
+
+The comparison exposed one layout regression: the inline Discovery badge could
+squeeze the connection-label text to zero width. Sol moved the badge into a
+wrapping metadata row below the existing label/readiness header. The PM reviewed
+the correction, updated plan §6.1/task 13a/AC-17, and inspected the corrected
+expanded-table screenshot against main. The existing name/readiness layout is
+preserved and the rank remains bound to its connection.
+
+The PM also required the regression to measure the actual text span, prevent
+geometric overlaps, and prove that narrower tables scroll within their container.
+Existing unit/browser checks now locate ranks in the correct connection cell.
+The grouped browser scenario compares semantic filter values, including source,
+auto-connected visibility, organization/service selections, search, saved-view
+count and absence of saved-view writes, rather than transient toolbar labels.
+All follow-up source and test findings are closed.
+
+Validation inspected by the PM:
+
+- Three focused frontend files passed all 60 tests in 4.53 seconds.
+- All 15 real-route browser scenarios passed in 38.8 seconds, including the new
+  1440-pixel label/overlap regression and 1024/390-pixel container-overflow checks.
+- Changed-file ESLint passed with no errors or warnings; whitespace checks passed.
+- The PM's production build passed TypeScript, both Vite outputs, legal prerender
+  and the mock-footprint assertion.
+- Two main/PR comparison scenarios passed in 6.7 seconds. Screenshots use identical
+  sample data, not the user's production account.
+
+Browser/build logs:
+`/tmp/nyxid-service-preference-main-check-{browser,build}.log`.
+Comparison harness, log and screenshots:
+`/tmp/nyxid-external-services-verification/`.
+Unit and lint execution are retained in the existing Sol heca session
+`01a11208-5a9b-7221-a009-5cd45b355530`.
+
+For the user's live review, the PM started the same frontend on loopback port
+4630 with a temporary configuration outside the repository. It reuses the
+existing production CLI/OAuth bridge, returns to normal `/keys`, and permits
+production metadata reads plus saving the existing service view. It retains the
+access token in server memory for 15 minutes, discards refresh tokens, and sets
+an opaque HttpOnly local cookie. The bridge's redirect, session requirement,
+invalid-callback rejection and mutation denial were verified. Production still
+returns 404 for `/service-preferences`, so the frontend's existing compatibility
+gate hides Reorder there. The setup introduces no repository source changes.
+
+Only the existing Sol and Opus heca sessions are reused for this follow-up.
+The PM owns publication; final required CI and Opus sign-off bind the revised
+published head in the PR body.

@@ -331,13 +331,11 @@ test("group chip uses complete inventory, pills preserve order and filters, edit
     name: "View Alpha connection details (Personal)",
     exact: true,
   });
-  await expect(alpha.locator("xpath=following-sibling::*[1]")).toHaveAttribute(
-    "aria-label",
-    "Discovery preference 3",
-  );
-  await expect(alpha.locator("xpath=following-sibling::*[2]")).toContainText(
-    "Credential check needed",
-  );
+  const alphaCell = alpha.locator("xpath=ancestor::td");
+  await expect(
+    alphaCell.getByLabel("Discovery preference 3", { exact: true }),
+  ).toHaveText("Discovery #3");
+  await expect(alphaCell).toContainText("Credential check needed");
   await expect(alpha.locator("xpath=ancestor::tr")).toContainText(
     "Example route · Priority 7",
   );
@@ -380,7 +378,6 @@ test("group chip uses complete inventory, pills preserve order and filters, edit
     table.getByRole("link", { name: /^View .+ connection details/ }),
   ).toHaveText(["Alpha"]);
   const filters = page.getByRole("region", { name: "Service filters" });
-  const before = await filters.innerText();
   for (const outcome of ["Cancel", "Save"] as const) {
     await enter(page);
     await expect(
@@ -400,7 +397,39 @@ test("group chip uses complete inventory, pills preserve order and filters, edit
         .click();
     await page.getByRole("button", { name: outcome, exact: true }).click();
     await expect(filters).toBeVisible();
-    await expect.poll(() => filters.innerText()).toBe(before);
+    await expect(
+      filters.getByRole("button", {
+        name: "Service view: Personal",
+        exact: true,
+      }),
+    ).toBeVisible();
+    await expect(
+      filters.getByRole("button", {
+        name: "Auto-connected services: hidden",
+        exact: true,
+      }),
+    ).toBeVisible();
+    await expect(
+      filters.getByRole("button", { name: "Organization", exact: true }),
+    ).toHaveText(/Organization\s*All/);
+    await expect(
+      filters.getByRole("button", { name: "Service", exact: true }),
+    ).toHaveText(/Service\s*Example API/);
+    await expect(
+      filters.getByRole("textbox", {
+        name: "Search services and connections",
+        exact: true,
+      }),
+    ).toHaveValue("Alpha");
+    await expect(
+      filters.getByRole("button", { name: "Saved views", exact: true }),
+    ).toContainText("1");
+    await expect(
+      filters.getByRole("button", { name: "Remove Service: Example API" }),
+    ).toBeVisible();
+    await expect(
+      filters.getByRole("button", { name: "Remove search", exact: true }),
+    ).toBeVisible();
     await expect(
       group.getByRole("button", {
         name: "Collapse Example API connections",
@@ -434,8 +463,9 @@ test("group chip uses complete inventory, pills preserve order and filters, edit
         name: "View Alpha connection details (Personal)",
         exact: true,
       })
-      .locator("xpath=following-sibling::*[1]"),
-  ).toHaveAttribute("aria-label", "Discovery preference 2");
+      .locator("xpath=ancestor::td")
+      .getByLabel("Discovery preference 2", { exact: true }),
+  ).toHaveText("Discovery #2");
   await page.goto("/keys?view=routing");
   await expect(
     page.getByRole("button", { name: "Reorder", exact: true }),
@@ -452,6 +482,90 @@ test("group chip uses complete inventory, pills preserve order and filters, edit
       .getByLabel("Discovery preference 2", { exact: true }),
   ).toBeVisible();
   expect(state.viewWrites).toEqual([]);
+});
+
+test("expanded table keeps connection labels visible beside discovery metadata", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  state.grouped = true;
+  state.withPool = true;
+  await page.reload();
+  await page.setViewportSize({ width: 1440, height: 900 });
+
+  const group = page.getByRole("region", { name: "Example API", exact: true });
+  await group
+    .getByRole("button", {
+      name: "Discovery preference 1 · Alpha",
+      exact: true,
+    })
+    .click();
+  const table = group.getByRole("table");
+  const details = table.getByRole("button", {
+    name: "Details for Alpha (Personal)",
+    exact: true,
+  });
+  await details.click();
+
+  const alpha = table.getByRole("link", {
+    name: "View Alpha connection details (Personal)",
+    exact: true,
+  });
+  const alphaCell = alpha.locator("xpath=ancestor::td");
+  const badge = alphaCell.getByLabel("Discovery preference 1", { exact: true });
+  const readiness = alphaCell.getByText("Credential check needed", {
+    exact: true,
+  });
+  const tableScroller = table.locator("xpath=..");
+  await expect(alpha).toBeVisible();
+  await expect(badge).toBeVisible();
+  await expect(readiness).toBeVisible();
+
+  const alphaLabel = alpha.locator('span[title="Alpha"]');
+  const [labelBox, badgeBox, readinessBox] = await Promise.all([
+    alphaLabel.boundingBox(),
+    badge.boundingBox(),
+    readiness.boundingBox(),
+  ]);
+  if (!labelBox || !badgeBox || !readinessBox)
+    throw new Error("Missing expanded table geometry");
+  expect(labelBox.width).toBeGreaterThan(12);
+  expect(labelBox.height).toBeGreaterThan(0);
+  const overlaps = (
+    a: NonNullable<typeof labelBox>,
+    b: NonNullable<typeof labelBox>,
+  ) =>
+    a.x < b.x + b.width &&
+    a.x + a.width > b.x &&
+    a.y < b.y + b.height &&
+    a.y + a.height > b.y;
+  expect(overlaps(labelBox, badgeBox)).toBe(false);
+  expect(overlaps(labelBox, readinessBox)).toBe(false);
+  expect(badgeBox.y).toBeGreaterThanOrEqual(labelBox.y + labelBox.height);
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth,
+    ),
+  ).toBe(true);
+
+  for (const viewport of [
+    { width: 1024, height: 900 },
+    { width: 390, height: 844 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await badge.scrollIntoViewIfNeeded();
+    await expect(badge).toBeVisible();
+    const scrollMetrics = await tableScroller.evaluate((element) => ({
+      clientWidth: element.clientWidth,
+      scrollWidth: element.scrollWidth,
+    }));
+    expect(scrollMetrics.scrollWidth).toBeGreaterThan(scrollMetrics.clientWidth);
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= window.innerWidth,
+      ),
+    ).toBe(true);
+  }
 });
 
 test("keyboard drag, escape cancellation, divider and dirty view/tab confirmation", async ({

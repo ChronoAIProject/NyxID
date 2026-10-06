@@ -338,12 +338,11 @@ describe("KeysPage", () => {
     expect(
       within(alpha.closest("tr")!).getByText("Example route · Priority 7"),
     ).toBeVisible();
-    expect(alpha.nextElementSibling).toBe(
-      screen.getByLabelText("Discovery preference 2"),
-    );
+    const alphaCell = within(alpha.closest("td")!);
     expect(
-      screen.getByLabelText("Discovery preference 2").nextElementSibling,
-    ).toHaveTextContent("Credential check needed");
+      alphaCell.getByLabelText("Discovery preference 2"),
+    ).toHaveTextContent("Discovery #2");
+    expect(alphaCell.getByText("Credential check needed")).toBeVisible();
     await userEvent.click(screen.getByRole("button", { name: /table view/i }));
     expect(screen.getByLabelText("Discovery preference 2")).toHaveTextContent(
       "#2",

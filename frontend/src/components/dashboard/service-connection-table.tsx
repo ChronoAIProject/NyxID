@@ -322,15 +322,6 @@ export function ServiceConnectionTable({
                           aria-hidden="true"
                         />
                       </Link>
-                      {key.preference_rank != null && (
-                        <Badge
-                          variant="accent"
-                          aria-label={`Discovery preference ${key.preference_rank}`}
-                        >
-                          Discovery #{key.preference_rank}
-                        </Badge>
-                      )}
-
                       <Badge
                         className="ml-auto shrink-0"
                         variant={
@@ -342,6 +333,17 @@ export function ServiceConnectionTable({
                         {readiness.reason}
                       </Badge>
                     </div>
+                    {key.preference_rank != null && (
+                      <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5">
+                        <Badge
+                          className="shrink-0"
+                          variant="accent"
+                          aria-label={`Discovery preference ${key.preference_rank}`}
+                        >
+                          Discovery #{key.preference_rank}
+                        </Badge>
+                      </div>
+                    )}
                     <p className="mt-1 flex min-w-0 items-center gap-1 text-11 text-muted-foreground">
                       <code className="truncate" title={key.slug}>
                         {key.slug}
