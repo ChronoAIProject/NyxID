@@ -71,6 +71,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { KEY_DETAIL_TABS, KEY_DETAIL_TAB_DEFAULT, parseTab } from "@/lib/url-tabs";
+import { useBreadcrumbSection } from "@/components/layout/breadcrumb-context";
 import {
   Globe,
   KeyRound,
@@ -2418,6 +2420,7 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
   const navigate = useNavigate();
   const identity = useAuthStore((state) => state.user?.id);
   const search = useSearch({ strict: false }) as {
+    readonly tab?: string;
     readonly provider_status?: string;
     readonly message?: string;
   };
@@ -2453,7 +2456,16 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
 
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [reconnectOpen, setReconnectOpen] = useState(false);
-  const [platformTab, setPlatformTab] = useState("overview");
+  const requestedTab = parseTab(search.tab, KEY_DETAIL_TABS, KEY_DETAIL_TAB_DEFAULT);
+  const platformManaged = keyInfo?.auto_connected || keyInfo?.credential_binding === "platform";
+  const tab = (requestedTab === "history" && !keyInfo?.authorship) ||
+    (requestedTab === "advanced" && platformManaged && !catalogTransferResource)
+    ? KEY_DETAIL_TAB_DEFAULT : requestedTab;
+  useBreadcrumbSection(tab);
+
+  function setTab(value: string) {
+    void navigate({ to: "/keys/$keyId", params: { keyId }, search: { tab: value }, replace: true });
+  }
 
   const catalogHeaders = useMemo<readonly DefaultRequestHeader[] | null>(() => {
     if (!catalogEntry?.default_request_headers) return null;
@@ -2700,8 +2712,8 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
       <ServiceAuthorshipFooter authorship={keyInfo.authorship} />
       {(keyInfo.auto_connected || keyInfo.credential_binding === "platform") ? (
         <Tabs
-          value={platformTab === "advanced" && !catalogTransferResource ? "overview" : platformTab}
-          onValueChange={setPlatformTab}
+          value={tab}
+          onValueChange={setTab}
           className="space-y-6"
         >
           <TabsList>
@@ -2837,7 +2849,7 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
           {keyInfo.authorship && <TabsContent value="history"><ServiceHistory serviceId={keyInfo.id} /></TabsContent>}
         </Tabs>
       ) : (
-        <Tabs defaultValue="overview" className="space-y-6">
+        <Tabs value={tab} onValueChange={setTab} className="space-y-6">
           <TabsList className="w-full max-w-full">
             <TabsTrigger value="overview">Overview</TabsTrigger>
             <TabsTrigger value="advanced">Advanced</TabsTrigger>

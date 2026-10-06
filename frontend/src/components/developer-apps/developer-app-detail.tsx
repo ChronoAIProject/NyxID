@@ -67,7 +67,7 @@ const OIDC_SCOPES = [
 
 interface DeveloperAppDetailProps {
   readonly clientId: string;
-  readonly backTo: { readonly to: string; readonly label: string };
+  readonly backTo: { readonly to: string; readonly label: string; readonly search?: { tab: string } };
 }
 
 export function DeveloperAppDetail({
@@ -159,7 +159,7 @@ export function DeveloperAppDetail({
       await deleteMutation.mutateAsync(app.id);
       toast.success("Application deactivated");
       setDeleteOpen(false);
-      void navigate({ to: backTo.to });
+      void navigate({ to: backTo.to, search: () => backTo.search ?? {} });
     } catch (error) {
       toast.error(error instanceof ApiError ? error.message : "Delete failed");
     }
@@ -186,7 +186,7 @@ export function DeveloperAppDetail({
         </p>
         <Button
           variant="outline"
-          onClick={() => void navigate({ to: backTo.to })}
+          onClick={() => void navigate({ to: backTo.to, search: () => backTo.search ?? {} })}
         >
           Back to {backTo.label}
         </Button>

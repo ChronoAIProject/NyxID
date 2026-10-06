@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { Check, RotateCcw, TriangleAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -15,15 +15,15 @@ import {
 } from "@/lib/theme-colors";
 import { cn } from "@/lib/utils";
 import {
-  DENSITIES,
   SIDEBAR_WIDTH,
-  TEXT_SCALES,
+  DISPLAY_SCALE_DEFAULT,
+  DISPLAY_SCALE_MAX,
+  DISPLAY_SCALE_MIN,
+  DISPLAY_SCALE_STEP,
   useThemeStore,
-  type Density,
   type SidebarId,
   type SidebarMode,
   type MotionPreference,
-  type TextScale,
   type ThemeMode,
 } from "@/stores/theme-store";
 
@@ -32,19 +32,6 @@ const THEME_OPTIONS: readonly { value: ThemeMode; label: string }[] = [
   { value: "light", label: "Light" },
   { value: "dark", label: "Dark" },
 ];
-
-const TEXT_SCALE_LABELS: Record<TextScale, string> = {
-  0.875: "Small",
-  1: "Default",
-  1.125: "Large",
-  1.25: "Larger",
-};
-
-const DENSITY_LABELS: Record<Density, string> = {
-  0.875: "Compact",
-  1: "Default",
-  1.125: "Comfortable",
-};
 
 const MOTION_OPTIONS: readonly { value: MotionPreference; label: string }[] = [
   { value: "system", label: "Follow system" },
@@ -77,7 +64,7 @@ function SegmentedChoice<T extends string | number>({
           aria-checked={value === option.value}
           onClick={() => onChange(option.value)}
           className={cn(
-            "h-7 rounded-md px-3 text-12 transition-colors",
+            "text-control h-7 rounded-md px-3 text-12 transition-colors",
             value === option.value
               ? "bg-overlay-strong font-medium text-foreground"
               : "text-muted-foreground hover:text-foreground",
@@ -100,8 +87,8 @@ function SettingRow({
   readonly children: ReactNode;
 }) {
   return (
-    <div className="flex flex-wrap items-center justify-between gap-3">
-      <div className="min-w-0">
+    <div className="flex flex-col items-start justify-between gap-3 sm:flex-row sm:items-center">
+      <div className="min-w-0 flex-1">
         <p className="text-12 font-medium">{title}</p>
         <p className="text-12 text-muted-foreground">{description}</p>
       </div>
@@ -183,6 +170,73 @@ function SidebarWidthControl({ sidebar, label }: { readonly sidebar: SidebarId; 
       >
         <RotateCcw className="size-3" />
       </Button>
+    </div>
+  );
+}
+
+function ScaleControl({ id, label, scale, onChange }: {
+  readonly id: string;
+  readonly label: string;
+  readonly scale: number;
+  readonly onChange: (value: number) => void;
+}) {
+  const [draft, setDraft] = useState<number | null>(null);
+  const dragPointer = useRef<number | null>(null);
+  const value = draft ?? scale;
+  const multiplier = `${value}×`;
+  const defaultPosition =
+    ((DISPLAY_SCALE_DEFAULT - DISPLAY_SCALE_MIN) / (DISPLAY_SCALE_MAX - DISPLAY_SCALE_MIN)) * 100;
+
+  return (
+    <div className="flex w-full max-w-full flex-wrap items-center gap-3 sm:w-auto">
+      <div className="flex w-64 max-w-full flex-1 items-start gap-3">
+        <div className="min-w-0 flex-1 space-y-1">
+          <input
+            id={id}
+            type="range"
+            aria-label={label}
+            aria-valuetext={multiplier}
+            min={DISPLAY_SCALE_MIN}
+            max={DISPLAY_SCALE_MAX}
+            step={DISPLAY_SCALE_STEP}
+            value={value}
+            onChange={(e) => {
+              const next = e.currentTarget.valueAsNumber;
+              if (dragPointer.current !== null) setDraft(next);
+              else onChange(next);
+            }}
+            onPointerDown={(e) => {
+              if (e.button !== 0 || dragPointer.current !== null) return;
+              dragPointer.current = e.pointerId;
+              e.currentTarget.setPointerCapture(e.pointerId);
+              setDraft(scale);
+            }}
+            onPointerUp={(e) => {
+              if (dragPointer.current !== e.pointerId) return;
+              dragPointer.current = null;
+              onChange(e.currentTarget.valueAsNumber);
+              setDraft(null);
+            }}
+            onPointerCancel={() => {
+              dragPointer.current = null;
+              setDraft(null);
+            }}
+            onLostPointerCapture={() => {
+              dragPointer.current = null;
+              setDraft(null);
+            }}
+            className="block h-6 w-full cursor-pointer rounded accent-primary focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring"
+          />
+          <div className="relative flex justify-between text-11 text-muted-foreground" aria-hidden="true">
+            <span>{DISPLAY_SCALE_MIN}×</span>
+            <span className="absolute -translate-x-1/2" style={{ left: `${defaultPosition}%` }}>{DISPLAY_SCALE_DEFAULT}×</span>
+            <span>{DISPLAY_SCALE_MAX}×</span>
+          </div>
+        </div>
+        <output htmlFor={id} aria-live="off" className="min-h-6 min-w-[5ch] shrink-0 text-right font-mono text-11 text-muted-foreground">
+          {multiplier}
+        </output>
+      </div>
     </div>
   );
 }
@@ -355,21 +409,11 @@ export function DisplaySettings() {
             <SettingRow title="Theme" description="System follows your device's light or dark setting.">
               <SegmentedChoice label="Theme" options={THEME_OPTIONS} value={mode} onChange={setMode} />
             </SettingRow>
-            <SettingRow title="Text size" description="Scales all text. Layout and spacing stay the same.">
-              <SegmentedChoice
-                label="Text size"
-                options={TEXT_SCALES.map((value) => ({ value, label: TEXT_SCALE_LABELS[value] }))}
-                value={textScale}
-                onChange={setTextScale}
-              />
+            <SettingRow title="Text size" description="Scales all text in 0.01× steps.">
+              <ScaleControl id="text-size" label="Text size" scale={textScale} onChange={setTextScale} />
             </SettingRow>
-            <SettingRow title="Density" description="Spacing between and inside elements.">
-              <SegmentedChoice
-                label="Density"
-                options={DENSITIES.map((value) => ({ value, label: DENSITY_LABELS[value] }))}
-                value={density}
-                onChange={setDensity}
-              />
+            <SettingRow title="Spacing" description="Adjust space between and inside elements in 0.01× steps.">
+              <ScaleControl id="spacing" label="Spacing" scale={density} onChange={setDensity} />
             </SettingRow>
             <SettingRow title="Motion" description="Reduce turns off animations and transitions.">
               <SegmentedChoice label="Motion" options={MOTION_OPTIONS} value={motion} onChange={setMotion} />

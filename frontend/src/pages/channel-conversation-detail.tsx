@@ -401,7 +401,8 @@ export function ChannelConversationDetailPage() {
   const activities = getPlatform(bot?.platform ?? "").activities;
   const { data: conversation, error: conversationError } =
     useChannelConversation(conversationId);
-  useBreadcrumbLabel(bot ? `${bot.label} messages` : "Messages");
+  useBreadcrumbLabel("Messages");
+  useBreadcrumbLabel(bot?.label, `/channel-bots/${botId}`);
   const { data, isLoading, error, refetch } = useChannelMessages(
     conversationId,
     page,

@@ -31,6 +31,7 @@ import type {
   UpdateServiceAccountRequest,
 } from "@/types/service-accounts";
 import { PageHeader } from "@/components/shared/page-header";
+import { useBreadcrumbLabel } from "@/components/layout/breadcrumb-context";
 import { DetailSection } from "@/components/shared/detail-section";
 import { DetailRow } from "@/components/shared/detail-row";
 import { Separator } from "@/components/ui/separator";
@@ -94,7 +95,7 @@ type ConfirmAction = "delete" | "revoke-tokens" | null;
 
 interface ServiceAccountDetailProps {
   readonly saId: string;
-  readonly backTo: { readonly to: string; readonly label: string };
+  readonly backTo: { readonly to: string; readonly label: string; readonly search?: { tab: string } };
   readonly showProviderSections?: boolean;
   readonly showKeyReadGrantSection?: boolean;
 }
@@ -112,6 +113,7 @@ function ServiceAccountDetailEditor({
   const navigate = useNavigate();
 
   const { data: sa, isLoading } = useServiceAccount(saId);
+  useBreadcrumbLabel(sa?.name);
   const isAdmin = useAuthStore((state) => state.user?.is_admin ?? false);
   const [editAccess, setEditAccess] = useState<AccessState | null>(null);
 
@@ -289,7 +291,7 @@ function ServiceAccountDetailEditor({
     try {
       await deleteMutation.mutateAsync(saId);
       toast.success("Service account deleted");
-      void navigate({ to: backTo.to });
+      void navigate({ to: backTo.to, search: () => backTo.search ?? {} });
     } catch (err) {
       toast.error(
         err instanceof ApiError
@@ -324,7 +326,7 @@ function ServiceAccountDetailEditor({
         </p>
         <Button
           variant="outline"
-          onClick={() => void navigate({ to: backTo.to })}
+          onClick={() => void navigate({ to: backTo.to, search: () => backTo.search ?? {} })}
         >
           Back to {backTo.label}
         </Button>

@@ -27,16 +27,24 @@ export type ThemeMode = "system" | "light" | "dark";
 export type ResolvedTheme = "light" | "dark";
 
 /**
- * Text size as a multiple of the browser's default font size. Applied as the
- * root font size, so it scales every `rem` text token (`text-12`, `text-xs`, …)
- * while spacing stays fixed (`--spacing` is px in app.css).
+ * Text and spacing multipliers. Text scales the root font size; spacing
+ * scales the 4px Tailwind spacing step. Both preferences are independent.
  */
-export const TEXT_SCALES = [0.875, 1, 1.125, 1.25] as const;
-export type TextScale = (typeof TEXT_SCALES)[number];
+export const DISPLAY_SCALE_MIN = 0.5;
+export const DISPLAY_SCALE_MAX = 2;
+export const DISPLAY_SCALE_STEP = 0.01;
+export const DISPLAY_SCALE_DEFAULT = 1;
 
-/** Multiplier on the 4px spacing step: padding, gaps and control heights. */
-export const DENSITIES = [0.875, 1, 1.125] as const;
-export type Density = (typeof DENSITIES)[number];
+function validDisplayScale(value: unknown): number {
+  if (
+    typeof value !== "number" ||
+    !Number.isFinite(value)
+  ) {
+    return DISPLAY_SCALE_DEFAULT;
+  }
+  const bounded = Math.min(DISPLAY_SCALE_MAX, Math.max(DISPLAY_SCALE_MIN, value));
+  return Math.round(bounded / DISPLAY_SCALE_STEP) / (1 / DISPLAY_SCALE_STEP);
+}
 
 /** `system` follows the OS reduced-motion setting; `reduce` always reduces. */
 export type MotionPreference = "system" | "reduce";
@@ -100,8 +108,8 @@ function getSystemPrefersDark(): boolean {
 interface ThemeState {
   /** The user's chosen mode. `system` follows the OS. Persisted. */
   readonly mode: ThemeMode;
-  readonly textScale: TextScale;
-  readonly density: Density;
+  readonly textScale: number;
+  readonly density: number;
   readonly motion: MotionPreference;
   /** Per-theme color overrides (`#RRGGBB` only). Empty = shipped colors. */
   readonly customColors: CustomColors;
@@ -114,8 +122,8 @@ interface ThemeState {
   readonly setMode: (mode: ThemeMode) => void;
   /** Flip between explicit light/dark based on what's currently showing. */
   readonly toggle: () => void;
-  readonly setTextScale: (textScale: TextScale) => void;
-  readonly setDensity: (density: Density) => void;
+  readonly setTextScale: (textScale: number) => void;
+  readonly setDensity: (density: number) => void;
   readonly setMotion: (motion: MotionPreference) => void;
   /** Override one color for one theme; non-hex values are ignored. */
   readonly setCustomColor: (mode: ColorMode, key: ColorKey, color: string) => void;
@@ -129,8 +137,8 @@ interface ThemeState {
 }
 
 const DISPLAY_DEFAULTS = {
-  textScale: 1,
-  density: 1,
+  textScale: DISPLAY_SCALE_DEFAULT,
+  density: DISPLAY_SCALE_DEFAULT,
   motion: "system",
   customColors: EMPTY_CUSTOM_COLORS,
   sidebarMode: "expanded",
@@ -146,8 +154,8 @@ export const useThemeStore = create<ThemeState>()(
       sidebarMode: legacySidebarMode(),
       systemPrefersDark: getSystemPrefersDark(),
       setMode: (mode) => set({ mode }),
-      setTextScale: (textScale) => set({ textScale }),
-      setDensity: (density) => set({ density }),
+      setTextScale: (textScale) => set({ textScale: validDisplayScale(textScale) }),
+      setDensity: (density) => set({ density: validDisplayScale(density) }),
       setMotion: (motion) => set({ motion }),
       setSidebarMode: (sidebarMode) => set({ sidebarMode }),
       setSidebarWidth: (sidebar, width) =>
@@ -193,8 +201,8 @@ export const useThemeStore = create<ThemeState>()(
         return {
           ...current,
           mode: oneOf(THEME_MODES, p.mode, current.mode),
-          textScale: oneOf(TEXT_SCALES, p.textScale, current.textScale),
-          density: oneOf(DENSITIES, p.density, current.density),
+          textScale: validDisplayScale(p.textScale),
+          density: validDisplayScale(p.density),
           motion: oneOf(MOTION_PREFERENCES, p.motion, current.motion),
           customColors: sanitizeCustomColors(p.customColors),
           sidebarMode: oneOf(SIDEBAR_MODES, p.sidebarMode, current.sidebarMode),
