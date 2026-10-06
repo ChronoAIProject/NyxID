@@ -74,6 +74,18 @@ describe("Studio breadcrumbs", () => {
     expect(location.search).toMatchObject({ tab: "service-accounts" });
   });
 
+  it("returns a service overview to the AI Services tab with its name", () => {
+    expect(
+      buildStudioBreadcrumbs("/keys/services/catalog:cat-1", {
+        "/keys/services/catalog:cat-1": "OpenAI",
+      }),
+    ).toEqual([
+      { label: expect.any(String), to: "/keys", search: expect.any(Object) },
+      { label: expect.any(String), to: "/keys", search: { tab: "services" } },
+      { label: "OpenAI" },
+    ]);
+  });
+
   it("returns agent keys to the Agent Keys tab", () => {
     expect(buildStudioBreadcrumbs("/keys/api-key/key-1")[1]).toEqual({
       label: "Agent Keys",

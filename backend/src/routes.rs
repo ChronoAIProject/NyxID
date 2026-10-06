@@ -540,6 +540,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route("/me", get(handlers::users::get_me))
         .route("/me", put(handlers::users::update_me))
         .route("/me", delete(handlers::users::delete_me))
+        .route(
+            "/me/preferences/services",
+            put(handlers::users::save_services_view),
+        )
         // Assistant postcondition evidence. These MUST be mounted on the
         // production router: a browser journey that proves success by a 404
         // cannot distinguish "resource absent" from "route absent", so an
@@ -1930,6 +1934,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     // Shared management routes; individual groups retain service-account gates.
     // Delegated reads require account:read and the existing route/method policy.
     let api_v1_shared = Router::new()
+        .route(
+            "/service-insights",
+            get(handlers::service_insights::get_insights),
+        )
         .route(
             "/assistant-attachments/{id}/content",
             get(handlers::assistant_uploads::thread_image),

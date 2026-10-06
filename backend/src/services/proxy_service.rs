@@ -543,6 +543,10 @@ const ALLOWED_FORWARD_HEADERS: &[&str] = &[
     // when they are absent.
     "http-referer",
     "x-title",
+    // LinkedIn API version selection; its `/rest/*` endpoints reject
+    // requests without `LinkedIn-Version`.
+    "linkedin-version",
+    "x-restli-protocol-version",
 ];
 
 /// Namespaced header prefixes that should be forwarded transparently.
@@ -5094,6 +5098,23 @@ mod tests {
     }
 
     #[test]
+    fn linkedin_version_headers_are_forwarded() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert("LinkedIn-Version", "202609".parse().unwrap());
+        headers.insert("X-Restli-Protocol-Version", "2.0.0".parse().unwrap());
+
+        let forwarded = collect_forward_headers(&headers);
+        for (name, value) in [
+            ("linkedin-version", "202609"),
+            ("x-restli-protocol-version", "2.0.0"),
+        ] {
+            assert!(forwarded.iter().any(|(actual_name, actual_value)| {
+                actual_name.eq_ignore_ascii_case(name) && actual_value == value
+            }));
+        }
+    }
+
+    #[test]
     fn valid_w3c_trace_context_and_async_metadata_are_forwarded_unchanged() {
         let mut headers = http::HeaderMap::new();
         headers.insert(
@@ -5825,6 +5846,7 @@ mod tests {
         let encrypted = keys.encrypt(override_secret.as_bytes()).await.unwrap();
         db.collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(UserApiKey {
+                oauth_app_observation: None,
                 credential_source: None,
                 id: override_credential_id.clone(),
                 user_id: user_id.clone(),
@@ -8522,6 +8544,7 @@ mod tests {
 
     fn authority_test_key(credential_type: &str) -> UserApiKey {
         UserApiKey {
+            oauth_app_observation: None,
             credential_source: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
@@ -8600,6 +8623,7 @@ mod tests {
     #[test]
     fn missing_credential_error_oauth2_with_provider() {
         let key = UserApiKey {
+            oauth_app_observation: None,
             credential_source: None,
             id: "k".into(),
             user_id: "u".into(),
@@ -8634,6 +8658,7 @@ mod tests {
     #[test]
     fn missing_credential_error_api_key() {
         let key = UserApiKey {
+            oauth_app_observation: None,
             credential_source: None,
             id: "k".into(),
             user_id: "u".into(),

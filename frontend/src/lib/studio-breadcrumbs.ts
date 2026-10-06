@@ -287,6 +287,9 @@ export function buildStudioBreadcrumbs(
       subsection(ORG_SECTION),
     ]);
   }
+  if (/^\/keys\/services\/[^/]+$/.test(path)) {
+    return finish([...keysParent("services"), named(path, "Service")]);
+  }
   if (/^\/keys\/[^/]+$/.test(path)) {
     return finish([
       ...keysParent("services"),

@@ -1463,6 +1463,24 @@ pub async fn seed_default_providers(
         );
     }
 
+    // LinkedIn was seeded with PKCE on, which makes every token exchange
+    // fail with `invalid_client` (see the LinkedIn seed below).
+    let linkedin_pkce_migration = collection
+        .update_one(
+            doc! { "slug": "linkedin", "supports_pkce": true },
+            doc! { "$set": {
+                "supports_pkce": false,
+                "updated_at": bson::DateTime::from_chrono(Utc::now()),
+            }},
+        )
+        .await?;
+    if linkedin_pkce_migration.modified_count > 0 {
+        tracing::info!(
+            slug = "linkedin",
+            "Migrated LinkedIn provider to supports_pkce=false"
+        );
+    }
+
     // 10. Google (OAuth2)
     if !slug_exists!("google") {
         let provider = ProviderConfig {
@@ -1821,7 +1839,10 @@ pub async fn seed_default_providers(
             ]),
             client_id_encrypted: None,
             client_secret_encrypted: None,
-            supports_pkce: true,
+            // LinkedIn's confidential web flow rejects a token request that
+            // carries `code_verifier` with `invalid_client`; PKCE exists only
+            // on its separate native flow.
+            supports_pkce: false,
             device_code_url: None,
             device_token_url: None,
             device_verification_url: None,
@@ -3722,6 +3743,16 @@ macro_rules! managed_oauth_service_seed {
     };
 }
 
+/// LinkedIn's Rest.li endpoints (including `/v2/ugcPosts`, used by the
+/// hosted `create_post` tool) require `X-Restli-Protocol-Version: 2.0.0`.
+/// Overridable so a caller pinning its own protocol version still wins.
+const LINKEDIN_DEFAULT_HEADERS: &[SeededHeader] = &[SeededHeader {
+    name: "X-Restli-Protocol-Version",
+    value: "2.0.0",
+    overridable: true,
+    sensitive: false,
+}];
+
 const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
     DefaultServiceSeed {
         provider_slug: "ifttt-mcp",
@@ -4345,7 +4376,7 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         description: Some(
             "LinkedIn profile and publishing tools for AI agents. Read the connected member profile and create posts with explicit approval.",
         ),
-        default_request_headers: None,
+        default_request_headers: Some(LINKEDIN_DEFAULT_HEADERS),
         service_category: "connection",
         requires_user_credential: true,
         homepage_url: Some("https://www.linkedin.com"),
@@ -10711,6 +10742,43 @@ mod tests {
                 "{slug} must stay credential_mode=both across startup seed runs"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn seed_turns_off_linkedin_pkce_and_adds_restli_header() {
+        let Some(db) = seed_default_catalog("prov_svc_linkedin_pkce").await else {
+            return;
+        };
+        let enc = test_encryption_keys();
+        let providers = db.collection::<ProviderConfig>(COLLECTION_NAME);
+        let services = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
+
+        // Existing installs carry the old PKCE-on seed value.
+        providers
+            .update_one(
+                doc! { "slug": "linkedin" },
+                doc! { "$set": { "supports_pkce": true } },
+            )
+            .await
+            .unwrap();
+        super::seed_default_providers(&db, &enc).await.unwrap();
+
+        let linkedin = providers
+            .find_one(doc! { "slug": "linkedin" })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!linkedin.supports_pkce);
+
+        let service = services
+            .find_one(doc! { "slug": "api-linkedin" })
+            .await
+            .unwrap()
+            .unwrap();
+        let headers = service.default_request_headers.unwrap_or_default();
+        assert!(headers.iter().any(|h| {
+            h.name.eq_ignore_ascii_case("x-restli-protocol-version") && h.value == "2.0.0"
+        }));
     }
 
     #[tokio::test]

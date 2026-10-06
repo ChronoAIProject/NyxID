@@ -154,31 +154,33 @@ export function DataTableSearch<SearchKey extends string>({
         >
           <X className="h-3.5 w-3.5" aria-hidden="true" />
         </button>
-        <Select
-          open={fieldSelectOpen}
-          onOpenChange={setFieldSelectOpen}
-          value={selectedField ?? ALL_FIELDS_VALUE}
-          onValueChange={handleFieldChange}
-        >
-          <SelectTrigger
-            aria-label={fieldAriaLabel}
-            title={`Search in ${selectedLabel}`}
-            className="h-full w-[124px] shrink-0 rounded-none border-y-0 border-r-0 border-l border-border/60 px-2.5 focus:border-border/60 sm:w-[146px]"
+        {fields.length > 0 && (
+          <Select
+            open={fieldSelectOpen}
+            onOpenChange={setFieldSelectOpen}
+            value={selectedField ?? ALL_FIELDS_VALUE}
+            onValueChange={handleFieldChange}
           >
-            <span className="min-w-0 truncate">
-              <span className="text-muted-foreground">In: </span>
-              {selectedLabel}
-            </span>
-          </SelectTrigger>
-          <SelectContent align="end">
-            <SelectItem value={ALL_FIELDS_VALUE}>{allFieldsLabel}</SelectItem>
-            {fields.map((field) => (
-              <SelectItem key={field.key} value={field.key}>
-                {field.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+            <SelectTrigger
+              aria-label={fieldAriaLabel}
+              title={`Search in ${selectedLabel}`}
+              className="h-full w-[124px] shrink-0 rounded-none border-y-0 border-r-0 border-l border-border/60 px-2.5 focus:border-border/60 sm:w-[146px]"
+            >
+              <span className="min-w-0 truncate">
+                <span className="text-muted-foreground">In: </span>
+                {selectedLabel}
+              </span>
+            </SelectTrigger>
+            <SelectContent align="end">
+              <SelectItem value={ALL_FIELDS_VALUE}>{allFieldsLabel}</SelectItem>
+              {fields.map((field) => (
+                <SelectItem key={field.key} value={field.key}>
+                  {field.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
       </div>
     </form>
   );
@@ -454,94 +456,96 @@ function DataTableFilterEditor<FilterKey extends string>({
         />
       )}
       {!textOnly && (
-      <div
-        role="group"
-        aria-label={`${field.label} values`}
-        className="max-h-[250px] flex-1 space-y-1 overflow-y-auto p-2"
-      >
-        {multiple && (
-          <button
-            type="button"
-            role="checkbox"
-            aria-checked={partiallySelected ? "mixed" : allSelected}
-            className={cn(
-              "mb-2 flex min-h-11 w-full items-center gap-2 rounded-md border border-dashed px-3 py-2 text-left text-xs font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring md:min-h-9",
-              allSelected || partiallySelected
-                ? "border-primary/45 bg-primary/[0.07] text-foreground"
-                : "border-border/80 bg-muted/20 text-muted-foreground hover:border-primary/35 hover:bg-muted/35 hover:text-foreground",
-            )}
-            onClick={() =>
-              onValuesChange(
-                allSelected ? [] : field.options.map((option) => option.value),
-              )
-            }
-          >
-            <span
-              className={cn(
-                "flex h-4 w-4 shrink-0 items-center justify-center rounded-[4px] border",
-                allSelected || partiallySelected
-                  ? "border-primary bg-primary text-primary-foreground"
-                  : "border-muted-foreground/40",
-              )}
-              aria-hidden="true"
-            >
-              {allSelected ? (
-                <Check className="h-3 w-3" />
-              ) : partiallySelected ? (
-                <Minus className="h-3 w-3" />
-              ) : null}
-            </span>
-            <span>Select all</span>
-            <span className="ml-auto text-10 font-normal text-muted-foreground">
-              {String(field.options.length)} values
-            </span>
-          </button>
-        )}
-        {field.options.map((option) => {
-          const checked = values.includes(option.value);
-          return (
+        <div
+          role="group"
+          aria-label={`${field.label} values`}
+          className="max-h-[250px] flex-1 space-y-1 overflow-y-auto p-2"
+        >
+          {multiple && (
             <button
-              key={option.value}
               type="button"
-              role={multiple ? "checkbox" : undefined}
-              aria-checked={multiple ? checked : undefined}
-              aria-pressed={multiple ? undefined : checked}
-              title={option.label === option.value ? undefined : option.value}
+              role="checkbox"
+              aria-checked={partiallySelected ? "mixed" : allSelected}
               className={cn(
-                "flex min-h-11 w-full items-center gap-2 rounded-md border px-3 py-2 text-left text-xs outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring md:min-h-9",
-                checked
-                  ? "border-primary/40 bg-primary/10 text-foreground"
-                  : "border-transparent text-muted-foreground hover:border-border hover:bg-accent/50 hover:text-foreground",
+                "mb-2 flex min-h-11 w-full items-center gap-2 rounded-md border border-dashed px-3 py-2 text-left text-xs font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring md:min-h-9",
+                allSelected || partiallySelected
+                  ? "border-primary/45 bg-primary/[0.07] text-foreground"
+                  : "border-border/80 bg-muted/20 text-muted-foreground hover:border-primary/35 hover:bg-muted/35 hover:text-foreground",
               )}
-              onClick={() => {
-                if (!multiple) {
-                  onValuesChange([option.value]);
-                  return;
-                }
+              onClick={() =>
                 onValuesChange(
-                  checked
-                    ? values.filter((value) => value !== option.value)
-                    : [...values, option.value],
-                );
-              }}
+                  allSelected
+                    ? []
+                    : field.options.map((option) => option.value),
+                )
+              }
             >
               <span
                 className={cn(
-                  "flex h-4 w-4 shrink-0 items-center justify-center border",
-                  multiple ? "rounded-[4px]" : "rounded-full",
-                  checked
+                  "flex h-4 w-4 shrink-0 items-center justify-center rounded-[4px] border",
+                  allSelected || partiallySelected
                     ? "border-primary bg-primary text-primary-foreground"
                     : "border-muted-foreground/40",
                 )}
                 aria-hidden="true"
               >
-                {checked && <Check className="h-3 w-3" />}
+                {allSelected ? (
+                  <Check className="h-3 w-3" />
+                ) : partiallySelected ? (
+                  <Minus className="h-3 w-3" />
+                ) : null}
               </span>
-              <span className="min-w-0 break-words">{option.label}</span>
+              <span>Select all</span>
+              <span className="ml-auto text-10 font-normal text-muted-foreground">
+                {String(field.options.length)} values
+              </span>
             </button>
-          );
-        })}
-      </div>
+          )}
+          {field.options.map((option) => {
+            const checked = values.includes(option.value);
+            return (
+              <button
+                key={option.value}
+                type="button"
+                role={multiple ? "checkbox" : undefined}
+                aria-checked={multiple ? checked : undefined}
+                aria-pressed={multiple ? undefined : checked}
+                title={option.label === option.value ? undefined : option.value}
+                className={cn(
+                  "flex min-h-11 w-full items-center gap-2 rounded-md border px-3 py-2 text-left text-xs outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring md:min-h-9",
+                  checked
+                    ? "border-primary/40 bg-primary/10 text-foreground"
+                    : "border-transparent text-muted-foreground hover:border-border hover:bg-accent/50 hover:text-foreground",
+                )}
+                onClick={() => {
+                  if (!multiple) {
+                    onValuesChange([option.value]);
+                    return;
+                  }
+                  onValuesChange(
+                    checked
+                      ? values.filter((value) => value !== option.value)
+                      : [...values, option.value],
+                  );
+                }}
+              >
+                <span
+                  className={cn(
+                    "flex h-4 w-4 shrink-0 items-center justify-center border",
+                    multiple ? "rounded-[4px]" : "rounded-full",
+                    checked
+                      ? "border-primary bg-primary text-primary-foreground"
+                      : "border-muted-foreground/40",
+                  )}
+                  aria-hidden="true"
+                >
+                  {checked && <Check className="h-3 w-3" />}
+                </span>
+                <span className="min-w-0 break-words">{option.label}</span>
+              </button>
+            );
+          })}
+        </div>
       )}
       <DataTableFilterActions
         hasValue={selectedCount > 0}
@@ -929,6 +933,7 @@ export interface DataTableFilterChipsProps<
   readonly filters: readonly AppliedDataTableFilter<FilterKey>[];
   readonly allFieldsLabel?: string;
   readonly ariaLabel?: string;
+  readonly className?: string;
   readonly onEditSearch: () => void;
   readonly onRemoveSearch: () => void;
   readonly onEditSearchValue: (field: SearchKey, value: string) => void;
@@ -949,6 +954,7 @@ export function DataTableFilterChips<
   filters,
   allFieldsLabel = "All fields",
   ariaLabel = "Applied filters",
+  className,
   onEditSearch,
   onRemoveSearch,
   onEditSearchValue,
@@ -967,7 +973,10 @@ export function DataTableFilterChips<
   );
 
   return (
-    <div className="flex flex-wrap items-center gap-1.5" aria-label={ariaLabel}>
+    <div
+      className={cn("flex flex-wrap items-center gap-1.5", className)}
+      aria-label={ariaLabel}
+    >
       {search && (
         <div
           role="group"
@@ -1057,7 +1066,14 @@ export function DataTableFilterChips<
         );
       })}
       {filters.map(
-        ({ field, values, valueLabels, operatorLabel, valueSummary, custom }) => {
+        ({
+          field,
+          values,
+          valueLabels,
+          operatorLabel,
+          valueSummary,
+          custom,
+        }) => {
           const resolvedOperatorLabel =
             operatorLabel ??
             (values.length > 1
@@ -1074,7 +1090,10 @@ export function DataTableFilterChips<
           const fullValueSummary = valueSummary ?? valueLabels.join(", ");
           // A filter's options and its custom text get their own chips, so
           // clearing one leaves the other applied.
-          const chipLabel = custom === true ? `${field.label} custom text` : `${field.label} filter`;
+          const chipLabel =
+            custom === true
+              ? `${field.label} custom text`
+              : `${field.label} filter`;
           return (
             <div
               key={`${field.key}:${custom === true ? "custom" : "values"}`}
@@ -1128,15 +1147,26 @@ export function DataTableControls({
   filter,
   status,
   chips,
+  singleRow = false,
+  className,
 }: {
   readonly search: ReactNode;
   readonly filter: ReactNode;
   readonly status?: ReactNode;
   readonly chips?: ReactNode;
+  readonly singleRow?: boolean;
+  readonly className?: string;
 }) {
   return (
-    <div className="space-y-2 border-b border-border/60 p-3">
-      <div className="flex flex-wrap items-center gap-2">
+    <div className={cn("space-y-2 border-b border-border/60 p-3", className)}>
+      <div
+        className={cn(
+          "flex items-center gap-2",
+          singleRow
+            ? "-m-1 flex-nowrap overflow-x-auto overscroll-x-contain p-1 [&>form]:min-w-48 [&>form]:w-auto"
+            : "flex-wrap",
+        )}
+      >
         {search}
         <div className="ml-auto flex shrink-0 items-center">{filter}</div>
         {status}

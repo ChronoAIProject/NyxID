@@ -531,6 +531,16 @@ pub async fn llm_proxy_request(
         credential_source.as_deref(),
         &target,
     );
+    let billing_request_id = uuid::Uuid::new_v4().to_string();
+    let mut request_audit = crate::services::service_insights_activity::RequestAudit::new(
+        &state.db,
+        &auth_user,
+        operation_user_service_id.as_deref(),
+        &service_id,
+        billing_resource_owner_id,
+        &billing_request_id,
+        credential_class,
+    );
     let billing_owner = state
         .billing
         .owner_resolver()
@@ -539,14 +549,15 @@ pub async fn llm_proxy_request(
             billing_resource_owner_id,
             credential_class,
         )
-        .await?;
+        .await
+        .inspect_err(|error| request_audit.admission_error(error))?;
     let billing_ctx = crate::services::billing::BillingRouteContext::new(
         crate::services::billing::BillingIngress::LlmProvider,
-        uuid::Uuid::new_v4().to_string(),
+        billing_request_id,
         billing_owner.owner_id,
         user_id_str.clone(),
         auth_user.api_key_id.clone(),
-        None,
+        operation_user_service_id.clone(),
         Some(service_id.clone()),
         Some(service.slug.clone()),
         crate::services::billing::NodeIntent::Direct,
@@ -557,7 +568,11 @@ pub async fn llm_proxy_request(
         state.billing.resale_enabled(),
     );
     let billing_ctx = billing_ctx.with_request_body(Some(&body_bytes));
-    let metered = state.billing.open(&billing_ctx).await?;
+    let metered = state
+        .billing
+        .open(&billing_ctx)
+        .await
+        .inspect_err(|error| request_audit.admission_error(error))?;
 
     // Resolve credentials for injection. The new UserService path bakes the
     // credential into `target` (via auth_method / credential), so we only need
@@ -753,6 +768,7 @@ pub async fn llm_proxy_request(
         })),
     );
 
+    request_audit.response(response.status().as_u16());
     Ok(response)
 }
 
@@ -1118,6 +1134,16 @@ async fn gateway_provider_request(
         credential_source.as_deref(),
         &target,
     );
+    let billing_request_id = uuid::Uuid::new_v4().to_string();
+    let mut request_audit = crate::services::service_insights_activity::RequestAudit::new(
+        &state.db,
+        &auth_user,
+        operation_user_service_id.as_deref(),
+        &service_id,
+        billing_resource_owner_id,
+        &billing_request_id,
+        credential_class,
+    );
     let billing_owner = state
         .billing
         .owner_resolver()
@@ -1126,14 +1152,15 @@ async fn gateway_provider_request(
             billing_resource_owner_id,
             credential_class,
         )
-        .await?;
+        .await
+        .inspect_err(|error| request_audit.admission_error(error))?;
     let billing_ctx = crate::services::billing::BillingRouteContext::new(
         crate::services::billing::BillingIngress::LlmGateway,
-        uuid::Uuid::new_v4().to_string(),
+        billing_request_id,
         billing_owner.owner_id,
         user_id_str.clone(),
         auth_user.api_key_id.clone(),
-        None,
+        operation_user_service_id,
         Some(service_id.clone()),
         Some(service.slug.clone()),
         crate::services::billing::NodeIntent::Direct,
@@ -1144,7 +1171,11 @@ async fn gateway_provider_request(
         state.billing.resale_enabled(),
     );
     let billing_ctx = billing_ctx.with_request_body(Some(&body_bytes));
-    let metered = state.billing.open(&billing_ctx).await?;
+    let metered = state
+        .billing
+        .open(&billing_ctx)
+        .await
+        .inspect_err(|error| request_audit.admission_error(error))?;
 
     // Resolve delegated credentials. When the target came from the new
     // UserService path, the credential is already baked into `target`; we only
@@ -1367,6 +1398,7 @@ async fn gateway_provider_request(
         })),
     );
 
+    request_audit.response(response.status().as_u16());
     Ok(response)
 }
 

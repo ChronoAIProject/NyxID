@@ -522,6 +522,7 @@ pub(crate) async fn mcp_call(
             actor_user_id: None,
             caller_token: None,
             delegation_restrictions: Default::default(),
+            attribution: None,
             org_agent_access: None,
             agent_owner: None,
             operation_scopes: None,

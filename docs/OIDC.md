@@ -8,6 +8,7 @@ how to configure NyxID as an OIDC provider and integrate it with relying parties
 - [Issuer URL](#issuer-url)
 - [Discovery Endpoints](#discovery-endpoints)
 - [Authorization Code Flow with PKCE](#authorization-code-flow-with-pkce)
+- [Resource Indicators](#resource-indicators)
 - [Token Types](#token-types)
 - [Scopes and Claims](#scopes-and-claims)
 - [JWKS and Signature Verification](#jwks-and-signature-verification)
@@ -31,6 +32,7 @@ how to configure NyxID as an OIDC provider and integrate it with relying parties
 | RFC 7009 | Token Revocation |
 | RFC 7591 | Dynamic Client Registration |
 | RFC 8693 | Token Exchange (delegated access) |
+| RFC 8707 | OAuth Resource Indicators |
 | RFC 9728 | OAuth 2.0 Protected Resource Metadata |
 
 ---
@@ -85,14 +87,14 @@ Returns the OIDC provider metadata. Example response:
   "grant_types_supported": ["authorization_code", "refresh_token"],
   "subject_types_supported": ["public"],
   "id_token_signing_alg_values_supported": ["RS256"],
-  "scopes_supported": ["openid", "profile", "email", "roles", "groups"],
+  "scopes_supported": ["openid", "profile", "email", "roles", "groups", "offline_access"],
   "claims_supported": [
     "sub", "iss", "aud", "exp", "iat", "email", "email_verified",
     "name", "picture", "nonce", "at_hash", "roles", "groups",
     "permissions", "acr", "amr", "auth_time", "sid"
   ],
   "code_challenge_methods_supported": ["S256"],
-  "token_endpoint_auth_methods_supported": ["client_secret_post", "none"]
+  "token_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post", "none"]
 }
 ```
 
@@ -174,7 +176,8 @@ GET /oauth/authorize
 | `redirect_uri` | Yes | Must match a registered redirect URI |
 | `code_challenge` | Yes | PKCE S256 challenge |
 | `code_challenge_method` | Yes | Must be `S256` |
-| `scope` | No | Space-separated scopes (default: `openid`) |
+| `scope` | No | Space-separated scopes (default: the client’s registered allowed scopes) |
+| `resource` | No | Repeatable RFC 8707 resource URI; see [Resource Indicators](#resource-indicators) |
 | `state` | Recommended | CSRF protection token |
 | `nonce` | Recommended | Replay protection (included in ID token) |
 
@@ -224,13 +227,47 @@ The `id_token` is only returned when the `openid` scope is requested.
 curl -X POST https://auth.example.com/oauth/token \
   -H "Content-Type: application/x-www-form-urlencoded" \
   -d "grant_type=refresh_token" \
-  -d "refresh_token=REFRESH_TOKEN"
+  -d "refresh_token=REFRESH_TOKEN" \
+  -d "client_id=YOUR_CLIENT_ID"
 ```
 
 NyxID uses **refresh token rotation**: each refresh returns a new refresh
 token and invalidates the old one. A 120-second grace period handles network
 retries. Reuse of a revoked refresh token outside the grace period triggers
 revocation of the entire token family.
+
+---
+
+## Resource Indicators
+
+OAuth requests can carry repeated `resource` parameters. A connected user service
+uses `{BASE_URL}/api/v1/proxy/s/{slug}`. The MCP transport uses `{BASE_URL}/mcp`
+(a trailing slash is accepted). Access JWTs retain the fixed NyxID audience and
+carry the effective URIs in `resources`, with `allowed_service_ids` and
+`allow_all_services` enforcing the service grant.
+
+An MCP resource alone preserves the user's consented service selection on both
+code exchange and refresh, whether `/oauth/token` repeats `resource` or omits it.
+An explicit empty selection stays restricted to zero services. A mixed grant such
+as `[service-A, mcp]` retains its original service-A boundary when a token request
+selects only `mcp`.
+
+For restricted grants with stored resource URIs, a token request must select a
+subset of those URIs. Even a consented service URI cannot be added to a grant
+that originally listed only `mcp`. Service URIs are resolved against live access
+and intersected with the originally consented service IDs: deleting a service
+and creating another under its slug never transfers the old grant. If the live
+service URIs resolve but no original service ID survives that intersection, the
+access token stays restricted to zero services. If a service resource no longer
+resolves because the service is missing or inactive, the token request fails;
+a refresh rejected for this reason neither rotates nor changes the stored grant.
+Restoring the original service can make the refresh grant usable again.
+MCP-only grants retain the original IDs; the proxy checks live service access.
+
+Resource narrowing applies to the access token for that request. Code exchange
+and refresh rotation persist the original consented grant, so a subsequent
+refresh without `resource` can use that original boundary again. Grants created
+without resource URIs can select resources within their consented service IDs.
 
 ---
 
@@ -395,6 +432,52 @@ RFC 7591 dynamic client registration is available for public clients. This is
 primarily used by MCP clients and native apps that perform automatic
 registration.
 
+Registration is public-only. Requests may omit `token_endpoint_auth_method` or
+request `none`, `client_secret_basic`, or `client_secret_post`; NyxID always returns
+the effective method `none` and never issues a client secret. Clients must use the
+returned metadata: use PKCE S256 and send `client_id` in the token form. Discovery
+advertises the token endpoint's broader methods for provisioned clients; it does
+not promise confidential dynamic registration. Authorization-code requests read
+client credentials from the form; Basic authentication is used by other endpoints
+such as PAR and token exchange.
+
+Only DCR clients tolerate unknown scope hints such as `claudeai`. Registration
+drops unknown tokens; if any known scopes remain, they form the registered scope
+set (`openid` is added when missing). If none remain, including omitted or blank
+`scope`, the MCP defaults apply: `openid profile email roles groups proxy
+offline_access`. The response's `scope` is authoritative. For example,
+`openid email claudeai` registers only `openid email`.
+
+Authorization, PAR, and consent revalidation apply the same DCR-only filtering.
+Known scopes that were not registered still fail with `invalid_scope`. An
+unknown-only ordinary authorization uses the client's registered scope set;
+during incremental consent it instead preserves the current consent scopes, as
+an omitted scope does. Admin and developer scope validation remains strict.
+When the broker admin-capability policy is enabled, requesting the known broker
+scope through DCR remains forbidden, even alongside unknown hints.
+
+Future startup default reconciliation can widen only rows durably marked
+`defaulted`. Explicit scope choices, later scope edits, and legacy rows with
+unknown provenance are preserved. Metadata-only edits retain provenance, and
+conditional migration writes protect concurrent administrator policy changes.
+
+Supplied redirect URIs are validated, trimmed, and deduplicated using the same
+validator as developer apps. Registration permits an omitted or empty list for
+public native clients; authorization still enforces NyxID's loopback/private-scheme
+rules or a registered callback. Limits are 16 redirect URIs of 2048 bytes each,
+64 scope tokens of 256 bytes each, and a 256-byte client name. The existing request
+body limit also applies.
+
+Registration errors use RFC 7591 JSON: `error` and `error_description`. Invalid
+metadata (including unsupported methods, malformed JSON, wrong field types, or
+missing JSON content type) returns `400 invalid_client_metadata`; invalid redirect
+metadata returns `400 invalid_redirect_uri`. Oversized bodies retain HTTP 413
+with the same JSON shape. Internal failures return a generic `500 server_error`.
+Each outcome emits one `nyxid::oauth::dcr` event with a stable reason. Names,
+unknown-scope samples and redirect origins are sanitized and bounded; full
+redirect paths, query strings, userinfo, request bodies and internal error details
+are excluded.
+
 ```bash
 curl -X POST https://auth.example.com/oauth/register \
   -H "Content-Type: application/json" \
@@ -416,7 +499,8 @@ Response:
   "redirect_uris": ["https://app.example.com/callback"],
   "grant_types": ["authorization_code", "refresh_token"],
   "response_types": ["code"],
-  "token_endpoint_auth_method": "none"
+  "token_endpoint_auth_method": "none",
+  "scope": "openid profile email roles groups proxy offline_access"
 }
 ```
 

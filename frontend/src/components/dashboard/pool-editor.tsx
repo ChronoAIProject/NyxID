@@ -41,7 +41,7 @@ import {
 import { poolEditorDefaults, poolEditorPayload } from "./pool-editor-state";
 import { PoolConnectionsEditor } from "./pool-connections-editor";
 import { Choice, PolicyEditor, Toggle } from "./pool-controls";
-import { message, strategyLabels } from "./pool-labels";
+import { message, readOnlyPreview, strategyLabels } from "./pool-labels";
 import type { PoolOperation } from "./pool-operation-check";
 
 export function PoolEditor({
@@ -108,6 +108,7 @@ export function PoolEditor({
     }
   }
   async function save(input: CreateServicePoolInput) {
+    if (readOnlyPreview) return;
     try {
       const normalized = {
         ...input,
@@ -362,7 +363,9 @@ export function PoolEditor({
                 type="submit"
                 variant="primary"
                 isLoading={pending}
-                disabled={!isDirty || !isValid || conflict || pending}
+                disabled={
+                  readOnlyPreview || !isDirty || !isValid || conflict || pending
+                }
               >
                 {pool ? "Save" : "Create pool"}
               </Button>

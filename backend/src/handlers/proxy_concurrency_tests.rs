@@ -104,6 +104,7 @@ async fn service_concurrency_rest_slug_uuid_mcp_and_stream_share_catalog_capacit
         actor_user_id: None,
         caller_token: None,
         delegation_restrictions: Default::default(),
+        attribution: None,
         org_agent_access: None,
         agent_owner: None,
         operation_scopes: None,
