@@ -3,13 +3,13 @@ name: nyxid
 description: Use NyxID's hosted MCP server to list connected services, connect a service through a browser-hosted link, and call downstream APIs with credentials kept out of the conversation.
 ---
 
-# NyxID for ChatGPT and Codex
+# NyxID for {{clients}}
 
-Use NyxID when the user wants to call an API that needs their credentials, see which services they have connected, or connect a new service. NyxID stores the provider credential and injects it when it proxies a tool call. The assistant sees the downstream response, never the provider secret.
+Use NyxID when the user wants to call an API that needs their credentials, see which services they have connected, or connect a new service. NyxID stores the provider credential and injects it when it proxies a tool call. {{assistant}} sees the downstream response, never the provider secret.
 
 ## Tools
 
-The plugin connects ChatGPT and Codex to NyxID's MCP server at `https://nyx-api.chrono-ai.fun/mcp`. The user signs in to NyxID in the browser the first time a tool is used. The core tools are:
+The plugin connects {{clients}} to NyxID's MCP server at `{{mcp_url}}`. The user signs in to NyxID in the browser the first time a tool is used. The core tools are:
 
 - `nyx__list_connected_services` lists the user's connected services and whether each is currently available.
 - `nyx__discover_services` lists catalog services the user has not connected yet. Use its optional `query` or `category` filters.
@@ -36,8 +36,8 @@ Ask the user before calling an operation that sends messages, changes data, or d
 
 ## When services are missing
 
-When the user approves this app in NyxID, they choose which of their services it may use. If `nyx__list_connected_services` returns nothing, or leaves out a service the user says is connected, or `nyx__connect_service` returns `service_not_granted`, the app was not given that service. Tell the user to open https://nyx.chrono-ai.fun/settings/consents, revoke this app, then reconnect it and choose the services to share (or all services). Do not ask for credentials or try another tool as a workaround.
+When the user approves this app in NyxID, they choose which of their services it may use. If `nyx__list_connected_services` returns nothing, or leaves out a service the user says is connected, or `nyx__connect_service` returns `service_not_granted`, the app was not given that service. Tell the user to open {{manage_access_url}}, revoke this app, then reconnect it and choose the services to share (or all services). Do not ask for credentials or try another tool as a workaround.
 
 ## Out of scope
 
-NyxID cannot disconnect services, delete connections, or change account settings from this plugin; direct the user to the NyxID web app at https://nyx.chrono-ai.fun for those. Only services available to the signed-in account are visible: its own connections, credential-free services, and services shared through its organizations under their permissions. Never attempt to access another person's account.
+NyxID cannot disconnect services, delete connections, or change account settings from this plugin; direct the user to the NyxID web app at {{homepage}} for those. Only services available to the signed-in account are visible: its own connections, credential-free services, and services shared through its organizations under their permissions. Never attempt to access another person's account.

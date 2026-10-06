@@ -2,7 +2,7 @@
 
 `integrations/claude-plugin/` is the self-contained plugin folder submitted to the Claude directory. It bundles the remote MCP server (`.mcp.json`), an MCP-first `nyxid` skill that works in Claude chat, Cowork, and Claude Code, a README with the data disclosure, the license, and the icon. It runs no local code.
 
-The repository-root `.claude-plugin/` marketplace is separate: it installs the CLI-oriented skills from `skills/` for Claude Code users and is unchanged by this folder.
+The repository-root `.claude-plugin/marketplace.json` lists this folder as plugin `nyxid` (installed with `claude plugin install nyxid@nyxid`; its MCP server is `plugin:nyxid:nyxid`) and the CLI skill bundle at the repository root as `nyxid-cli`. The manifest, `.mcp.json`, skill and marketplace are generated from `integrations/plugin-source/`; see [PLUGINS.md](PLUGINS.md).
 
 ## Validate
 

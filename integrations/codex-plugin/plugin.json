@@ -41,7 +41,7 @@
         "logo": "./assets/logo.svg"
       },
       "publication": {
-        "release_notes": "Ships a single MCP-first NyxID skill instead of the CLI skill family, and declares behavior hints on every tool."
+        "release_notes": "Ships a single MCP-first NyxID skill instead of the CLI skill family, declares behavior hints on every tool, and explains how to share more services with the app."
       }
     }
   }

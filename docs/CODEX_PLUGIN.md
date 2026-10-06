@@ -9,7 +9,7 @@ scripts/build-codex-plugin.sh --check   # validate only (CI: Codex Plugin Valida
 scripts/build-codex-plugin.sh           # validate, then write dist/nyxid-codex-plugin-<version>.zip
 ```
 
-The ZIP contains only the package folder's allowlisted entries (`plugin.json`, `mcp.json`, `README.md`, `LICENSE`, `assets/`, `skills/`); any other top-level entry, symlink, or `.DS_Store` fails the build. Bump `version` in `plugin.json` before building a new upload.
+The ZIP contains only the package folder's allowlisted entries (`plugin.json`, `mcp.json`, `README.md`, `LICENSE`, `assets/`, `skills/`); any other top-level entry, symlink, or `.DS_Store` fails the build. Bump `version` in `integrations/plugin-source/plugin.json` and run `python3 scripts/sync-plugins.py` before building a new upload; `plugin.json`, `mcp.json` and the skill are generated (see [PLUGINS.md](PLUGINS.md)).
 
 ## Publish to the OpenAI plugin directory
 

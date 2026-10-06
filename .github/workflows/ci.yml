@@ -201,11 +201,16 @@ jobs:
               - 'scripts/validate-cursor-plugin.py'
             codex_plugin:
               - 'integrations/codex-plugin/**'
+              - 'integrations/plugin-source/**'
               - '.agents/plugins/**'
               - 'scripts/build-codex-plugin.sh'
+              - 'scripts/sync-plugins.py'
             claude_plugin:
               - 'integrations/claude-plugin/**'
+              - 'integrations/plugin-source/**'
+              - '.claude-plugin/**'
               - 'scripts/validate-claude-plugin.py'
+              - 'scripts/sync-plugins.py'
             oracle_worker:
               - 'integrations/oracle/cdp-worker/**'
               - '.node-version'
@@ -268,7 +273,8 @@ jobs:
       - name: Validate Cursor plugin
         run: python3 scripts/validate-cursor-plugin.py
 
-  # Codex / OpenAI plugin: manifest, MCP, skills, and package allowlist.
+  # Codex / OpenAI plugin: generated files, manifest, MCP, skills, and
+  # package allowlist.
   codex-plugin-validate:
     name: Codex Plugin Validate
     needs: changes
@@ -276,6 +282,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      - name: Check generated plugin files match integrations/plugin-source
+        run: python3 scripts/sync-plugins.py --check
       - name: Validate Codex plugin
         run: scripts/build-codex-plugin.sh --check
 
@@ -301,9 +309,15 @@ jobs:
       - name: Install pinned Claude Code
         if: env.PACKAGE_CHANGED == 'true'
         run: npm install --global "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+      - name: Check generated plugin files match integrations/plugin-source
+        if: env.PACKAGE_CHANGED == 'true'
+        run: python3 scripts/sync-plugins.py --check
       - name: Validate Claude plugin
         if: env.PACKAGE_CHANGED == 'true'
         run: python3 scripts/validate-claude-plugin.py --require-claude
+      - name: Validate Claude marketplace
+        if: env.PACKAGE_CHANGED == 'true'
+        run: claude plugin validate --strict .
 
   oracle-worker-test:
     name: Oracle Worker Test

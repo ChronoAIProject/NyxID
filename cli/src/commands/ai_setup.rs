@@ -39,10 +39,12 @@ const PLUGIN_MARKETPLACE_SOURCE: &str = "ChronoAIProject/NyxID";
 /// Marketplace name declared in `.claude-plugin/marketplace.json`.
 const PLUGIN_MARKETPLACE_NAME: &str = "nyxid";
 
-/// `<plugin>@<marketplace>` spec for the bundled NyxID plugin, which ships
-/// every repo skill (nyxid, the aevatar family, github/firecrawl-via-nyxid,
-/// the Ornn manual, ...), not just `skills/nyxid`.
-const PLUGIN_SPEC: &str = "nyxid@nyxid";
+/// `<plugin>@<marketplace>` spec for the CLI edition of the NyxID plugin,
+/// which ships every repo skill (nyxid, the aevatar family,
+/// github/firecrawl-via-nyxid, the Ornn manual, ...), not just `skills/nyxid`.
+/// The marketplace's `nyxid` plugin is the hosted-MCP package submitted to the
+/// Claude directory; this command installs the CLI skills instead.
+const PLUGIN_SPEC: &str = "nyxid-cli@nyxid";
 
 /// The default hosted NyxID URL used in the repo's SKILL.md.
 /// Replaced with the user's actual server URL at install time.
@@ -940,7 +942,12 @@ async fn update(tool: Option<AiToolTarget>, base_url: &Option<String>) -> Result
                     // Plugin-managed: refresh the marketplace clone and the
                     // installed plugin instead of rewriting skill files.
                     run_claude(&["plugin", "marketplace", "update", PLUGIN_MARKETPLACE_NAME])?;
-                    run_claude(&["plugin", "update", PLUGIN_SPEC])?;
+                    // Installs made before the CLI edition was renamed hold
+                    // `nyxid@nyxid`, which is now the MCP package, so the CLI
+                    // edition may not be installed yet.
+                    if run_claude(&["plugin", "update", PLUGIN_SPEC]).is_err() {
+                        run_claude(&["plugin", "install", PLUGIN_SPEC])?;
+                    }
                     eprintln!("  Plugin {PLUGIN_SPEC} updated.");
                 } else {
                     install_claude_code(&content, &base).await?;

@@ -34,6 +34,10 @@ Never ask the user to paste an API key, OAuth token, password, or other credenti
 
 Ask the user before calling an operation that sends messages, changes data, or deletes anything, and describe exactly what it will do.
 
+## When services are missing
+
+When the user approves this app in NyxID, they choose which of their services it may use. If `nyx__list_connected_services` returns nothing, or leaves out a service the user says is connected, or `nyx__connect_service` returns `service_not_granted`, the app was not given that service. Tell the user to open https://nyx.chrono-ai.fun/settings/consents, revoke this app, then reconnect it and choose the services to share (or all services). Do not ask for credentials or try another tool as a workaround.
+
 ## Out of scope
 
 NyxID cannot disconnect services, delete connections, or change account settings from this plugin; direct the user to the NyxID web app at https://nyx.chrono-ai.fun for those. Only services available to the signed-in account are visible: its own connections, credential-free services, and services shared through its organizations under their permissions. Never attempt to access another person's account.
